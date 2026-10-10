@@ -18,9 +18,23 @@ use super::epoch_recovery::inventory::{is_link, regular_file};
 use super::epoch_recovery::AuthenticatedEpochFileBytes;
 use super::*;
 
+mod fault_record;
+pub(in crate::store) use fault_record::{BindingKind, ValidatedFaultAdmission};
+use fault_record::{InertFaultRecord, MAX_FAULT_ADMISSION_ATTESTATION_BYTES};
+mod repair;
+pub(in crate::store) use repair::{
+    decidable_pair, next_repair_sequence, repair_defers_install, TerminalRepairSource,
+};
+
 pub(super) const RECORD_DOMAIN: &[u8] = b"catcoms/epoch-owner-store/v1";
 // Full framed local/group/type/key scope plus length framing, separate from the signed wire.
-const MAX_RECORD_BYTES: usize = MAX_OWNER_RECEIPT_JOURNAL_BYTES + MAX_CLOSE_RECORD_BYTES + 1024;
+// Two external pairs, one reserved pair, one inline pair and the signed repair, plus at most
+// four local attestations. The pre-unseal reader and inventory share this same physical cap.
+const MAX_RECORD_BYTES: usize = MAX_OWNER_RECEIPT_JOURNAL_BYTES
+    + MAX_CLOSE_RECORD_BYTES
+    + 9 * MAX_RECEIPT_BYTES
+    + 1280
+    + 4 * MAX_FAULT_ADMISSION_ATTESTATION_BYTES;
 pub(super) const MAX_SEALED_BYTES: usize = MAX_RECORD_BYTES + 40;
 
 /// Historical, authenticated journal view. It is not a publication permit or pruning authority.
@@ -31,6 +45,47 @@ pub struct EpochOwnerReceiptState {
     // One exact close for the pending-preferred decision. Retained across publication completion
     // so a crash before source installation never needs to reconstruct lost close heads.
     decision_close: Option<([u8; 32], CloseRecord)>,
+    // Structural decoding is useful for inventory, but cannot establish the observer, matching
+    // durable MLS snapshot or custody. Only the contextual repair writer may consume or change it.
+    fault_record: Option<InertFaultRecord>,
+}
+
+/// How the single accounted writer authenticates a reloaded record before and after a change.
+enum OwnerGuard<'a> {
+    /// Legacy owner paths: any repair-bearing state refuses before mutation.
+    Ordinary,
+    /// Repair transitions: every retained attestation must name this observer and an epoch the
+    /// durable snapshot covers. This is a restore check, not new authority.
+    Repair {
+        observer: &'a catcoms_crypto::DeviceId,
+        durable_epoch: u64,
+    },
+    /// Repair-aware head publication: journal repair provenance is legal because the core
+    /// journal enforces its own adjacency and evidence-only holds. A held repair refuses, so a
+    /// nonterminal transaction still owns its target (CORE-007); retained evidence without a
+    /// repair is preserved verbatim, never consumed, so it needs no contextual restore here.
+    Publication,
+}
+
+impl OwnerGuard<'_> {
+    fn check(&self, state: &EpochOwnerReceiptState) -> Result<(), AppError> {
+        match self {
+            Self::Ordinary => state.require_ordinary(),
+            Self::Publication => match state.fault_record.as_ref().and_then(|r| r.repair()) {
+                Some(_) => Err(invalid("a held repair owns this target")),
+                None => Ok(()),
+            },
+            Self::Repair {
+                observer,
+                durable_epoch,
+            } => state
+                .fault_record
+                .as_ref()
+                .map(|record| record.contextual(observer, *durable_epoch))
+                .transpose()
+                .map(drop),
+        }
+    }
 }
 
 impl std::fmt::Debug for EpochOwnerReceiptState {
@@ -43,6 +98,20 @@ impl std::fmt::Debug for EpochOwnerReceiptState {
 }
 
 impl EpochOwnerReceiptState {
+    /// The legacy owner driver cannot resume a repair transaction. In particular, a NoChange
+    /// journal still has a claim in tag 3, and a journal-only repair can retain an unpublished
+    /// canonical choice or evidence. Refuse all three before exposing a legacy view or writing.
+    /// A fully cleaned v2 journal remains compatible; its version alone is not a hold.
+    fn require_ordinary(&self) -> Result<(), AppError> {
+        if self.fault_record.is_some()
+            || self.journal.reconciled().is_some()
+            || self.journal.retained_repair().is_some()
+        {
+            return Err(invalid("repair record requires contextual recovery"));
+        }
+        Ok(())
+    }
+
     /// Exact pending signed decision. After restart, re-prepare this before republication;
     /// merely reading visible bytes does not repair an earlier directory-sync failure.
     pub fn pending(&self) -> Option<&Receipt> {
@@ -68,14 +137,15 @@ impl EpochOwnerReceiptState {
             .pending()
             .into_iter()
             .chain(self.published())
+            .chain(self.journal.reconciled())
             .any(|r| &r.document != document)
         {
             return Err(invalid("journal belongs to another logical document"));
         }
         if let Some((hash, close)) = &self.decision_close {
             let receipt = self
-                .pending()
-                .or_else(|| self.published())
+                .journal
+                .effective_choice()
                 .ok_or_else(|| invalid("close without a decision"))?;
             if close.server_id.len() > 256
                 || close.author_public_key.len() != 32
@@ -118,7 +188,17 @@ impl EpochOwnerReceiptState {
             e.put_bytes(hash).map_err(invalid)?;
             e.put_bytes(&close.encode()).map_err(invalid)?;
         }
-        Ok(Zeroizing::new(e.finish()))
+        let mut bytes = Zeroizing::new(e.finish());
+        if let Some(fault) = &self.fault_record {
+            let fault = fault.encode()?;
+            // Never acknowledge tag-3 bytes the strict restart decoder would refuse.
+            InertFaultRecord::decode(&fault, document)?;
+            bytes.extend_from_slice(&fault);
+        }
+        if bytes.len() > MAX_RECORD_BYTES {
+            return Err(invalid("record exceeds its bound"));
+        }
+        Ok(bytes)
     }
 
     pub(super) fn decode(
@@ -135,24 +215,34 @@ impl EpochOwnerReceiptState {
         }
         let journal =
             OwnerReceiptJournal::decode(d.get_bytes().map_err(invalid)?).map_err(invalid)?;
-        let decision_close = if d.is_empty() {
-            None
-        } else {
-            if d.get_u8().map_err(invalid)? != 2 {
-                return Err(invalid("unsupported owner decision extension"));
+        let mut decision_close = None;
+        let mut fault_record = None;
+        while !d.is_empty() {
+            let start = bytes.len() - d.remaining();
+            match d.get_u8().map_err(invalid)? {
+                2 if decision_close.is_none() => {
+                    let hash = d
+                        .get_bytes()
+                        .map_err(invalid)?
+                        .try_into()
+                        .map_err(invalid)?;
+                    let close =
+                        CloseRecord::decode(d.get_bytes().map_err(invalid)?).map_err(invalid)?;
+                    decision_close = Some((hash, close));
+                }
+                3 => {
+                    // Tag 3 is last: its decoder consumes the exact suffix and rejects trailing
+                    // bytes, duplicate/reordered sections and legacy unattested payloads.
+                    fault_record = Some(InertFaultRecord::decode(&bytes[start..], document)?);
+                    break;
+                }
+                _ => return Err(invalid("unsupported or repeated owner decision extension")),
             }
-            let hash = d
-                .get_bytes()
-                .map_err(invalid)?
-                .try_into()
-                .map_err(invalid)?;
-            let close = CloseRecord::decode(d.get_bytes().map_err(invalid)?).map_err(invalid)?;
-            Some((hash, close))
-        };
-        d.finish().map_err(invalid)?;
+        }
         let state = Self {
             journal,
             decision_close,
+            fault_record,
         };
         state.check_scope(document)?;
         Ok(state)
@@ -161,15 +251,18 @@ impl EpochOwnerReceiptState {
 
 impl ServerStore {
     /// Load historical owner state, bounded before decrypting. Only absence is empty; corruption
-    /// never resets an irrevocable choice. This does not re-authorize old signatures for sending.
+    /// never resets an irrevocable choice. Repair-bearing records refuse until the contextual
+    /// repair coordinator is available; inventory still accounts their structurally valid bytes.
+    /// This does not re-authorize old signatures for sending.
     pub fn load_epoch_owner_receipts(
         &self,
         server: u64,
         document: &LogicalDocument,
     ) -> Result<EpochOwnerReceiptState, AppError> {
         let scope = scope_bytes(server, document)?;
-        self.read_epoch_owner_record(&scope, document)
-            .map(|(state, _)| state)
+        let (state, _) = self.read_epoch_owner_record(&scope, document)?;
+        state.require_ordinary()?;
+        Ok(state)
     }
 
     /// One authenticated final-file accounting input, NOT a full inventory. The future exclusive
@@ -213,7 +306,7 @@ impl ServerStore {
             expected_tenure_start_group_epoch,
             rng,
             budget,
-            atomic_write,
+            &mut WriteHooks::None,
         )
     }
 
@@ -226,7 +319,7 @@ impl ServerStore {
         tenure: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
         // Public Receipt fields are not a validation boundary. Bound variable fields before
         // canonical encoding/signature work, then use the wire decoder's exact schema too.
@@ -242,7 +335,7 @@ impl ServerStore {
             rng,
             budget,
             |journal| journal.prepare(receipt, group, tenure).map_err(invalid),
-            writer,
+            hooks,
         )
     }
 
@@ -263,7 +356,7 @@ impl ServerStore {
             rng,
             budget,
             |journal| journal.mark_published(receipt_hash).map_err(invalid),
-            atomic_write,
+            &mut WriteHooks::None,
         )
     }
 
@@ -278,24 +371,41 @@ impl ServerStore {
         budget: &mut EpochStorageBudget,
         after_rename: bool,
     ) -> Result<EpochOwnerReceiptState, AppError> {
+        // Either side of the completion replacement. After the rename the record is visible but
+        // its durability is unproven, which is a different repair from never having written.
+        let mut fail_before = |_: WriteTag, _: &Path, _: &[u8]| {
+            Intercept::Fail(AppError::Io("injected completion before write".into()))
+        };
+        let mut fail_after = |op: CompletedOperation, _: WriteTag, _: &Path| {
+            if op != CompletedOperation::Write {
+                return AfterIntercept::Continue;
+            }
+            AfterIntercept::Fail(AppError::CommittedButNotDurable(
+                "injected completion flush failure".into(),
+            ))
+        };
+        let mut hooks = if after_rename {
+            WriteHooks::Hooked {
+                before: None,
+                before_sync: None,
+                before_unlink: None,
+                after: Some(&mut fail_after),
+            }
+        } else {
+            WriteHooks::Hooked {
+                before: Some(&mut fail_before),
+                before_sync: None,
+                before_unlink: None,
+                after: None,
+            }
+        };
         self.update_epoch_owner_with_writer(
             server,
             &receipt.document,
             rng,
             budget,
             |journal| journal.mark_published(receipt.hash()).map_err(invalid),
-            |path, bytes| {
-                if after_rename {
-                    atomic_write_with_hook_and_sync(
-                        path,
-                        bytes,
-                        |_, _| {},
-                        |_| Err(std::io::Error::other("injected completion flush failure")),
-                    )
-                } else {
-                    Err(AppError::Io("injected completion before write".into()))
-                }
-            },
+            &mut hooks,
         )
     }
 
@@ -308,11 +418,34 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         apply: impl FnOnce(&mut OwnerReceiptJournal) -> Result<(), AppError>,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
-        self.update_epoch_owner_state_with_writer(
+        self.update_epoch_owner_journal_guarded(
             server,
             document,
+            OwnerGuard::Ordinary,
+            rng,
+            budget,
+            apply,
+            hooks,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn update_epoch_owner_journal_guarded(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        guard: OwnerGuard<'_>,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        apply: impl FnOnce(&mut OwnerReceiptJournal) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<EpochOwnerReceiptState, AppError> {
+        self.write_epoch_owner_state(
+            server,
+            document,
+            guard,
             rng,
             budget,
             |state| {
@@ -321,15 +454,15 @@ impl ServerStore {
                 // close only for the still-selected receipt; never attach old heads to a new choice.
                 if state.decision_close.as_ref().is_some_and(|(hash, _)| {
                     state
-                        .pending()
-                        .or_else(|| state.published())
+                        .journal
+                        .effective_choice()
                         .is_none_or(|r| r.hash() != *hash)
                 }) {
                     state.decision_close = None;
                 }
                 Ok(())
             },
-            writer,
+            hooks,
         )
     }
 
@@ -352,7 +485,7 @@ impl ServerStore {
             tenure,
             rng,
             budget,
-            atomic_write,
+            &mut WriteHooks::None,
         )
     }
 
@@ -365,7 +498,7 @@ impl ServerStore {
         tenure: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
         self.prepare_owner_pair_with_writer(
             server,
@@ -375,7 +508,7 @@ impl ServerStore {
             tenure,
             rng,
             budget,
-            writer,
+            hooks,
         )
     }
 
@@ -390,7 +523,7 @@ impl ServerStore {
         tenure: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
         self.prepare_owner_pair_with_writer(
             server,
@@ -400,7 +533,7 @@ impl ServerStore {
             tenure,
             rng,
             budget,
-            writer,
+            hooks,
         )
     }
 
@@ -414,7 +547,7 @@ impl ServerStore {
         tenure: u64,
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
         self.update_epoch_owner_state_with_writer(
             server,
@@ -429,7 +562,7 @@ impl ServerStore {
                 state.decision_close = Some((receipt.hash(), close.clone()));
                 Ok(())
             },
-            writer,
+            hooks,
         )
     }
 
@@ -440,7 +573,29 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         apply: impl FnOnce(&mut EpochOwnerReceiptState) -> Result<(), AppError>,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<EpochOwnerReceiptState, AppError> {
+        self.write_epoch_owner_state(
+            server,
+            document,
+            OwnerGuard::Ordinary,
+            rng,
+            budget,
+            apply,
+            hooks,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_epoch_owner_state(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        guard: OwnerGuard<'_>,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        apply: impl FnOnce(&mut EpochOwnerReceiptState) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochOwnerReceiptState, AppError> {
         let scope = scope_bytes(server, document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
@@ -451,6 +606,9 @@ impl ServerStore {
                 return Err(error);
             }
         };
+        // Before the mutation closure, budget verification/reservation, RNG or writer hooks.
+        // Neither an exact publication callback nor a legacy prepare may bypass a repair hold.
+        guard.check(&state)?;
         let observed = size
             .map(|size| storage_record(server, document, &scope, size))
             .transpose()?;
@@ -458,6 +616,7 @@ impl ServerStore {
             .verify_record(&storage_scope, *blake3::hash(&scope).as_bytes(), observed)
             .map_err(invalid)?;
         apply(&mut state)?;
+        guard.check(&state)?;
         let plain = state.encode(&scope, document)?;
         let record = storage_record(server, document, &scope, plain.len() as u64 + 40)?;
         let reservation = budget
@@ -477,12 +636,18 @@ impl ServerStore {
                 return Err(error.into());
             }
         };
-        writer(&self.epoch_owner_path(&scope), &frame(&sealed))?;
+        // I-4: path first, then rotate, then touch disk.
+        let path = self.epoch_owner_path(&scope);
+        let framed = frame(&sealed);
+        let mutation = self.epoch_mutation_guard();
+        let framed = hooks.before(WriteTag::Journal, &path, &framed)?;
+        mutation.write(&path, &framed)?;
+        hooks.after_write(WriteTag::Journal, &path)?;
         reservation.commit();
         Ok(state)
     }
 
-    fn epoch_owner_path(&self, scope: &[u8]) -> PathBuf {
+    pub(in crate::store) fn epoch_owner_path(&self, scope: &[u8]) -> PathBuf {
         self.dir
             .join("servers")
             .join(format!("{}.owner-receipts", blake3::hash(scope).to_hex()))
@@ -707,7 +872,7 @@ mod tests {
                         state.decision_close = Some((receipt.hash(), close.clone()));
                         Ok(())
                     },
-                    atomic_write,
+                    &mut WriteHooks::None,
                 )
                 .unwrap();
             // Repeating completion of epoch zero while epoch one is pending must preserve the
@@ -825,7 +990,7 @@ mod tests {
                 group.epoch(),
                 &mut rng(),
                 &mut budget,
-                |_, _| panic!("stale prepare wrote")
+                &mut WriteHooks::MustNotWrite("stale prepare wrote")
             )
             .is_err());
         let retry = store
@@ -856,13 +1021,20 @@ mod tests {
             if completing {
                 prepare(&mut store, signed.clone(), &group, &mut budget);
             }
-            let writer = |path: &Path, bytes: &[u8]| {
-                atomic_write_with_hook_and_sync(
-                    path,
-                    bytes,
-                    |_, _| {},
-                    |_| Err(std::io::Error::other("flush failure")),
-                )
+            // The replacement itself completes; only its durability barrier fails. That is what
+            // the old seam modelled by handing in a writer whose flush returned an error, and
+            // the after decision is where the same failure now lands: the bytes are in place.
+            let mut flush_failure = |op: CompletedOperation, _: WriteTag, _: &Path| {
+                if op != CompletedOperation::Write {
+                    return AfterIntercept::Continue;
+                }
+                AfterIntercept::Fail(AppError::CommittedButNotDurable("flush failure".into()))
+            };
+            let mut hooks = WriteHooks::Hooked {
+                before: None,
+                before_sync: None,
+                before_unlink: None,
+                after: Some(&mut flush_failure),
             };
             let result = if completing {
                 store.update_epoch_owner_with_writer(
@@ -871,7 +1043,7 @@ mod tests {
                     &mut rng(),
                     &mut budget,
                     |j| j.mark_published(signed.hash()).map_err(invalid),
-                    writer,
+                    &mut hooks,
                 )
             } else {
                 store.prepare_epoch_owner_with_writer(
@@ -881,7 +1053,7 @@ mod tests {
                     group.epoch(),
                     &mut rng(),
                     &mut budget,
-                    writer,
+                    &mut hooks,
                 )
             };
             assert!(matches!(result, Err(AppError::CommittedButNotDurable(_))));
@@ -928,7 +1100,7 @@ mod tests {
             prepare(&mut store, signed.clone(), &group, &mut budget);
             let path = store.epoch_owner_path(&scope_bytes(SERVER, &doc).unwrap());
             let before = fs::read(&path).unwrap();
-            let orphan = staging_candidate(&path, 901);
+            let orphan = staging_candidate_for_test(&path, 901);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 store.update_epoch_owner_with_writer(
                     SERVER,
@@ -936,12 +1108,20 @@ mod tests {
                     &mut rng(),
                     &mut budget,
                     |j| j.mark_published(signed.hash()).map_err(invalid),
-                    |_, bytes| {
-                        fs::write(&orphan, bytes).unwrap();
-                        if panic {
-                            panic!("injected after temporary write");
-                        }
-                        Err(AppError::Io("injected before rename".into()))
+                    // Plant the temporary sibling an interrupted write would have left, then
+                    // stop before the rename. Planting it is fixture work: the record itself
+                    // is never created on this path.
+                    &mut WriteHooks::Hooked {
+                        before: Some(&mut |_: WriteTag, _: &Path, bytes: &[u8]| {
+                            fs::write(&orphan, bytes).unwrap();
+                            if panic {
+                                panic!("injected after temporary write");
+                            }
+                            Intercept::Fail(AppError::Io("injected before rename".into()))
+                        }),
+                        before_sync: None,
+                        before_unlink: None,
+                        after: None,
                     },
                 )
             }));
@@ -1049,7 +1229,7 @@ mod tests {
             group.epoch(),
             &mut rng(),
             &mut budget,
-            |_, _| panic!("over-cap write"),
+            &mut WriteHooks::MustNotWrite("over-cap write"),
         );
         assert!(result.is_err());
         assert!(!budget.requires_reconciliation());
@@ -1069,7 +1249,7 @@ mod tests {
                 group.epoch(),
                 &mut rng(),
                 &mut budget,
-                |_, _| panic!("unauthorized write")
+                &mut WriteHooks::MustNotWrite("unauthorized write")
             )
             .is_err());
         let mut malformed = receipt(&owner, &group, &doc, 0);
@@ -1161,7 +1341,7 @@ mod tests {
                 alice_group.epoch(),
                 &mut rng(),
                 &mut budget,
-                |_, _| panic!("invalid adoption wrote")
+                &mut WriteHooks::MustNotWrite("invalid adoption wrote")
             )
             .is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
@@ -1189,7 +1369,7 @@ mod tests {
             alice_group.epoch(),
             &mut rng(),
             &mut budget,
-            |_, _| Err(AppError::Io("before write".into())),
+            &mut WriteHooks::fail_before_write(FailError::Io("before write")),
         );
         assert!(failure.is_err());
         assert_eq!(
@@ -1268,7 +1448,7 @@ mod tests {
                 group.epoch(),
                 &mut rng(),
                 &mut budget,
-                |_, _| panic!("noncanonical write")
+                &mut WriteHooks::MustNotWrite("noncanonical write")
             )
             .is_err());
         assert_eq!(

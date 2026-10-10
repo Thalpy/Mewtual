@@ -73,6 +73,41 @@ impl StudioOverlayState {
         if self.prepared.is_some() {
             return Err(ReplError::EpochClosed);
         }
+        self.live_authority(device, group, tenure)
+    }
+
+    /// [`Self::handoff_authority`]'s verdict for P2's classification, for the branch as H1 will hold
+    /// it when it gets that far. An Active branch is asked exactly as `handoff_authority` asks it.
+    /// A Prepared branch is asked as the active branch its resolution returns it to:
+    /// `return_to_active` changes nothing but the Prepared marker, so the active branch, its target,
+    /// author and receipt are the ones checked here. Mints nothing; the handoff still captures its
+    /// own authority under custody.
+    ///
+    /// `evidence` is the resolution evidence the caller already read for a Prepared branch, and the
+    /// contract is enforced rather than documented: only `Absent` returns a branch to active, so a
+    /// Prepared branch with any other evidence, or none, is refused with `EpochClosed`, exactly as
+    /// `handoff_authority` refuses it. Without that, a Hold or Complete branch would get the verdict
+    /// of an active branch it never becomes again. An Active branch ignores `evidence`.
+    pub fn check_handoff_authority_after_resolution(
+        &self,
+        evidence: Option<StudioHandoffEvidence>,
+        device: &MlsDevice,
+        group: &ServerGroup,
+        tenure: u64,
+    ) -> Result<(), ReplError> {
+        if self.prepared.is_some() && evidence != Some(StudioHandoffEvidence::Absent) {
+            return Err(ReplError::EpochClosed);
+        }
+        self.live_authority(device, group, tenure).map(drop)
+    }
+
+    /// The live check both share: everything `handoff_authority` checks except the Prepared guard.
+    fn live_authority(
+        &self,
+        device: &MlsDevice,
+        group: &ServerGroup,
+        tenure: u64,
+    ) -> Result<StudioHandoffAuthority, ReplError> {
         let active = self.active.as_ref().ok_or(ReplError::EpochScope)?;
         self.check_target(active.target())?;
         if active.author() != device.device_id() {
@@ -101,6 +136,17 @@ impl StudioOverlayState {
         self.validate(&ledger)?;
         if self.prepared.is_some() {
             return Err(ReplError::EpochClosed);
+        }
+        // An `Unconfirmed` branch has no installed source, so it cannot be handed off: there is no
+        // signed close for a recipient to verify against.
+        //
+        // Stated here, explicitly, before any authority work. It was previously enforced only as a
+        // side effect - the size probe below calls `encode_vault`, whose `validate` refuses the
+        // combination - which a review pointed out is a fence that a refactor of the probe would
+        // silently remove, and which in any case fires after the authority has already been captured
+        // and checked live. A rule that matters should be where a reader looks for it.
+        if !matches!(self.provenance(), StudioOverlayProvenance::Closing) {
+            return Err(ReplError::EpochAuthority);
         }
         let active = self.active.as_ref().ok_or(ReplError::EpochScope)?;
         if self.target != authority.target || active.receipt() != &authority.receipt {

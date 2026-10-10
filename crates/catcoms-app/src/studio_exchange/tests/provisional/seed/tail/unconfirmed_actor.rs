@@ -1,0 +1,1121 @@
+//! Design 8.7 through the actor's receiver: the Unconfirmed Save's two control actions, over a real
+//! preview driven to ready by the production queue and jobs.
+//!
+//! Agent 1's `unconfirmed_save` tests drive the store stages with mints they make themselves. These
+//! drive the receiver, which makes its own mint attempt from its ready-preview cache at each stage,
+//! so they are what shows the mint is made in the visit that consumes it, and that the scheduled
+//! detach runs through the production background path.
+use super::runtime::drive;
+use super::*;
+use crate::studio::{
+    PreviewHarness, StudioControlAction, StudioControlRequest, StudioControlResponse,
+    StudioReceiver, StudioSettlementState, StudioUnconfirmedOverlaySaveRequest,
+    StudioUnconfirmedSaveOutcome,
+};
+use crate::studio_exchange::ServerStudioWatch;
+use catcoms_replication::studio::StudioOverlayProvenance;
+
+fn control(
+    receiver: &mut StudioReceiver,
+    p: &mut Pair,
+    target: StudioTarget,
+    action: StudioControlAction,
+) -> Result<StudioControlResponse, AppError> {
+    receiver
+        .control(
+            &mut p.bob,
+            &mut p.b_store,
+            SERVER,
+            StudioControlRequest { target, action },
+        )
+        .map(|(_, _, response)| response.expect("a control response"))
+}
+
+fn save(
+    receiver: &mut StudioReceiver,
+    p: &mut Pair,
+    target: StudioTarget,
+    request: &StudioUnconfirmedOverlaySaveRequest,
+) -> Result<StudioUnconfirmedSaveOutcome, AppError> {
+    let action = StudioControlAction::SaveUnconfirmedOverlay(Box::new(
+        StudioUnconfirmedOverlaySaveRequest {
+            basis: request.basis,
+            branch: request.branch,
+            nonce: request.nonce,
+            body: request.body.clone(),
+        },
+    ));
+    match control(receiver, p, target, action)? {
+        StudioControlResponse::UnconfirmedOverlaySaved { target: t, outcome } => {
+            assert_eq!(t, target);
+            Ok(outcome)
+        }
+        other => panic!("expected an Unconfirmed Save outcome, got {other:?}"),
+    }
+}
+
+/// Run the receiver's background work the way the actor does, until it has none left.
+async fn settle(receiver: &mut StudioReceiver, p: &mut Pair) {
+    for _ in 0..8 {
+        let Some(work) = receiver.detach(&mut p.bob) else {
+            return;
+        };
+        receiver.complete(&mut p.bob, work.run(None).await);
+    }
+}
+
+fn recorded_provenance(p: &mut Pair, target: StudioTarget) -> Option<StudioOverlayProvenance> {
+    let logical = target.document(&p.bob.group_id()).unwrap();
+    let state = p
+        .b_store
+        .load_epoch_intents_structural(SERVER, &logical)
+        .unwrap();
+    state.handoff_metadata().map(|m| m.provenance())
+}
+
+/// A receiver holding one real, ready preview of the channel's Index, and the ticket for a Save on
+/// it. The saving member is a plain joiner, so no stage of the Save may consult a tenure (8.5).
+async fn ready_receiver() -> (Pair, StudioReceiver, StudioTarget, [u8; 32], [u8; 32]) {
+    let mut p = pages::proven_pair().await;
+    let target = StudioTarget::Index { channel: channel() };
+    p.watch = p
+        .bob
+        .watch_studio_epoch(&p.b_store, SERVER, target)
+        .unwrap();
+    let mut receiver = previewing_receiver(&mut p, target).await;
+    assert_eq!(
+        p.bob.observed_owner_tenure(),
+        crate::studio::StudioOwnerTenure::Unknown
+    );
+    // The ticket, minted from the live preview in this visit.
+    let StudioControlResponse::UnconfirmedOverlaySaveTicket {
+        target: ticketed,
+        basis,
+        branch,
+    } = control(
+        &mut receiver,
+        &mut p,
+        target,
+        StudioControlAction::BeginUnconfirmedOverlaySave,
+    )
+    .unwrap()
+    else {
+        panic!("expected a ticket")
+    };
+    assert_eq!(ticketed, target);
+    (p, receiver, target, basis, branch)
+}
+
+/// A new receiver watching `p.watch`, whose one ready preview of `target` was fetched by the
+/// production queue and jobs. Also how a restarted actor is rebuilt: everything it holds comes from
+/// this fetch and the store, nothing from an earlier receiver.
+async fn previewing_receiver(p: &mut Pair, target: StudioTarget) -> StudioReceiver {
+    let mut runtime = PreviewHarness::default();
+    drive(p, &mut runtime).await;
+    let watch = ServerStudioWatch {
+        inner: p.watch.inner.copy_binding(),
+        mount: p.watch.mount.clone(),
+        server: SERVER,
+        target,
+    };
+    let logical = target.document(&p.bob.group_id()).unwrap();
+    let epoch_id = epoch_zero_id(logical.doc_type, &logical.logical_key);
+    let mut receiver = runtime.into_receiver(vec![(watch, epoch_id)]);
+    // These tests park plans, and each holds a preparation permit while it waits. On the one
+    // process-wide pool, parallel tests would see each other's plans as `busy`.
+    receiver.inject_overlay_pool_for_test(4);
+    receiver
+}
+
+/// A new Index entry, as a Save request under the given ticket.
+fn new_entry(
+    p: &mut Pair,
+    (basis, branch): ([u8; 32], [u8; 32]),
+    nonce: u8,
+    object: [u8; 16],
+) -> StudioUnconfirmedOverlaySaveRequest {
+    let owner = p.bob.sync.with_registry_context(|_, d, _, _| d.device_id());
+    StudioUnconfirmedOverlaySaveRequest {
+        basis,
+        branch,
+        nonce: [nonce; 16],
+        body: IndexOp::PutObject {
+            object,
+            kind: StudioKind::Flipnote,
+            title: "drawn on a preview".into(),
+            created_by: owner,
+            ts: 1,
+            expiry: StudioExpiry::Never,
+        }
+        .encode()
+        .unwrap(),
+    }
+}
+
+fn pending(p: &mut Pair, target: StudioTarget) -> usize {
+    let logical = target.document(&p.bob.group_id()).unwrap();
+    p.b_store
+        .load_epoch_intents(SERVER, &logical)
+        .unwrap()
+        .pending()
+        .len()
+}
+
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_schedules_commits_and_retries_from_the_live_preview() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let logical = target.document(&p.bob.group_id()).unwrap();
+
+    // --- New authoring: the first visit captures and schedules; nothing is durable yet.
+    let request = new_entry(&mut p, (basis, branch), 41, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &request).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    assert_eq!(recorded_provenance(&mut p, target), None, "not durable yet");
+
+    // The detached plan runs through the production background path, then the identical request
+    // commits it, re-minting from the live preview in that visit.
+    settle(&mut receiver, &mut p).await;
+    let StudioUnconfirmedSaveOutcome::Saved {
+        basis: saved_basis,
+        accepted,
+    } = save(&mut receiver, &mut p, target, &request).unwrap()
+    else {
+        panic!("the commit visit saves")
+    };
+    assert_eq!((saved_basis, accepted), (basis, 1));
+    assert!(
+        matches!(
+            recorded_provenance(&mut p, target),
+            Some(StudioOverlayProvenance::Unconfirmed { .. })
+        ),
+        "the branch records Unconfirmed provenance"
+    );
+    // Local draft data only: no installed source, no Registry pointer, no receipt. The one pending
+    // intent is the draft's own accepted operation (the shared `assert_absent` demands none).
+    let pointer = PointerKey::new(logical.doc_type, logical.logical_key.clone()).unwrap();
+    p.bob.sync.with_registry_context(|g, d, _, _| {
+        assert!(p
+            .b_store
+            .load_studio_epoch(SERVER, g, target, d)
+            .unwrap()
+            .is_none());
+        assert!(p
+            .b_store
+            .load_registry_epoch(SERVER, g, pointer.bucket(), d)
+            .unwrap()
+            .is_none());
+    });
+    let receipts = p
+        .b_store
+        .load_epoch_owner_receipts(SERVER, &logical)
+        .unwrap();
+    assert!(receipts.pending().is_none() && receipts.published().is_none());
+    assert_eq!(
+        p.b_store
+            .load_epoch_intents(SERVER, &logical)
+            .unwrap()
+            .pending()
+            .len(),
+        1
+    );
+
+    // --- An exact retry is acknowledged and adds nothing.
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &request).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+    ));
+
+    // --- S3 re-enters the live check in its own visit. New work is scheduled while the preview is
+    // live. The preview goes away (expiry, eviction or restart) while the plan waits, and the
+    // commit visit refuses with the mint's own reason, writing nothing.
+    let second = StudioUnconfirmedOverlaySaveRequest {
+        basis,
+        branch,
+        nonce: [42; 16],
+        body: IndexOp::SetTitle {
+            object: [8; 16],
+            title: "after the preview went".into(),
+        }
+        .encode()
+        .unwrap(),
+    };
+    let scheduled = save(&mut receiver, &mut p, target, &second).unwrap();
+    assert!(
+        matches!(scheduled, StudioUnconfirmedSaveOutcome::Scheduled),
+        "a later append is scheduled too: {scheduled:?}"
+    );
+    settle(&mut receiver, &mut p).await;
+    // The preview alone goes, not a lock: a lock would release the parked plan too, and then
+    // this would be S1b's refusal rather than the commit visit's.
+    receiver.forget_previews_for_test();
+    let refused = save(&mut receiver, &mut p, target, &second)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("no live preview"),
+        "the commit visit mints from the live preview, not a parked basis: {refused}"
+    );
+    assert_eq!(
+        p.b_store
+            .load_epoch_intents(SERVER, &logical)
+            .unwrap()
+            .pending()
+            .len(),
+        1,
+        "the refused commit wrote nothing"
+    );
+
+    // --- With no preview, accepted work is still answered; new authoring and a new ticket are
+    // refused, with the mint's own reason.
+    assert!(
+        matches!(
+            save(&mut receiver, &mut p, target, &request).unwrap(),
+            StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+        ),
+        "an exact retry needs no live preview"
+    );
+    let refused = control(
+        &mut receiver,
+        &mut p,
+        target,
+        StudioControlAction::BeginUnconfirmedOverlaySave,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(refused.contains("no live preview"), "{refused}");
+    // The same new work again: its plan was consumed by the refused commit, so this is a fresh
+    // first visit, and S1b refuses it.
+    let refused = save(&mut receiver, &mut p, target, &second)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("no live preview"),
+        "new authoring with no preview surfaces the mint's refusal: {refused}"
+    );
+}
+
+/// Two requests interleaved on one document. A schedules; before A's caller returns, B's visit
+/// finds A's parked plan.
+///
+/// B's visit finishes A's work, so the slot cannot be held hostage by a caller who never comes
+/// back. But it reports `Busy`, never `Saved`: none of B was saved. A's own retry is then answered
+/// as an exact retry, and B proceeds on its own.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_never_reports_another_requests_plan_as_its_own() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let a = new_entry(&mut p, (basis, branch), 51, [8; 16]);
+    let b = new_entry(&mut p, (basis, branch), 52, [9; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+
+    let visit = save(&mut receiver, &mut p, target, &b).unwrap();
+    assert!(
+        matches!(visit, StudioUnconfirmedSaveOutcome::Busy),
+        "B must not be told A's work was its own: {visit:?}"
+    );
+    assert_eq!(pending(&mut p, target), 1, "A's work landed in B's visit");
+
+    assert!(
+        matches!(
+            save(&mut receiver, &mut p, target, &a).unwrap(),
+            StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+        ),
+        "A's retry is answered as an exact retry"
+    );
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &b).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &b).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 2, .. }
+    ));
+    assert_eq!(pending(&mut p, target), 2);
+}
+
+/// `DomainOp::id` intentionally identifies a nonce slot and therefore aliases two envelopes with
+/// the same nonce but different bodies. Actor correlation must use the complete canonical request:
+/// B may finish A's parked plan, but it cannot report A's success as its own. Once A is durable,
+/// the store independently rejects B as a conflicting reuse of that nonce.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_correlates_same_nonce_requests_by_full_envelope() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let a = new_entry(&mut p, (basis, branch), 53, [8; 16]);
+    let b = new_entry(&mut p, (basis, branch), 53, [9; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+
+    let visit = save(&mut receiver, &mut p, target, &b).unwrap();
+    assert!(matches!(visit, StudioUnconfirmedSaveOutcome::Busy));
+    assert_eq!(pending(&mut p, target), 1, "only A was committed");
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+    ));
+    let refused = save(&mut receiver, &mut p, target, &b)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("nonce was reused with conflicting bytes"),
+        "the conflicting nonce must be rejected by the durable ledger: {refused}"
+    );
+}
+
+/// Review of `b35e23d2`, HIGH-1 and MEDIUM-2. The slot is one per actor, so a plan parked for one
+/// target whose caller never returns must not block a Save on another target.
+///
+/// A's plan for the Index is parked and A goes away. B, a Save on a Flipnote of the same channel,
+/// finishes A's plan in its visit and is told `Busy`, since none of B was saved. The commit emits
+/// a refresh notice for A's document. B's next visit is no longer blocked: it reaches its own mint,
+/// which refuses because this fixture has no preview of B's Flipnote. A's work is durable, and
+/// A's own retry is an exact retry.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_a_parked_plan_never_blocks_another_target() {
+    let (mut p, mut receiver, index, basis, branch) = ready_receiver().await;
+    let a = new_entry(&mut p, (basis, branch), 71, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, index, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    let _ = receiver.take_settlement_notices();
+
+    let flipnote = StudioTarget::Flipnote {
+        channel: channel(),
+        object: [0x77; 16],
+    };
+    let b = StudioUnconfirmedOverlaySaveRequest {
+        basis: [1; 32],
+        branch: [2; 32],
+        nonce: [72; 16],
+        body: FlipnoteOp::SetHeader(FlipnoteHeader::Title("b".into()))
+            .encode()
+            .unwrap(),
+    };
+    let visit = save(&mut receiver, &mut p, flipnote, &b).unwrap();
+    assert!(
+        matches!(visit, StudioUnconfirmedSaveOutcome::Busy),
+        "B is told nothing of it was saved: {visit:?}"
+    );
+    assert!(
+        receiver
+            .take_settlement_notices()
+            .contains(&(index, StudioSettlementState::RefreshRequired)),
+        "finishing A's plan changed A's document, so its row is refreshed"
+    );
+    assert_eq!(pending(&mut p, index), 1, "A's work landed in B's visit");
+
+    let refused = save(&mut receiver, &mut p, flipnote, &b)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("no live preview"),
+        "B is no longer blocked by the slot; it reaches its own mint: {refused}"
+    );
+    assert!(matches!(
+        save(&mut receiver, &mut p, index, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+    ));
+}
+
+/// Re-review of `5ccc4647`, MEDIUM: a parked plan whose caller never returns is bounded.
+///
+/// While it waits, the actor's wake schedule holds a deadline no later than the park bound, so a
+/// quiet actor still schedules the visit. Past the deadline an ordinary pass drops the plan,
+/// releasing admission and the process-wide permit. Nothing was committed, and the caller's late
+/// retry cannot commit the dropped plan: it is either captured afresh or refused for want of a
+/// preview, never saved from the old plan.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_an_abandoned_plan_is_dropped_at_its_deadline() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let a = new_entry(&mut p, (basis, branch), 95, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    let wake = receiver.wake_in(&p.bob);
+    assert!(
+        wake.is_some_and(|ms| ms <= 30_000),
+        "a parked plan keeps a deadline in the wake schedule: {wake:?}"
+    );
+
+    p.clock.advance_ms(30_001);
+    receiver
+        .run(&mut p.bob, &mut p.b_store, SERVER, None)
+        .unwrap();
+    assert_eq!(
+        pending(&mut p, target),
+        0,
+        "the dropped plan committed nothing"
+    );
+    // The slot is free. A Save on another target is not told `busy`, whether or not any preview
+    // is still live: with the plan still parked it would finish it and say `busy`.
+    let flipnote = StudioTarget::Flipnote {
+        channel: channel(),
+        object: [0x78; 16],
+    };
+    let b = StudioUnconfirmedOverlaySaveRequest {
+        basis: [1; 32],
+        branch: [2; 32],
+        nonce: [96; 16],
+        body: FlipnoteOp::SetHeader(FlipnoteHeader::Title("b".into()))
+            .encode()
+            .unwrap(),
+    };
+    let other = save(&mut receiver, &mut p, flipnote, &b);
+    assert!(
+        !matches!(other, Ok(StudioUnconfirmedSaveOutcome::Busy)),
+        "the dropped plan no longer holds the slot: {other:?}"
+    );
+    let retry = save(&mut receiver, &mut p, target, &a);
+    assert!(
+        !matches!(retry, Ok(StudioUnconfirmedSaveOutcome::Saved { .. })),
+        "the expired plan was dropped, so a late retry cannot commit it: {retry:?}"
+    );
+}
+
+/// Review of `265b0756`, LOW-1 and LOW-2: the park deadline holds while the receiver is paused,
+/// and both of its scheduling terms are pinned.
+///
+/// Paused, every other term of `pending` and `wake_in` is gated off, so what remains is exactly
+/// the park's. Before the deadline: no work, and the deadline published. At it: work, and no
+/// deadline (an expired one still published would be a spin, not a wake). Then the paused pass the
+/// scheduler asked for drops the plan.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_park_deadline_holds_while_paused() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let a = new_entry(&mut p, (basis, branch), 97, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    receiver.pause_for_test();
+
+    let wake = receiver
+        .wake_in(&p.bob)
+        .expect("a paused receiver still publishes a parked plan's deadline");
+    assert!(
+        !receiver.pending(&p.bob),
+        "nothing is owed before the deadline"
+    );
+    p.clock.advance_ms(wake - 1);
+    assert_eq!(receiver.wake_in(&p.bob), Some(1));
+    assert!(!receiver.pending(&p.bob));
+
+    p.clock.advance_ms(1);
+    assert!(
+        receiver.pending(&p.bob),
+        "at its deadline a parked plan is pending even while paused"
+    );
+    assert!(
+        receiver.wake_in(&p.bob).is_none(),
+        "an expired deadline is no longer published"
+    );
+    receiver
+        .run(&mut p.bob, &mut p.b_store, SERVER, None)
+        .unwrap();
+    assert!(
+        !receiver.pending(&p.bob) && receiver.wake_in(&p.bob).is_none(),
+        "the paused pass dropped the plan"
+    );
+    assert_eq!(pending(&mut p, target), 0);
+}
+
+/// Review of `b35e23d2`, LOW-1: a retry while this request's own plan is in flight is `Scheduled`,
+/// not `Busy`. "Nothing of this request was saved" would be untrue of a plan already running.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_retry_of_its_own_scheduled_plan_is_pending() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let a = new_entry(&mut p, (basis, branch), 81, [8; 16]);
+    for _ in 0..2 {
+        let visit = save(&mut receiver, &mut p, target, &a).unwrap();
+        assert!(
+            matches!(visit, StudioUnconfirmedSaveOutcome::Scheduled),
+            "a retry of its own in-flight plan is pending, not busy: {visit:?}"
+        );
+    }
+    settle(&mut receiver, &mut p).await;
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+    ));
+}
+
+/// Design 18.3 review, F4, at the Unconfirmed Save's entry point. While the receiver is paused a
+/// fresh capture is dropped and the visit answers `Paused`: a paused receiver hands out no work, so
+/// a queued capture would hold admission, a pool permit and its media hold for the whole pause.
+/// `Paused`, not `Busy`, because resending does not end a pause and pays the visit's costs again
+/// (the batch re-review, M-1). Nothing was durable, and after the pause, ended by an explicit
+/// access as in production, the identical request plans afresh and saves.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_captured_while_paused_answers_paused_and_holds_nothing() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let pool = receiver.inject_overlay_pool_for_test(4);
+    let a = new_entry(&mut p, (basis, branch), 101, [8; 16]);
+    receiver.pause_for_test();
+
+    let visit = save(&mut receiver, &mut p, target, &a).unwrap();
+    assert!(
+        matches!(visit, StudioUnconfirmedSaveOutcome::Paused),
+        "a capture made while paused was not refused as paused: {visit:?}"
+    );
+    assert_eq!(
+        pool.available_permits(),
+        4,
+        "a capture made while paused kept its pool permit"
+    );
+    assert_eq!(pending(&mut p, target), 0, "nothing was durable");
+
+    receiver
+        .run(
+            &mut p.bob,
+            &mut p.b_store,
+            SERVER,
+            Some(crate::studio::StudioRequest::Read { target }),
+        )
+        .unwrap();
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+    ));
+}
+
+/// F4's boundary: the refusal is at the capture, not at the door. An exact retry of accepted work
+/// is answered at S1 before any capture, so it stays `Saved` while the receiver is paused.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_exact_retry_while_paused_is_still_saved() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let a = new_entry(&mut p, (basis, branch), 102, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+    ));
+
+    receiver.pause_for_test();
+    let retried = save(&mut receiver, &mut p, target, &a).unwrap();
+    assert!(
+        matches!(
+            retried,
+            StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+        ),
+        "an exact retry while paused was not answered as saved: {retried:?}"
+    );
+}
+
+/// F4's other half: a capture queued before the pause is released by the pause itself, through
+/// the production transition, and the request it belonged to is forgotten. Its retry after the
+/// pause plans afresh, so it is `Scheduled`, not a stale `Scheduled` for a capture that is gone.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_a_capture_queued_then_paused_is_released() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let pool = receiver.inject_overlay_pool_for_test(4);
+    let a = new_entry(&mut p, (basis, branch), 103, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    assert_eq!(
+        pool.available_permits(),
+        3,
+        "precondition: the capture is queued"
+    );
+
+    receiver.pause_at_for_test(&p.bob);
+    assert_eq!(
+        pool.available_permits(),
+        4,
+        "the pause did not release the queued capture's pool permit"
+    );
+    assert!(
+        receiver.detach(&mut p.bob).is_none(),
+        "a paused receiver still had the capture to hand out"
+    );
+
+    receiver
+        .run(
+            &mut p.bob,
+            &mut p.b_store,
+            SERVER,
+            Some(crate::studio::StudioRequest::Read { target }),
+        )
+        .unwrap();
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+    ));
+}
+
+/// A UI lock releases whatever a Save holds in the overlay slot (the F2 batch review's residual
+/// risk). Each of these holds draft plaintext, admission and a pool permit:
+/// - a capture still queued, released by the lock;
+/// - a parked plan, released by the lock;
+/// - a job already detached when the lock arrives, whose plan is dropped as it returns rather
+///   than parked.
+///
+/// No visit runs while locked, so neither the pause release nor the park deadline would reach
+/// them. Nothing was durable in any case.
+///
+/// Each case runs in its own boxed future. Built inline, the three fixtures stayed alive together
+/// in one future, which `#[tokio::test]` keeps on the test thread's stack, and that overflowed the
+/// default 2 MiB stack the root suite runs with, on Linux and Windows alike (CI at `5c80e69c`).
+/// The overlay workflow and its harness passed only because they set `RUST_MIN_STACK`.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_a_lock_releases_queued_parked_and_returning_work() {
+    Box::pin(lock_releases_a_queued_capture()).await;
+    Box::pin(lock_releases_a_parked_plan()).await;
+    Box::pin(lock_drops_a_detached_jobs_returning_plan()).await;
+}
+
+async fn lock_releases_a_queued_capture() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let pool = receiver.inject_overlay_pool_for_test(4);
+    let a = new_entry(&mut p, (basis, branch), 111, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    assert_eq!(pool.available_permits(), 3, "precondition: queued");
+    receiver.clear_previews();
+    assert_eq!(
+        pool.available_permits(),
+        4,
+        "the lock did not release a queued capture"
+    );
+    assert!(receiver.detach(&mut p.bob).is_none());
+    assert_eq!(pending(&mut p, target), 0, "nothing was durable");
+}
+
+async fn lock_releases_a_parked_plan() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let pool = receiver.inject_overlay_pool_for_test(4);
+    let a = new_entry(&mut p, (basis, branch), 112, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    assert_eq!(pool.available_permits(), 3, "precondition: parked");
+    receiver.clear_previews();
+    assert_eq!(
+        pool.available_permits(),
+        4,
+        "the lock did not release a parked plan"
+    );
+    assert_eq!(pending(&mut p, target), 0, "nothing was durable");
+}
+
+async fn lock_drops_a_detached_jobs_returning_plan() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let pool = receiver.inject_overlay_pool_for_test(4);
+    let a = new_entry(&mut p, (basis, branch), 113, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &a).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    let job = receiver
+        .detach(&mut p.bob)
+        .expect("precondition: the capture detaches");
+    receiver.clear_previews();
+    // Before the job returns, the request has been forgotten with it. Its retry finds the slot
+    // still held by the running worker and is `busy`, not `pending` for work about to be dropped.
+    let retried = save(&mut receiver, &mut p, target, &a).unwrap();
+    assert!(
+        matches!(retried, StudioUnconfirmedSaveOutcome::Busy),
+        "a retry after the lock was told its dropped work is still pending: {retried:?}"
+    );
+    receiver.complete(&mut p.bob, job.run(None).await);
+    assert_eq!(
+        pool.available_permits(),
+        4,
+        "the lock did not drop a detached job's plan when it returned"
+    );
+    assert_eq!(pending(&mut p, target), 0, "nothing was durable");
+}
+
+/// The confirmed checkpoint arrives on this member: the very receipt and seed the preview was of,
+/// installed by checkpoint adoption, as discovery installs it after a fresh owner proof.
+///
+/// The fixture's preview is of a synthetic candidate that the owner never installs, so there are no
+/// pages to receive; adoption is the confirmed path this member really takes. The tenure is the
+/// proof's claim (the owner's start, 0 here), handed in directly. The proof exchange itself is
+/// discovery's, tested there.
+fn install_confirmed_checkpoint(p: &mut Pair, target: StudioTarget) {
+    let (receipt, seed) = candidate(p, target);
+    install_checkpoint(p, target, &receipt, &seed);
+}
+
+/// Another owner checkpoint of the same document: the same empty projection, under another close.
+/// Installed instead of the preview's, it is a confirmed source that is not the branch's base.
+fn other_checkpoint(p: &mut Pair, target: StudioTarget) -> (Receipt, CheckpointSeed) {
+    p.alice.sync.with_registry_context(|g, d, _, _| {
+        let seed = StudioEpoch::new(g, target, d.device_id())
+            .unwrap()
+            .projection()
+            .unwrap()
+            .checkpoint([8; 32])
+            .unwrap();
+        let receipt = Receipt::sign(
+            target.document(&g.group_id()).unwrap(),
+            0,
+            [8; 32],
+            seed.change_hash(),
+            0,
+            InheritedCheckpoint::EpochZero,
+            d,
+        )
+        .unwrap();
+        (receipt, seed)
+    })
+}
+
+fn install_checkpoint(
+    p: &mut Pair,
+    target: StudioTarget,
+    receipt: &Receipt,
+    seed: &CheckpointSeed,
+) {
+    let mut b = budget(&mut p.bob, &mut p.b_store);
+    let clock = p.clock.clone();
+    let store = &mut p.b_store;
+    let (outcome, _) = p
+        .bob
+        .sync
+        .with_registry_context(|g, d, _, rng| {
+            store.adopt_studio_checkpoint(
+                SERVER,
+                g,
+                target,
+                d,
+                receipt,
+                Some(seed.bytes()),
+                0,
+                &clock,
+                rng,
+                &mut b,
+            )
+        })
+        .unwrap();
+    assert_eq!(outcome, crate::store::StudioAdoptionOutcome::Installed);
+}
+
+/// The lifecycle row's design 8.6 field, read through the ordinary control transaction.
+fn reconciliation(
+    receiver: &mut StudioReceiver,
+    p: &mut Pair,
+    target: StudioTarget,
+) -> Option<catcoms_replication::studio::StudioOverlayUnconfirmedState> {
+    match control(receiver, p, target, StudioControlAction::OverlayLifecycle).unwrap() {
+        StudioControlResponse::OverlayLifecycle(lifecycle) => lifecycle.unconfirmed,
+        other => panic!("expected the lifecycle row, got {other:?}"),
+    }
+}
+
+/// Design 8.6 on a real Unconfirmed branch, derived on every read and never written. With no
+/// installed source it is awaiting one. When the confirmed checkpoint is installed, the installed
+/// source is the very checkpoint the branch was based on, and the row says so. Nothing about the
+/// branch changes: it is still Unconfirmed, still local, still this device's.
+#[tokio::test]
+async fn studio_actor_unconfirmed_branch_reconciles_from_awaiting_to_confirmed_on_read() {
+    use catcoms_replication::studio::StudioOverlayUnconfirmedState as U;
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    assert_eq!(
+        reconciliation(&mut receiver, &mut p, target),
+        None,
+        "no branch, no reconciliation"
+    );
+    let request = new_entry(&mut p, (basis, branch), 61, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &request).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &request).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+    ));
+    assert_eq!(
+        reconciliation(&mut receiver, &mut p, target),
+        Some(U::AwaitingSource)
+    );
+
+    install_confirmed_checkpoint(&mut p, target);
+    assert_eq!(
+        reconciliation(&mut receiver, &mut p, target),
+        Some(U::BaseConfirmed),
+        "the installed source is the checkpoint the branch was based on"
+    );
+    assert!(
+        matches!(
+            recorded_provenance(&mut p, target),
+            Some(StudioOverlayProvenance::Unconfirmed { .. })
+        ),
+        "a confirmed base promotes nothing: the branch is still Unconfirmed"
+    );
+    assert_eq!(pending(&mut p, target), 1);
+}
+
+/// The other two app-level arms of design 8.6 (re-review of `5ccc4647`, LOW-5). A confirmed source
+/// that is not the branch's base, here another owner checkpoint under another close, reads
+/// `BaseSuperseded`. The same source made unreadable on disk reads `SourceUnreadable`, never
+/// `AwaitingSource`: a record is there, and it cannot be vouched for as absent.
+#[tokio::test]
+async fn studio_actor_unconfirmed_branch_reconciles_superseded_then_unreadable() {
+    use catcoms_replication::studio::StudioOverlayUnconfirmedState as U;
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let request = new_entry(&mut p, (basis, branch), 91, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &request).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &request).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+    ));
+
+    let (receipt, seed) = other_checkpoint(&mut p, target);
+    install_checkpoint(&mut p, target, &receipt, &seed);
+    assert_eq!(
+        reconciliation(&mut receiver, &mut p, target),
+        Some(U::BaseSuperseded),
+        "a confirmed source from another checkpoint supersedes the branch's base"
+    );
+
+    let store = &p.b_store;
+    let path = p
+        .bob
+        .sync
+        .with_registry_context(|g, _, _, _| store.studio_source_path_for_test(SERVER, g, target))
+        .unwrap();
+    std::fs::write(&path, b"not a sealed studio record").unwrap();
+    assert_eq!(
+        reconciliation(&mut receiver, &mut p, target),
+        Some(U::SourceUnreadable),
+        "a source that is there but unreadable is neither awaited nor compared"
+    );
+}
+
+/// Design 12's restart row, through the actor on the real Index.
+///
+/// The store is reopened and a new receiver is built, so nothing the first actor held in memory
+/// survives: not its preview, not a parked plan, and not the fingerprint of the request that
+/// scheduled one. The `Server` and its sync are kept, as in Agent 1's store-level restart test, so
+/// this speaks for actor and store state, not sync state. None of what it asserts reads sync memory:
+/// the exact retry is settled from the store before any mint, the fresh preview registers its own
+/// hint, and provenance and 8.6 are store reads. Before the restart, one Save has landed and a second
+/// has been planned but not committed.
+///
+/// - The landed Save's exact retry is acknowledged after the restart and adds nothing. A caller
+///   whose answer was lost in the crash can resend safely, with or without a live preview; new
+///   work without one is refused.
+/// - The planned Save died with the process. Nothing durable was written (RT-001), so its identical
+///   request is a fresh first visit: it plans again and lands once.
+/// - The branch is rebuilt from what it persisted. The fresh preview's ticket names the same basis
+///   and branch, new work appends to it, and its admission provenance is unchanged.
+/// - Design 8.6 needs nothing the first process held: the row reads `AwaitingSource`, then
+///   `BaseConfirmed` once the confirmed checkpoint is installed.
+#[tokio::test]
+async fn studio_actor_unconfirmed_branch_resumes_after_a_restart_from_what_it_persisted() {
+    use catcoms_replication::studio::StudioOverlayUnconfirmedState as U;
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let landed = new_entry(&mut p, (basis, branch), 101, [8; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &landed).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &landed).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+    ));
+    let admitted = recorded_provenance(&mut p, target);
+    assert!(matches!(
+        admitted,
+        Some(StudioOverlayProvenance::Unconfirmed { .. })
+    ));
+    let planned = new_entry(&mut p, (basis, branch), 102, [9; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &planned).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    assert_eq!(
+        pending(&mut p, target),
+        1,
+        "precondition: the second Save is planned and parked, not committed"
+    );
+
+    // --- The restart.
+    drop(receiver);
+    drop(p.b_store);
+    p.b_store = open(p.b_root.path());
+    p.watch = p
+        .bob
+        .watch_studio_epoch(&p.b_store, SERVER, target)
+        .unwrap();
+    let mut receiver = previewing_receiver(&mut p, target).await;
+
+    assert_eq!(
+        recorded_provenance(&mut p, target),
+        admitted,
+        "the reopened branch keeps its admission's facts"
+    );
+    assert_eq!(
+        reconciliation(&mut receiver, &mut p, target),
+        Some(U::AwaitingSource)
+    );
+    assert!(
+        matches!(
+            save(&mut receiver, &mut p, target, &landed).unwrap(),
+            StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+        ),
+        "work that landed before the restart is answered as an exact retry"
+    );
+    assert_eq!(pending(&mut p, target), 1, "and its retry adds nothing");
+    let StudioControlResponse::UnconfirmedOverlaySaveTicket {
+        basis: reopened_basis,
+        branch: reopened_branch,
+        ..
+    } = control(
+        &mut receiver,
+        &mut p,
+        target,
+        StudioControlAction::BeginUnconfirmedOverlaySave,
+    )
+    .unwrap()
+    else {
+        panic!("expected a ticket")
+    };
+    assert_eq!(
+        (reopened_basis, reopened_branch),
+        (basis, branch),
+        "the fresh preview's ticket names the branch rebuilt from disk"
+    );
+
+    let visit = save(&mut receiver, &mut p, target, &planned).unwrap();
+    assert!(
+        matches!(visit, StudioUnconfirmedSaveOutcome::Scheduled),
+        "the parked plan died with the process, so its retry plans again: {visit:?}"
+    );
+    settle(&mut receiver, &mut p).await;
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &planned).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 2, .. }
+    ));
+    assert_eq!(pending(&mut p, target), 2, "it landed once");
+    assert_eq!(recorded_provenance(&mut p, target), admitted);
+
+    // With the preview gone again, both accepted Saves are still answered, and new work is
+    // refused for want of one.
+    receiver.clear_previews();
+    for request in [&landed, &planned] {
+        assert!(
+            matches!(
+                save(&mut receiver, &mut p, target, request).unwrap(),
+                StudioUnconfirmedSaveOutcome::Saved { accepted: 2, .. }
+            ),
+            "an exact retry after a restart needs no live preview"
+        );
+    }
+    let fresh = new_entry(&mut p, (basis, branch), 103, [10; 16]);
+    let refused = save(&mut receiver, &mut p, target, &fresh)
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("no live preview"), "{refused}");
+    assert_eq!(pending(&mut p, target), 2);
+
+    install_confirmed_checkpoint(&mut p, target);
+    assert_eq!(
+        reconciliation(&mut receiver, &mut p, target),
+        Some(U::BaseConfirmed),
+        "after a restart too, the installed source is the checkpoint the branch was based on"
+    );
+}
+
+/// Both actions go through the receiver and its scope checks; neither can be reached through the
+/// control transaction, and neither answers for a channel this server does not know.
+#[tokio::test]
+async fn studio_unconfirmed_save_actions_refuse_outside_the_receiver_and_an_unknown_channel() {
+    let mut p = pages::proven_pair().await;
+    let target = StudioTarget::Index { channel: channel() };
+    for action in [
+        StudioControlAction::BeginUnconfirmedOverlaySave,
+        StudioControlAction::SaveUnconfirmedOverlay(Box::new(
+            StudioUnconfirmedOverlaySaveRequest {
+                basis: [1; 32],
+                branch: [2; 32],
+                nonce: [3; 16],
+                body: Vec::new(),
+            },
+        )),
+    ] {
+        let refused = p
+            .bob
+            .studio_control_transaction(
+                &mut p.b_store,
+                SERVER,
+                StudioControlRequest { target, action },
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("requires the actor's live preview"),
+            "{refused}"
+        );
+    }
+
+    let mut receiver = PreviewHarness::default().into_receiver(Vec::new());
+    let unknown = StudioTarget::Index {
+        channel: 0xdead_u128.to_be_bytes(),
+    };
+    let refused = control(
+        &mut receiver,
+        &mut p,
+        unknown,
+        StudioControlAction::BeginUnconfirmedOverlaySave,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(refused.contains("unknown Studio channel"), "{refused}");
+
+    // A body past the operation bound is refused by the request's own validation, before any
+    // channel check or store read.
+    let oversized = StudioControlAction::SaveUnconfirmedOverlay(Box::new(
+        StudioUnconfirmedOverlaySaveRequest {
+            basis: [1; 32],
+            branch: [2; 32],
+            nonce: [3; 16],
+            body: vec![0; catcoms_replication::epoch::MAX_DOMAIN_OP_BYTES + 1],
+        },
+    ));
+    let refused = control(&mut receiver, &mut p, target, oversized)
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("exceeds the operation bound"), "{refused}");
+}

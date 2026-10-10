@@ -25,6 +25,30 @@ impl CatchupRuntime {
             .owner_target
             .filter(|t| watches.iter().any(|(w, _)| w.target == *t))
             .unwrap_or(watches[self.owner_selection % watches.len()].0.target);
+        if self.repair_claimed(CheckpointTarget::Studio(target)) {
+            // A repair job owns this source. The sticky target advances instead of waiting on
+            // it, so one repairing document cannot stall rotation for every other.
+            self.owner_target = None;
+            self.owner_selection = self.owner_selection.wrapping_add(1);
+            self.owner_next_at = now.saturating_add(5_000);
+            return Ok(None);
+        }
+        // A target whose overlay handoff is Prepared is skipped this turn, and the rail moves on.
+        // The rotation check below reads it through the read-only service path, which refuses a
+        // Prepared destination before any rotation fence could run, and that refusal would
+        // surface as an error that pauses all of receive. Its resolution is already scheduled:
+        // Flow R (design 6.4.2) or H1 resolves it within a few turns. Flow R made this window
+        // routine; before it, a Prepared record held back by a Hold reached here too. No path
+        // resolves a Hold, so a stuck one suspends this document's rotation indefinitely, quietly
+        // rather than by pausing receive; the eligibility view reports it as `PreparedStuck`. See
+        // `handoff_prepared`.
+        let prepared = Self::handoff_prepared(server, store, id, target);
+        if prepared {
+            self.owner_target = None;
+            self.owner_selection = self.owner_selection.wrapping_add(1);
+            self.owner_next_at = now.saturating_add(5_000);
+            return Ok(None);
+        }
         self.owner_target = Some(target);
         if !self.prepare(server, store, id, target)? {
             // Captured, busy or superseded work must all pay the same local cadence. The

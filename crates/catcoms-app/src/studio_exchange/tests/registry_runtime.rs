@@ -106,6 +106,13 @@ async fn studio_held_registry_page_is_discarded_after_fault_or_checkpoint_replac
         });
         assert_eq!(fetched.unwrap(), RegistryReceiveState::PageReady);
         let mut receiver = crate::studio::StudioReceiver::default();
+        // Its own process's preparation capacity, as the `unopened` fixtures keep theirs: the
+        // discard below needs one preparation within three turns, and parallel actor tests
+        // retaining process-pool slots must not turn that into a retry on a later idle turn.
+        receiver.preparation_pools_for_test(
+            std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(3)),
+        );
         receiver
             .run(
                 &mut p.bob,

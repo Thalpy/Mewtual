@@ -18,6 +18,9 @@ pub(super) fn check(accepted: bool) {
             .edit_or_reseal(&f.device, &f.group, &mut rng(), &late, 100)
             .unwrap();
         let (close, basis) = seal_source(&f, &mut store);
+        // The branch a ticket for this (soon stale) basis named: generation 1, which is also the
+        // live branch once the first Save below opens it.
+        let branch = request_branch(&f, &mut store, &close);
         let saved =
             accepted.then(|| save(&f, &mut store, &close, basis.fingerprint(), f.title(), 123));
         let mut before = f.load(&store).unwrap();
@@ -105,8 +108,9 @@ pub(super) fn check(accepted: bool) {
             f.target,
             &f.device,
             &close,
-            Some(0),
+            StudioOwnerTenure::Known(0),
             basis.fingerprint(),
+            branch,
             new_request.clone(),
             456,
             &mut rng(),
@@ -123,10 +127,55 @@ pub(super) fn check(accepted: bool) {
         assert_eq!(fs::read(&intent_path).unwrap(), original_intents);
         let source_after_ingest = canonical(&store);
         if let Some(saved) = saved {
-            let retry = save(&f, &mut store, &close, basis.fingerprint(), f.title(), 999);
-            assert_eq!(retry.accepted(), 1);
-            assert_eq!(retry.basis(), saved.basis());
-            assert_eq!(retry.projection(), saved.projection());
+            let acknowledged = retry(&f, &mut store, &close, basis.fingerprint(), f.title(), 999);
+            assert_eq!(acknowledged, (saved.basis(), 1));
+            assert_eq!(stored_draft(&f, &store).projection(), saved.projection());
+            assert_eq!(fs::read(&intent_path).unwrap(), original_intents);
+
+            // A ticket prepared now carries the fresh basis but still names the live branch, and
+            // that branch was opened on the basis the source has moved past, so it can take no
+            // append at all. The refusal belongs at S1b, ahead of media admission. On Flipnote the
+            // request names pixels that were never published, so a media-first order would answer
+            // "publish the frame PIX" instead - that difference is what makes the order visible.
+            let doomed = match f.target {
+                StudioTarget::Flipnote { .. } => f.domain(
+                    FlipnoteOp::InsertFrame {
+                        frame: [9; 16],
+                        after: None,
+                        cid: [0xAB; 32],
+                        bytes: 39,
+                    }
+                    .encode()
+                    .unwrap(),
+                    31,
+                ),
+                StudioTarget::Index { .. } => {
+                    let mut op = f.title();
+                    op.nonce = [31; 16];
+                    op
+                }
+            };
+            let live = live_branch(&f, &store);
+            let mut b = budget(&mut store, &f);
+            let refused = store.save_studio_closing_overlay(
+                SERVER,
+                &f.group,
+                f.target,
+                &f.device,
+                &close,
+                StudioOwnerTenure::Known(0),
+                fresh.fingerprint(),
+                live,
+                doomed,
+                457,
+                &mut rng(),
+                &mut b,
+            );
+            assert_eq!(
+                refused.map(|_| ()).unwrap_err().to_string(),
+                invalid(catcoms_replication::ReplError::EpochScope).to_string(),
+                "a live branch on a superseded basis was not refused ahead of media admission"
+            );
             assert_eq!(fs::read(&intent_path).unwrap(), original_intents);
         } else {
             assert!(store

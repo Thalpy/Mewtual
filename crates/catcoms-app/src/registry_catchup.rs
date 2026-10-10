@@ -7,6 +7,7 @@ use crate::registry_ingress::ServerRegistryWatch;
 use catcoms_replication::registry_epoch::catchup::{
     RegistryPageOutcome, RegistryPageProvider, RegistryPageRequest, RegistryPageSource,
 };
+use catcoms_replication::{Receipt, ReceiptRepair};
 use catcoms_rt::{CryptoRngCore, MeshTransport, PeerId};
 use catcoms_sync::registry_catchup::RegistryPageQuery;
 use catcoms_sync::RegistrySyncInstance;
@@ -106,6 +107,9 @@ pub struct ServerRegistryPageProvider {
     server: u64,
     bucket: u8,
     prepared: Option<PreparedSource>,
+    /// A custody-checked missing source is distinct from a cold/stale provider. It authorizes
+    /// only the local fact that no repair can be owed, and is rechecked by path before use.
+    prepared_absent: bool,
     preparation_generation: Arc<()>,
 }
 impl ServerRegistryPageProvider {
@@ -205,6 +209,56 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         provider.prepared = Some(prepared);
         Ok(true)
     }
+    /// Classify an owed Registry replacement from the already detached and verified source.
+    /// The test-facing yes/no view of [`Self::prepared_registry_owed_repair`].
+    #[cfg(test)]
+    pub(crate) fn prepared_registry_repair_install_pending(
+        &mut self,
+        store: &ServerStore,
+        server: u64,
+        bucket: u8,
+        provider: &mut ServerRegistryPageProvider,
+    ) -> Result<Option<bool>, AppError> {
+        Ok(self
+            .prepared_registry_owed_repair(store, server, bucket, provider)?
+            .map(|owed| owed.is_some()))
+    }
+
+    /// The replacement a Registry bucket owes, read from the already detached and verified
+    /// source: the committed repair and its full pair, sorted by hash as issuance sorts them.
+    ///
+    /// `None` is deliberately "unknown", not "healthy": the provider may be absent, retargeted,
+    /// cold or stale. The automatic receiver must defer in that case. `Some(None)` is a checked
+    /// "owes nothing", from checked absence or a current source with no pending install. A
+    /// returned fact is bound to the current Server/mount/member context and to an exact reread
+    /// of the saved wrapper, while avoiding a second synchronous Registry reconstruction under
+    /// actor/store custody. It schedules work only: the repair it names is verified again under
+    /// the current owner and this device's tenure before anything acts on it.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn prepared_registry_owed_repair(
+        &mut self,
+        store: &ServerStore,
+        server: u64,
+        bucket: u8,
+        provider: &mut ServerRegistryPageProvider,
+    ) -> Result<Option<Option<(ReceiptRepair, [Receipt; 2])>>, AppError> {
+        if !self.registry_page_provider_matches(store, server, bucket, provider) {
+            return Ok(None);
+        }
+        if provider.prepared_absent {
+            if store.registry_page_source_is_absent(server, &self.group_id(), bucket)? {
+                return Ok(Some(None));
+            }
+            provider.prepared_absent = false;
+            return Ok(None);
+        }
+        if !self.registry_page_preparation_is_warm(store, provider)? {
+            return Ok(None);
+        }
+        Ok(provider.prepared.as_ref().map(|prepared| {
+            crate::store::registry_owed_replacement(prepared.source.repair_state())
+        }))
+    }
     /// Head/seed/page service from the existing one prepared Registry source. Its semaphore
     /// permit follows the graph's actual lifetime, including cancellation and queued results.
     pub(crate) fn serve_registry_interest(
@@ -235,20 +289,26 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     .map(|s| &s.inner);
                 let served = self
                     .sync
-                    .serve_epoch_head_interest(interest, snapshot, |g, d, rng, request| {
-                        store.with_studio_protocol_budget(server, g, budget, |store, budget| {
-                            store.prepare_registry_head_prepared(
-                                server,
-                                g,
-                                bucket,
-                                d,
-                                request.tenure,
-                                rng,
-                                provider.prepared.as_ref().map(|p| (&p.stamp, &p.source)),
-                                budget,
-                            )
-                        })
-                    })?
+                    .serve_epoch_head_interest_with_fault_repair(
+                        interest,
+                        snapshot,
+                        |g, d, rng, request| {
+                            store.with_studio_protocol_budget(server, g, budget, |store, budget| {
+                                store.prepare_registry_head_prepared_with_fault_repair(
+                                    server,
+                                    g,
+                                    bucket,
+                                    d,
+                                    request.tenure,
+                                    request.archived_owner,
+                                    request.fault_report,
+                                    rng,
+                                    provider.prepared.as_ref().map(|p| (&p.stamp, &p.source)),
+                                    budget,
+                                )
+                            })
+                        },
+                    )?
                     .transpose()?;
                 if let Some(ReceiptHeadServed::Owner(handoff)) = served {
                     self.sync
@@ -319,7 +379,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.begin_registry_page_preparation_with(store, provider, preparation_pool())
     }
 
-    fn begin_registry_page_preparation_with(
+    pub(crate) fn begin_registry_page_preparation_with(
         &mut self,
         store: &ServerStore,
         provider: &mut ServerRegistryPageProvider,
@@ -328,6 +388,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.check_page_provider(store, provider)?;
         // Refresh keeps the cursor MAC but releases the previous full source BEFORE reserving.
         provider.prepared = None;
+        provider.prepared_absent = false;
         provider.preparation_generation = Arc::new(());
         let permit = pool.clone().try_acquire_owned().map_err(|_| {
             AppError::Invalid("registry page preparation capacity exhausted".into())
@@ -345,6 +406,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     ) -> Result<Option<ServerRegistryPagePreparation>, AppError> {
         self.check_page_provider(store, provider)?;
         provider.prepared = None;
+        provider.prepared_absent = false;
         provider.preparation_generation = Arc::new(());
         let capture = store.capture_registry_page_source(
             provider.server,
@@ -352,6 +414,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             provider.bucket,
         )?;
         let Some(capture) = capture else {
+            provider.prepared_absent = true;
             return Ok(None);
         };
         Ok(Some(ServerRegistryPagePreparation {
@@ -530,6 +593,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             server,
             bucket,
             prepared: None,
+            prepared_absent: false,
             preparation_generation: Arc::new(()),
         })
     }

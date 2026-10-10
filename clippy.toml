@@ -1,0 +1,20 @@
+# Repository-wide Clippy configuration. Clippy reads the nearest clippy.toml walking up from each
+# crate's manifest, so this file covers the root workspace and apps/desktop/src-tauri alike.
+#
+# Construction gates (docs/GATE4-AGENT-2-DESIGN.md, section 8.1, design review (ii)).
+#
+# An Unconfirmed overlay basis turns an awaiting-tenure preview's seed into the base of a durable
+# local draft. It must be minted only inside catcoms-sync's live hint callback, which re-checks
+# every current-scope condition at the moment of the mint. Rust cannot restrict a public
+# constructor to one downstream crate, so both the mint and the parser that produces its input are
+# hidden, and their call sites are pinned here and by the source-scan test
+# `construction_gates_are_called_only_from_their_sanctioned_sites` in catcoms-replication.
+#
+# Pinning the parser as well as the mint is the point: whoever can build an UnconfirmedStudioSeed
+# from bytes of their choosing (an archive, an installed checkpoint, copied callback bytes) could
+# mint a preview base from them. The sanctioned call sites carry
+# `#[allow(clippy::disallowed_methods)]` with a comment saying why.
+disallowed-methods = [
+    { path = "catcoms_replication::studio::UnconfirmedStudioSeed::parse_live_transfer", reason = "reserved for catcoms-sync's live seed transfer (design 8.1 (ii)); use parse_graph inside catcoms-replication" },
+    { path = "catcoms_replication::studio::StudioUnconfirmedOverlayBasis::mint_from_live_preview", reason = "reserved for ChannelSync::mint_unconfirmed_overlay_basis inside the live hint callback (design 8.1 (ii))" },
+]

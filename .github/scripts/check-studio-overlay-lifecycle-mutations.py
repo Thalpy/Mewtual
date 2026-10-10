@@ -1,0 +1,795 @@
+"""Require the overlay-lifecycle regressions to catch guard removals at their named assertions.
+
+**Scope, stated precisely because it used to be overstated:** each entry runs ONE test with
+`--exact`, so this script establishes "detected at the named assertion, and the restored source
+passes". It does not establish isolation - no sibling test is selected, so a mutant that also breaks
+one would go unnoticed here. Isolation rests on the hand-runs behind each entry.
+
+Covers Agent 2's scope: the draft archive and its release, the disposal transaction, copy into
+current, the branch-generation namespace, the owner-tenure observation rule and the receipt order
+across tenures (N-T5, in `catcoms-replication`'s `ReceiptBook`), and the Unconfirmed Save: its
+operation rail, its reconciliation and its actor slot and park deadline.
+
+Optional entry names on the command line run a subset; with none, every entry runs (the CI default).
+
+Every mutation here was first proved by hand: each fails its own named test, at its own intended
+assertion, and the restored source passes. The script exists so that stays true - a guard that stops
+being anchored shows up as a mutation that no longer fails.
+
+Run from a Rust test environment; no native/UI build is needed. Logs stay local under logs/.
+Restoration is byte-exact and refuses to overwrite an unrelated concurrent source change.
+
+`RUST_MIN_STACK` is set because these suites currently need more thread stack than the default. That
+is a workaround for a stack regression elsewhere in the tree, not a property of this scope, and it is
+set here so a CI run and a local run agree rather than one of them mysteriously aborting.
+"""
+from pathlib import Path
+import os
+import subprocess
+import sys
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+APP = "crates/catcoms-app/src/store"
+REPL = "crates/catcoms-replication/src/studio"
+
+APP_TESTS = "store::epoch_studio::tests::rotation::overlay::"
+REPL_TESTS = "studio::epoch::owner::tests::"
+
+# (name, package, test-path prefix, file, before, after, test, expected assertion text)
+MUTATIONS = [
+    # --- the archive release path: the only thing that destroys preserved evidence ---
+    (
+        "release-identity", "catcoms-app", APP_TESTS,
+        f"{APP}/epoch_draft_archive.rs",
+        "if archive.archive_id().map_err(invalid)? != expected_archive {",
+        # Inverted rather than short-circuited. `if false {` drops the only use of both `archive`
+        # and `expected_archive`, and under the `-D warnings` this script now sets, two unused
+        # variables are compile ERRORS. A mutant that does not build proves nothing about the guard
+        # it names, and the harness correctly refused to call that a detection. Inverting keeps both
+        # bindings live and negates exactly the identity comparison. Found by Agent 3 in CI.
+        "if archive.archive_id().map_err(invalid)? == expected_archive {",
+        "archive::release_refuses_an_archive_other_than_the_one_it_names",
+        "release must refuse a content it was not asked to destroy",
+    ),
+    (
+        "release-budget-verify", "catcoms-app", APP_TESTS,
+        f"{APP}/epoch_draft_archive.rs",
+        "budget\n            .verify_record(&storage_scope, id, Some(observed))\n            .map_err(invalid)?;",
+        "let _ = (&storage_scope, id, observed);",
+        "archive::release_refuses_a_record_its_budget_does_not_know",
+        "release must refuse when its budget never accounted the record it is destroying",
+    ),
+    (
+        "release-closes-budgets", "catcoms-app", APP_TESTS,
+        f"{APP}/epoch_draft_archive.rs",
+        "budget.invalidate();\n        intents.begin_write();",
+        "intents.begin_write();",
+        "archive::a_release_that_fails_after_the_unlink_still_closes_both_budgets",
+        "left a usable storage budget describing a record",
+    ),
+    (
+        "release-scope-binding", "catcoms-app", APP_TESTS,
+        f"{APP}/epoch_draft_archive.rs",
+        "if d.get_bytes().map_err(invalid)? != scope {\n        return Err(invalid(\"wrong sealed scope\"));\n    }",
+        "let _ = (d.get_bytes().map_err(invalid)?, scope);",
+        "archive::a_record_sealed_for_another_slot_is_refused_by_the_addressed_readers",
+        "must refuse a record sealed for another slot",
+    ),
+    # --- the disposal transaction: D1 and D4 ---
+    (
+        "dispose-authorship", "catcoms-app", APP_TESTS,
+        f"{APP}/epoch_intents/disposal.rs",
+        "if active.author() != device.device_id() {",
+        "if false {",
+        "disposal::a_group_member_who_did_not_author_the_branch_cannot_dispose_of_it",
+        "a member who did not author the branch must not dispose of it",
+    ),
+    (
+        "dispose-envelope-match", "catcoms-app", APP_TESTS,
+        f"{APP}/epoch_intents/disposal.rs",
+        ".matches_branch(active, &state.ledger)",
+        ".matches_branch(active, &state.ledger)\n                    .map(|_| true)",
+        "disposal::a_preserving_disposal_refuses_an_archive_whose_entries_are_not_the_branchs",
+        "must not authorise destroying it",
+    ),
+    # The branch and generation compares are removed TOGETHER. They are deliberately redundant for
+    # a correctly derived archive (`branch_id` is `H(basis, generation)`), so removing one alone
+    # leaves the other refusing; the semantic defence is "an archive of another generation is not
+    # this branch's", and that is what this mutant takes away. Without it, G3 is disposed of as
+    # `Preserved` under G1's archive.
+    (
+        "dispose-generation-binding", "catcoms-app", APP_TESTS,
+        f"{APP}/epoch_intents/disposal.rs",
+        "                    || Some(archive.branch()) != metadata.branch_id()\n                    || archive.generation() != metadata.branch_generation()\n",
+        "",
+        "disposal::a_preserving_disposal_refuses_an_earlier_generations_archive_of_identical_work",
+        "an archive of an earlier generation must not authorise disposing of a later one",
+    ),
+    # Membership on its own: the real author, removed. The stranger test cannot isolate this, since
+    # a stranger fails authorship too, and it stays green under this mutant.
+    (
+        "dispose-membership", "catcoms-app", APP_TESTS,
+        f"{APP}/epoch_intents/disposal.rs",
+        "        if document.server_id != group.group_id()\n            || group.member_signature_key(&device.device_id()).as_deref()\n                != Some(device.public_key_bytes().as_slice())\n        {\n            return Err(invalid(\"disposal author is not a current local member\"));",
+        "        if document.server_id != group.group_id() {\n            return Err(invalid(\"disposal author is not a current local member\"));",
+        "disposal::the_branchs_own_author_cannot_dispose_of_it_once_removed_from_the_group",
+        "a removed author must not dispose of the branch",
+    ),
+    # --- evidence before removal: a preserving disposal must establish its archive durably first ---
+    #
+    # Swallowing the barrier's error is caught, but read what catches it. The disposal is STILL
+    # refused - by the budget, because the failed sync closed both budgets before its I/O and the
+    # removal write then demands reconciliation. So "nothing is removed" is defended twice, and only
+    # the test's assertion on the refusal MESSAGE distinguishes the barrier's own refusal from the
+    # budget's. That is why the expected text below is the message assertion and not the expect_err.
+    #
+    # Skipping the barrier call entirely is the more alarming mutant - the disposal then SUCCEEDS and
+    # records `Preserved` without the archive ever being made durable - but it cannot be expressed as
+    # one string replacement, so it rests on the hand-run recorded in the status doc, where it failed
+    # both ordering tests at their own assertions with the other ten disposal tests green.
+    (
+        "dispose-archive-durability-propagates", "catcoms-app", APP_TESTS,
+        f"{APP}/epoch_intents/disposal.rs",
+        "                })?;\n                StudioDisposalDecision::Preserve { archive: record.id }",
+        "                }).ok();\n                StudioDisposalDecision::Preserve { archive: record.id }",
+        "disposal::a_preserving_disposal_whose_archive_cannot_be_made_durable_removes_nothing",
+        "the refusal must be the durability barrier's",
+    ),
+    # --- copy into current: the object probe at C3 and C4, each on its own ---
+    #
+    # The planner runs with no store, so it calls a dangling `PutObject` Ready; only the probe can
+    # tell. The C3 mutant keeps the probe call (so every binding stays live under -D warnings) and
+    # ignores its answer; the C4 mutant does the same at apply. Each fails its own assertion.
+    (
+        "copy-probe-preview", "catcoms-app", "studio::copy::tests::",
+        "crates/catcoms-app/src/studio/copy.rs",
+        # The probe reads the object record's header and no longer needs the device.
+        "Self::probe_copy_object(store, server, group, &plan)\n        })? {",
+        "Self::probe_copy_object(store, server, group, &plan).map(|_| true)\n        })? {",
+        "the_copy_probe_refuses_an_object_that_is_missing_or_disappears_before_apply",
+        "C3 must tell the user the object is missing",
+    ),
+    (
+        "copy-probe-apply", "catcoms-app", "studio::copy::tests::",
+        "crates/catcoms-app/src/studio/copy.rs",
+        "if !Self::probe_copy_object(store, server, group, &plan)? {",
+        "if !Self::probe_copy_object(store, server, group, &plan).map(|_| true)? {",
+        "the_copy_probe_refuses_an_object_that_is_missing_or_disappears_before_apply",
+        "C4 must refuse to publish an entry",
+    ),
+    # --- copy into current: the 2026-10-06 P1 closures, each guard on its own ---
+    #
+    # The review of that slice found these were hand-run once and anchored nowhere, so a later
+    # change could stop testing them silently. Each mutant removes exactly one guard and keeps every
+    # binding live under -D warnings.
+    #
+    # L4: a copy publishes under its own nonce domain. Without it an ordinary Save of the copy's
+    # exact bytes is acknowledged as the copy having landed.
+    (
+        "copy-nonce-domain", "catcoms-app", "studio::copy::tests::",
+        "crates/catcoms-app/src/studio/copy.rs",
+        "        let hash = blake3::derive_key(\"catcoms/studio-overlay-copy-nonce/v1\", &nonce);\n"
+        "        let mut out = [0; 16];\n"
+        "        out.copy_from_slice(&hash[..16]);\n"
+        "        out\n",
+        "        let _ = blake3::derive_key(\"catcoms/studio-overlay-copy-nonce/v1\", &nonce);\n"
+        "        nonce\n",
+        "an_ordinary_save_of_the_same_bytes_is_never_reported_as_this_copy",
+        "an ordinary Save must not be acknowledged as this copy having landed",
+    ),
+    # C1' at each of its three stages, separately. C3's mutant still refuses, because the staged
+    # hold rewrote the branch's record and the source stamp catches that. So its expected text is
+    # the message assertion ("C3 refusal"), which only the hold check satisfies.
+    (
+        "copy-hold-c1", "catcoms-app", "studio::copy::tests::",
+        "crates/catcoms-app/src/studio/copy.rs",
+        "            Self::refuse_held_destination(store, server, group, choice.destination)?;\n",
+        "",
+        "a_transfer_hold_on_the_destination_refuses_the_copy_at_c1_c3_and_c4",
+        "C1 must refuse while the destination is held",
+    ),
+    (
+        "copy-hold-c3", "catcoms-app", "studio::copy::tests::",
+        "crates/catcoms-app/src/studio/copy.rs",
+        "            Self::refuse_held_destination(store, server, group, plan.destination_target())?;\n",
+        "",
+        "a_transfer_hold_on_the_destination_refuses_the_copy_at_c1_c3_and_c4",
+        "C3 refusal",
+    ),
+    (
+        "copy-hold-c4", "catcoms-app", "studio::copy::tests::",
+        "crates/catcoms-app/src/studio/copy.rs",
+        "            Self::refuse_held_destination(store, server, group, apply.destination)?;\n",
+        "",
+        "a_transfer_hold_on_the_destination_refuses_the_copy_at_c1_c3_and_c4",
+        "C4 must refuse while the destination is held",
+    ),
+    # Review 2, L-2: only a cross-document pair tells the source's hold from the destination's. The
+    # mutant points C1's check at the source, so a copy from a held source, which C1' permits, is
+    # refused.
+    (
+        "copy-hold-names-the-destination", "catcoms-app", "studio::copy::tests::cross::",
+        "crates/catcoms-app/src/studio/copy.rs",
+        "            Self::refuse_held_destination(store, server, group, choice.destination)?;\n",
+        "            Self::refuse_held_destination(store, server, group, source)?;\n",
+        "a_cross_document_copy_from_a_held_source_applies_and_leaves_its_handoff_prepared",
+        "C1' permits a copy from a held source",
+    ),
+    # Review 2, L-1, the stamp half: C3 compares the source branch's stamp, so a Save that landed
+    # on the source after C1 is refused as changed. The mutant skips that comparison; the source
+    # is another document, so the destination's own currency check cannot stand in for it.
+    (
+        "copy-c3-source-stamp", "catcoms-app", "studio::copy::tests::cross::",
+        "crates/catcoms-app/src/store/epoch_studio/copy_capture.rs",
+        "            &plan.source,\n        )? {\n            return Ok(false);\n",
+        "            &plan.source,\n        )? && false {\n            return Ok(false);\n",
+        "a_save_landing_on_the_source_mid_copy_is_refused_at_c3_and_at_c4_only_if_it_moved_the_value",
+        "C3 must refuse a source that a Save moved after C1",
+    ),
+    # M3: the exact-retry shortcut. Without it a landed copy's identical echo re-plans against a
+    # destination that already holds it and is refused as stale.
+    (
+        "copy-exact-retry", "catcoms-app", "studio::copy::tests::",
+        "crates/catcoms-app/src/studio/copy.rs",
+        "            if exact {\n                return Ok(true);\n            }\n",
+        "            let _ = exact;\n",
+        "a_copy_lands_once_and_its_exact_retry_is_acknowledged_without_a_second_operation",
+        "an exact retry is acknowledged, not refused as stale",
+    ),
+    # The wrong-object-channel Low: an object stored under another channel's label is missing in
+    # this channel. As an error it fails the whole preview instead.
+    (
+        "copy-wrong-channel", "catcoms-app", "studio::copy::tests::",
+        f"{APP}/epoch_studio/eligibility.rs",
+        "        if stored != object {\n            return Ok(false);\n        }\n",
+        "        if stored != object {\n            return Err(invalid(\"wrong object channel\"));\n        }\n",
+        "an_object_stored_under_another_channel_label_is_missing_here_not_an_error",
+        "a wrong-channel object is a missing target, not a failed preview",
+    ),
+    # The Prepared handoff's write barrier. C1' (the copy-hold entries above) refuses a copy into a
+    # held destination before any work is done; beneath it this barrier fences every ordinary Apply
+    # to the held document, a copy's or a Save's. The C1' tests cannot see it, since C1' refuses
+    # first, so this pins the barrier on its own.
+    (
+        "handoff-write-barrier", "catcoms-app", APP_TESTS,
+        "crates/catcoms-app/src/store/epoch_intents.rs",
+        "        if state.handoff_prepared() {\n",
+        "        if state.handoff_prepared() && false {\n",
+        "handoff::fences::studio_overlay_handoff_publication_and_shared_replacement_fences_survive_restart",
+        "handoff must resolve before ordinary Apply",
+    ),
+    # --- repeated tenure: A -> B -> A through the actor ---
+    #
+    # The same key owning twice is what makes the tenure comparison load-bearing: A's earlier
+    # receipt carries A's key and A is the committer again, so without the comparison it verifies
+    # as current. `&& false` keeps both operands used under -D warnings.
+    (
+        "repeated-tenure-comparison", "catcoms-app", "studio_exchange::tests::succession::repeated::",
+        "crates/catcoms-replication/src/epoch.rs",
+        "            || self.tenure_start_group_epoch != expected_tenure_start_group_epoch\n",
+        "            || (self.tenure_start_group_epoch != expected_tenure_start_group_epoch && false)\n",
+        "studio_actor_a_to_b_to_a_progresses_under_new_tenure_and_refuses_the_returning_keys_old_one",
+        "A's earlier-tenure receipt is refused under the tenure the witness observed",
+    ),
+    # The same comparison, from the side of a device that owns twice and works: B -> A -> B, where
+    # B's first-tenure receipt is otherwise valid again once B owns a second time.
+    (
+        "repeated-tenure-comparison-returning-owner", "catcoms-app",
+        "studio_exchange::tests::succession::repeated::",
+        "crates/catcoms-replication/src/epoch.rs",
+        "            || self.tenure_start_group_epoch != expected_tenure_start_group_epoch\n",
+        "            || (self.tenure_start_group_epoch != expected_tenure_start_group_epoch && false)\n",
+        "studio_actor_b_to_a_to_b_issues_the_returning_keys_receipt_under_its_new_tenure_and_the_newcomer_learns_it_by_observation",
+        "B's first-tenure receipt is refused under its second tenure",
+    ),
+    # N-T2 (design M22): a joiner derives a start from its own join ONLY if it is the committer. The
+    # mutant lets every joiner do so, so the newcomer reads its Welcome's epoch instead of Unknown.
+    # `|| true` keeps `device` used under -D warnings.
+    (
+        "newcomer-joined-unknown", "catcoms-app", "studio_exchange::tests::succession::repeated::",
+        "crates/catcoms-sync/src/owner_tenure.rs",
+        "        if group.designated_committer() == Some(device.device_id()) {\n            state.start = Some(state.position.epoch);\n",
+        "        if group.designated_committer() == Some(device.device_id()) || true {\n            state.start = Some(state.position.epoch);\n",
+        "studio_actor_a_to_b_to_a_progresses_under_new_tenure_and_refuses_the_returning_keys_old_one",
+        "a newcomer that is not the committer reads Unknown, not its Welcome's epoch",
+    ),
+    # Review 2's M-1: the member-side gate on a fresh owner proof. Production adoption is handed the
+    # proof's claimed tenure, so this comparison, not `verify_current_owner`'s, is the first one a
+    # same-key owner proving an earlier tenure's receipt meets. `&& false` keeps `t` used.
+    (
+        "proof-claimed-tenure-gate", "catcoms-sync", "receipt_head::tests::tenure::",
+        "crates/catcoms-sync/src/receipt_head/detached.rs",
+        "                    .is_some_and(|t| t != proof.tenure_start_group_epoch)\n",
+        "                    .is_some_and(|t| t != proof.tenure_start_group_epoch && false)\n",
+        "a_member_refuses_a_fresh_proof_of_the_same_owners_earlier_tenure_receipt",
+        "a proof claiming the owner's earlier tenure is refused by a member that observed the later",
+    ),
+    # N-T5 (design 9.2 T4): a new tenure's receipt advances a member whatever its epoch, so history
+    # hidden above the new owner's inherited checkpoint is rewound into recovery. The mutant orders
+    # receipts by epoch across tenures: it keeps the old tenure's high-water and refuses a lower
+    # epoch of another tenure as stale, so the member stays on the former owner's history. One
+    # contiguous block, because the rule is the take and the tenure-scoped comparison together.
+    (
+        "hidden-history-new-tenure-advances", "catcoms-app",
+        "studio_exchange::tests::succession::hidden::",
+        "crates/catcoms-replication/src/epoch.rs",
+        "            self.previous_until_installed = self.latest.take();\n"
+        "            self.tenure = Some(selection);\n"
+        "        } else if self.tenure.is_none() {\n"
+        "            self.tenure = Some(selection);\n"
+        "        }\n"
+        "\n"
+        "        if let Some(latest) = &self.latest {\n"
+        "            if latest.tenure_id == receipt.tenure_id {\n",
+        "            self.previous_until_installed = self.latest.clone();\n"
+        "            self.tenure = Some(selection);\n"
+        "        } else if self.tenure.is_none() {\n"
+        "            self.tenure = Some(selection);\n"
+        "        }\n"
+        "\n"
+        "        if let Some(latest) = &self.latest {\n"
+        "            if latest.tenure_id == receipt.tenure_id || latest.closed_epoch > receipt.closed_epoch {\n",
+        "studio_discovery_rewinds_hidden_old_tenure_history_into_recovery_never_adopting_it",
+        "a new tenure's receipt advances C whatever its epoch",
+    ),
+    # --- design 8.3's per-branch rail for an Unconfirmed branch ---
+    #
+    # The mutant gives an Unconfirmed branch the Closing cap.
+    (
+        "unconfirmed-op-rail", "catcoms-replication", REPL_TESTS,
+        f"{REPL}/overlay.rs",
+        "            BasisKind::Unconfirmed => MAX_STUDIO_UNCONFIRMED_OVERLAY_OPS,\n",
+        "            BasisKind::Unconfirmed => MAX_STUDIO_OVERLAY_OPS,\n",
+        "unconfirmed::an_unconfirmed_branch_accepts_sixty_four_operations_and_refuses_the_sixty_fifth",
+        "the Unconfirmed rail refuses operation",
+    ),
+    # The read-side half: `checked_entries` applies the same cap once the kind is known. No
+    # production writer produces an over-long Unconfirmed branch, but a crafted record could, so the
+    # test builds one past the rail with a test-only bypass and requires it to refuse to read.
+    (
+        "unconfirmed-read-rail", "catcoms-replication", REPL_TESTS,
+        f"{REPL}/overlay.rs",
+        "            || self.entries.len() > self.max_ops()\n",
+        "            || self.entries.len() > MAX_STUDIO_OVERLAY_OPS\n",
+        "unconfirmed::an_unconfirmed_branch_accepts_sixty_four_operations_and_refuses_the_sixty_fifth",
+        "an Unconfirmed branch past the rail refuses to read",
+    ),
+    # --- design 8.3's per-server and vault-wide rails, at Flow S's S1b and S3 ---
+    #
+    # Each rail's comparison, each admission point's call and both sources of the tally on their
+    # own. `&& false` keeps every operand compiled and used under -D warnings.
+    (
+        "unconfirmed-rail-per-server", "catcoms-app", "studio_exchange::tests::provisional::seed::tail::unconfirmed_rails::",
+        "crates/catcoms-app/src/store/epoch_intents.rs",
+        "        if !self.unconfirmed.contains_key(&id) && branches >= MAX_UNCONFIRMED_BRANCHES_PER_SERVER {\n",
+        "        if !self.unconfirmed.contains_key(&id) && branches >= MAX_UNCONFIRMED_BRANCHES_PER_SERVER && false {\n",
+        "studio_unconfirmed_rail_refuses_a_fourth_draft_on_a_server_at_s1b",
+        "expected a refusal at S1b (unconfirmed draft limit reached)",
+    ),
+    (
+        "unconfirmed-rail-vault-share", "catcoms-app", "studio_exchange::tests::provisional::seed::tail::unconfirmed_rails::",
+        "crates/catcoms-app/src/store/epoch_intents.rs",
+        "            .is_none_or(|total| total > MAX_VAULT_UNCONFIRMED_BYTES)\n",
+        "            .is_none_or(|total| total > MAX_VAULT_UNCONFIRMED_BYTES && false)\n",
+        "studio_unconfirmed_rail_lets_a_live_branch_append_and_refuses_growth_past_the_share",
+        "expected a refusal at S3 (unconfirmed draft storage limit reached)",
+    ),
+    # Without S1b's call the count is still caught, but at S3, after the media work S1b exists to
+    # spare. So the expected text is the stage assertion, not a missing refusal.
+    (
+        "unconfirmed-rail-s1b", "catcoms-app", "studio_exchange::tests::provisional::seed::tail::unconfirmed_rails::",
+        "crates/catcoms-app/src/store/epoch_studio/overlay.rs",
+        "            catcoms_replication::studio::StudioOverlayBasis::Unconfirmed(_)\n        ) {\n",
+        "            catcoms_replication::studio::StudioOverlayBasis::Unconfirmed(_)\n        ) && false {\n",
+        "studio_unconfirmed_rail_refuses_a_fourth_draft_on_a_server_at_s1b",
+        "refused at the wrong stage",
+    ),
+    # Without S3's call, a competing draft admitted while this one's plan was detached slips
+    # through: S1b saw room, and nothing checks again.
+    (
+        "unconfirmed-rail-s3", "catcoms-app", "studio_exchange::tests::provisional::seed::tail::unconfirmed_rails::",
+        "crates/catcoms-app/src/store/epoch_studio/overlay_capture.rs",
+        "            Some(StudioOverlayProvenance::Unconfirmed { .. })\n        ) {\n",
+        "            Some(StudioOverlayProvenance::Unconfirmed { .. })\n        ) && false {\n",
+        "studio_unconfirmed_rail_refuses_a_fourth_draft_on_a_server_at_s1b",
+        "expected a refusal at S3 (unconfirmed draft limit reached)",
+    ),
+    (
+        "unconfirmed-rail-tally-follows-write", "catcoms-app", "studio_exchange::tests::provisional::seed::tail::unconfirmed_rails::",
+        "crates/catcoms-app/src/store/epoch_intents.rs",
+        "            intents.unconfirmed.insert(id, (server, next));\n",
+        "            intents.unconfirmed.remove(&id);\n",
+        "studio_unconfirmed_rail_tally_comes_from_the_inventory_and_follows_the_commit",
+        "the commit's budget counts the draft it just wrote, at its written size",
+    ),
+    (
+        "unconfirmed-rail-tally-from-inventory", "catcoms-app", "studio_exchange::tests::provisional::seed::tail::unconfirmed_rails::",
+        "crates/catcoms-app/src/store/epoch_intents.rs",
+        "                    Some(catcoms_replication::studio::StudioOverlayProvenance::Unconfirmed { .. })\n                ) {\n                    unconfirmed.insert(entry.record.id",
+        "                    Some(catcoms_replication::studio::StudioOverlayProvenance::Unconfirmed { .. })\n                ) && false {\n                    unconfirmed.insert(entry.record.id",
+        "studio_unconfirmed_rail_tally_comes_from_the_inventory_and_follows_the_commit",
+        "a fresh budget counts it from the inventory",
+    ),
+    # The writer's other arm: a write that leaves no live Unconfirmed branch (here a disposal)
+    # drops the record. The mutant keeps it, so the disposal's own budget still counts it.
+    (
+        "unconfirmed-rail-tally-drops-ended-branch", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_rails::",
+        "crates/catcoms-app/src/store/epoch_intents.rs",
+        "        } else {\n            intents.unconfirmed.remove(&id);\n        }\n",
+        "        } else {\n            let _ = intents.unconfirmed.get(&id);\n        }\n",
+        "studio_unconfirmed_rail_tally_follows_ordinary_growth_and_drops_a_disposed_branch",
+        "the disposal's own budget drops the record",
+    ),
+    # --- design 8.6 reconciliation (design M21): each half of the predicate on its own ---
+    #
+    # The fixture's mixed cases differ in exactly one half, so dropping either half fails on that
+    # half's own assertion. `|| true` keeps the dropped operand used under -D warnings.
+    (
+        "reconcile-document-half", "catcoms-replication", REPL_TESTS,
+        f"{REPL}/epoch/handoff.rs",
+        "    same_document && opening_seed == Some(branch_seed)\n",
+        "    (same_document || true) && opening_seed == Some(branch_seed)\n",
+        "unconfirmed::reconciliation_confirms_the_base_only_when_both_the_document_and_the_seed_agree",
+        "the same seed under another document id is superseded",
+    ),
+    (
+        "reconcile-seed-half", "catcoms-replication", REPL_TESTS,
+        f"{REPL}/epoch/handoff.rs",
+        "    same_document && opening_seed == Some(branch_seed)\n",
+        "    same_document && (opening_seed == Some(branch_seed) || true)\n",
+        "unconfirmed::reconciliation_confirms_the_base_only_when_both_the_document_and_the_seed_agree",
+        "the base document id with another seed is superseded",
+    ),
+    # The same two halves at the reader production calls (review of f3ce1758, MEDIUM-1): each mutant
+    # wires one half of the predicate to the branch's own value, so only a source that differs in
+    # that half alone can catch it. `|| true` and `|_|` keep every binding used.
+    (
+        "reconcile-reader-document-half", "catcoms-replication", REPL_TESTS,
+        f"{REPL}/epoch/handoff.rs",
+        "                shape.is_document(&base.document, base_doc_id),\n",
+        "                shape.is_document(&base.document, base_doc_id) || true,\n",
+        "unconfirmed::reconciliation_supersedes_a_source_that_differs_in_only_the_document_or_only_the_seed",
+        "the opening seed under another document id is superseded",
+    ),
+    (
+        "reconcile-reader-seed-half", "catcoms-replication", REPL_TESTS,
+        f"{REPL}/epoch/handoff.rs",
+        "                opening.as_ref().map(|r| r.seed_change_hash),\n",
+        "                opening.as_ref().map(|_| base.seed_change_hash),\n",
+        "unconfirmed::reconciliation_supersedes_a_source_that_differs_in_only_the_document_or_only_the_seed",
+        "the base document id with another opening seed is superseded",
+    ),
+    # --- design 8.7: a visit never reports another request's parked plan as its own ---
+    #
+    # The mutant reports whatever plan a visit commits as this request's `Saved`, which is how the
+    # Closing `save_overlay` behaves. `&& false` keeps `ours` used.
+    (
+        "unconfirmed-save-not-ours", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/unconfirmed.rs",
+        "            if !ours {\n",
+        "            if !ours && false {\n",
+        "studio_actor_unconfirmed_save_never_reports_another_requests_plan_as_its_own",
+        "B must not be told A's work was its own",
+    ),
+    # Review of `b35e23d2`, HIGH-1: a visit finishes a parked plan of ANY target. The mutant skips
+    # the parked-plan branch at the caller, so a plan parked for another target keeps the slot and
+    # nothing finishes it. Mutating the take itself (an earlier form of this entry) broke the
+    # check-then-take pair the branch relies on, and failed at its `expect` rather than at the
+    # assertion (follow-up review of `abbb6076`). `&& false` keeps both calls compiled and used.
+    (
+        "unconfirmed-save-any-parked-plan", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/unconfirmed.rs",
+        "        if self.catchup.has_planned_overlay() {\n",
+        "        if self.catchup.has_planned_overlay() && false {\n",
+        "studio_actor_unconfirmed_save_a_parked_plan_never_blocks_another_target",
+        "finishing A's plan changed A's document, so its row is refreshed",
+    ),
+    # Design 18.3 review, F4, and its re-review's M-1: new work captured while paused is `Paused`,
+    # not `Busy`, so a caller is not told to resend into a pause. The mutant answers `Busy` again.
+    # It still constructs `Paused` once: that line is the variant's only construction, and
+    # removing it would fail to compile under -D warnings (dead_code), not at the assertion.
+    (
+        "unconfirmed-save-paused-outcome", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/unconfirmed.rs",
+        "                    return Ok(UnconfirmedSaveVisit::Paused);\n",
+        "                    let _paused = UnconfirmedSaveVisit::Paused;\n"
+        "                    return Ok(Visit(StudioOverlaySaveVisit::Busy));\n",
+        "studio_actor_unconfirmed_save_captured_while_paused_answers_paused_and_holds_nothing",
+        "a capture made while paused was not refused as paused",
+    ),
+    # The F2 batch review's residual risk: a UI lock releases whatever the overlay slot holds. One
+    # entry per form: the queued capture and the parked plan are kept, or the detached job's plan
+    # is parked as it returns. Each mutant leaves its operand used under -D warnings.
+    (
+        "unconfirmed-save-lock-releases-queued", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/catchup.rs",
+        "        let queued = self.overlay.take().is_some();\n",
+        "        let queued = self.overlay.is_some();\n",
+        "studio_actor_unconfirmed_save_a_lock_releases_queued_parked_and_returning_work",
+        "the lock did not release a queued capture",
+    ),
+    (
+        "unconfirmed-save-lock-releases-parked", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/catchup.rs",
+        "        let parked = self.overlay_planned.take().is_some();\n",
+        "        let parked = self.overlay_planned.is_some();\n",
+        "studio_actor_unconfirmed_save_a_lock_releases_queued_parked_and_returning_work",
+        "the lock did not release a parked plan",
+    ),
+    (
+        "unconfirmed-save-lock-drops-returning", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/catchup.rs",
+        "            self.overlay_drop_returning = true;\n",
+        "            self.overlay_drop_returning = false;\n",
+        "studio_actor_unconfirmed_save_a_lock_releases_queued_parked_and_returning_work",
+        "the lock did not drop a detached job's plan when it returned",
+    ),
+    # Review of the lock release, MEDIUM-3: a lock that finds only a detached job still forgets the
+    # request, so its retry is `busy`, not `pending` for work the lock will drop.
+    (
+        "unconfirmed-save-lock-forgets-detached", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/catchup.rs",
+        "        queued || parked || self.overlay_detached\n",
+        "        queued || parked || (self.overlay_detached && false)\n",
+        "studio_actor_unconfirmed_save_a_lock_releases_queued_parked_and_returning_work",
+        "a retry after the lock was told its dropped work is still pending",
+    ),
+    # Review of the lock release, MEDIUM-1 and MEDIUM-2: the drop flag is spent by the one job it
+    # was set for, and a cancelled waiter clears it. Either mutant drops a later, unrelated plan.
+    (
+        "unconfirmed-save-lock-flag-taken-once", "catcoms-app", "studio::receiver::catchup::tests::",
+        "crates/catcoms-app/src/studio/receiver/catchup.rs",
+        "                let dropped_for_lock = std::mem::take(&mut self.catchup.overlay_drop_returning);\n",
+        "                let dropped_for_lock = self.catchup.overlay_drop_returning;\n",
+        "a_lock_drops_only_the_returning_plan_it_found_detached",
+        "a lock's drop flag outlived the job it was set for",
+    ),
+    (
+        "unconfirmed-save-lock-flag-cleared-on-cancel", "catcoms-app",
+        "studio::receiver::catchup::tests::",
+        "crates/catcoms-app/src/studio/receiver/catchup.rs",
+        "                self.catchup.overlay_drop_returning = false;\n",
+        "",
+        "a_cancelled_waiter_clears_the_lock_drop_flag",
+        "a cancelled waiter left the lock's drop flag set",
+    ),
+    # Re-review of `5ccc4647`, MEDIUM: a parked plan is dropped at its deadline. The mutant never
+    # drops it, so after the deadline the slot is still held and another target's Save is `busy`.
+    # `&& false` keeps the retention call used.
+    (
+        "unconfirmed-save-park-deadline", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/catchup.rs",
+        "        if self.overlay_park_retention(now) == Some(0) {\n",
+        "        if self.overlay_park_retention(now) == Some(0) && false {\n",
+        "studio_actor_unconfirmed_save_an_abandoned_plan_is_dropped_at_its_deadline",
+        "the dropped plan no longer holds the slot",
+    ),
+    # Review of `265b0756`, LOW-1 and LOW-2: the park deadline's two scheduling terms, outside the
+    # pause gate. Paused, they are the only terms left, so each mutant is seen alone.
+    (
+        "unconfirmed-save-park-pending-term", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver.rs",
+        "            || self.catchup.overlay_park_expiry_due(now)\n",
+        "            || (self.catchup.overlay_park_expiry_due(now) && false)\n",
+        "studio_actor_unconfirmed_save_park_deadline_holds_while_paused",
+        "at its deadline a parked plan is pending even while paused",
+    ),
+    (
+        "unconfirmed-save-park-wake-term", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver.rs",
+        "            return self.catchup.overlay_park_wake_in(now);\n",
+        "            return None;\n",
+        "studio_actor_unconfirmed_save_park_deadline_holds_while_paused",
+        "a paused receiver still publishes a parked plan's deadline",
+    ),
+    # Review of `265b0756`, LOW-3: the ticket refuses a Closing draft before it mints. The fixture
+    # has no preview, so the mutant's ticket is refused for that instead, under another reason.
+    (
+        "unconfirmed-ticket-refuses-closing-draft", "catcoms-app", "studio::copy::tests::",
+        "crates/catcoms-app/src/studio/receiver/unconfirmed.rs",
+        "                // the reason here, before a ticket exists, is the truthful place for it.\n                refuse_closing_draft(server, store, id, target)?;\n",
+        "                // the reason here, before a ticket exists, is the truthful place for it.\n                let _ = refuse_closing_draft(server, store, id, target);\n",
+        "a_closing_drafts_operation_resent_as_an_unconfirmed_save_is_refused",
+        "the ticket names the Closing draft before it mints",
+    ),
+    # Review of `b35e23d2`, LOW-1: a retry of this request's own in-flight plan is `Scheduled`.
+    (
+        "unconfirmed-save-own-plan-pending", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/unconfirmed.rs",
+        "            return Ok(Visit(if self.unconfirmed_scheduled == Some(request) {\n",
+        "            return Ok(Visit(if self.unconfirmed_scheduled == Some(request) && false {\n",
+        "studio_actor_unconfirmed_save_retry_of_its_own_scheduled_plan_is_pending",
+        "a retry of its own in-flight plan is pending, not busy",
+    ),
+    # Review of `b35e23d2`, MEDIUM-1: a Closing draft refuses the Unconfirmed Save. The mutant lets it
+    # through, and the store's kind-blind acknowledgement answers it as saved.
+    (
+        "unconfirmed-save-refuses-closing-draft", "catcoms-app", "studio::copy::tests::",
+        "crates/catcoms-app/src/studio/receiver/unconfirmed.rs",
+        "            && matches!(metadata.provenance(), StudioOverlayProvenance::Closing)\n",
+        "            && matches!(metadata.provenance(), StudioOverlayProvenance::Closing)\n            && false\n",
+        "a_closing_drafts_operation_resent_as_an_unconfirmed_save_is_refused",
+        "a Closing draft must be refused by the Unconfirmed Save",
+    ),
+    # --- the branch-generation namespace ---
+    (
+        "admission-not-trusted", "catcoms-replication", REPL_TESTS,
+        f"{REPL}/overlay/handoff.rs",
+        "if generation != self.next_generation()? {\n            return Err(ReplError::IntentConflict);\n        }",
+        "let _ = generation;",
+        "lifecycle::a_fabricated_admission_cannot_mint_a_branch_at_a_chosen_generation",
+        "would give a new branch its identity",
+    ),
+    # `append` no longer opens a branch: admission is the only way in. The mutant restores the old
+    # third door, so a state with no live branch silently gets one. Under it `validate`'s "a live
+    # branch beside a retained disposal must be strictly later" rule may also refuse, so the
+    # expected message is the test's own refusal assertion, which runs before any of that.
+    (
+        "append-refuses-without-a-live-branch", "catcoms-replication", REPL_TESTS,
+        f"{REPL}/overlay/handoff.rs",
+        "let Some(mut active) = self.active.clone() else {\n            return Err(ReplError::IntentConflict);\n        };",
+        "let mut active = self.active.clone().unwrap_or_else(|| StudioOverlay::new(basis));",
+        "lifecycle::appending_where_no_branch_exists_is_refused_and_admission_opens_the_next_one",
+        "append must not open a branch that admission never admitted",
+    ),
+    # --- M-1 on the receive path: the only defence against a one-commit remove-and-re-add ---
+    #
+    # Hand-run first: with this rule disabled the witness MERGES the hostile commit, so OpenMLS does
+    # not make it redundant. `&& false` keeps `re_adds_committer` used under -D warnings.
+    (
+        "m1-receive-refusal", "catcoms-mls", "group::m1_tests::",
+        "crates/catcoms-mls/src/group.rs",
+        "if re_adds_committer {",
+        "if re_adds_committer && false {",
+        "a_witness_refuses_one_commit_that_removes_the_committer_and_re_adds_its_device_id",
+        "a witness must refuse a commit that removes the committer",
+    ),
+    # --- the owner-tenure observation rule ---
+    (
+        "tenure-leaf-arm", "catcoms-sync", "owner_tenure::tests::",
+        "crates/catcoms-sync/src/owner_tenure.rs",
+        "} else if before.owner.is_some() && before.owner == after.owner && before.leaf != after.leaf\n        {",
+        "} else if false {",
+        "owner_tenure_same_owner_on_a_new_leaf_identity_starts_a_new_tenure",
+        "is a new tenure, not preserved knowledge",
+    ),
+]
+
+
+def run(package, prefix, test):
+    env = os.environ.copy()
+    env["CARGO_INCREMENTAL"] = "0"
+    env["RUST_MIN_STACK"] = "33554432"
+    # Set here rather than inherited, because inheriting it is exactly what went wrong.
+    #
+    # The workflow sets `-D warnings` at job level, so CI built every mutant with it while a local
+    # run built them without. One mutant then behaved differently in the two places: it left two
+    # bindings unused, which is a warning locally and an error in CI, so it passed here and failed
+    # there. A harness whose result depends on the caller's environment is not evidence, and the
+    # divergence let this script report nine detections while the job was red.
+    env["RUSTFLAGS"] = "-D warnings"
+    if os.name == "nt":
+        env["_LINK_"] = "/DEBUG:NONE"
+    command = [
+        "cargo", "test", "--locked", "-j", "1", "--config",
+        f"profile.test.package.{package}.debug=0", "-p", package, "--lib",
+    ]
+    return subprocess.run(
+        command + [prefix + test, "--", "--exact", "--nocapture"], cwd=ROOT,
+        env=env, text=True, encoding="utf-8", errors="replace",
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=1800, check=False,
+    )
+
+
+def parse_args(argv):
+    """Entry names, and an optional `--shard K/N`.
+
+    Names select a subset for diagnosis or for proving new entries, as the handoff harness allows.
+    `--shard K/N` keeps every Nth entry by its index in `MUTATIONS`, starting at the Kth (1-based).
+    CI splits the run across N jobs this way, because one job no longer fits its time limit. By
+    index, not by a list of names: a new entry lands in a shard automatically, and a name list in
+    the workflow could forget one, which would then never run in CI. Each shard still runs its own
+    restored-regression phase.
+    """
+    names, shard = [], None
+    args = iter(argv)
+    for arg in args:
+        if arg == "--shard" or arg.startswith("--shard="):
+            spec = arg.split("=", 1)[1] if "=" in arg else next(args, "")
+            try:
+                k, n = (int(part) for part in spec.split("/"))
+            except ValueError:
+                raise ValueError(f"--shard takes K/N, got {spec!r}") from None
+            if not 1 <= k <= n:
+                raise ValueError(f"--shard {spec}: K must be between 1 and N")
+            shard = (k, n)
+        else:
+            names.append(arg)
+    return set(names), shard
+
+
+def main():
+    # With no names, every entry runs (in the shard, when one is given). An unknown name refuses
+    # rather than silently running nothing, and so does a shard that selects nothing.
+    selected, shard = parse_args(sys.argv[1:])
+    unknown = selected - {m[0] for m in MUTATIONS}
+    if unknown:
+        raise ValueError(f"unknown mutation selector: {sorted(unknown)}")
+    mutations = [
+        m
+        for index, m in enumerate(MUTATIONS)
+        if (not selected or m[0] in selected)
+        and (shard is None or index % shard[1] == shard[0] - 1)
+    ]
+    if not mutations:
+        raise ValueError("this selection runs no mutation entry")
+    log_dir = ROOT / "logs"
+    log_dir.mkdir(exist_ok=True)
+    for name, package, prefix, path, before, after, test, assertion in mutations:
+        source = ROOT / path
+        original = source.read_bytes()
+        before, after = before.encode(), after.encode()
+        if original.count(before) != 1:
+            raise AssertionError(f"mutation anchor is not unique: {name}")
+        changed = original.replace(before, after, 1)
+        try:
+            source.write_bytes(changed)
+            result = run(package, prefix, test)
+            (log_dir / f"gate4-overlay-lifecycle-mutation-{name}.log").write_text(
+                result.stdout, encoding="utf-8"
+            )
+            # The mutation must fail THIS test, at THIS assertion.
+            #
+            # **This script does NOT check isolation, and an earlier version of this comment claimed
+            # it did.** The run below is `--exact` on one fully qualified test, so no sibling is ever
+            # selected; "0 passed; 1 failed" therefore describes only that one test and says nothing
+            # about whether the mutant also breaks others. A review pointed this out and was right.
+            #
+            # Isolation for these entries rests on the hand-runs recorded behind each of them, not on
+            # anything this script observes. Do not report a passing run here as "the mutation is
+            # isolated" - the supported claim is "the mutation was detected at its named assertion
+            # and the restored source passes".
+            if not (
+                result.returncode != 0
+                and assertion in result.stdout
+                and "test result: FAILED. 0 passed; 1 failed;" in result.stdout
+            ):
+                print(result.stdout, flush=True)
+                raise AssertionError(f"mutation did not fail at its intended assertion: {name}")
+            print(f"DETECTED {name}: {assertion}", flush=True)
+        finally:
+            if source.read_bytes() != changed:
+                raise AssertionError(f"source changed concurrently: {path}")
+            source.write_bytes(original)
+            assert source.read_bytes() == original
+            print(f"RESTORED {path} byte-for-byte", flush=True)
+    # Recompile the restored sources once, then require each exercised regression to pass. Green here
+    # is not the evidence - the failing mutants above are - but a restored suite that does not pass
+    # would mean the restoration itself was wrong.
+    for name, package, prefix, _, _, _, test, _ in mutations:
+        result = run(package, prefix, test)
+        (log_dir / f"gate4-overlay-lifecycle-restored-{name}.log").write_text(
+            result.stdout, encoding="utf-8"
+        )
+        if result.returncode != 0 or "test result: ok. 1 passed; 0 failed;" not in result.stdout:
+            print(result.stdout, flush=True)
+            raise AssertionError(f"restored regression failed: {name}")
+        print(f"PASS restored {name}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

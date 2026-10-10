@@ -133,8 +133,8 @@ fn studio_inspection_same_size_authenticated_replacement_is_stale() {
                 &mut rng(),
                 &mut b.storage,
                 &mut b.intents,
-                atomic_write,
-                sync_intent,
+                WriteStep::new(WriteTag::Intents),
+                &mut WriteHooks::None,
             )
             .unwrap();
         let after_bytes = fs::read(&path).unwrap();
@@ -311,13 +311,8 @@ fn studio_inspection_prepared_and_completed_never_resolve_on_read() {
             Some(0),
             &mut rng(),
             &mut b,
-            &mut |step, p, bytes| {
-                if step == HandoffWrite::Source {
-                    return Err(AppError::Io("pause after Prepared".into()));
-                }
-                atomic_write(p, bytes)
-            },
-            &mut flush,
+            &mut WriteHooks::fail_before_write(FailError::Io("pause after Prepared"))
+                .at(WriteTag::Source),
         );
         assert!(result.is_err());
         let path = store.epoch_intent_path(
@@ -446,8 +441,8 @@ fn studio_inspection_maximal_canonical_seed_and_bounded_record_input() {
                 &mut rng(),
                 &mut b.storage,
                 &mut b.intents,
-                atomic_write,
-                sync_intent,
+                WriteStep::new(WriteTag::Intents),
+                &mut WriteHooks::None,
             )
             .unwrap();
         let path = store.epoch_intent_path(&scope);

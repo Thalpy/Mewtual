@@ -35,6 +35,9 @@ An installed, flushed checkpoint with an exactly matching current-owner journal 
 that journal's pending publication slot locally: it is available through keyed head/seed service,
 not claimed delivered to another member. This lets a solo owner keep rotating. A Registry Fault
 remains a per-bucket hold; it does not invalidate otherwise authenticated storage accounting.
+Registry head adapters therefore authenticate/account the source, persist any independently
+authorized B0 report, and only then preserve Fault as a no-head result. The prepared adapter reuses
+the verified detached graph rather than reconstructing it for this ordering.
 Actual changed Registry wrappers refresh the existing inventory-validation cache before the next
 Studio turn. No second mutable document cache, budget owner or network protocol is introduced.
 
@@ -164,9 +167,12 @@ and membership/MLS are rechecked before disk work; snapshot persistence precedes
 Only newly Accepted durable edits emit remote StudioUpdated; events recheck native incarnation.
 Automatic inventory uses the existing scanner with local limits (1024 directory entries,
 64 records, 8 MiB authenticated bytes and 256 KiB cold validation bytes). The mount-local
-64-entry LRU retains only pure Registry/Studio footprint validation, never a document, inventory
-or write permit. Every hit requires fresh authenticated file bytes, scope/filename binding and
+LRU retains every family's pure accounting validation (and an Intents record's inventory facts),
+never a document, inventory or write permit. Every hit requires fresh authenticated file bytes, scope/filename binding and
 the exact complete-wrapper digest/size. Ordinary complete scans warm it; remount starts cold.
+It is indexed and holds up to `MAX_ACCOUNTED_RECORDS` (65 536) entries, so a complete scan never
+thrashes it, and every inventory-issuing finish prunes the entries of records the scan did not
+find, within the scan's own coverage (`GATE4-AGENT-1-C3-RUNTIME.md` 16.1).
 The sole mounted store can also retain one owned verified Studio restart unit, moved rather than
 cloned. Explicit view access prepares it; warm receive and timeline reads reauthenticate its exact
 complete wrapper and bind current actor/group/MLS before reuse. Index refreshes keep only their

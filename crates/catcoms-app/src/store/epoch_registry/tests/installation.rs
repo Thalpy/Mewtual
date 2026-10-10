@@ -1,5 +1,4 @@
 //! Real bounded closures exercise the production settlement ordering and restart file paths.
-use super::super::installation::{InstallSync, InstallWrite};
 use super::settlement::{source_fixture, TestSource};
 use super::*;
 use catcoms_replication::registry::RegistryRecovery;
@@ -76,12 +75,6 @@ fn pending(s: &TestSource) -> Vec<u8> {
         .pending()
         .map(|(_, intent)| intent.operation.nonce[0])
         .collect()
-}
-fn sync(step: InstallSync, path: &Path, bytes: u64) -> Result<(), AppError> {
-    match step {
-        InstallSync::Intents => crate::store::epoch_intents::sync_intent(path, bytes),
-        _ => sync_registry(path, bytes),
-    }
 }
 
 #[test]
@@ -217,11 +210,7 @@ fn registry_install_empty_recovery_and_missing_ledger_create_only_successor() {
 
 #[test]
 fn registry_install_crash_boundaries_keep_source_or_successor_and_resume_without_loss() {
-    for step in [
-        InstallWrite::Recovery,
-        InstallWrite::Intents,
-        InstallWrite::Successor,
-    ] {
+    for step in [WriteTag::Recovery, WriteTag::Intents, WriteTag::Successor] {
         for mode in 0..3 {
             // before write, after rename, writer unwind
             let root = tempfile::tempdir().unwrap();
@@ -243,19 +232,29 @@ fn registry_install_crash_boundaries_keep_source_or_successor_and_resume_without
                     &mut rng(),
                     &mut s.budget,
                     &mut intents,
-                    &mut |at, path, bytes| {
-                        if at == step {
-                            if mode == 1 {
-                                atomic_write(path, bytes)?;
+                    &mut WriteHooks::Hooked {
+                        before: Some(&mut |at: WriteTag, _: &Path, _: &[u8]| {
+                            if at != step || mode == 1 {
+                                return Intercept::Continue;
                             }
                             if mode == 2 {
                                 panic!("injected installation panic");
                             }
-                            return Err(AppError::Io("injected installation write failure".into()));
-                        }
-                        atomic_write(path, bytes)
+                            Intercept::Fail(AppError::Io(
+                                "injected installation write failure".into(),
+                            ))
+                        }),
+                        before_sync: None,
+                        before_unlink: None,
+                        after: Some(&mut |op: CompletedOperation, at: WriteTag, _: &Path| {
+                            if op == CompletedOperation::Write && at == step && mode == 1 {
+                                return AfterIntercept::Fail(AppError::Io(
+                                    "injected installation write failure".into(),
+                                ));
+                            }
+                            AfterIntercept::Continue
+                        }),
                     },
-                    &mut sync,
                 )
             }));
             assert!(result.is_err() || result.unwrap().is_err());
@@ -263,7 +262,7 @@ fn registry_install_crash_boundaries_keep_source_or_successor_and_resume_without
             let after = s.f.load(&s.store).unwrap();
             assert_eq!(
                 after.epoch(),
-                u64::from(step == InstallWrite::Successor && mode == 1)
+                u64::from(step == WriteTag::Successor && mode == 1)
             );
             if after.epoch() == 0 {
                 assert_eq!((after.phase(), after.op_count()), (EpochPhase::Closing, 11));
@@ -272,7 +271,7 @@ fn registry_install_crash_boundaries_keep_source_or_successor_and_resume_without
                 pending(&s).contains(&10),
                 "never retire excluded author work"
             );
-            if step == InstallWrite::Successor {
+            if step == WriteTag::Successor {
                 assert!(
                     !pending(&s).contains(&1),
                     "retirement durable before selection"
@@ -318,10 +317,16 @@ fn registry_install_sync_failure_never_retires_before_source_flush() {
         &mut rng(),
         &mut s.budget,
         &mut intents,
-        &mut |_, _, _| panic!("source durability must precede every write"),
-        &mut |step, _, _| {
-            assert_eq!(step, InstallSync::Source);
-            Err(AppError::Io("source flush failed".into()))
+        &mut WriteHooks::Hooked {
+            before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                panic!("source durability must precede every write")
+            }),
+            before_sync: Some(&mut |step: WriteTag, _: &Path, _: u64| {
+                assert_eq!(step, WriteTag::Source);
+                AfterIntercept::Fail(AppError::Io("source flush failed".into()))
+            }),
+            before_unlink: None,
+            after: None,
         },
     );
     assert!(result.is_err());

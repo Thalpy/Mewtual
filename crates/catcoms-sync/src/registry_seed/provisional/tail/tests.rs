@@ -4,7 +4,9 @@ use catcoms_replication::registry_epoch::catchup::{
     RegistryOpPage, RegistryPageCursor, REGISTRY_CURSOR_BYTES,
 };
 use catcoms_replication::studio::catchup::StudioPageProvider;
-use catcoms_replication::studio::{FlipnoteHeader, FlipnoteOp, IndexOp, StudioEpoch};
+use catcoms_replication::studio::{
+    FlipnoteHeader, FlipnoteOp, IndexOp, StudioEpoch, StudioOverlayProvenance,
+};
 use catcoms_replication::{DomainOp, InheritedCheckpoint, SealedOp};
 use catcoms_rt::{Hub, ManualClock, MemNetwork};
 use rand_chacha::ChaCha20Rng;
@@ -199,6 +201,11 @@ async fn provisional_tail_pages_use_real_fixed_prefix_without_rebinding_ordinary
             Arc::new(f.clock.clone()),
             &mut f.provider.rng,
         );
+        // The seed as the callback exposed it before any tail, to compare once the tail has run.
+        let seed_before = f
+            .client
+            .with_provisional_studio_seed(&f.candidate, |view| view.seed_bytes.to_vec())
+            .unwrap();
         let mut candidate = f.candidate;
         for expected_more in [true, false] {
             let pending = f.client.prepare_provisional_studio_tail(candidate).unwrap();
@@ -231,6 +238,12 @@ async fn provisional_tail_pages_use_real_fixed_prefix_without_rebinding_ordinary
         f.client
             .with_provisional_studio_seed(&candidate, |view| {
                 assert_eq!(view.projection, &f.source.projection().unwrap());
+                // Design 8.1: the merged view moved with the tail; the seed it exposes did not.
+                assert_eq!(
+                    view.seed_bytes,
+                    seed_before.as_slice(),
+                    "the tail must not change the seed an unconfirmed draft is based on"
+                );
                 assert_eq!(view.candidate.provider, f.provider.device.device_id());
                 assert!(view
                     .candidate
@@ -240,6 +253,39 @@ async fn provisional_tail_pages_use_real_fixed_prefix_without_rebinding_ordinary
             })
             .unwrap();
         assert_eq!(f.source.snapshot().unwrap(), source_bytes);
+
+        // Design 8.1: with the tail complete, the live mint succeeds. It records the hint's own
+        // provider, this device's current MLS epoch and WALL time: the wall clock is moved apart
+        // from the monotonic one so the two cannot be confused, since a persisted monotonic
+        // reading means nothing after a restart.
+        f.clock.set_wall_ms(1_700_000_000_000);
+        let basis = f.client.mint_unconfirmed_overlay_basis(&candidate).unwrap();
+        assert_eq!(
+            basis.provenance(),
+            StudioOverlayProvenance::Unconfirmed {
+                provider: f.provider.device.device_id(),
+                observed_mls_epoch: f.client.group.epoch(),
+                observed_at_ms: 1_700_000_000_000,
+            }
+        );
+        // Wall time moving does not change the base: the fingerprint is not the observation.
+        f.clock.set_wall_ms(1_700_000_050_000);
+        assert_eq!(
+            f.client
+                .mint_unconfirmed_overlay_basis(&candidate)
+                .unwrap()
+                .fingerprint(),
+            basis.fingerprint()
+        );
+        // And the same hint expiry that ends the preview ends the mint. Advancing by the absolute
+        // expiry puts the monotonic clock at or past it from any starting point.
+        assert!(candidate.unconfirmed_is_unexpired(candidate.hint.expires - 1));
+        f.clock.advance_ms(candidate.hint.expires);
+        assert!(matches!(
+            f.client.mint_unconfirmed_overlay_basis(&candidate),
+            Err(SyncError::Unauthorized)
+        ));
+
         assert!(f.client.prepare_provisional_studio_tail(candidate).is_err());
         assert_eq!(retained(&f.client), 0);
     }

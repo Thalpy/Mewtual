@@ -134,6 +134,7 @@ impl RegistryEpoch {
         )?;
         // Carry anti-replay repair state; the standalone constructor starts a fresh book.
         successor.receipts = self.receipts.clone();
+        successor.repair_binding = self.repair_binding;
         successor.receipts.mark_latest_installed();
         Ok(successor)
     }

@@ -18,9 +18,95 @@ table with the commit that closed it.
   revalidates them on restart, and screens its named loser across all three receipt paths.
   Different inherited baselines identify a losing branch; identical baselines do not reveal
   descendant ancestry. Third baselines still fault. New progress survives exact retries, and a
-  newer fault cannot be cleared by replaying the old repair. Latest-only retention is not an
-  audit chain: a no-longer-covered old conflict may require another repair. These primitives do
-  not change gates, persist recovery or rebase the owner's journal; runtime repair is unfinished.
+  newer fault cannot be cleared by replaying the old repair. The monotonic repair sequence is
+  scoped to that authenticated issuer tenure, so a current owner can exhaust only its own tenure;
+  checked allocation refuses at MAX before signing or persistence, while a verified successor
+  starts at one. Unfinished source/journal provenance remains a cross-tenure barrier. No wire or
+  persistence field changed. Latest-only retention is not an
+  audit chain: a no-longer-covered old conflict may require another repair. The app-side candidate
+  now consumes the one archived Observed witness only from a still-current durable sync snapshot,
+  matches the receipts' full owner/start/tenure tuple, and seals a receiver-local exact-pair
+  attestation before storage. Unknown, Imported, wrong and evicted unadmitted history remain
+  unavailable by design. Registry head service authenticates and accounts its source before this
+  B0 write, propagates every failed or uncertain write before classifying the source, and preserves
+  Fault as a hard refusal afterward; prepared service does not cold-reconstruct that source. Studio
+  head service keeps B0 ahead of its authoritative source read, so a Faulted or unprepared source
+  still refuses service only after an independently authorized report is retained. A report
+  naming exactly the pair the owner's source already carries a finished repair for is answered by
+  that repair in the same response rather than staged again. This is declined only while no
+  decision is held, the source is servable and carries the repair, and the repair verifies under
+  the current tenure. Studio reads that repair from its warm, byte-verified source through a
+  probe that cannot fail or delay B0. Otherwise the report stages as before, so a pair the owner
+  can no longer answer stays decidable. Without this, a faulted peer's
+  late reports reopened the decided pair: proof of the selected receipt stayed suppressed, so no
+  newcomer could install the repaired document, and the view offered the pair for a second
+  decision. Native repair remains unavailable.
+  Studio fault repair executes only as Agent 3's detached job (design 10.3). Each actor runs one
+  job at a time. A shared preparation-pool slot and a per-target live claim are reserved before
+  any body read. The source is rebuilt detached, holding no store, vault key or MLS state. At
+  commit the rebuild's context and plaintext digest are rechecked against disk and the unchanged
+  authority-checked transaction runs. An offered repair is verified against the live owner and
+  this device's authoring tenure before anything is captured, so a newcomer with `Unknown` or
+  `Imported` tenure, or a repair signed by anyone but the current owner, costs no capture and
+  holds nothing else. While a job owns a target, ordinary installs, page receive, owner rotation,
+  preparation and foreground Apply into it defer or refuse. Own-operation replay and gossip
+  ingest that needs source preparation wait through the same preparation check. Gossip ingest
+  into an already warm source and Flow S, H and R writes (including the handoff's commit, H5, and
+  Flow R's commit, R3) are not claim-checked; a change from them makes the rebuild stale, and the
+  job writes nothing (an automatic job reruns; an explicit decision is reported abandoned, to be
+  made again). S3 commits a rebuild only after installing it, and builds its storage budget only
+  then, so a cold source over the receive scan's cold-byte limit is never validated inline.
+  Registry bucket repair executes only as the same job, scoped to the bucket. This covers the
+  explicit decision, Flow D, the owner's resume and the owed replacement. The bucket is captured
+  as bounded authenticated bytes and rebuilt detached. At commit the issue/apply transaction
+  receives the rebuild and uses it only if all of the following still match: mount, server,
+  group, bucket, actor, designated owner, MLS epoch, plaintext digest and physical size, plus a
+  fresh read verified against the live budget. Its writer re-reads the bytes once more before
+  writing. The authority checks are the custody path's own: V5, channel, durable snapshot, owner
+  refusal for Flow A, and `verify_current_owner`. Offered bucket repairs pass the same owner and
+  authoring-tenure pre-check before capture as Studio's. Every failure or held outcome of an
+  offered repair, Studio or Registry, at any stage (no local copy, a failed capture or rebuild, a
+  rebuild gone stale, a held outcome, a failed commit), holds that repair rather than its target,
+  so a replayed older repair cannot keep a target's legitimate replacement from being fetched. An
+  offered repair that was applied and now needs the user (a recovery warning, a storage refusal)
+  holds the document, since that hold is this device's own state. The same repair offered again
+  while its job runs may complete that job's evidence; it is never trusted beyond what S3
+  verifies.
+  The router still classifies a pending replacement only from the exact-current verified source
+  already retained by the bounded preparation boundary; a held owner decision is read from the
+  bounded owner record. Missing, cold, stale, retargeted or unreadable preparation is unknown and
+  defers the pass; it is never treated as proof that ordinary installation is safe. The owner's
+  resume uses the same exact classification, falling back to the record's B3 flag only while the
+  provider is unknown, so an install that landed just before a crash (its recycle lost) is
+  resumed and recycled rather than waited on forever. Nothing on the repair path reconstructs
+  the full Registry graph under custody to decide. Classification preparation is scheduled even
+  when the local file is small. A custody-checked absent source is tracked separately and
+  rechecked by path, so first installation can proceed without turning cold or stale state into
+  a false absence claim. While a job owns a bucket, Registry maintenance, pointer refresh, page
+  persistence and installs into it are skipped or deferred. A Studio-side pointer write is not
+  claim-checked; like any other change, it makes the rebuild stale and the job writes nothing.
+  The owner's automatic repair work is paced per target. A hold, a failure, a started
+  repaired-seed fetch or a started resume job defers only that Studio target's or bucket's next
+  owner-resume visit: by 60 s, doubling while it repeats, up to 15 min. Every persistent hold
+  also backs off that target's automatic jobs. A terminal outcome, a new explicit decision, or the person
+  acknowledging the document's recovery warning resets it. One held target therefore never
+  delays another's resume, and the owner's resume work for a target whose seed no peer serves,
+  or that needs the user, costs less and less. That pacing covers the owner's resume visits
+  only. A repaired-seed fetch started any other way (from an answer that carries a repair, from
+  the router, or after a job) is paced only by the single checkpoint slot and a hold, so a peer
+  owing a seed nobody serves refetches it on every reporting discovery of that target, as it
+  always has (an open follow-up). Nor is the pacing a global cap: K newly held targets can still
+  start K seed fetches in their first minute, each holding the single checkpoint slot, and the
+  deferral state lives in memory, so a restart starts every target afresh. A page fetched before
+  an S3 that rewrote its source is dropped, never saved against the repaired source. After a
+  crash between an owner's replacement install and its record's recycle, the router resumes the
+  decision as soon as it finds the source owing nothing behind it. If no fetch can start (an
+  owner alone has no peer at all), the owner resumes at once, and if a fetch comes to nothing,
+  its next visit resumes, for a Studio source and a Registry bucket alike (including a bucket
+  whose only watched document is stuck Prepared, whose provider is never prepared). So
+  recovering an install already on the owner's disk never needs another device. The cost of that: an owner alone whose seed really is still owed, with its
+  source evicted between visits, reruns a full detached rebuild once per deferral window (down to
+  one per 15 min) although nothing has changed. It is bounded by the deferral and the shared pool.
 
 - **Automatic recovery is conservative and author-local.** Studio replay checks the complete
   own envelope, every retained/staged historical selection and the fresh current projection.
@@ -256,6 +342,84 @@ table with the commit that closed it.
   also covers owner journals. Each result reports its fixed coverage, and its metadata becomes stale
   if the future coordinator permits writes after the scan. A malicious local process concurrently
   replacing filesystem paths is outside the mounted-store exclusion guarantee.
+- **An inventory issued from a scan is checked against the vault as it is now, not only as the
+  scan saw it.** Every five-family write rotates `inventory_generation` before its first I/O
+  (I-4), and an owned scan cursor rechecks that token when it resumes, installs a detached
+  validation and finishes, and the Studio budget mint checks it again. The type-level write guard
+  does not cover a raw `std::fs` call, so `scripts/check-store-raw-fs.sh` in CI refuses raw
+  filesystem mutation in non-test store code. A cursor held across custody visits also holds its
+  directory stream while unrelated files in the same directory change, and some filesystems a
+  vault can sit on (certain SMB and FUSE backends) do not keep a stream stable under that churn.
+  Every finished inventory, budget or reference, is therefore confirmed against one fresh
+  names-only listing and refused on any mismatch: an inventory job restarts, and a synchronous
+  scan's caller gets an error, which pauses background receive. On such a filesystem Studio
+  storage work can be refused, never budgeted from an undercount.
+- **Replay's manual move holds a cursor across visits** (C-3 step 2, the first production path to).
+  Its shared, turn-based inventory job keeps an owned cursor and its directory stream between the
+  receiver's custody visits.
+  - **How long:** until the first visit 30 s or more after its owner last asked for a budget,
+    when the idle drop runs. That is about 35 s with the native 5 s idle wake.
+  - **What is bounded:** a parked record's authenticated plaintext and its preparation permit are
+    released at pause, at the lock reset and on context change. The job takes permits from the
+    same four-slot process pool as catch-up preparation.
+  - **Under writes:** a write by another actor charges the job's restart budget, and an exhausted
+    budget backs off; this actor's own writes refresh it uncharged, within a cap.
+  - **Errors:** a detached validation's error pauses background receive only if it is about bytes
+    still current. An error about bytes a later write replaced restarts the job.
+  - **Fallback:** a move that the job cannot serve within 60 s falls back to the synchronous scan
+    it used before step 2. So the move, and its recovery notice, can be delayed by up to that
+    long.
+- **A Studio handoff's final commit (H5) runs in one custody visit, accepted as technical debt**
+  (decision 2026-10-09, `GATE4-AGENT-1-C3-RUNTIME.md` 15.14). It grows with the document and the
+  local draft, both capped (999 frames, 256 draft operations). At both caps it measured about
+  0.15 s, and once 0.25 s on a busy host, against a 0.125 s visit target. While it runs, the
+  server's background work and Studio requests wait.
+  - **What a member can do:** fill a shared Flipnote to the frame cap. The draft is the
+    handing-off device's own, and a device hands off only documents it drafted on, so this buys
+    at most one such pause per draft, with no amplification.
+- **An interrupted handoff is resolved off custody (Flow R, design 6.4.2).** The source restore
+  that used to run under custody, twice when the source was cold, now runs on a worker, and the
+  commit performs exactly the synchronous resolver's writes behind a stamp.
+  - **What a member can do:** send operations to the document while it is Prepared. That changes
+    its source under the stamp, and the commit then falls back to the synchronous resolver in the
+    same visit. On the actor that costs at most what resolution cost before Flow R, plus a
+    discarded detached stage on a worker, once. The resolution completes there, so it cannot be
+    repeated to hold the record Prepared.
+  - **While the record is Prepared,** catch-up's rotation, client pass, Registry maintenance and
+    replay skip that document rather than pausing receive. Replay also drops a pass it had
+    already begun on the document, so the others keep replaying. No path resolves a record stuck
+    on Hold, so these rails stay suspended for that document indefinitely; the eligibility view
+    reports it as `PreparedStuck`.
+  - **The suspension stays with the document.** Its pointer bucket is shared with other
+    documents, and maintenance's turn is a held bucket decision's only ordinary resume route. So
+    before skipping, Registry maintenance resumes that bucket's held owner decision, unless a
+    repair job claims the bucket (Agent 3, PR #37). That resume reads only the bucket and its
+    owner record, never the Prepared document's source, and an error there is recorded, never
+    returned, so the skip still cannot pause receive. Until PR #37, a stuck document that was the
+    only watched one in its bucket stranded the bucket's decision.
+- **A budgeted scan holds custody for a bounded validation only, and a memoized validation is
+  reused only for identical bytes.** Under a deadline, `validation_fits` admits a fresh validation
+  inline only in accounting mode, and only for four families:
+  - Recovery, to 64 KiB;
+  - Intents, to 384 KiB, where the 25 ms cap binds;
+  - OwnerReceipts, to 747 bytes;
+  - DraftArchive, whose accounting does no size-dependent work.
+
+  It also requires a measured worst rate, times four, to fit in what remains of the slice and in
+  25 ms. Every other fresh validation detaches, including every fresh Registry and Studio
+  validation; a memo hit is reused instead. The rates are from one host, in a release build, on
+  the shapes measured. A peer able to make a much denser record than those shapes, or a much
+  slower machine, lengthens an inline hold in proportion. For Recovery and OwnerReceipts the size
+  envelopes keep it small; for Intents, the cap does. The validation memo holds every family's
+  accounting record (C-3 runtime 15.2, M1), and for an Intents record its inventory facts too,
+  keyed by filename hash, physical size and the blake3 digest of the authenticated plaintext, and
+  a hit needs all three to match bytes a scan has just read. Validation is a pure function of
+  those bytes for every family (OwnerReceipts verifies signatures over keys its own bytes carry),
+  so a hit is what a fresh validation of the same bytes returns. **One deliberate
+  relaxation:** a detached result refused because a write overtook it is still memoized, unless
+  the memo already holds that record, so the restarted scan need not validate it again. The result
+  never reaches an inventory, and validation is a pure function of those bytes, so a memo entry
+  for bytes since rewritten is only a miss. A read evicts any entry its bytes contradict.
 - **Recovery staging cleanup deletes unpublished attempts, never saved recovery versions.** Only
   strict canonical temporary sibling names under the mounted store's fixed parent are eligible,
   with regular/non-reparse checks and exclusive access for the whole bounded pass. No caller can
@@ -264,8 +428,9 @@ table with the commit that closed it.
   durable source history/intents until that success. Cleanup does not parse/promote those bytes,
   delete logical staged snapshots, or authorize pruning. Errors and caught panics can leave
   partial removals, but never a completed pass or accounting credit. Retry runs the directory
-  flush even when no siblings remain; this retains the existing Unix-only directory-durability
-  guarantee, not a stronger Windows claim. A new inventory is mandatory after traversal because
+  flush even when no siblings remain; this retains the existing Unix/Windows directory-durability
+  guarantee, not a universal filesystem or hardware guarantee. A new inventory is mandatory after
+  traversal because
   deletion can affect directory iteration. Observed deleted lengths are not promised reclaimed
   disk space. This API remains unwired to startup and network input.
 - **Owner receipt persistence is a publication prerequisite, not proof of current authority.**
@@ -283,8 +448,9 @@ table with the commit that closed it.
   with both the same namespace and digest, and owner bodies keep their own small pre-read cap.
   Cleanup can remove unpublished attempts only; saved pending/high-water decisions are never targets.
   The explicit registry owner driver and checked head-response preparation invoke it, but no
-  automatic actor/startup scheduler owns those paths yet. Durability remains file-sync/atomic replacement plus Unix parent sync, not protection from
-  device failure or restoration of an older vault backup.
+  automatic actor/startup scheduler owns those paths yet. Durability remains file-sync/atomic
+  replacement plus Unix/Windows parent sync, not protection from device failure or restoration of
+  an older vault backup.
 - **Owner issuance resumes exact heads, not a new decision from changed content.** The explicit
   registry driver requires the current physical mount/server and a durable runtime/MLS/full-owner/
   tenure snapshot permit, not merely an observed tenure number. It validates and flushes the source
@@ -326,8 +492,8 @@ table with the commit that closed it.
   Exact retries sync an authenticated unchanged final and parent without a replacement copy,
   so a committed write at the cap can still pass its durability barrier. Cleanup removes only
   unpublished siblings, not saved intents, and still needs a fresh scan before credit is released.
-  Parent sync remains Unix-only; hostile local path replacement, device failure and backup
-  rollback remain outside these guarantees. Storage admission across other record types,
+  Parent sync is implemented on Unix and Windows; hostile local path replacement, device failure
+  and backup rollback remain outside these guarantees. Storage admission across other record types,
   live settlement scheduling, replay and network/editor integration are still unwired. The checked
   registry store transaction below now performs receipt-covered retirement before source replacement.
 - **Registry restart consistency is not settlement durability.** The `RegistryEpoch` coordinator
@@ -401,7 +567,7 @@ table with the commit that closed it.
   that fault pair; old readers explicitly reject it, and ordinary v1 records stay compatible.
   Conservative per-record content reserves and physical intent replacement headroom can still
   refuse at full quota. No live actor/discovery, repair or automatic replay is wired. The existing
-  file-sync/Unix-parent-sync durability and local-path threat boundary apply.
+  file-sync plus Unix/Windows-parent-sync durability and local-path threat boundary apply.
 - **Newcomer adoption preserves the whole source before replacement.** The registry core can seal a
   whole source against a distant or new-tenure checkpoint, retaining every signed operation.
   Ordinary restart remains v1; explicit adoption v2 contains an adoption-only bounded receipt
@@ -526,9 +692,14 @@ table with the commit that closed it.
   complete the exact owner publication journal, without proving driver admission or peer delivery.
   Eight fixed-lifetime queued requests,
   full-identity rates, four driver-owned outbound slots and source service rails bound resources;
-  rate debt is process-local and Sybils still reach aggregate caps. Signed repair bytes are not
-  served yet. Registry seed fetching and explicit recovery-first installation are implemented;
-  head hints alone still authorize neither replacement nor an editing lease.
+  rate debt is process-local and Sybils still reach aggregate caps. Authenticated current-tenure
+  repair bytes may be carried only after the exact replacement source is synchronized and the
+  contextual owner record is re-saved durably. For Studio sources and Registry buckets alike,
+  receiving-side repair application, owner continuation and repaired-seed installation run only
+  as the detached job described under the Studio fault repair entry above, which holds shared
+  preparation admission from capture through commit. Registry seed fetching
+  and explicit recovery-first installation are implemented; head hints alone still authorize
+  neither replacement nor an editing lease.
 - **Registry page cursors are continuation claims, not remote possession or currency proofs.**
   Cooperative page serving binds an ephemeral HMAC-SHA256 key to the exact provider/requester,
   full group/logical/concrete scope, initial heads/seed, fixed accepted-log prefix and monotonic
@@ -717,6 +888,24 @@ table with the commit that closed it.
   a sole coordinator remains required. Blobs/legacy snapshots are outside this inventory. No
   network snapshot authority, completed Studio settlement, live publication, retention guarantee
   or actor/native Save/Load follows from these store APIs alone.
+  Awaiting-tenure overlay authoring is likewise an internal local-draft capability, not source or
+  signing authority. New work requires checked source absence plus a current complete prepared
+  preview at both authorization and commit; detached plans bind mount, numeric server, complete
+  target, member key, owner, MLS epoch and exact authenticated Intents bytes. A parked request also
+  binds target, provenance, basis, branch and a domain-separated digest of the full canonical
+  operation, including its body. A mismatched request may finish the plan to release the bounded
+  actor slot, but it receives only `Busy` and cannot claim another request's outcome.
+  Unconfirmed history is excluded from automatic handoff and is capped at three live branches per
+  numeric server, 8 MiB of authenticated physical Intents bytes per vault and 64 accepted
+  operations per branch. Exact
+  retry is classified before preview expiry, while any new operation after expiry refuses.
+  Accounting changes only after a durable replacement and terminal disposal releases the live
+  quota; fresh complete inventory reconstructs it. The common `EpochIntentBudget` writer tracks
+  ordinary and Flow S replacements alike. The 8 MiB share is an admission limit on Unconfirmed
+  growth, not a hard vault invariant: an ordinary edit can take the tally over the share, after
+  which new Unconfirmed growth refuses until headroom returns. The
+  internal actor path and native result types exist, but no native command or UI exposes them;
+  this slice grants no permission to promote P5.
   The new explicit native Index/art transactions lend the sole mounted store only AFTER the
   actor's Ready rendezvous. Numeric-server persistence, UI commit and exact registry-incarnation
   locks are acquired without awaiting; a busy fence drops Ready and writes nothing. The blocking
@@ -792,10 +981,33 @@ table with the commit that closed it.
   emitted under a replacement numeric server id; the UI/incarnation fence lasts through emission.
   Automatic inventory uses LOCAL limits of 1024 visited entries, 64 records, 8 MiB aggregate
   authenticated reads and 256 KiB aggregate cold validation bytes, including unrelated saved P1
-  sources. Its mount-local 64-entry LRU stores only context-free Registry/Studio footprint
-  validation. Every hit still authenticates the actual file and binds its scope/filename,
+  sources. Its mount-local LRU stores every family's context-free accounting validation
+  (C-3 runtime 15.2, M1). Every hit still authenticates the actual file and binds its scope/filename,
   full plaintext-wrapper digest and physical size, including gate/receipts/quarantine/history.
   That metadata LRU stores no key/plaintext/doc, completed inventory, membership decision or budget authority.
+  **What it does hold beyond accounting:** for each Intents record, its inventory facts. For an
+  Unconfirmed branch these include the preview provider's device id, the observed MLS epoch and
+  the observation time. The same facts are in that record on this device's disk, and decrypted
+  into memory by every scan of it, but the memo keeps them resident for the mount's life, UI
+  lock included. That is a residual, not a new disclosure: nothing leaves the device.
+  **Admission depends on history** (15.9, MEDIUM-4): warm bytes do not count against the cold
+  rail for any family, so a vault receive refuses cold is admitted once its records are warm. A
+  refused scan warms what it validated before reaching the rail, so a later attempt does less
+  fresh work, and a remount makes the vault cold again. The rail still bounds each scan's fresh
+  validation, which is its purpose. Warm bytes still count against the 8 MiB authenticated-read
+  rail, since every hit reads and authenticates its file, so a vault admitted warm authenticates
+  up to 8 MiB on each receive turn, where it used to stop at the cold rail.
+  **Entries outlive their records until a complete covering scan prunes them**, which includes
+  another member's Unconfirmed provider id after leaving a server.
+  It holds up to `MAX_ACCOUNTED_RECORDS` (65 536) entries, so a complete scan never thrashes it,
+  and every inventory-issuing scan, once complete, prunes the entries of records it did not find,
+  within its own coverage (C-3 runtime design 15.3). About 300 bytes an entry (an Intents entry
+  about 60 more, for its boxed inventory facts), so about 20 MiB at
+  the bound, resident for the mount's life, UI lock included. **The bound is the only
+  unconditional limit**, and it holds whatever puts an entry. Pruning keeps it near the vault's
+  record count only as often as a covering scan completes, and some do not complete: receive's
+  scan refuses any vault over 64 records. Until one does, entries stay for records deleted since
+  the last, including any a peer caused this device to store and then remove.
   New/staged files still count; reference scans cannot skip CID enumeration. Remount clears reuse.
   A large cold record refuses before read; a changed candidate above the cold rail refuses before
   reconstruction. Warm footprint metadata alone does not authorize a mutable target above its
@@ -1074,9 +1286,11 @@ table with the commit that closed it.
   from later being mistaken for migration consent. On every later dial the sync layer reparses the
   terminal peer binding, requires exactly one current roster member's signed descriptor to claim
   that transport peer, rejects removed/replaced/ambiguous claims, and charges the shared
-  process/server/peer/endpoint/prefix budget. Direct admission therefore makes one bounded
-  best-effort PEX request while the authenticated connection is still live, so an immediate
-  post-join snapshot normally contains the inviter descriptor required by reload.
+  process/server/peer/endpoint/prefix budget. Every completed admission now makes one bounded
+  best-effort PEX request over the existing connection, so the first snapshot can retain signed
+  member descriptors even after a reply/helper join. This request fails if the connection closes;
+  it cannot implicitly redial a temporary contact. Learning records is independent of local route
+  authority and does not make the reply/helper path restart-safe by itself.
 
   The route remains self-asserted at the device-to-transport boundary: Noise proves control of the
   transport key, while the member's signed descriptor is the only link from that key to a device.
@@ -1121,7 +1335,7 @@ table with the commit that closed it.
 | Forward secrecy on removal | A removal is a real MLS Remove commit → epoch advance + routing-secret rotation; the removed member is genuinely cut off | `catcoms-sync` removal path |
 | Blob integrity | Content-addressed; served bytes are re-hashed against the requested CID before storing (no cache poisoning) | `catcoms-sync::request_blob` |
 | File-at-rest encryption | Per-group file-wrap key; sealed at rest under the vault key | `catcoms-storage` (Phase 9h) |
-| UI continuity and backup confidentiality | Drafts/read positions are vault-sealed and bounded; sealed records use destination-specific create-new siblings, file sync, rename and parent-directory sync on Unix, so concurrent record types cannot alias, pre-planted staging symlinks are rejected, and abrupt termination exposes a complete predecessor or replacement rather than a partial record. A failed post-rename directory flush is disclosed as committed-but-not-durable. Offline backup copies only the already-sealed vault tree without following links. Export creates another offline guessing target and exposes filesystem metadata; it does not weaken record encryption. Catastrophic filesystem/hardware failure remains outside the guarantee. | `catcoms-app::ServerStore`; desktop `create_backup` |
+| UI continuity and backup confidentiality | Drafts/read positions are vault-sealed and bounded; sealed records use destination-specific create-new siblings, file sync, rename and parent-directory sync on Unix and Windows, so concurrent record types cannot alias, pre-planted staging symlinks are rejected, and abrupt termination exposes a complete predecessor or replacement rather than a partial record. A failed post-rename directory flush is disclosed as committed-but-not-durable. Offline backup copies only the already-sealed vault tree without following links. Export creates another offline guessing target and exposes filesystem metadata; it does not weaken record encryption. Catastrophic filesystem/hardware failure and unsupported targets remain outside the directory-durability guarantee. | `catcoms-app::ServerStore`; desktop `create_backup` |
 | Vault creation and secret rotation | A non-blocking OS-backed sibling lock serializes first creation and rewrap across processes; contention returns `VaultBusy` for retry instead of hanging behind a suspended process. The current wrapper is authenticated; the same root DEK is published through a unique create-new, file-synced staging sibling with rename and Unix directory sync, so concurrent app instances cannot return mismatched first-run DEKs or both report a conflicting rewrap. New/replacement secrets are capped at 4096 bytes. A v1 wrapper with a legacy 4097..65536-byte secret receives one bounded compatibility open and is atomically migrated to fixed-input v2; larger inputs are rejected. This intentionally loses downgrade compatibility with v1-only builds, not ciphertext confidentiality. Wrapper reads accept exactly 89 bytes and never allocate from a hostile file length. | `catcoms-storage::{open_or_create_vault,change_vault_passphrase}`; desktop `change_vault_secret` |
 | Vault single-writer lifetime | `ServerStore::open` acquires a separate non-blocking OS session lock before unsealing and retains it until drop/process exit. A second desktop cannot start duplicate MLS, registry, invite-ledger or transport writers from the same snapshot; it receives `VaultBusy`. Normal exit and abort release the OS lock. Explicit UI lock keeps the native mount but closes IPC; re-unlock performs verify-only authentication against `vault.bin`, and a wrong secret cannot reopen the session. This is same-host installation exclusion, not distributed consensus or protection from malware with the user's OS authority. | `catcoms-storage::{acquire_vault_session,verify_vault_passphrase}`; `catcoms-app::ServerStore`; desktop `unlock` |
 | Desktop explicit-lock IPC boundary | Every non-bootstrap Tauri command requires both a mounted vault and an open UI session. Lock atomically saves bounded continuity state then closes the command boundary; actor events are dropped, late frontend/native cache publications are exact-generation gated, and plaintext export publication holds the exact-generation commit guard while actors continue native background network/persistence work. Native window-close attempts serialize, and a duplicate caller cannot overtake an unacknowledged continuity failure to destroy the window. | desktop `require_unlocked_session`; `require_ui_session_generation`; `lock_session`; `close_vault_window`; `forward_events` |

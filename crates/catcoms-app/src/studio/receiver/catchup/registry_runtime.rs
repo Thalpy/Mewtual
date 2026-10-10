@@ -32,6 +32,14 @@ impl CatchupRuntime {
             return Ok(false);
         };
         let bucket = pointer(target, &server.group_id())?.bucket();
+        if self.repair_claimed(CheckpointTarget::Registry(bucket)) {
+            // A repair job owns this bucket between S1 and S4. A page persisted now would only
+            // make its rebuild stale, and the job's outcome may supersede the page's epoch anyway:
+            // discard it like any other superseded page and let the next tail pass refetch.
+            self.registry_pass = None;
+            self.registry_next_at = server.runtime_clock().monotonic_ms().saturating_add(5_000);
+            return Ok(true);
+        }
         if !self.prepare_registry_inventory(server, store, id, bucket)? {
             return Ok(true);
         }
@@ -136,9 +144,48 @@ impl CatchupRuntime {
         let target = self
             .registry_target
             .unwrap_or(watches[self.registry_selection % watches.len()].0.target);
+        // Its maintenance read refuses a Prepared destination with an error that pauses all of
+        // receive; its resolution is already scheduled (see `handoff_prepared`). Move on.
+        if Self::handoff_prepared(server, store, id, target) {
+            // But first resume the bucket's held owner decision, if any. That resume reads only
+            // the bucket and its owner record, never this document's source. A record stuck on
+            // Hold is never resolved, so skipping it here stranded the bucket's decision for as
+            // long as this was the only watched document in that bucket (Agent 1's note on the
+            // merge of PR #36). An error is recorded, never returned: this skip exists so that
+            // nothing here pauses receive.
+            if let Ok(key) = pointer(target, &server.group_id()) {
+                let bucket = key.bucket();
+                if !self.repair_claimed(CheckpointTarget::Registry(bucket)) {
+                    if let Err(error) =
+                        self.resume_registry_repair(server, store, id, target, bucket)
+                    {
+                        self.note_repair_failure_for(Some(target), &error);
+                    }
+                }
+            }
+            self.registry_target = None;
+            self.registry_selection = self.registry_selection.wrapping_add(1);
+            return Ok(false);
+        }
         self.registry_target = Some(target);
         let key = pointer(target, &server.group_id())?;
         let bucket = key.bucket();
+        if self.repair_claimed(CheckpointTarget::Registry(bucket)) {
+            // A repair job owns this bucket: no pointer refresh, owner maintenance or page pass
+            // may write it until S4, and this target's turn would only stale the job's rebuild.
+            // Move on to the next watched target; the job is what unblocks this one.
+            self.registry_target = None;
+            self.registry_selection = self.registry_selection.wrapping_add(1);
+            return Ok(false);
+        }
+        if self.registry_decision_waiting(server, store, id, bucket, now) {
+            // A held owner decision owns this bucket's turn and its work is backing off.
+            // Preparing would buy nothing this turn: a detached rebuild when cold, and the eviction
+            // of the single warm source another target may need. Spend the turn and move on.
+            self.registry_target = None;
+            self.registry_selection = self.registry_selection.wrapping_add(1);
+            return Ok(true);
+        }
         if !self.prepare(server, store, id, target)?
             || !self.prepare_registry_inventory(server, store, id, bucket)?
         {
@@ -151,11 +198,35 @@ impl CatchupRuntime {
             &key,
             &mut budget,
         )?;
+        // A held owner decision for this bucket owns it until terminal: resume it first, whatever
+        // the phase, so a restart between its barriers can never strand the bucket.
+        if self.resume_registry_repair(server, store, id, target, bucket)? {
+            self.registry_target = None;
+            self.registry_selection = self.registry_selection.wrapping_add(1);
+            return Ok(true);
+        }
         if hint.is_some_and(|h| h.phase == EpochPhase::Fault) {
             // Fault is scoped to this bucket, not the vault or unrelated Studio traffic.
             // Keep refusing checkpoint service and writes there until an owner repair, but
             // allow the existing Studio pass and other watched buckets to continue normally.
             self.owner_failure = Some((target, "Registry bucket needs owner repair".into()));
+            // A peer cannot decide; the owner's next answer is what carries the repair, and the
+            // Registry query reports this bucket's frozen pair so the owner can stage it (W-1).
+            if self.owner_snapshot.is_none() {
+                if let (Some((watch, _)), Some(peer)) = (
+                    watches.iter().find(|(w, _)| w.target == target),
+                    server.sync.studio_page_peers().first(),
+                ) {
+                    let peer = *peer;
+                    self.schedule_discovery(store, id, watch, peer);
+                    let report = server.sync.with_registry_context(|g, d, _, _| {
+                        store.registry_fault_pair(id, g, bucket, d)
+                    });
+                    if let (Some(plan), Ok(report)) = (self.discovery_plan.as_mut(), report) {
+                        plan.fault_report = report;
+                    }
+                }
+            }
             self.registry_target = None;
             self.registry_selection = self.registry_selection.wrapping_add(1);
             return Ok(false);
@@ -198,10 +269,7 @@ impl CatchupRuntime {
         }
         if let Some(snapshot) = self.owner_snapshot.clone() {
             let logical = registry_document(&server.group_id(), bucket).map_err(invalid)?;
-            let pending = store
-                .load_epoch_owner_receipts(id, &logical)?
-                .pending()
-                .is_some();
+            let pending = store.epoch_owner_rotation_pending(id, &logical)?;
             if pending
                 || hint.is_some_and(|h| h.phase == EpochPhase::Closing || h.close_candidate_ready)
             {

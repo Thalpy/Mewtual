@@ -6,6 +6,7 @@ on:
       - '.github/workflows/studio-handoff.yml'
       - '.github/scripts/check-studio-handoff-mutations.py'
       - '.github/scripts/check-studio-handoff-signing-mutations.py'
+      - '.github/scripts/check-studio-resolution-mutations.py'
       - 'crates/catcoms-app/**'
       - 'crates/catcoms-sync/**'
       - 'crates/catcoms-replication/**'
@@ -43,7 +44,16 @@ jobs:
           if-no-files-found: ignore
   handoff:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # About 16 minutes of tests, then 18 mutants and their restored regressions, about 55 in all
+    # on 2026-10-09. 45 was enough only while a broken entry stopped the harness early (from
+    # 17dd54fc until 528f0d2e); with every entry running, that run was cancelled in its last phase.
+    # F2's five handoff-priority entries add about 20 more (17 locally, 2026-10-09): four of them
+    # run an actor-level test, about two minutes per run, once mutated and once restored. Step
+    # A's three base-coverage entries add about two in all, and the PR #27 review's six
+    # `reconcile-*` entries about four (half a minute each mutated, plus the restored runs), so
+    # about 81. The limit is 120 for headroom: a 55-minute run was cancelled at the old 45, and CI
+    # runners can be slower than these local timings.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89.0
@@ -62,4 +72,31 @@ jobs:
           path: |
             logs/gate4-handoff-mutation-*.log
             logs/gate4-handoff-restored-*.log
+          if-no-files-found: ignore
+  # Flow R, the staged resolution of an interrupted handoff (design 6.4.2). Its own job, because
+  # its 18 mutants would push the handoff job past its limit: each rebuilds the crate and runs a
+  # store or actor test once mutated and once restored, about 60 minutes in all locally.
+  resolution:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Test Flow R's staged resolution against the synchronous resolver
+        run: >-
+          cargo test --locked -j 4 --config 'profile.test.package.catcoms-app.debug=0'
+          -p catcoms-app --lib -- resolution:: flow_r a_resolve_ _skips_a_prepared_document
+          replay_waits_for_a_prepared_document an_active_replay_pass_on_a_prepared_document
+          --test-threads=4
+      - name: Verify isolated mutations and restored regressions
+        run: python3 .github/scripts/check-studio-resolution-mutations.py
+      - name: Preserve mutation and restoration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: studio-resolution-mutations
+          path: |
+            logs/gate4-resolution-mutation-*.log
+            logs/gate4-resolution-restored-*.log
           if-no-files-found: ignore

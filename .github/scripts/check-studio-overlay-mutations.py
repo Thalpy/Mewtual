@@ -15,17 +15,23 @@ COMMAND = [
     "profile.test.package.catcoms-app.debug=0", "-p", "catcoms-app", "--lib",
 ]
 MUTATIONS = [
+    # The mutant pins the basis's source version to a CONSTANT, so the basis ignores the real
+    # persisted source version, which is the binding these tests exist for. It is a nonzero
+    # constant on purpose. A zero version is now refused outright by `validate` (a Closing label
+    # needs both source-identity fields nonzero, 330c16ed), so a zeroing mutant died at that
+    # earlier, stricter rule instead of at the assertion it names. That is real protection, but
+    # not a detection of this guard.
     (
         "source-version-first", "crates/catcoms-replication/src/studio/overlay.rs",
         "source_version,\n            receipt: plan.receipt().clone(),",
-        "source_version: source_version.map(|_| 0),\n            receipt: plan.receipt().clone(),",
+        "source_version: source_version.map(|_| 1),\n            receipt: plan.receipt().clone(),",
         "changed_closing_source_refuses_first_acceptance",
         "overlay basis ignored changed persisted Closing source version",
     ),
     (
         "source-version-append", "crates/catcoms-replication/src/studio/overlay.rs",
         "source_version,\n            receipt: plan.receipt().clone(),",
-        "source_version: source_version.map(|_| 0),\n            receipt: plan.receipt().clone(),",
+        "source_version: source_version.map(|_| 1),\n            receipt: plan.receipt().clone(),",
         "changed_closing_source_refuses_append_but_keeps_exact_retry",
         "overlay basis ignored changed persisted Closing source version",
     ),
@@ -39,6 +45,26 @@ MUTATIONS = [
         "sequence", "crates/catcoms-replication/src/studio/overlay.rs",
         "|| entry.sequence != index as u64 + 1", "|| (index == usize::MAX)",
         "codec_binds_annotations_envelopes_and_sequence", "overlay accepted reordered sequence",
+    ),
+    # Design 6.2's S1a (design 18.3 review, F1): an exact retry is acknowledged flush-only. The
+    # mutant rebuilds the draft before acknowledging, which is what S1a did before the fix. It keeps
+    # the acknowledgement, so only the rebuild counter can catch it, not the outcome type.
+    (
+        "retry-rebuild", "crates/catcoms-app/src/store/epoch_intents/overlay.rs",
+        "        let acknowledged = StudioOverlaySave::Acknowledged {",
+        "        let _ = state.local_draft()?;\n"
+        "        let acknowledged = StudioOverlaySave::Acknowledged {",
+        "exact_retry_rebuilds_no_draft", "an exact retry rebuilt the draft",
+    ),
+    # The same, in the form the defect actually had: a direct `overlay.read`, which bypasses the
+    # app's draft reader. Caught only because the counter sits inside `StudioOverlay::read` in the
+    # replication crate (implementation review of the 18.3 fixes, M-2).
+    (
+        "retry-read", "crates/catcoms-app/src/store/epoch_intents/overlay.rs",
+        "        let acknowledged = StudioOverlaySave::Acknowledged {",
+        "        let _ = overlay.read(&state.ledger).map_err(invalid)?;\n"
+        "        let acknowledged = StudioOverlaySave::Acknowledged {",
+        "exact_retry_rebuilds_no_draft", "an exact retry rebuilt the draft",
     ),
     (
         "seed-refs", "crates/catcoms-app/src/store/epoch_recovery/inventory.rs",

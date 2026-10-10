@@ -5,7 +5,9 @@ on:
     paths:
       - '.github/workflows/studio-overlay.yml'
       - '.github/scripts/check-studio-overlay-mutations.py'
+      - '.github/scripts/check-studio-overlay-lifecycle-mutations.py'
       - 'crates/catcoms-app/**'
+      - 'crates/catcoms-mls/**'
       - 'crates/catcoms-sync/**'
       - 'crates/catcoms-replication/**'
   workflow_dispatch:
@@ -39,4 +41,78 @@ jobs:
           path: |
             logs/gate4-overlay-mutation-*.log
             logs/gate4-overlay-restored-*.log
+          if-no-files-found: ignore
+
+  # The overlay LIFECYCLE: the draft archive and its release, the disposal transaction, the
+  # branch-generation namespace, and the owner-tenure observation rule.
+  #
+  # A separate job rather than more steps on `overlay`, for two reasons. It spans four crates, so a
+  # failure here should not be reported as a failure of the Closing-overlay foundation; and the
+  # mutation harness serialises deliberately, so sharing a job would make the two halves wait on each
+  # other for no benefit.
+  #
+  # RUST_MIN_STACK is set for the suites because they currently need more thread stack than the
+  # default. That is a workaround for a stack regression elsewhere in the tree rather than a property
+  # of this scope, and it is pinned here so a CI run and a local run behave the same instead of one of
+  # them aborting without a test failure to point at.
+  #
+  # The tests and the mutation harness are separate jobs, so they run in parallel. Run in sequence
+  # they no longer fit one job: on 2026-10-01 the app overlay suite alone took 33 minutes in CI,
+  # leaving the harness about ten minutes for roughly twenty, and it timed out at the fourth
+  # mutation on every run from `e5205318` on.
+  lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Test the archive, release and disposal boundaries
+        run: >-
+          cargo test --locked -j 4 --config 'profile.test.package.catcoms-app.debug=0'
+          -p catcoms-app --lib store::epoch_studio::tests::rotation::overlay::
+          -- --test-threads=4
+        env:
+          RUST_MIN_STACK: '33554432'
+      - name: Test the branch-generation namespace and the disposal manifest
+        run: >-
+          cargo test --locked -j 4 --config 'profile.test.package.catcoms-replication.debug=0'
+          -p catcoms-replication --lib studio::epoch::owner::tests:: -- --test-threads=4
+        env:
+          RUST_MIN_STACK: '33554432'
+      - name: Test owner tenure observation, migration and the accessor split
+        run: >-
+          cargo test --locked -j 4 --config 'profile.test.package.catcoms-sync.debug=0'
+          -p catcoms-sync --lib owner_tenure -- --test-threads=4
+        env:
+          RUST_MIN_STACK: '33554432'
+
+  # Each mutation recompiles one crate. On `af113f24` the single job detected 45 entries in the
+  # 54 minutes after its 6-minute setup, about 1.2 minutes each, and was cancelled at its 60-minute
+  # limit before the restored phase. So the entries are split across shards by index
+  # (`--shard K/N` in the harness). A new entry joins a shard automatically, and each shard runs
+  # its own restored phase. Three shards leave room to grow; raise N when a shard nears the limit.
+  # The harness sets RUST_MIN_STACK itself.
+  lifecycle-mutations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      # N comes from the matrix itself, so growing the matrix cannot leave entries unassigned.
+      - name: Verify isolated lifecycle mutations and restored regressions (shard ${{ matrix.shard }} of ${{ strategy.job-total }})
+        run: python3 .github/scripts/check-studio-overlay-lifecycle-mutations.py --shard ${{ matrix.shard }}/${{ strategy.job-total }}
+      - name: Preserve lifecycle mutation and restoration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: studio-overlay-lifecycle-mutations-${{ matrix.shard }}
+          path: |
+            logs/gate4-overlay-lifecycle-mutation-*.log
+            logs/gate4-overlay-lifecycle-restored-*.log
           if-no-files-found: ignore

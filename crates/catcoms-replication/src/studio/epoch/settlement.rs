@@ -152,6 +152,7 @@ impl StudioEpoch {
             plan.checkpoint.bytes(),
         )?;
         successor.receipts = self.receipts.clone();
+        successor.repair_binding = self.repair_binding;
         successor.receipts.mark_latest_installed();
         Ok(successor)
     }

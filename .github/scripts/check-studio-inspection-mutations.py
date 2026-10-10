@@ -25,7 +25,11 @@ MUTATIONS = {
          "same-sized authenticated replacement escaped inspection digest fence"),
     ],
     "native": [
-        (NATIVE, "|| inspection_delivery\n            .as_ref()\n            .is_some_and(|delivery| !delivery.is_current())", "",
+        # Continuation lines indented 16 spaces since the post-response checks moved inside the
+        # `delivered` block of `invoke_with_context` (3168de6e). The preview harness's sibling
+        # anchor was updated then; this one was missed and matched nothing until it was found by
+        # a static anchor sweep.
+        (NATIVE, "|| inspection_delivery\n                .as_ref()\n                .is_some_and(|delivery| !delivery.is_current())", "",
          NPREFIX + "native_studio_inspection_expiring_after_conversion_is_rejected",
          "expired inspection escaped final native delivery fence"),
         ("apps/desktop/src-tauri/src/studio/inspection.rs", "after_rebuild(&context);",

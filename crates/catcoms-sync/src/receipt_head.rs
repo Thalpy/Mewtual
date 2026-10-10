@@ -3,7 +3,8 @@
 use super::*;
 use crate::checkpoint_exchange::CheckpointTarget;
 use catcoms_replication::{
-    registry::registry_document, LogicalDocument, Receipt, ReceiptHeadProof, VerifiedReceipt,
+    registry::registry_document, LogicalDocument, Receipt, ReceiptHeadProof, ReceiptRepair,
+    VerifiedReceipt,
 };
 use catcoms_rt::Responder;
 use registry_ingress::Rate;
@@ -44,6 +45,8 @@ struct Pending {
     generation: Arc<()>,
     inner: Vec<u8>,
     nonce: [u8; 16],
+    // The v2 report section, bounds-checked but not parsed until admission.
+    report: Option<Vec<u8>>,
     requester: DeviceId,
     key: Vec<u8>,
     auth: RequestAuth,
@@ -96,12 +99,31 @@ impl Drop for CancelOnDrop {
 /// Evidence that the trusted local persistence callback saved this exact owner/MLS observation.
 /// Created by explicit local preparation, NEVER by a remotely triggered source request. Later
 /// membership commits invalidate it; ordinary document edits do not change the owner evidence.
-#[derive(Clone)]
 pub struct DurableOwnerSnapshot {
     instance: RegistrySyncInstance,
     epoch: u64,
     owner: DeviceId,
     tenure: u64,
+    /// The archived witness in the snapshot this permit vouches for (CORE-005). Captured with the
+    /// save, so a witness minted after it, or held only in memory, is never handed out. Boxed
+    /// because this permit rides inside `ReceiptHeadServed::Owner`, which must stay small.
+    archive: Option<Box<ArchivedOwnerTenure>>,
+}
+impl Clone for DurableOwnerSnapshot {
+    fn clone(&self) -> Self {
+        // Cloning the opaque permit does not expose its witness: every use still revalidates the
+        // runtime instance, epoch, live owner tenure and current one-entry archive.
+        Self {
+            instance: self.instance.clone(),
+            epoch: self.epoch,
+            owner: self.owner,
+            tenure: self.tenure,
+            archive: self
+                .archive
+                .as_deref()
+                .map(|archive| Box::new(archive.duplicate())),
+        }
+    }
 }
 impl fmt::Debug for DurableOwnerSnapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -134,19 +156,26 @@ pub enum ReceiptHeadServed {
     Owner(ReceiptHeadHandoff),
 }
 
-/// Trusted synchronous source context. `tenure` is present only with a still-current durable
-/// snapshot permit. The source must separately persist its selected irrevocable decision and
-/// check its registry/inventory before asking sync to sign a fresh proof.
+/// Trusted synchronous source context. `tenure` and `archived_owner` are available only from a
+/// still-current durable snapshot permit. The source must separately persist its selected
+/// irrevocable decision and check its registry/inventory before asking sync to sign a fresh proof.
 pub struct ReceiptHeadSource<'a> {
     pub document: &'a LogicalDocument,
     pub requester: DeviceId,
     pub nonce: [u8; 16],
     pub tenure: Option<u64>,
+    /// The single locally observed retired owner carried by the same durable snapshot. This is
+    /// historical provenance for exact fault-pair admission, never current signing authority.
+    pub archived_owner: Option<&'a ArchivedOwnerTenure>,
+    /// A faulted requester's complete frozen pair, decoded only after both request rails. It is
+    /// self-signed evidence, not authority: the trusted provider decides whether it is provable.
+    pub fault_report: Option<&'a [Receipt; 2]>,
 }
 impl fmt::Debug for ReceiptHeadSource<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReceiptHeadSource")
             .field("durable_tenure", &self.tenure.is_some())
+            .field("archived_owner", &self.archived_owner.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -210,14 +239,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         &mut self,
         save: impl FnOnce(&[u8], &mut R) -> Result<(), E>,
     ) -> Result<Result<DurableOwnerSnapshot, E>, SyncError> {
+        // Authoring: minting a publication permit is authoring, so an `Imported` tenure must not
+        // satisfy it.
         let tenure = self
-            .observed_owner_tenure_start()
+            .authoring_owner_tenure_start()
             .ok_or(SyncError::Unauthorized)?;
         if self.group.designated_committer() != Some(self.device.device_id())
             || !self.head_member(&self.device.public_key_bytes())
         {
             return Err(SyncError::Unauthorized);
         }
+        // Read before serializing, from the same state `snapshot()` writes.
+        let archive = self.owner_tenure.archived(&self.group).map(Box::new);
         let snapshot = self.snapshot()?;
         if let Err(error) = save(&snapshot, &mut self.rng) {
             return Ok(Err(error));
@@ -227,6 +260,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             epoch: self.group.epoch(),
             owner: self.device.device_id(),
             tenure,
+            archive,
         }))
     }
     fn head_snapshot_is_current(&self, permit: &DurableOwnerSnapshot) -> bool {
@@ -234,7 +268,41 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             && permit.epoch == self.group.epoch()
             && self.device.device_id() == permit.owner
             && self.group.designated_committer() == Some(permit.owner)
-            && self.observed_owner_tenure_start() == Some(permit.tenure)
+            // Authoring. A permit cannot exist for an `Imported` tenure, since minting one uses the
+            // authoring accessor, so either would be correct today; authoring is the semantics that
+            // stays correct if permit minting ever moves.
+            && self.authoring_owner_tenure_start() == Some(permit.tenure)
+            // A witness only changes on an MLS transition, which the epoch check already catches.
+            // Compared anyway, so the permit never vouches for a witness it was not saved with.
+            && self.owner_tenure.archived(&self.group).as_ref() == permit.archive.as_deref()
+    }
+
+    /// [`Self::with_durable_owner_snapshot`] plus the archived Observed-tenure witness that the
+    /// permit's durable snapshot carried, for CORE-005 historical report admission.
+    ///
+    /// The witness is local evidence that this device watched that tenure begin and end. It is
+    /// **not** current authority (the caller still gets `tenure` for that), not transferable, and
+    /// not proof that any particular receipt was signed during it: the caller must match a pair's
+    /// full `(owner key, start, tenure id)` against it, and seal its own admission attestation.
+    /// `None` means there is no positively observed history to offer, which is a refusal for a
+    /// historical pair, never a fallback to the receipts' own claim.
+    pub fn with_durable_owner_history<V>(
+        &mut self,
+        permit: &DurableOwnerSnapshot,
+        use_owner: impl FnOnce(&ServerGroup, &MlsDevice, &mut R, u64, Option<&ArchivedOwnerTenure>) -> V,
+    ) -> Result<V, SyncError> {
+        if !self.head_snapshot_is_current(permit)
+            || !self.head_member(&self.device.public_key_bytes())
+        {
+            return Err(SyncError::Unauthorized);
+        }
+        Ok(use_owner(
+            &self.group,
+            &self.device,
+            &mut self.rng,
+            permit.tenure,
+            permit.archive.as_deref(),
+        ))
     }
     /// Admit a finite local owner transaction under the exact persisted MLS/tenure snapshot.
     /// An observed tenure alone is insufficient: a restart must not restore authority behind
@@ -355,7 +423,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         responder: Responder,
     ) {
         let now = self.receipt_heads.expire(self.clock.monotonic_ms());
-        if data.len() > MAX_QUERY + 144
+        if data.len() > MAX_QUERY_V2 + 144
             || (self.receipt_heads.watches.is_empty() && self.epoch_service.generation.is_none())
             || self.receipt_heads.pending.len() >= MAX_PENDING
             || !self
@@ -375,7 +443,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return;
         }
-        let Ok((target, nonce)) = decode_scoped_query(kind, &inner, &self.group.group_id()) else {
+        // Header only: the report section is captured as bounded opaque bytes and never parsed
+        // before this requester has paid its per-requester rail below.
+        let Ok((target, nonce, report)) = decode_scoped_query(kind, &inner, &self.group.group_id())
+        else {
             return;
         };
         // At most 256 fixed-size hashes, after authentication and the global preauth rail.
@@ -423,6 +494,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             generation,
             inner,
             nonce,
+            report,
             requester,
             key,
             auth,
@@ -464,6 +536,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             ReceiptHeadSource<'_>,
         ) -> Result<ReceiptHeadSelection, E>,
     ) -> Result<Option<Result<ReceiptHeadServed, E>>, SyncError> {
+        self.serve_receipt_head_with_fault_repair(watch, snapshot, |g, d, rng, source| {
+            serve(g, d, rng, source).map(|selected| (selected, None))
+        })
+    }
+
+    /// The same serving transaction, additionally carrying a signed fault repair the trusted
+    /// caller found durably servable: applied locally, never merely signed. Serving it claims
+    /// availability only; the receiver verifies it under its own observed tenure before use, and
+    /// a repair never mints a proof or a journal handoff.
+    pub fn serve_receipt_head_with_fault_repair<E>(
+        &mut self,
+        watch: &RegistryHeadWatch,
+        snapshot: Option<&DurableOwnerSnapshot>,
+        serve: impl FnOnce(
+            &ServerGroup,
+            &MlsDevice,
+            &mut R,
+            ReceiptHeadSource<'_>,
+        ) -> Result<(ReceiptHeadSelection, Option<ReceiptRepair>), E>,
+    ) -> Result<Option<Result<ReceiptHeadServed, E>>, SyncError> {
         if !self.registry_head_watch_is_current(watch) {
             return Err(SyncError::NoSuchDoc);
         }
@@ -495,10 +587,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return Err(SyncError::Unauthorized);
         }
         let document = watch.target.document(&self.group.group_id())?;
-        let tenure = snapshot
-            .filter(|p| self.head_snapshot_is_current(p))
-            .map(|p| p.tenure);
-        let selected = match serve(
+        let snapshot = snapshot.filter(|p| self.head_snapshot_is_current(p));
+        let tenure = snapshot.map(|p| p.tenure);
+        let archived_owner = snapshot.and_then(|p| p.archive.as_deref());
+        // Both rails are paid; only now are the reported receipts decoded. A malformed report
+        // is the requester's error and refuses this request without a response.
+        let fault_report = item
+            .report
+            .as_deref()
+            .map(|bytes| decode_fault_report(bytes, &document))
+            .transpose()?
+            .flatten();
+        let (selected, fault_repair) = match serve(
             &self.group,
             &self.device,
             &mut self.rng,
@@ -507,11 +607,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 requester: item.requester,
                 nonce: item.nonce,
                 tenure,
+                archived_owner,
+                fault_report: fault_report.as_ref(),
             },
         ) {
             Ok(value) => value,
             Err(error) => return Ok(Some(Err(error))),
         };
+        if fault_repair
+            .as_ref()
+            .is_some_and(|r| r.document != document)
+        {
+            return Err(SyncError::Malformed);
+        }
         // Synchronous disk work can consume the request's lifetime. Never send stale success.
         if !self.head_request_current(&item) || self.clock.monotonic_ms() >= item.expires {
             return Err(SyncError::Unauthorized);
@@ -523,7 +631,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let proof = if selected.prove {
             let receipt = receipt.as_ref().ok_or(SyncError::Malformed)?;
             let tenure = tenure.ok_or(SyncError::Unauthorized)?;
-            if self.observed_owner_tenure_start() != Some(tenure) {
+            // Authoring: signing a proof AS the owner is authoring, not verification.
+            if self.authoring_owner_tenure_start() != Some(tenure) {
                 return Err(SyncError::Unauthorized);
             }
             receipt.verify_current_owner(&self.group, tenure)?;
@@ -538,7 +647,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         let answer = ReceiptHeadAnswer {
             receipt,
-            repair: None,
+            repair: fault_repair,
             proof,
         };
         let bytes = encode_answer(&answer, &document)?;

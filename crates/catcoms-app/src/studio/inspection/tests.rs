@@ -292,14 +292,71 @@ async fn studio_inspection_paused_real_draft_allows_actor_checkpoint_progress() 
     else {
         panic!("not an inspection")
     };
-    read.inspect(|target, prepared, draft| {
-        assert_eq!(target, f.target);
-        assert!(!prepared);
-        let draft = draft.unwrap();
+    read.inspect(|v| {
+        assert_eq!(v.target, f.target);
+        assert!(!v.prepared);
+        assert!(
+            v.replayable,
+            "this draft rebuilds, so it must be labelled so"
+        );
+        assert!(v.branch.is_some(), "a live branch has an identity");
+        let draft = v.draft.unwrap();
         assert_eq!(draft.basis(), f.basis);
         assert_eq!(draft.projection(), &f.expected);
     })
     .unwrap();
     drop(read);
+    f.shutdown().await;
+}
+
+/// The actor half of the delivery fence, for the results that used to skip it.
+///
+/// Through the real actor, an export and an archive come back with a delivery the actor began, and
+/// while native still holds that delivery the actor takes no further custody request: a lifecycle
+/// read issued meanwhile does not get through until the delivery is dropped. That is the property
+/// the review asked for - between the finish visit's final validation and native's disclosure, no
+/// membership, MLS or source change can be processed unnoticed, because the actor is parked in the
+/// handoff rather than back in its loop. Before the fix the actor began a handoff only for an
+/// inspection, so both of these would have come back with no delivery at all.
+#[tokio::test]
+async fn export_and_archive_through_the_actor_park_it_until_native_releases_the_result() {
+    let f = fixture::InspectionFixture::new(true).await;
+    for (begin, finish) in [
+        (
+            StudioControlAction::ExportOverlay,
+            StudioControlAction::FinishOverlayExport as fn(_) -> _,
+        ),
+        (
+            StudioControlAction::ArchiveOverlay,
+            StudioControlAction::FinishOverlayArchive,
+        ),
+    ] {
+        let StudioControlResponse::OverlayPreparation(job) = f.control(begin).await.unwrap() else {
+            panic!("not a real capture")
+        };
+        let prepared = job.rebuild_for_archive().await.unwrap();
+        let response = f.control(finish(Box::new(prepared))).await.unwrap();
+        let delivery = response
+            .delivery()
+            .expect("the actor must begin a handoff for this result");
+        assert!(delivery.is_current());
+
+        // While native holds the result, the actor is parked in the handoff.
+        let blocked = tokio::time::timeout(
+            Duration::from_millis(300),
+            f.control(StudioControlAction::OverlayLifecycle),
+        )
+        .await;
+        assert!(
+            blocked.is_err(),
+            "the actor took another custody request while a delivered result was outstanding"
+        );
+
+        drop(response);
+        drop(delivery);
+        f.control(StudioControlAction::OverlayLifecycle)
+            .await
+            .expect("releasing the result must let the actor continue");
+    }
     f.shutdown().await;
 }

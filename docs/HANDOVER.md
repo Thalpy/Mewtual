@@ -8,7 +8,363 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-09-15)
+## Status (latest entry: 2026-10-10)
+
+- **Gate 4 repair: PR #27 review MEDIUM-1 and two interface points (2026-10-10).** A repair job's
+  S3 now builds its storage budget only after installing (or, for a bucket, memoizing) the rebuild,
+  so a cold source over the receive scan's 256 KiB cold-byte limit commits instead of being
+  refused and discarded. A held Registry owner decision now resumes even while its bucket's only
+  watched document is stuck in a Prepared handoff, and (after the PR #37 review) a bucket whose
+  B3 guess already came to nothing resumes rather than refetching, so a landed install recycles
+  without the seed. The repair claim's comment and THREAT-MODEL
+  now name the writers that do not consult it (H5, Flow R's R3, Flow S, warm gossip ingest); S3's
+  digest recheck still catches them. Details are in `GATE4-AGENT-3-STATUS.md`.
+
+- **Gate 4 repair: real-peer Registry Flow D and plan D (2026-10-09).** A peer now takes a bucket
+  repair from a real discovery answer and installs its network-fetched replacement through the
+  router's Replace job, all through spawned actors. A replayed repair held by the transaction
+  holds only itself on a real peer. Plan D's remaining items each have a test:
+  - another actor progressing while an S2 is paused;
+  - S3 with a pending page on the claimed target;
+  - fairness across held targets;
+  - crash recovery through the job.
+
+  Fairness needed a runtime change. The owner resume's single shared cadence, which any held
+  target pushed to 60 s, is now a per-target visit deferral that doubles while it repeats (60 s to
+  a 15 min cap). It resets on a terminal outcome, a new decision, or the person acknowledging the
+  document's recovery warning. Its review added two more fixes. The router itself now resumes an
+  install that landed just before a crash, and a cold owner resumes rather than refetching once a
+  fetch has come to nothing. S3 now drops a page fetched for the source it rewrote, which before
+  could pause catch-up. The PR #36 review added three more: an owner alone (no peer at all)
+  still recovers from that crash; the same repair offered again while its job runs completes
+  that job's evidence; and an offered repair's failure at any stage holds only that repair, never
+  its document. Still open: a peer's repaired-seed refetch is not paced (pre-existing), hosted
+  CI on PR #36 and a bounded repair verdict. Details are in `GATE4-AGENT-3-STATUS.md`.
+
+- **Gate 4 Agent 1: C-3's prerequisite, the validation memo (2026-10-10).** The project owner
+  decided the remaining C-3 owners wait for writer-side warms and then a measurement, after which
+  each is converted or recorded as debt (`GATE4-AGENT-1-C3-RUNTIME.md` 16).
+  - **M2, landed:** the memo is indexed, holds up to 65 536 entries and is pruned by every
+    inventory-issuing scan, so a vault of more than 64 memoizable records no longer revalidates
+    every record on every scan.
+  - **M1's memo half, built:** every family's accounting validation is memoized, an Intents
+    record's inventory facts included, so unchanged Recovery, Intents and OwnerReceipts records
+    are no longer revalidated under custody either. The writer warms, M1's other half, wait on
+    Agent 2 and Agent 3, since five of the eight writer files are theirs.
+  - **Changed limitation, user-visible:** whether automatic receive refuses a vault at its
+    256 KiB cold rail now depends on history for every family, not only Registry and Studio. A
+    vault refused cold is admitted once its records are warm, a refused attempt warms what it
+    validated, and a remount makes the vault cold again.
+  - **Residual:** the memo keeps an Unconfirmed branch's provider device id, MLS epoch and
+    observation time resident for the mount's life, UI lock included. The same facts are in the
+    record on this device's disk.
+
+- **Gate 4 Agent 1: C-3 step 2, F1 and F4 (2026-10-09).**
+  - **C-3 step 2:** replay's manual move now takes its storage budget from a shared, turn-based
+    inventory job that keeps a cursor across custody visits, the first production path to do so.
+    Limitations, as `THREAT-MODEL.md` now states:
+    - the cursor and its directory stream live until the first visit 30 s or more past the
+      owner's last turn, about 35 s with the native idle wake;
+    - a move the job cannot serve within 60 s falls back to the synchronous scan it ran before;
+    - so the move, and its recovery notice, can wait up to 60 s;
+    - the job takes permits from the same four-slot preparation pool as catch-up;
+    - a detached validation's error pauses background receive only if it is about bytes that
+      are still current.
+  - **F1:** an exact retry of an accepted overlay operation now returns
+    `StudioOverlaySave::Acknowledged { basis, accepted }` and rebuilds no draft (see
+    `INTERFACES.md`).
+  - **F4:** a Save captured while the receiver is paused is dropped, and a pause releases a
+    capture still queued, freeing admission, the pool permit and the media hold. The refusal is
+    not free, since the visit paid for media admission and, for the Unconfirmed Save, the budget
+    scan. The Unconfirmed Save answers it with `Paused` (natively `retry:"afterExplicitAccess"`,
+    Agent 2, 2026-10-10), so a caller can tell it from `Busy`, which the paused event alone could
+    not. The Closing `save_overlay` still answers `Busy` while paused, and needs the same
+    distinction before its native result registers.
+  - **F2:** an actor-level test of Flow H's signing yield, with a second member's checkpoint
+    request arriving mid-signing. It found that a request catch-up had reserved, and whose source
+    it had installed, was invisible to the yield. Signing then ran to the end, and H5's commit
+    evicted the source and dropped the request unanswered. The yield now waits for such a request
+    once it has captured its source (`CatchupRuntime::captured_service_owed`). An uncaptured one
+    may be waiting for the signing job's own pool permit, so it is signed past. It is served after
+    H5 only if it is still current then (5 s from arrival) and wins the freed permit; otherwise the
+    requester retries.
+    - **Still open:**
+      - `replay_ready()`, the gate for H5 and replay, has the same blind spot. A request captured
+        just before H5 or a replay step can still be dropped, costing the requester a retry.
+      - On a full pool, a held client page or Registry page can keep catch-up from serving at all,
+        while H3 yields to a request it cannot reach.
+      - The inbound term has no actor-level test.
+  - **Decision, technical debt:** a Studio handoff's final commit (H5) stays one blocking step.
+    At the caps (999 frames, 256 draft operations) it takes about 0.15 s, past the design's
+    0.125 s target, once per handoff. Splitting it (C-3 step 3's remaining route) is deferred, and
+    Flow R is next. See `GATE4-AGENT-1-C3-RUNTIME.md` 15.14.
+  - **Flow R, built:** an interrupted handoff's Prepared record is now resolved by the background
+    scheduler in three stages, with the source restore detached, instead of synchronously under
+    custody, where a cold source was restored twice. R3 writes exactly what the synchronous
+    resolver would, or refuses with nothing written; tests compare the two byte for byte. The
+    fences (rotation, adoption, repair) keep the synchronous resolver. Design 6.4.2 to 6.4.5 in
+    `GATE4-AGENT-1-DESIGN.md`.
+    - **Fixed on the way:** four of the receiver's background rails no longer pause all of receive
+      when a watched document's handoff is Prepared: owner rotation, the client pass, Registry
+      maintenance and replay. Each skips that document for the turn. This was reachable before
+      Flow R too, whenever a Prepared record outlived the probe. With Flow R and a peer online it
+      was a livelock, found by the implementation review. Replay also drops a pass it had begun on
+      such a document, which would otherwise stop replay of every other. A Prepared record held
+      back by a Hold is never resolved, so it suspends these rails for its document indefinitely.
+      It no longer strands its shared pointer bucket's held owner decision: since PR #37 Registry
+      maintenance resumes that decision before skipping the document.
+    - **Residual:** while a resolution is in flight the actor's one overlay slot is taken, so a
+      Save on that server answers `Busy` for a few turns longer than before.
+  - **PR #36 merged into this line, and the PR #27 review:** Agent 3's repair runtime is merged
+    in, and every rail keeps both skips. Rotation and the client pass check the repair claim
+    first, then the Prepared record. Registry maintenance checks the Prepared document first,
+    then the repair claim on its bucket, a different key. The review's LOW-1 is fixed:
+    the handoff probe's per-target bookkeeping is now bounded by the 16-watch rail, plus at most
+    64 unexpired holds of unwatched targets. Its MEDIUM-1, in Agent 3's repair commit (the
+    inventory budget was built before the rebuild was installed, so a cold source over the
+    inline threshold failed S3 and the rebuild was discarded), is fixed by Agent 3 in PR #37,
+    merged into this line: S3 installs, or for a bucket memoizes, the rebuild before it budgets.
+  - Native Save and repair commands remain unregistered. This is not Gate 4 acceptance.
+
+- **Gate 4 PR #35 reconciliation (2026-10-08).** The candidate now preserves
+  `gate4-agent1-runtime` through `7310b22b76848c4b9f85fec816744cff00c1a64f`. Agent 2's newer
+  `EpochIntentBudget` implementation remains the sole owner of the 3-branch/8 MiB rails and their
+  mutation coverage. PR #35 contributes the still-missing full-envelope parked-request correlation
+  for both Closing and Unconfirmed Flow S: another caller may finish abandoned work to free the
+  bounded slot, but receives `Busy` and cannot claim that result. P5 remains false; Save and repair
+  commands remain unregistered. This is incremental integration, not Gate 4 acceptance, and Gate 5
+  remains closed. Residual LOW coverage gap: the common fingerprint path has the Unconfirmed
+  same-nonce/different-body regression, but Closing and cross-provenance parked-plan cases do not yet
+  have direct equivalents.
+
+- **Gate 4 Agent 2: the Unconfirmed aggregate rails, and the parked-plan mutation fix
+  (2026-10-07).**
+  - **Rails:** design 8.3's per-server count (3) and vault-wide bytes (8 MiB, inside the intent
+    ceiling) now exist. The tally sits in `EpochIntentBudget`, built from the inventory's
+    authenticated facts and kept current by `write_prepared_intents`. Flow S checks it at S1b,
+    before media work, and again at S3, at the exact size of the write. Only growth is refused; an
+    exact retry is answered at capacity. There is no typed `StorageRefused`: the refusal is
+    `Invalid` with its own reason. The share is admission policy at Flow S, not a vault invariant.
+    Ordinary edits beside a live branch whose confirmed source is installed grow the counted
+    record unrefused, so the tally can pass 8 MiB. After that, every Unconfirmed Save is refused
+    until headroom returns.
+  - **`new_admitted`:** its redundant `provenance` argument is gone, by agreement with Agent 1.
+  - **Harness:** CI's `lifecycle-mutations` job failed at `abbb6076` on
+    `unconfirmed-save-any-parked-plan`. Its mutant broke a check-then-take pair and panicked at an
+    `expect` before its assertion. It now skips the branch at the caller. Seven `unconfirmed-rail-*`
+    entries were added.
+  - **Still open** (the 2026-10-06 entry's list, less the rails and the selector skip, which
+    Agent 1 landed in `9c63bd6e`):
+    - native registration (Agent 4);
+    - the same-key refusal through a fresh discovery proof;
+    - N-T5 through the receiver loop and with a full recovery journal;
+    - the A' product decision (design 9.6).
+
+    P5 remains false.
+
+- **Gate 4 repair runtime evidence (2026-10-06).** A two-peer run through spawned actors now
+  covers:
+  - a real Fault;
+  - the owner's decision as a job;
+  - a peer applying the owner's repair and installing its replacement with a seed fetched over the
+    network;
+  - a restart;
+  - a document newcomer installing the repaired version.
+
+  The run found that a faulted peer's late reports were staged again after the owner's repair
+  finished. That suppressed proof of the selected receipt, so no newcomer could install the
+  repaired document. Such a report is now answered by the repair the source carries (see
+  THREAT-MODEL).
+
+  The run also confirmed a protocol limit: after an owner succession, no fresh MLS member can
+  join until a succession proof exists.
+
+  New: a 12-mutant runtime harness with its own workflow (`agent3-repair-runtime.yml`) and an
+  opt-in S3 cost profile. Still open: Registry Flow D on a real peer and a bounded repair
+  verdict. Details are in `GATE4-AGENT-3-STATUS.md`.
+
+- **Gate 4 detached Registry repair job (2026-10-06).** Agent 4's Registry fail-closed gate is
+  removed: every Registry repair path now runs through the same design 10.3 job as a Studio
+  source, scoped to the bucket. That covers:
+  - the explicit `RepairRegistryFault`;
+  - Flow D from Registry discovery answers;
+  - the owner's resume of a held bucket decision;
+  - the owed bucket replacement.
+
+  How the bucket job differs from the Studio job:
+  - **S1** reads bounded authenticated bytes and **S2** rebuilds the bucket detached
+    (`RegistryEpoch::prepare_vault_source`).
+  - **S3** hands the rebuild to the unchanged issue/apply transaction. That transaction
+    rechecks context, digest, physical size and the live budget, and its writer re-reads the
+    bytes before using the rebuild. A stale rebuild is an ordinary rerun.
+  - Owed-repair facts come from the retained prepared provider; an unknown fact defers. Nothing
+    restores a bucket under custody to decide.
+  - The bucket claim also stops Registry maintenance and page persistence for that bucket.
+
+  Still open:
+  - Registry Flow D on a real second peer;
+  - the two-peer scenario;
+  - the S3 cost measurement;
+  - claims on gossip ingest, replay and Flow S/H.
+
+  Native repair commands remain unregistered, P5 is false and Gate 4 remains open. Details are
+  in `GATE4-AGENT-3-STATUS.md`.
+
+- **Gate 4 detached Studio repair job (2026-10-06).** Studio fault repair runs again, but only as
+  Agent 3's design 10.3 job; Agent 4's fail-closed gate (`3fcde979`) then covered Registry alone,
+  until the Registry job above removed it.
+  - **S1:** reserves a shared preparation-pool slot and a per-target live claim before any body
+    read, then captures the bounded plaintext.
+  - **S2:** rebuilds the source detached.
+  - **S3:** installs the rebuild only if its context and digest still match disk, then runs the
+    unchanged Server transaction (issuance, resume, Flow D or the owed replacement).
+  - **S4:** drops the slot and claim after the attempt.
+
+  Explicit decisions answer `RepairStarted`, or an error when they cannot start (including while
+  catch-up is paused). The fault view reports a `Scheduled` blocker and a bounded `lastAttempt`
+  for every way a job ends. Offered repairs are authority-checked before capture. The repaired
+  replacement is installed through the same job. The core gained a sealed owner-authority view
+  for a later detached adoption half.
+
+  At the time the Registry job was still open (since built, above), with the two-peer scenario,
+  the S3 cost measurement, and claims on gossip ingest, replay and Flow S/H. Native repair
+  commands remain unregistered, P5 is false and Gate 4 remains open. Details are in
+  `GATE4-AGENT-3-STATUS.md`.
+
+- **Gate 4 Agent 2: the Unconfirmed Save through the actor, 8.6 reconciliation, N-T5 and the
+  cross-document copy regressions (2026-10-06).** This updates the 2026-10-05 entry's "Unconfirmed Flow S and its app-side
+  consumers remain missing". Agent 1's Flow S (`c9566b82`) is now consumed through the actor
+  (`b35e23d2`..`3b795bf7`, pushed):
+  - Save, through the receiver: `BeginUnconfirmedOverlaySave` and `SaveUnconfirmedOverlay`. Each
+    stage mints from the actor's live preview in its own visit. The actor has one overlay slot: a
+    visit finishes any parked plan and reports only its own request's outcome. A parked plan has a
+    30 s deadline that holds while the receiver is paused. A Closing draft is refused.
+  - Rail: an Unconfirmed branch takes at most 64 operations.
+  - Design 8.6: the state is derived on every read from headers, with four values, `awaitingSource`,
+    `baseConfirmed`, `baseSuperseded` and `sourceUnreadable`. It is carried as `unconfirmedState`
+    on the native lifecycle row and inspection.
+  - Restart: through the actor, landed work is answered as an exact retry, and a parked plan dies
+    with the process and re-plans once.
+  - N-T5 (hidden higher old-tenure history). This runs over the real discovery wire, through the
+    Server discovery stages the receiver drives, but not the receiver's own scheduling loop. A
+    member two closes ahead on the former owner's history adopts the new owner's lower-epoch
+    receipt and converges on the new owner's history. It keeps the former owner's history only as
+    a `Rewound` recovery snapshot, also after its vault is reopened, and refuses the former owner's
+    receipt from then on.
+  - Copy, Review 2's L-1 and L-2: cross-document Flipnote regressions. A hold on the destination
+    refuses, and a hold on the source permits and stays `Prepared`. A Save landing on the source
+    mid-copy is refused at C3. C4 compares no source stamp. It refuses only if its re-plan no
+    longer resolves the selected value (replaced or removed) or rebuilds a different body;
+    otherwise it applies the source's current value.
+  - **Updated by the 2026-10-08 entry:** the handoff selector skip and Agent 2's per-server/vault
+    rails are in the shared baseline. PR #35 adds full-envelope parked-request correlation. Native
+    registration remains missing and P5 remains false.
+  - **Known local flake class:** tests on `StudioReceiver::default()` share the process-wide
+    preparation pool and can fail under full-suite load
+    (`registry_runtime.rs:164`, `receiver.rs:68`).
+
+  Ledger: `docs/GATE4-AGENT-2-STATUS.md`. Design: `docs/GATE4-AGENT-2-DESIGN.md` 8.3, 8.6, 8.7,
+  12.
+
+- **Gate 4 archived-owner admission candidate (2026-10-05).** The app now consumes the single
+  archived Observed-tenure witness only through the still-current durable owner snapshot used by
+  head service. Studio and Registry report admission first perform a bounded contextual owner-record
+  read, accept an exact retained attestation without depending on the current archive, otherwise
+  require both full receipts to match either the live Observed owner tuple or the archived tuple,
+  and seal the receiver-local attestation in B0. Historical evidence never enters the live source
+  seal or current-tenure overflow hold. A real A -> B -> C MLS regression persists/reopens C,
+  admits B for both document families, refuses the Unknown A tenure with absent and wrong archive,
+  retries B from its retained attestation, and signs a current-C screening repair. Complete root
+  and frontend suites, strict root/desktop Clippy, desktop check/build and `cargo deny` pass.
+  Independent review's MEDIUM cloneable-capability escape was fixed with a non-cloneable,
+  snapshot-borrowed witness and compile-fail regression. PR #34 review then found that Registry's
+  explicit and prepared adapters asked a valid Fault source for a head before persisting B0, while
+  one wrong-archive negative could be masked by already-occupied capacity. Both adapters now
+  authenticate/account their exact source, attempt B0 with failed and uncertain writer errors
+  taking precedence, and only then preserve Fault as a hard service refusal. Empty-capacity
+  absent/wrong-authority checks, a post-write/reopen retained-attestation regression and a direct
+  prepared no-reconstruction counter close the review gaps. Final adversarial re-review reports no
+  finding at any severity. The correction bytes pass the complete root suite, root/desktop strict
+  Clippy, desktop check, all 1,282 frontend tests, Svelte check, production build and `cargo deny`.
+  The complete native run passes 324/325 and a focused retry reproduces the already baseline-
+  observed normal-order six-client final-convergence flake; its reverse-order companion passes, so
+  native is not claimed green locally. Linux ambient and repair-store mutations remain exact-head
+  CI-owned. The detached S1-S4 repair runtime remains absent, P5 is false, commands remain
+  unregistered, Gate 4 remains open and Gate 5 remains closed.
+
+- **PR #33 repair-integration review response (2026-10-05).** Whole-candidate review found two
+  HIGH issues outside the structural inventory seam. First, a repair-only head response could
+  return a visible B2 replacement without repeating the source and owner-record durability
+  barriers. Studio and Registry service now flush the exact authenticated source and re-save the
+  contextual owner record before carrying a repair; injected uncertain-B2 and uncertain-B3,
+  source-sync and journal-save regressions cover both families. Second, offered-repair application,
+  owner resume and repaired-seed installation performed substantial synchronous work outside a
+  shared preparation permit.
+  Those automatic paths now refuse or defer without source mutation until the designed
+  capture/detach/revalidate/commit job owns shared admission through result handling. A warm valid
+  owed-repair regression occupies every shared slot and pins that fail-closed behavior. Core/store
+  repair and its mutation harness remain present, but automatic repair is not a current product
+  capability. The correction is commit `3fcde979...`; independent re-review closed the durability
+  and automatic-mutation bypasses but retained one MEDIUM residual because Registry routing still
+  reconstructed the full source before reaching the disabled gate. `f7c74cb2...` now reuses the
+  exact-current verified prepared source, treats absent/cold/stale/retargeted preparation as
+  unknown, and defers pending or unknown state without mutation. Rereview closed the reconstruction
+  defect but found that a fresh receiver with a small source did not schedule classification and
+  could defer forever. `164a94d7...` makes the detached preparation size-independent and keeps
+  exact checked absence separate from cold state. Its fresh requester-bound ordinary-pass,
+  classifier/absence, pending no-write and repair regressions pass. Final bounded re-review found no
+  remaining BLOCKER, HIGH, MEDIUM or LOW finding. The complete root suite, complete native suite
+  (325 library and 5 command-ACL tests), all 1,282 frontend tests, root and desktop strict Clippy,
+  desktop check, root formatting, frontend check/build and cargo-deny pass on the final local
+  candidate. Startup/flow remain inapplicable because no setup, process, renderer or command-
+  registration path changed. Exact-head Linux ambient and repair-mutation checks remain CI-owned.
+  P5 is false, commands are unregistered, Gate 4 remains open and Gate 5 remains closed.
+
+- **Gate 4 structural inventory seam (2026-10-04).** The authenticated structural scan now exposes
+  the exact sealed-file charge for every Intents record and the provenance of a live overlay branch.
+  Ledger-only and terminal disposed records keep their byte charge but report no live provenance,
+  so historic diagnostic metadata cannot strand a lifecycle capacity slot. The seam grants no
+  mutation, source, tenure, replay or signing authority and changes no wire/persistence format.
+  Focused regressions cover a live Closing branch, a ledger without an overlay and disposed terminal
+  metadata. Independent review found and prompted the terminal-state and ledger controls; re-review
+  has no remaining finding. This completes only the first Agent 1 -> Agent 2 handoff. Generalized
+  Unconfirmed Flow S and its app-side custody/rail/restart consumers remain missing, P5 remains
+  false, native Save and repair remain unregistered, Gate 4 remains open and Gate 5 remains closed.
+
+- **Gate 4 repair CI integration checkpoint (2026-10-04).** The store mutation harness now has a
+  dedicated, serial Linux/Windows workflow rather than extending the 30-minute core job. Each
+  platform uses Rust 1.89.0, Python 3.11, the Rust cache, `RUSTFLAGS=-D warnings`, a 90-minute
+  timeout and always-uploaded mutant/restored-control logs. The Linux desktop job also runs strict
+  all-target/all-feature Clippy for the separate Tauri workspace; its root `clippy.toml` therefore
+  remains an enforced construction boundary. Existing harness and anchor corrections at
+  `3e0dac09`, `db385014`, `f12b6aae` and `ef28d45b` are already in this candidate's ancestry and
+  were not copied or rewritten. Exact candidate `2b6f716ef05fdf99bdc04da531eb0c0194682e65`
+  passes the complete Linux and Windows CI matrix on PR #32, including both store-mutation jobs,
+  strict desktop Clippy and the Linux `check-no-ambient.sh` step
+  ([main CI](https://github.com/Thalpy/Mewtual/actions/runs/37175644295),
+  [store mutations](https://github.com/Thalpy/Mewtual/actions/runs/37175644375)). The earlier
+  `6a2f8979` run and local WSL launch failure are superseded evidence, not the current result.
+
+  Registration and ownership are unchanged: P5 remains false, Save and native repair commands
+  remain unregistered, and the app-side archived Observed-tenure consumer/historical repair is
+  still missing. The structural provenance/charged-byte inventory seam is now complete on the
+  completion line. Remaining Agent 1 work is: parameterize Flow S over the accepted overlay-basis
+  variants, map structured eligibility/manual reasons, migrate the six C-3 runtime scan owners to the
+  reviewed cursor, complete Flow R, and obtain the outstanding core-signing review. This ancestry
+  does not implement C-3 adoption or any of those specialist requirements. Gate 4 and Gate 5 stay
+  closed.
+
+- **Gate 4 repair-sequence integration correction (2026-10-04).** Repair high-water and owner
+  journal comparisons now use the issuer-tenure start already covered by the v2 signature and
+  independently checked against current owner authority. Existing wire and persistence codecs are
+  unchanged. Same-tenure gaps remain valid; same-tenure replay remains stale; unfinished B1/B2
+  provenance still blocks across turnover; a real successor tenure starts at one. Allocation uses
+  checked addition and reports `RepairSequenceExhausted` before signing or B1 mutation rather than
+  panicking or wrapping at `u64::MAX`. Focused core, owner-journal, Studio and Registry regressions
+  cover MAX persistence, turnover, authority, gaps and typed exhaustion. At that checkpoint native
+  Save/repair remained unregistered with P5 false and the archived Observed-tenure consumer was
+  still missing; the newer entry above records its bounded implementation. This was an incremental
+  candidate correction, not Gate 4 or Gate 5 acceptance.
 
 - **Four remaining-work handoffs prepared (2026-09-15).** The user requests commit/push and
   implementation/review prompts for four agents. [Implementation handoffs](GATE4-AGENT-HANDOFFS.md)
@@ -475,7 +831,10 @@ and ranks the live hazards in that path.
   snapshot/quarantine, unchanged source identity, receipt, close, expected seed and owner-tenure
   input, successful fresh preparation, a different basis, and exact stale-basis refusal with
   unchanged intent bytes. Already accepted exact retry still returns the same complete draft
-  with its original timestamp/count. First acceptance has a positive control using the fresh basis.
+  with its original timestamp/count. *(Superseded on 2026-10-09. An exact retry now returns
+  `StudioOverlaySave::Acknowledged { basis, accepted }` without rebuilding the draft, and these
+  tests compare the stored draft read back instead; see `docs/INTERFACES.md` and the F1 entry of
+  `docs/GATE4-AGENT-1-STATUS.md`.)* First acceptance has a positive control using the fresh basis.
   The harness now tests the reviewer's constant-source-version mutation independently against
   both regressions. The focused pair passes (2 tests, 64.20s). Each constant-version mutation
   fails at `overlay basis ignored changed persisted Closing source version` with exactly one
@@ -555,11 +914,14 @@ and ranks the live hazards in that path.
   [CI](https://github.com/Thalpy/Mewtual/actions/runs/34844201267) have started for `b1b0ec9`;
   their result is pending at this evidence update. Local results above are not GitHub results.
 
-  The repository-wide `scripts/check-no-ambient.sh` fails on six verified pre-existing findings:
+  At this historical `b1b0ec9` checkpoint, `scripts/check-no-ambient.sh` reported six findings:
   `apps/desktop/src-tauri/src/media_decode.rs:333,426,444,504`,
   `crates/catcoms-app/src/studio_exchange/tests/scheduling.rs:150`, and
-  `crates/catcoms-app/tests/support/studio_preview.rs:329`. Each reported call is present in the
-  baseline HEAD, outside this change. No full-repository green or full Gate 4 acceptance is claimed.
+  `crates/catcoms-app/tests/support/studio_preview.rs:329`. That result describes this old entry,
+  not the current candidate. PR #32's later Linux root job failed the preceding test step and never
+  ran the ambient gate; the local WSL launcher failure is likewise not product evidence. A current
+  pass may be claimed only from the exact candidate's Linux CI job. No full-repository green or
+  full Gate 4 acceptance is claimed here.
 
   No frontend/native overlay command, automatic overlay replay/disposition, provisional-preview
   write or new historical-tenure authority is enabled. The UI keeps Closing/Fault/awaiting-tenure
@@ -4012,8 +4374,9 @@ the reciprocal control protocol is not a dual-key device↔transport ownership p
   separate store coverage.) Linux-only store tests abort a subprocess
   after the staged record is synced and immediately after rename; readers observe either the
   complete previous or complete replacement record. The persistence primitive uses unique
-  create-new siblings, rejects staging symlinks, syncs the staged file and, on Unix, its parent
-  directory; a post-rename sync failure is explicitly classified as committed-but-not-durable.
+  create-new siblings, rejects staging symlinks, syncs the staged file and, on Unix and Windows,
+  its parent directory; a post-rename sync failure is explicitly classified as
+  committed-but-not-durable.
   The root `vault.bin` now uses the same durable staging shape plus an OS-backed interprocess lock;
   it fails lock contention promptly as `VaultBusy`, and real child-process tests prove concurrent
   first creation cannot return mismatched DEKs or hang and conflicting rewraps cannot both succeed.
@@ -4159,6 +4522,17 @@ lives in `App.svelte`: it has been extracted into `apps/desktop/src/call-audio.t
    for a hostile review on that class of change. Worth running before voice is "done".
 
 ## Known limitations / deferred (the security-relevant ones)
+
+- **Technical debt: a Studio handoff's final commit is one blocking step of up to about 0.15 s**
+  (decided 2026-10-09). This is H5, which transfers a closed document's local draft. It grows with
+  the document and the draft. At their caps (`FLIPNOTE_MAX_FRAMES` 999, `MAX_STUDIO_OVERLAY_OPS`
+  256) it measured 147 ms, and once 248 ms on a busy host, past the 125 ms custody-visit target;
+  that server's background work and Studio requests wait meanwhile.
+  - **Exposure:** a member can fill a shared Flipnote to the frame cap, but the draft is the
+    handing-off device's own. So a peer gets at most one such pause per local draft, with no
+    amplification.
+  - **To pay it down:** split the commit across visits, starting from
+    `GATE4-AGENT-1-C3-RUNTIME.md` 15.10 and 15.12; Flow R's commit would then need the same.
 
 - **Desktop networking: the transport paths are wired, but public infrastructure is not
   deployed by the app.** The `apps/desktop` bridge binds all interfaces and the

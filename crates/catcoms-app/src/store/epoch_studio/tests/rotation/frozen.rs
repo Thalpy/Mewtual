@@ -16,7 +16,7 @@ fn sealed_old_owner(f: &mut Fixture, store: &mut ServerStore) -> Receipt {
             0,
             &mut rng(),
             &mut b.storage,
-            atomic_write,
+            &mut WriteHooks::None,
         )
         .unwrap();
     store
@@ -52,10 +52,10 @@ fn handoff(f: &mut Fixture) -> u64 {
 fn studio_frozen_owner_store_crash_matrix_retains_full_source_then_recovery_then_successor() {
     for art in [false, true] {
         for failure in [
-            RotationWrite::Journal,
-            RotationWrite::Source,
-            RotationWrite::Recovery,
-            RotationWrite::Successor,
+            WriteTag::Journal,
+            WriteTag::Source,
+            WriteTag::Recovery,
+            WriteTag::Successor,
         ] {
             for after_write in [false, true] {
                 let root = tempfile::tempdir().unwrap();
@@ -69,7 +69,14 @@ fn studio_frozen_owner_store_crash_matrix_retains_full_source_then_recovery_then
                 let mut store = open(root.path());
                 warm(&f, &mut store);
                 let mut b = budget(&mut store, &f);
-                let mut hit = false;
+                let source_before = fs::read(f.path(&store)).unwrap();
+                let hit = std::cell::Cell::new(false);
+                // As in the ordinary matrix: the takeover flushes the held source before it
+                // seals it, so a Source-tagged after decision sees two events on one record.
+                // This fixture masks the difference especially well, because the predecessor is
+                // already Closing and the "unchanged projection" checks below hold either way.
+                let completed: std::cell::RefCell<Vec<(CompletedOperation, WriteTag)>> =
+                    std::cell::RefCell::new(Vec::new());
                 let result = store.rotate_studio_owner_with_io(
                     SERVER,
                     &f.group,
@@ -79,19 +86,74 @@ fn studio_frozen_owner_store_crash_matrix_retains_full_source_then_recovery_then
                     &ManualClock::new(1000),
                     &mut rng(),
                     &mut b,
-                    &mut |step, path, bytes| {
-                        if step == failure && !hit {
-                            hit = true;
-                            if after_write {
-                                atomic_write(path, bytes)?;
+                    &mut WriteHooks::Hooked {
+                        before: Some(&mut |step: WriteTag, _: &Path, _: &[u8]| {
+                            if step == failure && !hit.get() && !after_write {
+                                hit.set(true);
+                                return Intercept::Fail(invalid("injected frozen takeover crash"));
                             }
-                            return Err(invalid("injected frozen takeover crash"));
-                        }
-                        atomic_write(path, bytes)
+                            Intercept::Continue
+                        }),
+                        before_sync: None,
+                        before_unlink: None,
+                        after: Some(&mut |op: CompletedOperation, step: WriteTag, _: &Path| {
+                            completed.borrow_mut().push((op, step));
+                            if op == CompletedOperation::Write
+                                && step == failure
+                                && !hit.get()
+                                && after_write
+                            {
+                                hit.set(true);
+                                return AfterIntercept::Fail(invalid(
+                                    "injected frozen takeover crash",
+                                ));
+                            }
+                            AfterIntercept::Continue
+                        }),
                     },
-                    &mut sync,
                 );
-                assert!(hit && result.is_err(), "{art}/{failure:?}/{after_write}");
+                assert!(
+                    hit.get() && result.is_err(),
+                    "{art}/{failure:?}/{after_write}"
+                );
+                if after_write {
+                    let seen = completed.borrow();
+                    assert_eq!(
+                        seen.last(),
+                        Some(&(CompletedOperation::Write, failure)),
+                        "the injection fired at an earlier operation, not after the {failure:?} \
+                         replacement it names: {seen:?}"
+                    );
+                    if failure == WriteTag::Source {
+                        // As in the ordinary matrix. Asserting only the final event rejects an
+                        // injection that fires on the preceding flush, but not a change that
+                        // removes that flush altogether, which would silently drop the
+                        // durability barrier this takeover depends on.
+                        assert!(
+                            seen.contains(&(CompletedOperation::Sync, WriteTag::Source)),
+                            "the held source was never flushed before the takeover sealed it: \
+                             {seen:?}"
+                        );
+                    }
+                }
+                // The predecessor is already Closing, so phase and projection cannot tell a
+                // failure after the takeover's Source replacement from one before it. The
+                // record's own bytes can.
+                if failure == WriteTag::Source {
+                    let durable = fs::read(f.path(&store)).unwrap();
+                    if after_write {
+                        assert_ne!(
+                            durable, source_before,
+                            "the takeover's sealed source never reached disk"
+                        );
+                    } else {
+                        assert_eq!(
+                            durable, source_before,
+                            "a failure before the Source replacement must leave the \
+                             predecessor's source untouched"
+                        );
+                    }
+                }
                 let held = f.load(&store).unwrap();
                 let installed = held.epoch() == 1;
                 if !installed {
@@ -406,15 +468,19 @@ fn studio_frozen_owner_store_promotes_staged_recovery_at_its_deadline_without_ac
                 &clock,
                 &mut rng(),
                 &mut b,
-                &mut |step, path, bytes| {
-                    assert_ne!(
-                        step,
-                        RotationWrite::Recovery,
-                        "an idle pass inside the grace must not rewrite the warning"
-                    );
-                    atomic_write(path, bytes)
+                &mut WriteHooks::Hooked {
+                    before: Some(&mut |step: WriteTag, _: &Path, _: &[u8]| {
+                        assert_ne!(
+                            step,
+                            WriteTag::Recovery,
+                            "an idle pass inside the grace must not rewrite the warning"
+                        );
+                        Intercept::Continue
+                    }),
+                    before_sync: None,
+                    before_unlink: None,
+                    after: None,
                 },
-                &mut sync,
             )
             .unwrap();
         assert_eq!(outcome, StudioRotationOutcome::RecoveryPending);

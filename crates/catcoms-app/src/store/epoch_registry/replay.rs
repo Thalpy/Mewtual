@@ -31,13 +31,6 @@ impl std::fmt::Debug for RegistryReplayOutcome {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ReplaySync {
-    Source,
-    Intent,
-    Epoch,
-}
-
 /// Pure screening for NEW authoring only; current-log retries never reapply their effect.
 fn new_authoring_hold(
     operation: &RegistryOp,
@@ -140,11 +133,7 @@ impl ServerStore {
             rng,
             budget,
             intents,
-            atomic_write,
-            &mut |step, path, bytes| match step {
-                ReplaySync::Intent => super::super::epoch_intents::sync_intent(path, bytes),
-                _ => sync_registry(path, bytes),
-            },
+            &mut WriteHooks::None,
         )
     }
 
@@ -160,8 +149,7 @@ impl ServerStore {
         rng: &mut impl CryptoRngCore,
         budget: &mut EpochStorageBudget,
         intents: &mut EpochIntentBudget,
-        writer: impl FnOnce(&Path, &[u8]) -> Result<(), AppError>,
-        sync: &mut impl FnMut(ReplaySync, &Path, u64) -> Result<(), AppError>,
+        hooks: &mut WriteHooks<'_>,
     ) -> Result<(RegistryReplayOutcome, EpochRegistryState), AppError> {
         if group.member_signature_key(&device.device_id()).as_deref()
             != Some(device.public_key_bytes().as_slice())
@@ -194,8 +182,11 @@ impl ServerStore {
                 unit.retains_local_operation(device, group, &intent.operation)
                     .map_err(invalid)
             },
-            |_, _| Err(invalid("replay assessment must not rewrite the epoch")),
-            |path, bytes| sync(ReplaySync::Source, path, bytes),
+            WriteStep::flush_only(
+                WriteTag::Source,
+                "replay assessment must not rewrite the epoch",
+            ),
+            hooks,
         )?;
 
         // Validate every slot, even for an exact retry. Corrupt/opaque recovery must not become
@@ -232,9 +223,9 @@ impl ServerStore {
                 return Ok((RegistryReplayOutcome::Held(reason), state));
             }
         }
-        // The existing adapter invokes these callbacks sequentially (no await/reentrancy).
-        // Share the deterministic failure seam without giving either closure a second &mut.
-        let sync = std::cell::RefCell::new(sync);
+        // This used to need a RefCell: two adapter closures each wanted `&mut sync`, and only
+        // one could hold it. One set of decisions for the whole transaction removes the
+        // aliasing rather than working around it.
         self.edit_registry_epoch_with_io(
             server,
             group,
@@ -245,10 +236,8 @@ impl ServerStore {
             rng,
             budget,
             intents,
-            |_, _| Err(invalid("replay must not create an intent")),
-            |path, bytes| sync.borrow_mut()(ReplaySync::Intent, path, bytes),
-            writer,
-            |path, bytes| sync.borrow_mut()(ReplaySync::Epoch, path, bytes),
+            WriteStep::flush_only(WriteTag::Intents, "replay must not create an intent"),
+            hooks,
         )
         .map(|(sealed, state)| (RegistryReplayOutcome::Prepared(sealed), state))
     }

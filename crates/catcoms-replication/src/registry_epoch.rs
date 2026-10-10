@@ -20,10 +20,13 @@ use crate::registry::{
 };
 use crate::{
     epoch_zero_id, Admission, DomainOp, EncryptedDoc, EpochGate, EpochPhase, LogicalDocument,
-    Receipt, ReceiptBook, ReceiptIngest, ReplError, SealedOp, SignedOp, MAX_CHECKPOINT_BYTES,
+    OwnerAuthority, Receipt, ReceiptBook, ReceiptIngest, ReplError, SealedOp, SignedOp,
+    MAX_CHECKPOINT_BYTES,
 };
 
 mod adoption;
+mod repair;
+use crate::epoch::repair_transition::RepairBinding;
 pub mod catchup;
 mod owner;
 pub use adoption::RegistryAdoptionPlan;
@@ -58,6 +61,8 @@ pub struct RegistryEpoch {
     // Explicit restart mode: the selected checkpoint need not be adjacent to this still-whole
     // source. Never infer this permission from a receipt epoch or weaken ordinary restoration.
     adopting: bool,
+    // Exact signed-repair binding and original action; copied alongside the book on successors.
+    repair_binding: Option<RepairBinding>,
 }
 
 impl RegistryEpoch {
@@ -86,6 +91,7 @@ impl RegistryEpoch {
             receipts: ReceiptBook::default(),
             opening: None,
             adopting: false,
+            repair_binding: None,
         })
     }
 
@@ -93,7 +99,7 @@ impl RegistryEpoch {
     /// This does NOT replace, settle or discard a predecessor. The caller must first satisfy
     /// recovery/durable-install ordering before selecting this as its current epoch.
     pub fn from_checkpoint(
-        group: &ServerGroup,
+        group: &(impl OwnerAuthority + ?Sized),
         bucket: u8,
         actor: DeviceId,
         receipt: Receipt,
@@ -140,6 +146,7 @@ impl RegistryEpoch {
             receipts,
             opening: Some(receipt),
             adopting: false,
+            repair_binding: None,
         })
     }
 
@@ -352,6 +359,9 @@ impl RegistryEpoch {
         group: &ServerGroup,
         expected_tenure_start: u64,
     ) -> Result<ReceiptIngest, ReplError> {
+        if self.repair_install_pending() {
+            return self.begin_checkpoint_adoption(receipt, group, expected_tenure_start);
+        }
         self.refresh_owner(group)?;
         if self.adopting {
             return self.begin_checkpoint_adoption(receipt, group, expected_tenure_start);
@@ -376,7 +386,7 @@ impl RegistryEpoch {
     /// a wire format: receipt history and past membership admission are trusted only locally.
     pub fn snapshot(&mut self) -> Result<Vec<u8>, ReplError> {
         let mut e = Encoder::new();
-        e.put_u8(if self.adopting { 2 } else { 1 });
+        RepairBinding::encode_prefix(self.repair_binding.as_ref(), self.adopting, &mut e);
         e.put_u8(self.bucket);
         for bytes in [
             self.opening
@@ -421,6 +431,21 @@ impl RegistryEpoch {
         Self::restore_scoped(bytes, &group.group_id(), bucket, actor, owner)
     }
 
+    /// The same restore with the group's public facts passed in, so a detached worker that holds
+    /// no MLS state can rebuild a source captured under custody (Agent 3 design 10.3, S2). The
+    /// caller binds `server`, `actor` and `owner` to the live group at capture and rechecks all
+    /// of them, and the saved bytes, before anything rebuilt here is written. Mirrors
+    /// `StudioEpoch::prepare_vault_source`.
+    pub fn prepare_vault_source(
+        bytes: &[u8],
+        server: &[u8],
+        bucket: u8,
+        actor: DeviceId,
+        owner: DeviceId,
+    ) -> Result<Self, ReplError> {
+        Self::restore_scoped(bytes, server, bucket, actor, owner)
+    }
+
     /// Validate a locally authenticated vault snapshot for storage inventory, even after the
     /// server or its former owner has left. Returns no editable object, receipt capability or
     /// publication permission. Like restore, this MUST NOT authenticate network history.
@@ -458,7 +483,9 @@ impl RegistryEpoch {
         } else {
             0
         };
-        Ok(book_growth + opening + gate_hash)
+        // v3 replaces the one-byte legacy prefix with flags plus the exact signed repair hash.
+        let repair_binding = if self.repair_binding.is_some() { 39 } else { 0 };
+        Ok(book_growth + opening + gate_hash + repair_binding)
     }
 
     fn restore_scoped(
@@ -472,11 +499,7 @@ impl RegistryEpoch {
             return Err(ReplError::EpochBound);
         }
         let mut d = Decoder::new(bytes);
-        let adopting = match d.get_u8().map_err(|_| ReplError::Malformed)? {
-            1 => false,
-            2 => true,
-            _ => return Err(ReplError::Malformed),
-        };
+        let (adopting, repair_binding) = RepairBinding::decode_prefix(&mut d)?;
         if d.get_u8().map_err(|_| ReplError::Malformed)? != bucket {
             return Err(ReplError::EpochScope);
         }
@@ -554,6 +577,15 @@ impl RegistryEpoch {
         result.gate = gate;
         result.receipts = receipts;
         result.adopting = adopting;
+        if let Some(binding) = &repair_binding {
+            binding.validate(
+                &result.receipts,
+                &result.gate,
+                result.opening.as_ref(),
+                adopting,
+            )?;
+        }
+        result.repair_binding = repair_binding;
         result.gate.update_owner(owner);
         Ok(result)
     }

@@ -1,0 +1,1054 @@
+//! The disposal transaction, D1 to D6, against real branches in a real vault.
+//!
+//! Every test here drives `dispose_studio_overlay_with_io`, the production transaction, and the
+//! branches come from the ordinary Save path. Nothing constructs a branch or a request by hand.
+use super::archive::frame_branch;
+use super::*;
+use crate::store::epoch_intents::disposal::{
+    StudioDisposalRequestMode, StudioOverlayDisposalRequest,
+};
+use catcoms_replication::studio::{
+    StudioDiscardConfirmation, StudioDisposalMode, StudioDraftArchive, StudioOverlayProvenance,
+};
+
+fn confirmation() -> StudioDiscardConfirmation {
+    StudioDiscardConfirmation::parse(StudioDiscardConfirmation::TOKEN).unwrap()
+}
+
+/// The request a correctly behaved caller would build from the current inspection.
+fn honest_request(
+    f: &Fixture,
+    store: &mut ServerStore,
+    mode: StudioDisposalRequestMode,
+) -> StudioOverlayDisposalRequest {
+    let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    let metadata = state.handoff_metadata().unwrap();
+    StudioOverlayDisposalRequest {
+        branch: metadata.branch_id().unwrap(),
+        content: metadata.branch_content(&state.ledger).unwrap(),
+        accepted: state.overlay().unwrap().accepted(),
+        mode,
+    }
+}
+
+fn dispose(
+    f: &Fixture,
+    store: &mut ServerStore,
+    request: StudioOverlayDisposalRequest,
+) -> Result<catcoms_replication::studio::StudioOverlayDisposal, AppError> {
+    let mut b = budget(store, f);
+    store.dispose_studio_overlay_with_io(
+        SERVER,
+        &f.logical,
+        f.target,
+        &f.group,
+        &f.device,
+        request,
+        4242,
+        &mut rng(),
+        &mut b.storage,
+        &mut b.intents,
+        &mut WriteHooks::None,
+    )
+}
+
+/// Build and persist the archive for the current branch, which is what a preserving disposal needs
+/// to already exist.
+fn preserve_archive(f: &Fixture, store: &mut ServerStore) -> StudioDraftArchive {
+    let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    let metadata = state.handoff_metadata().unwrap();
+    let archive = StudioDraftArchive::from_branch(
+        state.overlay().unwrap(),
+        &state.ledger,
+        StudioOverlayProvenance::Closing,
+        true,
+        metadata.branch_id().unwrap(),
+        metadata.branch_content(&state.ledger).unwrap(),
+        metadata.branch_generation(),
+    )
+    .unwrap();
+    drop(state);
+    let mut b = budget(store, f);
+    store
+        .write_studio_draft_archive_with_io(
+            SERVER,
+            &f.logical,
+            &archive,
+            &mut rng(),
+            &mut b.storage,
+            &mut b.intents,
+            &mut WriteHooks::None,
+        )
+        .expect("the archive must persist");
+    archive
+}
+
+/// The loop the two halves of this scope were missing: the archive the **production rebuild**
+/// produces is the one D4 accepts.
+///
+/// Every other test here builds its archive by calling `from_branch` directly, which proves D4 and
+/// proves nothing about the path a user actually takes. Until `StudioInspectionPurpose::Archive`
+/// landed there was no such path at all, so a preserving disposal could only ever refuse outside
+/// `cfg(test)`. This asserts the two agree, and it is the only test that would fail if
+/// `rebuild_for` built a correct-looking archive of the wrong branch, the wrong generation or the
+/// wrong content.
+#[test]
+fn the_rebuilt_archive_is_the_one_a_preserving_disposal_accepts() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+
+    let (_stamp, built) = store
+        .capture_studio_inspection(SERVER, &f.group.group_id(), f.target, f.device.device_id())
+        .unwrap()
+        .rebuild_for(crate::store::StudioInspectionPurpose::Archive)
+        .expect("the archive rebuild must succeed for a real branch");
+    let archive = built
+        .archive
+        .expect("a live branch must produce an archive");
+    assert_eq!(
+        built.replayable,
+        Ok(()),
+        "this branch is replayable, so the label must say so"
+    );
+    assert!(
+        archive.replayable(),
+        "the label must be carried into the archive, not just reported beside it"
+    );
+
+    // The same rebuild under Draft yields no archive at all. That is what makes finishing an
+    // archive against a Draft rebuild a distinguishable mistake rather than a silent one.
+    let (_stamp, draft_only) = store
+        .capture_studio_inspection(SERVER, &f.group.group_id(), f.target, f.device.device_id())
+        .unwrap()
+        .rebuild_for(crate::store::StudioInspectionPurpose::Draft)
+        .unwrap();
+    assert!(draft_only.archive.is_none());
+
+    let mut b = budget(&mut store, &f);
+    store
+        .write_studio_draft_archive_with_io(
+            SERVER,
+            &f.logical,
+            &archive,
+            &mut rng(),
+            &mut b.storage,
+            &mut b.intents,
+            &mut WriteHooks::None,
+        )
+        .expect("the rebuilt archive must persist");
+    drop(b);
+
+    let request = honest_request(&f, &mut store, StudioDisposalRequestMode::Preserve);
+    let manifest = dispose(&f, &mut store, request)
+        .expect("D4 must accept the archive the production rebuild produced");
+    assert_eq!(
+        manifest.mode,
+        StudioDisposalMode::Preserved {
+            archive: archive.archive_id().unwrap()
+        },
+        "the manifest must name the rebuilt archive"
+    );
+}
+
+/// Every persisted record, by filename, so "nothing changed" is a comparison rather than a belief.
+fn on_disk(root: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    std::fs::read_dir(root.join("servers"))
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            (
+                path.file_name().unwrap().to_string_lossy().into_owned(),
+                std::fs::read(&path).unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// A preserving disposal syncs the matching archive BEFORE it replaces the intent record.
+///
+/// This is the ordering half of the preservation guarantee. Matching proves the archive is this
+/// branch's; it does not prove it is durable. Without an explicit barrier, the first flush to cover
+/// an archive whose own parent sync failed would be the replacement's - which runs after the
+/// branch-removing rename, so the evidence would become durable no earlier than the removal.
+///
+/// Observed through the transaction's own hooks rather than inferred from the result, because the
+/// result is identical whether or not the archive was synced first. That is exactly why a
+/// result-only test of this could never have caught the gap.
+#[test]
+fn a_preserving_disposal_syncs_its_archive_before_it_removes_the_branch() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+    preserve_archive(&f, &mut store);
+    let request = honest_request(&f, &mut store, StudioDisposalRequestMode::Preserve);
+
+    let events = std::cell::RefCell::new(Vec::new());
+    // An inner scope rather than `drop(hooks)`: `WriteHooks` has no `Drop`, so dropping it only to
+    // end the closures' borrow of `events` is `clippy::drop_non_drop`, which failed the workspace
+    // gate. Ending the scope ends the borrow without pretending a destructor runs.
+    {
+        let mut on_write = |tag: WriteTag, _p: &std::path::Path, _b: &[u8]| {
+            events.borrow_mut().push(("write", tag));
+            Intercept::Continue
+        };
+        let mut on_sync = |tag: WriteTag, _p: &std::path::Path, _n: u64| {
+            events.borrow_mut().push(("sync", tag));
+            AfterIntercept::Continue
+        };
+        let mut hooks = WriteHooks::Hooked {
+            before: Some(&mut on_write),
+            before_sync: Some(&mut on_sync),
+            before_unlink: None,
+            after: None,
+        };
+        let mut b = budget(&mut store, &f);
+        store
+            .dispose_studio_overlay_with_io(
+                SERVER,
+                &f.logical,
+                f.target,
+                &f.group,
+                &f.device,
+                request,
+                4242,
+                &mut rng(),
+                &mut b.storage,
+                &mut b.intents,
+                &mut hooks,
+            )
+            .expect("a preserving disposal with a durable archive must succeed");
+    }
+
+    let events = events.into_inner();
+    let archive_sync = events
+        .iter()
+        .position(|e| *e == ("sync", WriteTag::Archive))
+        .expect("the matching archive must be explicitly synced");
+    let removal = events
+        .iter()
+        .position(|e| *e == ("write", WriteTag::Intents))
+        .expect("the disposal must replace the intent record");
+    assert!(
+        archive_sync < removal,
+        "the archive must be durably established BEFORE the branch is removed, saw {events:?}"
+    );
+}
+
+/// And if establishing the archive's durability fails, the branch is NOT removed.
+///
+/// Injected at the sync boundary itself, between "the archive is in place" and "the archive is
+/// durable". An outer after-write failure would not reach this case: it fires once the physical
+/// write has completed, so it describes a durable-but-unaccounted record rather than an
+/// unconfirmed one.
+#[test]
+fn a_preserving_disposal_whose_archive_cannot_be_made_durable_removes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+    preserve_archive(&f, &mut store);
+    let request = honest_request(&f, &mut store, StudioDisposalRequestMode::Preserve);
+    let before = on_disk(root.path());
+
+    let mut b = budget(&mut store, &f);
+    let error = store
+        .dispose_studio_overlay_with_io(
+            SERVER,
+            &f.logical,
+            f.target,
+            &f.group,
+            &f.device,
+            request,
+            4242,
+            &mut rng(),
+            &mut b.storage,
+            &mut b.intents,
+            &mut WriteHooks::fail_before_sync(FailError::Io("archive flush did not complete")),
+        )
+        .expect_err("an archive that cannot be made durable must not authorise a removal");
+    drop(b);
+    assert!(
+        error
+            .to_string()
+            .contains("could not establish its archive durably"),
+        "the refusal must be the durability barrier's, said: {error}"
+    );
+
+    // Nothing was removed, and nothing was rewritten.
+    assert!(
+        store
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap()
+            .overlay()
+            .is_some(),
+        "the branch must survive a disposal that could not secure its evidence"
+    );
+    assert_eq!(
+        on_disk(root.path()),
+        before,
+        "no record may change when the durability barrier fails"
+    );
+}
+
+/// The whole transaction, discarding: the branch goes, its entries go, the manifest stays, and all
+/// three land in one replacement.
+#[test]
+fn a_discarding_disposal_removes_the_branch_and_its_entries_in_one_replacement() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+
+    // Split the ledger into the branch's entries and everything else, using the branch's own
+    // membership rather than assuming the ledger holds nothing but the branch. This vault does hold
+    // other pending intents, and a disposal that retired those too would be destroying work it was
+    // never asked about - so the split is the point of the test, not incidental to it.
+    let before = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    let overlay = before.overlay().unwrap();
+    let (branch_ids, other_ids): (Vec<[u8; 32]>, Vec<[u8; 32]>) = before
+        .pending()
+        .map(|(id, _)| *id)
+        .partition(|id| overlay.contains(id));
+    assert!(!branch_ids.is_empty(), "the branch must hold entries");
+    assert!(
+        !other_ids.is_empty(),
+        "this fixture must hold a pending intent outside the branch, or the test cannot show that \
+         disposal leaves those alone"
+    );
+    drop(before);
+
+    let request = honest_request(
+        &f,
+        &mut store,
+        StudioDisposalRequestMode::Discard(confirmation()),
+    );
+    let manifest = dispose(&f, &mut store, request).expect("a confirmed discard must succeed");
+    assert_eq!(manifest.mode, StudioDisposalMode::Discarded);
+    assert_eq!(manifest.accepted, branch_ids.len());
+
+    // Reopen: the durable record is the one that matters.
+    drop(store);
+    let mut store = open(root.path());
+    let after = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    assert!(
+        after.overlay().is_none(),
+        "the branch must be gone from the durable record"
+    );
+    assert_eq!(
+        after.handoff_metadata().unwrap().disposed().unwrap().mode,
+        StudioDisposalMode::Discarded,
+        "the terminal manifest must be durable"
+    );
+    for id in &branch_ids {
+        assert!(
+            !after.pending().any(|(pending, _)| pending == id),
+            "entry {id:?} was acknowledged as disposed but is still in the ledger"
+        );
+    }
+    for id in &other_ids {
+        assert!(
+            after.pending().any(|(pending, _)| pending == id),
+            "intent {id:?} was never part of the branch and must survive its disposal"
+        );
+    }
+    drop(after);
+
+    // Terminal metadata retains the branch's historic provenance for diagnostics, but lifecycle
+    // capacity is about live branches. The inventory must therefore keep the authenticated byte
+    // charge while exposing no live provenance for this disposed record.
+    let physical =
+        fs::metadata(store.epoch_intent_path(
+            &crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap(),
+        ))
+        .unwrap()
+        .len();
+    let observed = inventory(&mut store);
+    let facts = observed
+        .records()
+        .find(|entry| entry.kind == EpochRecordKind::Intents && entry.document == f.logical)
+        .and_then(|entry| entry.intent_facts())
+        .expect("the disposed Intents row must retain accounting facts");
+    assert_eq!(facts.provenance(), None);
+    assert_eq!(facts.charged_bytes(), physical);
+}
+
+/// D4: a preserving disposal requires a durable archive for this exact branch, and the manifest names
+/// it so a reader can find the bodies.
+#[test]
+fn a_preserving_disposal_requires_a_durable_archive_and_names_it() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+
+    // Without an archive, refused, and the branch survives.
+    let request = honest_request(&f, &mut store, StudioDisposalRequestMode::Preserve);
+    assert!(
+        dispose(&f, &mut store, request).is_err(),
+        "a preserving disposal with no archive must be refused"
+    );
+    assert!(
+        store
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap()
+            .overlay()
+            .is_some(),
+        "a refused disposal must leave the branch intact"
+    );
+
+    // With one, it succeeds and the manifest names that exact archive.
+    let archive = preserve_archive(&f, &mut store);
+    let request = honest_request(&f, &mut store, StudioDisposalRequestMode::Preserve);
+    let manifest = dispose(&f, &mut store, request).expect("a preserving disposal must succeed");
+    assert_eq!(
+        manifest.mode,
+        StudioDisposalMode::Preserved {
+            archive: archive.archive_id().unwrap()
+        },
+        "the manifest must name the archive that holds the bodies"
+    );
+}
+
+/// D4's full-envelope half. An archive for a **different** branch must not authorise this disposal,
+/// even though it is a perfectly valid archive for this document.
+#[test]
+fn a_preserving_disposal_refuses_an_archive_for_another_branch() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+
+    // An archive taken now, then the branch grows. The archive is still valid evidence - of a
+    // smaller branch. Destroying the larger one on its strength would lose the extra work.
+    preserve_archive(&f, &mut store);
+    save(
+        &f,
+        &mut store,
+        &close,
+        basis.fingerprint(),
+        f.domain(
+            FlipnoteOp::SetHeader(FlipnoteHeader::Title("work after the archive".into()))
+                .encode()
+                .unwrap(),
+            0x7f,
+        ),
+        400,
+    );
+
+    let request = honest_request(&f, &mut store, StudioDisposalRequestMode::Preserve);
+    assert!(
+        dispose(&f, &mut store, request).is_err(),
+        "an archive of a smaller branch must not authorise disposing of the larger one"
+    );
+    assert!(
+        store
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap()
+            .overlay()
+            .is_some(),
+        "the branch must survive"
+    );
+}
+
+/// D4's full-envelope match, reached at last.
+///
+/// The review proved the previous test named for this never executed `matches_branch`: it grew the
+/// branch after archiving, so `request.content` moved too and D4 refused at the content compare
+/// first. `matches_branch` could be replaced by `false` with the suite still green - the one guard
+/// the commit message staked its case on.
+///
+/// The only input that reaches it is an archive whose **metadata agrees with the live branch while
+/// its stored entries do not**: exactly the "an archive claims a content hash its entries do not
+/// carry" case the method exists for. Built here by taking the entry list from the two-entry branch
+/// while labelling it with the three-entry branch's branch id, content and generation.
+#[test]
+fn a_preserving_disposal_refuses_an_archive_whose_entries_are_not_the_branchs() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+
+    // The smaller branch's entries, captured before it grows.
+    let small = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    let small_overlay = small.overlay().unwrap().clone();
+    let small_ledger = small.ledger.clone();
+    drop(small);
+
+    // Grow the branch. Its id, content and generation all move on.
+    save(
+        &f,
+        &mut store,
+        &close,
+        basis.fingerprint(),
+        f.domain(
+            FlipnoteOp::SetHeader(FlipnoteHeader::Title("work after the capture".into()))
+                .encode()
+                .unwrap(),
+            0x7e,
+        ),
+        410,
+    );
+
+    // An archive labelled for the LARGE branch but carrying the SMALL branch's entries.
+    let large = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    let meta = large.handoff_metadata().unwrap();
+    let mislabelled = StudioDraftArchive::from_branch(
+        &small_overlay,
+        &small_ledger,
+        StudioOverlayProvenance::Closing,
+        true,
+        meta.branch_id().unwrap(),
+        meta.branch_content(&large.ledger).unwrap(),
+        meta.branch_generation(),
+    )
+    .expect("the mislabelled archive must build: only its labels disagree with its entries");
+    drop(large);
+
+    let mut b = budget(&mut store, &f);
+    store
+        .write_studio_draft_archive_with_io(
+            SERVER,
+            &f.logical,
+            &mislabelled,
+            &mut rng(),
+            &mut b.storage,
+            &mut b.intents,
+            &mut WriteHooks::None,
+        )
+        .expect("it must persist: the writer checks the document, not the entries");
+    drop(b);
+
+    // Guard the guard: every metadata field D4 compares must AGREE, so the only thing left to refuse
+    // it is the entry comparison.
+    let check = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    let meta = check.handoff_metadata().unwrap();
+    assert_eq!(Some(mislabelled.branch()), meta.branch_id());
+    assert_eq!(mislabelled.generation(), meta.branch_generation());
+    assert_eq!(
+        mislabelled.content(),
+        meta.branch_content(&check.ledger).unwrap()
+    );
+    assert_ne!(
+        mislabelled.accepted(),
+        check.overlay().unwrap().accepted(),
+        "the archive must hold a different entry list, or there is nothing for the match to catch"
+    );
+    drop(check);
+
+    let request = honest_request(&f, &mut store, StudioDisposalRequestMode::Preserve);
+    let refused = dispose(&f, &mut store, request);
+    assert!(
+        refused.is_err(),
+        "an archive whose entries are not this branch's must not authorise destroying it"
+    );
+    assert!(
+        store
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap()
+            .overlay()
+            .is_some(),
+        "the branch must survive"
+    );
+}
+
+/// Design section 12, row 6: an exact retry of a disposal that already landed.
+///
+/// A disposal can fail after its rename lands, so a caller that reconciles and resends is doing the
+/// right thing. The review found the resend met "no local draft branch exists" - the same answer a
+/// vault that never had a branch gives - so the caller could never learn whether its disposal had
+/// succeeded. Disposal has a tombstone, unlike release, so it can recognise itself.
+#[test]
+fn an_exact_retry_of_a_completed_disposal_is_acknowledged_not_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+
+    let first = honest_request(
+        &f,
+        &mut store,
+        StudioDisposalRequestMode::Discard(confirmation()),
+    );
+    let branch = first.branch;
+    let content = first.content;
+    let accepted = first.accepted;
+    let manifest = dispose(&f, &mut store, first).expect("the first disposal must succeed");
+
+    // The identical request again. It must be acknowledged with the same manifest.
+    let retry = StudioOverlayDisposalRequest {
+        branch,
+        content,
+        accepted,
+        mode: StudioDisposalRequestMode::Discard(confirmation()),
+    };
+    let again = dispose(&f, &mut store, retry).expect("an exact retry must be acknowledged");
+    assert_eq!(
+        again, manifest,
+        "the retry must return the manifest that already exists, not a new one"
+    );
+
+    // A retry naming a DIFFERENT branch is still refused: recognition is not a blanket pass.
+    let mut wrong_branch = branch;
+    wrong_branch[0] ^= 0xff;
+    let wrong = StudioOverlayDisposalRequest {
+        branch: wrong_branch,
+        content,
+        accepted,
+        mode: StudioDisposalRequestMode::Discard(confirmation()),
+    };
+    assert!(
+        dispose(&f, &mut store, wrong).is_err(),
+        "a retry naming another branch must not be acknowledged by this manifest"
+    );
+
+    // And a retry in the OTHER mode is refused: telling a user their bodies were discarded when they
+    // were archived, or the reverse, is the one thing this record must never do.
+    let crossed = StudioOverlayDisposalRequest {
+        branch,
+        content,
+        accepted,
+        mode: StudioDisposalRequestMode::Preserve,
+    };
+    assert!(
+        dispose(&f, &mut store, crossed).is_err(),
+        "a preserving retry must not be satisfied by a discarding disposal"
+    );
+}
+
+/// D3, all three halves. Each is a distinct check with a distinct meaning, and each must refuse on
+/// its own without the others masking it.
+#[test]
+fn d3_refuses_a_wrong_branch_a_wrong_content_and_a_wrong_count_separately() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+
+    for (label, mutate) in [
+        (
+            "branch",
+            (|r: &mut StudioOverlayDisposalRequest| r.branch[0] ^= 0xff)
+                as fn(&mut StudioOverlayDisposalRequest),
+        ),
+        ("content", |r| r.content[0] ^= 0xff),
+        ("accepted", |r| r.accepted += 1),
+    ] {
+        let mut request = honest_request(
+            &f,
+            &mut store,
+            StudioDisposalRequestMode::Discard(confirmation()),
+        );
+        mutate(&mut request);
+        assert!(
+            dispose(&f, &mut store, request).is_err(),
+            "a wrong {label} must refuse"
+        );
+        assert!(
+            store
+                .load_epoch_intents(SERVER, &f.logical)
+                .unwrap()
+                .overlay()
+                .is_some(),
+            "a disposal refused on {label} must leave the branch intact"
+        );
+    }
+
+    // The honest request still works, so each refusal above was about its own field.
+    let request = honest_request(
+        &f,
+        &mut store,
+        StudioDisposalRequestMode::Discard(confirmation()),
+    );
+    assert!(dispose(&f, &mut store, request).is_ok());
+}
+
+/// D1's authorship half, with a device that **is** a current member.
+///
+/// The review found the previous test for this used a non-member, so it refused at the membership
+/// check and the authorship line below it was never reached: deleting authorship left the suite
+/// green, and deleting membership left the same test green for the other reason. Neither guard was
+/// individually anchored. A member of the group has no standing over another device's local draft,
+/// and that is what this asserts.
+#[test]
+fn a_group_member_who_did_not_author_the_branch_cannot_dispose_of_it() {
+    let root = tempfile::tempdir().unwrap();
+    let mut f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+    let request = honest_request(
+        &f,
+        &mut store,
+        StudioDisposalRequestMode::Discard(confirmation()),
+    );
+
+    // A second device admitted to the group, so membership passes and only authorship can refuse.
+    let other = MlsDevice::generate().unwrap();
+    f.group
+        .add_member(&f.device, other.key_package().unwrap())
+        .expect("the fixture must admit a second member");
+    assert!(
+        f.group.member_signature_key(&other.device_id()).is_some(),
+        "the second device must really be a current member, or this repeats the old mistake"
+    );
+
+    let mut b = budget(&mut store, &f);
+    let refused = store.dispose_studio_overlay_with_io(
+        SERVER,
+        &f.logical,
+        f.target,
+        &f.group,
+        &other,
+        request,
+        4242,
+        &mut rng(),
+        &mut b.storage,
+        &mut b.intents,
+        &mut WriteHooks::None,
+    );
+    assert!(
+        refused.is_err(),
+        "a member who did not author the branch must not dispose of it"
+    );
+    drop(b);
+    assert!(
+        store
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap()
+            .overlay()
+            .is_some(),
+        "the branch must survive"
+    );
+}
+
+/// D1's membership half, kept separate so each guard has its own test.
+#[test]
+fn only_the_branchs_own_author_may_dispose_of_it() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+    let request = honest_request(
+        &f,
+        &mut store,
+        StudioDisposalRequestMode::Discard(confirmation()),
+    );
+
+    // A second device that is NOT a member: refused at membership.
+    let stranger = MlsDevice::generate().unwrap();
+    let mut b = budget(&mut store, &f);
+    assert!(
+        store
+            .dispose_studio_overlay_with_io(
+                SERVER,
+                &f.logical,
+                f.target,
+                &f.group,
+                &stranger,
+                request,
+                4242,
+                &mut rng(),
+                &mut b.storage,
+                &mut b.intents,
+                &mut WriteHooks::None,
+            )
+            .is_err(),
+        "a non-member must not dispose of a branch"
+    );
+    drop(b);
+    assert!(
+        store
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap()
+            .overlay()
+            .is_some(),
+        "the branch must survive"
+    );
+    // The author still can, so the refusal was about the device. A fresh request, because a
+    // confirmation is now consumed by the call that uses it and cannot back a second disposal.
+    let again = honest_request(
+        &f,
+        &mut store,
+        StudioDisposalRequestMode::Discard(confirmation()),
+    );
+    assert!(dispose(&f, &mut store, again).is_ok());
+}
+
+/// The transaction is atomic in the direction that matters: a failure anywhere leaves the branch,
+/// its entries and any archive exactly as they were.
+#[test]
+fn a_disposal_that_fails_at_the_write_leaves_the_branch_and_its_entries_intact() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+
+    let before = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    let ids: Vec<[u8; 32]> = before.pending().map(|(id, _)| *id).collect();
+    assert!(!ids.is_empty());
+    drop(before);
+
+    let request = honest_request(
+        &f,
+        &mut store,
+        StudioDisposalRequestMode::Discard(confirmation()),
+    );
+    {
+        let mut refuse = |_t: WriteTag, _p: &std::path::Path, _b: &[u8]| {
+            Intercept::Fail(AppError::Io(
+                "injected refusal before the disposal write".into(),
+            ))
+        };
+        let mut hooks = WriteHooks::Hooked {
+            before: Some(&mut refuse),
+            before_sync: None,
+            before_unlink: None,
+            after: None,
+        };
+        let mut b = budget(&mut store, &f);
+        assert!(
+            store
+                .dispose_studio_overlay_with_io(
+                    SERVER,
+                    &f.logical,
+                    f.target,
+                    &f.group,
+                    &f.device,
+                    request,
+                    4242,
+                    &mut rng(),
+                    &mut b.storage,
+                    &mut b.intents,
+                    &mut hooks,
+                )
+                .is_err(),
+            "a refusal before the write must fail the call"
+        );
+    }
+
+    drop(store);
+    let store = open(root.path());
+    let after = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    assert!(
+        after.overlay().is_some(),
+        "a disposal refused before its write must leave the branch"
+    );
+    assert!(
+        after.handoff_metadata().unwrap().disposed().is_none(),
+        "and must leave no terminal manifest"
+    );
+    for id in &ids {
+        assert!(
+            after.pending().any(|(pending, _)| pending == id),
+            "entry {id:?} was retired by a disposal that never wrote"
+        );
+    }
+}
+
+/// Title edits with fixed nonces and timestamps, so a later generation can hold exactly the same
+/// entries as an earlier one. Header ops carry no PIX, which keeps blob protection out of a test
+/// that is about identity.
+fn save_titles(
+    f: &Fixture,
+    store: &mut ServerStore,
+    close: &CloseRecord,
+    basis: &StudioClosingOverlayBasis,
+    titles: &[(&str, u8, u64)],
+) {
+    for (title, nonce, ts) in titles {
+        save(
+            f,
+            store,
+            close,
+            basis.fingerprint(),
+            f.domain(
+                FlipnoteOp::SetHeader(FlipnoteHeader::Title((*title).into()))
+                    .encode()
+                    .unwrap(),
+                *nonce,
+            ),
+            *ts,
+        );
+    }
+}
+
+/// D4's generation binding, on the one input that isolates it.
+///
+/// An archive of an EARLIER generation whose entries genuinely match the live branch: same
+/// operations, same envelopes, same order and timestamps, so `matches_branch` accepts it and its
+/// content hash is the live branch's. Only the branch identity and generation differ. The review
+/// pointed out that the existing archive refusals all used different entries or mislabelled
+/// metadata, so none of them showed that an old archive cannot authorise destroying new work that
+/// happens to look the same.
+///
+/// The sequence is the one design 6.6 describes: G1 holds X and is preserve-disposed, leaving its
+/// archive A1 behind; G2 holds a disjoint Y and is discarded, replacing G1's retained manifest; G3
+/// holds X again. A preserving disposal of G3 must not accept A1.
+#[test]
+fn a_preserving_disposal_refuses_an_earlier_generations_archive_of_identical_work() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    let x: [(&str, u8, u64); 2] = [("x one", 0x61, 500), ("x two", 0x62, 501)];
+
+    // G1 holds X, is archived as A1, and is preserve-disposed. A1 stays on disk.
+    save_titles(&f, &mut store, &close, &basis, &x);
+    let a1 = preserve_archive(&f, &mut store);
+    let request = honest_request(&f, &mut store, StudioDisposalRequestMode::Preserve);
+    dispose(&f, &mut store, request).expect("G1's preserving disposal must succeed");
+
+    // G2 holds a disjoint Y and is discarded, replacing G1's retained manifest.
+    save_titles(&f, &mut store, &close, &basis, &[("y", 0x63, 600)]);
+    let request = honest_request(
+        &f,
+        &mut store,
+        StudioDisposalRequestMode::Discard(confirmation()),
+    );
+    dispose(&f, &mut store, request).expect("G2's discarding disposal must succeed");
+
+    // G3 holds X again, identically.
+    save_titles(&f, &mut store, &close, &basis, &x);
+
+    // Guard the guard: everything except identity must agree, or the refusal below could come
+    // from the content compare or the entry match instead of the generation binding.
+    let state = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    let meta = state.handoff_metadata().unwrap();
+    let live = state.overlay().unwrap();
+    assert_eq!(meta.branch_generation(), 3, "the live branch must be G3");
+    assert_eq!(
+        meta.disposed().unwrap().generation,
+        2,
+        "G2's discard must have replaced G1's manifest"
+    );
+    assert_eq!(a1.generation(), 1);
+    assert_eq!(
+        a1.content(),
+        meta.branch_content(&state.ledger).unwrap(),
+        "A1's content must equal G3's, or the content compare refuses first"
+    );
+    assert!(
+        a1.matches_branch(live, &state.ledger).unwrap(),
+        "A1's entries must genuinely match G3's, or the entry match refuses first"
+    );
+    assert_ne!(Some(a1.branch()), meta.branch_id());
+    drop(state);
+    let on_disk = store
+        .read_studio_draft_archive(SERVER, &f.logical)
+        .unwrap()
+        .expect("A1 must still be the archive on disk");
+    assert_eq!(
+        on_disk.archive.archive_id().unwrap(),
+        a1.archive_id().unwrap()
+    );
+
+    let request = honest_request(&f, &mut store, StudioDisposalRequestMode::Preserve);
+    let refused = dispose(&f, &mut store, request)
+        .expect_err(
+            "an archive of an earlier generation must not authorise disposing of a later one",
+        )
+        .to_string();
+    assert!(
+        refused.contains("the preserved archive is for a different branch"),
+        "the refusal must be the generation binding's, got: {refused}"
+    );
+    let after = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    assert_eq!(
+        after.overlay().map(|o| o.accepted()),
+        Some(2),
+        "G3 must survive with its work"
+    );
+    drop(after);
+    assert_eq!(
+        store
+            .read_studio_draft_archive(SERVER, &f.logical)
+            .unwrap()
+            .unwrap()
+            .archive
+            .archive_id()
+            .unwrap(),
+        a1.archive_id().unwrap(),
+        "and A1 must survive unchanged"
+    );
+}
+
+/// D1's membership half, isolated: the branch's REAL author, removed from the group.
+///
+/// The existing membership test uses a stranger, who fails authorship as well, so it cannot show
+/// that membership is checked on its own. Here authorship matches positively and only membership
+/// fails. The removal is real MLS - a second member commits it and the author's group processes it -
+/// and the refusal is asserted at the store boundary, not credited to any outer native check.
+#[test]
+fn the_branchs_own_author_cannot_dispose_of_it_once_removed_from_the_group() {
+    let root = tempfile::tempdir().unwrap();
+    let mut f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    frame_branch(&f, &mut store, &close, &basis);
+    let request = honest_request(
+        &f,
+        &mut store,
+        StudioDisposalRequestMode::Discard(confirmation()),
+    );
+    assert_eq!(
+        store
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap()
+            .overlay()
+            .unwrap()
+            .author(),
+        f.device.device_id(),
+        "authorship must match, so it cannot be what refuses"
+    );
+
+    // A second member joins, then commits the author's removal; the author's group applies it.
+    let other = MlsDevice::generate().unwrap();
+    let added = f
+        .group
+        .add_member(&f.device, other.key_package().unwrap())
+        .unwrap();
+    let mut other_group = catcoms_mls::ServerGroup::join(&other, &added.welcome).unwrap();
+    let removal = other_group
+        .stage_remove(&other, &f.device.device_id())
+        .unwrap();
+    other_group.merge_staged_self(&other).unwrap();
+    f.group
+        .process_incoming(&f.device, &removal.commit)
+        .expect("the author's group must apply its own removal");
+    assert!(
+        f.group
+            .member_signature_key(&f.device.device_id())
+            .is_none(),
+        "the author must really be removed, or this repeats the stranger test"
+    );
+
+    let refused = dispose(&f, &mut store, request)
+        .expect_err("a removed author must not dispose of the branch")
+        .to_string();
+    assert!(
+        refused.contains("not a current local member"),
+        "the refusal must be membership's, got: {refused}"
+    );
+    assert!(
+        store
+            .load_epoch_intents(SERVER, &f.logical)
+            .unwrap()
+            .overlay()
+            .is_some(),
+        "the branch must survive"
+    );
+}

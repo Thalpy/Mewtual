@@ -30,10 +30,17 @@ pub use recovery::{StudioProjection, StudioRecovery};
 mod admission;
 pub use admission::StudioTarget;
 mod overlay;
+#[cfg(feature = "test-counters")]
+pub use overlay::overlay_reconstructions_on_this_thread;
 pub use overlay::{
-    StudioClosingOverlayBasis, StudioHandoffAuthority, StudioHandoffCandidate,
+    StudioClosingOverlayBasis, StudioDiscardConfirmation, StudioDisposalDecision,
+    StudioDisposalMode, StudioDraftArchive, StudioHandoffAuthority, StudioHandoffCandidate,
     StudioHandoffEvidence, StudioHandoffOutcome, StudioHandoffSigning, StudioLocalDraft,
-    StudioOverlay, StudioOverlaySave, StudioOverlayState, MAX_STUDIO_OVERLAY_OPS,
+    StudioOverlay, StudioOverlayAdmission, StudioOverlayBasis, StudioOverlayDisposal,
+    StudioOverlayEligibility, StudioOverlayManualReason, StudioOverlayProvenance,
+    StudioOverlayRequestClass, StudioOverlaySave, StudioOverlayState,
+    StudioOverlayUnconfirmedState, StudioUnconfirmedOverlayBasis, MAX_STUDIO_DRAFT_ARCHIVE_BYTES,
+    MAX_STUDIO_OVERLAY_OPS, MAX_STUDIO_UNCONFIRMED_OVERLAY_OPS,
 };
 mod epoch;
 pub use epoch::catchup;

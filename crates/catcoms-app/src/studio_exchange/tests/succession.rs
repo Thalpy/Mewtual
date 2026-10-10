@@ -9,8 +9,10 @@ use catcoms_replication::studio::StudioRecovery;
 use catcoms_replication::{EpochPhase, InheritedCheckpoint};
 use tokio::sync::Mutex;
 
+mod hidden;
 mod interrupted;
 mod joining;
+mod repeated;
 
 #[tokio::test]
 async fn studio_actor_new_owner_keeps_open_edits_and_rotates_after_restart() {
@@ -144,7 +146,7 @@ async fn successor_with_interruption(
         .alice
         .sync
         .with_registry_context(|_, d, _, _| d.device_id());
-    assert_eq!(p.bob.sync.observed_owner_tenure_start(), None);
+    assert_eq!(p.bob.sync.authoring_owner_tenure_start(), None);
     p.bob.sync.set_config(catcoms_sync::SyncConfig {
         max_committer_rank: 1,
         stage_decision_window_ms: 0,
@@ -155,7 +157,7 @@ async fn successor_with_interruption(
     p.bob.sync.set_config(catcoms_sync::SyncConfig::default());
     assert!(p.bob.is_owner());
     let new_owner_id = p.bob.sync.with_registry_context(|_, d, _, _| d.device_id());
-    let tenure = p.bob.sync.observed_owner_tenure_start().unwrap();
+    let tenure = p.bob.sync.authoring_owner_tenure_start().unwrap();
     assert!(tenure > 0);
 
     let snapshot = p.bob.snapshot().unwrap();
@@ -172,7 +174,7 @@ async fn successor_with_interruption(
         "new owner after restart",
     )
     .unwrap();
-    assert_eq!(restored.sync.observed_owner_tenure_start(), Some(tenure));
+    assert_eq!(restored.sync.authoring_owner_tenure_start(), Some(tenure));
     let mut verifier = Node::restore(
         &snapshot,
         Net::new(Hub::new().join(PeerId::from_u64(99))),
@@ -325,7 +327,7 @@ async fn successor_with_interruption(
             "successor after interrupted installation",
         )
         .unwrap();
-        assert_eq!(restored.sync.observed_owner_tenure_start(), Some(tenure));
+        assert_eq!(restored.sync.authoring_owner_tenure_start(), Some(tenure));
         store = Arc::new(Mutex::new(Some(reopened)));
         (actor, events, task) = crate::spawn(restored);
         drain = joining::drain_events(events);
@@ -490,7 +492,7 @@ async fn successor_with_interruption(
         "new owner editing after checkpoint restart",
     )
     .unwrap();
-    assert_eq!(restored.sync.observed_owner_tenure_start(), Some(tenure));
+    assert_eq!(restored.sync.authoring_owner_tenure_start(), Some(tenure));
     let store = Arc::new(Mutex::new(Some(reopened)));
     let (actor, mut events, task) = crate::spawn(restored);
     let drain = tokio::spawn(async move {

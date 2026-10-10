@@ -1,8 +1,14 @@
 use super::*;
+// The shared fixture below reaches its crate through `super::app`.
+use catcoms_app as app;
 use catcoms_rt::{Hub, ManualClock, PeerId};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::future::Future;
+/// The shared genuine-accepted-draft fixture, declared once for the whole Studio test tree.
+/// `#[path]`-including it from two test modules would compile two unrelated copies of it.
+#[path = "../../../../../crates/catcoms-app/tests/support/studio_inspection.rs"]
+pub(in crate::studio) mod fixture;
 mod preview;
 mod receiver;
 mod recovery;

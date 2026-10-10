@@ -1,0 +1,55 @@
+name: Agent 3 repair runtime
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/agent3-repair-runtime.yml'
+      - 'scripts/check-agent3-core-mutations.py'
+      - 'scripts/check-agent3-runtime-mutations.py'
+      - 'crates/catcoms-app/**'
+      - 'crates/catcoms-replication/**'
+      - 'crates/catcoms-sync/**'
+      - 'crates/catcoms-mls/**'
+      - 'crates/catcoms-crypto/**'
+      - 'crates/catcoms-rt/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+  RUSTFLAGS: '-D warnings'
+
+jobs:
+  repair-runtime:
+    name: repair-runtime (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      # Same rule as the store harness: every mutant and restored control is serial, and the two
+      # platform jobs stay serial so this high-memory app test binary never competes with itself.
+      max-parallel: 1
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record actual checkout
+        run: git rev-parse HEAD
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify repair job runtime mutations and exact restored controls
+        run: python scripts/check-agent3-runtime-mutations.py
+      - name: Preserve runtime mutation and restoration evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent3-runtime-mutations-${{ matrix.os }}
+          path: logs/agent3-runtime-mutations/
+          if-no-files-found: error

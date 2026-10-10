@@ -4,6 +4,27 @@ A reference for the **seams** (dependency-injection hooks) and the key public AP
 Signatures are abbreviated; see the source for exact generics/lifetimes. This is the
 contract a new contributor (or agent) builds against.
 
+The native `send_message` command returns `{ accepted: true, persistence }` after actor acceptance.
+`persistence.status` is `durable`, `pending` (with `snapshot_failed`, `store_unavailable`, or
+`write_failed` reason), or `superseded` for a replaced server incarnation. Only `durable` confirms
+a covering local snapshot; none asserts remote custody or delivery. Pending writes keep their
+dirty ticket for the existing discovery worker to retry. The frontend must not resubmit an
+accepted message because persistence or a later view refresh failed. Successful warm unlock
+wakes that same coalescing worker; duplicate already-open unlocks do not create a new actor.
+
+`AppEvent::SnapshotNeeded` is a native persistence request with no renderer payload. An independent
+actor tracker compares the MLS epoch and current open legacy-document identities/operation counts
+at owner-turn boundaries, including after a partially applied sync tick is cancelled by a command.
+It costs O(open documents), reads no message bodies, and replaces the tracked map so removed ids
+are released. Reads and snapshot commands alone do not produce another invalidation.
+
+The native event consumer marks the exact server incarnation dirty before the UI lock gate and
+wakes one separate snapshot worker; it never awaits the actor for a snapshot itself. The worker
+requests an initial save, then coalesces subsequent wakes in fixed 250-ms windows through the same
+ticket/write locks. Discovery also retries failed writes. Neither a marker nor the batching window
+confirms a completed save: an abrupt stop before the write remains nondurable. This supplements
+existing persistence triggers and leaves Studio's separate persistence barriers intact.
+
 ---
 
 ## 1. The seams (the load-bearing hooks)
@@ -785,8 +806,9 @@ Plaintext wraps framed scope, channel and snapshot; vault framing adds 40 physic
 The store caps both path metadata and actual bounded reads, authenticates the seal and verifies
 scope/name consistency during inventory. Receipt-book growth, opening receipt and closing gate
 hash charge protocol; user/seed/metadata/quarantine bytes charge content. Atomic replacements
-reserve old-plus-new peak bytes; unchanged files are flushed without rewriting. File sync plus
-Unix-only parent sync uses the existing vault durability seam, not a new Windows guarantee.
+reserve old-plus-new peak bytes; unchanged files are flushed without rewriting. File sync is
+followed by parent sync on Unix and Windows; unsupported targets retain atomic replacement without
+a directory-flush guarantee.
 
 These store APIs are not network-send permits. The explicit native adapter below coordinates
 local indexing and blob/reference ordering. Conservative byte-reference protection is described
@@ -841,9 +863,47 @@ P1 core repair now uses `ReceiptRepair::sign_in_tenure` and
 `verify_current_owner(group, expected_issuer_tenure_start)`. V1 decoding/hashing stays compatible
 but is not live authority. `ReceiptBook::apply_repair` takes the same independent tenure and
 returns `(Applied | Duplicate, losing_receipt)`; an exact duplicate preserves later progress,
-and an active different fault refuses it. The latest full signed evidence survives book
-encoding/checkpoint copies under the existing 8 KiB cap. This remains a bookkeeping prerequisite,
-not a callable native repair, gate transition, owner-journal rebase or recovery persistence API.
+and an active different fault refuses it. Repair-sequence monotonicity is scoped to the signed,
+independently authenticated issuer tenure: same-tenure gaps are valid, replay is stale, and a real
+successor tenure starts at one even if historical state retained `u64::MAX`. MAX in the current
+issuer tenure returns `RepairSequenceExhausted` before signing or B1 mutation. The existing repair
+and book encodings are unchanged. The latest full signed evidence survives book
+encoding/checkpoint copies under the existing 8 KiB cap. The trusted head-service source context
+now carries the one archived Observed-tenure witness from the same durable owner snapshot. Shared
+Studio/Registry admission checks an exact retained attestation first, otherwise requires the pair's
+full owner key/start/tenure id to match the live or archived tuple and records the admission origin.
+Both head adapters authenticate the exact source and its physical inventory, persist B0, and only
+then ask whether that source may serve a head. A valid Registry Fault therefore retains the report
+but still refuses service; failed or uncertain B0 takes precedence over that expected refusal, and
+the prepared adapter does not reconstruct the source. Historical evidence never becomes a live
+source seal or current-tenure overflow hold. Native repair commands remain unregistered.
+
+Studio repair execution is a detached job, never a call inside the request (Agent 3 design 10.3).
+`RepairFault` answers `StudioControlResponse::RepairStarted { target, scope, start }`. Here `start`
+is `Scheduled`, either newly or because the identical decision's job is already running, or `Busy`:
+another repair job is running or the shared preparation pool is full, nothing was reserved, and the
+caller asks again. Nothing has been decided or written when the reply is sent. The native encoding
+is `kind: "faultRepairStarted"` with `start: "scheduled" | "busy"` and `refreshRequired: true`.
+
+When a decision cannot start at all, for example because the source cannot be captured,
+`RepairFault` returns that error instead; asking again would fail the same way. The job's
+outcome reaches the renderer only through the fault view:
+- `blockedBy: "scheduled"` while the job or its worker still owns the target;
+- `lastAttempt` afterwards, for every way the job ends: the store's repair outcome, or
+  `outcome: "failed"` with bounded text when it was abandoned (owner tenure or MLS epoch moved,
+  catch-up paused, cancelled), found the document changed mid-rebuild, or failed. A new decision
+  clears the previous report, so it is never shown as the new one's outcome. The report is
+  volatile, local and bounded.
+
+`RepairRegistryFault` follows the same contract for the target's Registry bucket. It answers
+`RepairStarted` with `scope: RegistryBucket(bucket)`, and its outcome is read through that
+bucket's fault view. Registry Flow D, the owner's resume of a held bucket decision and the owed
+bucket replacement are the same job, scoped to the bucket. Whether a bucket owes a replacement
+is classified from the retained prepared page provider, never by restoring the bucket inside the
+request; a held owner decision is read from the bounded owner record. While the provider is
+cold or stale, a fetched bucket pass is deferred, not installed.
+While a job owns a target, foreground `Apply` and `ApplyOverlayCopy` into it are refused for retry.
+While a job owns a bucket, Registry maintenance, pointer refresh and page persistence skip it.
 
 `studio_recovery_list`, `studio_recovery_read`, `studio_recovery_export`, and
 `studio_recovery_acknowledge` use the same actor/native custody as Save. They authenticate all
@@ -1006,7 +1066,11 @@ pending false/true churn cannot bypass it. Locked/busy native custody retains qu
 
 Automatic inventory has LOCAL service rails of 1024 visited directory entries, 64 P1 records,
 8 MiB aggregate authenticated record bytes and 256 KiB aggregate cold validation bytes. A
-mount-local 64-entry LRU memoizes only pure Registry/Studio footprint validation. A hit needs a
+mount-local LRU of up to 65 536 entries (`MAX_ACCOUNTED_RECORDS`) memoizes every family's pure
+accounting validation, with an Intents record's inventory facts, so a hit's
+`EpochStorageInventoryEntry::intent_facts()` equals a fresh scan's; an inventory-issuing finish (`EpochStorageScan::finish`,
+`finish_epoch_inventory_job`, `finish_epoch_storage_scan`) prunes entries for records the scan did
+not find, within its own coverage. The reference-scan finish does not prune. A hit needs a
 fresh bounded read/unseal, scope/filename binding, and exact complete-wrapper digest plus size;
 it never reuses a complete inventory or budget. `EpochStorageScanProgress.reused_records` and
 `uncached_bytes` report reuse and physical bytes charged to cold validation. Reference scans
@@ -1322,6 +1386,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   mint_invite(nonce:[u8;16], expires_at_ms, bootstrap) -> Result<InviteToken>;
   mint_invite_with_rendezvous(nonce, expires_at_ms, bootstrap, rendezvous:Vec<String>) -> Result<InviteToken>;  // 6e-3d-9
   async open_channel(DocType, doc_id) -> Result<()>;       // create doc + subscribe its ns_secret_L-keyed topic
+  document_versions() -> impl Iterator<Item = ((DocType, u128), u64)>; // raw open-document op counts for snapshot invalidation
   async post(DocType, doc_id, FnOnce(&mut AutoCommit)->Result<(),AutomergeError>) -> Result<()>;  // edit, then gossip; Ok once the EDIT applied
   async run_once() -> Result<bool>;                        // drain outbox + recovery + sub-resync; then handle ONE event
   async request_catchup(peer:PeerId, DocType, doc_id) -> Result<usize>;        // incremental where possible; see KIND_CATCHUP_SINCE
@@ -1332,6 +1397,8 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   // 6e-3d-7 member PEX: members supply each other dialable, self-signed peer records.
   publish_self_record(addresses:Vec<String>, seq:u64) -> Result<()>;  ingest_peer_record(PeerDescriptor) -> bool;
   async request_pex(peer:PeerId) -> Result<usize>;  known_peer_records() -> Vec<PeerDescriptor>;  peer_record(&DeviceId) -> Option<&PeerDescriptor>;
+  async request_pex_connected(peer:PeerId) -> Result<usize>; // same verification; never implicitly redial a temporary admission contact
+  schedule_reconciliation() -> usize; // paced, bounded sweep of open docs; preserves pending cursors/cooldowns
   // Cross-session redial: newest roster-checked cached records are policy-ranked. Equal address
   // epochs retry with bounded monotonic exponential backoff+jitter; a newer signed seq or a live
   // connect/disconnect lifecycle resets the delay. Old public IPs are not unioned indefinitely.
@@ -1882,8 +1949,8 @@ step visits at most 64 names, with the same 131,072-entry traversal rail as inve
 only exact canonical recovery-write staging siblings. It does not read bodies or touch published
 recovery files, even corrupt ones; logical staged snapshots stay inside their final record.
 Failure/panic poisons completion and can leave partial deletions. Every successful batch/EOF,
-including an empty retry, runs the existing parent sync (Unix-only durability). A successful EOF
-means that traversal ended, not that directory iteration during deletion found every orphan.
+including an empty retry, runs the existing parent sync (Unix and Windows durability). A successful
+EOF means that traversal ended, not that directory iteration during deletion found every orphan.
 `into_inventory()` requires successful EOF and transfers the exclusive borrow to a fresh scan;
 callers repeat cleanup if necessary and reconcile complete current inventories before refunding
 any budget. This standalone operation has no startup, actor/bridge or network invocation yet.
@@ -1960,8 +2027,8 @@ inventory below covers its namespace and orphan temporaries. The sole coordinato
 publication remain deferred; the recovery-only scanner still excludes owner files. Before actual sending,
 the publisher must re-prepare/re-save the exact choice and recheck current owner, tenure and session.
 The explicit registry rotation path now validates the close and deterministic seed before signing;
-other managed types still need their own adapters. File-sync and
-atomic replacement use the existing store primitive, with parent-directory durability on Unix only.
+other managed types still need their own adapters. File-sync and atomic replacement use the
+existing store primitive, with parent-directory durability on Unix and Windows.
 
 `scan_epoch_storage()` returns `EpochStorageScan`; `cleanup_epoch_storage_staging()` returns
 `EpochStorageCleanup`. These share the recovery engine and its unchanged aggregate traversal,
@@ -1993,7 +2060,8 @@ The caller must validate type-specific semantics first. There is no public raw-s
 API. Exact duplicate intents preserve newer entries and sync the authenticated unchanged final
 file plus parent without rewriting; sync-only admission reserves no bytes. New entries use ordinary
 content replacement accounting. Reads alone do not repair an uncertain save or authorize replay
-as a different author. File and parent durability are the existing file-sync/Unix-parent-sync model.
+as a different author. File and parent durability are the existing file-sync plus
+Unix/Windows-parent-sync model.
 
 The new explicit `scan_epoch_storage_with_intents` and
 `cleanup_epoch_storage_staging_with_intents` APIs return the same incremental jobs with fixed
@@ -2024,14 +2092,42 @@ actor/network path invokes these adapters yet.
 
 The design passed user review at `d576af2` on 2026-09-14. The bounded implementation adds
 `Server::prepare_studio_closing_overlay` and `Server::save_studio_closing_overlay` as explicit
-Rust adapters under caller-owned exclusive Server/store custody. They obtain tenure from
-`ChannelSync::observed_owner_tenure_start`; request data cannot supply tenure. A checked
-`StudioClosingOverlayBasis` derives from the actual Closing source and its settlement plan.
-Save takes its fingerprint and a canonical domain operation; timestamps come from the runtime
-clock and are preserved on exact retries. The result is now `StudioOverlaySave::Local(StudioLocalDraft)`
-or `StudioOverlaySave::HandedOff(StudioHandoffOutcome)` for a completed exact retry. A handoff is
-shared pending history, not receipt finality. No actor/native overlay command or automatic
-promotion/disposition is enabled by these internal adapters.
+Rust adapters under caller-owned exclusive Server/store custody. Tenure comes only from the
+device's own observation (`Server::observed_owner_tenure`, a `StudioOwnerTenure` of `Known`,
+`Imported` or `Unknown`); request data cannot supply it. Preparation requires `Known` and refuses
+the other two with different messages. Save only *reads* it, because exact retries and terminal
+acknowledgements must succeed without it (V8); its authoring stages, S1b and the commit, require
+it at their own points. A checked `StudioClosingOverlayBasis` derives from the actual Closing
+source and its settlement plan.
+
+Preparation returns a `StudioOverlaySaveTicket { basis, branch }`. The branch is the
+branch-generation identity the Save must name: the live branch if there is one, otherwise the one
+the next admission would open, derived by `StudioOverlayState::request_branch_id` and never by the
+caller. Save takes the basis fingerprint, that branch and a canonical domain operation. A retry
+must resend its original request's branch: after a transfer or disposal, a fresh ticket names the
+*next* branch. Timestamps come from the runtime clock and are preserved on exact retries.
+
+The result is one of:
+- `StudioOverlaySave::Local(StudioLocalDraft)` for newly accepted work;
+- `StudioOverlaySave::Acknowledged { basis, accepted }` for an exact retry of an operation the
+  live branch already accepted;
+- `StudioOverlaySave::HandedOff(StudioHandoffOutcome)` for a retry of a transferred operation;
+- `StudioOverlaySave::Disposed(StudioOverlayDisposal)` for a retry of an operation in the most
+  recently disposed branch.
+
+The last three are terminal acknowledgements that accept nothing and open no branch.
+
+`Acknowledged` carries the stored branch's basis fingerprint and accepted count, the same values
+a rebuilt draft would report. It is flush-only and does **not** rebuild the draft, which costs the
+branch's whole depth. A caller that wants the projection reads it explicitly, through
+`local_draft()` or the overlay read path.
+
+A request naming a branch no admission would open is refused as stale. A handoff is shared pending
+history, not receipt finality. No actor/native overlay command or automatic promotion/disposition
+is enabled by these internal adapters.
+
+(Until 2026-10-09 an exact retry returned `Local` with a full draft, rebuilt under custody; design
+18.3 review, F1.)
 
 `EpochIntentState::overlay()` exposes immutable acceptance metadata and `local_draft()` rebuilds
 the local projection. The existing ledger's encoding is unchanged. Its enclosing record is
@@ -2077,8 +2173,42 @@ flushed before publication or normal source rewrites. Rotation/adoption resolve 
 journal/recovery/retirement work; the common source writer also fences evidence loss.
 
 The bounded store handoff is accepted; HANDOFF-002 is closed. Read-only `studio_overlay_read`
-is separately accepted, with INSPECTION-TEST-001 now closed. Native overlay writes, automatic
-handoff scheduling, manual disposition and preview-based overlays remain unavailable.
+is separately accepted, with INSPECTION-TEST-001 now closed. Native overlay writes and manual
+disposition remain unavailable. Automatic Closing handoff scheduling exists, but its selector now
+memoizes Unconfirmed history as quiet rather than attempting to transfer it.
+
+#### Awaiting-tenure overlay Save slice (Gate 4, internal only)
+
+The internal app/store path generalizes Flow S over an owned typed Closing or Unconfirmed basis.
+`prepare_studio_unconfirmed_overlay` proves the installed source absent against the current
+five-family inventory, mints a basis only through the current complete prepared preview, repeats
+absence before deriving the branch, and returns only the basis fingerprint plus branch identity.
+Classification remains provenance-independent, so terminal acknowledgements and exact accepted
+retries precede preview/source/media work. New authoring re-mints the preview at S1b, captures the
+exact authenticated Intents version and context, plans off custody, then at S3 rechecks mount,
+server, complete target, member/device key, owner, MLS epoch, exact record bytes and source absence
+before re-minting the preview and writing.
+
+The actor's parked-request key is exact rather than advisory: it includes target, provenance,
+basis fingerprint, branch identity and a domain-separated BLAKE3 digest of the complete canonical
+`DomainOp::encode()` bytes (nonce, type, logical key and body). A different request may finish the
+parked plan to prevent an abandoned caller holding the actor slot, but it returns busy and cannot
+claim that plan's outcome as its own. The exact request is then answered from durable state.
+
+Live Unconfirmed work is limited to three branches per numeric server, 8 MiB of exact
+physical Intents bytes per mounted vault and 64 accepted operations per branch. A fresh complete
+inventory derives the live counters from authenticated provenance and charged bytes. Replacement
+preflight subtracts the authenticated old charge; counters change only after a successful durable
+write, and disposal releases the live charge only after its terminal replacement succeeds.
+The tally lives in `EpochIntentBudget`, so every successful ordinary or Flow S replacement updates
+the same record charge. The 8 MiB share is Flow S admission policy rather than a hard vault
+invariant: ordinary edits beside a live branch may take the tally over the share, after which new
+Unconfirmed growth refuses until headroom returns.
+Unconfirmed provenance grants no handoff, signing, receipt, installed-source or publication
+authority. The shared baseline now has real Index and Flipnote preview coverage, 8.6 reconciliation,
+an actor/store restart regression, the actor Save and native result conversion types. Its functions
+and ticket remain crate-private; P5 is false, no Save command is registered, and there is no UI
+exposure.
 
 The [prepared-signing checkpoint](GATE4-HANDOFF-SIGNING-REVIEW.md), awaiting review, adds:
 
@@ -2467,6 +2597,15 @@ partial, malformed or trailing data rejects. New snapshots always encode the tai
 Unknown. Older binaries reject the new tail; backward reading of old snapshots is supported,
 not downgrade compatibility. Existing peer-address extraction stops before this appended data.
 
+Current snapshots follow the tenure frame with the authenticated group-policy pin and durable-chat
+state, then an optional member-finalization correlation frame. Its version-1 body contains a u32
+count and at most 512 device/transport pairs (two length-prefixed 32-byte identities each; 36,869
+inner bytes maximum). Canonical device order, unique peers, exact lengths and full consumption are
+required. Absence loads an empty correlation map; malformed/unknown data rejects. Current P2P
+permission, membership and descriptor conflicts are checked on restore. These are admitted retry
+correlations only, with no live proof, addresses or dial authority. An older reader rejects the
+new trailing frame, even with zero entries; reopening after a new write requires the new reader.
+
 Welcome joins start Unknown, even if the new device fills the lowest leaf and becomes owner.
 Legacy upgrades and such owners may remain Unknown indefinitely across same-owner commits.
 Do not recover availability by assigning the current epoch or copying a receipt's own tenure.
@@ -2706,7 +2845,8 @@ authenticated file and parent. Both snapshots use the restored current owner: re
 derived quota owner alone needs no copy at the content cap. Actual old bytes remain accounted and
 flushed, and each restore derives the owner again. Failed writes, flushes or unwinds grant no
 success and poison accounting until reconciliation. A loaded state alone grants no acknowledgement
-after an uncertain rename. The existing durability model remains file sync plus Unix-only parent sync.
+after an uncertain rename. The existing durability model remains file sync plus Unix/Windows
+parent sync.
 
 Peer-writable history, seed and metadata charge ordinary content. Only exact receipt-book growth,
 the opening receipt and the optional gate receipt hash charge protocol allowance; an owner seal
@@ -2808,13 +2948,15 @@ clone/decode/verification, containing malicious replicated-index work.
 `ReconnectRoute { peer_id, address }` rows. A row is valid only under `AuthorizedPeer` and must name
 that exact peer. Version 4 appends an optional `pending_recovery_peer` plus the signed code's
 absolute expiry. Versions 1 and 2 decode with an empty route list and `LegacyPending`; version 3
-decodes with no pending recovery. New founders
-and helper/reply/switchboard admissions persist `Disabled`, while a successful direct admission
-persists only its named inviter as `AuthorizedPeer`. Each address is capped at 512 bytes and the
+decodes with no pending recovery. Without authenticated P2P permission, helper/reply/switchboard
+admissions retain `Disabled`, while a successful direct admission permits only its named inviter
+as `AuthorizedPeer`. Version 5 adds `MemberMesh` for authenticated P2P groups; version 6 retains up
+to eight current members with two routes each inside an exact 8-KiB encoded route budget. Each
+address is capped at 512 bytes and the
 entire record remains vault-sealed and atomically replaced. Every `ServerStore` record uses the
 same durability primitive: write and sync a sibling staging file, rename it over the destination,
-then sync the parent directory on Unix. Abrupt termination before rename therefore retains the
-complete authenticated predecessor; after rename readers see the complete replacement. Staging
+then sync the parent directory on Unix and Windows. Abrupt termination before rename therefore
+retains the complete authenticated predecessor; after rename readers see the complete replacement. Staging
 siblings are destination-specific, unique per invocation and opened with create-new semantics, so
 concurrent record types cannot alias and a pre-planted symlink is not followed. A parent-directory
 sync failure is reported distinctly as `CommittedButNotDurable`: the replacement is already visible
@@ -2833,13 +2975,24 @@ them into `ChannelSync`, which reparses the canonical terminal peer binding, per
 TCP/QUIC (including private/loopback) but rejects DNS, relay, WebSocket, link-local, multicast,
 unspecified and IPv4 0/8 or 240/4 hosts, requires exactly one current roster record to claim that
 transport peer, skips live/self peers, and spends the same process-wide endpoint scheduler as other
-untrusted recovery dials. Direct admission makes one bounded best-effort PEX request before the
-first post-join snapshot so the inviter's signed descriptor normally accompanies the sealed socket.
+untrusted recovery dials. Every completed admission makes one bounded connected-only PEX request
+before the first post-join snapshot. Direct admission can thereby retain the descriptor needed
+by its sealed route; reply/helper admission learns records without acquiring route authority.
 On the discovery cadence, an authorized record may refresh only that inviter. `LegacyPending` may
 promote once only when the group has exactly one other member and exactly one unique live member
 claim; its captured route must additionally be private/loopback. A non-empty observation replaces
 and installs the bounded hints; an empty observation does not erase them merely because the remote
-app is closed.
+app is closed. These narrow migration rules apply to legacy groups. Authenticated P2P admission
+also performs a connected two-way signed member-finalization exchange, which can prove the
+callback dialer's peer before immediate close. Its bounded capture worker retries unfinished
+observed members without granting authority to an unverified endpoint.
+
+Orderly close performs local capture only: unfinished peer verification is saved retry work and
+does not require a network response. The final actor barrier still saves accepted history before
+freezing; failed local snapshot/network writes or stale custody refuse close. Initial admission
+and restored-server projections expose an absent saved outgoing route without claiming the group
+cannot reconnect: inbound connections and discovery may still recover it. See
+[the offline-close contract](communication-recovery/OFFLINE-CLOSE.md).
 
 Applying a member recovery code first verifies its group, signature, current roster membership,
 exact unique device→transport record, deadline and route grammar **without dialing**. While the UI
@@ -2949,7 +3102,11 @@ pub struct ChannelChange {          // WHAT moved, carried by every ChannelUpdat
     topic: bool,
     jukebox: bool,
 }
-pub enum AppEvent { ChannelUpdated { channel: u128, change: ChannelChange }, /* … */ }
+pub enum AppEvent {
+    SnapshotNeeded,                 // native snapshot request; no rendered change or completed-save claim
+    ChannelUpdated { channel: u128, change: ChannelChange },
+    /* … */
+}
 
 pub struct ChannelHead {            // one per directory channel; no message text
     channel: u128, count: u64, latest_ts: u64,
