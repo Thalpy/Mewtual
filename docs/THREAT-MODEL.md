@@ -102,8 +102,9 @@ table with the commit that closed it.
   crash between an owner's replacement install and its record's recycle, the router resumes the
   decision as soon as it finds the source owing nothing behind it. If no fetch can start (an
   owner alone has no peer at all), the owner resumes at once, and if a fetch comes to nothing,
-  its next visit resumes, so recovering an install already on the owner's disk never needs
-  another device. The cost of that: an owner alone whose seed really is still owed, with its
+  its next visit resumes, for a Studio source and a Registry bucket alike (including a bucket
+  whose only watched document is stuck Prepared, whose provider is never prepared). So
+  recovering an install already on the owner's disk never needs another device. The cost of that: an owner alone whose seed really is still owed, with its
   source evicted between visits, reruns a full detached rebuild once per deferral window (down to
   one per 15 min) although nothing has changed. It is bounded by the deferral and the shared pool.
 

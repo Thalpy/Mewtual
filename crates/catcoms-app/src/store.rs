@@ -45,9 +45,9 @@ mod epoch_registry;
 #[cfg(test)]
 mod measure;
 #[cfg(test)]
-pub(crate) use epoch_registry::registry_full_loads_for_test;
-#[cfg(test)]
 pub(crate) use epoch_registry::tests::performance::save_inventory_fixture;
+#[cfg(test)]
+pub(crate) use epoch_registry::{registry_full_loads_for_test, registry_inventory_key_for_test};
 pub(crate) use epoch_registry::{
     registry_owed_replacement, OfferedRepairEvidence, PreparedRegistryRepair,
     RegistryRepairCapture, RegistrySourceCapture, RegistrySourceStamp,
@@ -64,7 +64,9 @@ pub use epoch_recovery::cleanup::{
     EpochStorageCleanupProgress as RecoveryCleanupProgress,
 };
 #[cfg(test)]
-pub(crate) use epoch_recovery::inventory::inline_studio_validations_for_test;
+pub(crate) use epoch_recovery::inventory::{
+    inline_registry_validations_for_test, inline_studio_validations_for_test,
+};
 pub use epoch_recovery::inventory::{
     EpochInventoryCoverage, EpochRecordKind, EpochStorageCursor, EpochStorageInventory,
     EpochStorageInventory as EpochRecoveryInventory, EpochStorageInventoryEntry,

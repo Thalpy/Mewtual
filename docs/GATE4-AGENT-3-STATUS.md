@@ -4,6 +4,21 @@ Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-faul
 Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 16 follow-up.
 Review preamble: 3. Current entries override older ones.
 
+## PR #37 review: dispositions, 2026-10-10
+
+An external review of PR #37 at `b4d95e5d` kept the install-before-budget fix and requested
+changes on the Prepared-document addition: one MEDIUM and one LOW.
+
+| Finding | Disposition |
+|---|---|
+| MEDIUM-1: a Prepared-only bucket could still strand a landed install. The Prepared skip resumes the bucket's held decision before any provider is prepared, so the classification is the B3 guess. A peer that never serves the seed meant every eligible turn refetched on that same guess. An unfetched sealed pass returns before Registry preparation, so nothing ever classified exactly. | **Fixed.** As for a cold Studio source, a bucket's B3 guess already tried once (the bucket has an expired deferral entry) is not trusted again: the next eligible visit schedules the resume job, and S3 classifies exactly with no custody restore and no seed. Test: `registry::a_prepared_documents_bucket_recycles_a_landed_install_without_the_seed`. It combines the crash between install and recycle, a cold provider, the sole watched document Prepared, and Bob present but never serving. The first turn fetches; the next eligible turn resumes; S3 gives `AlreadyRepaired` and recycles the record. Mutant `RUNTIME-bucket-tried-guess-resumes`. |
+| LOW-1: no runtime regression pinned the bucket arm's order (memoize, then budget). | **Fixed** without building a bucket over 256 KiB. A test-only counter, `inline_registry_validations_for_test`, beside the Studio one, counts the scan's inline validations of one bucket. `registry::a_bucket_job_commits_without_validating_its_cold_bucket_inline` forgets the cache before S3 and requires zero for the job's bucket. Mutant `RUNTIME-bucket-warm-before-budget` builds the budget first and fails it, which also proves the bucket really was cold at S3. A bucket over the limit through the whole job remains unbuilt; the ordering it would test is now pinned. |
+
+A short static re-review of these fixes found nothing at any level. The runtime harness has 36
+mutants. Root suite: 2311 passed, 1 failed, 23 ignored. The failure was
+`unopened::studio_actors_new_member_after_index_checkpoint_installs_registry_and_index_tail`, the
+known load flake; it passed 3 of 3 runs alone.
+
 ## PR #27 review MEDIUM-1 and Agent 1's interface notes, 2026-10-10
 
 A user-run review of PR #27, pinned at `db46ef0a` (the merge of PR #36), raised one MEDIUM in

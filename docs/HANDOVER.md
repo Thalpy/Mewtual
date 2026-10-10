@@ -14,7 +14,9 @@ and ranks the live hazards in that path.
   S3 now builds its storage budget only after installing (or, for a bucket, memoizing) the rebuild,
   so a cold source over the receive scan's 256 KiB cold-byte limit commits instead of being
   refused and discarded. A held Registry owner decision now resumes even while its bucket's only
-  watched document is stuck in a Prepared handoff. The repair claim's comment and THREAT-MODEL
+  watched document is stuck in a Prepared handoff, and (after the PR #37 review) a bucket whose
+  B3 guess already came to nothing resumes rather than refetching, so a landed install recycles
+  without the seed. The repair claim's comment and THREAT-MODEL
   now name the writers that do not consult it (H5, Flow R's R3, Flow S, warm gossip ingest); S3's
   digest recheck still catches them. Details are in `GATE4-AGENT-3-STATUS.md`.
 

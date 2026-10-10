@@ -1594,6 +1594,10 @@ impl EpochStorageCursor {
                         if matches!(family, EpochRecordKind::Studio) {
                             INLINE_STUDIO_VALIDATIONS.with(|seen| seen.borrow_mut().push(hash));
                         }
+                        #[cfg(test)]
+                        if matches!(family, EpochRecordKind::Registry) {
+                            INLINE_REGISTRY_VALIDATIONS.with(|seen| seen.borrow_mut().push(hash));
+                        }
                         validate_record_body(
                             family,
                             &plain,
@@ -2466,6 +2470,22 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn inline_studio_validations_for_test(scope_hash: [u8; 32]) -> usize {
     INLINE_STUDIO_VALIDATIONS
+        .with(|seen| seen.borrow().iter().filter(|h| **h == scope_hash).count())
+}
+
+#[cfg(test)]
+thread_local! {
+    static INLINE_REGISTRY_VALIDATIONS: std::cell::RefCell<Vec<[u8; 32]>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The Registry counterpart of [`inline_studio_validations_for_test`]: how many times a scan on
+/// this thread validated the bucket whose scope hashes to `scope_hash` inline, under custody. A
+/// repair job's S3 memoizes its rebuilt bucket first, so its budget's scan must not count one
+/// (PR #37 review LOW-1).
+#[cfg(test)]
+pub(crate) fn inline_registry_validations_for_test(scope_hash: [u8; 32]) -> usize {
+    INLINE_REGISTRY_VALIDATIONS
         .with(|seen| seen.borrow().iter().filter(|h| **h == scope_hash).count())
 }
 

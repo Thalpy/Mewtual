@@ -914,6 +914,118 @@ async fn a_prepared_document_never_strands_its_buckets_held_decision() {
     );
 }
 
+/// PR #37 review MEDIUM-1, the two fixtures combined. The owner installed its bucket's replacement
+/// and crashed before recycling the record, the provider is cold, and the bucket's only watched
+/// document is Prepared, so Registry maintenance never prepares the provider. Bob is a peer but
+/// never serves the seed. B3 alone says only the seed is missing, so the first turn fetches it;
+/// that fetch comes to nothing. The next eligible turn must not trust the same guess again: it
+/// resumes, and S3 finds the install landed and recycles, with no seed ever delivered.
+#[tokio::test]
+async fn a_prepared_documents_bucket_recycles_a_landed_install_without_the_seed() {
+    let mut owed = Owed::new(false).await;
+    let target = StudioTarget::Flipnote {
+        channel: owed.target.channel(),
+        object: [23; 16],
+    };
+    let (store, alice) = (&mut owed.store, &mut owed.alice);
+    alice.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_handoff_interrupted_fixture(store, SERVER, g, d, target, 1, true);
+    });
+    let fault = Bucket::for_target(&mut owed, target, true);
+    let (mut runtime, _pool) = owed.runtime(4);
+    let scope = fault.scope();
+    crash_after_bucket_install(&mut owed, &mut runtime, &fault).await;
+    // Restarted: the provider is cold, and the only watched document is Prepared.
+    runtime.registry_provider = None;
+    runtime.owner_snapshot = Some(owed.snapshot());
+    assert!(CatchupRuntime::handoff_prepared(
+        &owed.alice,
+        &owed.store,
+        SERVER,
+        target
+    ));
+    assert!(
+        !owed.alice.sync.studio_page_peers().is_empty(),
+        "Bob is a peer"
+    );
+    let watch = owed
+        .alice
+        .watch_studio_epoch(&owed.store, SERVER, target)
+        .unwrap();
+    let watches = VecDeque::from([(watch, 0)]);
+    runtime
+        .work_registry(&mut owed.alice, &mut owed.store, SERVER, &watches)
+        .unwrap();
+    assert!(
+        runtime
+            .checkpoint
+            .take()
+            .is_some_and(|pass| pass.inner.target() == scope),
+        "the first turn trusts B3 and fetches the seed"
+    );
+    assert!(runtime.repair_job_target().is_none());
+    // Bob never serves it. Once the bucket's deferral has run out, the next turn resumes.
+    owed.clock.advance_ms(60_000);
+    runtime
+        .work_registry(&mut owed.alice, &mut owed.store, SERVER, &watches)
+        .unwrap();
+    assert!(
+        runtime.checkpoint.is_none(),
+        "no second fetch on the same guess"
+    );
+    assert_eq!(
+        runtime.repair_job_target(),
+        Some(scope),
+        "a guess that came to nothing resumes"
+    );
+    commit(&mut runtime, &mut owed).await;
+    assert_eq!(
+        runtime.repair_report(scope),
+        Some(StudioRepairReport::Completed(
+            StudioRepairOutcome::AlreadyRepaired
+        ))
+    );
+    let logical = registry_document(&owed.alice.group_id(), fault.bucket).unwrap();
+    assert!(
+        owed.store
+            .load_epoch_owner_receipts(SERVER, &logical)
+            .is_ok(),
+        "the owner record is recycled, and no seed was ever delivered"
+    );
+}
+
+/// PR #37 review LOW-1: the bucket arm of S3 memoizes the rebuilt bucket's footprint before
+/// building its budget, so the budget's scan reuses it instead of validating the bucket inline,
+/// which the receive scan refuses for a cold bucket over its 256 KiB cold-byte limit. This pins
+/// the order on a really cold vault without building such a bucket: the commit validates this
+/// bucket inline not once.
+#[tokio::test]
+async fn a_bucket_job_commits_without_validating_its_cold_bucket_inline() {
+    let mut owed = Owed::new(false).await;
+    let fault = Bucket::new(&mut owed, false);
+    let (mut runtime, _pool) = owed.runtime(1);
+    let scope = fault.scope();
+    fault.decide(&mut runtime, &mut owed);
+    rebuild(&mut runtime, &owed).await;
+    // Cold for real at S3: the inventory cache forgotten, as a restart leaves it.
+    owed.store.forget_warm_studio_state_for_test();
+    let key =
+        crate::store::registry_inventory_key_for_test(SERVER, &owed.alice.group_id(), fault.bucket);
+    let inline = crate::store::inline_registry_validations_for_test(key);
+    runtime
+        .repair_commit(&mut owed.alice, &mut owed.store, SERVER)
+        .unwrap();
+    assert_eq!(
+        runtime.repair_report(scope),
+        Some(StudioRepairReport::Completed(StudioRepairOutcome::Repaired))
+    );
+    assert_eq!(
+        crate::store::inline_registry_validations_for_test(key),
+        inline,
+        "S3 validated the cold bucket inline"
+    );
+}
+
 /// Plan D, fairness, for buckets: a held bucket never delays another bucket's resume. The one
 /// shared Registry resume cadence did; now only the held bucket's next visit waits.
 #[tokio::test]
