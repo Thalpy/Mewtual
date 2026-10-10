@@ -15,9 +15,11 @@
 //! It used to be a 64-entry LRU, so a scan of more memoizable records than that missed on every
 //! record: each pass evicted what the next needed. It now holds up to `MAX_ACCOUNTED_RECORDS`
 //! entries, the most records any inventory can account, so a complete scan never thrashes it.
-//! [`RecordCache::prune`] drops the entries for files a completed scan did not find, so in steady
-//! state it tracks the vault rather than its history. Memory is about 300 bytes per entry, about
-//! 20 MiB at the bound, resident for the mount's life (15.7, LOW).
+//! [`RecordCache::prune`] drops the entries for files a scan did not find, at every finish that
+//! issues an inventory, so in steady state it tracks the vault rather than its history. Memory is
+//! about 300 bytes per entry, about 20 MiB at the bound, resident for the mount's life (15.7,
+//! LOW). The bound is the only unconditional limit: entries for records deleted since the last
+//! completed scan stay until another completes.
 //!
 //! It is indexed (a keyed map plus an access order), so get, put and eviction are logarithmic:
 //! the linear scan the 64-entry form used would make a scan of 65 536 records quadratic.
@@ -80,10 +82,15 @@ impl RecordCache {
         record: StorageRecord,
     ) {
         self.remove(&key);
-        if self.entries.len() >= MAX_RECORDS {
-            if let Some((_, oldest)) = self.order.pop_first() {
-                self.entries.remove(&oldest);
-            }
+        // Evict until there is room, rather than once. With `entries` and `order` in step one
+        // eviction always suffices, but the bound is what keeps this memo's memory finite, so it
+        // must not rest on that alone: an order entry that named no live entry would otherwise
+        // let `entries` grow past the bound by one each time it was popped (review of M2, LOW-1).
+        while self.entries.len() >= MAX_RECORDS {
+            let Some((_, oldest)) = self.order.pop_first() else {
+                break;
+            };
+            self.entries.remove(&oldest);
         }
         let tick = self.take_tick();
         self.order.insert(tick, key);
@@ -95,6 +102,18 @@ impl RecordCache {
                 record,
                 tick,
             },
+        );
+        self.debug_check();
+    }
+
+    /// `entries` and `order` name the same keys, each exactly once. Checked after every mutation
+    /// in debug and test builds, where it is cheap enough at the sizes tests use; a release build
+    /// relies on [`Self::put`]'s eviction loop for the bound.
+    fn debug_check(&self) {
+        debug_assert_eq!(
+            self.entries.len(),
+            self.order.len(),
+            "the memo's index and access order disagree"
         );
     }
 
@@ -118,12 +137,15 @@ impl RecordCache {
             }
             keep
         });
+        self.debug_check();
     }
 
+    /// Remove `key` from both maps. Every removal goes through here, so they cannot drift apart.
     fn remove(&mut self, key: &Key) {
         if let Some(old) = self.entries.remove(key) {
             self.order.remove(&old.tick);
         }
+        self.debug_check();
     }
 
     fn take_tick(&mut self) -> u64 {
@@ -261,6 +283,12 @@ mod tests {
         );
         assert!(!cache.candidate((EpochRecordKind::Studio, hash(0)), 77));
         assert!(!cache.candidate((EpochRecordKind::Registry, hash(0)), 78));
+        assert!(
+            cache
+                .get((EpochRecordKind::Registry, hash(0)), 78, digest)
+                .is_none(),
+            "a hit ignored the physical size"
+        );
         assert!(cache
             .get(
                 (EpochRecordKind::Registry, hash(0)),
@@ -278,6 +306,25 @@ mod tests {
         assert!(cache
             .get((EpochRecordKind::Registry, hash(0)), 77, digest)
             .is_none());
+        assert!(consistent(&cache));
+    }
+
+    /// The bound holds after an eviction on mismatch, which removes an entry outside `put`'s own
+    /// path (review of M2, LOW-1). Had the eviction left its access-order entry behind, a later
+    /// put at the bound would pop that dangling tick and let the memo grow past its bound.
+    #[test]
+    fn the_bound_and_the_index_survive_an_eviction_on_mismatch() {
+        let mut cache = RecordCache::default();
+        let (v1, v2) = (blake3::hash(b"v1"), blake3::hash(b"v2"));
+        let key = (EpochRecordKind::Studio, hash(0));
+        cache.put(key, 10, v1, record());
+        cache.evict_mismatch(key, 10, v2);
+        assert!(consistent(&cache), "an eviction left the order behind");
+        cache.put(key, 10, v2, record());
+        for n in 1..=MAX_RECORDS {
+            cache.put((EpochRecordKind::Registry, hash(n)), 10, v1, record());
+        }
+        assert_eq!(cache.entries.len(), MAX_RECORDS, "the bound was not held");
         assert!(consistent(&cache));
     }
 

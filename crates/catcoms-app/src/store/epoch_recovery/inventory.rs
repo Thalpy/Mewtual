@@ -1158,10 +1158,15 @@ impl ServerStore {
     /// Drop the memoized validations of records a just-completed scan did not find (C-3 runtime
     /// design 15.3, M2), within that scan's coverage only.
     ///
-    /// Called by every finish path, and only once `finish_with` has issued the inventory: that
-    /// is what proves the traversal saw every record in its coverage, under a token confirmed
-    /// current and a listing confirmed against it. An entry it did not see names a file that is
-    /// gone, so the memo tracks the vault rather than everything it ever held.
+    /// Called by every finish that issues an inventory (`EpochStorageScan::finish`,
+    /// `finish_epoch_inventory_job`, `finish_epoch_storage_scan`), and only once `finish_with` has
+    /// issued it: that is what proves the traversal saw every record in its coverage, under a
+    /// token confirmed current and a listing confirmed against it. An entry it did not see names a
+    /// file that is gone, so the memo tracks the vault rather than everything it ever held.
+    ///
+    /// The reference-scan finish (`finish_creative_references`) does not prune. It would be sound
+    /// to, being a full-coverage finish under the same checks; it is left out only because it
+    /// issues no inventory, and memory is all pruning is about.
     fn prune_inventory_cache(&mut self, inventory: &EpochStorageInventory) {
         let coverage = inventory.coverage;
         self.inventory_cache.prune(
@@ -5650,51 +5655,123 @@ mod tests {
         assert_matches_fresh(&mut store, job);
     }
 
-    /// M2: a completed scan drops the memo entry of a record that is gone, and keeps the others.
-    /// Then a narrower scan, which does not read Studio records, leaves Studio entries alone.
+    /// The three ways a scan issues its inventory, each of which must prune.
+    #[derive(Clone, Copy, Debug)]
+    enum Finish {
+        /// `EpochStorageScan::finish`, the synchronous scans.
+        Scan,
+        /// `finish_epoch_inventory_job`, the converted background owners.
+        Job,
+        /// `finish_epoch_storage_scan`, a bare cursor.
+        Cursor,
+    }
+
+    /// A complete scan of `coverage`, issued through `how`.
+    fn finish_by(store: &mut ServerStore, coverage: EpochInventoryCoverage, how: Finish) {
+        match how {
+            Finish::Scan => {
+                collect_with(store, coverage);
+            }
+            Finish::Job => {
+                let clock = ManualClock::new(0);
+                let mut job = store.begin_epoch_inventory_job(coverage).unwrap();
+                drive_to_end(store, &mut job, &clock);
+                assert!(
+                    matches!(
+                        store.finish_epoch_inventory_job(job).unwrap(),
+                        EpochInventoryOutcome::Complete(_)
+                    ),
+                    "a quiet vault's job did not complete"
+                );
+            }
+            Finish::Cursor => {
+                let mut cursor = store.begin_epoch_storage_scan(coverage).unwrap();
+                while !store
+                    .step_epoch_storage_scan(&mut cursor, ENTRIES_PER_STEP, None)
+                    .unwrap()
+                    .complete
+                {}
+                store.finish_epoch_storage_scan(cursor).unwrap();
+            }
+        }
+    }
+
+    /// M2: a completed scan drops the memo entry of a record that is gone and keeps the others,
+    /// and a scan that does not read a family leaves that family's entries alone. Through each
+    /// of the three finish paths, since each prunes separately (review of M2, MEDIUM-1).
     #[test]
     fn a_completed_scan_prunes_a_removed_records_entry_within_its_coverage() {
-        let root = tempfile::tempdir().unwrap();
-        let mut store = open(root.path());
-        kept_studio_source(&mut store, 1);
-        kept_studio_source(&mut store, 2);
-        let full = EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio;
-        collect_with(&mut store, full);
-        let keys = studio_keys_on_disk(&store);
-        assert_eq!(keys.len(), 2, "precondition: two Studio records");
-        for key in &keys {
+        for how in [Finish::Scan, Finish::Job, Finish::Cursor] {
+            let root = tempfile::tempdir().unwrap();
+            let mut store = open(root.path());
+            kept_studio_source(&mut store, 1);
+            kept_studio_source(&mut store, 2);
+            let full = EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio;
+            collect_with(&mut store, full);
+            let keys = studio_keys_on_disk(&store);
+            assert_eq!(keys.len(), 2, "precondition: two Studio records");
+            for key in &keys {
+                assert!(
+                    store.inventory_cache.holds_for_test(*key),
+                    "precondition: both records are memoized"
+                );
+            }
+
+            // Removed the way any production removal is: under the mutation guard.
+            let (gone, kept) = (keys[0], keys[1]);
+            store.epoch_mutation_guard();
+            fs::remove_file(store.dir.join("servers").join(format!(
+                "{}{}",
+                hex::encode(gone.1),
+                EpochRecordKind::Studio.suffix()
+            )))
+            .unwrap();
+            finish_by(&mut store, full, how);
             assert!(
-                store.inventory_cache.holds_for_test(*key),
-                "precondition: both records are memoized"
+                !store.inventory_cache.holds_for_test(gone),
+                "a removed record's entry survived a completed scan, finished by {how:?}"
             );
+            assert!(
+                store.inventory_cache.holds_for_test(kept),
+                "a record still on disk was pruned, finished by {how:?}"
+            );
+
+            // A Registry entry naming no file: kept by a scan that does not read Registry
+            // records, pruned by one that does. And a Recovery-only scan keeps every Studio entry.
+            let registry = (EpochRecordKind::Registry, [0xAB; 32]);
+            store.inventory_cache.put(
+                registry,
+                10,
+                blake3::hash(b"absent"),
+                StorageRecord {
+                    id: [0; 32],
+                    document: [1; 32],
+                    footprint: Default::default(),
+                },
+            );
+            stage(&mut store, 7, &document(b"group", b"prune"), 1);
+            finish_by(&mut store, EpochInventoryCoverage::RecoveryOnly, how);
+            finish_by(
+                &mut store,
+                EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents,
+                how,
+            );
+            assert!(
+                store.inventory_cache.holds_for_test(kept)
+                    && store.inventory_cache.holds_for_test(registry),
+                "a scan pruned a family outside its coverage, finished by {how:?}"
+            );
+            finish_by(
+                &mut store,
+                EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsAndRegistry,
+                how,
+            );
+            assert!(
+                !store.inventory_cache.holds_for_test(registry),
+                "a Registry scan kept an entry for a record it did not find, finished by {how:?}"
+            );
+            assert!(store.inventory_cache.holds_for_test(kept));
         }
-
-        // Removed the way any production removal is: under the mutation guard.
-        let (gone, kept) = (keys[0], keys[1]);
-        store.epoch_mutation_guard();
-        fs::remove_file(store.dir.join("servers").join(format!(
-            "{}{}",
-            hex::encode(gone.1),
-            EpochRecordKind::Studio.suffix()
-        )))
-        .unwrap();
-        collect_with(&mut store, full);
-        assert!(
-            !store.inventory_cache.holds_for_test(gone),
-            "a removed record's entry survived a completed scan"
-        );
-        assert!(
-            store.inventory_cache.holds_for_test(kept),
-            "a record still on disk was pruned"
-        );
-
-        // A Recovery-only scan never reads Studio records, so it must not prune them.
-        stage(&mut store, 7, &document(b"group", b"prune"), 1);
-        collect_with(&mut store, EpochInventoryCoverage::RecoveryOnly);
-        assert!(
-            store.inventory_cache.holds_for_test(kept),
-            "a scan pruned a family outside its coverage"
-        );
     }
 
     /// A copy of a validated result, for tests that offer the same one more than once.

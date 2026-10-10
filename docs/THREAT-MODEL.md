@@ -981,11 +981,13 @@ table with the commit that closed it.
   full plaintext-wrapper digest and physical size, including gate/receipts/quarantine/history.
   That metadata LRU stores no key/plaintext/doc, completed inventory, membership decision or budget authority.
   It holds up to `MAX_ACCOUNTED_RECORDS` (65 536) entries, so a complete scan never thrashes it,
-  and every completed scan prunes the entries of records it did not find, within its own coverage
-  (C-3 runtime design 15.3). Its memory is therefore bounded by the vault's record count, about
-  300 bytes an entry and about 20 MiB at the bound, resident for the mount's life, UI lock
-  included. The bound is hard whatever puts an entry. Pruning keeps it near the vault's record
-  count, which a peer can raise only by making this device store more records.
+  and every inventory-issuing scan, once complete, prunes the entries of records it did not find,
+  within its own coverage (C-3 runtime design 15.3). About 300 bytes an entry, so about 20 MiB at
+  the bound, resident for the mount's life, UI lock included. **The bound is the only
+  unconditional limit**, and it holds whatever puts an entry. Pruning keeps it near the vault's
+  record count only as often as a covering scan completes, and some do not complete: receive's
+  scan refuses any vault over 64 records. Until one does, entries stay for records deleted since
+  the last, including any a peer caused this device to store and then remove.
   New/staged files still count; reference scans cannot skip CID enumeration. Remount clears reuse.
   A large cold record refuses before read; a changed candidate above the cold rail refuses before
   reconstruction. Warm footprint metadata alone does not authorize a mutable target above its

@@ -167,9 +167,12 @@ and membership/MLS are rechecked before disk work; snapshot persistence precedes
 Only newly Accepted durable edits emit remote StudioUpdated; events recheck native incarnation.
 Automatic inventory uses the existing scanner with local limits (1024 directory entries,
 64 records, 8 MiB authenticated bytes and 256 KiB cold validation bytes). The mount-local
-64-entry LRU retains only pure Registry/Studio footprint validation, never a document, inventory
+LRU retains only pure Registry/Studio footprint validation, never a document, inventory
 or write permit. Every hit requires fresh authenticated file bytes, scope/filename binding and
 the exact complete-wrapper digest/size. Ordinary complete scans warm it; remount starts cold.
+It is indexed and holds up to `MAX_ACCOUNTED_RECORDS` (65 536) entries, so a complete scan never
+thrashes it, and every inventory-issuing finish prunes the entries of records the scan did not
+find, within the scan's own coverage (`GATE4-AGENT-1-C3-RUNTIME.md` 16.1).
 The sole mounted store can also retain one owned verified Studio restart unit, moved rather than
 cloned. Explicit view access prepares it; warm receive and timeline reads reauthenticate its exact
 complete wrapper and bind current actor/group/MLS before reuse. Index refreshes keep only their

@@ -1760,10 +1760,11 @@ source-growing terms) stays deferred with H5 (15.14).
 - **Bounded at `MAX_ACCOUNTED_RECORDS`** (65 536), the most records any inventory can account, so
   a complete scan never thrashes it. It was a 64-entry LRU, which re-validated every record of a
   larger vault on every scan.
-- **Pruned on every completed scan.** `prune_inventory_cache` runs in all three finish paths
-  (`EpochStorageScan::finish`, `finish_epoch_inventory_job` and `finish_epoch_storage_scan`), and
-  only after `finish_with` has issued the inventory. It drops entries of the scan's own covered
-  families that the scan did not find (15.7, LOW).
+- **Pruned at every finish that issues an inventory.** `prune_inventory_cache` runs in the three
+  such paths (`EpochStorageScan::finish`, `finish_epoch_inventory_job` and
+  `finish_epoch_storage_scan`), and only after `finish_with` has issued the inventory. It drops
+  entries of the scan's own covered families that the scan did not find (15.7, LOW). The
+  reference-scan finish issues no inventory and does not prune; it could, soundly.
 - **One coverage rule.** `EpochInventoryCoverage::covers(family)` is now asked by both the
   traversal (`storage_name`) and pruning, so a scan cannot prune a family it did not read. It is
   equivalent, case by case, to the four checks `storage_name` used to make inline.
@@ -1784,5 +1785,24 @@ All 127 inventory tests pass. `THREAT-MODEL.md` now gives the memo's real bound 
 Memory is about 300 bytes an entry and about 20 MiB at the bound, resident for the mount's life.
 The bound is hard, whatever puts an entry.
 
+**Review of M2 (2026-10-10, Opus, static, at `310770d0`): no blocker or high.** It checked the
+coverage refactor against all 30 (coverage, family) pairs. It confirmed that pruning runs only on
+`finish_with` success, can never drop a record the scan found, and leaves every non-scan put
+(each describes bytes on disk) alone. It also found nothing quadratic, and the memory figures
+fair.
+
+| finding | what | disposition |
+|---|---|---|
+| MEDIUM-1 | pruning was pinned on only one of the three finish paths: deleting it from the job or cursor path failed nothing | **fixed:** the prune test runs its whole sequence through each path (`Finish::{Scan, Job, Cursor}`); each deletion now fails it, naming the path |
+| MEDIUM-2 | `ARCHITECTURE.md` and `INTERFACES.md` still said "64-entry LRU" | **fixed** |
+| LOW-1 | the bound rested on `entries` and `order` staying in step, unchecked after `evict_mismatch`: one that removed from `entries` only would let the memo grow past the bound | **fixed:** every removal goes through one helper; `put` evicts in a loop until below the bound; consistency is `debug_assert`ed after every mutation; a test of eviction then refilling to the bound. That mutant now fails three tests |
+| LOW-2 | "every finish path" was not literal: the reference-scan finish does not prune | **reworded** to "every inventory-issuing finish", in code and docs; pruning there would be sound, and is left out because that finish issues no inventory |
+| LOW-3 | THREAT-MODEL said memory is bounded by the vault's record count | **reworded:** only the 65 536 bound is unconditional; entries for deleted records stay until a covering scan completes, which receive's scan never does on a vault over 64 records |
+| LOW-4 | `get`'s size check, and coverage for families other than Studio, had no test | **fixed:** a size-mismatched `get` with the right digest must miss; a Registry entry must survive scans that do not read Registry and be pruned by one that does. Each mutant now fails |
+
+All 128 inventory tests pass.
+
 **Next: M1** (15.2), with 15.8's HIGH-1 writer warms at the eight writers 15.9's M3 counts, the
-forced-warm token, M4's contract, MEDIUM-2's three gates and 15.9's L1, L4 and L5.
+forced-warm token, M4's contract, MEDIUM-2's three gates and 15.9's L1, L4 and L5. Its residual
+risk from this review: each writer warm must land after its write's rename, in the same custody
+visit, or a scan completing between the two could prune the new record's warm entry.

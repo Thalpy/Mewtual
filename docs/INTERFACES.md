@@ -1066,7 +1066,10 @@ pending false/true churn cannot bypass it. Locked/busy native custody retains qu
 
 Automatic inventory has LOCAL service rails of 1024 visited directory entries, 64 P1 records,
 8 MiB aggregate authenticated record bytes and 256 KiB aggregate cold validation bytes. A
-mount-local 64-entry LRU memoizes only pure Registry/Studio footprint validation. A hit needs a
+mount-local LRU of up to 65 536 entries (`MAX_ACCOUNTED_RECORDS`) memoizes only pure
+Registry/Studio footprint validation; an inventory-issuing finish (`EpochStorageScan::finish`,
+`finish_epoch_inventory_job`, `finish_epoch_storage_scan`) prunes entries for records the scan did
+not find, within its own coverage. The reference-scan finish does not prune. A hit needs a
 fresh bounded read/unseal, scope/filename binding, and exact complete-wrapper digest plus size;
 it never reuses a complete inventory or budget. `EpochStorageScanProgress.reused_records` and
 `uncached_bytes` report reuse and physical bytes charged to cold validation. Reference scans
