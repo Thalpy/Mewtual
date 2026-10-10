@@ -180,6 +180,17 @@ byte-for-byte, and the restored tests passed. The first version of `owner-charge
 shared `admit_open`, and the harness refused it as the short re-review predicted: it died in the
 fixture's own fill instead of at its assertion. It now mutates `admit_local` only.
 
+**SIGN-TEST-001b short re-review (2026-10-10, static plus two focused controls): CLOSED, no
+finding.** The reviewed code and harness at shared head `acc43bcf` are unchanged from the
+documentation checkpoint. The positive test creates a real second current member while retaining
+the designated committer, restores the authenticated source with the member as actor, constructs
+that member's successor and completes both Index and Flipnote handoffs; every signed operation is
+the member's. The cap test gives owner and member identical deterministic operation shapes: the
+owner signs and finishes above `MAX_DEVICE_BYTES` but below `MAX_EPOCH_BYTES`, while the member is
+refused `EpochBound` before signing. The three mutants change only the intended actor/owner or
+per-device-cap guard. The harness requires one failed executed test at the named assertion,
+byte-exact restoration and one restored pass. Both focused current-tree tests passed (1/1 each).
+
 **Not done, and why.**
 - **Residual, not part of the original correction:** no isolated mutant for the per-operation
   `recovery::preflight` in `PreparedOverlayChanges::prepare`, nor for the manifest framing probe

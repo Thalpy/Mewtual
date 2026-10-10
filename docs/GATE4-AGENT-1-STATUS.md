@@ -5702,9 +5702,10 @@ SIGN-TEST-001.
 - **SIGN-TEST-001, editor-cap and aggregate halves closed**: `local_policy` through a structurally
   decoded over-cap branch (`local-policy` mutant), and the probe gate through an **honest**
   branch (`probe-gate` mutant).
-- **SIGN-TEST-001b, submitted**: a positive handoff by a non-owner member, and the per-device cap
-  pinned in both directions (owner exempt, member charged), with three mutants
-  (`author-is-owner`, `owner-charged`, `device-exempt`); short re-review outstanding. Residual and
+- **SIGN-TEST-001b, closed by short re-review on 2026-10-10**: a positive handoff by a non-owner
+  member, and the per-device cap pinned in both directions (owner exempt, member charged), with
+  three mutants (`author-is-owner`, `owner-charged`, `device-exempt`). The reviewer found no
+  issue and both focused current-tree controls passed. Residual and
   not part of the correction: no isolated mutant for the per-operation preflight or the framing
   probe, neither of which is the first refusal for any cheap input.
 - **A product gap, for Agent 2**: the honest over-gate branch is valid local work that can never be
