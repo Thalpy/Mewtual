@@ -1857,3 +1857,19 @@ reference-scan half, which reuses nothing, is unchanged.
 **Residual, recorded in THREAT-MODEL:** the memo keeps an Unconfirmed branch's provider device
 id, observed MLS epoch and observation time resident for the mount's life, UI lock included.
 The same facts are in that record on this device's disk; nothing leaves the device.
+
+**Review of M1's memo half (2026-10-10, Opus, static, at `39840b8e`): no blocker or high.** It
+checked each validator's purity (Recovery, OwnerReceipts with signatures over its own bytes,
+Intents' structural decode, DraftArchive): none reads a clock, membership, MLS state, the
+registry or device identity. It also checked that a hit restores every inventory field a
+consumer reads, that facts can be neither fabricated nor dropped by any put path, and that the
+cold rail still bounds each scan's fresh work.
+
+| finding | what | disposition |
+|---|---|---|
+| MEDIUM-1 | the Unconfirmed tally never passed through a hit in any test; the branch case's "facts carry provenance" was never asserted; the refused (overtaken) path was untested for Intents | **fixed in part:** the branch case asserts its facts carry provenance; `a_refused_intents_result_is_memoized_with_its_facts` checks the refused path straight after the refusal, before a later scan could re-memoize the record (a mutant passing no facts there fails it). **Follow-up, proposed to Agent 2:** the only real Unconfirmed-draft fixture is in their `unconfirmed_rails.rs`; one more `budget()` there after `fresh` would put the tally itself through a hit. The cache stores the facts struct whole, so the Closing case's provenance exercises the same path |
+| LOW-1 | `facts_fit` checked presence, not that the facts belong to the entry | **fixed:** it also requires the facts' `charged_bytes` to equal the entry's size; a unit test refuses another record's facts and round-trips matching ones |
+| LOW-2 | the facts stored inline in every entry pushed memory to about 380 bytes an entry and 25 MiB | **fixed:** boxed, so other families' entries carry a pointer; THREAT-MODEL notes an Intents entry's extra 60 bytes |
+| LOW-3 | stale "only Registry and Studio are cacheable" comments in `performance.rs` | **fixed** (four comments, and the profile name explained rather than renamed, since docs and run commands quote it) |
+| residual | two replay tests (`studio_exchange/tests/replay.rs`) needed records to park, and the watch's synchronous scan now warms them | **confirmed by the full suite and fixed:** a new `forget_inventory_memo_for_test` empties the memo, and only the memo, after the watch, so each test's job meets the cold records it was written for. The existing hook also drops the retained Studio source, which would change what they test |
+| residual | THREAT-MODEL could say warm bytes still count against the 8 MiB read rail, and that entries (another member's Unconfirmed provider id included) outlive their records until a covering scan prunes | **added** |

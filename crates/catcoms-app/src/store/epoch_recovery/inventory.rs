@@ -2469,6 +2469,15 @@ impl ServerStore {
     /// would also cost a receiver its watches and its mount): every memoized validation, and the
     /// retained source graph. Both are needed: retaining a source also caches its inventory
     /// footprint (`cache_studio_source_footprint`), so a retained graph alone re-warms the cache.
+    /// Forget every memoized validation and nothing else, for a test outside the store whose
+    /// subject needs records cold after a synchronous scan has read them. Since C-3 runtime 15.2
+    /// (M1) such a scan, an explicit access's included, memoizes every family's records, so a
+    /// job started after it finds nothing to park.
+    #[cfg(test)]
+    pub(crate) fn forget_inventory_memo_for_test(&mut self) {
+        self.inventory_cache.clear_for_test();
+    }
+
     #[cfg(test)]
     pub(crate) fn forget_warm_studio_state_for_test(&mut self) {
         self.inventory_cache.clear_for_test();
@@ -5486,6 +5495,85 @@ mod tests {
             store.finish_epoch_inventory_job(job).unwrap(),
             EpochInventoryOutcome::Complete(_)
         ));
+    }
+
+    /// A refused Intents result is memoized with its inventory facts (review of M1, MEDIUM-1). The
+    /// overtaken path memoizes through `memoize_refused`, a different route from an install, and
+    /// nothing exercised it for Intents: had it dropped the facts, the restarted job's hit would
+    /// have returned the record without them. Checked straight after the refusal, before any later
+    /// scan re-memoizes the record, on a Closing branch whose facts carry provenance.
+    #[test]
+    fn a_refused_intents_result_is_memoized_with_its_facts() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let device = catcoms_mls::MlsDevice::generate().unwrap();
+        let group = catcoms_mls::ServerGroup::create(&device).unwrap();
+        crate::store::epoch_studio::tests::performance::studio_handoff_ready_fixture(
+            &mut store,
+            7,
+            &group,
+            &device,
+            catcoms_replication::studio::StudioTarget::Flipnote {
+                channel: [9; 16],
+                object: [3; 16],
+            },
+            1,
+        );
+        store.detach_every_validation_for_test();
+        store.inventory_cache.clear_for_test();
+        let clock = ManualClock::new(0);
+        let full = EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio;
+        let mut job = store.begin_epoch_inventory_job(full).unwrap();
+        let validated = loop {
+            match store
+                .step_epoch_inventory_job(&mut job, ENTRIES_PER_STEP, Some((&clock, 250)))
+                .unwrap()
+            {
+                EpochInventoryStep::Parked => {
+                    let parked = store.take_parked_job_record(&mut job).unwrap();
+                    let is_intents = parked.classification().0 == EpochRecordKind::Intents;
+                    let validated = parked.validate().unwrap();
+                    if is_intents {
+                        break validated;
+                    }
+                    store
+                        .install_validated_job_record(&mut job, validated)
+                        .unwrap();
+                }
+                EpochInventoryStep::Stepped(progress) if progress.complete => {
+                    panic!("the traversal ended without parking the Intents record")
+                }
+                EpochInventoryStep::Unstable => panic!("a quiet vault reported unstable"),
+                _ => {}
+            }
+        };
+        let facts = validated
+            .body
+            .intent
+            .expect("an Intents result carries its facts");
+        assert!(
+            facts.provenance().is_some(),
+            "precondition: a branch's facts with provenance"
+        );
+        let (key, size, digest) = (validated.key, validated.size, validated.digest);
+
+        store.epoch_mutation_guard();
+        assert!(matches!(
+            store
+                .install_validated_job_record(&mut job, validated)
+                .unwrap(),
+            EpochInventoryStep::Restarted
+        ));
+        assert_eq!(
+            store
+                .inventory_cache
+                .get(key, size, digest)
+                .and_then(|(_, intent)| intent),
+            Some(facts),
+            "the refused result was memoized without its facts"
+        );
+        drive_to_end(&mut store, &mut job, &clock);
+        assert_matches_fresh(&mut store, job);
     }
 
     /// Piece 3: an entry put after the scan read the record, as a write path warming a newer

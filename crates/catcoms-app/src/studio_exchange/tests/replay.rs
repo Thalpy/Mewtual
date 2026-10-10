@@ -189,6 +189,10 @@ async fn studio_replay_nonowner_restarts_replays_selected_own_title_and_archives
     // detach count could not tell the job from a synchronous scan (C-3 runtime 14.6).
     p.b_store.detach_every_validation_for_test();
     let mut receiver = watch(&mut p);
+    // The watch's explicit access scanned synchronously, and since C-3 runtime 15.2 (M1) that
+    // memoizes every family, so the job would find every record warm and park nothing. Cold
+    // again, as this vault was before M1.
+    p.b_store.forget_inventory_memo_for_test();
     assert!(
         settle_replay(&mut p, &mut receiver).await > 0,
         "the manual move did not take its budget from the shared inventory job"
@@ -376,6 +380,8 @@ async fn studio_replay_inventory_lifecycle_at_the_receiver() {
     // validate inline or be warm, so nothing would park (C-3 runtime 14.6).
     p.b_store.detach_every_validation_for_test();
     let mut receiver = watch(&mut p);
+    // Cold again after the watch's synchronous scan, which memoizes every family since M1.
+    p.b_store.forget_inventory_memo_for_test();
     let pool = receiver.inject_overlay_pool_for_test(4);
     // Visit until the manual move's job has parked a body, detaching nothing else on the way.
     let park = |receiver: &mut StudioReceiver, p: &mut Pair| {

@@ -42,8 +42,10 @@ struct Verified {
     digest: blake3::Hash,
     physical_bytes: u64,
     record: StorageRecord,
-    /// Present exactly when the key's family is Intents.
-    intent: Option<EpochIntentInventoryFacts>,
+    /// Present exactly when the key's family is Intents. Boxed, so the other families' entries,
+    /// most of the memo, carry a pointer rather than the facts inline: about 64 bytes more per
+    /// entry otherwise, and about 25 MiB at the bound instead of about 20 (review of M1, LOW-2).
+    intent: Option<Box<EpochIntentInventoryFacts>>,
     /// Position in [`RecordCache::order`]: the entry with the smallest tick is evicted first.
     tick: u64,
 }
@@ -51,9 +53,17 @@ struct Verified {
 /// What a hit restores: the accounting record and, for an Intents record, its inventory facts.
 pub(in crate::store) type Memoized = (StorageRecord, Option<EpochIntentInventoryFacts>);
 
-/// Whether `intent` is the right shape for `family`: facts for Intents, none otherwise.
-fn facts_fit(family: EpochRecordKind, intent: &Option<EpochIntentInventoryFacts>) -> bool {
+/// Whether `intent` is the right shape for an entry of `family` and physical `size`: facts for
+/// Intents, none otherwise, and facts that charge exactly the entry's size, since a validation
+/// charges the record's physical bytes (review of M1, LOW-1). A value whose facts came from
+/// another record would otherwise go in silently.
+fn facts_fit(
+    family: EpochRecordKind,
+    size: u64,
+    intent: &Option<EpochIntentInventoryFacts>,
+) -> bool {
     (family == EpochRecordKind::Intents) == intent.is_some()
+        && intent.is_none_or(|facts| facts.charged_bytes == size)
 }
 
 /// Mount-local metadata only: no plaintext, mutable CRDT, authority key or scan budget survives.
@@ -84,7 +94,7 @@ impl RecordCache {
         self.order.remove(&value.tick);
         value.tick = tick;
         self.order.insert(tick, key);
-        Some((value.record, value.intent))
+        Some((value.record, value.intent.as_deref().copied()))
     }
 
     /// Memoize a family's accounting record, for a family with no inventory facts. The writer
@@ -114,7 +124,7 @@ impl RecordCache {
         record: StorageRecord,
         intent: Option<EpochIntentInventoryFacts>,
     ) -> bool {
-        if !facts_fit(key.0, &intent) {
+        if !facts_fit(key.0, size, &intent) {
             debug_assert!(
                 false,
                 "a {:?} memo entry with the wrong inventory facts",
@@ -141,7 +151,7 @@ impl RecordCache {
                 digest,
                 physical_bytes: size,
                 record,
-                intent,
+                intent: intent.map(Box::new),
                 tick,
             },
         );
@@ -361,6 +371,40 @@ mod tests {
         let key = (EpochRecordKind::Intents, hash(1));
         assert!(!cache.put_validated(key, 10, blake3::hash(b"v"), record(), None));
         assert!(!cache.holds_for_test(key));
+    }
+
+    /// Facts that charge a different size from the entry's are refused (review of M1, LOW-1): a
+    /// validation charges the record's own physical bytes, so they belong to another record. The
+    /// same facts at the entry's own size are accepted, and a hit returns them.
+    #[test]
+    fn facts_from_another_record_are_refused_and_matching_facts_round_trip() {
+        let mut cache = RecordCache::default();
+        let key = (EpochRecordKind::Intents, hash(1));
+        let facts = |charged_bytes| EpochIntentInventoryFacts {
+            provenance: None,
+            charged_bytes,
+        };
+        let digest = blake3::hash(b"v");
+        assert!(cache.put_validated(key, 10, digest, record(), Some(facts(10))));
+        assert_eq!(
+            cache.get(key, 10, digest).and_then(|(_, intent)| intent),
+            Some(facts(10)),
+            "a hit did not return the facts it was given"
+        );
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cache.put_validated(key, 10, digest, record(), Some(facts(11)))
+        }));
+        // A debug build fails loudly; a release build refuses quietly. Either way nothing is
+        // stored, and the matching entry already cached is left in place.
+        assert!(
+            !matches!(refused, Ok(true)),
+            "facts from another record were stored"
+        );
+        assert_eq!(
+            cache.get(key, 10, digest).and_then(|(_, intent)| intent),
+            Some(facts(10)),
+            "facts from another record replaced the entry's own"
+        );
     }
 
     /// And the converse: facts on any other family's entry are refused too, since no other

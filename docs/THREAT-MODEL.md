@@ -994,10 +994,15 @@ table with the commit that closed it.
   rail for any family, so a vault receive refuses cold is admitted once its records are warm. A
   refused scan warms what it validated before reaching the rail, so a later attempt does less
   fresh work, and a remount makes the vault cold again. The rail still bounds each scan's fresh
-  validation, which is its purpose.
+  validation, which is its purpose. Warm bytes still count against the 8 MiB authenticated-read
+  rail, since every hit reads and authenticates its file, so a vault admitted warm authenticates
+  up to 8 MiB on each receive turn, where it used to stop at the cold rail.
+  **Entries outlive their records until a complete covering scan prunes them**, which includes
+  another member's Unconfirmed provider id after leaving a server.
   It holds up to `MAX_ACCOUNTED_RECORDS` (65 536) entries, so a complete scan never thrashes it,
   and every inventory-issuing scan, once complete, prunes the entries of records it did not find,
-  within its own coverage (C-3 runtime design 15.3). About 300 bytes an entry, so about 20 MiB at
+  within its own coverage (C-3 runtime design 15.3). About 300 bytes an entry (an Intents entry
+  about 60 more, for its boxed inventory facts), so about 20 MiB at
   the bound, resident for the mount's life, UI lock included. **The bound is the only
   unconditional limit**, and it holds whatever puts an entry. Pruning keeps it near the vault's
   record count only as often as a covering scan completes, and some do not complete: receive's

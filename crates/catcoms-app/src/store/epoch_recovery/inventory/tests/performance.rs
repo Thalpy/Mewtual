@@ -138,9 +138,10 @@ impl RecordCost {
 
 /// Whether the validation cache is allowed to carry across trials.
 ///
-/// Only Registry and Studio are cacheable, and only in accounting mode (`cacheable` requires
-/// `references.is_none()`). The distinction is load-bearing for them and irrelevant for the
-/// rest, so it is an explicit parameter rather than a property of the fixture.
+/// Every family is cacheable since C-3 runtime 15.2 (M1), and only in accounting mode
+/// (`cacheable` requires `references.is_none()`). The distinction is load-bearing for every
+/// family's accounting profile, so it is an explicit parameter rather than a property of the
+/// fixture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CachePolicy {
     /// Clear between trials. Every trial performs a fresh validation, so `TRIALS` batches
@@ -757,8 +758,8 @@ fn recovery_accounting_case(sizes: &[usize]) -> Case {
         let key = format!("recovery-{n}");
         stage_sized(&mut store, 7, &document(b"group", key.as_bytes()), *size);
     }
-    // Recovery is not a cacheable family, so the policy is immaterial here; `Fresh` states the
-    // intent rather than relying on that.
+    // Recovery is cacheable since C-3 runtime 15.2 (M1), so `Fresh` matters here: it makes each
+    // trial a fresh validation rather than a hit.
     case(
         "recovery_accounting",
         root,
@@ -1286,8 +1287,8 @@ fn check_case_structure(case: &Case) {
     if case.references {
         assert!(
             cost.reused.iter().all(|n| *n == 0),
-            "{label}: a reference scan reported validation-cache hits, but nothing is cacheable \
-             in that mode: {:?}",
+            "{label}: a reference scan reported validation-cache hits, but a reference scan never \
+             consults the memo (it memoizes, but must enumerate the actual CIDs): {:?}",
             cost.reused
         );
     }
@@ -1527,9 +1528,10 @@ fn c3_canonical_reference_fixture_collects_its_planted_cids() {
 /// The cacheable families behave differently across trials, and the profile depends on exactly
 /// how. Pin it on a frozen clock rather than discovering it in a timing run.
 ///
-/// Registry stands for both: `cacheable` is `matches!(family, Registry | Studio) &&
-/// references.is_none()`, so the three modes are structurally distinct and a profile that
-/// conflated them would divide its means by the wrong count without saying so.
+/// Registry stands for every family: `cacheable` is `references.is_none()` (every family since
+/// C-3 runtime 15.2, M1; Registry and Studio only before), so the three modes are structurally
+/// distinct and a profile that conflated them would divide its means by the wrong count without
+/// saying so.
 #[test]
 fn c3_cacheable_family_parks_when_fresh_and_hits_cache_when_warm() {
     let clock = ManualClock::new(0);
@@ -1715,6 +1717,18 @@ fn c3_every_family_is_memoized_and_a_hit_restores_a_fresh_validation() {
             "{}: precondition: an Intents record with its facts",
             case.label
         );
+        // The branch case's facts carry provenance, which is what makes it the case that pins a
+        // hit restoring provenance and not only the charged bytes (review of M1, MEDIUM-1).
+        if case.label.starts_with("intents_branch") {
+            assert!(
+                fresh
+                    .iter()
+                    .any(|(kind, .., facts)| *kind == EpochRecordKind::Intents
+                        && facts.is_some_and(|f| f.provenance().is_some())),
+                "{}: precondition: the branch's facts carry provenance",
+                case.label
+            );
+        }
         let families: std::collections::BTreeSet<_> = fresh.iter().map(|o| o.0).collect();
         for family in &families {
             assert!(
@@ -2468,7 +2482,9 @@ fn uncached_family_fixtures_scan_cleanly() {
 
 /// Opt-in, real clock: the uncached families at their accepted ceilings, interleaved with the
 /// Recovery size sweep for comparison with the earlier profile. Prints; asserts correctness,
-/// never machine speed. Run on a quiet machine:
+/// never machine speed. "Uncached" names these families as they were when the profile was written;
+/// they are memoized since C-3 runtime 15.2 (M1), and each case's `Fresh` policy keeps every trial
+/// a fresh validation. Run on a quiet machine:
 /// `RUST_MIN_STACK=33554432 cargo test --release -p catcoms-app --lib -- --ignored
 /// profile_c3_uncached_families --nocapture`.
 #[test]
