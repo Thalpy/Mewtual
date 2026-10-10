@@ -680,9 +680,19 @@ async fn studio_actor_unconfirmed_save_a_capture_queued_then_paused_is_released(
 ///
 /// No visit runs while locked, so neither the pause release nor the park deadline would reach
 /// them. Nothing was durable in any case.
+///
+/// Each case runs in its own boxed future. Built inline, the three fixtures stayed alive together
+/// in one future, which `#[tokio::test]` keeps on the test thread's stack, and that overflowed the
+/// default 2 MiB stack the root suite runs with, on Linux and Windows alike (CI at `5c80e69c`).
+/// The overlay workflow and its harness passed only because they set `RUST_MIN_STACK`.
 #[tokio::test]
 async fn studio_actor_unconfirmed_save_a_lock_releases_queued_parked_and_returning_work() {
-    // Queued.
+    Box::pin(lock_releases_a_queued_capture()).await;
+    Box::pin(lock_releases_a_parked_plan()).await;
+    Box::pin(lock_drops_a_detached_jobs_returning_plan()).await;
+}
+
+async fn lock_releases_a_queued_capture() {
     let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
     let pool = receiver.inject_overlay_pool_for_test(4);
     let a = new_entry(&mut p, (basis, branch), 111, [8; 16]);
@@ -699,8 +709,9 @@ async fn studio_actor_unconfirmed_save_a_lock_releases_queued_parked_and_returni
     );
     assert!(receiver.detach(&mut p.bob).is_none());
     assert_eq!(pending(&mut p, target), 0, "nothing was durable");
+}
 
-    // Parked.
+async fn lock_releases_a_parked_plan() {
     let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
     let pool = receiver.inject_overlay_pool_for_test(4);
     let a = new_entry(&mut p, (basis, branch), 112, [8; 16]);
@@ -717,8 +728,9 @@ async fn studio_actor_unconfirmed_save_a_lock_releases_queued_parked_and_returni
         "the lock did not release a parked plan"
     );
     assert_eq!(pending(&mut p, target), 0, "nothing was durable");
+}
 
-    // Detached when the lock arrives.
+async fn lock_drops_a_detached_jobs_returning_plan() {
     let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
     let pool = receiver.inject_overlay_pool_for_test(4);
     let a = new_entry(&mut p, (basis, branch), 113, [8; 16]);
