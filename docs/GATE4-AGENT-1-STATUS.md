@@ -6013,8 +6013,26 @@ makes that more important, not less.
      since without them a converted catch-up job provably never finishes under ordinary receive
      (15.7, HIGH-1). After the measurement, each remaining owner is either converted or recorded as
      debt, as H5 was. **M2 is built** (16.1): the memo is indexed, bounded at 65 536 and pruned.
-     Next is M1 with the writer warms, then MEDIUM-3's progress rule, then section 7's
+     **M1's memo half is built** (16.2). Next is M1's writer half, waiting on Agent 2's and
+     Agent 3's go-ahead for their writer files, then MEDIUM-3's progress rule, then section 7's
      measurement.
+   - **MEDIUM-3 is built and reviewed but held, not landed** (2026-10-10, commit `2e7892aa`,
+     kept on the local ref `refs/agent1/medium3-held`). It was built out of 15.9's order, before
+     the writer warms. Its review (Opus, static) found no blocker or high, but MEDIUM-1 showed why
+     the order matters. Without writer warms, a write leaves the record it touched cold, and the
+     next attempt re-warms it. That counts as progress, so up to 64 restarts per job are excused
+     with no real progress, and replay's manual move would then wait out its full 60 s patience
+     rather than reach the faster fallback through backoff. **To land it, after the writer warms:**
+     - rebase it onto the line;
+     - add the review's MEDIUM-2 tests: the own-write refresh's credit, the error path's excuse,
+       and a store-level refused-but-unstored check;
+     - add a runtime storm with token-only foreign writes that pins the excused count, then
+       charged restarts, then backoff;
+     - fix LOW-1's stale comments and `MAX_INVENTORY_RESTARTS`'s doc;
+     - state LOW-2 in 16.3 (the ceiling suits the receive profile only; a full-profile owner must
+       revisit it);
+     - order or document LOW-3's own-write refresh against the rule;
+     - restrict `warmed` to job cursors (LOW-4).
 2. **Flow R is built** (2026-10-09; see "Flow R: the staged resolution of an interrupted handoff,
    built" above, and design 6.4.2 to 6.4.5). With H5's single visit accepted (C-3 runtime 15.14),
    R3 joins H5 in the deferred split if that target is ever restored. Still to do: its
