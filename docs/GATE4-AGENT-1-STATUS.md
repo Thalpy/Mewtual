@@ -2632,6 +2632,43 @@ was redundant. Two lows, both fixed:
 | LOW-A | the replay test checked how many documents completed, not which, so a wrong fix that completed the stuck document instead of moving on would pass | **fixed:** it asserts the completed set is exactly the other document. Broken on purpose with that wrong fix, the count check passed and only the new assertion failed |
 | LOW-B | THREAT-MODEL's "repair's other resume routes do not pass through this skip" read as a fallback for the bucket's held decision, which has none | **fixed:** it now says maintenance's turn is that decision's only ordinary resume route |
 
+### After the push of `af113f24`: the other agents' replies (2026-10-10)
+
+**Agent 2** pushed `5c80e69c` directly onto this branch:
+- the Unconfirmed Save's `Paused` outcome;
+- a UI lock now releases the overlay slot (in `receiver.rs` and `catchup.rs`);
+- the lifecycle harness split into three shards.
+
+**Root CI was red at `5c80e69c`, on both OSes.** One of its new tests,
+`studio_actor_unconfirmed_save_a_lock_releases_queued_parked_and_returning_work`, overflowed the
+default 2 MiB test-thread stack. It reproduced locally, and passed with 8 MiB.
+- **Why it slipped through:** the overlay workflow and its harness set `RUST_MIN_STACK`, and the
+  root `build & test` job does not.
+- **The cause:** the test built three fixtures in one future, shadowed rather than dropped. All
+  three were alive together on the test thread's stack.
+- **Fixed here, with the user's go-ahead:** each case runs in its own boxed future, under the same
+  name and with the same assertions. It now passes on the default stack, and Agent 2's four
+  harness entries that name it are still DETECTED.
+
+Two doc points from Agent 2:
+- the F4 test's new name, above;
+- the native `retry` vocabulary's fourth value, now in `GATE4-AGENT-1-MAP-DESIGN.md` section 3.
+
+Agent 2 agreed the `replay_ready()` follow-up's shape: gate H5's commit and the replay step on
+`replay_ready() && !captured_service_owed(server)` by name, not inside `replay_ready()`, which
+also gates the Save's detach. It has a design check before it is built.
+
+**Agent 3** answered the PR #27 review's MEDIUM-1 in `b4d95e5d` on `gate4-agent3-repair` (PR
+#37, into this branch):
+- S3 installs before it budgets;
+- a Registry bucket memoizes its rebuild;
+- `RepairClaims::claimed` lists the writers that do not consult the claim (H5 and R3 among them);
+- Registry maintenance now resumes a bucket's held decision before skipping a Prepared document.
+
+The caveat here, in THREAT-MODEL and in HANDOVER, that a stuck Hold delays that decision stays
+until PR #37 merges into this branch, since until then it is true here. The probe's
+`repair_claimed` skip stays an Agent 1 follow-up.
+
 ## Design 18.3 bounded implementation review (2026-10-09, Opus, static): PASS WITH FINDINGS
 
 **No blocker, no high.** Three mediums and five lows. The review covered Agent 1's runtime
@@ -2722,7 +2759,8 @@ before F4.
 
 **Tests, each broken on purpose:**
 - **The capture check removed:** fails
-  `studio_actor_unconfirmed_save_captured_while_paused_answers_busy_and_holds_nothing`.
+  `studio_actor_unconfirmed_save_captured_while_paused_answers_paused_and_holds_nothing` (named
+  `..._answers_busy_...` until Agent 2 added the `Paused` outcome, 2026-10-10).
 - **A check at the entry instead:** fails
   `studio_actor_unconfirmed_save_exact_retry_while_paused_is_still_saved`.
 - **The pause release removed:** fails both

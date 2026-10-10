@@ -45,14 +45,13 @@ and ranks the live hazards in that path.
   - **F1:** an exact retry of an accepted overlay operation now returns
     `StudioOverlaySave::Acknowledged { basis, accepted }` and rebuilds no draft (see
     `INTERFACES.md`).
-  - **F4:** a Save captured while the receiver is paused is dropped with `Busy`, and a pause
-    releases a capture still queued, freeing admission, the pool permit and the media hold. That
-    `Busy` is not free, since the visit paid for media admission and, for the Unconfirmed Save,
-    the budget scan. A caller could not tell it from the other `Busy`, because the paused event
-    is one-shot and neither Save ends a pause. *Closed for the Unconfirmed Save on 2026-10-10:* it
-    answers `Paused` (natively `retry:"afterExplicitAccess"`). The Closing `save_overlay` still
-    answers `Busy` while paused, and needs the same distinction before its native result
-    registers.
+  - **F4:** a Save captured while the receiver is paused is dropped, and a pause releases a
+    capture still queued, freeing admission, the pool permit and the media hold. The refusal is
+    not free, since the visit paid for media admission and, for the Unconfirmed Save, the budget
+    scan. The Unconfirmed Save answers it with `Paused` (natively `retry:"afterExplicitAccess"`,
+    Agent 2, 2026-10-10), so a caller can tell it from `Busy`, which the paused event alone could
+    not. The Closing `save_overlay` still answers `Busy` while paused, and needs the same
+    distinction before its native result registers.
   - **F2:** an actor-level test of Flow H's signing yield, with a second member's checkpoint
     request arriving mid-signing. It found that a request catch-up had reserved, and whose source
     it had installed, was invisible to the yield. Signing then ran to the end, and H5's commit
