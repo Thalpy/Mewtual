@@ -1730,3 +1730,59 @@ and saves only about 0.06 ms per frame.
 
 Also recorded in `THREAT-MODEL.md` (the pause a member can cause) and in `HANDOVER.md`'s known
 limitations.
+
+## 16. The remaining owners: the prerequisite first, then a decision (2026-10-10)
+
+**Decided by the project owner.** What remains of C-3's adoption is catch-up (section 5's
+persist, begin-pass and serve sites, discovery, Registry and rotation), Agent 3's repair sites,
+receive, H1, and replay's Apply seam. None of them is converted until the prerequisite below is
+built and section 7's measurement is taken. The numbers then decide, site by site, whether it is
+converted or recorded as debt, as H5 was (15.14).
+
+**Why the prerequisite comes first.** Section 7 gates catch-up and receive on two measurements:
+visits per inventory, and the restart rate with another writer active. Without writer-side warms
+the outcome is already known (15.7, HIGH-1). With document A open and a peer drawing on B, every
+receive turn writes B cold. A converted job therefore parks on B each turn and is overtaken by the
+next packet, so it never finishes. Measuring before the warms would only confirm that.
+
+**The prerequisite is 15.9's items 2 to 4:** M2, then M1 with writer warms at all eight writers
+(the forced-warm token and 15.9's M4 contract), then MEDIUM-3's progress rule with per-key credit
+and a ceiling. All three also cut today's synchronous cost, since a warm record is never validated
+under custody again, so they are worth building whatever the decision. Item 1 (H5's
+source-growing terms) stays deferred with H5 (15.14).
+
+### 16.1 M2, built (2026-10-10)
+
+`RecordCache` (`inventory/cache.rs`) now has four properties:
+- **Indexed:** two `BTreeMap`s, the entries by key and an access order by a never-reused tick, so
+  get, put and eviction are logarithmic. `EpochRecordKind` is `Ord` but not `Hash`, so this needs
+  no new derive or dependency.
+- **Bounded at `MAX_ACCOUNTED_RECORDS`** (65 536), the most records any inventory can account, so
+  a complete scan never thrashes it. It was a 64-entry LRU, which re-validated every record of a
+  larger vault on every scan.
+- **Pruned on every completed scan.** `prune_inventory_cache` runs in all three finish paths
+  (`EpochStorageScan::finish`, `finish_epoch_inventory_job` and `finish_epoch_storage_scan`), and
+  only after `finish_with` has issued the inventory. It drops entries of the scan's own covered
+  families that the scan did not find (15.7, LOW).
+- **One coverage rule.** `EpochInventoryCoverage::covers(family)` is now asked by both the
+  traversal (`storage_name`) and pruning, so a scan cannot prune a family it did not read. It is
+  equivalent, case by case, to the four checks `storage_name` used to make inline.
+
+`finish_epoch_storage_scan` now takes `&mut self`. Its only callers are tests; one closure in
+`epoch_registry/tests.rs` changed from `&ServerStore` to `&mut ServerStore`.
+
+**Tests, each guard broken on purpose:**
+
+| test | guards |
+|---|---|
+| `inventory_cache_is_bounded_lru_and_requires_family_size_and_full_digest` (rewritten for the new bound, a recorded contract change from 64) | the bound; a hit counts as a use; the index and order agree. A hit that does not refresh its tick fails it |
+| `pruning_drops_only_covered_entries_the_scan_did_not_find` | prune's two predicates, at unit level |
+| `a_scan_of_more_records_than_the_old_lru_held_reuses_every_warm_entry` (72 Studio records) | with the bound put back to 64 it fails, revalidating all 72 on the second scan, `(72, 0)` against `(0, 72)` |
+| `a_completed_scan_prunes_a_removed_records_entry_within_its_coverage` | pruning disabled: the removed record's entry survives. Coverage ignored: a Recovery-only scan prunes a Studio entry |
+
+All 127 inventory tests pass. `THREAT-MODEL.md` now gives the memo's real bound and residency.
+Memory is about 300 bytes an entry and about 20 MiB at the bound, resident for the mount's life.
+The bound is hard, whatever puts an entry.
+
+**Next: M1** (15.2), with 15.8's HIGH-1 writer warms at the eight writers 15.9's M3 counts, the
+forced-warm token, M4's contract, MEDIUM-2's three gates and 15.9's L1, L4 and L5.

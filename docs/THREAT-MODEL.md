@@ -976,10 +976,16 @@ table with the commit that closed it.
   emitted under a replacement numeric server id; the UI/incarnation fence lasts through emission.
   Automatic inventory uses LOCAL limits of 1024 visited entries, 64 records, 8 MiB aggregate
   authenticated reads and 256 KiB aggregate cold validation bytes, including unrelated saved P1
-  sources. Its mount-local 64-entry LRU stores only context-free Registry/Studio footprint
+  sources. Its mount-local LRU stores only context-free Registry/Studio footprint
   validation. Every hit still authenticates the actual file and binds its scope/filename,
   full plaintext-wrapper digest and physical size, including gate/receipts/quarantine/history.
   That metadata LRU stores no key/plaintext/doc, completed inventory, membership decision or budget authority.
+  It holds up to `MAX_ACCOUNTED_RECORDS` (65 536) entries, so a complete scan never thrashes it,
+  and every completed scan prunes the entries of records it did not find, within its own coverage
+  (C-3 runtime design 15.3). Its memory is therefore bounded by the vault's record count, about
+  300 bytes an entry and about 20 MiB at the bound, resident for the mount's life, UI lock
+  included. The bound is hard whatever puts an entry. Pruning keeps it near the vault's record
+  count, which a peer can raise only by making this device store more records.
   New/staged files still count; reference scans cannot skip CID enumeration. Remount clears reuse.
   A large cold record refuses before read; a changed candidate above the cold rail refuses before
   reconstruction. Warm footprint metadata alone does not authorize a mutable target above its

@@ -6006,6 +6006,13 @@ makes that more important, not less.
      8. the touched-path cursor decision, which moves into step 3 if item 1 leaves no margined
         share.
    - **Steps 4 and 5** still need section 7's measurements.
+   - **Decision, 2026-10-10 (C-3 runtime 16): the prerequisite first, then the numbers decide.**
+     The project owner chose to build writer-side warms and the indexed memo before measuring,
+     since without them a converted catch-up job provably never finishes under ordinary receive
+     (15.7, HIGH-1). After the measurement, each remaining owner is either converted or recorded as
+     debt, as H5 was. **M2 is built** (16.1): the memo is indexed, bounded at 65 536 and pruned.
+     Next is M1 with the writer warms, then MEDIUM-3's progress rule, then section 7's
+     measurement.
 2. **Flow R is built** (2026-10-09; see "Flow R: the staged resolution of an interrupted handoff,
    built" above, and design 6.4.2 to 6.4.5). With H5's single visit accepted (C-3 runtime 15.14),
    R3 joins H5 in the deferred split if that target is ever restored. Still to do: its

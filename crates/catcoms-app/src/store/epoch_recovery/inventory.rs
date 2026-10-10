@@ -41,6 +41,28 @@ impl EpochInventoryCoverage {
                 | Self::RecoveryOwnerReceiptsIntentsRegistryAndStudio
         )
     }
+
+    /// Whether a scan of this coverage reads `family`'s records. The one rule for it: the
+    /// traversal ([`storage_name`]) and the memo's pruning ([`ServerStore::prune_inventory_cache`])
+    /// both ask here, so a completed scan can never prune a family it did not read.
+    ///
+    /// Archives are gated with intents because they share the Intents accounting class. That is
+    /// only safe while no coverage narrower than the full five-family scan installs a
+    /// deletion-protection set: a narrower scan would omit archived CIDs from the known set and
+    /// archived pixels would be reclaimed. Reference scans run at full coverage.
+    pub(in crate::store) fn covers(self, family: EpochRecordKind) -> bool {
+        match family {
+            EpochRecordKind::Recovery => true,
+            EpochRecordKind::OwnerReceipts => self != Self::RecoveryOnly,
+            EpochRecordKind::Intents | EpochRecordKind::DraftArchive => self.includes_intents(),
+            EpochRecordKind::Registry => matches!(
+                self,
+                Self::RecoveryOwnerReceiptsIntentsAndRegistry
+                    | Self::RecoveryOwnerReceiptsIntentsRegistryAndStudio
+            ),
+            EpochRecordKind::Studio => self == Self::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+        }
+    }
 }
 
 /// Physical record family; a digest alone must never identify a temporary's destination.
@@ -885,7 +907,10 @@ impl ServerStore {
             restarts,
         } = job;
         match cursor.finish_with(self) {
-            Ok(inventory) => Ok(EpochInventoryOutcome::Complete(Box::new(inventory))),
+            Ok(inventory) => {
+                self.prune_inventory_cache(&inventory);
+                Ok(EpochInventoryOutcome::Complete(Box::new(inventory)))
+            }
             Err(CursorFailure::Invalidated(_)) => {
                 if restarts >= MAX_INVENTORY_RESTARTS {
                     return Ok(EpochInventoryOutcome::Unstable);
@@ -1120,10 +1145,29 @@ impl ServerStore {
     /// Consume a cursor and issue its inventory. Rechecks invalidation: a scan that completed
     /// its traversal before a write landed must not hand out a stale inventory.
     pub fn finish_epoch_storage_scan(
-        &self,
+        &mut self,
         cursor: EpochStorageCursor,
     ) -> Result<EpochStorageInventory, AppError> {
-        cursor.finish_with(self).map_err(CursorFailure::into_error)
+        let inventory = cursor
+            .finish_with(self)
+            .map_err(CursorFailure::into_error)?;
+        self.prune_inventory_cache(&inventory);
+        Ok(inventory)
+    }
+
+    /// Drop the memoized validations of records a just-completed scan did not find (C-3 runtime
+    /// design 15.3, M2), within that scan's coverage only.
+    ///
+    /// Called by every finish path, and only once `finish_with` has issued the inventory: that
+    /// is what proves the traversal saw every record in its coverage, under a token confirmed
+    /// current and a listing confirmed against it. An entry it did not see names a file that is
+    /// gone, so the memo tracks the vault rather than everything it ever held.
+    fn prune_inventory_cache(&mut self, inventory: &EpochStorageInventory) {
+        let coverage = inventory.coverage;
+        self.inventory_cache.prune(
+            |family| coverage.covers(family),
+            |key| inventory.records.contains_key(key),
+        );
     }
 }
 
@@ -1776,9 +1820,12 @@ impl EpochStorageScan<'_> {
             .map_err(CursorFailure::into_error)
     }
     pub fn finish(self) -> Result<EpochStorageInventory, AppError> {
-        self.cursor
+        let inventory = self
+            .cursor
             .finish_with(self.store)
-            .map_err(CursorFailure::into_error)
+            .map_err(CursorFailure::into_error)?;
+        self.store.prune_inventory_cache(&inventory);
+        Ok(inventory)
     }
 }
 
@@ -1860,30 +1907,7 @@ pub(super) fn storage_name(
         EpochRecordKind::Registry,
         EpochRecordKind::Studio,
     ] {
-        // Archives are gated with intents because they share the Intents accounting class. That
-        // is only safe while no coverage narrower than the full five-family scan installs a
-        // deletion-protection set: a narrower scan would omit archived CIDs from the known set
-        // and archived pixels would be reclaimed. Reference scans run at full coverage.
-        if family.intent_class() && !coverage.includes_intents() {
-            continue;
-        }
-        if family == EpochRecordKind::Registry
-            && !matches!(
-                coverage,
-                EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsAndRegistry
-                    | EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio
-            )
-        {
-            continue;
-        }
-        if family == EpochRecordKind::Studio
-            && coverage != EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio
-        {
-            continue;
-        }
-        if family == EpochRecordKind::OwnerReceipts
-            && coverage == EpochInventoryCoverage::RecoveryOnly
-        {
+        if !coverage.covers(family) {
             continue;
         }
         if let Some(kind) = record_name(name, family)? {
@@ -5555,6 +5579,121 @@ mod tests {
         assert!(
             studio >= 1,
             "the control failed: the Studio record was not memoized"
+        );
+    }
+
+    /// A real Studio source record, like [`cold_studio_source`] but leaving the memo as the
+    /// fixture's own scan left it, so building many records costs one validation each.
+    fn kept_studio_source(store: &mut ServerStore, object: u8) {
+        let device = catcoms_mls::MlsDevice::generate().unwrap();
+        let group = catcoms_mls::ServerGroup::create(&device).unwrap();
+        crate::store::epoch_studio::tests::performance::save_studio_source_fixture_ops(
+            store,
+            7,
+            &group,
+            &device,
+            catcoms_replication::studio::StudioTarget::Flipnote {
+                channel: [9; 16],
+                object: [object; 16],
+            },
+            3,
+            16,
+        );
+    }
+
+    /// The memo keys of the Studio records on disk, from their filenames.
+    fn studio_keys_on_disk(store: &ServerStore) -> Vec<(EpochRecordKind, [u8; 32])> {
+        fs::read_dir(store.dir.join("servers"))
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.unwrap().file_name().into_string().unwrap();
+                let hash = name.strip_suffix(EpochRecordKind::Studio.suffix())?;
+                Some((EpochRecordKind::Studio, filename_hash(hash).unwrap()))
+            })
+            .collect()
+    }
+
+    /// M2 (C-3 runtime design 15.3): a scan of more memoizable records than the old 64-entry LRU
+    /// held reuses every one of them once they are warm. Under that LRU each scan of such a vault
+    /// evicted entries the same scan needed later, so every scan parked every record again.
+    #[test]
+    fn a_scan_of_more_records_than_the_old_lru_held_reuses_every_warm_entry() {
+        const RECORDS: u8 = 72;
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        for object in 0..RECORDS {
+            kept_studio_source(&mut store, object);
+        }
+        store.inventory_cache.clear_for_test();
+        let full = EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio;
+        let clock = ManualClock::new(0);
+
+        let mut job = store.begin_epoch_inventory_job(full).unwrap();
+        let (cold, _) = drive_to_end(&mut store, &mut job, &clock);
+        assert_eq!(
+            cold,
+            usize::from(RECORDS),
+            "precondition: every record was validated fresh"
+        );
+        assert!(matches!(
+            store.finish_epoch_inventory_job(job).unwrap(),
+            EpochInventoryOutcome::Complete(_)
+        ));
+
+        let mut job = store.begin_epoch_inventory_job(full).unwrap();
+        let (parks, reused) = drive_to_end(&mut store, &mut job, &clock);
+        assert_eq!(
+            (parks, reused),
+            (0, usize::from(RECORDS)),
+            "a warm record was validated again: the memo thrashed"
+        );
+        assert_matches_fresh(&mut store, job);
+    }
+
+    /// M2: a completed scan drops the memo entry of a record that is gone, and keeps the others.
+    /// Then a narrower scan, which does not read Studio records, leaves Studio entries alone.
+    #[test]
+    fn a_completed_scan_prunes_a_removed_records_entry_within_its_coverage() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        kept_studio_source(&mut store, 1);
+        kept_studio_source(&mut store, 2);
+        let full = EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio;
+        collect_with(&mut store, full);
+        let keys = studio_keys_on_disk(&store);
+        assert_eq!(keys.len(), 2, "precondition: two Studio records");
+        for key in &keys {
+            assert!(
+                store.inventory_cache.holds_for_test(*key),
+                "precondition: both records are memoized"
+            );
+        }
+
+        // Removed the way any production removal is: under the mutation guard.
+        let (gone, kept) = (keys[0], keys[1]);
+        store.epoch_mutation_guard();
+        fs::remove_file(store.dir.join("servers").join(format!(
+            "{}{}",
+            hex::encode(gone.1),
+            EpochRecordKind::Studio.suffix()
+        )))
+        .unwrap();
+        collect_with(&mut store, full);
+        assert!(
+            !store.inventory_cache.holds_for_test(gone),
+            "a removed record's entry survived a completed scan"
+        );
+        assert!(
+            store.inventory_cache.holds_for_test(kept),
+            "a record still on disk was pruned"
+        );
+
+        // A Recovery-only scan never reads Studio records, so it must not prune them.
+        stage(&mut store, 7, &document(b"group", b"prune"), 1);
+        collect_with(&mut store, EpochInventoryCoverage::RecoveryOnly);
+        assert!(
+            store.inventory_cache.holds_for_test(kept),
+            "a scan pruned a family outside its coverage"
         );
     }
 

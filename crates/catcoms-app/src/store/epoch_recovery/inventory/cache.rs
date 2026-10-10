@@ -10,30 +10,51 @@
 //! **Each put should also describe bytes that are, or were, on disk for that record**, never bytes
 //! a writer is about to write. That is about usefulness, not correctness: an entry for bytes not
 //! on disk is evicted by the next read ([`RecordCache::evict_mismatch`]) or simply never hits.
+//!
+//! **Sized to the inventory's own bound, and pruned to the vault** (C-3 runtime design 15.3, M2).
+//! It used to be a 64-entry LRU, so a scan of more memoizable records than that missed on every
+//! record: each pass evicted what the next needed. It now holds up to `MAX_ACCOUNTED_RECORDS`
+//! entries, the most records any inventory can account, so a complete scan never thrashes it.
+//! [`RecordCache::prune`] drops the entries for files a completed scan did not find, so in steady
+//! state it tracks the vault rather than its history. Memory is about 300 bytes per entry, about
+//! 20 MiB at the bound, resident for the mount's life (15.7, LOW).
+//!
+//! It is indexed (a keyed map plus an access order), so get, put and eviction are logarithmic:
+//! the linear scan the 64-entry form used would make a scan of 65 536 records quadratic.
 
 use super::{EpochRecordKind, StorageRecord};
-use std::collections::VecDeque;
+use crate::store::epoch_budget::MAX_ACCOUNTED_RECORDS;
+use std::collections::BTreeMap;
 
 type Key = (EpochRecordKind, [u8; 32]);
-const MAX_RECORDS: usize = 64;
+const MAX_RECORDS: usize = MAX_ACCOUNTED_RECORDS;
 
 struct Verified {
-    key: Key,
     digest: blake3::Hash,
     physical_bytes: u64,
     record: StorageRecord,
+    /// Position in [`RecordCache::order`]: the entry with the smallest tick is evicted first.
+    tick: u64,
 }
 
 /// Mount-local metadata only: no plaintext, mutable CRDT, authority key or scan budget survives.
 /// One version per physical record prevents retained old versions from multiplying the cache.
+///
+/// `entries` and `order` always describe the same set of keys: every method that touches one
+/// updates the other, and nothing outside this type sees either.
 #[derive(Default)]
-pub(in crate::store) struct RecordCache(VecDeque<Verified>);
+pub(in crate::store) struct RecordCache {
+    entries: BTreeMap<Key, Verified>,
+    /// Least recently used first. A tick is never reused, so no two entries share one.
+    order: BTreeMap<u64, Key>,
+    next_tick: u64,
+}
 impl RecordCache {
     /// A candidate permits bounded authentication work, NEVER reuse before matching its digest.
     pub(super) fn candidate(&self, key: Key, size: u64) -> bool {
-        self.0
-            .iter()
-            .any(|v| v.key == key && v.physical_bytes == size)
+        self.entries
+            .get(&key)
+            .is_some_and(|v| v.physical_bytes == size)
     }
     pub(super) fn get(
         &mut self,
@@ -41,14 +62,15 @@ impl RecordCache {
         size: u64,
         digest: blake3::Hash,
     ) -> Option<StorageRecord> {
-        let i = self
-            .0
-            .iter()
-            .position(|v| v.key == key && v.physical_bytes == size && v.digest == digest)?;
-        let value = self.0.remove(i).expect("cache index");
-        let record = value.record;
-        self.0.push_back(value);
-        Some(record)
+        self.entries
+            .get(&key)
+            .filter(|v| v.physical_bytes == size && v.digest == digest)?;
+        let tick = self.take_tick();
+        let value = self.entries.get_mut(&key).expect("matched just above");
+        self.order.remove(&value.tick);
+        value.tick = tick;
+        self.order.insert(tick, key);
+        Some(value.record)
     }
     pub(in crate::store) fn put(
         &mut self,
@@ -57,16 +79,57 @@ impl RecordCache {
         digest: blake3::Hash,
         record: StorageRecord,
     ) {
-        self.0.retain(|v| v.key != key);
-        if self.0.len() == MAX_RECORDS {
-            self.0.pop_front();
+        self.remove(&key);
+        if self.entries.len() >= MAX_RECORDS {
+            if let Some((_, oldest)) = self.order.pop_first() {
+                self.entries.remove(&oldest);
+            }
         }
-        self.0.push_back(Verified {
+        let tick = self.take_tick();
+        self.order.insert(tick, key);
+        self.entries.insert(
             key,
-            digest,
-            physical_bytes: size,
-            record,
+            Verified {
+                digest,
+                physical_bytes: size,
+                record,
+                tick,
+            },
+        );
+    }
+
+    /// Drop every entry `present` says is not in the vault, among the families `covered` names.
+    ///
+    /// For a scan that has just completed (C-3 runtime design 15.3, M2). Such a scan has seen
+    /// every record in its coverage, so an entry it did not see names a file that is gone. Only
+    /// the scan's own coverage is pruned: a narrower scan saw nothing of the other families, so
+    /// it cannot tell their entries are stale (15.7, LOW). Pruning is about memory, never about
+    /// correctness: a stale entry could only ever hit for bytes that are on disk.
+    pub(super) fn prune(
+        &mut self,
+        covered: impl Fn(EpochRecordKind) -> bool,
+        present: impl Fn(&Key) -> bool,
+    ) {
+        let entries = &mut self.entries;
+        self.order.retain(|_, key| {
+            let keep = !covered(key.0) || present(key);
+            if !keep {
+                entries.remove(key);
+            }
+            keep
         });
+    }
+
+    fn remove(&mut self, key: &Key) {
+        if let Some(old) = self.entries.remove(key) {
+            self.order.remove(&old.tick);
+        }
+    }
+
+    fn take_tick(&mut self) -> u64 {
+        let tick = self.next_tick;
+        self.next_tick += 1;
+        tick
     }
 
     /// [`Self::put`], unless any version of `key` is already cached. Returns whether it stored.
@@ -86,7 +149,7 @@ impl RecordCache {
         digest: blake3::Hash,
         record: StorageRecord,
     ) -> bool {
-        if self.0.iter().any(|v| v.key == key) {
+        if self.entries.contains_key(&key) {
             return false;
         }
         self.put(key, size, digest, record);
@@ -96,7 +159,13 @@ impl RecordCache {
     /// How many entries belong to `family`. Test-only, for checking what the memo admits.
     #[cfg(test)]
     pub(in crate::store) fn entries_for_test(&self, family: EpochRecordKind) -> usize {
-        self.0.iter().filter(|v| v.key.0 == family).count()
+        self.entries.keys().filter(|key| key.0 == family).count()
+    }
+
+    /// Whether any version of `key` is cached. Test-only.
+    #[cfg(test)]
+    pub(in crate::store) fn holds_for_test(&self, key: Key) -> bool {
+        self.entries.contains_key(&key)
     }
 
     /// Drop the entry for `key` if it describes bytes other than the ones a scan just read.
@@ -107,8 +176,13 @@ impl RecordCache {
     /// (the core Studio writer, or a warm its own checks declined) would leave the record cold
     /// for good (C-3 runtime design 14.3, piece 1).
     pub(super) fn evict_mismatch(&mut self, key: Key, size: u64, digest: blake3::Hash) {
-        self.0
-            .retain(|v| v.key != key || (v.physical_bytes == size && v.digest == digest));
+        if self
+            .entries
+            .get(&key)
+            .is_some_and(|v| v.physical_bytes != size || v.digest != digest)
+        {
+            self.remove(&key);
+        }
     }
 
     /// Drop every memoized validation.
@@ -121,7 +195,8 @@ impl RecordCache {
     /// *not* clearing is the separate cache-hit measurement.
     #[cfg(test)]
     pub(in crate::store) fn clear_for_test(&mut self) {
-        self.0.clear();
+        self.entries.clear();
+        self.order.clear();
     }
 }
 
@@ -129,6 +204,28 @@ impl RecordCache {
 mod tests {
     use super::*;
     use crate::store::epoch_budget::Footprint;
+
+    /// The `n`th distinct record hash.
+    fn hash(n: usize) -> [u8; 32] {
+        let mut hash = [0; 32];
+        hash[..8].copy_from_slice(&(n as u64).to_le_bytes());
+        hash
+    }
+
+    /// `entries` and `order` name the same keys, each exactly once.
+    fn consistent(cache: &RecordCache) -> bool {
+        cache.entries.len() == cache.order.len()
+            && cache
+                .order
+                .iter()
+                .all(|(tick, key)| cache.entries.get(key).is_some_and(|v| v.tick == *tick))
+    }
+
+    /// The bound is the inventory's own (C-3 runtime design 15.3, M2), and a put at the bound
+    /// evicts the least recently used entry. A hit counts as a use. A hit also needs the family,
+    /// the size and the full digest, and a put replaces any other version of its record.
+    ///
+    /// Contract change, recorded: until M2 the bound was 64.
     #[test]
     fn inventory_cache_is_bounded_lru_and_requires_family_size_and_full_digest() {
         let mut cache = RecordCache::default();
@@ -138,34 +235,84 @@ mod tests {
             footprint: Footprint::default(),
         };
         let digest = blake3::hash(b"complete authenticated wrapper");
-        for n in 0..64 {
-            cache.put((EpochRecordKind::Registry, [n; 32]), 77, digest, record);
+        for n in 0..MAX_RECORDS {
+            cache.put((EpochRecordKind::Registry, hash(n)), 77, digest, record);
         }
-        assert_eq!(cache.0.len(), 64);
+        assert_eq!(cache.entries.len(), MAX_RECORDS);
+        assert!(
+            consistent(&cache),
+            "the index and the access order disagree"
+        );
+        // Record 0 is used, so record 1 is now the least recently used.
         assert!(cache
-            .get((EpochRecordKind::Registry, [0; 32]), 77, digest)
+            .get((EpochRecordKind::Registry, hash(0)), 77, digest)
             .is_some());
-        cache.put((EpochRecordKind::Registry, [64; 32]), 77, digest, record);
-        assert!(!cache.candidate((EpochRecordKind::Registry, [1; 32]), 77));
-        assert!(!cache.candidate((EpochRecordKind::Studio, [0; 32]), 77));
-        assert!(!cache.candidate((EpochRecordKind::Registry, [0; 32]), 78));
+        cache.put(
+            (EpochRecordKind::Registry, hash(MAX_RECORDS)),
+            77,
+            digest,
+            record,
+        );
+        assert_eq!(cache.entries.len(), MAX_RECORDS, "the bound was not held");
+        assert!(!cache.candidate((EpochRecordKind::Registry, hash(1)), 77));
+        assert!(
+            cache.candidate((EpochRecordKind::Registry, hash(0)), 77),
+            "a hit did not count as a use"
+        );
+        assert!(!cache.candidate((EpochRecordKind::Studio, hash(0)), 77));
+        assert!(!cache.candidate((EpochRecordKind::Registry, hash(0)), 78));
         assert!(cache
             .get(
-                (EpochRecordKind::Registry, [0; 32]),
+                (EpochRecordKind::Registry, hash(0)),
                 77,
                 blake3::hash(b"gate-only change")
             )
             .is_none());
         cache.put(
-            (EpochRecordKind::Registry, [0; 32]),
+            (EpochRecordKind::Registry, hash(0)),
             77,
             blake3::hash(b"new version"),
             record,
         );
-        assert_eq!(cache.0.len(), 64);
+        assert_eq!(cache.entries.len(), MAX_RECORDS);
         assert!(cache
-            .get((EpochRecordKind::Registry, [0; 32]), 77, digest)
+            .get((EpochRecordKind::Registry, hash(0)), 77, digest)
             .is_none());
+        assert!(consistent(&cache));
+    }
+
+    /// Pruning drops exactly the covered entries the scan did not find, and nothing outside its
+    /// coverage, and keeps the index consistent.
+    #[test]
+    fn pruning_drops_only_covered_entries_the_scan_did_not_find() {
+        let mut cache = RecordCache::default();
+        let digest = blake3::hash(b"v1");
+        let present = (EpochRecordKind::Studio, hash(1));
+        let gone = (EpochRecordKind::Studio, hash(2));
+        let uncovered = (EpochRecordKind::Registry, hash(3));
+        for key in [present, gone, uncovered] {
+            cache.put(key, 10, digest, record());
+        }
+        cache.prune(
+            |family| family == EpochRecordKind::Studio,
+            |key| *key == present,
+        );
+        assert!(
+            cache.holds_for_test(present),
+            "a record still on disk was pruned"
+        );
+        assert!(
+            !cache.holds_for_test(gone),
+            "a deleted record's entry survived pruning"
+        );
+        assert!(
+            cache.holds_for_test(uncovered),
+            "pruning reached a family outside the scan's coverage"
+        );
+        assert!(consistent(&cache));
+        // The pruned record can be cached again, with a vacant-only put.
+        assert!(cache.put_if_vacant(gone, 10, digest, record()));
+        assert!(consistent(&cache));
     }
 
     fn record() -> StorageRecord {
