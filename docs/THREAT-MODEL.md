@@ -51,9 +51,11 @@ table with the commit that closed it.
   holds nothing else. While a job owns a target, ordinary installs, page receive, owner rotation,
   preparation and foreground Apply into it defer or refuse. Own-operation replay and gossip
   ingest that needs source preparation wait through the same preparation check. Gossip ingest
-  into an already warm source and Flow S/H writes are not claim-checked; a change from them makes
-  the rebuild stale, and the job writes nothing (an automatic job reruns; an explicit decision is
-  reported abandoned, to be made again).
+  into an already warm source and Flow S, H and R writes (including the handoff's commit, H5, and
+  Flow R's commit, R3) are not claim-checked; a change from them makes the rebuild stale, and the
+  job writes nothing (an automatic job reruns; an explicit decision is reported abandoned, to be
+  made again). S3 commits a rebuild only after installing it, and builds its storage budget only
+  then, so a cold source over the receive scan's cold-byte limit is never validated inline.
   Registry bucket repair executes only as the same job, scoped to the bucket. This covers the
   explicit decision, Flow D, the owner's resume and the owed replacement. The bucket is captured
   as bounded authenticated bytes and rebuilt detached. At commit the issue/apply transaction
@@ -100,8 +102,9 @@ table with the commit that closed it.
   crash between an owner's replacement install and its record's recycle, the router resumes the
   decision as soon as it finds the source owing nothing behind it. If no fetch can start (an
   owner alone has no peer at all), the owner resumes at once, and if a fetch comes to nothing,
-  its next visit resumes, so recovering an install already on the owner's disk never needs
-  another device. The cost of that: an owner alone whose seed really is still owed, with its
+  its next visit resumes, for a Studio source and a Registry bucket alike (including a bucket
+  whose only watched document is stuck Prepared, whose provider is never prepared). So
+  recovering an install already on the owner's disk never needs another device. The cost of that: an owner alone whose seed really is still owed, with its
   source evicted between visits, reruns a full detached rebuild once per deferral window (down to
   one per 15 min) although nothing has changed. It is bounded by the deferral and the shared pool.
 
@@ -387,14 +390,13 @@ table with the commit that closed it.
     already begun on the document, so the others keep replaying. No path resolves a record stuck
     on Hold, so these rails stay suspended for that document indefinitely; the eligibility view
     reports it as `PreparedStuck`.
-  - **The suspension reaches past the document in one place.** Registry maintenance skips the
-    document before its turn would resume a held owner decision for the document's pointer
-    bucket, and that bucket is shared with other documents. While the stuck document is the only
-    watched one in its bucket, maintenance does not resume that decision; a watched document in
-    the same bucket resumes it on its own turn. There is no fallback: maintenance's turn is a
-    held bucket decision's only ordinary resume route. Repair's Studio-scope resumes and the
-    router's resume of a landed install do not pass through this skip, but neither resumes a
-    held bucket decision in general.
+  - **The suspension stays with the document.** Its pointer bucket is shared with other
+    documents, and maintenance's turn is a held bucket decision's only ordinary resume route. So
+    before skipping, Registry maintenance resumes that bucket's held owner decision, unless a
+    repair job claims the bucket (Agent 3, PR #37). That resume reads only the bucket and its
+    owner record, never the Prepared document's source, and an error there is recorded, never
+    returned, so the skip still cannot pause receive. Until PR #37, a stuck document that was the
+    only watched one in its bucket stranded the bucket's decision.
 - **A budgeted scan holds custody for a bounded validation only, and a memoized validation is
   reused only for identical bytes.** Under a deadline, `validation_fits` admits a fresh validation
   inline only in accounting mode, and only for four families:

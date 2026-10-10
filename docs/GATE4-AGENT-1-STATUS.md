@@ -2617,7 +2617,7 @@ every match. Every anchor in all ten mutation harnesses is unique.
 |---|---|---|
 | MEDIUM-1 | two of `reconcile`'s guards (rail membership and the live job's exemption) failed no test, while the commit and the table above claimed one test per guard. Without rail membership, a watched target's expired hold was erased on every probe, so design 7.3's 30 s to 300 s escalation never got past 30 s | **fixed:** two unit tests, a non-vacuous check in the churn test, two harness entries, and the claim corrected above |
 | LOW-1 | an active replay pass on a document that became Prepared waited there, and an active pass is replay's only candidate, so one stuck document stopped replay of every other. The comment claimed the opposite | **fixed:** replay drops the active pass, as it already does for a watch eviction or a history change; the now-redundant later check is removed. Test: `an_active_replay_pass_on_a_prepared_document_does_not_stall_the_rest`, with a test hook beginning the pass at the document's real watch epoch. Harness: `replay-skip` and `replay-active-drop`, each half alone, so the resolution harness now has 18 entries |
-| LOW-1, second half | Registry maintenance skips a Prepared document before resuming a held owner decision for its pointer bucket, which is shared, so a stuck Hold reaches past its own document | **docs:** THREAT-MODEL and HANDOVER now say so. Reordering Registry maintenance is Agent 3's call |
+| LOW-1, second half | Registry maintenance skips a Prepared document before resuming a held owner decision for its pointer bucket, which is shared, so a stuck Hold reaches past its own document | **docs** at first. Then **fixed by Agent 3** in PR #37 (merged into this line, 2026-10-10): the held decision is resumed before the skip, unless a repair claims the bucket. The caveat is gone from THREAT-MODEL and HANDOVER |
 | LOW-2 | watch churn resets the doubling: once an off-rail hold expires it is dropped with its doubling, so evict, wait and rewatch starts again at 30 s | **recorded, as designed:** only the user's own UI churn drives it, and it needs the document evicted from a 16-watch rail for longer than its hold. Keeping off-rail entries until `at + hold_ms` is an option if it matters |
 | LOW-3 | HANDOVER's "repair first, then Prepared" is wrong for Registry maintenance, which checks the Prepared document first and then the repair claim on its bucket. Separately, `repair_job.rs` says every path that would install into a claimed source consults the claim, but H5 and R3 do not | **HANDOVER fixed.** The claim gap is **recorded as a follow-up**: nothing is corrupted, because S3's digest recheck and R3's stamp fallback catch the conflict, and the cost is wasted work and a 5 s repair retry. The likely fix is a `repair_claimed` skip at the probe's selection, with a hold at `handoff_commit`, and the comment is Agent 3's |
 
@@ -2665,9 +2665,11 @@ also gates the Save's detach. It has a design check before it is built.
 - `RepairClaims::claimed` lists the writers that do not consult the claim (H5 and R3 among them);
 - Registry maintenance now resumes a bucket's held decision before skipping a Prepared document.
 
-The caveat here, in THREAT-MODEL and in HANDOVER, that a stuck Hold delays that decision stays
-until PR #37 merges into this branch, since until then it is true here. The probe's
-`repair_claimed` skip stays an Agent 1 follow-up.
+PR #37 merged into this branch (`acc43bcf`), and this line merges it after M2. The caveat that a
+stuck Hold delays that decision is now gone from here, THREAT-MODEL and HANDOVER. The merge was
+clean. Agent 3's one new memo writer, `warm_registry_repair_inventory`, uses the cache's
+unchanged `put` for bytes it has just confirmed current. The probe's `repair_claimed` skip stays
+an Agent 1 follow-up.
 
 ## Design 18.3 bounded implementation review (2026-10-09, Opus, static): PASS WITH FINDINGS
 

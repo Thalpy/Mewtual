@@ -8,7 +8,17 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-10-09)
+## Status (latest entry: 2026-10-10)
+
+- **Gate 4 repair: PR #27 review MEDIUM-1 and two interface points (2026-10-10).** A repair job's
+  S3 now builds its storage budget only after installing (or, for a bucket, memoizing) the rebuild,
+  so a cold source over the receive scan's 256 KiB cold-byte limit commits instead of being
+  refused and discarded. A held Registry owner decision now resumes even while its bucket's only
+  watched document is stuck in a Prepared handoff, and (after the PR #37 review) a bucket whose
+  B3 guess already came to nothing resumes rather than refetching, so a landed install recycles
+  without the seed. The repair claim's comment and THREAT-MODEL
+  now name the writers that do not consult it (H5, Flow R's R3, Flow S, warm gossip ingest); S3's
+  digest recheck still catches them. Details are in `GATE4-AGENT-3-STATUS.md`.
 
 - **Gate 4 repair: real-peer Registry Flow D and plan D (2026-10-09).** A peer now takes a bucket
   repair from a real discovery answer and installs its network-fetched replacement through the
@@ -82,9 +92,9 @@ and ranks the live hazards in that path.
       Flow R too, whenever a Prepared record outlived the probe. With Flow R and a peer online it
       was a livelock, found by the implementation review. Replay also drops a pass it had begun on
       such a document, which would otherwise stop replay of every other. A Prepared record held
-      back by a Hold is never resolved, so it suspends these rails for its document indefinitely,
-      and also Registry maintenance's resume of a held owner decision for the document's shared
-      pointer bucket, unless another watched document in that bucket takes the turn.
+      back by a Hold is never resolved, so it suspends these rails for its document indefinitely.
+      It no longer strands its shared pointer bucket's held owner decision: since PR #37 Registry
+      maintenance resumes that decision before skipping the document.
     - **Residual:** while a resolution is in flight the actor's one overlay slot is taken, so a
       Save on that server answers `Busy` for a few turns longer than before.
   - **PR #36 merged into this line, and the PR #27 review:** Agent 3's repair runtime is merged
@@ -92,9 +102,10 @@ and ranks the live hazards in that path.
     first, then the Prepared record. Registry maintenance checks the Prepared document first,
     then the repair claim on its bucket, a different key. The review's LOW-1 is fixed:
     the handoff probe's per-target bookkeeping is now bounded by the 16-watch rail, plus at most
-    64 unexpired holds of unwatched targets. Its MEDIUM-1 is in Agent 3's repair commit and open
-    with Agent 3: the inventory budget is built before the rebuild is installed, so a cold
-    source over the inline threshold fails S3 and the rebuild is discarded.
+    64 unexpired holds of unwatched targets. Its MEDIUM-1, in Agent 3's repair commit (the
+    inventory budget was built before the rebuild was installed, so a cold source over the
+    inline threshold failed S3 and the rebuild was discarded), is fixed by Agent 3 in PR #37,
+    merged into this line: S3 installs, or for a bucket memoizes, the rebuild before it budgets.
   - Native Save and repair commands remain unregistered. This is not Gate 4 acceptance.
 
 - **Gate 4 PR #35 reconciliation (2026-10-08).** The candidate now preserves

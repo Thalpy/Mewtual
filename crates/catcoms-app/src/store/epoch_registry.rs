@@ -36,6 +36,12 @@ thread_local! {
 pub(crate) fn registry_full_loads_for_test() -> usize {
     FULL_LOADS.get()
 }
+/// The inventory key of `bucket`'s record, for `inline_registry_validations_for_test`.
+#[cfg(test)]
+pub(crate) fn registry_inventory_key_for_test(server: u64, group: &[u8], bucket: u8) -> [u8; 32] {
+    let logical = registry_document(group, bucket).unwrap();
+    *blake3::hash(&scope_bytes(server, &logical).unwrap()).as_bytes()
+}
 // Every accepted inner op fits a 256-KiB padding bucket, plus the authenticated length footer
 // and AEAD tag. Bound the public struct before SealedOp::open can allocate plaintext.
 const MAX_INBOUND_CIPHERTEXT: usize = MAX_SIGNED_EPOCH_OP_BYTES + 4 + 16;

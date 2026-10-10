@@ -153,6 +153,47 @@ fn inventory_cache_large_source_needs_explicit_warmup_and_counts_actual_bytes() 
     assert!(changed.finish().is_err());
 }
 
+/// PR #27 review MEDIUM-1, the bucket half (its re-review's LOW-1). A repair job's S3 memoizes its
+/// rebuilt bucket's footprint before building the budget, so the budget's scan reuses it instead
+/// of validating the bucket inline. That is sound only if the memoized footprint is exactly what
+/// the scan computes from the same bytes; a drift would silently change the bucket's accounting.
+#[test]
+fn a_repair_rebuilds_memoized_footprint_is_what_the_scan_computes() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let mut f = Fixture::new();
+    let mut budget = budget(&mut store, &f);
+    let first = f.op(1);
+    f.ingest(&mut store, &first, &mut budget).unwrap();
+    store.inventory_cache.clear_for_test();
+    let (cold, p) = scan(&mut store);
+    assert_eq!(p.reused_records, 0, "precondition: the scan validated cold");
+    store.inventory_cache.clear_for_test();
+    let bucket = f.key.bucket();
+    let prepared = store
+        .capture_registry_repair_source(SERVER, &f.group, bucket, &f.device)
+        .unwrap()
+        .expect("the bucket exists")
+        .rebuild()
+        .unwrap();
+    assert!(store
+        .warm_registry_repair_inventory(SERVER, &f.group, bucket, &f.device, &prepared)
+        .unwrap());
+    let (warm, p) = scan(&mut store);
+    assert_eq!(
+        (p.reused_records, p.uncached_bytes),
+        (1, 0),
+        "the scan reused the memoized footprint"
+    );
+    assert_eq!(
+        warm.records_for_server(SERVER, &f.group.group_id())
+            .unwrap(),
+        cold.records_for_server(SERVER, &f.group.group_id())
+            .unwrap(),
+        "the memoized footprint is exactly what the scan computes"
+    );
+}
+
 #[test]
 fn inventory_cache_warm_records_cannot_exceed_aggregate_read_rail() {
     let root = tempfile::tempdir().unwrap();

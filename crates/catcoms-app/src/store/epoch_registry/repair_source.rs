@@ -141,6 +141,44 @@ impl ServerStore {
         }))
     }
 
+    /// S3, before the commit builds its budget: if the rebuild is still current, memoize its
+    /// bucket's inventory footprint, as `cache_registry_source_footprint` does for a prepared
+    /// page source. The budget's inventory scan then finds this record warm instead of validating
+    /// it inline, which the receive scan refuses for cold records over its cold-byte limit. That
+    /// threw away a rebuild S2 had already validated (PR #27 review MEDIUM-1; installing a Studio
+    /// rebuild first is the Studio counterpart). The entry can only ever serve these exact bytes:
+    /// the cache answers an exact (record, physical size, plaintext digest) match, and the scan
+    /// still authenticates the whole wrapper on a hit. Returns whether the rebuild is current;
+    /// `false` is a stale rebuild, and nothing is memoized.
+    pub(crate) fn warm_registry_repair_inventory(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        bucket: u8,
+        device: &MlsDevice,
+        prepared: &PreparedRegistryRepair,
+    ) -> Result<bool, AppError> {
+        if !self.registry_repair_source_is_current(server, group, bucket, device, prepared)? {
+            return Ok(false);
+        }
+        let logical = registry_document(&group.group_id(), bucket).map_err(invalid)?;
+        let scope = scope_bytes(server, &logical)?;
+        let record = storage_record(
+            server,
+            &logical,
+            &scope,
+            prepared.physical,
+            prepared.unit.storage_protocol_bytes().map_err(invalid)?,
+        )?;
+        self.inventory_cache.put(
+            (crate::store::EpochRecordKind::Registry, record.id),
+            prepared.physical,
+            prepared.digest,
+            record,
+        );
+        Ok(true)
+    }
+
     /// Whether a rebuild can still be used: the live context matches and the bucket on disk is
     /// byte-for-byte what was captured. A `false` here is a stale rebuild, not a fault.
     pub(crate) fn registry_repair_source_is_current(
