@@ -1339,6 +1339,15 @@ persisted-byte accounting. Refusals are `StorageRefused { reason }` and retain a
   `StudioOverlay::append` (before staging, so a refused Save changes nothing) and in
   `checked_entries` (every read, once the decoder has set the kind). It is pinned by mutation entry
   `unconfirmed-op-rail`.
+  - *At S1b too (2026-10-10, MAP K12).* `StudioOverlay::has_room` is the one predicate, and both
+    `append` and S1b refuse on it. S1b asks it for a join to the live branch, after the
+    `EpochScope` check and before the 8.3 rails and media. A full branch used to be refused by the
+    detached plan, after a capture, media admission and a pool permit, all paid again on every
+    retry. It applies to both kinds, so the Closing cap is refused at S1b as well. Pinned by
+    `unconfirmed-branch-room-predicate` and `unconfirmed-rail-branch-s1b`. The store test fills a
+    real branch with 64 Saves, about a minute in a debug build, because each Save's plan replays
+    the branch so far. The Closing cap at S1b is pinned only through the shared predicate: no test
+    fills a Closing branch to 256, which would cost about 16 times as much.
 - **Per-document rail: holds structurally.** Admission never opens a branch beside a live one.
 - **Per-server count and vault-wide bytes: built (2026-10-07).**
   - *The tally.* `EpochIntentBudget` holds every intent record whose live branch is Unconfirmed,
@@ -1505,6 +1514,47 @@ Agent 1's Flow S is not implemented, this path is not implemented either; it is 
     afresh. After a lock that retry needs a fresh preview anyway, since the lock also clears the
     previews.
   - *Pinned* by `unconfirmed-save-lock-releases-queued`, `-releases-parked` and `-drops-returning`.
+- **A refused plan's answer is kept for its retry** (2026-10-10, Agent 1's MAP K12).
+  - *The defect.* A refused plan parks nothing (RT-001) and its request is forgotten. So the retry
+    reached S1b again, captured again and was told `pending` again, for ever. Each lap paid a scan,
+    media admission (a PIX promotion for a frame), a pool permit and a detached decode, and the
+    caller never heard why.
+  - *Now.* When a plan the Unconfirmed Save scheduled comes back refused with `Invalid`, the
+    receiver keeps the refusal's text, the request's fingerprint and the capture's stamp. The plan
+    consumes its capture, so the job copies the stamp before the worker runs. The identical retry
+    is answered with that refusal, after any parked plan is finished and before the slot is
+    reserved. It costs one authenticated read of the intent record, beside the structural read
+    every Save makes at the control boundary: no scan, no capture, no permit.
+  - *Why it may be answered.* The plan is a pure function of what the stamp pins (the intent
+    record's plaintext digest and size, mount, actor and key, owner, MLS epoch) and of the request.
+    The one other input is the Save's timestamp, refused only past 2^53 ms. So the refusal is
+    answered only while `studio_overlay_is_current` holds for that stamp, and only under the
+    numeric server it was kept under: the fingerprint does not name the server, and the stamp
+    check reads the record at the stamp's own (review of K12, LOW-1). Once the record moves on, by
+    a commit, a disposal or anything else, it is forgotten and the request is decided afresh.
+  - *Bounds.* One per actor; a later refusal replaces it. It expires at `OVERLAY_PARK_MS`. Expiry is
+    lazy: the retry that would answer checks it. It holds no admission, permit, hold or draft
+    plaintext, so it feeds neither `pending` nor `wake_in`. A lock drops it.
+  - *Bound by the stamp, not by the scheduled request.* The MAP's K12 item says to clear it
+    wherever the scheduled request is cleared. It is deliberately not cleared at a pause or at
+    another request's park expiry: those say nothing about the record, so clearing there would
+    forget a refusal that is still true. The stamp check covers every case that clearing was
+    meant to. So a paused receiver answers a kept refusal too, which is truthful and costs nothing.
+  - *Follow-up (review of K12, LOW-4).* Because there is one per actor, two refused requests
+    retried in turn evict each other, and each lap pays the full cost again. Only the local user
+    can drive this. A small bounded map would close it. The current limit is pinned by
+    `..._a_later_refusal_replaces_the_kept_one`.
+  - *What the stamp does not pin.* The live preview and the 8.3 rails' budget can change while
+    the refusal is kept, so a retry may hear it where S1b would now give another refusal, such as
+    "no live preview". Both refuse the same request; the deadline bounds the window.
+  - *Not covered.* Only `Invalid` is kept: every plan refusal is built that way, so anything else is
+    not known to be one of them. Only the Unconfirmed Save keeps its refusal; Agent 1 mirrors this
+    in the Closing `save_overlay`. Until the refusal carrier lands, the answer is the store's own
+    `Err`, as on the first attempt.
+  - *Pinned* by `unconfirmed-save-refusal-kept`, `-answered`, `-own-request`, `-server`,
+    `-stamp`, `-forgotten-when-stale`, `-deadline` and `-lock`. A refusal that comes back after a
+    lock is not kept, which a test shows. No single mutant breaks that, because two guards cover it:
+    the lock forgets the request, and the park also checks `dropped_for_lock`.
 - **The ticket refuses a device that is no longer a member.** The mint checks the provider's
   membership, not this device's.
 - **The two Saves stay apart.** Neither action is reachable through the control transaction: both

@@ -105,7 +105,8 @@ pub use epoch_studio::{
 pub(crate) use epoch_studio::{
     PreparedStudioSource, SigningSlice, StudioHandoffCapture, StudioHandoffCommit,
     StudioHandoffPlan, StudioHandoffStart, StudioOverlayCapture, StudioOverlayPlan,
-    StudioOverlayStart, StudioSourceCapture, MAX_SIGNING_TURNS_PER_VISIT, SIGNING_SLICE_BUDGET_MS,
+    StudioOverlayStamp, StudioOverlayStart, StudioSourceCapture, MAX_SIGNING_TURNS_PER_VISIT,
+    SIGNING_SLICE_BUDGET_MS,
 };
 // Flow R, the scheduled resolution of an interrupted Prepared handoff (Agent 1, design 6.4.2).
 pub(crate) use epoch_studio::{

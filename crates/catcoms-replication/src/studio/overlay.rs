@@ -429,6 +429,15 @@ impl StudioOverlay {
             BasisKind::Unconfirmed => MAX_STUDIO_UNCONFIRMED_OVERLAY_OPS,
         }
     }
+    /// Whether this branch can take one more entry under its rail (design 8.3).
+    ///
+    /// The one predicate both places use: `append` refuses on it before staging, and Flow S's S1b
+    /// refuses on it before media admission and capture (MAP K12). A full branch is then refused
+    /// before a capture is made, not by the detached plan after it, so its refusal is never paid
+    /// for again on every retry. Two separate checks could drift apart.
+    pub fn has_room(&self) -> bool {
+        self.entries.len() < self.max_ops()
+    }
     /// For the state decoder only, once it has read the record's provenance. The nested blob
     /// cannot say, so a standalone decode always starts as Closing.
     pub(in crate::studio) fn set_basis_kind(&mut self, kind: BasisKind) {
@@ -497,8 +506,9 @@ impl StudioOverlay {
             return Err(ReplError::EpochScope);
         }
         // Design 8.3's per-branch rail for an Unconfirmed branch, the overall cap for a Closing
-        // one. Refused before staging, so a refused Save changes nothing durable.
-        if self.entries.len() >= self.max_ops() {
+        // one. Refused before staging, so a refused Save changes nothing durable. S1b asks the
+        // same predicate first, so this is the backstop.
+        if !self.has_room() {
             return Err(ReplError::EpochBound);
         }
         if self.contains(&id) {

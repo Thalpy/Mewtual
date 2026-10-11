@@ -482,6 +482,15 @@ impl ServerStore {
             if state.overlay().map(|live| live.basis()) != Some(fresh.as_basis().fingerprint()) {
                 return Err(invalid(catcoms_replication::ReplError::EpochScope));
             }
+            // A full branch, by the predicate `append` itself refuses on: design 8.3's 64 ops for
+            // an Unconfirmed branch, the overall cap for a Closing one. Refused here and not by
+            // the detached plan (MAP K12): the plan's refusal came after a capture, a promotion
+            // and a permit, all paid again on every retry, and a Save that can never succeed
+            // must be told so before any of it. A newly admitted branch is empty, so only a
+            // join can be full.
+            if !state.overlay().is_some_and(|live| live.has_room()) {
+                return Err(invalid(catcoms_replication::ReplError::EpochBound));
+            }
             OverlayBranch::Live
         } else {
             let admission = match state.handoff_metadata() {

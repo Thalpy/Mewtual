@@ -136,7 +136,9 @@ fn save_between(
             other => panic!("expected an exact-retry acknowledgement, got {other:?}"),
         },
     };
-    let plan = capture.plan().unwrap();
+    // A refusal from the detached plan is reported as its own stage, so a test that expects S1b to
+    // refuse names the plan when it is the plan that did.
+    let plan = capture.plan().map_err(|error| ("plan", error))?;
     let attempt = mint(p, prepared);
     let mut b = budget(&mut p.bob, &mut p.b_store);
     at_commit(&mut b);
@@ -295,6 +297,86 @@ async fn studio_unconfirmed_rail_lets_a_live_branch_append_and_refuses_growth_pa
     assert_eq!(recorded(&mut p, target), before);
 }
 
+/// Design 8.3's per-branch rail, at S1b (MAP K12). A live branch holding 64 operations refuses a
+/// 65th before capture, so the refusal costs no media promotion, no permit and no detached decode,
+/// and is not paid again on every retry. It used to come from the plan's `append`, after all of
+/// that. The record is unchanged, and an exact retry of the 64th is still answered: the rail
+/// refuses growth, never acknowledgement.
+#[tokio::test]
+async fn studio_unconfirmed_rail_refuses_a_full_branch_at_s1b() {
+    use catcoms_replication::studio::MAX_STUDIO_UNCONFIRMED_OVERLAY_OPS as RAIL;
+    let (mut p, target, prepared) = preview_pair().await;
+    let ticket = ticket(&mut p, target, &prepared);
+    // Filled by 64 real Saves on one budget, which every custody visit re-enters. This is slow, about
+    // a minute in a debug build, because each Save's plan replays the branch so far (Saves are
+    // quadratic in branch length; the rail is what bounds that). A record forged through a hook
+    // would be quicker and would test less.
+    let mut b = budget(&mut p.bob, &mut p.b_store);
+    for n in 0..RAIL {
+        let op = entry(&p, target, n as u8);
+        let attempt = mint(&p, &prepared);
+        let store = &mut p.b_store;
+        let StudioOverlayStart::Captured(capture) = p
+            .bob
+            .sync
+            .with_registry_context(|g, d, clock, rng| {
+                store.start_studio_overlay(
+                    SERVER,
+                    g,
+                    target,
+                    d,
+                    StudioOverlayMint::unconfirmed(attempt),
+                    ticket.0,
+                    ticket.1,
+                    op,
+                    clock.now_ms(),
+                    rng,
+                    &mut b,
+                )
+            })
+            .unwrap()
+        else {
+            panic!("operation {n} is new authoring")
+        };
+        let plan = capture.plan().unwrap();
+        let attempt = mint(&p, &prepared);
+        let store = &mut p.b_store;
+        let draft = p
+            .bob
+            .sync
+            .with_registry_context(|g, d, _, rng| {
+                store.commit_studio_overlay_with(
+                    SERVER,
+                    g,
+                    target,
+                    d,
+                    StudioOverlayMint::unconfirmed(attempt),
+                    plan,
+                    rng,
+                    &mut b,
+                )
+            })
+            .unwrap();
+        assert_eq!(draft.accepted(), n + 1);
+    }
+    drop(b);
+    let before = recorded(&mut p, target);
+
+    let op = entry(&p, target, RAIL as u8);
+    let full = save(&mut p, target, &prepared, ticket, op, |_| {});
+    refused_by(full, "S1b", "exceeds its bound");
+    assert_eq!(
+        recorded(&mut p, target),
+        before,
+        "the full branch's refusal wrote nothing"
+    );
+
+    let op = entry(&p, target, RAIL as u8 - 1);
+    let retried = save(&mut p, target, &prepared, ticket, op, |_| {})
+        .expect("an exact retry is answered on a full branch");
+    assert_eq!(retried.accepted(), RAIL);
+}
+
 /// The tally the rails read. A fresh budget takes it from the inventory's authenticated facts:
 /// this draft's record, on this server, at its charged bytes. And the commit's own budget follows
 /// its write, so a later check on that same budget sees the draft it just admitted.
@@ -369,8 +451,16 @@ async fn studio_unconfirmed_rail_tally_comes_from_the_inventory_and_follows_the_
         vec![(SERVER, charged)],
         "a fresh budget counts it from the inventory"
     );
-    // And after the vault is reopened: the tally is rebuilt from what was persisted, not carried.
+    // The same again, now that the first fresh scan validated the draft's Intents record: this
+    // second scan is a memo hit on it (M1), so the tally comes from the facts the memo restores,
+    // not from a decode. Only this fixture holds a real Unconfirmed draft to put through a hit.
     drop(fresh);
+    assert_eq!(
+        budget(&mut p.bob, &mut p.b_store).unconfirmed_tally_for_test(),
+        vec![(SERVER, charged)],
+        "a memo hit restores the draft's tally"
+    );
+    // And after the vault is reopened: the tally is rebuilt from what was persisted, not carried.
     drop(p.b_store);
     p.b_store = open(p.b_root.path());
     let reopened = budget(&mut p.bob, &mut p.b_store);

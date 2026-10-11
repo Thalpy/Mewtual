@@ -18,6 +18,10 @@
 //! cannot hold the slot. A visit reports only its own request's outcome; another request's finished
 //! work is that request's to learn on its own retry.
 //!
+//! **A refused plan is answered, not re-planned** (MAP K12). Its refusal is kept against the stamp of
+//! the record it was planned from, and the identical retry hears it again, with no capture, while
+//! that record is unchanged and for at most the park bound.
+//!
 //! No tenure is read anywhere here: an Unconfirmed branch has none (design 8.5).
 use super::*;
 use crate::store::{EpochStudioBudget, StudioOverlayMint, StudioOverlayStart};
@@ -217,6 +221,30 @@ impl StudioReceiver {
                 )))
             });
         }
+        // MAP K12: this request's plan was refused, and the record it was planned from is unchanged,
+        // so the refusal is answered again. It goes before the reservation and every stage after it:
+        // the point is that a Save that cannot succeed costs no scan, no media admission, no permit
+        // and no detached decode on each retry. The stamp is proved current under custody first,
+        // which costs one authenticated read of the intent record, beside the structural read every
+        // Save makes at the control boundary. Until the refusal carrier lands it is the store's own
+        // `Err`, as on the first attempt.
+        //
+        // The numeric server first. The fingerprint does not name it, and the stamp check reads the
+        // record at the stamp's server rather than this one, so a refusal kept under another would
+        // otherwise answer for a record it never read (review of K12, LOW-1). The commit compares
+        // it for the same reason.
+        let now = server.runtime_clock().monotonic_ms();
+        if let Some(refusal) = self.catchup.overlay_refusal_for(request, now) {
+            let current = refusal.stamp().server() == id
+                && server.sync.with_registry_context(|group, device, _, _| {
+                    store.studio_overlay_is_current(group, device, refusal.stamp())
+                })?;
+            if current {
+                return Err(invalid(refusal.message().to_owned()));
+            }
+            // The record moved on, by a commit, a disposal or anything else. Decide afresh.
+            self.catchup.forget_overlay_refusal();
+        }
         // 7.2: reserve before the first bounded read, release by dropping if nothing is scheduled.
         let Some(ownership) = self.catchup.reserve_overlay() else {
             // The slot is busy with work in flight. If that work is this very request's, say so:
@@ -265,6 +293,14 @@ impl StudioReceiver {
                 Ok(Visit(StudioOverlaySaveVisit::Scheduled))
             }
         }
+    }
+}
+
+impl StudioReceiver {
+    /// Whether a refused plan's answer is kept (MAP K12), for a test that must see it was not.
+    #[cfg(test)]
+    pub(crate) fn has_overlay_refusal_for_test(&self) -> bool {
+        self.catchup.has_overlay_refusal_for_test()
     }
 }
 

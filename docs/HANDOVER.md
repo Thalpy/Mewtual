@@ -239,7 +239,10 @@ and ranks the live hazards in that path.
     stage mints from the actor's live preview in its own visit. The actor has one overlay slot: a
     visit finishes any parked plan and reports only its own request's outcome. A parked plan has a
     30 s deadline that holds while the receiver is paused. A Closing draft is refused.
-  - Rail: an Unconfirmed branch takes at most 64 operations.
+  - Rail: an Unconfirmed branch takes at most 64 operations, refused at S1b before any capture.
+  - A Save whose detached plan was refused is answered with that refusal on its identical retry,
+    for up to 30 s and only while the intent record it was planned from is unchanged, instead of
+    being captured and planned again. Unconfirmed only; the Closing `save_overlay` still re-plans.
   - Design 8.6: the state is derived on every read from headers, with four values, `awaitingSource`,
     `baseConfirmed`, `baseSuperseded` and `sourceUnreadable`. It is carried as `unconfirmedState`
     on the native lifecycle row and inspection.
