@@ -13,9 +13,13 @@ Registry terminal reset.
 Every replacement must compile under CI's `RUSTFLAGS=-D warnings`: a mutant that fails to build
 would fail "at its intended assertion" only by accident, so the harness would reject it anyway.
 Run serially, only in Agent 3's isolated worktree or a disposable Actions checkout.
+
+`--shard K/N` runs every Nth entry by index, starting at the Kth (1-based), as Agent 2's lifecycle
+harness does. With no argument every entry runs.
 """
 
 import importlib.util
+import sys
 from pathlib import Path
 
 
@@ -366,5 +370,48 @@ core.MUTATIONS = [
 ]
 
 
+def parse_shard(argv):
+    """An optional `--shard K/N`, else `None`.
+
+    Shards select by index in `MUTATIONS`, never by a list of names: a new entry joins a shard
+    automatically, and a name list in the workflow could forget one, which would then never run
+    in CI. Each shard still checks every mutant's restored control right after restoring it, so a
+    shard is a complete run of its own entries.
+    """
+    shard = None
+    args = iter(argv)
+    for arg in args:
+        if arg == "--shard":
+            spec = next(args, "")
+        elif arg.startswith("--shard="):
+            spec = arg.split("=", 1)[1]
+        else:
+            raise SystemExit(f"unknown argument {arg!r}; the only option is --shard K/N")
+        try:
+            k, n = (int(part) for part in spec.split("/"))
+        except ValueError:
+            raise SystemExit(f"--shard takes K/N, got {spec!r}") from None
+        if not 1 <= k <= n:
+            raise SystemExit(f"--shard {spec}: K must be between 1 and N")
+        shard = (k, n)
+    return shard
+
+
+def select(mutations, shard):
+    """The entries `shard` runs: all of them for `None`. Refuses a shard that selects nothing,
+    rather than passing having run nothing."""
+    if shard is None:
+        return mutations
+    k, n = shard
+    chosen = [m for index, m in enumerate(mutations) if index % n == k - 1]
+    if not chosen:
+        raise SystemExit(f"--shard {k}/{n} selects no entry of {len(mutations)}")
+    return chosen
+
+
 if __name__ == "__main__":
+    shard = parse_shard(sys.argv[1:])
+    core.MUTATIONS = select(core.MUTATIONS, shard)
+    if shard is not None:
+        print(f"shard {shard[0]}/{shard[1]}: {len(core.MUTATIONS)} entries", flush=True)
     core.main("agent3-runtime-mutations")

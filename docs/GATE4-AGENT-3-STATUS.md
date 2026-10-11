@@ -4,6 +4,19 @@ Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-faul
 Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 16 follow-up.
 Review preamble: 3. Current entries override older ones.
 
+## Runtime harness sharded for CI, 2026-10-11
+
+The `agent3-repair-runtime` workflow's windows-latest job was cancelled at its 120-minute limit
+with 36 entries (run 38099286970, at `0e8fce8e`); ubuntu-latest passed. The harness now takes
+`--shard K/N` by index, as Agent 2's lifecycle harness does. The workflow runs {ubuntu, windows}
+× 3 shards of 12. `max-parallel: 1` is gone, since each job is its own runner. N is written out
+because `strategy.job-total` would also count the platform. Checked locally:
+- the three shards cover all 36 entries, with no overlap;
+- bad arguments and an empty shard are refused;
+- a one-entry shard runs end to end.
+
+PR #37 is merged (`acc43bcf`), and Agent 1 has merged it into their line (`02b631d1`).
+
 ## PR #37 review: dispositions, 2026-10-10
 
 An external review of PR #37 at `b4d95e5d` kept the install-before-budget fix and requested
