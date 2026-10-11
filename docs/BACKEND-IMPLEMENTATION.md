@@ -732,8 +732,8 @@ the acknowledgement; failed sharing never erases Save. Automatic recent-target r
 the SAME native lease and typed store, and emits remote updates only after accepted persistence.
 The native two-member test includes real frame CIDs, both edit directions, paced receive and
 restart. At most 16 recent targets are watched; missed edits on those targets now catch up
-automatically. Closed/unwatched objects still need discovery. The scanner memoizes pure Registry/Studio footprint validation in a
-mount-local 64-entry LRU, matching freshly authenticated complete wrapper bytes on every hit.
+automatically. Closed/unwatched objects still need discovery. The scanner memoizes every family's pure accounting validation in a
+mount-local LRU of up to 65 536 entries, matching freshly authenticated complete wrapper bytes on every hit.
 Its LOCAL rails are 1024 directory entries, 64 records, 8 MiB authenticated P1 bytes and 256 KiB
 cold validation across the vault. Normal Save/full scans warm it; Read warms its actual Studio
 record, not unrelated histories. Missing/corrupt/changed records and reference enumeration cannot

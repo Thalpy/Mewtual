@@ -390,14 +390,13 @@ table with the commit that closed it.
     already begun on the document, so the others keep replaying. No path resolves a record stuck
     on Hold, so these rails stay suspended for that document indefinitely; the eligibility view
     reports it as `PreparedStuck`.
-  - **The suspension reaches past the document in one place.** Registry maintenance skips the
-    document before its turn would resume a held owner decision for the document's pointer
-    bucket, and that bucket is shared with other documents. While the stuck document is the only
-    watched one in its bucket, maintenance does not resume that decision; a watched document in
-    the same bucket resumes it on its own turn. There is no fallback: maintenance's turn is a
-    held bucket decision's only ordinary resume route. Repair's Studio-scope resumes and the
-    router's resume of a landed install do not pass through this skip, but neither resumes a
-    held bucket decision in general.
+  - **The suspension stays with the document.** Its pointer bucket is shared with other
+    documents, and maintenance's turn is a held bucket decision's only ordinary resume route. So
+    before skipping, Registry maintenance resumes that bucket's held owner decision, unless a
+    repair job claims the bucket (Agent 3, PR #37). That resume reads only the bucket and its
+    owner record, never the Prepared document's source, and an error there is recorded, never
+    returned, so the skip still cannot pause receive. Until PR #37, a stuck document that was the
+    only watched one in its bucket stranded the bucket's decision.
 - **A budgeted scan holds custody for a bounded validation only, and a memoized validation is
   reused only for identical bytes.** Under a deadline, `validation_fits` admits a fresh validation
   inline only in accounting mode, and only for four families:
@@ -411,9 +410,12 @@ table with the commit that closed it.
   validation; a memo hit is reused instead. The rates are from one host, in a release build, on
   the shapes measured. A peer able to make a much denser record than those shapes, or a much
   slower machine, lengthens an inline hold in proportion. For Recovery and OwnerReceipts the size
-  envelopes keep it small; for Intents, the cap does. The validation memo holds only Registry and Studio accounting
-  records, keyed by filename hash, physical size and the blake3 digest of the authenticated
-  plaintext, and a hit needs all three to match bytes a scan has just read. **One deliberate
+  envelopes keep it small; for Intents, the cap does. The validation memo holds every family's
+  accounting record (C-3 runtime 15.2, M1), and for an Intents record its inventory facts too,
+  keyed by filename hash, physical size and the blake3 digest of the authenticated plaintext, and
+  a hit needs all three to match bytes a scan has just read. Validation is a pure function of
+  those bytes for every family (OwnerReceipts verifies signatures over keys its own bytes carry),
+  so a hit is what a fresh validation of the same bytes returns. **One deliberate
   relaxation:** a detached result refused because a write overtook it is still memoized, unless
   the memo already holds that record, so the restarted scan need not validate it again. The result
   never reaches an inventory, and validation is a pure function of those bytes, so a memo entry
@@ -979,10 +981,33 @@ table with the commit that closed it.
   emitted under a replacement numeric server id; the UI/incarnation fence lasts through emission.
   Automatic inventory uses LOCAL limits of 1024 visited entries, 64 records, 8 MiB aggregate
   authenticated reads and 256 KiB aggregate cold validation bytes, including unrelated saved P1
-  sources. Its mount-local 64-entry LRU stores only context-free Registry/Studio footprint
-  validation. Every hit still authenticates the actual file and binds its scope/filename,
+  sources. Its mount-local LRU stores every family's context-free accounting validation
+  (C-3 runtime 15.2, M1). Every hit still authenticates the actual file and binds its scope/filename,
   full plaintext-wrapper digest and physical size, including gate/receipts/quarantine/history.
   That metadata LRU stores no key/plaintext/doc, completed inventory, membership decision or budget authority.
+  **What it does hold beyond accounting:** for each Intents record, its inventory facts. For an
+  Unconfirmed branch these include the preview provider's device id, the observed MLS epoch and
+  the observation time. The same facts are in that record on this device's disk, and decrypted
+  into memory by every scan of it, but the memo keeps them resident for the mount's life, UI
+  lock included. That is a residual, not a new disclosure: nothing leaves the device.
+  **Admission depends on history** (15.9, MEDIUM-4): warm bytes do not count against the cold
+  rail for any family, so a vault receive refuses cold is admitted once its records are warm. A
+  refused scan warms what it validated before reaching the rail, so a later attempt does less
+  fresh work, and a remount makes the vault cold again. The rail still bounds each scan's fresh
+  validation, which is its purpose. Warm bytes still count against the 8 MiB authenticated-read
+  rail, since every hit reads and authenticates its file, so a vault admitted warm authenticates
+  up to 8 MiB on each receive turn, where it used to stop at the cold rail.
+  **Entries outlive their records until a complete covering scan prunes them**, which includes
+  another member's Unconfirmed provider id after leaving a server.
+  It holds up to `MAX_ACCOUNTED_RECORDS` (65 536) entries, so a complete scan never thrashes it,
+  and every inventory-issuing scan, once complete, prunes the entries of records it did not find,
+  within its own coverage (C-3 runtime design 15.3). About 300 bytes an entry (an Intents entry
+  about 60 more, for its boxed inventory facts), so about 20 MiB at
+  the bound, resident for the mount's life, UI lock included. **The bound is the only
+  unconditional limit**, and it holds whatever puts an entry. Pruning keeps it near the vault's
+  record count only as often as a covering scan completes, and some do not complete: receive's
+  scan refuses any vault over 64 records. Until one does, entries stay for records deleted since
+  the last, including any a peer caused this device to store and then remove.
   New/staged files still count; reference scans cannot skip CID enumeration. Remount clears reuse.
   A large cold record refuses before read; a changed candidate above the cold rail refuses before
   reconstruction. Warm footprint metadata alone does not authorize a mutable target above its

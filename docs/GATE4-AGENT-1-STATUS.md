@@ -2617,7 +2617,7 @@ every match. Every anchor in all ten mutation harnesses is unique.
 |---|---|---|
 | MEDIUM-1 | two of `reconcile`'s guards (rail membership and the live job's exemption) failed no test, while the commit and the table above claimed one test per guard. Without rail membership, a watched target's expired hold was erased on every probe, so design 7.3's 30 s to 300 s escalation never got past 30 s | **fixed:** two unit tests, a non-vacuous check in the churn test, two harness entries, and the claim corrected above |
 | LOW-1 | an active replay pass on a document that became Prepared waited there, and an active pass is replay's only candidate, so one stuck document stopped replay of every other. The comment claimed the opposite | **fixed:** replay drops the active pass, as it already does for a watch eviction or a history change; the now-redundant later check is removed. Test: `an_active_replay_pass_on_a_prepared_document_does_not_stall_the_rest`, with a test hook beginning the pass at the document's real watch epoch. Harness: `replay-skip` and `replay-active-drop`, each half alone, so the resolution harness now has 18 entries |
-| LOW-1, second half | Registry maintenance skips a Prepared document before resuming a held owner decision for its pointer bucket, which is shared, so a stuck Hold reaches past its own document | **docs:** THREAT-MODEL and HANDOVER now say so. Reordering Registry maintenance is Agent 3's call |
+| LOW-1, second half | Registry maintenance skips a Prepared document before resuming a held owner decision for its pointer bucket, which is shared, so a stuck Hold reaches past its own document | **docs** at first. Then **fixed by Agent 3** in PR #37 (merged into this line, 2026-10-10): the held decision is resumed before the skip, unless a repair claims the bucket. The caveat is gone from THREAT-MODEL and HANDOVER |
 | LOW-2 | watch churn resets the doubling: once an off-rail hold expires it is dropped with its doubling, so evict, wait and rewatch starts again at 30 s | **recorded, as designed:** only the user's own UI churn drives it, and it needs the document evicted from a 16-watch rail for longer than its hold. Keeping off-rail entries until `at + hold_ms` is an option if it matters |
 | LOW-3 | HANDOVER's "repair first, then Prepared" is wrong for Registry maintenance, which checks the Prepared document first and then the repair claim on its bucket. Separately, `repair_job.rs` says every path that would install into a claimed source consults the claim, but H5 and R3 do not | **HANDOVER fixed.** The claim gap is **recorded as a follow-up**: nothing is corrupted, because S3's digest recheck and R3's stamp fallback catch the conflict, and the cost is wasted work and a 5 s repair retry. The likely fix is a `repair_claimed` skip at the probe's selection, with a hold at `handoff_commit`, and the comment is Agent 3's |
 
@@ -2665,9 +2665,11 @@ also gates the Save's detach. It has a design check before it is built.
 - `RepairClaims::claimed` lists the writers that do not consult the claim (H5 and R3 among them);
 - Registry maintenance now resumes a bucket's held decision before skipping a Prepared document.
 
-The caveat here, in THREAT-MODEL and in HANDOVER, that a stuck Hold delays that decision stays
-until PR #37 merges into this branch, since until then it is true here. The probe's
-`repair_claimed` skip stays an Agent 1 follow-up.
+PR #37 merged into this branch (`acc43bcf`), and this line merges it after M2. The caveat that a
+stuck Hold delays that decision is now gone from here, THREAT-MODEL and HANDOVER. The merge was
+clean. Agent 3's one new memo writer, `warm_registry_repair_inventory`, uses the cache's
+unchanged `put` for bytes it has just confirmed current. The probe's `repair_claimed` skip stays
+an Agent 1 follow-up.
 
 ## Design 18.3 bounded implementation review (2026-10-09, Opus, static): PASS WITH FINDINGS
 
@@ -6007,6 +6009,31 @@ makes that more important, not less.
      8. the touched-path cursor decision, which moves into step 3 if item 1 leaves no margined
         share.
    - **Steps 4 and 5** still need section 7's measurements.
+   - **Decision, 2026-10-10 (C-3 runtime 16): the prerequisite first, then the numbers decide.**
+     The project owner chose to build writer-side warms and the indexed memo before measuring,
+     since without them a converted catch-up job provably never finishes under ordinary receive
+     (15.7, HIGH-1). After the measurement, each remaining owner is either converted or recorded as
+     debt, as H5 was. **M2 is built** (16.1): the memo is indexed, bounded at 65 536 and pruned.
+     **M1's memo half is built** (16.2). Next is M1's writer half, waiting on Agent 2's and
+     Agent 3's go-ahead for their writer files, then MEDIUM-3's progress rule, then section 7's
+     measurement.
+   - **MEDIUM-3 is built and reviewed but held, not landed** (2026-10-10, commit `2e7892aa`,
+     kept on the local ref `refs/agent1/medium3-held`). It was built out of 15.9's order, before
+     the writer warms. Its review (Opus, static) found no blocker or high, but MEDIUM-1 showed why
+     the order matters. Without writer warms, a write leaves the record it touched cold, and the
+     next attempt re-warms it. That counts as progress, so up to 64 restarts per job are excused
+     with no real progress, and replay's manual move would then wait out its full 60 s patience
+     rather than reach the faster fallback through backoff. **To land it, after the writer warms:**
+     - rebase it onto the line;
+     - add the review's MEDIUM-2 tests: the own-write refresh's credit, the error path's excuse,
+       and a store-level refused-but-unstored check;
+     - add a runtime storm with token-only foreign writes that pins the excused count, then
+       charged restarts, then backoff;
+     - fix LOW-1's stale comments and `MAX_INVENTORY_RESTARTS`'s doc;
+     - state LOW-2 in 16.3 (the ceiling suits the receive profile only; a full-profile owner must
+       revisit it);
+     - order or document LOW-3's own-write refresh against the rule;
+     - restrict `warmed` to job cursors (LOW-4).
 2. **Flow R is built** (2026-10-09; see "Flow R: the staged resolution of an interrupted handoff,
    built" above, and design 6.4.2 to 6.4.5). With H5's single visit accepted (C-3 runtime 15.14),
    R3 joins H5 in the deferred split if that target is ever restored. Still to do: its

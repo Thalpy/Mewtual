@@ -155,6 +155,21 @@ uses cancellation, a session lock or a generation change, not clock expiry.
    cap must not be answered "refused"), expire it lazily without feeding `pending` or `wake_in`,
    and clear it wherever the scheduled request is cleared. Move the per-branch rail to S1b through
    one predicate shared with `append` **[A2]**.
+
+   **Landed for the Unconfirmed Save, and the rail at S1b (Agent 2, `0e8fce8e`, 2026-10-10).**
+   A refused plan is kept as `ParkedOverlayRefusal` (`CatchupRuntime.overlay_refused`, one per
+   actor). The identical retry is answered from it while its capture stamp is current, and while
+   the stamp's numeric server is the caller's. `StudioOverlay::has_room()` is the one predicate
+   that `append` and S1b both refuse on, so a full branch of either kind is now refused at S1b.
+   **One correction to the text above, agreed:** the stamp binding *replaces* "clear it wherever
+   the scheduled request is cleared". Clearing at a pause, or at another request's park expiry,
+   would forget a refusal that still describes an unchanged record, and the stamp check covers
+   every case the clearing was for. So a kept refusal ends only at a lock, a stale stamp, its
+   deadline or a replacement. **Still to do: the Closing mirror** (`save_overlay` and the park
+   site in `complete`). It accepts either fingerprint, which are domain-separated by the
+   provenance tag, so one slot serves both. It waits until Agent 2 has finished in `catchup.rs`.
+   When the carrier lands, the kept refusal keeps its typed reason, so a retry is answered
+   exactly as the first refusal was.
 2. **S1b refusals emit no `RefreshRequired`**, so after `InstalledSource` or `SourceNotClosing`
    the row can lag. Emit one on any refusal caused by a durable-state change (review M3).
 

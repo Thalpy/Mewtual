@@ -190,6 +190,10 @@ fn frame_pixels(
 
 /// Record identity and public live context, captured under custody. It carries no plaintext, no
 /// key, no store handle, no Server and no budget, so it is safe to hold across a detach.
+///
+/// `Clone` for the receiver's parked refusal (MAP K12): a refused plan consumes its capture, so the
+/// job keeps a copy of the stamp to tell later whether the refusal still describes the record.
+#[derive(Clone)]
 pub(crate) struct StudioOverlayStamp {
     mount: Arc<()>,
     server: u64,
@@ -201,6 +205,14 @@ pub(crate) struct StudioOverlayStamp {
     mls: u64,
     /// Captured absence is explicit and must remain absence; it is not the same as unreadable.
     intent: Option<(blake3::Hash, u64)>,
+}
+
+impl StudioOverlayStamp {
+    /// The numeric server the record was read under. `studio_overlay_is_current` reads the record
+    /// at this server, not at a caller's, so a caller that may be another server must compare it.
+    pub(crate) fn server(&self) -> u64 {
+        self.server
+    }
 }
 
 impl std::fmt::Debug for StudioOverlayStamp {
@@ -249,6 +261,11 @@ impl std::fmt::Debug for StudioOverlayPlan {
 }
 
 impl StudioOverlayCapture {
+    /// What this capture was made from, for a caller that must outlive `plan`, which consumes it.
+    pub(crate) fn stamp(&self) -> &StudioOverlayStamp {
+        &self.stamp
+    }
+
     /// Runs on a blocking worker, off actor and store custody. It owns authenticated plaintext,
     /// public context, the basis and the media hold; it owns no store, Server, device key, MLS
     /// secret or source writer, and it writes nothing.

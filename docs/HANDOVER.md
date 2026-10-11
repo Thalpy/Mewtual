@@ -8,7 +8,15 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-10-10)
+## Status (latest entry: 2026-10-11)
+
+- **Gate 4 exact-head CI refresh (2026-10-11).** The shared line is now
+  `2ab84645b126fafe27a2180d79d9cb6267a0425a`. Agent 2 corrected lifecycle mutation shard 2's
+  assertion ordering in `4a1a1d4c`: the mutation was detected, but a newly earlier `has_room`
+  assertion hid the harness's intended append assertion. PR #39 then merged CI-only sharding for
+  Agent 3's unchanged runtime mutation set after its monolithic Windows job timed out. PR #27's
+  exact-head run is in progress. These CI corrections do not promote P5; native Save and repair
+  commands remain unregistered.
 
 - **Gate 4 core signing coverage closed (2026-10-10).** The short re-review of SIGN-TEST-001b
   found no issue. A real non-owner member completes Index and Flipnote handoffs of its own work;
@@ -53,6 +61,24 @@ and ranks the live hazards in that path.
   bounded repair verdict must be carried into the final combined review without being widened.
   PR #36 and its PR #37 corrections are merged; exact combined-head CI is running on PR #27.
   Details are in `GATE4-AGENT-3-STATUS.md`.
+
+- **Gate 4 Agent 1: C-3's prerequisite, the validation memo (2026-10-10).** The project owner
+  decided the remaining C-3 owners wait for writer-side warms and then a measurement, after which
+  each is converted or recorded as debt (`GATE4-AGENT-1-C3-RUNTIME.md` 16).
+  - **M2, landed:** the memo is indexed, holds up to 65 536 entries and is pruned by every
+    inventory-issuing scan, so a vault of more than 64 memoizable records no longer revalidates
+    every record on every scan.
+  - **M1's memo half, built:** every family's accounting validation is memoized, an Intents
+    record's inventory facts included, so unchanged Recovery, Intents and OwnerReceipts records
+    are no longer revalidated under custody either. The writer warms, M1's other half, wait on
+    Agent 2 and Agent 3, since five of the eight writer files are theirs.
+  - **Changed limitation, user-visible:** whether automatic receive refuses a vault at its
+    256 KiB cold rail now depends on history for every family, not only Registry and Studio. A
+    vault refused cold is admitted once its records are warm, a refused attempt warms what it
+    validated, and a remount makes the vault cold again.
+  - **Residual:** the memo keeps an Unconfirmed branch's provider device id, MLS epoch and
+    observation time resident for the mount's life, UI lock included. The same facts are in the
+    record on this device's disk.
 
 - **Gate 4 Agent 1: C-3 step 2, F1 and F4 (2026-10-09).**
   - **C-3 step 2:** replay's manual move now takes its storage budget from a shared, turn-based
@@ -106,9 +132,9 @@ and ranks the live hazards in that path.
       Flow R too, whenever a Prepared record outlived the probe. With Flow R and a peer online it
       was a livelock, found by the implementation review. Replay also drops a pass it had begun on
       such a document, which would otherwise stop replay of every other. A Prepared record held
-      back by a Hold is never resolved, so it suspends those document-scoped rails indefinitely.
-      PR #37 separately makes Registry maintenance resume the shared bucket's held owner decision
-      before applying the Prepared-document skip.
+      back by a Hold is never resolved, so it suspends these rails for its document indefinitely.
+      It no longer strands its shared pointer bucket's held owner decision: since PR #37, Registry
+      maintenance resumes that decision before skipping the Prepared document.
     - **Residual:** while a resolution is in flight the actor's one overlay slot is taken, so a
       Save on that server answers `Busy` for a few turns longer than before.
   - **PRs #36 and #37 merged into this line, and the PR #27 review:** Agent 3's repair runtime is merged
@@ -116,10 +142,10 @@ and ranks the live hazards in that path.
     first, then the Prepared record. Registry maintenance checks the Prepared document first,
     then the repair claim on its bucket, a different key. The review's LOW-1 is fixed:
     the handoff probe's per-target bookkeeping is now bounded by the 16-watch rail, plus at most
-    64 unexpired holds of unwatched targets. Its MEDIUM-1 is closed in PR #37: S3 installs or
-    memoizes the rebuild before building the inventory budget, so a cold source over the inline
-    threshold does not discard the detached validation. The same correction resumes a prepared-
-    only bucket after its first B3 guess fails.
+    64 unexpired holds of unwatched targets. Its MEDIUM-1 is closed by PR #37, now merged into
+    this line: S3 installs, or for a bucket memoizes, the rebuild before building the inventory
+    budget, so a cold source over the inline threshold does not discard the detached validation.
+    The same correction resumes a prepared-only bucket after its first B3 guess fails.
   - Native Save and repair commands remain unregistered. This is not Gate 4 acceptance.
 
 - **Gate 4 PR #35 reconciliation (merged 2026-10-08).** The merged history preserves
@@ -235,7 +261,10 @@ and ranks the live hazards in that path.
     stage mints from the actor's live preview in its own visit. The actor has one overlay slot: a
     visit finishes any parked plan and reports only its own request's outcome. A parked plan has a
     30 s deadline that holds while the receiver is paused. A Closing draft is refused.
-  - Rail: an Unconfirmed branch takes at most 64 operations.
+  - Rail: an Unconfirmed branch takes at most 64 operations, refused at S1b before any capture.
+  - A Save whose detached plan was refused is answered with that refusal on its identical retry,
+    for up to 30 s and only while the intent record it was planned from is unchanged, instead of
+    being captured and planned again. Unconfirmed only; the Closing `save_overlay` still re-plans.
   - Design 8.6: the state is derived on every read from headers, with four values, `awaitingSource`,
     `baseConfirmed`, `baseSuperseded` and `sourceUnreadable`. It is carried as `unconfirmedState`
     on the native lifecycle row and inspection.

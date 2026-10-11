@@ -33,7 +33,9 @@ pub(crate) use handoff_capture::{
 mod overlay;
 pub(crate) use overlay::StudioOverlayStart;
 mod overlay_capture;
-pub(crate) use overlay_capture::{StudioOverlayCapture, StudioOverlayMint, StudioOverlayPlan};
+pub(crate) use overlay_capture::{
+    StudioOverlayCapture, StudioOverlayMint, StudioOverlayPlan, StudioOverlayStamp,
+};
 mod preparation;
 mod recovery_disposition;
 mod registry;

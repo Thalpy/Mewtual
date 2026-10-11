@@ -15,8 +15,14 @@ fn studio_inventory_cache_never_skips_reference_enumeration() {
             break p;
         }
     };
-    assert_eq!(p.reused_records, 1);
-    warm.finish().unwrap();
+    let warmed = warm.finish().unwrap();
+    // Every record is warm, the Studio wrapper among them. Since C-3 runtime 15.2 (M1) every
+    // family is memoized, so this counts all of them; it was `1` while only Studio's was
+    // (contract change, recorded).
+    assert!(warmed
+        .records()
+        .any(|entry| entry.kind == crate::store::EpochRecordKind::Studio));
+    assert_eq!(p.reused_records, warmed.records().count());
     let mut references = store.scan_epoch_storage_with_studio().unwrap();
     references.collect_creative_references().unwrap();
     let p = loop {

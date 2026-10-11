@@ -356,6 +356,31 @@ MUTATIONS = [
         "unconfirmed::an_unconfirmed_branch_accepts_sixty_four_operations_and_refuses_the_sixty_fifth",
         "an Unconfirmed branch past the rail refuses to read",
     ),
+    # MAP K12: the one predicate `append` and S1b both refuse on. The mutant lets a full branch
+    # report room. `append` asks the same predicate, passes the rail, and its staged read then
+    # refuses the 65 entries as `Malformed` (the read-side cap), so the `append` assertion fails
+    # on the wrong variant. The test checks `append` before `has_room`, so that
+    # `unconfirmed-op-rail` keeps pinning `append` itself.
+    (
+        "unconfirmed-branch-room-predicate", "catcoms-replication", REPL_TESTS,
+        f"{REPL}/overlay.rs",
+        "        self.entries.len() < self.max_ops()\n",
+        "        self.entries.len() <= self.max_ops()\n",
+        "unconfirmed::an_unconfirmed_branch_accepts_sixty_four_operations_and_refuses_the_sixty_fifth",
+        "the Unconfirmed rail refuses operation",
+    ),
+    # The predicate is kind-aware, which is what lets S1b refuse a Closing branch at its own cap
+    # (design 8.3). The mutant applies the Unconfirmed rail to both kinds; every Unconfirmed
+    # assertion still holds, and only the Closing branch at 64 is wrongly reported full.
+    # `max_ops` stays used by `checked_entries`.
+    (
+        "unconfirmed-branch-room-kind", "catcoms-replication", REPL_TESTS,
+        f"{REPL}/overlay.rs",
+        "        self.entries.len() < self.max_ops()\n",
+        "        self.entries.len() < MAX_STUDIO_UNCONFIRMED_OVERLAY_OPS\n",
+        "unconfirmed::an_unconfirmed_branch_accepts_sixty_four_operations_and_refuses_the_sixty_fifth",
+        "has_room keeps the Closing cap",
+    ),
     # --- design 8.3's per-server and vault-wide rails, at Flow S's S1b and S3 ---
     #
     # Each rail's comparison, each admission point's call and both sources of the tally on their
@@ -422,6 +447,18 @@ MUTATIONS = [
         "        } else {\n            let _ = intents.unconfirmed.get(&id);\n        }\n",
         "studio_unconfirmed_rail_tally_follows_ordinary_growth_and_drops_a_disposed_branch",
         "the disposal's own budget drops the record",
+    ),
+    # MAP K12: a full branch is refused at S1b, before capture. Without the call the detached plan
+    # still refuses it, after the capture and permit S1b exists to spare, so the expected text is
+    # the stage assertion. Slow: the fixture is 64 real Saves, about a minute in a debug build.
+    (
+        "unconfirmed-rail-branch-s1b", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_rails::",
+        "crates/catcoms-app/src/store/epoch_studio/overlay.rs",
+        "            if !state.overlay().is_some_and(|live| live.has_room()) {\n",
+        "            if !state.overlay().is_some_and(|live| live.has_room()) && false {\n",
+        "studio_unconfirmed_rail_refuses_a_full_branch_at_s1b",
+        "refused at the wrong stage",
     ),
     # --- design 8.6 reconciliation (design M21): each half of the predicate on its own ---
     #
@@ -562,6 +599,84 @@ MUTATIONS = [
         "",
         "a_cancelled_waiter_clears_the_lock_drop_flag",
         "a cancelled waiter left the lock's drop flag set",
+    ),
+    # --- MAP K12: a refused plan's answer is kept for its request's retry ---
+    #
+    # One entry per guard: kept at all, answered, keyed to its own request, bounded by its record,
+    # by its deadline and by a lock. Each mutant keeps its operands used under -D warnings.
+    (
+        "unconfirmed-save-refusal-kept", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/catchup.rs",
+        "                            self.catchup\n"
+        "                                .park_overlay_refusal(request, stamp, message, now);\n",
+        "                            let _ = (request, stamp, message, now, CatchupRuntime::park_overlay_refusal);\n",
+        "studio_actor_unconfirmed_save_a_refused_plan_is_answered_without_another_capture",
+        "retry 1 of a refused plan: answered",
+    ),
+    (
+        "unconfirmed-save-refusal-answered", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/unconfirmed.rs",
+        "            if current {\n",
+        "            if current && false {\n",
+        "studio_actor_unconfirmed_save_a_refused_plan_is_answered_without_another_capture",
+        "retry 1 of a refused plan: answered",
+    ),
+    (
+        "unconfirmed-save-refusal-own-request", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/catchup.rs",
+        "            .filter(|refusal| refusal.request == request)\n",
+        "            .filter(|refusal| refusal.request == request || true)\n",
+        "studio_actor_unconfirmed_save_a_kept_refusal_ends_when_its_record_changes",
+        "another request was answered from a refusal that was not its own",
+    ),
+    (
+        "unconfirmed-save-refusal-stamp", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/unconfirmed.rs",
+        "            if current {\n",
+        "            if current || true {\n",
+        "studio_actor_unconfirmed_save_a_kept_refusal_ends_when_its_record_changes",
+        "a refusal was answered after its record changed",
+    ),
+    # Review of K12, LOW-1: the fingerprint does not name the numeric server, so the answer must.
+    (
+        "unconfirmed-save-refusal-server", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/unconfirmed.rs",
+        "            let current = refusal.stamp().server() == id\n",
+        "            let current = (refusal.stamp().server() == id || true)\n",
+        "studio_actor_unconfirmed_save_a_kept_refusal_answers_only_its_own_server",
+        "a refusal kept under one server answered a Save under another",
+    ),
+    (
+        "unconfirmed-save-refusal-forgotten-when-stale", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/catchup.rs",
+        "    pub(super) fn forget_overlay_refusal(&mut self) {\n        self.overlay_refused = None;\n",
+        "    pub(super) fn forget_overlay_refusal(&mut self) {\n        let _ = &self.overlay_refused;\n",
+        "studio_actor_unconfirmed_save_a_kept_refusal_ends_when_its_record_changes",
+        "the refusal that no longer describes its record was kept",
+    ),
+    (
+        "unconfirmed-save-refusal-deadline", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/catchup.rs",
+        "            .is_some_and(|r| now >= r.until)\n",
+        "            .is_some_and(|r| now >= r.until && false)\n",
+        "studio_actor_unconfirmed_save_a_kept_refusal_expires_and_a_lock_drops_it",
+        "a refusal was answered at its deadline",
+    ),
+    (
+        "unconfirmed-save-refusal-lock", "catcoms-app",
+        "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
+        "crates/catcoms-app/src/studio/receiver/catchup.rs",
+        "        self.overlay_refused = None;\n        queued || parked || self.overlay_detached\n",
+        "        queued || parked || self.overlay_detached\n",
+        "studio_actor_unconfirmed_save_a_kept_refusal_expires_and_a_lock_drops_it",
+        "the lock kept a refusal",
     ),
     # Re-review of `5ccc4647`, MEDIUM: a parked plan is dropped at its deadline. The mutant never
     # drops it, so after the deadline the slot is still held and another target's Save is `busy`.

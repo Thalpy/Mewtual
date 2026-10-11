@@ -25,16 +25,24 @@ env:
 
 jobs:
   repair-runtime:
-    name: repair-runtime (${{ matrix.os }})
+    name: repair-runtime (${{ matrix.os }}, shard ${{ matrix.shard }} of 3)
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
-      # Same rule as the store harness: every mutant and restored control is serial, and the two
-      # platform jobs stay serial so this high-memory app test binary never competes with itself.
-      max-parallel: 1
+      # Every mutant and its restored control recompile the app's test binary, serially within a
+      # job. With 36 entries the single windows-latest job was cancelled at its 120-minute limit
+      # (run 38099286970, at 0e8fce8e). So the entries are split by index, as Agent 2's lifecycle
+      # harness does (`--shard K/N`): a new entry joins a shard automatically, and each shard runs
+      # its own restored controls. Each job is its own runner, so shards and platforms run side
+      # by side without competing for memory.
+      #
+      # N is written out below, not taken from `strategy.job-total`, because this matrix also
+      # spans the platform: job-total would count both. Keep N equal to this list's length, and
+      # raise both when a shard nears the limit.
       matrix:
         os: [ubuntu-latest, windows-latest]
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
       - name: Record actual checkout
@@ -44,12 +52,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Verify repair job runtime mutations and exact restored controls
-        run: python scripts/check-agent3-runtime-mutations.py
+      - name: Verify repair job runtime mutations and exact restored controls (shard ${{ matrix.shard }} of 3)
+        run: python scripts/check-agent3-runtime-mutations.py --shard ${{ matrix.shard }}/3
       - name: Preserve runtime mutation and restoration evidence
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: agent3-runtime-mutations-${{ matrix.os }}
+          name: agent3-runtime-mutations-${{ matrix.os }}-${{ matrix.shard }}
           path: logs/agent3-runtime-mutations/
           if-no-files-found: error

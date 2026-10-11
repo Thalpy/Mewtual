@@ -21,11 +21,22 @@ fn control(
     target: StudioTarget,
     action: StudioControlAction,
 ) -> Result<StudioControlResponse, AppError> {
+    control_on(receiver, p, SERVER, target, action)
+}
+
+/// [`control`] under a given numeric server, for a test that needs another.
+fn control_on(
+    receiver: &mut StudioReceiver,
+    p: &mut Pair,
+    id: u64,
+    target: StudioTarget,
+    action: StudioControlAction,
+) -> Result<StudioControlResponse, AppError> {
     receiver
         .control(
             &mut p.bob,
             &mut p.b_store,
-            SERVER,
+            id,
             StudioControlRequest { target, action },
         )
         .map(|(_, _, response)| response.expect("a control response"))
@@ -37,6 +48,17 @@ fn save(
     target: StudioTarget,
     request: &StudioUnconfirmedOverlaySaveRequest,
 ) -> Result<StudioUnconfirmedSaveOutcome, AppError> {
+    save_on(receiver, p, SERVER, target, request)
+}
+
+/// [`save`] under a given numeric server.
+fn save_on(
+    receiver: &mut StudioReceiver,
+    p: &mut Pair,
+    id: u64,
+    target: StudioTarget,
+    request: &StudioUnconfirmedOverlaySaveRequest,
+) -> Result<StudioUnconfirmedSaveOutcome, AppError> {
     let action = StudioControlAction::SaveUnconfirmedOverlay(Box::new(
         StudioUnconfirmedOverlaySaveRequest {
             basis: request.basis,
@@ -45,7 +67,7 @@ fn save(
             body: request.body.clone(),
         },
     ));
-    match control(receiver, p, target, action)? {
+    match control_on(receiver, p, id, target, action)? {
         StudioControlResponse::UnconfirmedOverlaySaved { target: t, outcome } => {
             assert_eq!(t, target);
             Ok(outcome)
@@ -756,6 +778,282 @@ async fn lock_drops_a_detached_jobs_returning_plan() {
         "the lock did not drop a detached job's plan when it returned"
     );
     assert_eq!(pending(&mut p, target), 0, "nothing was durable");
+}
+
+/// A retitle of an object the document does not hold, as a Save request. It decodes, so S0 and
+/// S1b take it, and the detached plan refuses it when its replay finds no such object: a refusal
+/// that is a pure function of the record and the request, which is what MAP K12 keeps.
+fn retitle_missing(
+    (basis, branch): ([u8; 32], [u8; 32]),
+    nonce: u8,
+    object: [u8; 16],
+) -> StudioUnconfirmedOverlaySaveRequest {
+    StudioUnconfirmedOverlaySaveRequest {
+        basis,
+        branch,
+        nonce: [nonce; 16],
+        body: IndexOp::SetTitle {
+            object,
+            title: "not here yet".into(),
+        }
+        .encode()
+        .unwrap(),
+    }
+}
+
+/// The text the plan's refusal of [`retitle_missing`] carries.
+const PLAN_REFUSAL: &str = "malformed op";
+
+/// What a retry is answered: the refusal's text, or a panic naming what came instead.
+fn refused_text(answer: Result<StudioUnconfirmedSaveOutcome, AppError>, what: &str) -> String {
+    match answer {
+        Err(error) => error.to_string(),
+        Ok(outcome) => panic!("{what}: answered {outcome:?}, not refused"),
+    }
+}
+
+/// MAP K12. A plan refused for a reason that cannot change while its record does not is answered
+/// again on the identical retry, from what was kept, with no second capture: no slot reservation,
+/// no pool permit, nothing queued for a worker. Before this the retry captured afresh and was told
+/// `Scheduled`, and so was every retry after it, each paying a scan, media admission, a permit and
+/// a detached decode. It is answered on every retry, not once, and it owes the actor nothing: no
+/// visit and no wake, because it holds nothing a deadline must release.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_a_refused_plan_is_answered_without_another_capture() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let pool = receiver.inject_overlay_pool_for_test(4);
+    let (wake, owed) = (receiver.wake_in(&p.bob), receiver.pending(&p.bob));
+    let request = retitle_missing((basis, branch), 121, [0xE1; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &request).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    assert_eq!(
+        pool.available_permits(),
+        4,
+        "precondition: the refused plan released its permit"
+    );
+
+    for retry in 1..=2 {
+        let refused = refused_text(
+            save(&mut receiver, &mut p, target, &request),
+            &format!("retry {retry} of a refused plan"),
+        );
+        assert!(refused.contains(PLAN_REFUSAL), "retry {retry}: {refused}");
+        assert_eq!(
+            pool.available_permits(),
+            4,
+            "retry {retry}: answering a kept refusal reserved a permit"
+        );
+        assert!(
+            receiver.detach(&mut p.bob).is_none(),
+            "retry {retry}: answering a kept refusal queued a capture"
+        );
+    }
+    assert_eq!(
+        recorded_provenance(&mut p, target),
+        None,
+        "nothing was durable"
+    );
+    assert_eq!(
+        (receiver.wake_in(&p.bob), receiver.pending(&p.bob)),
+        (wake, owed),
+        "a kept refusal changed the actor's schedule"
+    );
+}
+
+/// MAP K12's bound by the record. The refusal is kept against the intent record it was planned
+/// from, so once that record changes it is no longer answered. Here another request creates the
+/// very object the refused retitle named. That request is not answered from the other's refusal;
+/// it saves. The retitle's retry then finds its record moved on, plans afresh, and this time saves:
+/// a refusal kept past its record would have refused a Save that now succeeds.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_a_kept_refusal_ends_when_its_record_changes() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let object = [0xE2; 16];
+    let retitled = retitle_missing((basis, branch), 122, object);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &retitled).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    let refused = refused_text(
+        save(&mut receiver, &mut p, target, &retitled),
+        "precondition: the refusal is kept",
+    );
+    assert!(refused.contains(PLAN_REFUSAL), "{refused}");
+
+    let created = new_entry(&mut p, (basis, branch), 123, object);
+    let visit = save(&mut receiver, &mut p, target, &created);
+    assert!(
+        matches!(visit, Ok(StudioUnconfirmedSaveOutcome::Scheduled)),
+        "another request was answered from a refusal that was not its own: {visit:?}"
+    );
+    settle(&mut receiver, &mut p).await;
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &created).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+    ));
+
+    let visit = save(&mut receiver, &mut p, target, &retitled);
+    assert!(
+        matches!(visit, Ok(StudioUnconfirmedSaveOutcome::Scheduled)),
+        "a refusal was answered after its record changed: {visit:?}"
+    );
+    assert!(
+        !receiver.has_overlay_refusal_for_test(),
+        "the refusal that no longer describes its record was kept"
+    );
+    settle(&mut receiver, &mut p).await;
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &retitled).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 2, .. }
+    ));
+}
+
+/// MAP K12's bound in time, and the lock. The refusal is answered up to the park bound and not at
+/// it: the first retry at the deadline plans afresh (and, the record being unchanged, is refused
+/// and kept again). Expiry is lazy, enforced by the retry that would answer, since nothing else
+/// needs it gone. A UI lock drops it: the first Save after it is decided afresh, here by S1b, which
+/// refuses for want of the preview the lock also dropped.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_a_kept_refusal_expires_and_a_lock_drops_it() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let request = retitle_missing((basis, branch), 124, [0xE3; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &request).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+
+    p.clock.advance_ms(29_999);
+    let refused = refused_text(
+        save(&mut receiver, &mut p, target, &request),
+        "a refusal before its deadline",
+    );
+    assert!(refused.contains(PLAN_REFUSAL), "{refused}");
+
+    p.clock.advance_ms(1);
+    let visit = save(&mut receiver, &mut p, target, &request);
+    assert!(
+        matches!(visit, Ok(StudioUnconfirmedSaveOutcome::Scheduled)),
+        "a refusal was answered at its deadline: {visit:?}"
+    );
+    settle(&mut receiver, &mut p).await;
+    assert!(
+        receiver.has_overlay_refusal_for_test(),
+        "precondition: planned afresh, refused and kept again"
+    );
+
+    receiver.clear_previews();
+    assert!(
+        !receiver.has_overlay_refusal_for_test(),
+        "the lock kept a refusal"
+    );
+    let refused = refused_text(
+        save(&mut receiver, &mut p, target, &request),
+        "the first Save after a lock",
+    );
+    assert!(
+        refused.contains("no live preview"),
+        "the first Save after a lock was not decided afresh: {refused}"
+    );
+}
+
+/// MAP K12, the lock while the refused plan is still detached. Its refusal comes back after the
+/// lock and is not kept: the lock forgot the request that scheduled it, so the identical Save after
+/// the lock is decided afresh (here, refused for want of the preview the lock dropped).
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_a_refusal_returning_after_a_lock_is_not_kept() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let request = retitle_missing((basis, branch), 125, [0xE4; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &request).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    let job = receiver
+        .detach(&mut p.bob)
+        .expect("precondition: the capture detaches");
+    receiver.clear_previews();
+    receiver.complete(&mut p.bob, job.run(None).await);
+    assert!(
+        !receiver.has_overlay_refusal_for_test(),
+        "a refusal that came back after a lock was kept"
+    );
+    let refused = refused_text(
+        save(&mut receiver, &mut p, target, &request),
+        "the first Save after the lock",
+    );
+    assert!(!refused.contains(PLAN_REFUSAL), "{refused}");
+}
+
+/// MAP K12 keys the refusal to the numeric server as well as the request (review of K12, LOW-1).
+/// The request fingerprint does not name the server, and the stamp check reads the record at the
+/// stamp's own server, so without the comparison a refusal kept under one server answered the
+/// identical Save under another, for a record that Save never read. Under the other id it is
+/// decided afresh, and the refusal is forgotten.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_a_kept_refusal_answers_only_its_own_server() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let request = retitle_missing((basis, branch), 126, [0xE5; 16]);
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &request).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    assert!(
+        receiver.has_overlay_refusal_for_test(),
+        "precondition: the refusal is kept"
+    );
+
+    // Decided afresh under the other id, which here means S1b's mint refuses: the preview was
+    // prepared under `SERVER`. Nothing is captured.
+    let elsewhere = save_on(&mut receiver, &mut p, SERVER + 1, target, &request);
+    assert!(
+        !matches!(&elsewhere, Err(error) if error.to_string().contains(PLAN_REFUSAL)),
+        "a refusal kept under one server answered a Save under another: {elsewhere:?}"
+    );
+    assert!(
+        matches!(&elsewhere, Err(error) if error.to_string().contains("replaced mount/server")),
+        "under another server the Save was not decided afresh by S1b: {elsewhere:?}"
+    );
+    assert!(
+        !receiver.has_overlay_refusal_for_test(),
+        "the refusal kept under another server was not forgotten"
+    );
+    assert!(
+        receiver.detach(&mut p.bob).is_none(),
+        "the Save under another server captured work"
+    );
+}
+
+/// MAP K12 keeps one refusal per actor, as the overlay slot holds one plan (review of K12, LOW-4,
+/// recorded as a follow-up). A later request's refusal replaces an earlier one's, so the earlier
+/// request's retry is decided afresh and pays for a capture again. Pinned so the limit is a test,
+/// not an accident: a change to keep several must change this test on purpose.
+#[tokio::test]
+async fn studio_actor_unconfirmed_save_a_later_refusal_replaces_the_kept_one() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let first = retitle_missing((basis, branch), 127, [0xE6; 16]);
+    let second = retitle_missing((basis, branch), 128, [0xE7; 16]);
+    for request in [&first, &second] {
+        assert!(matches!(
+            save(&mut receiver, &mut p, target, request).unwrap(),
+            StudioUnconfirmedSaveOutcome::Scheduled
+        ));
+        settle(&mut receiver, &mut p).await;
+    }
+    let refused = refused_text(
+        save(&mut receiver, &mut p, target, &second),
+        "the later refusal",
+    );
+    assert!(refused.contains(PLAN_REFUSAL), "{refused}");
+    let visit = save(&mut receiver, &mut p, target, &first);
+    assert!(
+        matches!(visit, Ok(StudioUnconfirmedSaveOutcome::Scheduled)),
+        "the replaced refusal was still answered: {visit:?}"
+    );
 }
 
 /// The confirmed checkpoint arrives on this member: the very receipt and seed the preview was of,

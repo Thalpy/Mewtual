@@ -1730,3 +1730,146 @@ and saves only about 0.06 ms per frame.
 
 Also recorded in `THREAT-MODEL.md` (the pause a member can cause) and in `HANDOVER.md`'s known
 limitations.
+
+## 16. The remaining owners: the prerequisite first, then a decision (2026-10-10)
+
+**Decided by the project owner.** What remains of C-3's adoption is catch-up (section 5's
+persist, begin-pass and serve sites, discovery, Registry and rotation), Agent 3's repair sites,
+receive, H1, and replay's Apply seam. None of them is converted until the prerequisite below is
+built and section 7's measurement is taken. The numbers then decide, site by site, whether it is
+converted or recorded as debt, as H5 was (15.14).
+
+**Why the prerequisite comes first.** Section 7 gates catch-up and receive on two measurements:
+visits per inventory, and the restart rate with another writer active. Without writer-side warms
+the outcome is already known (15.7, HIGH-1). With document A open and a peer drawing on B, every
+receive turn writes B cold. A converted job therefore parks on B each turn and is overtaken by the
+next packet, so it never finishes. Measuring before the warms would only confirm that.
+
+**The prerequisite is 15.9's items 2 to 4:** M2, then M1 with writer warms at all eight writers
+(the forced-warm token and 15.9's M4 contract), then MEDIUM-3's progress rule with per-key credit
+and a ceiling. All three also cut today's synchronous cost, since a warm record is never validated
+under custody again, so they are worth building whatever the decision. Item 1 (H5's
+source-growing terms) stays deferred with H5 (15.14).
+
+### 16.1 M2, built (2026-10-10)
+
+`RecordCache` (`inventory/cache.rs`) now has four properties:
+- **Indexed:** two `BTreeMap`s, the entries by key and an access order by a never-reused tick, so
+  get, put and eviction are logarithmic. `EpochRecordKind` is `Ord` but not `Hash`, so this needs
+  no new derive or dependency.
+- **Bounded at `MAX_ACCOUNTED_RECORDS`** (65 536), the most records any inventory can account, so
+  a complete scan never thrashes it. It was a 64-entry LRU, which re-validated every record of a
+  larger vault on every scan.
+- **Pruned at every finish that issues an inventory.** `prune_inventory_cache` runs in the three
+  such paths (`EpochStorageScan::finish`, `finish_epoch_inventory_job` and
+  `finish_epoch_storage_scan`), and only after `finish_with` has issued the inventory. It drops
+  entries of the scan's own covered families that the scan did not find (15.7, LOW). The
+  reference-scan finish issues no inventory and does not prune; it could, soundly.
+- **One coverage rule.** `EpochInventoryCoverage::covers(family)` is now asked by both the
+  traversal (`storage_name`) and pruning, so a scan cannot prune a family it did not read. It is
+  equivalent, case by case, to the four checks `storage_name` used to make inline.
+
+`finish_epoch_storage_scan` now takes `&mut self`. Its only callers are tests; one closure in
+`epoch_registry/tests.rs` changed from `&ServerStore` to `&mut ServerStore`.
+
+**Tests, each guard broken on purpose:**
+
+| test | guards |
+|---|---|
+| `inventory_cache_is_bounded_lru_and_requires_family_size_and_full_digest` (rewritten for the new bound, a recorded contract change from 64) | the bound; a hit counts as a use; the index and order agree. A hit that does not refresh its tick fails it |
+| `pruning_drops_only_covered_entries_the_scan_did_not_find` | prune's two predicates, at unit level |
+| `a_scan_of_more_records_than_the_old_lru_held_reuses_every_warm_entry` (72 Studio records) | with the bound put back to 64 it fails, revalidating all 72 on the second scan, `(72, 0)` against `(0, 72)` |
+| `a_completed_scan_prunes_a_removed_records_entry_within_its_coverage` | pruning disabled: the removed record's entry survives. Coverage ignored: a Recovery-only scan prunes a Studio entry |
+
+All 127 inventory tests pass. `THREAT-MODEL.md` now gives the memo's real bound and residency.
+Memory is about 300 bytes an entry and about 20 MiB at the bound, resident for the mount's life.
+The bound is hard, whatever puts an entry.
+
+**Review of M2 (2026-10-10, Opus, static, at `310770d0`): no blocker or high.** It checked the
+coverage refactor against all 30 (coverage, family) pairs. It confirmed that pruning runs only on
+`finish_with` success, can never drop a record the scan found, and leaves every non-scan put
+(each describes bytes on disk) alone. It also found nothing quadratic, and the memory figures
+fair.
+
+| finding | what | disposition |
+|---|---|---|
+| MEDIUM-1 | pruning was pinned on only one of the three finish paths: deleting it from the job or cursor path failed nothing | **fixed:** the prune test runs its whole sequence through each path (`Finish::{Scan, Job, Cursor}`); each deletion now fails it, naming the path |
+| MEDIUM-2 | `ARCHITECTURE.md` and `INTERFACES.md` still said "64-entry LRU" | **fixed** |
+| LOW-1 | the bound rested on `entries` and `order` staying in step, unchecked after `evict_mismatch`: one that removed from `entries` only would let the memo grow past the bound | **fixed:** every removal goes through one helper; `put` evicts in a loop until below the bound; consistency is `debug_assert`ed after every mutation; a test of eviction then refilling to the bound. That mutant now fails three tests |
+| LOW-2 | "every finish path" was not literal: the reference-scan finish does not prune | **reworded** to "every inventory-issuing finish", in code and docs; pruning there would be sound, and is left out because that finish issues no inventory |
+| LOW-3 | THREAT-MODEL said memory is bounded by the vault's record count | **reworded:** only the 65 536 bound is unconditional; entries for deleted records stay until a covering scan completes, which receive's scan never does on a vault over 64 records |
+| LOW-4 | `get`'s size check, and coverage for families other than Studio, had no test | **fixed:** a size-mismatched `get` with the right digest must miss; a Registry entry must survive scans that do not read Registry and be pruned by one that does. Each mutant now fails |
+
+All 128 inventory tests pass.
+
+**Next: M1** (15.2), with 15.8's HIGH-1 writer warms at the eight writers 15.9's M3 counts, the
+forced-warm token, M4's contract, MEDIUM-2's three gates and 15.9's L1, L4 and L5. Its residual
+risk from this review: each writer warm must land after its write's rename, in the same custody
+visit, or a scan completing between the two could prune the new record's warm entry.
+
+### 16.2 M1's memo half, built (2026-10-10)
+
+M1 has two halves.
+- **The memo half, here:** entirely in `inventory.rs` and `inventory/cache.rs`. 15.7 judged
+  memoizing every family sound on its own, without the warms.
+- **The writer half:** the warms at the eight writers, the forced-warm token and 15.9's M4
+  contract. Five of the eight writer files are Agent 2's or Agent 3's, so it waits on their
+  go-ahead.
+
+**What changed:**
+- **The value carries the facts.** A memo entry is the accounting record plus, for an Intents
+  record, its `EpochIntentInventoryFacts`; `get` returns both and `accounting_only` restores
+  both. `put_validated` (and `put_if_vacant`) take the facts and **refuse an entry of the wrong
+  shape**: an Intents entry without facts, or another family's with them. The refusal
+  `debug_assert`s and returns false. A fact-less Intents hit would undercount the Unconfirmed
+  tally and mint too generous a budget. `put` keeps its signature for the facts-less writer
+  paths (Registry and Studio, Agent 3's new `warm_registry_repair_inventory` included), so no
+  other agent's file changed.
+- **MEDIUM-2's three gates widened together:** the scan's `cacheable` (every family, accounting
+  mode only), `memoize`'s family gate (removed) and `evict_mismatch` on every family's read.
+- **L5:** the test helper `validated_clone` copies the facts.
+- **L4:** stale text corrected in THREAT-MODEL (twice), ARCHITECTURE, INTERFACES,
+  BACKEND-IMPLEMENTATION, design 9.2 consequence 2, `cache.rs`, and the docs of `memoize` and
+  `memoize_overtaken_inventory_result`.
+- **MEDIUM-4:** HANDOVER and THREAT-MODEL state that receive admission is history-dependent for
+  every family.
+
+**Tests, each guard broken on purpose:**
+
+| test | guards; the mutant that fails it |
+|---|---|
+| `c3_every_family_is_memoized_and_a_hit_restores_a_fresh_validation` (`performance.rs`; the five-family vault, and one with a Closing overlay branch whose facts carry provenance) | a second scan reuses every record, and its inventory (identity, accounting, Intents facts) equals a cold scan's; a reference scan reuses nothing. The lookup gate narrowed back to Registry and Studio fails it ("a record was validated again"); a hit that drops the facts trips the cache's shape refusal first, at the re-memoize; the old family gate fails it |
+| `a_budgeted_scan_memoizes_every_family` (renamed from `a_budgeted_scan_memoizes_only_registry_and_studio_records`, a recorded contract change) | a budgeted scan memoizes its Recovery, DraftArchive and Studio records, and a second reuses all three. The old family gate fails it |
+| `an_intents_entry_without_its_facts_is_refused`, `facts_on_another_familys_entry_are_refused` (`cache.rs`; `should_panic` under `debug_assertions`, a returned `false` otherwise) | the shape refusal; removing it fails both |
+| `a_stale_recovery_entry_is_evicted_so_a_refused_result_still_warms` | eviction on read for a family other than Registry and Studio; the old eviction gate fails it |
+| `c3_receive_admission_depends_on_what_is_warm_and_a_remount_resets_it` (three 100 KiB Recovery records) | MEDIUM-4's both directions: refused cold at the rail, admitted on the next attempt (the refused scan warmed what it validated), refused again after a remount. Before M1 the second step fails |
+
+**Two existing tests needed a cold scan restored**, a recorded precondition change rather than a
+loosening. `a_budgeted_scan_produces_the_same_inventory_as_an_unbudgeted_one` and
+`the_aggregate_byte_rail_still_refuses_after_a_record_has_been_parked_and_installed` each
+require every record cold, and an earlier scan in the same test now warms Recovery records too.
+Each empties the memo first, so each runs exactly the scan it was written for. A third,
+`studio_inventory_cache_never_skips_reference_enumeration`, asserted that a warm scan reused
+exactly one record, its Studio wrapper, when that was the only memoizable one. It now asserts that
+the warm scan reuses every record, the Studio wrapper among them (a recorded contract change); its
+reference-scan half, which reuses nothing, is unchanged.
+
+**Residual, recorded in THREAT-MODEL:** the memo keeps an Unconfirmed branch's provider device
+id, observed MLS epoch and observation time resident for the mount's life, UI lock included.
+The same facts are in that record on this device's disk; nothing leaves the device.
+
+**Review of M1's memo half (2026-10-10, Opus, static, at `39840b8e`): no blocker or high.** It
+checked each validator's purity (Recovery, OwnerReceipts with signatures over its own bytes,
+Intents' structural decode, DraftArchive): none reads a clock, membership, MLS state, the
+registry or device identity. It also checked that a hit restores every inventory field a
+consumer reads, that facts can be neither fabricated nor dropped by any put path, and that the
+cold rail still bounds each scan's fresh work.
+
+| finding | what | disposition |
+|---|---|---|
+| MEDIUM-1 | the Unconfirmed tally never passed through a hit in any test; the branch case's "facts carry provenance" was never asserted; the refused (overtaken) path was untested for Intents | **fixed in part:** the branch case asserts its facts carry provenance; `a_refused_intents_result_is_memoized_with_its_facts` checks the refused path straight after the refusal, before a later scan could re-memoize the record (a mutant passing no facts there fails it). **Follow-up, proposed to Agent 2:** the only real Unconfirmed-draft fixture is in their `unconfirmed_rails.rs`; one more `budget()` there after `fresh` would put the tally itself through a hit. The cache stores the facts struct whole, so the Closing case's provenance exercises the same path |
+| LOW-1 | `facts_fit` checked presence, not that the facts belong to the entry | **fixed:** it also requires the facts' `charged_bytes` to equal the entry's size; a unit test refuses another record's facts and round-trips matching ones |
+| LOW-2 | the facts stored inline in every entry pushed memory to about 380 bytes an entry and 25 MiB | **fixed:** boxed, so other families' entries carry a pointer; THREAT-MODEL notes an Intents entry's extra 60 bytes |
+| LOW-3 | stale "only Registry and Studio are cacheable" comments in `performance.rs` | **fixed** (four comments, and the profile name explained rather than renamed, since docs and run commands quote it) |
+| residual | two replay tests (`studio_exchange/tests/replay.rs`) needed records to park, and the watch's synchronous scan now warms them | **confirmed by the full suite and fixed:** a new `forget_inventory_memo_for_test` empties the memo, and only the memo, after the watch, so each test's job meets the cold records it was written for. The existing hook also drops the retained Studio source, which would change what they test |
+| residual | THREAT-MODEL could say warm bytes still count against the 8 MiB read rail, and that entries (another member's Unconfirmed provider id included) outlive their records until a covering scan prunes | **added** |

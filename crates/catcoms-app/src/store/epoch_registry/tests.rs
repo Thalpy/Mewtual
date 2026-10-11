@@ -943,8 +943,8 @@ fn a_cursor_parked_across_registry_writes_refuses_including_retry_flush_and_fail
         store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
         cursor
     };
-    let refused = |store: &ServerStore, mut cursor: EpochStorageCursor, what: &str| {
-        // `step` needs &mut; take it separately so the closure stays shared over the store.
+    // `&mut` because a finish that succeeds prunes the validation memo (C-3 runtime design 15.3).
+    let refused = |store: &mut ServerStore, mut cursor: EpochStorageCursor, what: &str| {
         let _ = &mut cursor;
         assert!(
             store.finish_epoch_storage_scan(cursor).is_err(),
@@ -968,7 +968,7 @@ fn a_cursor_parked_across_registry_writes_refuses_including_retry_flush_and_fail
         store.step_epoch_storage_scan(&mut cursor, 1, None).is_err(),
         "a cursor parked across a Registry write resumed anyway"
     );
-    refused(&store, cursor, "a Registry write");
+    refused(&mut store, cursor, "a Registry write");
 
     // 2. The exact-retry flush of an unchanged record, which changes no bytes at all and must
     //    still invalidate.
@@ -989,7 +989,7 @@ fn a_cursor_parked_across_registry_writes_refuses_including_retry_flush_and_fail
         "a cursor survived an unchanged-record flush, which is still a durability-changing \
          operation on an inventoried file"
     );
-    refused(&store, cursor, "an unchanged-record flush");
+    refused(&mut store, cursor, "an unchanged-record flush");
 
     // 3. A failed write. Rotation happens before the first possible I/O, so a cursor must not
     //    survive an attempt merely because the attempt returned an error.
@@ -1015,5 +1015,5 @@ fn a_cursor_parked_across_registry_writes_refuses_including_retry_flush_and_fail
         store.step_epoch_storage_scan(&mut cursor, 1, None).is_err(),
         "a cursor survived a failed write attempt, so it would miss whatever that attempt left"
     );
-    refused(&store, cursor, "a failed write attempt");
+    refused(&mut store, cursor, "a failed write attempt");
 }

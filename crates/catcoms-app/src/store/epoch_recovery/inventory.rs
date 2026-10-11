@@ -41,6 +41,28 @@ impl EpochInventoryCoverage {
                 | Self::RecoveryOwnerReceiptsIntentsRegistryAndStudio
         )
     }
+
+    /// Whether a scan of this coverage reads `family`'s records. The one rule for it: the
+    /// traversal ([`storage_name`]) and the memo's pruning ([`ServerStore::prune_inventory_cache`])
+    /// both ask here, so a completed scan can never prune a family it did not read.
+    ///
+    /// Archives are gated with intents because they share the Intents accounting class. That is
+    /// only safe while no coverage narrower than the full five-family scan installs a
+    /// deletion-protection set: a narrower scan would omit archived CIDs from the known set and
+    /// archived pixels would be reclaimed. Reference scans run at full coverage.
+    pub(in crate::store) fn covers(self, family: EpochRecordKind) -> bool {
+        match family {
+            EpochRecordKind::Recovery => true,
+            EpochRecordKind::OwnerReceipts => self != Self::RecoveryOnly,
+            EpochRecordKind::Intents | EpochRecordKind::DraftArchive => self.includes_intents(),
+            EpochRecordKind::Registry => matches!(
+                self,
+                Self::RecoveryOwnerReceiptsIntentsAndRegistry
+                    | Self::RecoveryOwnerReceiptsIntentsRegistryAndStudio
+            ),
+            EpochRecordKind::Studio => self == Self::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+        }
+    }
 }
 
 /// Physical record family; a digest alone must never identify a temporary's destination.
@@ -838,8 +860,9 @@ impl ServerStore {
     /// else warms nothing. A result installed through [`Self::install_validated_job_record`] needs
     /// no call; its own refusal warms the cache the same way.
     ///
-    /// Only Registry and Studio results are memoized, and never over an entry already present for
-    /// that record. Returns whether the cache was warmed.
+    /// Every family's result is memoized (C-3 runtime 15.2), with an Intents record's inventory
+    /// facts, and never over an entry already present for that record. Returns whether the cache
+    /// was warmed.
     #[cfg(test)]
     pub(crate) fn memoize_overtaken_inventory_result(
         &mut self,
@@ -885,7 +908,10 @@ impl ServerStore {
             restarts,
         } = job;
         match cursor.finish_with(self) {
-            Ok(inventory) => Ok(EpochInventoryOutcome::Complete(Box::new(inventory))),
+            Ok(inventory) => {
+                self.prune_inventory_cache(&inventory);
+                Ok(EpochInventoryOutcome::Complete(Box::new(inventory)))
+            }
             Err(CursorFailure::Invalidated(_)) => {
                 if restarts >= MAX_INVENTORY_RESTARTS {
                     return Ok(EpochInventoryOutcome::Unstable);
@@ -1120,10 +1146,34 @@ impl ServerStore {
     /// Consume a cursor and issue its inventory. Rechecks invalidation: a scan that completed
     /// its traversal before a write landed must not hand out a stale inventory.
     pub fn finish_epoch_storage_scan(
-        &self,
+        &mut self,
         cursor: EpochStorageCursor,
     ) -> Result<EpochStorageInventory, AppError> {
-        cursor.finish_with(self).map_err(CursorFailure::into_error)
+        let inventory = cursor
+            .finish_with(self)
+            .map_err(CursorFailure::into_error)?;
+        self.prune_inventory_cache(&inventory);
+        Ok(inventory)
+    }
+
+    /// Drop the memoized validations of records a just-completed scan did not find (C-3 runtime
+    /// design 15.3, M2), within that scan's coverage only.
+    ///
+    /// Called by every finish that issues an inventory (`EpochStorageScan::finish`,
+    /// `finish_epoch_inventory_job`, `finish_epoch_storage_scan`), and only once `finish_with` has
+    /// issued it: that is what proves the traversal saw every record in its coverage, under a
+    /// token confirmed current and a listing confirmed against it. An entry it did not see names a
+    /// file that is gone, so the memo tracks the vault rather than everything it ever held.
+    ///
+    /// The reference-scan finish (`finish_creative_references`) does not prune. It would be sound
+    /// to, being a full-coverage finish under the same checks; it is left out only because it
+    /// issues no inventory, and memory is all pruning is about.
+    fn prune_inventory_cache(&mut self, inventory: &EpochStorageInventory) {
+        let coverage = inventory.coverage;
+        self.inventory_cache.prune(
+            |family| coverage.covers(family),
+            |key| inventory.records.contains_key(key),
+        );
     }
 }
 
@@ -1236,7 +1286,15 @@ impl EpochStorageCursor {
         }
         // Even an explicit reference scan may warm pure validation metadata, but a later
         // reference scan must still enumerate the actual CIDs.
-        memoize(store, key, size, digest, body.record, Memoize::Replace);
+        memoize(
+            store,
+            key,
+            size,
+            digest,
+            body.record,
+            body.intent,
+            Memoize::Replace,
+        );
         if self
             .inventory
             .records
@@ -1343,6 +1401,7 @@ impl EpochStorageCursor {
                 validated.size,
                 validated.digest,
                 validated.body.record,
+                validated.body.intent,
                 Memoize::IfVacant,
             )
     }
@@ -1491,9 +1550,10 @@ impl EpochStorageCursor {
                     if peak > self.byte_limit {
                         return Err(invalid("epoch storage inventory byte limit reached"));
                     }
-                    let cacheable =
-                        matches!(family, EpochRecordKind::Registry | EpochRecordKind::Studio)
-                            && self.references.is_none();
+                    // Every family's accounting validation is memoized (C-3 runtime design 15.2,
+                    // M1). A reference scan never consults the memo: it must enumerate the actual
+                    // CIDs, which an entry does not hold.
+                    let cacheable = self.references.is_none();
                     let candidate = cacheable
                         && store
                             .inventory_cache
@@ -1536,21 +1596,20 @@ impl EpochStorageCursor {
                     let digest = blake3::hash(&plain);
                     // A cached version these bytes contradict can never hit again, and left in
                     // place it would block a later refused result from warming the record
-                    // (C-3 runtime design 14.3, piece 1). On every Registry or Studio read, so a
-                    // reference scan, which never consults the cache, clears it too.
-                    if matches!(family, EpochRecordKind::Registry | EpochRecordKind::Studio) {
-                        store
-                            .inventory_cache
-                            .evict_mismatch((family, hash), size, digest);
-                    }
+                    // (C-3 runtime design 14.3, piece 1). On every read of every family, now that
+                    // every family is memoized (15.9, MEDIUM-2), so a reference scan, which never
+                    // consults the cache, clears it too.
+                    store
+                        .inventory_cache
+                        .evict_mismatch((family, hash), size, digest);
                     let cached = cacheable
                         .then(|| store.inventory_cache.get((family, hash), size, digest))
                         .flatten();
-                    let body = if let Some(record) = cached {
+                    let body = if let Some((record, intent)) = cached {
                         // A cache hit is cheap by construction, so it is never a parking
                         // candidate: the expensive thing is exactly what the cache avoided.
                         self.progress.reused_records += 1;
-                        ValidatedRecordBody::accounting_only(record)
+                        ValidatedRecordBody::accounting_only(record, intent)
                     } else {
                         self.check_cold_bytes(size)?;
                         self.progress.uncached_bytes = self
@@ -1780,9 +1839,12 @@ impl EpochStorageScan<'_> {
             .map_err(CursorFailure::into_error)
     }
     pub fn finish(self) -> Result<EpochStorageInventory, AppError> {
-        self.cursor
+        let inventory = self
+            .cursor
             .finish_with(self.store)
-            .map_err(CursorFailure::into_error)
+            .map_err(CursorFailure::into_error)?;
+        self.store.prune_inventory_cache(&inventory);
+        Ok(inventory)
     }
 }
 
@@ -1864,30 +1926,7 @@ pub(super) fn storage_name(
         EpochRecordKind::Registry,
         EpochRecordKind::Studio,
     ] {
-        // Archives are gated with intents because they share the Intents accounting class. That
-        // is only safe while no coverage narrower than the full five-family scan installs a
-        // deletion-protection set: a narrower scan would omit archived CIDs from the known set
-        // and archived pixels would be reclaimed. Reference scans run at full coverage.
-        if family.intent_class() && !coverage.includes_intents() {
-            continue;
-        }
-        if family == EpochRecordKind::Registry
-            && !matches!(
-                coverage,
-                EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsAndRegistry
-                    | EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio
-            )
-        {
-            continue;
-        }
-        if family == EpochRecordKind::Studio
-            && coverage != EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio
-        {
-            continue;
-        }
-        if family == EpochRecordKind::OwnerReceipts
-            && coverage == EpochInventoryCoverage::RecoveryOnly
-        {
+        if !coverage.covers(family) {
             continue;
         }
         if let Some(kind) = record_name(name, family)? {
@@ -2200,12 +2239,14 @@ pub(in crate::store) struct ValidatedRecordBody {
 
 impl ValidatedRecordBody {
     /// A cache hit: the record's typed validation already happened, and its reference facts were
-    /// deliberately not cached, which is why a reference scan never consults the cache.
-    fn accounting_only(record: StorageRecord) -> Self {
+    /// deliberately not cached, which is why a reference scan never consults the cache. An
+    /// Intents hit restores the inventory facts the validation produced (C-3 runtime design 15.2),
+    /// which `EpochIntentBudget::from_inventory` reads; every other family has none.
+    fn accounting_only(record: StorageRecord, intent: Option<EpochIntentInventoryFacts>) -> Self {
         Self {
             record,
             cids: std::collections::BTreeSet::new(),
-            intent: None,
+            intent,
             metadata: None,
             required: None,
         }
@@ -2321,12 +2362,12 @@ enum Memoize {
 
 /// The one place a validation result enters `inventory_cache` (C-3 runtime design 14.3).
 ///
-/// Only Registry and Studio are memoized, and only their accounting record, because a hit
-/// returns [`ValidatedRecordBody::accounting_only`]. That is sound for these two families, which
-/// carry no Intents inventory facts. **Extending the cache to Intents must store
-/// `EpochIntentInventoryFacts` as well, and this signature must grow to take them**, or
-/// `EpochIntentBudget::from_inventory`, which builds its Unconfirmed tally from them, would
-/// undercount live branches and mint too generous a budget.
+/// Every family is memoized (15.2, M1), with what a hit returns through
+/// [`ValidatedRecordBody::accounting_only`]: the accounting record and, for an Intents record,
+/// its `EpochIntentInventoryFacts`. Without the facts, `EpochIntentBudget::from_inventory`, which
+/// builds its Unconfirmed tally from them, would undercount live branches and mint too generous a
+/// budget; the cache refuses an Intents entry without them. Sound for every family because
+/// validation is a pure function of the bytes the entry's digest names (15.7).
 ///
 /// Returns whether the cache was written.
 fn memoize(
@@ -2335,19 +2376,16 @@ fn memoize(
     size: u64,
     digest: blake3::Hash,
     record: StorageRecord,
+    intent: Option<EpochIntentInventoryFacts>,
     mode: Memoize,
 ) -> bool {
-    if !matches!(key.0, EpochRecordKind::Registry | EpochRecordKind::Studio) {
-        return false;
-    }
     match mode {
-        Memoize::Replace => {
-            store.inventory_cache.put(key, size, digest, record);
-            true
-        }
+        Memoize::Replace => store
+            .inventory_cache
+            .put_validated(key, size, digest, record, intent),
         Memoize::IfVacant => store
             .inventory_cache
-            .put_if_vacant(key, size, digest, record),
+            .put_if_vacant(key, size, digest, record, intent),
     }
 }
 
@@ -2422,6 +2460,7 @@ impl ServerStore {
             warmth.size,
             warmth.digest,
             warmth.record,
+            None,
             Memoize::IfVacant,
         )
     }
@@ -2430,6 +2469,15 @@ impl ServerStore {
     /// would also cost a receiver its watches and its mount): every memoized validation, and the
     /// retained source graph. Both are needed: retaining a source also caches its inventory
     /// footprint (`cache_studio_source_footprint`), so a retained graph alone re-warms the cache.
+    /// Forget every memoized validation and nothing else, for a test outside the store whose
+    /// subject needs records cold after a synchronous scan has read them. Since C-3 runtime 15.2
+    /// (M1) such a scan, an explicit access's included, memoizes every family's records, so a
+    /// job started after it finds nothing to park.
+    #[cfg(test)]
+    pub(crate) fn forget_inventory_memo_for_test(&mut self) {
+        self.inventory_cache.clear_for_test();
+    }
+
     #[cfg(test)]
     pub(crate) fn forget_warm_studio_state_for_test(&mut self) {
         self.inventory_cache.clear_for_test();
@@ -3879,6 +3927,10 @@ mod tests {
         // construction. One read of the cursor cannot be wrong in that way.
         let budgeted_progress = cursor_progress(&cursor);
         let budgeted = store.finish_epoch_storage_scan(cursor).unwrap();
+        // The direct scan must be cold too, as the budgeted one was. Every family is memoized
+        // since C-3 runtime 15.2 (M1), so the budgeted scan's installs would otherwise make it
+        // all hits, and its reuse counters would differ for that reason alone.
+        store.inventory_cache.clear_for_test();
         let (direct, direct_progress) = collect_with_progress(&mut store);
 
         let (budgeted_records, budgeted_orphans) = canonical(&budgeted);
@@ -4045,6 +4097,9 @@ mod tests {
             .footprint
             .total()
             .unwrap();
+        // That scan memoized every record (C-3 runtime 15.2, M1), so a hit would install it with
+        // no detached round trip. Cold again, so each record parks as this test needs.
+        store.inventory_cache.clear_for_test();
 
         let clock = ManualClock::new(0);
         let mut cursor = store
@@ -5382,6 +5437,145 @@ mod tests {
         assert_matches_fresh(&mut store, job);
     }
 
+    /// Piece 1 for a family other than Registry and Studio, now that eviction on read covers every
+    /// family (C-3 runtime 15.9, MEDIUM-2). A stale Recovery entry, as a writer that does not warm
+    /// would leave one, is evicted when the scan reads the current bytes, so the refused result
+    /// still warms and the restarted job reuses it. With eviction still gated to Registry and
+    /// Studio, the stale entry would refuse that vacant-only warm and the record would park again.
+    #[test]
+    fn a_stale_recovery_entry_is_evicted_so_a_refused_result_still_warms() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        // A small Recovery record would otherwise validate inline and never park.
+        store.detach_every_validation_for_test();
+        stage(&mut store, 7, &document(b"group", b"stale"), 1);
+        store.inventory_cache.clear_for_test();
+        let clock = ManualClock::new(0);
+        let coverage = EpochInventoryCoverage::RecoveryOnly;
+        let park = |store: &mut ServerStore, job: &mut EpochInventoryJob| loop {
+            match store
+                .step_epoch_inventory_job(job, ENTRIES_PER_STEP, Some((&clock, 250)))
+                .unwrap()
+            {
+                EpochInventoryStep::Parked => break store.take_parked_job_record(job).unwrap(),
+                EpochInventoryStep::Stepped(progress) if progress.complete => {
+                    panic!("the traversal ended without parking the Recovery record")
+                }
+                EpochInventoryStep::Unstable => panic!("a quiet vault reported unstable"),
+                _ => {}
+            }
+        };
+
+        // Learn the record's key and accounting from one park, then abandon that job.
+        let mut probe = store.begin_epoch_inventory_job(coverage).unwrap();
+        let probed = park(&mut store, &mut probe).validate().unwrap();
+        drop(probe);
+        store.inventory_cache.put(
+            probed.key,
+            probed.size,
+            blake3::hash(b"an older version of this record"),
+            probed.body.record,
+        );
+
+        let mut job = store.begin_epoch_inventory_job(coverage).unwrap();
+        let validated = park(&mut store, &mut job).validate().unwrap();
+        store.epoch_mutation_guard();
+        assert!(matches!(
+            store
+                .install_validated_job_record(&mut job, validated)
+                .unwrap(),
+            EpochInventoryStep::Restarted
+        ));
+        let (_, reused) = drive_to_end(&mut store, &mut job, &clock);
+        assert_eq!(
+            reused, 1,
+            "the stale entry survived the read and blocked the refused result's warm"
+        );
+        assert!(matches!(
+            store.finish_epoch_inventory_job(job).unwrap(),
+            EpochInventoryOutcome::Complete(_)
+        ));
+    }
+
+    /// A refused Intents result is memoized with its inventory facts (review of M1, MEDIUM-1). The
+    /// overtaken path memoizes through `memoize_refused`, a different route from an install, and
+    /// nothing exercised it for Intents: had it dropped the facts, the restarted job's hit would
+    /// have returned the record without them. Checked straight after the refusal, before any later
+    /// scan re-memoizes the record, on a Closing branch whose facts carry provenance.
+    #[test]
+    fn a_refused_intents_result_is_memoized_with_its_facts() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        let device = catcoms_mls::MlsDevice::generate().unwrap();
+        let group = catcoms_mls::ServerGroup::create(&device).unwrap();
+        crate::store::epoch_studio::tests::performance::studio_handoff_ready_fixture(
+            &mut store,
+            7,
+            &group,
+            &device,
+            catcoms_replication::studio::StudioTarget::Flipnote {
+                channel: [9; 16],
+                object: [3; 16],
+            },
+            1,
+        );
+        store.detach_every_validation_for_test();
+        store.inventory_cache.clear_for_test();
+        let clock = ManualClock::new(0);
+        let full = EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio;
+        let mut job = store.begin_epoch_inventory_job(full).unwrap();
+        let validated = loop {
+            match store
+                .step_epoch_inventory_job(&mut job, ENTRIES_PER_STEP, Some((&clock, 250)))
+                .unwrap()
+            {
+                EpochInventoryStep::Parked => {
+                    let parked = store.take_parked_job_record(&mut job).unwrap();
+                    let is_intents = parked.classification().0 == EpochRecordKind::Intents;
+                    let validated = parked.validate().unwrap();
+                    if is_intents {
+                        break validated;
+                    }
+                    store
+                        .install_validated_job_record(&mut job, validated)
+                        .unwrap();
+                }
+                EpochInventoryStep::Stepped(progress) if progress.complete => {
+                    panic!("the traversal ended without parking the Intents record")
+                }
+                EpochInventoryStep::Unstable => panic!("a quiet vault reported unstable"),
+                _ => {}
+            }
+        };
+        let facts = validated
+            .body
+            .intent
+            .expect("an Intents result carries its facts");
+        assert!(
+            facts.provenance().is_some(),
+            "precondition: a branch's facts with provenance"
+        );
+        let (key, size, digest) = (validated.key, validated.size, validated.digest);
+
+        store.epoch_mutation_guard();
+        assert!(matches!(
+            store
+                .install_validated_job_record(&mut job, validated)
+                .unwrap(),
+            EpochInventoryStep::Restarted
+        ));
+        assert_eq!(
+            store
+                .inventory_cache
+                .get(key, size, digest)
+                .and_then(|(_, intent)| intent),
+            Some(facts),
+            "the refused result was memoized without its facts"
+        );
+        drive_to_end(&mut store, &mut job, &clock);
+        assert_matches_fresh(&mut store, job);
+    }
+
     /// Piece 3: an entry put after the scan read the record, as a write path warming a newer
     /// version would, is never displaced by the older refused result.
     #[test]
@@ -5526,12 +5720,18 @@ mod tests {
         );
     }
 
-    /// `memoize` admits only Registry and Studio. A budgeted full scan inlines a small Recovery
-    /// record and a small DraftArchive, installs both through `memoize`, and must leave neither
-    /// in the memo: a hit returns accounting facts only, and for Intents that would drop the
-    /// facts lifecycle accounting reads (implementation review L-5).
+    /// `memoize` admits every family (C-3 runtime 15.2, M1). A budgeted full scan inlines a small
+    /// Recovery record and a small DraftArchive and parks a cold Studio record, and all three are
+    /// memoized; a second scan then reuses every one.
+    ///
+    /// **Contract change, recorded.** Until M1 this test was
+    /// `a_budgeted_scan_memoizes_only_registry_and_studio_records` and asserted the opposite for
+    /// Recovery and DraftArchive, because a hit then returned no Intents facts (implementation
+    /// review L-5). A hit now restores them, and the cache refuses an Intents entry without them.
+    /// That a hit equals a fresh validation for every family, and that a reference scan never
+    /// consults the memo, is `c3_every_family_is_memoized_and_a_hit_restores_a_fresh_validation`.
     #[test]
-    fn a_budgeted_scan_memoizes_only_registry_and_studio_records() {
+    fn a_budgeted_scan_memoizes_every_family() {
         let root = tempfile::tempdir().unwrap();
         let mut store = open(root.path());
         let doc = document(b"group", b"memo");
@@ -5558,24 +5758,222 @@ mod tests {
         else {
             panic!("a quiet vault did not complete");
         };
-        for family in [EpochRecordKind::Recovery, EpochRecordKind::DraftArchive] {
+        let families = [
+            EpochRecordKind::Recovery,
+            EpochRecordKind::DraftArchive,
+            EpochRecordKind::Studio,
+        ];
+        for family in families {
             assert!(
                 inventory.records().any(|entry| entry.kind == family),
                 "precondition: the scan installed no {family:?} record"
             );
             assert_eq!(
                 store.inventory_cache.entries_for_test(family),
-                0,
-                "a {family:?} record was memoized"
+                1,
+                "the {family:?} record was not memoized"
             );
         }
-        let studio = store
-            .inventory_cache
-            .entries_for_test(EpochRecordKind::Studio);
-        assert!(
-            studio >= 1,
-            "the control failed: the Studio record was not memoized"
+
+        let mut job = store
+            .begin_epoch_inventory_job(
+                EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+            )
+            .unwrap();
+        let (studio_parks, reused) = drive_to_end(&mut store, &mut job, &clock);
+        assert_eq!(
+            (studio_parks, reused),
+            (0, families.len()),
+            "a memoized record was validated again"
         );
+        assert_matches_fresh(&mut store, job);
+    }
+
+    /// A real Studio source record, like [`cold_studio_source`] but leaving the memo as the
+    /// fixture's own scan left it, so building many records costs one validation each.
+    fn kept_studio_source(store: &mut ServerStore, object: u8) {
+        let device = catcoms_mls::MlsDevice::generate().unwrap();
+        let group = catcoms_mls::ServerGroup::create(&device).unwrap();
+        crate::store::epoch_studio::tests::performance::save_studio_source_fixture_ops(
+            store,
+            7,
+            &group,
+            &device,
+            catcoms_replication::studio::StudioTarget::Flipnote {
+                channel: [9; 16],
+                object: [object; 16],
+            },
+            3,
+            16,
+        );
+    }
+
+    /// The memo keys of the Studio records on disk, from their filenames.
+    fn studio_keys_on_disk(store: &ServerStore) -> Vec<(EpochRecordKind, [u8; 32])> {
+        fs::read_dir(store.dir.join("servers"))
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.unwrap().file_name().into_string().unwrap();
+                let hash = name.strip_suffix(EpochRecordKind::Studio.suffix())?;
+                Some((EpochRecordKind::Studio, filename_hash(hash).unwrap()))
+            })
+            .collect()
+    }
+
+    /// M2 (C-3 runtime design 15.3): a scan of more memoizable records than the old 64-entry LRU
+    /// held reuses every one of them once they are warm. Under that LRU each scan of such a vault
+    /// evicted entries the same scan needed later, so every scan parked every record again.
+    #[test]
+    fn a_scan_of_more_records_than_the_old_lru_held_reuses_every_warm_entry() {
+        const RECORDS: u8 = 72;
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        for object in 0..RECORDS {
+            kept_studio_source(&mut store, object);
+        }
+        store.inventory_cache.clear_for_test();
+        let full = EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio;
+        let clock = ManualClock::new(0);
+
+        let mut job = store.begin_epoch_inventory_job(full).unwrap();
+        let (cold, _) = drive_to_end(&mut store, &mut job, &clock);
+        assert_eq!(
+            cold,
+            usize::from(RECORDS),
+            "precondition: every record was validated fresh"
+        );
+        assert!(matches!(
+            store.finish_epoch_inventory_job(job).unwrap(),
+            EpochInventoryOutcome::Complete(_)
+        ));
+
+        let mut job = store.begin_epoch_inventory_job(full).unwrap();
+        let (parks, reused) = drive_to_end(&mut store, &mut job, &clock);
+        assert_eq!(
+            (parks, reused),
+            (0, usize::from(RECORDS)),
+            "a warm record was validated again: the memo thrashed"
+        );
+        assert_matches_fresh(&mut store, job);
+    }
+
+    /// The three ways a scan issues its inventory, each of which must prune.
+    #[derive(Clone, Copy, Debug)]
+    enum Finish {
+        /// `EpochStorageScan::finish`, the synchronous scans.
+        Scan,
+        /// `finish_epoch_inventory_job`, the converted background owners.
+        Job,
+        /// `finish_epoch_storage_scan`, a bare cursor.
+        Cursor,
+    }
+
+    /// A complete scan of `coverage`, issued through `how`.
+    fn finish_by(store: &mut ServerStore, coverage: EpochInventoryCoverage, how: Finish) {
+        match how {
+            Finish::Scan => {
+                collect_with(store, coverage);
+            }
+            Finish::Job => {
+                let clock = ManualClock::new(0);
+                let mut job = store.begin_epoch_inventory_job(coverage).unwrap();
+                drive_to_end(store, &mut job, &clock);
+                assert!(
+                    matches!(
+                        store.finish_epoch_inventory_job(job).unwrap(),
+                        EpochInventoryOutcome::Complete(_)
+                    ),
+                    "a quiet vault's job did not complete"
+                );
+            }
+            Finish::Cursor => {
+                let mut cursor = store.begin_epoch_storage_scan(coverage).unwrap();
+                while !store
+                    .step_epoch_storage_scan(&mut cursor, ENTRIES_PER_STEP, None)
+                    .unwrap()
+                    .complete
+                {}
+                store.finish_epoch_storage_scan(cursor).unwrap();
+            }
+        }
+    }
+
+    /// M2: a completed scan drops the memo entry of a record that is gone and keeps the others,
+    /// and a scan that does not read a family leaves that family's entries alone. Through each
+    /// of the three finish paths, since each prunes separately (review of M2, MEDIUM-1).
+    #[test]
+    fn a_completed_scan_prunes_a_removed_records_entry_within_its_coverage() {
+        for how in [Finish::Scan, Finish::Job, Finish::Cursor] {
+            let root = tempfile::tempdir().unwrap();
+            let mut store = open(root.path());
+            kept_studio_source(&mut store, 1);
+            kept_studio_source(&mut store, 2);
+            let full = EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio;
+            collect_with(&mut store, full);
+            let keys = studio_keys_on_disk(&store);
+            assert_eq!(keys.len(), 2, "precondition: two Studio records");
+            for key in &keys {
+                assert!(
+                    store.inventory_cache.holds_for_test(*key),
+                    "precondition: both records are memoized"
+                );
+            }
+
+            // Removed the way any production removal is: under the mutation guard.
+            let (gone, kept) = (keys[0], keys[1]);
+            store.epoch_mutation_guard();
+            fs::remove_file(store.dir.join("servers").join(format!(
+                "{}{}",
+                hex::encode(gone.1),
+                EpochRecordKind::Studio.suffix()
+            )))
+            .unwrap();
+            finish_by(&mut store, full, how);
+            assert!(
+                !store.inventory_cache.holds_for_test(gone),
+                "a removed record's entry survived a completed scan, finished by {how:?}"
+            );
+            assert!(
+                store.inventory_cache.holds_for_test(kept),
+                "a record still on disk was pruned, finished by {how:?}"
+            );
+
+            // A Registry entry naming no file: kept by a scan that does not read Registry
+            // records, pruned by one that does. And a Recovery-only scan keeps every Studio entry.
+            let registry = (EpochRecordKind::Registry, [0xAB; 32]);
+            store.inventory_cache.put(
+                registry,
+                10,
+                blake3::hash(b"absent"),
+                StorageRecord {
+                    id: [0; 32],
+                    document: [1; 32],
+                    footprint: Default::default(),
+                },
+            );
+            stage(&mut store, 7, &document(b"group", b"prune"), 1);
+            finish_by(&mut store, EpochInventoryCoverage::RecoveryOnly, how);
+            finish_by(
+                &mut store,
+                EpochInventoryCoverage::RecoveryOwnerReceiptsAndIntents,
+                how,
+            );
+            assert!(
+                store.inventory_cache.holds_for_test(kept)
+                    && store.inventory_cache.holds_for_test(registry),
+                "a scan pruned a family outside its coverage, finished by {how:?}"
+            );
+            finish_by(
+                &mut store,
+                EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsAndRegistry,
+                how,
+            );
+            assert!(
+                !store.inventory_cache.holds_for_test(registry),
+                "a Registry scan kept an entry for a record it did not find, finished by {how:?}"
+            );
+            assert!(store.inventory_cache.holds_for_test(kept));
+        }
     }
 
     /// A copy of a validated result, for tests that offer the same one more than once.
@@ -5592,7 +5990,9 @@ mod tests {
             body: ValidatedRecordBody {
                 record: validated.body.record,
                 cids: validated.body.cids.clone(),
-                intent: None,
+                // Copied, not dropped: an Intents result without its facts is refused by the
+                // memo, and would plant a fact-less entry if it were not (15.9, L5).
+                intent: validated.body.intent,
                 metadata: validated.body.metadata,
                 required: validated.body.required,
             },

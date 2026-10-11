@@ -7,7 +7,7 @@ use crate::registry_catchup::{
 use crate::registry_head::ServerOwnerSnapshot;
 use crate::store::{
     PreparedStudioSource, StudioHandoffCapture, StudioHandoffCommit, StudioHandoffPlan,
-    StudioOverlayCapture, StudioOverlayPlan, StudioSourceCapture,
+    StudioOverlayCapture, StudioOverlayPlan, StudioOverlayStamp, StudioSourceCapture,
 };
 use crate::studio::overlay::{OverlayAdmission, OverlayOwnership};
 use crate::studio_exchange::discovery::{
@@ -74,6 +74,12 @@ pub(crate) struct OverlayContext {
     /// matched against the job that asked for it rather than against its target. Flow S leaves it
     /// zero: a parked Save capture is user-initiated and there is only ever one.
     token: u64,
+    /// Flow S only, on a returning S2 plan: the stamp of the capture it was planned from. The plan
+    /// consumes its capture, so a refusal would otherwise come back with nothing to say which
+    /// record it described, and could not be parked against it (MAP K12). `None` elsewhere. Boxed:
+    /// the stamp is several hundred bytes, and every background result would otherwise carry its
+    /// size (clippy's `large_enum_variant`).
+    stamp: Option<Box<StudioOverlayStamp>>,
     /// Test-only barrier, in the shape `PreviewJob::pause_for_test` established: the blocking
     /// worker signals once it has entered and then blocks until released. It is taken out of the
     /// context before the closure is built, so the pause happens **after** `OverlayOwnership` has
@@ -90,6 +96,7 @@ impl OverlayContext {
         Self {
             target,
             token: 0,
+            stamp: None,
             #[cfg(test)]
             pause: None,
         }
@@ -99,9 +106,48 @@ impl OverlayContext {
         Self {
             target,
             token,
+            stamp: None,
             #[cfg(test)]
             pause: None,
         }
+    }
+}
+
+/// A detached plan's refusal, kept so the identical retry is answered from it (MAP K12).
+///
+/// **Why.** A refused plan parks nothing (RT-001) and its request is forgotten, so without this its
+/// retry reached S1b again, captured again and was told `Scheduled` again, for ever. Each lap paid
+/// an inventory scan, media admission (a PIX promotion for a frame), a pool permit and a detached
+/// decode, and the caller never heard why.
+///
+/// **Why it may be answered.** The plan is a pure function of what the capture's stamp pins (the
+/// intent record's plaintext digest and size, the mount, the actor and key, the owner and the MLS
+/// epoch) and of the request, which the fingerprint pins (target, basis, branch and the full
+/// envelope). So while the stamp is current, the same request would be refused the same way. It is
+/// answered only under the numeric server it was kept under, which the fingerprint does not name
+/// and the stamp check does not compare (review of K12, LOW-1).
+/// Only `Invalid` is parked: that is how every plan refusal is built, so anything else is not
+/// known to be one of them.
+///
+/// **What it does not pin.** The live preview and the 8.3 rails' budget are not in the stamp. Either
+/// can change while this is kept, so the retry may hear this refusal where S1b would now give
+/// another, such as "no live preview". Both are refusals of the same request, and the deadline
+/// bounds how long this one is preferred.
+pub(super) struct ParkedOverlayRefusal {
+    request: [u8; 32],
+    stamp: Box<StudioOverlayStamp>,
+    message: String,
+    /// Monotonic. Checked lazily, by the retry that would answer from it.
+    until: u64,
+}
+
+impl ParkedOverlayRefusal {
+    pub(super) fn stamp(&self) -> &StudioOverlayStamp {
+        &self.stamp
+    }
+
+    pub(super) fn message(&self) -> &str {
+        &self.message
     }
 }
 
@@ -365,9 +411,13 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                         target,
                         // Flow S routes on target; the handoff token is not used here.
                         token: _,
+                        stamp: _,
                         #[cfg(test)]
                         pause,
                     } = context;
+                    // Copied before the worker consumes the capture, so a refusal comes back with
+                    // the record it describes (MAP K12). Public context only: no plaintext.
+                    let stamp = Box::new(capture.stamp().clone());
                     let result = tokio::task::spawn_blocking(move || {
                         // Ownership and the capture are already inside this closure.
                         #[cfg(test)]
@@ -390,7 +440,10 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                     .await;
                     match result {
                         Ok(result) => StudioBackgroundResult::OverlayPlanned(
-                            OverlayContext::new(target),
+                            OverlayContext {
+                                stamp: Some(stamp),
+                                ..OverlayContext::new(target)
+                            },
                             result,
                         ),
                         // The worker itself died, taking both the bundle and the capture with it.
@@ -493,8 +546,8 @@ pub(super) struct CatchupRuntime {
     /// the lifetime of an actor, nor the reverse. The shared four-slot pool is what bounds total
     /// process-wide work; this slot bounds per-actor concurrency only.
     overlay: Option<(Box<StudioOverlayCapture>, OverlayOwnership, OverlayContext)>,
-    /// Only a committable plan is parked. A refusal parks nothing, because it owns nothing and the
-    /// next Save reclassifies from durable state anyway (RT-001).
+    /// Only a committable plan is parked. A refusal parks no plan, because it owns nothing (RT-001).
+    /// For an Unconfirmed Save only its answer is kept, in `overlay_refused` (MAP K12).
     overlay_planned: Option<(OverlayContext, Box<StudioOverlayPlan>, OverlayOwnership)>,
     /// When a parked plan is dropped if no Save has come back for it ([`OVERLAY_PARK_MS`]). The
     /// plan holds this actor's admission and one of four process-wide preparation permits, and
@@ -509,6 +562,9 @@ pub(super) struct CatchupRuntime {
     /// Set by a UI lock that found a job detached: that job's plan is dropped when it returns
     /// instead of parked ([`release_overlay_for_lock`](Self::release_overlay_for_lock)).
     overlay_drop_returning: bool,
+    /// The last Unconfirmed Save whose detached plan was refused, and why (MAP K12). Holds no
+    /// admission, permit, hold or plaintext, so unlike a parked plan it needs no wake to bound it.
+    overlay_refused: Option<ParkedOverlayRefusal>,
     overlay_admission: OverlayAdmission,
     /// Test-only simulated process pool. All preparation classes in that process share it;
     /// unrelated fixtures must not consume capacity against independent simulated clocks.
@@ -1107,7 +1163,60 @@ impl CatchupRuntime {
         if self.overlay_detached {
             self.overlay_drop_returning = true;
         }
+        // A refusal holds nothing a lock must release, and is not counted as released work. It is
+        // dropped anyway, so the first Save after an unlock is decided afresh.
+        self.overlay_refused = None;
         queued || parked || self.overlay_detached
+    }
+
+    /// Keep a refused plan's answer for its request's retry (MAP K12), replacing any other. One per
+    /// actor, as the slot is: only the latest refusal can still have a caller retrying.
+    pub(super) fn park_overlay_refusal(
+        &mut self,
+        request: [u8; 32],
+        stamp: Box<StudioOverlayStamp>,
+        message: String,
+        now: u64,
+    ) {
+        self.overlay_refused = Some(ParkedOverlayRefusal {
+            request,
+            stamp,
+            message,
+            until: now.saturating_add(OVERLAY_PARK_MS),
+        });
+    }
+
+    /// The refusal kept for `request`, if it is not yet past its deadline. A refusal past it is
+    /// dropped here, which is the only place the deadline is enforced: it holds nothing, so nothing
+    /// is lost by keeping it until a retry looks, and it feeds neither `pending` nor `wake_in`.
+    ///
+    /// Not an answer by itself: the caller must also prove the stamp current under custody, and
+    /// [`forget_overlay_refusal`](Self::forget_overlay_refusal) when it is not.
+    pub(super) fn overlay_refusal_for(
+        &mut self,
+        request: [u8; 32],
+        now: u64,
+    ) -> Option<&ParkedOverlayRefusal> {
+        if self
+            .overlay_refused
+            .as_ref()
+            .is_some_and(|r| now >= r.until)
+        {
+            self.overlay_refused = None;
+        }
+        self.overlay_refused
+            .as_ref()
+            .filter(|refusal| refusal.request == request)
+    }
+
+    /// Drop the kept refusal: its record moved on, so the request is decided afresh.
+    pub(super) fn forget_overlay_refusal(&mut self) {
+        self.overlay_refused = None;
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_overlay_refusal_for_test(&self) -> bool {
+        self.overlay_refused.is_some()
     }
 
     #[cfg(test)]
@@ -1715,24 +1824,56 @@ impl StudioReceiver {
                 // custody visit consumes it. That is deliberate: a plan waiting to commit is a
                 // live job, and its pixels are still protected only by its transient hold.
                 //
-                // RT-001. A refusal parks nothing: the worker released admission and the shared
+                // RT-001. A refusal parks no plan: the worker released admission and the shared
                 // slot when planning failed, and the capture took its media hold with it. The
-                // request stays retryable and the next Save reclassifies from durable state.
+                // request stays retryable. A Closing retry reclassifies from durable state; an
+                // Unconfirmed one is answered from the kept refusal while its record is unchanged.
                 // A UI lock released the slot while this job was detached, so its plan is dropped
                 // as it returns rather than parked: nothing may hold draft plaintext through a
                 // lock, and no visit runs while locked to expire it.
                 let dropped_for_lock = std::mem::take(&mut self.catchup.overlay_drop_returning);
-                if let (Ok((plan, ownership)), false) = (result, dropped_for_lock) {
-                    self.catchup.overlay_planned = Some((context, plan, ownership));
-                    self.catchup.overlay_planned_until = server
-                        .runtime_clock()
-                        .monotonic_ms()
-                        .saturating_add(OVERLAY_PARK_MS);
-                } else {
-                    // Nothing was parked, so neither provenance has scheduled work any more. A
-                    // stale fingerprint would answer a retry "pending" while nothing is in flight.
-                    self.closing_scheduled = None;
-                    self.unconfirmed_scheduled = None;
+                match (result, dropped_for_lock) {
+                    (Ok((plan, ownership)), false) => {
+                        self.catchup.overlay_planned = Some((context, plan, ownership));
+                        self.catchup.overlay_planned_until = server
+                            .runtime_clock()
+                            .monotonic_ms()
+                            .saturating_add(OVERLAY_PARK_MS);
+                    }
+                    (result, _) => {
+                        // MAP K12: an Unconfirmed request's refusal is kept, against the stamp of
+                        // the record it was planned from, so the identical retry hears it instead
+                        // of capturing and planning again. Only for the request that scheduled this
+                        // job: a Closing one is Agent 1's to mirror.
+                        //
+                        // Not across a lock. Today a lock that finds a job detached also forgets
+                        // its request, so `unconfirmed_scheduled` is already `None` here and the
+                        // `dropped_for_lock` term is redundant: no test can tell it apart, and its
+                        // mutant survives. It stays so the rule holds where it is applied, should
+                        // the lock ever stop forgetting the request.
+                        if let (
+                            Err(AppError::Invalid(message)),
+                            false,
+                            Some(request),
+                            None,
+                            Some(stamp),
+                        ) = (
+                            result,
+                            dropped_for_lock,
+                            self.unconfirmed_scheduled,
+                            self.closing_scheduled,
+                            context.stamp,
+                        ) {
+                            let now = server.runtime_clock().monotonic_ms();
+                            self.catchup
+                                .park_overlay_refusal(request, stamp, message, now);
+                        }
+                        // Nothing was parked, so neither provenance has scheduled work any more. A
+                        // stale fingerprint would answer a retry "pending" while nothing is in
+                        // flight.
+                        self.closing_scheduled = None;
+                        self.unconfirmed_scheduled = None;
+                    }
                 }
             }
             StudioBackgroundResult::CancelledOverlay => {

@@ -1,6 +1,6 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-10-10 against shared Gate 4 head `acc43bcf`. **Gate 4 is incomplete; Gate 5
+Last checked: 2026-10-11 against shared Gate 4 head `2ab84645`. **Gate 4 is incomplete; Gate 5
 remains closed.** The exact current ledger is [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md); historical
 implementation and verification detail is in [HANDOVER](HANDOVER.md).
 
