@@ -47,6 +47,12 @@ pub(crate) enum StudioOverlaySaveVisit {
     /// Terminal and already durable: an acknowledgement, an exact retry, or a commit that this
     /// visit completed from a plan an earlier visit left ready.
     Saved(Box<catcoms_replication::studio::StudioOverlaySave>),
+    /// A policy or present-state refusal. Nothing was written; the stable reason is carried from
+    /// the store rather than inferred from diagnostic text at this boundary.
+    Refused {
+        reason: catcoms_replication::studio::StudioOverlaySaveRefusal,
+        message: String,
+    },
     /// New authoring captured and handed to the background runtime. The caller asks again after
     /// a later visit; the request stays retryable and byte-stable in the meantime.
     Scheduled,
@@ -69,6 +75,30 @@ pub(crate) enum StudioOverlaySaveVisit {
     /// The receiver refused a fresh capture because storage receive is paused. Retry only after
     /// explicit access has cleared that pause; this is not ordinary slot contention.
     Paused,
+}
+
+/// Convert the one typed store refusal into a successful Save visit. Every other error retains
+/// the error channel: I/O, invariant and uncertain-write failures must never be reported as a
+/// clean refusal merely because the caller happened to be saving.
+fn refused_save_visit(error: AppError) -> Result<StudioOverlaySaveVisit, AppError> {
+    match error {
+        AppError::StudioRefused { reason, message } => {
+            Ok(StudioOverlaySaveVisit::Refused { reason, message })
+        }
+        error => Err(error),
+    }
+}
+
+/// These S1b refusals reveal that the durable source has moved to a lifecycle state the row may
+/// not yet show. Other refusal reasons describe the request, transient capacity, or the already
+/// visible draft and must not manufacture a lifecycle transition merely to report an error.
+fn refused_save_requires_refresh(
+    reason: catcoms_replication::studio::StudioOverlaySaveRefusal,
+) -> bool {
+    use catcoms_replication::studio::{
+        StudioOverlayManualReason as M, StudioOverlaySaveRefusal as R,
+    };
+    matches!(reason, R::InstalledSource | R::Durable(M::SourceNotClosing))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,12 +171,13 @@ impl StudioReceiver {
     /// `close` and `budget` are parameters, exactly as they are on the existing explicit
     /// `Server::save_studio_closing_overlay`. Acquiring them is the caller's job: the saved close
     /// comes from the owner journal and the budget from a completed five-family inventory, and
-    /// deciding when to pay for both is the manual lifecycle Agent 2 owns. That command is what
-    /// will call this, so no production caller exists yet.
+    /// deciding when to pay for both belongs to the still-unregistered direct Closing Save. This
+    /// helper therefore has no production caller yet. The registered ticketed Unconfirmed Save is
+    /// a separate Flow-S entry point that mints from the live preview on every stage and never
+    /// turns this Closing helper into a renderer command.
     //
-    // Consumed by the native/actor overlay lifecycle, which is gated on Agent 2's P5 (still
-    // false) and on C-3 making the per-visit inventory affordable. The seam is exercised by its
-    // own tests today and exposes no command; delete this marker with that commit.
+    // Keep the dead-code marker until direct Closing Save is separately completed and registered;
+    // do not remove it merely because the narrower preview-local route is now available.
     #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn save_overlay<T: MeshTransport + 'static, R: CryptoRngCore>(
@@ -190,11 +221,12 @@ impl StudioReceiver {
                 }
                 return Ok(StudioOverlaySaveVisit::Busy);
             }
-            return committed.map(|draft| {
-                StudioOverlaySaveVisit::Saved(Box::new(
+            return match committed {
+                Ok(draft) => Ok(StudioOverlaySaveVisit::Saved(Box::new(
                     catcoms_replication::studio::StudioOverlaySave::Local(draft),
-                ))
-            });
+                ))),
+                Err(error) => refused_save_visit(error),
+            };
         }
         // MAP K12: a detached plan for this exact Closing request was refused. Answer the kept
         // refusal only while the authenticated record stamp is still current; otherwise decide
@@ -207,7 +239,10 @@ impl StudioReceiver {
                     store.studio_overlay_is_current(group, device, refusal.stamp())
                 })?;
             if current {
-                return Err(invalid(refusal.message().to_owned()));
+                return Ok(StudioOverlaySaveVisit::Refused {
+                    reason: refusal.reason(),
+                    message: refusal.message().to_owned(),
+                });
             }
             self.catchup.forget_overlay_refusal();
         }
@@ -223,7 +258,7 @@ impl StudioReceiver {
         // Read only once new work reaches S1b. Terminal retries and kept refusals above must keep
         // working without current observed tenure (V8).
         let tenure = server.observed_owner_tenure();
-        let started = server
+        let started = match server
             .sync
             .with_registry_context(|group, device, clock, rng| {
                 store.start_studio_closing_overlay(
@@ -240,7 +275,21 @@ impl StudioReceiver {
                     rng,
                     budget,
                 )
-            })?;
+            }) {
+            Ok(started) => started,
+            Err(error) => {
+                let refused = refused_save_visit(error)?;
+                if matches!(
+                    refused,
+                    StudioOverlaySaveVisit::Refused { reason, .. }
+                        if refused_save_requires_refresh(reason)
+                ) {
+                    self.settlement
+                        .note(target, StudioSettlementState::RefreshRequired);
+                }
+                return Ok(refused);
+            }
+        };
         match started {
             // Terminal, and the reservation is released by dropping `ownership` on return.
             crate::store::StudioOverlayStart::Settled(saved) => {
@@ -421,6 +470,26 @@ impl StudioReceiver {
                     .note(target, StudioSettlementState::RefreshRequired);
             }
             let mut result = result;
+            if let Ok(response) = &mut result {
+                // Store reads own durable classification. Only the receiver owns the automatic
+                // runtime and can attach a failed attempt, after revalidating its exact H1 stamp.
+                let attempt = match response {
+                    StudioControlResponse::OverlayLifecycle(_)
+                    | StudioControlResponse::OverlayInspection(_) => {
+                        self.handoff_attempt(server, store, target)
+                    }
+                    _ => None,
+                };
+                match response {
+                    StudioControlResponse::OverlayLifecycle(lifecycle) => {
+                        lifecycle.handoff_attempt = attempt;
+                    }
+                    StudioControlResponse::OverlayInspection(inspection) => {
+                        inspection.annotate_handoff_attempt(attempt);
+                    }
+                    _ => {}
+                }
+            }
             if let Ok(StudioControlResponse::Fault(view)) = &mut result {
                 // Only the runtime knows whether its repair job for this scope is running and
                 // how its last one ended; the store's view cannot.
@@ -911,10 +980,12 @@ impl StudioReceiver {
                 return Ok(());
             }
             let _ = server.unwatch_studio_epoch(&old);
+            self.handoff.forget_attempt(old.target);
         }
         if self.watches.len() == 16 {
             let (old, _) = self.watches.pop_front().expect("full watch rail");
             let _ = server.unwatch_studio_epoch(&old);
+            self.handoff.forget_attempt(old.target);
         }
         // The existing transaction already validated channel/member and loaded this concrete
         // epoch (or proved absence). Do not replay the full source again just to subscribe.

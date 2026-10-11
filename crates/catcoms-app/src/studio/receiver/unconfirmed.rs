@@ -56,9 +56,14 @@ impl StudioReceiver {
             StudioControlAction::BeginUnconfirmedOverlaySave => {
                 // Every Save under a ticket for a Closing draft would be refused anyway; naming
                 // the reason here, before a ticket exists, is the truthful place for it.
-                refuse_closing_draft(server, store, id, target)?;
+                if let Err(error) = refuse_closing_draft(server, store, id, target) {
+                    return unconfirmed_refusal(target, error);
+                }
                 let (basis, branch) =
-                    self.begin_unconfirmed_overlay_save(server, store, id, target)?;
+                    match self.begin_unconfirmed_overlay_save(server, store, id, target) {
+                        Ok(ticket) => ticket,
+                        Err(error) => return unconfirmed_refusal(target, error),
+                    };
                 Ok(StudioControlResponse::UnconfirmedOverlaySaveTicket {
                     target,
                     basis,
@@ -71,7 +76,9 @@ impl StudioReceiver {
                 // acknowledged by the store's kind-blind exact retry and then reported here as
                 // Unconfirmed work. Refused first instead, by what the document's live draft is
                 // (review of `b35e23d2`, MEDIUM-1).
-                refuse_closing_draft(server, store, id, target)?;
+                if let Err(error) = refuse_closing_draft(server, store, id, target) {
+                    return unconfirmed_refusal(target, error);
+                }
                 let operation = crate::studio::domain(target, save.nonce, save.body);
                 let visit = self.save_unconfirmed_overlay(
                     server,
@@ -110,6 +117,9 @@ impl StudioReceiver {
                             StudioUnconfirmedSaveOutcome::HandedOff(outcome)
                         }
                     },
+                    StudioOverlaySaveVisit::Refused { reason, message } => {
+                        StudioUnconfirmedSaveOutcome::Refused { reason, message }
+                    }
                     StudioOverlaySaveVisit::Scheduled => StudioUnconfirmedSaveOutcome::Scheduled,
                     StudioOverlaySaveVisit::Busy => StudioUnconfirmedSaveOutcome::Busy,
                     StudioOverlaySaveVisit::Paused => StudioUnconfirmedSaveOutcome::Paused,
@@ -140,7 +150,10 @@ impl StudioReceiver {
             .sync
             .with_registry_context(|g, d, _, _| g.contains_device(&d.device_id()))
         {
-            return Err(invalid("this device is no longer a member"));
+            return Err(AppError::StudioRefused {
+                reason: catcoms_replication::studio::StudioOverlaySaveRefusal::NotMember,
+                message: "Studio: this device is no longer a member".into(),
+            });
         }
         let basis = self.catchup.preview.mint(server, store, id, target)?;
         let mut budget = save_budget(server, store, id)?;
@@ -202,11 +215,12 @@ impl StudioReceiver {
                 }
                 return Ok(Visit(StudioOverlaySaveVisit::Busy));
             }
-            return committed.map(|draft| {
-                Visit(StudioOverlaySaveVisit::Saved(Box::new(
+            return match committed {
+                Ok(draft) => Ok(Visit(StudioOverlaySaveVisit::Saved(Box::new(
                     StudioOverlaySave::Local(draft),
-                )))
-            });
+                )))),
+                Err(error) => refused_save_visit(error).map(Visit),
+            };
         }
         // MAP K12: this request's plan was refused, and the record it was planned from is unchanged,
         // so the refusal is answered again. It goes before the reservation and every stage after it:
@@ -227,7 +241,10 @@ impl StudioReceiver {
                     store.studio_overlay_is_current(group, device, refusal.stamp())
                 })?;
             if current {
-                return Err(invalid(refusal.message().to_owned()));
+                return Ok(Visit(StudioOverlaySaveVisit::Refused {
+                    reason: refusal.reason(),
+                    message: refusal.message().to_owned(),
+                }));
             }
             // The record moved on, by a commit, a disposal or anything else. Decide afresh.
             self.catchup.forget_overlay_refusal();
@@ -245,7 +262,7 @@ impl StudioReceiver {
         };
         let attempt = self.catchup.preview.mint(server, store, id, target);
         let mut budget = save_budget(server, store, id)?;
-        let started = server
+        let started = match server
             .sync
             .with_registry_context(|group, device, clock, rng| {
                 store.start_studio_overlay(
@@ -261,7 +278,21 @@ impl StudioReceiver {
                     rng,
                     &mut budget,
                 )
-            })?;
+            }) {
+            Ok(started) => started,
+            Err(error) => {
+                let refused = refused_save_visit(error)?;
+                if matches!(
+                    refused,
+                    StudioOverlaySaveVisit::Refused { reason, .. }
+                        if super::refused_save_requires_refresh(reason)
+                ) {
+                    self.settlement
+                        .note(target, StudioSettlementState::RefreshRequired);
+                }
+                return Ok(Visit(refused));
+            }
+        };
         match started {
             StudioOverlayStart::Settled(saved) => {
                 // An acknowledgement or a disposal manifest. Neither changed the vault, but a
@@ -286,6 +317,22 @@ impl StudioReceiver {
             }
         }
     }
+}
+
+/// Lift a classified refusal into the stable control response without laundering any other error.
+/// Invariant, I/O and uncertain-write failures must remain on the error channel; only the app's
+/// typed `StudioRefused` variant is safe to present as proof that this request wrote nothing.
+fn unconfirmed_refusal(
+    target: StudioTarget,
+    error: AppError,
+) -> Result<StudioControlResponse, AppError> {
+    let StudioOverlaySaveVisit::Refused { reason, message } = refused_save_visit(error)? else {
+        unreachable!("the refusal converter returned a non-refusal visit")
+    };
+    Ok(StudioControlResponse::UnconfirmedOverlaySaved {
+        target,
+        outcome: StudioUnconfirmedSaveOutcome::Refused { reason, message },
+    })
 }
 
 impl StudioReceiver {
@@ -337,7 +384,8 @@ fn refuse_closing_draft<T: MeshTransport + 'static, R: CryptoRngCore>(
         if metadata.overlay().is_some()
             && matches!(metadata.provenance(), StudioOverlayProvenance::Closing)
         {
-            return Err(invalid(
+            return Err(crate::store::studio_refused(
+                catcoms_replication::studio::StudioOverlaySaveRefusal::OtherKindDraft,
                 "this document's live draft was not made on a preview; it cannot take an \
                  unconfirmed Save",
             ));

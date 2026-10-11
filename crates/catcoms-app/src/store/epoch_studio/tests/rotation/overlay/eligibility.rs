@@ -137,11 +137,24 @@ fn an_index_entry_naming_a_missing_flipnote_is_manual_exactly_while_the_handoff_
         classify(&f, &store, Known(0)),
         Some(E::Manual(R::ObjectMissing))
     );
-    let refused = handoff(&mut store).unwrap_err().to_string();
-    assert!(
-        refused.contains("unavailable Flipnote"),
-        "the handoff must refuse for the reason the classifier named, got: {refused}"
-    );
+    let mut b = budget(&mut store, &f);
+    let refused = store
+        .start_studio_handoff_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            basis.fingerprint(),
+            Some(0),
+            &mut rng(),
+            &mut b,
+            &mut WriteHooks::None,
+        )
+        .expect("H1 returned an unclassified error");
+    assert!(matches!(
+        refused,
+        crate::store::StudioHandoffStart::Refused(R::ObjectMissing)
+    ));
 
     // Create the Flipnote the entry names, and the two must agree the other way.
     let flipnote = StudioTarget::Flipnote {

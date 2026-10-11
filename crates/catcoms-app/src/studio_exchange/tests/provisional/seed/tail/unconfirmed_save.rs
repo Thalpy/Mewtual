@@ -12,12 +12,28 @@ use super::*;
 use crate::store::{EpochRecordKind, StudioOverlayMint, StudioOverlayStart};
 use crate::studio::StudioOwnerTenure;
 use catcoms_replication::studio::{
-    StudioLocalDraft, StudioOverlayProvenance, StudioOverlaySave, StudioUnconfirmedOverlayBasis,
+    StudioLocalDraft, StudioOverlayProvenance, StudioOverlaySave, StudioOverlaySaveRefusal,
+    StudioUnconfirmedOverlayBasis,
 };
 use catcoms_replication::CloseRecord;
 use catcoms_rt::Clock;
 
 type Mint = Result<StudioUnconfirmedOverlayBasis, AppError>;
+
+/// Pin the typed MAP carrier at the store boundary while retaining the diagnostic for legacy text
+/// assertions. A generic error with matching prose is not an accepted refusal.
+fn refusal(error: AppError, expected: StudioOverlaySaveRefusal) -> String {
+    match error {
+        AppError::StudioRefused { reason, message } => {
+            assert_eq!(
+                reason, expected,
+                "Save returned the wrong refusal: {message}"
+            );
+            message
+        }
+        other => panic!("Save returned an untyped error instead of {expected:?}: {other}"),
+    }
+}
 
 /// A ready preview whose authenticated tail is complete: the state the mint requires.
 async fn complete_preview(p: &mut Pair) -> ServerPreparedProvisionalStudioSeed {
@@ -407,7 +423,10 @@ async fn unconfirmed_save_refuses_beside_an_installed_source() {
     assert_eq!(before.map(|(provenance, _)| provenance), Some(None));
     let operation = draft_op(&p, target, 0x31, "beside a source");
     let refused = save(&mut p, target, &prepared, ticket, operation).unwrap_err();
-    assert_eq!(refused.to_string(), INSTALLED);
+    assert_eq!(
+        refusal(refused, StudioOverlaySaveRefusal::InstalledSource),
+        INSTALLED
+    );
     assert_eq!(
         recorded(&mut p, target),
         before,
@@ -541,7 +560,12 @@ async fn unconfirmed_save_refuses_stale_requests_and_a_basis_for_another_channel
     let operation = draft_op(&p, target, 0x51, "other basis");
     let changed = save(&mut p, target, &prepared, ([0xee; 32], branch), operation).unwrap_err();
     assert_eq!(
-        changed.to_string(),
+        refusal(
+            changed,
+            StudioOverlaySaveRefusal::BasisChanged {
+                during_detach: false,
+            },
+        ),
         "epoch studio: unconfirmed overlay basis changed; prepare again from the current preview"
     );
     let operation = draft_op(&p, target, 0x52, "other branch");
@@ -554,7 +578,7 @@ async fn unconfirmed_save_refuses_stale_requests_and_a_basis_for_another_channel
     )
     .unwrap_err();
     assert_eq!(
-        stale.to_string(),
+        refusal(stale, StudioOverlaySaveRefusal::StaleBranch),
         "epoch studio: unconfirmed overlay request names a stale branch; prepare it again"
     );
 
@@ -620,7 +644,10 @@ async fn unconfirmed_save_exact_retry_is_answered_beside_a_newly_received_source
 
     let new_work = draft_op(&p, target, 0x73, "new beside the source");
     let refused = save(&mut p, target, &prepared, ticket, new_work).unwrap_err();
-    assert_eq!(refused.to_string(), INSTALLED);
+    assert_eq!(
+        refusal(refused, StudioOverlaySaveRefusal::InstalledSource),
+        INSTALLED
+    );
 }
 
 /// Presence, not readability, is what refuses.
@@ -752,7 +779,7 @@ async fn unconfirmed_save_refuses_a_basis_minted_under_an_earlier_mls_epoch() {
     let operation = draft_op(&p, target, 0x91, "stale basis");
     let refused = save_with(&mut p, target, stale, ticket, operation).unwrap_err();
     assert_eq!(
-        refused.to_string(),
+        refusal(refused, StudioOverlaySaveRefusal::MembershipChanged),
         "epoch studio: unconfirmed overlay basis was minted under another membership; prepare \
          again from the current preview"
     );

@@ -4,10 +4,20 @@ Owner: Agent 2, [overlay lifecycle, provisional local work and repeated tenure](
 Design of record: [GATE4-AGENT-2-DESIGN.md](GATE4-AGENT-2-DESIGN.md).
 Review preamble: [preamble 2](GATE4-REVIEW-PREAMBLES.md#review-2-manualprovisional-overlay-lifecycle-and-repeated-tenure).
 
-## Completion matrix, 2026-10-02
+## Integration override, 2026-10-11
 
-**This table is the current state.** Every section below it is a dated record; where one disagrees
-with this table, this table wins. Built against the six goals of the assignment and the
+The isolated Gate 4 completion candidate supersedes the old live-status tables below while keeping
+them as implementation/review history. P1's bounded review findings are closed; P2 and P4 are
+implemented; P3 now has exhaustive native/frontend conversions, command policy and a truthful
+Studio consumer; the supported fresh-key product path is pinned through the actor/receiver. P5 is
+therefore **TRUE on that isolated candidate only** for the lifecycle family and ticketed
+Unconfirmed Save. It does not authorize a direct Closing Save or any repair command. Final full
+suites and Review 4 are still required before the shared baseline may inherit this promotion.
+
+## Completion matrix, 2026-10-02 (historical)
+
+**This table was the current state at that checkpoint.** The integration override above now wins.
+Built against the six goals of the assignment and the
 whole-scope review of `510d0b54` (verdict: CHANGES REQUIRED, Agent 2 not complete).
 
 | Goal | State | Evidence, and what is still missing | Owner |
@@ -154,7 +164,7 @@ snapshot.
 
 ## Agent 1's registration prerequisites (its section 12.3)
 
-**Authoritative statement: P5 is FALSE. `studio_overlay_save` must not be registered.**
+**Historical checkpoint statement: P5 was FALSE and `studio_overlay_save` was not registered.**
 
 *Table updated 2026-09-30 at `bbef5908`, in answer to Agent 1's question of whether it had gone
 stale. It had: the table still read "no line of production code has been written for any of them",

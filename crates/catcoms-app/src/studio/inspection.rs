@@ -69,6 +69,8 @@ pub struct StudioOverlayInspected<'a> {
     /// no branch is live. A branch that did not reconstruct is `Manual(NotReplayable)` whatever
     /// else holds, because that is the one condition no amount of waiting changes.
     pub eligibility: Option<types::StudioOverlayEligibility>,
+    /// Runtime attempt state, validated by the receiver against its original H1 stamp.
+    pub handoff_attempt: Option<super::StudioHandoffAttempt>,
     /// Design 8.6: how an Unconfirmed branch's base relates to the installed source, derived on
     /// read. `None` for a Closing branch or no branch.
     pub unconfirmed: Option<types::StudioOverlayUnconfirmedState>,
@@ -79,6 +81,7 @@ pub struct StudioOverlayInspection {
     read: Arc<Retained>,
     delivery: Option<StudioInspectionDelivery>,
     eligibility: Option<types::StudioOverlayEligibility>,
+    handoff_attempt: Option<super::StudioHandoffAttempt>,
     unconfirmed: Option<types::StudioOverlayUnconfirmedState>,
 }
 #[derive(Clone, Debug)]
@@ -257,6 +260,7 @@ impl StudioOverlayInspection {
             disposed: value.disposed.as_ref(),
             replayable: value.replayable.is_ok(),
             eligibility: self.eligibility,
+            handoff_attempt: self.handoff_attempt,
             unconfirmed: self.unconfirmed,
         }))
     }
@@ -284,6 +288,15 @@ impl StudioOverlayInspection {
             (eligibility, _) => eligibility,
         };
         self
+    }
+
+    /// Attach the receiver-owned runtime report after its H1 stamp has been revalidated. Store
+    /// inspection cannot do this: it deliberately has no access to the actor's scheduler state.
+    pub(crate) fn annotate_handoff_attempt(
+        &mut self,
+        attempt: Option<super::StudioHandoffAttempt>,
+    ) {
+        self.handoff_attempt = attempt;
     }
     /// The archive this inspection built, for the durable write in the same custody visit.
     ///
@@ -408,6 +421,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             read: prepared.read,
             delivery: None,
             eligibility: None,
+            handoff_attempt: None,
             unconfirmed: None,
         })
     }

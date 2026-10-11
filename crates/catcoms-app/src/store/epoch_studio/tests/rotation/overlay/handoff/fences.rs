@@ -657,12 +657,12 @@ fn studio_overlay_handoff_h1_refuses_a_non_pristine_successor_before_capture() {
             &mut WriteHooks::None,
         );
         match started {
-            Err(error) => assert!(
-                error
-                    .to_string()
-                    .contains("successor is not transferable: SuccessorNotPristine"),
-                "refused for another reason (art {art}): {error}"
+            Ok(crate::store::StudioHandoffStart::Refused(reason)) => assert_eq!(
+                reason,
+                catcoms_replication::studio::StudioOverlayManualReason::SuccessorNotPristine,
+                "refused for another reason (art {art})"
             ),
+            Err(error) => panic!("the durable refusal was untyped (art {art}): {error}"),
             Ok(crate::store::StudioHandoffStart::Captured(_)) => {
                 panic!("H2 started for a non-pristine successor (art {art})")
             }

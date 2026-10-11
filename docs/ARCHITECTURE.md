@@ -21,6 +21,15 @@ code was written), the honest residual risks, and the phased build plan.
 
 ## 2. Corrections from the adversarial review (must hold in the implementation)
 
+The Gate 4 completion candidate exposes retained Studio work without promoting it into shared
+history. Awaiting-tenure views remain non-authoritative bases: their edits use a ticketed
+Unconfirmed overlay, are shown as local-only and follow typed exact-retry instructions. The
+lifecycle surface can inspect/export/archive/copy/dispose retained work; copy is preview then one
+ordinary provisional Save, and destructive actions require literal confirmations. The registration,
+command policy, native conversion, frontend parser and consumer move together. Direct Closing Save
+and repair commands stay unavailable. This preserves the existing ownership model rather than
+creating a second source, receipt or repair authority in the renderer.
+
 Creative immutable blobs are independent of the P1 document lifecycle. The C0c native seam uses
 the existing blob staging/store and authenticated fetch protocol, with PIX1 validation and bounded
 reads/response decoding added at the relevant boundaries. Publication returns a real CID only after

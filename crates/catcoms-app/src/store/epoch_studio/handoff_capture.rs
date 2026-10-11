@@ -22,11 +22,12 @@ use super::super::epoch_intents::{self, EpochIntentState};
 use super::*;
 use catcoms_crypto::DeviceId;
 use catcoms_replication::studio::{
-    StudioHandoffAuthority, StudioHandoffSigning, StudioOverlayState,
+    StudioHandoffAuthority, StudioHandoffSigning, StudioOverlayManualReason, StudioOverlayState,
 };
 
 /// Record identity and public live context, captured under custody. It carries no key, no store
 /// handle, no `Server` and no budget, so it is safe to hold across a detach.
+#[derive(Clone)]
 pub(crate) struct StudioHandoffStamp {
     mount: Arc<()>,
     pub(super) server: u64,
@@ -61,6 +62,37 @@ impl StudioHandoffStamp {
     /// captured and H2 decoded. H5's step 6 holds its own read to this (design 9.3).
     pub(super) fn captured_intent(&self, digest: Option<blake3::Hash>, size: Option<u64>) -> bool {
         digest.zip(size) == Some(self.intent)
+    }
+}
+
+/// An H2 failure still carries the exact H1 stamp. The actor may expose the bounded reason only
+/// while that stamp remains current; an old worker result is never evidence about a new branch.
+pub(crate) struct StudioHandoffPrepareFailure {
+    stamp: StudioHandoffStamp,
+    reason: Option<StudioOverlayManualReason>,
+    error: AppError,
+}
+
+impl StudioHandoffPrepareFailure {
+    pub(crate) fn stamp(&self) -> &StudioHandoffStamp {
+        &self.stamp
+    }
+
+    pub(crate) fn reason(&self) -> Option<StudioOverlayManualReason> {
+        self.reason
+    }
+
+    pub(crate) fn into_error(self) -> AppError {
+        self.error
+    }
+}
+
+impl std::fmt::Debug for StudioHandoffPrepareFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StudioHandoffPrepareFailure")
+            .field("reason", &self.reason)
+            .field("error", &self.error)
+            .finish_non_exhaustive()
     }
 }
 
@@ -139,6 +171,12 @@ impl std::fmt::Debug for StudioHandoffCommit {
     }
 }
 
+impl StudioHandoffCommit {
+    pub(crate) fn stamp(&self) -> &StudioHandoffStamp {
+        &self.stamp
+    }
+}
+
 /// An experiment configuration, not a responsiveness guarantee. The deadline is checked between
 /// signatures and can overrun by one whole operation including its authority checks, so both must
 /// be recalibrated against the measured largest admitted individual operation and roster shape
@@ -189,6 +227,10 @@ impl SigningSlice {
 }
 
 impl StudioHandoffPlan {
+    pub(crate) fn stamp(&self) -> &StudioHandoffStamp {
+        &self.stamp
+    }
+
     pub(crate) fn remaining(&self) -> usize {
         self.signing.remaining()
     }
@@ -301,47 +343,98 @@ impl StudioHandoffCapture {
     /// H2, on a blocking worker and off custody. This is the expensive stage: the full
     /// `decode_vault` of any retained branch, the private successor reconstruction, and the
     /// per-operation change set. It signs nothing and writes nothing.
-    pub(crate) fn prepare(self) -> Result<StudioHandoffPlan, AppError> {
-        let scope = epoch_intents::scope_bytes(self.stamp.server, &self.stamp.document)?;
-        let state = EpochIntentState::decode(&self.intent_bytes, &scope, &self.stamp.document)?;
-        let metadata = state
-            .handoff_metadata()
-            .ok_or_else(|| invalid("overlay metadata missing"))?
-            .clone();
-        let source_scope = scope_bytes(self.stamp.server, &self.stamp.document)?;
-        let (target, snapshot) =
-            decode_record(&self.source_bytes, &source_scope, &self.stamp.document)?;
-        if target != self.stamp.target {
-            return Err(invalid("prepared source channel changed"));
+    pub(crate) fn prepare(self) -> Result<StudioHandoffPlan, Box<StudioHandoffPrepareFailure>> {
+        enum Failure {
+            Transient(AppError),
+            Refused(StudioOverlayManualReason, AppError),
         }
-        // Captured public context only. See the module comment for why this is not
-        // `copy_handoff_source(group)`.
-        let source = StudioEpoch::prepare_vault_source(
-            snapshot,
-            &self.group,
-            target,
-            self.stamp.actor,
-            self.stamp.owner,
-        )
-        .map_err(invalid)?;
-        // Taken before the restored source is consumed below, so H5 can account for the record
-        // it is about to replace without restoring it a second time (design 9.1.1, step 1).
-        let facts = HandoffFacts {
-            source: (blake3::hash(&self.source_bytes), self.stamp.source.1),
-            storage_protocol_bytes: source.storage_protocol_bytes().map_err(invalid)?,
-        };
-        // The freshly decoded metadata must agree with the authority H1 minted. If the record
-        // changed under the capture this refuses here, before any signature exists.
-        let signing = metadata
-            .prepare_handoff_detached(source, state.ledger.clone(), self.authority)
+        impl From<AppError> for Failure {
+            fn from(error: AppError) -> Self {
+                Self::Transient(error)
+            }
+        }
+
+        let StudioHandoffCapture {
+            stamp,
+            group,
+            basis,
+            authority,
+            intent_bytes,
+            source_bytes,
+        } = self;
+        let prepared = (|| -> Result<_, Failure> {
+            let scope = epoch_intents::scope_bytes(stamp.server, &stamp.document)?;
+            let state = EpochIntentState::decode(&intent_bytes, &scope, &stamp.document)?;
+            let metadata = state
+                .handoff_metadata()
+                .ok_or_else(|| invalid("overlay metadata missing"))?
+                .clone();
+            let overlay = metadata
+                .overlay()
+                .ok_or_else(|| invalid("overlay metadata has no active branch"))?;
+            let source_scope = scope_bytes(stamp.server, &stamp.document)?;
+            let (target, snapshot) = decode_record(&source_bytes, &source_scope, &stamp.document)?;
+            if target != stamp.target {
+                return Err(Failure::Transient(invalid(
+                    "prepared source channel changed",
+                )));
+            }
+            // Captured public context only. See the module comment for why this is not
+            // `copy_handoff_source(group)`.
+            let mut source = StudioEpoch::prepare_vault_source(
+                snapshot,
+                &group,
+                target,
+                stamp.actor,
+                stamp.owner,
+            )
             .map_err(invalid)?;
-        Ok(StudioHandoffPlan {
-            stamp: self.stamp,
-            basis: self.basis,
-            signing,
-            state,
-            facts,
-        })
+            // The full restored-source oracle runs beside the authoritative preparation, before
+            // that preparation consumes `source`. It catches projection-only mismatches the H1
+            // header probe cannot see and preserves their stable manual reason.
+            if let Some(reason) = source
+                .overlay_successor_hold(overlay, &state.ledger)
+                .map_err(invalid)?
+            {
+                return Err(Failure::Refused(
+                    reason,
+                    invalid(format!(
+                        "overlay handoff successor is not transferable: {reason:?}"
+                    )),
+                ));
+            }
+            // Taken before the restored source is consumed below, so H5 can account for the
+            // record it is about to replace without restoring it a second time.
+            let facts = HandoffFacts {
+                source: (blake3::hash(&source_bytes), stamp.source.1),
+                storage_protocol_bytes: source.storage_protocol_bytes().map_err(invalid)?,
+            };
+            // The freshly decoded metadata must agree with the authority H1 minted. If the record
+            // changed under the capture this refuses here, before any signature exists.
+            let signing = metadata
+                .prepare_handoff_detached(source, state.ledger.clone(), authority)
+                .map_err(invalid)?;
+            Ok((signing, state, facts))
+        })();
+        match prepared {
+            Ok((signing, state, facts)) => Ok(StudioHandoffPlan {
+                stamp,
+                basis,
+                signing,
+                state,
+                facts,
+            }),
+            Err(Failure::Transient(error)) => Err(Box::new(StudioHandoffPrepareFailure {
+                stamp,
+                reason: None,
+                error,
+            })),
+            Err(Failure::Refused(reason, error)) => Err(Box::new(StudioHandoffPrepareFailure {
+                stamp,
+                reason: Some(reason),
+                error,
+            })),
+        }
     }
 }
 
@@ -370,6 +463,18 @@ impl ServerStore {
         plan: &StudioHandoffPlan,
     ) -> Result<bool, AppError> {
         self.studio_handoff_is_current(group, device, tenure, &plan.stamp)
+    }
+
+    /// Validate a retained runtime-attempt report against the same H1 stamp H3/H5 use. Reports
+    /// are diagnostic state only; returning `false` drops one and grants no authority.
+    pub(crate) fn studio_handoff_stamp_is_current(
+        &self,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        tenure: Option<u64>,
+        stamp: &StudioHandoffStamp,
+    ) -> Result<bool, AppError> {
+        self.studio_handoff_is_current(group, device, tenure, stamp)
     }
 
     pub(super) fn studio_handoff_is_current(

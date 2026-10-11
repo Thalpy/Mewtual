@@ -144,6 +144,9 @@ fn studio_overlay_handoff_signing_slice_reports_yield_bound_and_completion_apart
         crate::store::epoch_studio::handoff::StudioHandoffStart::Settled(_) => {
             panic!("the fixture branch was classified as already transferred")
         }
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Refused(reason) => {
+            panic!("the transferable fixture was refused: {reason:?}")
+        }
     };
     let mut plan = capture.prepare().expect("H2 reconstructs the candidate");
     assert_eq!(plan.remaining(), 40);
@@ -260,6 +263,9 @@ fn studio_overlay_handoff_assembly_refuses_a_partly_signed_batch() {
         crate::store::epoch_studio::handoff::StudioHandoffStart::Settled(_) => {
             panic!("the fixture branch was classified as already transferred")
         }
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Refused(reason) => {
+            panic!("the transferable fixture was refused: {reason:?}")
+        }
     };
     let mut plan = capture.prepare().unwrap();
     // One bounded slice, deliberately short of the whole branch.
@@ -310,6 +316,9 @@ fn studio_overlay_handoff_plan_is_refused_when_its_records_changed() {
         crate::store::epoch_studio::handoff::StudioHandoffStart::Captured(capture) => capture,
         crate::store::epoch_studio::handoff::StudioHandoffStart::Settled(_) => {
             panic!("the fixture branch was classified as already transferred")
+        }
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Refused(reason) => {
+            panic!("the transferable fixture was refused: {reason:?}")
         }
     };
     let mut plan = capture.prepare().expect("H2 reconstructs the candidate");
@@ -893,10 +902,11 @@ fn studio_overlay_handoff_completed_retry_keeps_channel_after_real_receipt_retir
             after: None,
         },
     );
-    assert!(
-        matches!(negative, Err(AppError::Invalid(ref s)) if s == &format!("epoch studio: {}",ReplError::EpochScope)),
-        "completed retry acknowledged a different channel: {negative:?}"
+    let message = refusal(
+        negative.expect_err("completed retry acknowledged a different channel"),
+        StudioOverlaySaveRefusal::OtherKindDraft,
     );
+    assert_eq!(message, format!("epoch studio: {}", ReplError::EpochScope));
     assert_eq!(syncs, 0, "wrong-channel retry reached its sync callback");
     assert_eq!(fs::read(&path).unwrap(), original);
     assert!(store

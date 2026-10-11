@@ -1,14 +1,15 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-10-11 against shared Gate 4 head `2ab84645`. **Gate 4 is incomplete; Gate 5
-remains closed.** The exact current ledger is [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md); historical
+Last checked: 2026-10-11 against the isolated Gate 4 completion candidate based on
+`700d1daba4069af69fea4ff76b105c3008e6825c`. **Gate 4 is not yet accepted; Gate 5 remains
+closed.** The exact current ledger is [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md); historical
 implementation and verification detail is in [HANDOVER](HANDOVER.md).
 
-The read-only `studio_overlay_read` command is registered and remains the only native overlay
-command. Closing/Unconfirmed Flow S, Flow R, manual lifecycle conversion and detached signed
-repair now exist internally, but they are not renderer capabilities. Agent 2's P5 is still false:
-durable overlay Save and the lifecycle/repair commands remain absent from `generate_handler!` and
-the command-security ledger. No UI control may imply those actions are callable.
+The completion candidate promotes P5 for the reviewed local-draft lifecycle and ticketed
+awaiting-tenure Save boundary. Its lifecycle/read/export/archive/copy/dispose commands and the
+Unconfirmed Save begin/visit pair are registered, permissioned, parsed exhaustively and consumed
+by the real Studio surface. This promotion is isolated pending final suites and Review 4; it has
+not changed the shared `gate4-agent1-runtime` branch. Native repair commands remain unregistered.
 
 The [handoff signing checkpoint](GATE4-HANDOFF-SIGNING-REVIEW.md) has its bounded production PASS,
 and the 2026-10-10 short re-review closes its last test-coverage finding. That verdict does not
@@ -87,15 +88,16 @@ Studio tests and the dedicated handoff/mutation workflows. The user accepts the 
 bounded implementation at `62f06d4` / evidence head `aa0a81f` and closes HANDOFF-002: reference
 inventory enforces the linked source's required metadata before enabling deletion. The reviewer
 inspected 24 passing handoff tests, ten detected mutations and ten restored passes in GitHub
-run 34903404377. This changes no UI command or result shape.
-Those accepted write adapters supply no native Save command. Continue to disable durable overlay
-Save in Closing/Fault and awaiting-tenure previews; preserve unsaved editor work without claiming
-it is vault-saved. The separate read-only inspection command is documented below.
+run 34903404377. That historical checkpoint changed no UI command or result shape. The current
+candidate adds only the ticketed Unconfirmed Save for awaiting-tenure previews; Closing/Fault still
+cannot use ordinary Apply and there is no direct Closing Save command. Preserve editor pixels until
+the typed local-only result is returned, and never present it as installed, receipted or published.
 The accepted foundations and earlier review closures are recorded in
 [the provisional review note](GATE4-PROVISIONAL-READ-REVIEW.md) and HANDOVER.
 
-This guide describes native contracts. Frontend implementation and visual design remain
-independently owned; backend work changes command security registration, not the visual surface.
+This guide describes native contracts and the current Studio consumer. Visual polish remains
+separate; command registration, typed parsing and the minimum truthful controls are part of this
+candidate.
 
 ## Available now
 
@@ -142,8 +144,11 @@ an owner-tenure or publication claim. `provenance` is not a receipt or authority
 Absent does not imply no pending ordinary edits, no completed transfer or settled content.
 There are no `epochId`, `epoch`, `phase`, publication, receipt or provisional-preview flags.
 Keep this separate from the editor's unsaved work and from awaiting-tenure history previews.
-No other overlay command is registered. Durable overlay Save, transfer, copy/export and
-disposition remain unavailable to the renderer even though internal handlers exist.
+The current isolated candidate registers the bounded lifecycle commands listed below. Reads and
+exports are evidence only. Copy preview cannot save; copy apply writes one exact operation through
+ordinary provisional Save. Preserve writes the archive before disposal. Discard and archive
+release require their literal confirmations. None of these calls grants source, receipt, tenure,
+handoff or publication authority, and none is a repair command.
 
 Run ordinary and overlay reads sequentially for the same target: they share the latest-view
 request fence, so starting another read supersedes the older result.
@@ -153,7 +158,8 @@ fresh context. Capacity exhaustion returns a retryable error. The shared four pr
 slots remain owned until actual worker/result destruction, including cancellation. Complete
 native JSON is capped at 32 MiB; overflow returns an error with no partial result. Neither
 this encoded limit nor the bounded input is a measured heap or latency guarantee. The
-frontend adapter/layout remains separately owned; this adds the backend contract only.
+frontend adapter and Studio surface consume this contract. A local draft is displayed as a
+separate local-only projection and never relabelled as the installed/awaiting-tenure base.
 
 The native entry points are [studio.rs](../apps/desktop/src-tauri/src/studio.rs),
 [studio/inspection.rs](../apps/desktop/src-tauri/src/studio/inspection.rs) (local-draft reads),
@@ -161,8 +167,8 @@ The native entry points are [studio.rs](../apps/desktop/src-tauri/src/studio.rs)
 `studio_recovery_*` commands) and
 [creative_blobs.rs](../apps/desktop/src-tauri/src/creative_blobs.rs); registration and event
 forwarding are in [lib.rs](../apps/desktop/src-tauri/src/lib.rs). These are real actor/vault
-paths. The frontend adapter/session modules above implement the existing document and recovery
-flows. Hooking up the new local-draft read remains with the UI agent.
+paths. The frontend adapter/session modules above implement document, recovery and local-draft
+flows, including exact retry identity, explicit re-authoring and destructive confirmations.
 
 `studio_list` and `studio_read` can now return a distinct unconfirmed-history result:
 
@@ -180,8 +186,9 @@ flows. Hooking up the new local-draft read remains with the UI agent.
 
 `content` uses the existing complete Index/Flipnote projection schema, including conflicts,
 claimed authors, frame CIDs and declared byte lengths. The example abbreviates that content.
-This result has no current `phase` or `publication` claim. Display it as read-only and awaiting
-a tenure receipt. Its `epochId` cannot authorize ordinary Apply; durable overlays remain pending.
+This result has no current `phase` or `publication` claim. Display the base as awaiting a tenure
+receipt. Its `epochId` cannot authorize ordinary Apply. The candidate editor can instead save one
+operation to a ticketed local-only Unconfirmed overlay and then re-read that separate projection.
 An installed source takes precedence. An absent Index's synthetic empty epoch zero does not hide
 a ready preview. Ordinary view fields remain unchanged; there is no new `confirmed` flag.
 
@@ -226,6 +233,23 @@ are 64 lowercase hex. A four-byte display fingerprint is never an authority key.
 | Preview a recovery choice | `studio_recovery_preview({server, channel, object?, snapshot, choice, mode})` | One bounded proposed domain edit or an explicit conflict/hold; saves nothing |
 | Apply that exact choice | `studio_recovery_apply({server, channel, object?, edit})` | Ordinary provisional content Save; see the retry contract below |
 | Restore discoverability | `studio_recovery_restore_pointer({server, channel, object?})` | Separately retryable Registry pointer step for an actually saved document; no caller-supplied epoch |
+| Inspect retained local work | `studio_overlay_read({server, channel, object?})` | Absent, local-draft or disposed evidence; never authority |
+| Read lifecycle state | `studio_overlay_lifecycle({server, channel, object?})` | Branch, manual reason, handoff attempt, archive and terminal state |
+| Export the active draft | `studio_overlay_export({server, channel, object?})` | Bounded `catcoms-studio-draft-v1` bytes for local backup |
+| Preserve before disposal | `studio_overlay_archive({server, channel, object?})` | Durable, terminal, non-authoritative archive evidence |
+| Read/export preserved work | `studio_overlay_archive_read` / `studio_overlay_archive_export` with the same target | Archive projection or bounded backup bytes |
+| Release preserved archive | `studio_overlay_archive_release({server, channel, object?, archive, confirmation:"release-local-archive"})` | Reconciliation-required release result |
+| Preview copying one retained value | `studio_overlay_copy_preview({server, channel, object?, destination, choice, mode})` | Exact provisional edit or explicit disposition; saves nothing |
+| Apply that exact copy | `studio_overlay_copy_apply({server, channel, object?, edit})` | One ordinary provisional Save; an uncertain delivery retains the exact edit |
+| Dispose retained work | `studio_overlay_dispose({server, channel, object?, disposal})` | Terminal preserved/discarded result; discard requires `"destroy-local-draft"` |
+| Begin preview-local Save | `studio_unconfirmed_overlay_save_begin({server, channel, object?})` | Ticket with exact basis/branch, or typed known-no-write refusal; not authoring authority outside its visit |
+| Visit preview-local Save | `studio_unconfirmed_overlay_save({server, channel, object?, save})` | Saved/pending/busy/paused/refused/disposed/handed-off typed result; retry as directed |
+
+The lifecycle controls apply to both Flipnote targets and the channel Index (`object` omitted).
+The sidebar exposes the Index draft's export, archive, bounded copy, disposal and archive-release
+actions, so local-only Index edits cannot retain quota without a user-visible recovery path.
+`busy`, `paused` and typed refusals are shown as known not written; `pending` and native delivery
+failures remain uncertain because a detached or already-committed write may still land.
 
 `body` is a **canonical JSON string**, not an object or a full signed P1 envelope. Use
 `canonicalJson` from [studio-contract.ts](../apps/desktop/src/studio-contract.ts).
@@ -345,10 +369,10 @@ installation; the UI should not implement a second catch-up scheduler or derive 
 | Canonical UI surface | Backend availability / next hook |
 |---|---|
 | Settlement chip / rotation progress | `settlement-changed` invalidates the actual phase/recovery listing. `open` does **not** mean the current edits are receipted. Current responses always say `provisional:true`. Do not synthesize receipt author/time or “settled” from epoch alone. |
-| Current owner has not confirmed history | Native Read/List return the distinct `awaitingTenureReceipt: true` preview documented above. Actor/native implementation and NATIVE-TEST-001 passed review; combined scheduling at `6b71d96` is now accepted. The frontend adapter handles this read-only result; live UI acceptance remains separate. |
+| Current owner has not confirmed history | Native Read/List return the distinct `awaitingTenureReceipt: true` preview documented above. Its base is never ordinary authoring authority. The candidate UI can retain edits in the separately labelled local-only Unconfirmed overlay, with exact retry or explicit re-authoring as the typed result directs. |
 | History fault / repair progress | Actual `phase:"fault"` and `fault` invalidations are available. The detached bounded repair runtime is merged and reviewed at its stated boundary, but it has no native command or `repairing` event. Restore/Copy saves ordinary content in an Open target and cannot clear Fault. Historical Read/Export remain available. |
-| Local overlay while rotating | Preserve unsaved editor work. Closing and awaiting-tenure Save, handoff and interrupted-Prepared resolution exist internally, but P5 is false and no native durable overlay Save/replay command exists. `studio_overlay_read` remains the only registered overlay command. Shared Apply refuses Closing/Fault. |
-| Manual lifecycle and preview-local Save | Internal lifecycle/archive/export/copy/dispose handlers and native result conversion exist but are deliberately unregistered. `eligibility`, `manualReason` and `unconfirmedState` are backend contract fields, not evidence of a callable UI path; no frontend consumer exists yet. The Unconfirmed paused outcome is `paused` / `afterExplicitAccess`; the Closing Save still needs the same distinction before registration. |
+| Local overlay while rotating | Closing Flow S/handoff remains automatic and Shared Apply still refuses Closing/Fault. The registered lifecycle UI can inspect, export, preserve, copy or explicitly dispose retained work; it does not expose a direct Closing Save command. |
+| Manual lifecycle and preview-local Save | Registered on the isolated candidate. `eligibility`, `manualReason` and `unconfirmedState` drive truthful actions; awaiting-tenure edits use the ticketed Unconfirmed Save pair. `pending`/`busy` retry the same bytes, `paused` requires explicit access before the same request, `newTicket` requires explicit re-authoring, and `none` cannot be retried as success. Final suites and Review 4 remain pending. |
 | Recovery rail: Restore / Copy / Export | List/inspect/backup export, per-item Restore/Copy and conservative own-intent replay are connected. Unsafe replay is manual recovery, never settlement. Final Gate 4 acceptance remains pending; backup export is not `.pixa`. |
 | Eviction warning / countdown | Use the listing's actual warning pair/deadline and `studio_recovery_acknowledge`. Refresh after the action and matching `settlement-changed` events. |
 | Claims, Ask, Pass, countdown | Pending Gate 5. Local fixture claims are not peer claims and never locks. |

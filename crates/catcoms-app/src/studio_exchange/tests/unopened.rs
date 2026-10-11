@@ -730,11 +730,6 @@ async fn actor_newcomer(selected_target: StudioTarget, restart_closing: bool) {
         // keep driving its ORIGINAL bounded window so the independent Registry maintenance
         // path also gets a turn. The final assertions still require BOTH durable outcomes.
     }
-    assert!(
-        count.load(Ordering::SeqCst) >= 3,
-        "Closing, installation and remote tail each repaint: got {}",
-        count.load(Ordering::SeqCst)
-    );
     let view = super::actor_save::save(
         &b,
         &b_store,
@@ -761,6 +756,15 @@ async fn actor_newcomer(selected_target: StudioTarget, restart_closing: bool) {
     bt.await.unwrap();
     ad.await.unwrap();
     bd.await.unwrap();
+    // The event drain runs independently of the request actor. Join it before inspecting the
+    // count: during a heavily parallel suite the durable work can finish before this observer is
+    // scheduled, even though every repaint is already queued. Actor shutdown closes the stream,
+    // so the join is a deterministic delivery barrier rather than a timing concession.
+    assert!(
+        count.load(Ordering::SeqCst) >= 3,
+        "Closing, installation and remote tail each repaint: got {}",
+        count.load(Ordering::SeqCst)
+    );
     drop(b_store.lock().await.take());
     let reopened = open(p.b_root.path());
     let mut verifier = Node::restore(

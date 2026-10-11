@@ -205,11 +205,11 @@ fn a_delayed_request_for_a_branch_whose_manifest_was_replaced_is_stale_on_the_sa
 
         // G1's delayed request: stale, and it opens nothing.
         let refused = send(&f, &mut store, &close, basis, g1, x.clone());
-        assert!(
-            matches!(refused, Err(AppError::Invalid(ref s)) if s.contains("stale branch")),
-            "a delayed request for a branch whose manifest was replaced was not refused as \
-             stale: {refused:?}"
+        let message = refusal(
+            refused.expect_err("the delayed request was not refused"),
+            StudioOverlaySaveRefusal::StaleBranch,
         );
+        assert!(message.contains("stale branch"));
         assert_eq!(
             intents_record(&f, &store),
             before,
@@ -258,10 +258,11 @@ fn a_first_save_naming_an_identity_no_admission_would_mint_is_stale() {
     assert!(before, "the fixture must start with no overlay record");
 
     let refused = send(&f, &mut store, &close, basis, forged, op(&f, 7));
-    assert!(
-        matches!(refused, Err(AppError::Invalid(ref s)) if s.contains("stale branch")),
-        "a first Save naming an unminted identity was not refused as stale: {refused:?}"
+    let message = refusal(
+        refused.expect_err("a first Save naming an unminted identity was accepted"),
+        StudioOverlaySaveRefusal::StaleBranch,
     );
+    assert!(message.contains("stale branch"));
     assert!(store
         .load_epoch_intents(SERVER, &f.logical)
         .unwrap()

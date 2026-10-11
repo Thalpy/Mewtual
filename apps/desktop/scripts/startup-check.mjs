@@ -23,6 +23,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import process from "node:process";
+import { startupChildEnv } from "./startup-env.mjs";
 
 // `fileURLToPath`, not the URL's `pathname`: this repository lives under a directory with a space
 // in its name, and a raw pathname keeps it percent-encoded.
@@ -85,7 +86,15 @@ function killTree(pid) {
   }
 }
 
-const child = spawn(EXE, [], { stdio: ["ignore", "pipe", "pipe"] });
+// The marker is an Info event. A developer or CI runner may legitimately set `RUST_LOG=warn`,
+// which used to suppress it from this captured console even though setup completed and the file
+// sink recorded the proof. Append the narrow directive so this gate observes its own marker while
+// leaving every other target at the caller's chosen verbosity. When the variable is absent, keep
+// it absent so `catcoms-log` can install its more useful application-wide development default.
+const child = spawn(EXE, [], {
+  stdio: ["ignore", "pipe", "pipe"],
+  env: startupChildEnv(process.env),
+});
 let output = "";
 let exited = null;
 child.stdout.on("data", (d) => (output += d));

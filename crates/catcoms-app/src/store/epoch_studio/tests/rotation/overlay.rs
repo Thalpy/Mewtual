@@ -1,7 +1,8 @@
 use super::*;
 use crate::studio::StudioOwnerTenure;
 use catcoms_replication::studio::{
-    StudioClosingOverlayBasis, StudioLocalDraft, StudioOverlayProvenance,
+    StudioClosingOverlayBasis, StudioLocalDraft, StudioOverlayManualReason,
+    StudioOverlayProvenance, StudioOverlaySaveRefusal,
 };
 use catcoms_replication::CloseRecord;
 use std::collections::{BTreeMap, BTreeSet};
@@ -30,6 +31,21 @@ fn acknowledged(saved: catcoms_replication::studio::StudioOverlaySave) -> ([u8; 
             (basis, accepted)
         }
         other => panic!("expected an exact-retry acknowledgement, got {other:?}"),
+    }
+}
+
+/// Require the Save-specific error channel and return its diagnostic text. Tests use this instead
+/// of accepting an arbitrary `AppError` whose prose happens to look like a refusal.
+fn refusal(error: AppError, expected: StudioOverlaySaveRefusal) -> String {
+    match error {
+        AppError::StudioRefused { reason, message } => {
+            assert_eq!(
+                reason, expected,
+                "Save returned the wrong refusal: {message}"
+            );
+            message
+        }
+        other => panic!("Save returned an untyped error instead of {expected:?}: {other}"),
     }
 }
 
@@ -693,9 +709,10 @@ fn studio_overlay_store_failed_ordinary_intent_is_not_acceptance_and_ordinary_ap
                 &mut b,
             )
             .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("ordinary intent cannot become an accepted overlay"));
+        assert!(
+            refusal(error, StudioOverlaySaveRefusal::OrdinaryIntentPending)
+                .contains("ordinary intent cannot become an accepted overlay")
+        );
         assert!(store
             .load_epoch_intents(SERVER, &f.logical)
             .unwrap()
@@ -750,7 +767,11 @@ fn studio_overlay_store_basis_scope_and_semantics_reject_before_acceptance() {
                 SERVER, &f.group, f.target, &f.device, &close, None, &mut b,
             )
             .unwrap_err();
-        assert!(missing.to_string().contains("observed owner tenure"));
+        assert!(refusal(
+            missing,
+            StudioOverlaySaveRefusal::Durable(StudioOverlayManualReason::TenureUnknown),
+        )
+        .contains("observed owner tenure"));
         let mut stale = basis.fingerprint();
         stale[0] ^= 1;
         let error = store
@@ -769,10 +790,16 @@ fn studio_overlay_store_basis_scope_and_semantics_reject_before_acceptance() {
                 &mut b,
             )
             .unwrap_err();
-        assert!(error.to_string().contains("basis changed"));
+        assert!(refusal(
+            error,
+            StudioOverlaySaveRefusal::BasisChanged {
+                during_detach: false,
+            },
+        )
+        .contains("basis changed"));
         let mut bad = f.title();
         bad.body = b"{}".to_vec();
-        assert!(store
+        let malformed = store
             .save_studio_closing_overlay(
                 SERVER,
                 &f.group,
@@ -785,11 +812,15 @@ fn studio_overlay_store_basis_scope_and_semantics_reject_before_acceptance() {
                 bad,
                 123,
                 &mut rng(),
-                &mut b
+                &mut b,
             )
-            .is_err());
+            .unwrap_err();
+        assert!(
+            !matches!(malformed, AppError::StudioRefused { .. }),
+            "a malformed domain operation was misreported as a policy refusal: {malformed}"
+        );
         let stranger = MlsDevice::generate().unwrap();
-        assert!(store
+        let not_member = store
             .prepare_studio_closing_overlay(
                 SERVER,
                 &f.group,
@@ -797,9 +828,10 @@ fn studio_overlay_store_basis_scope_and_semantics_reject_before_acceptance() {
                 &stranger,
                 &close,
                 Some(0),
-                &mut b
+                &mut b,
             )
-            .is_err());
+            .unwrap_err();
+        refusal(not_member, StudioOverlaySaveRefusal::NotMember);
         assert!(store
             .load_epoch_intents(SERVER, &f.logical)
             .unwrap()
@@ -1219,10 +1251,8 @@ fn studio_overlay_store_replacement_counts_base_and_orphans_without_refunding_ol
             &mut b,
         )
         .unwrap_err();
-    assert!(
-        error.to_string().contains("vault intent limit reached"),
-        "{error}"
-    );
+    let message = refusal(error, StudioOverlaySaveRefusal::StorageRefused);
+    assert!(message.contains("vault intent limit reached"), "{message}");
     assert_eq!(fs::read(&path).unwrap(), original);
     assert_eq!(
         store
@@ -1608,9 +1638,9 @@ fn studio_overlay_detached_plan_is_refused_when_the_record_changed() {
         &mut b,
         &mut WriteHooks::None,
     );
-    assert!(
-        refused.is_err(),
-        "a plan derived from superseded bytes was committed"
+    refusal(
+        refused.expect_err("a plan derived from superseded bytes was committed"),
+        StudioOverlaySaveRefusal::Retry,
     );
     assert_eq!(canonical(&store), records, "the refusal changed records");
     assert_eq!(
@@ -1667,9 +1697,9 @@ fn studio_overlay_new_acceptance_requires_pixels_at_admission_and_again_before_t
         &mut rng(),
         &mut b,
     );
-    assert!(
-        refused.is_err(),
-        "an operation naming absent pixels was accepted"
+    refusal(
+        refused.expect_err("an operation naming absent pixels was accepted"),
+        StudioOverlaySaveRefusal::PixelUnpublished,
     );
     assert_eq!(canonical(&store), records, "the refusal changed records");
     assert!(store
@@ -1740,13 +1770,11 @@ fn studio_overlay_new_acceptance_requires_pixels_at_admission_and_again_before_t
         &mut b,
         &mut WriteHooks::None,
     );
-    match refused {
-        Err(error) => assert!(
-            error.to_string().contains("no longer held"),
-            "a new acceptance named absent pixels: {error}"
-        ),
-        Ok(_) => panic!("a new acceptance named absent pixels"),
-    }
+    let message = refusal(
+        refused.expect_err("a new acceptance named absent pixels"),
+        StudioOverlaySaveRefusal::PixelMissing,
+    );
+    assert!(message.contains("no longer held"), "{message}");
     assert_eq!(canonical(&store), records, "the refusal changed records");
     assert!(store
         .load_epoch_intents(SERVER, &f.logical)
@@ -2017,7 +2045,6 @@ fn studio_overlay_stale_basis_is_refused_before_any_media_admission() {
             )
             .map(|_| ())
             .unwrap_err()
-            .to_string()
     };
 
     // Hazard 1: the pixels this new frame names were never published. A stale request must not
@@ -2037,8 +2064,13 @@ fn studio_overlay_stale_basis_is_refused_before_any_media_admission() {
     let live = store.live_transient_holds_for_test();
     let blobs_before = blob_namespace(&store, &f);
     assert_eq!(
-        attempt(&mut store, &stale, absent.clone()),
-        invalid("Closing overlay basis changed").to_string(),
+        refusal(
+            attempt(&mut store, &stale, absent.clone()),
+            StudioOverlaySaveRefusal::BasisChanged {
+                during_detach: false,
+            },
+        ),
+        "epoch studio: Closing overlay basis changed",
         "a stale request was classified by its media instead of its basis"
     );
     assert_eq!(
@@ -2055,7 +2087,11 @@ fn studio_overlay_stale_basis_is_refused_before_any_media_admission() {
     // Positive control: with the current basis this identical request does reach media admission,
     // and is refused there. The stale refusal above was ordering, not an inert request.
     assert!(
-        attempt(&mut store, &fresh, absent).contains("publish the frame PIX"),
+        refusal(
+            attempt(&mut store, &fresh, absent),
+            StudioOverlaySaveRefusal::PixelUnpublished,
+        )
+        .contains("publish the frame PIX"),
         "the absent-pixel hazard was not reachable, so the stale case proves nothing"
     );
 
@@ -2084,8 +2120,13 @@ fn studio_overlay_stale_basis_is_refused_before_any_media_admission() {
     let live = store.live_transient_holds_for_test();
     let blobs_before = blob_namespace(&store, &f);
     assert_eq!(
-        attempt(&mut store, &stale, held.clone()),
-        invalid("Closing overlay basis changed").to_string(),
+        refusal(
+            attempt(&mut store, &stale, held.clone()),
+            StudioOverlaySaveRefusal::BasisChanged {
+                during_detach: false,
+            },
+        ),
+        "epoch studio: Closing overlay basis changed",
         "a stale request consulted the reference rails before its basis"
     );
     assert_eq!(
@@ -2100,10 +2141,12 @@ fn studio_overlay_stale_basis_is_refused_before_any_media_admission() {
     );
     assert_eq!(fs::read(&intent_path).ok(), intents_before);
     // Positive control: the saturated rail does refuse this request once its basis is current.
-    assert_eq!(
-        attempt(&mut store, &fresh, held),
-        AppError::Invalid("creative reference scan incomplete, unsupported or over bound".into())
-            .to_string(),
+    assert!(
+        refusal(
+            attempt(&mut store, &fresh, held),
+            StudioOverlaySaveRefusal::ReferenceCapacity,
+        )
+        .contains("creative reference capacity is occupied"),
         "the saturated-rail hazard was not reachable, so the stale case proves nothing"
     );
     drop(occupied);

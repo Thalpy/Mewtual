@@ -113,3 +113,96 @@ pub enum StudioOverlayManualReason {
     /// copy into a held destination.
     PreparedStuck,
 }
+
+/// What a caller should do after a local Studio Save is refused.
+///
+/// This is deliberately an action, not a severity or an error class. A renderer can therefore
+/// offer the right recovery without interpreting diagnostic prose, while the store remains the
+/// single source of truth for why the request did not write anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StudioOverlaySaveAction {
+    /// Retry the byte-identical Save request. The refusal describes transient local capacity or
+    /// work which may finish without minting a new authoring ticket.
+    SameRequest,
+    /// Discard the old ticket and prepare again from current durable/live state.
+    NewTicket,
+    /// Retrying alone cannot change the answer; another state change or a manual lifecycle action
+    /// is required.
+    None,
+}
+
+/// Why a local Studio Save was refused before a successful durable acceptance.
+///
+/// This vocabulary is separate from [`StudioOverlayManualReason`]. Manual reasons classify why
+/// an existing draft cannot be handed off automatically; Save reasons answer why new local
+/// authoring cannot proceed now. Durable source/tenure facts embed the manual reason so the two
+/// surfaces cannot give the same fact different names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StudioOverlaySaveRefusal {
+    /// A durable source or tenure fact also reported by the lifecycle classifier.
+    Durable(StudioOverlayManualReason),
+    NotMember,
+    SourceAdopting,
+    InstalledSource,
+    PreviewUnavailable,
+    PreviewExpired,
+    TailIncomplete,
+    PreviewReplaced,
+    MembershipChanged,
+    /// The fresh basis no longer matches the request. `during_detach` distinguishes S3 from S1b.
+    BasisChanged {
+        during_detach: bool,
+    },
+    TransferInProgress,
+    OtherKindDraft,
+    LiveBranchSuperseded,
+    StaleBranch,
+    NonceConflict,
+    OrdinaryIntentPending,
+    BranchFull,
+    PixelUnpublished,
+    PixelInvalid,
+    PixelMissing,
+    UnconfirmedBranchesPerServer,
+    UnconfirmedBytesVaultWide,
+    ReferenceCapacity,
+    StorageRefused,
+    Retry,
+}
+
+impl StudioOverlaySaveRefusal {
+    /// The recovery action attached to this reason. Kept here, beside the exhaustive reason set,
+    /// so native and future UI consumers cannot drift into contradictory retry advice.
+    pub fn action(self) -> StudioOverlaySaveAction {
+        use StudioOverlayManualReason as M;
+        use StudioOverlaySaveAction as A;
+        use StudioOverlaySaveRefusal as R;
+
+        match self {
+            R::Durable(M::ReceiptChanged)
+            | R::PreviewUnavailable
+            | R::PreviewExpired
+            | R::TailIncomplete
+            | R::PreviewReplaced
+            | R::MembershipChanged
+            | R::BasisChanged { .. }
+            | R::StaleBranch
+            | R::PixelUnpublished
+            | R::PixelInvalid
+            | R::PixelMissing => A::NewTicket,
+            R::SourceAdopting | R::TransferInProgress | R::Retry => A::SameRequest,
+            R::Durable(_)
+            | R::NotMember
+            | R::InstalledSource
+            | R::OtherKindDraft
+            | R::LiveBranchSuperseded
+            | R::NonceConflict
+            | R::OrdinaryIntentPending
+            | R::BranchFull
+            | R::UnconfirmedBranchesPerServer
+            | R::UnconfirmedBytesVaultWide
+            | R::ReferenceCapacity
+            | R::StorageRefused => A::None,
+        }
+    }
+}

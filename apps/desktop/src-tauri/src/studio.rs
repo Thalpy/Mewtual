@@ -5,16 +5,11 @@ use catcoms_app::studio::{
     types::*, EpochPhase, StudioRead, StudioRequest, StudioVaultLease, StudioView,
 };
 use serde_json::{json, Value};
-// The overlay lifecycle and copy commands are built and tested but NOT registered: native command
-// and security registration is Agent 4's, and registering them without their policy rows,
-// capability grants and session-gate review failed the frontend security gate. They also carry no
-// `#[tauri::command]` yet, because that gate requires every annotated function to be registered.
-// Registration restores the attributes and removes these expectations in the same change.
-#[expect(dead_code, reason = "registered by Agent 4 with its security rows")]
+// Overlay lifecycle and copy commands are registered atomically with their reviewed policy,
+// capability, frontend-contract and session-gate rows. Signed-repair controls remain absent.
 pub(crate) mod copy;
 pub(crate) mod fault;
 pub(crate) mod inspection;
-#[expect(dead_code, reason = "registered by Agent 4 with its security rows")]
 pub(crate) mod lifecycle;
 pub(crate) mod recovery;
 mod requests;
@@ -31,6 +26,34 @@ enum InvokeReady {
 enum InvokeResponse {
     Document(Option<StudioRead>),
     Control(catcoms_app::studio::StudioControlResponse),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WithheldWrite {
+    Archive,
+    Save,
+    Release,
+    Dispose,
+    Copy,
+}
+
+/// Classify the response before conversion or any final UI-session fence can withhold it. This is
+/// based on the typed outcome, never its eventual JSON or diagnostic text: a refused/busy Save is
+/// known not to have written, while a scheduled Save can still commit after native loses interest.
+fn withheld_write(response: &InvokeResponse) -> Option<WithheldWrite> {
+    use catcoms_app::studio::StudioControlResponse as R;
+    match response {
+        InvokeResponse::Control(R::OverlayArchived(_)) => Some(WithheldWrite::Archive),
+        InvokeResponse::Control(R::OverlayArchiveReleased) => Some(WithheldWrite::Release),
+        InvokeResponse::Control(R::OverlayDisposed(_)) => Some(WithheldWrite::Dispose),
+        InvokeResponse::Control(R::OverlayCopyApplied { .. }) => Some(WithheldWrite::Copy),
+        InvokeResponse::Control(R::UnconfirmedOverlaySaved { outcome, .. })
+            if outcome.may_have_durable_effect() =>
+        {
+            Some(WithheldWrite::Save)
+        }
+        _ => None,
+    }
 }
 
 fn id(s: &str) -> Result<[u8; 16], String> {
@@ -214,12 +237,7 @@ async fn invoke_with_context<V>(
     // not `refused` (design section 11's write outcomes): the renderer must re-read rather than
     // tell a user nothing was preserved. Reads lose nothing by being withheld and keep the plain
     // refusals. Before results were delivered this could not arise for an archive.
-    let durable_write = matches!(
-        &response,
-        InvokeResponse::Control(catcoms_app::studio::StudioControlResponse::OverlayArchived(
-            _
-        ))
-    );
+    let durable_write = withheld_write(&response);
     let delivered = async {
         if cancellation.is_cancelled() {
             return Err("Studio request cancelled; its local save may have completed".into());
@@ -257,8 +275,15 @@ async fn invoke_with_context<V>(
         Ok(value)
     }
     .await;
-    if durable_write {
-        return delivered.map_err(|error| format!("{UNDELIVERED_ARCHIVE} ({error})"));
+    if let Some(write) = durable_write {
+        let message = match write {
+            WithheldWrite::Archive => UNDELIVERED_ARCHIVE,
+            WithheldWrite::Save => UNDELIVERED_SAVE,
+            WithheldWrite::Release => UNDELIVERED_RELEASE,
+            WithheldWrite::Dispose => UNDELIVERED_DISPOSE,
+            WithheldWrite::Copy => UNDELIVERED_COPY,
+        };
+        return delivered.map_err(|error| format!("{message} ({error})"));
     }
     delivered
 }
@@ -269,6 +294,24 @@ async fn invoke_with_context<V>(
 /// payload as a sync-only repair.
 pub(crate) const UNDELIVERED_ARCHIVE: &str = "outcome=uncertain; the archive was written, but its \
      result could not be delivered; read the archive to confirm it, or retry exactly";
+
+/// A completed or still-running Save whose typed response was withheld by a final native fence.
+/// The caller must re-read before claiming either success or refusal; an identical retry remains
+/// safe because Save classification recognizes already accepted work.
+pub(crate) const UNDELIVERED_SAVE: &str = "outcome=uncertain; the Save may have completed, but its \
+     result could not be delivered; refresh the Studio document, or retry exactly";
+
+/// A release or disposal cannot safely be repeated after a withheld result: each exact retry may
+/// now find that the thing it destroyed is absent. The caller must reconcile the lifecycle view.
+pub(crate) const UNDELIVERED_RELEASE: &str = "outcome=uncertain; the archive release completed, but \
+     its result could not be delivered; refresh the local-draft lifecycle before acting again";
+pub(crate) const UNDELIVERED_DISPOSE: &str = "outcome=uncertain; the draft disposal completed, but \
+     its result could not be delivered; refresh the local-draft lifecycle before acting again";
+
+/// Copy Apply is nonce-idempotent. Its result may be withheld after the destination write, so the
+/// safe recovery is the same exact prepared request, never a newly previewed copy.
+pub(crate) const UNDELIVERED_COPY: &str = "outcome=uncertain; the draft copy may have completed, but \
+     its result could not be delivered; retry the exact prepared copy";
 
 /// The weaker form, for an archive finish that failed without producing a result: the store could
 /// not read back what it wrote, or the actor dropped the reply. The second can also happen BEFORE

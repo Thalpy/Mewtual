@@ -1,24 +1,39 @@
 //! No source writes accompany local acceptance. Eligibility is checked under the same
 //! exclusive store/group borrow as the shared intent transaction, with no detached gap.
-use super::overlay_capture::{basis_changed, OverlayBranch, OwnedOverlayBasis, StudioOverlayMint};
+use super::overlay_capture::{
+    basis_changed, current_save_member, prepare_closing_basis, OverlayBranch, OwnedOverlayBasis,
+    StudioOverlayMint,
+};
 use super::*;
 use crate::studio::StudioOwnerTenure;
 use catcoms_replication::studio::{
-    StudioClosingOverlayBasis, StudioOverlayAdmission, StudioOverlayBasis,
-    StudioOverlayRequestClass, StudioOverlaySave, StudioOverlayState,
+    StudioClosingOverlayBasis, StudioOverlayAdmission, StudioOverlayBasis, StudioOverlayProvenance,
+    StudioOverlayRequestClass, StudioOverlaySave, StudioOverlaySaveRefusal, StudioOverlayState,
 };
-use catcoms_replication::{CloseRecord, LocalIntent};
+use catcoms_replication::{CloseRecord, LocalIntent, ReplError};
 
 /// The stale-branch refusal, worded for the fresh basis's kind. The Closing wording is exactly what
 /// it was before Flow S was parameterized.
 fn stale_branch(fresh: &OwnedOverlayBasis) -> AppError {
     match fresh {
-        OwnedOverlayBasis::Closing(_) => {
-            invalid("Closing overlay request names a stale branch; prepare it again")
-        }
-        OwnedOverlayBasis::Unconfirmed(_) => {
-            invalid("unconfirmed overlay request names a stale branch; prepare it again")
-        }
+        OwnedOverlayBasis::Closing(_) => studio_refused(
+            StudioOverlaySaveRefusal::StaleBranch,
+            "Closing overlay request names a stale branch; prepare it again",
+        ),
+        OwnedOverlayBasis::Unconfirmed(_) => studio_refused(
+            StudioOverlaySaveRefusal::StaleBranch,
+            "unconfirmed overlay request names a stale branch; prepare it again",
+        ),
+    }
+}
+
+/// Classification errors whose meaning is part of the Save contract. Everything else is an
+/// invariant/decoding failure and deliberately stays on the error channel.
+fn classify_save_error(error: ReplError) -> AppError {
+    match error {
+        ReplError::IntentConflict => studio_refused(StudioOverlaySaveRefusal::NonceConflict, error),
+        ReplError::EpochScope => studio_refused(StudioOverlaySaveRefusal::OtherKindDraft, error),
+        error => invalid(error),
     }
 }
 
@@ -240,18 +255,27 @@ impl ServerStore {
         tenure: Option<u64>,
         budget: &mut EpochStudioBudget,
     ) -> Result<StudioClosingOverlayBasis, AppError> {
-        current_member(group, device)?;
+        current_save_member(group, device)?;
         self.enter_studio_budget(server, group, budget)?;
-        let tenure =
-            tenure.ok_or_else(|| invalid("Closing overlay needs observed owner tenure"))?;
+        let tenure = tenure.ok_or_else(|| {
+            studio_refused(
+                catcoms_replication::studio::StudioOverlaySaveRefusal::Durable(
+                    catcoms_replication::studio::StudioOverlayManualReason::TenureUnknown,
+                ),
+                "Closing overlay needs observed owner tenure",
+            )
+        })?;
         let (mut source, observed, _) =
             self.checked_studio_source(server, group, target, device, false, &mut budget.storage)?;
         if observed.is_none() {
-            return Err(invalid("Closing overlay source is missing"));
+            return Err(studio_refused(
+                catcoms_replication::studio::StudioOverlaySaveRefusal::Durable(
+                    catcoms_replication::studio::StudioOverlayManualReason::SourceMissing,
+                ),
+                "Closing overlay source is missing",
+            ));
         }
-        source
-            .prepare_closing_overlay(close, group, tenure)
-            .map_err(invalid)
+        prepare_closing_basis(&mut source, close, group, tenure)
     }
 
     /// The branch a Save prepared against `fresh` must name.
@@ -321,7 +345,7 @@ impl ServerStore {
         budget: &mut EpochStudioBudget,
         hooks: &mut WriteHooks<'_>,
     ) -> Result<StudioOverlayStart, AppError> {
-        current_member(group, device)?;
+        current_save_member(group, device)?;
         let logical = target.document(&group.group_id()).map_err(invalid)?;
         // Bound the caller's public Vec before making a LocalIntent copy.
         match target {
@@ -330,6 +354,9 @@ impl ServerStore {
                     .map_err(invalid)?;
             }
             StudioTarget::Flipnote { .. } => {
+                // A malformed domain operation is a malformed request, not evidence that a PIX
+                // blob is invalid. `PixelInvalid` is selected later only after a decoded frame
+                // reference has been resolved and its declared/content dimensions disagree.
                 FlipnoteOp::decode_domain(&logical, &operation).map_err(invalid)?;
             }
         }
@@ -352,7 +379,7 @@ impl ServerStore {
         let class = match state.handoff_metadata() {
             Some(metadata) => metadata
                 .classify_request(target, branch, &intent)
-                .map_err(invalid)?,
+                .map_err(classify_save_error)?,
             // No overlay record at all: nothing to acknowledge and nothing live to join.
             None => StudioOverlayRequestClass::Unmatched,
         };
@@ -387,7 +414,7 @@ impl ServerStore {
                 if let Some(outcome) = match state.handoff_metadata() {
                     Some(metadata) => metadata
                         .completed_retry(target, basis, &intent)
-                        .map_err(invalid)?,
+                        .map_err(classify_save_error)?,
                     None => None,
                 } {
                     self.flush_acknowledged_overlay(server, &logical, state, rng, budget, hooks)?;
@@ -406,7 +433,10 @@ impl ServerStore {
             let overlay = state
                 .overlay()
                 .ok_or_else(|| invalid("classified Active with no live branch"))?;
-            if overlay.exact_retry(basis, &intent).map_err(invalid)? {
+            if overlay
+                .exact_retry(basis, &intent)
+                .map_err(classify_save_error)?
+            {
                 drop(state);
                 return self
                     .write_studio_overlay_intent(
@@ -432,7 +462,10 @@ impl ServerStore {
             .pending()
             .any(|(id, _)| *id == intent.operation.id(&intent.author))
         {
-            return Err(invalid("ordinary intent cannot become an accepted overlay"));
+            return Err(studio_refused(
+                StudioOverlaySaveRefusal::OrdinaryIntentPending,
+                "ordinary intent cannot become an accepted overlay",
+            ));
         }
         // Everything from here is new authoring. Authorization comes BEFORE media admission:
         // "not previously accepted" is not the same as "authorized to author now". A request
@@ -458,7 +491,7 @@ impl ServerStore {
         // the joins below refuse it (`EpochScope` when it names the live branch, `Stale` when it
         // does not, since no branch is admitted beside a live one).
         if fresh.as_basis().fingerprint() != basis {
-            return Err(basis_changed(&fresh));
+            return Err(basis_changed(&fresh, false));
         }
         // S1b, the branch half: resolve `Unmatched` against the basis just minted. A new branch is
         // admitted only when the request names exactly the identity the next admission would mint;
@@ -477,10 +510,32 @@ impl ServerStore {
                 .handoff_metadata()
                 .ok_or_else(|| invalid("classified Active with no overlay record"))?;
             if metadata.is_prepared() {
-                return Err(invalid(catcoms_replication::ReplError::EpochClosed));
+                return Err(studio_refused(
+                    StudioOverlaySaveRefusal::TransferInProgress,
+                    ReplError::EpochClosed,
+                ));
             }
             if state.overlay().map(|live| live.basis()) != Some(fresh.as_basis().fingerprint()) {
-                return Err(invalid(catcoms_replication::ReplError::EpochScope));
+                let live = state.live_overlay_provenance();
+                let fresh_provenance = fresh.as_basis().provenance();
+                let other_kind = matches!(
+                    (live, fresh_provenance),
+                    (
+                        Some(StudioOverlayProvenance::Closing),
+                        StudioOverlayProvenance::Unconfirmed { .. }
+                    ) | (
+                        Some(StudioOverlayProvenance::Unconfirmed { .. }),
+                        StudioOverlayProvenance::Closing
+                    )
+                );
+                return Err(studio_refused(
+                    if other_kind {
+                        StudioOverlaySaveRefusal::OtherKindDraft
+                    } else {
+                        StudioOverlaySaveRefusal::LiveBranchSuperseded
+                    },
+                    ReplError::EpochScope,
+                ));
             }
             // A full branch, by the predicate `append` itself refuses on: design 8.3's 64 ops for
             // an Unconfirmed branch, the overall cap for a Closing one. Refused here and not by
@@ -489,7 +544,10 @@ impl ServerStore {
             // must be told so before any of it. A newly admitted branch is empty, so only a
             // join can be full.
             if !state.overlay().is_some_and(|live| live.has_room()) {
-                return Err(invalid(catcoms_replication::ReplError::EpochBound));
+                return Err(studio_refused(
+                    StudioOverlaySaveRefusal::BranchFull,
+                    ReplError::EpochBound,
+                ));
             }
             OverlayBranch::Live
         } else {

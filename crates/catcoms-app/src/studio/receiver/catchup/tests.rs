@@ -1,6 +1,6 @@
 use super::*;
 use catcoms_mls::MlsDevice;
-use catcoms_rt::{Hub, ManualClock, PeerId};
+use catcoms_rt::{Clock, Hub, ManualClock, PeerId};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
@@ -499,6 +499,121 @@ async fn studio_handoff_runs_through_every_scheduled_stage_and_notifies() {
             .iter()
             .any(|(t, _)| *t == target),
         "H6 published no settlement notice for the completed transfer"
+    );
+}
+
+/// MAP Flow H: a worker refusal is runtime evidence beside eligibility. It is retained with the
+/// exact H1 stamp, exposed while that stamp is current, and disappears across a vault remount even
+/// though the same target and durable records remain readable.
+#[tokio::test]
+async fn handoff_attempt_reports_a_typed_worker_refusal_only_for_its_current_stamp() {
+    use crate::studio::{
+        StudioControlAction, StudioControlRequest, StudioControlResponse,
+        StudioHandoffAttemptReason, StudioHandoffAttemptState,
+    };
+    use catcoms_replication::studio::StudioOverlayManualReason;
+
+    let clock = ManualClock::new(1_000);
+    let mut rng = ChaCha20Rng::seed_from_u64(930);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"flow-h-attempt", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [10; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_handoff_ready_fixture(&mut store, 83, g, d, target, 1)
+    });
+    let mut receiver = StudioReceiver::default();
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            83,
+            Some(StudioRequest::Read { target }),
+        )
+        .unwrap();
+    receiver.catchup.inject_overlay_pool_for_test(4);
+
+    for _ in 0..10 {
+        receiver.run(&mut server, &mut store, 83, None).unwrap();
+        if let Some(work) = receiver.detach(&mut server) {
+            receiver.complete(&mut server, work.run(None).await);
+        }
+        if receiver.handoff.stage_for_test() == Some("signing") {
+            break;
+        }
+    }
+    assert_eq!(receiver.handoff.stage_for_test(), Some("signing"));
+    receiver.fail_live_handoff_for_test(
+        Some(StudioOverlayManualReason::SuccessorNotPristine),
+        clock.monotonic_ms(),
+    );
+
+    let read_attempt =
+        |receiver: &mut StudioReceiver, server: &mut Server<_, _>, store: &mut ServerStore| {
+            let (_, _, response) = receiver
+                .control(
+                    server,
+                    store,
+                    83,
+                    StudioControlRequest {
+                        target,
+                        action: StudioControlAction::OverlayLifecycle,
+                    },
+                )
+                .unwrap();
+            let Some(StudioControlResponse::OverlayLifecycle(lifecycle)) = response else {
+                panic!("expected lifecycle response")
+            };
+            lifecycle.handoff_attempt
+        };
+    let attempt = read_attempt(&mut receiver, &mut server, &mut store)
+        .expect("current worker refusal was not reported");
+    assert_eq!(attempt.state, StudioHandoffAttemptState::Refused);
+    assert_eq!(
+        attempt.reason,
+        StudioHandoffAttemptReason::Manual(StudioOverlayManualReason::SuccessorNotPristine)
+    );
+    assert!(attempt.retry_at_ms > clock.monotonic_ms());
+
+    // Once the backoff expires, selecting this target starts a new attempt. The old report must
+    // disappear before H1 runs: H1 can refuse synchronously while the old stamp is still current,
+    // and keeping that report would make the lifecycle row describe the previous worker as if it
+    // were the result of the new retry.
+    clock.advance_ms(30_000);
+    receiver.handoff_probe_for_test(&mut server, &mut store, 83);
+    assert_eq!(receiver.handoff.stage_for_test(), Some("captured"));
+    assert_eq!(
+        read_attempt(&mut receiver, &mut server, &mut store),
+        None,
+        "a fresh H1 retry retained the previous attempt's result"
+    );
+    let work = receiver
+        .detach(&mut server)
+        .expect("the replacement H2 did not detach");
+    receiver.complete(&mut server, work.run(None).await);
+    assert_eq!(receiver.handoff.stage_for_test(), Some("signing"));
+    receiver.fail_live_handoff_for_test(
+        Some(StudioOverlayManualReason::SuccessorNotPristine),
+        clock.monotonic_ms(),
+    );
+    assert!(read_attempt(&mut receiver, &mut server, &mut store).is_some());
+
+    drop(store);
+    let mut store = ServerStore::open(root.path(), b"flow-h-attempt", &mut rng).unwrap();
+    assert_eq!(
+        read_attempt(&mut receiver, &mut server, &mut store),
+        None,
+        "a report from the previous mount survived its H1 stamp"
     );
 }
 
@@ -2055,7 +2170,13 @@ async fn a_closing_save_answers_its_stamped_refusal_without_replanning() {
         .run(None)
         .await;
     let refusal = match &result {
-        StudioBackgroundResult::OverlayPlanned(_, Err(error)) => error.to_string(),
+        StudioBackgroundResult::OverlayPlanned(
+            _,
+            Err(AppError::StudioRefused {
+                reason: catcoms_replication::studio::StudioOverlaySaveRefusal::StorageRefused,
+                message,
+            }),
+        ) => message.clone(),
         _ => panic!("the full intent ledger did not refuse the Closing plan"),
     };
     receiver.complete(&mut server, result);
@@ -2080,13 +2201,13 @@ async fn a_closing_save_answers_its_stamped_refusal_without_replanning() {
         operation,
         &mut budget,
     ) {
-        Err(error) => error,
-        Ok(_) => panic!("the identical Closing retry was not answered from its kept refusal"),
+        Ok(StudioOverlaySaveVisit::Refused {
+            reason: catcoms_replication::studio::StudioOverlaySaveRefusal::StorageRefused,
+            message,
+        }) => message,
+        _ => panic!("the identical Closing retry was not answered from its kept refusal"),
     };
-    assert!(
-        retry.to_string().ends_with(&refusal),
-        "the retry did not carry the kept refusal: {retry}"
-    );
+    assert_eq!(retry, refusal, "the retry did not carry the kept refusal");
     assert_eq!(
         pool.available_permits(),
         1,

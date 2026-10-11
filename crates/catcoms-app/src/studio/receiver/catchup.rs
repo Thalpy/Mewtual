@@ -176,6 +176,7 @@ pub(super) enum OverlayCommit {
 pub(super) struct ParkedOverlayRefusal {
     request: [u8; 32],
     stamp: Box<StudioOverlayStamp>,
+    reason: catcoms_replication::studio::StudioOverlaySaveRefusal,
     message: String,
     /// Monotonic. Checked lazily, by the retry that would answer from it.
     until: u64,
@@ -188,6 +189,10 @@ impl ParkedOverlayRefusal {
 
     pub(super) fn message(&self) -> &str {
         &self.message
+    }
+
+    pub(super) fn reason(&self) -> catcoms_replication::studio::StudioOverlaySaveRefusal {
+        self.reason
     }
 }
 
@@ -247,15 +252,20 @@ pub(crate) enum StudioBackgroundJob<T: MeshTransport> {
 /// it whenever authority moves mid-detachment, and after the target's backoff expires the actor
 /// may legitimately hold a *different* job for the *same* target; matching on target alone would
 /// hand the new job the dead worker's result.
+type HandoffAssembleResult = Result<
+    (Box<StudioHandoffCommit>, OverlayOwnership),
+    (crate::store::StudioHandoffStamp, Box<AppError>),
+>;
+
 pub(crate) enum HandoffCompletion {
     Prepared(
         u64,
-        Result<(Box<StudioHandoffPlan>, OverlayOwnership), AppError>,
+        Result<
+            (Box<StudioHandoffPlan>, OverlayOwnership),
+            Box<crate::store::StudioHandoffPrepareFailure>,
+        >,
     ),
-    Assembled(
-        u64,
-        Result<(Box<StudioHandoffCommit>, OverlayOwnership), AppError>,
-    ),
+    Assembled(u64, Box<HandoffAssembleResult>),
     /// Flow R's R2 came back, routed on the job token like the others.
     Resolved(
         u64,
@@ -559,16 +569,19 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                 // H4. Same ownership discipline.
                 Self::HandoffAssemble(plan, ownership, context) => {
                     let token = context.token;
-                    let result = tokio::task::spawn_blocking(move || match plan.assemble() {
-                        Ok(commit) => Ok((Box::new(commit), ownership)),
-                        Err(error) => {
-                            drop(ownership);
-                            Err(error)
+                    let result = tokio::task::spawn_blocking(move || {
+                        let stamp = plan.stamp().clone();
+                        match plan.assemble() {
+                            Ok(commit) => Ok((Box::new(commit), ownership)),
+                            Err(error) => {
+                                drop(ownership);
+                                Err((stamp, Box::new(error)))
+                            }
                         }
                     })
                     .await;
                     StudioBackgroundResult::Handoff(match result {
-                        Ok(result) => HandoffCompletion::Assembled(token, result),
+                        Ok(result) => HandoffCompletion::Assembled(token, Box::new(result)),
                         Err(_) => HandoffCompletion::Cancelled(token),
                     })
                 }
@@ -1263,12 +1276,14 @@ impl CatchupRuntime {
         &mut self,
         request: [u8; 32],
         stamp: Box<StudioOverlayStamp>,
+        reason: catcoms_replication::studio::StudioOverlaySaveRefusal,
         message: String,
         now: u64,
     ) {
         self.overlay_refused = Some(ParkedOverlayRefusal {
             request,
             stamp,
+            reason,
             message,
             until: now.saturating_add(OVERLAY_PARK_MS),
         });
@@ -1999,7 +2014,7 @@ impl StudioReceiver {
                             None => None,
                         };
                         if let (
-                            Err(AppError::Invalid(message)),
+                            Err(AppError::StudioRefused { reason, message }),
                             false,
                             Some(request),
                             Some(stamp),
@@ -2007,7 +2022,7 @@ impl StudioReceiver {
                         {
                             let now = server.runtime_clock().monotonic_ms();
                             self.catchup
-                                .park_overlay_refusal(request, stamp, message, now);
+                                .park_overlay_refusal(request, stamp, reason, message, now);
                         }
                         // Nothing was parked, so neither provenance has scheduled work any more. A
                         // stale fingerprint would answer a retry "pending" while nothing is in

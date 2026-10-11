@@ -152,6 +152,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 }
 impl ServerPreparedProvisionalStudioSeed {
+    /// Whether this volatile preview still belongs to the mounted numeric server and target the
+    /// caller is about to use. Descriptive only: the mint repeats the authoritative scope checks.
+    pub(crate) fn scope_matches(
+        &self,
+        store: &ServerStore,
+        server: u64,
+        target: StudioTarget,
+    ) -> bool {
+        self.scope.server == server
+            && self.scope.target == target
+            && Arc::ptr_eq(&self.scope.mount, &store.registry_mount())
+    }
+
     pub(crate) fn unconfirmed_projection(&self) -> &catcoms_replication::studio::StudioProjection {
         self.inner.unconfirmed_projection()
     }

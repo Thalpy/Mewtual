@@ -8,7 +8,33 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-10-11)
+## Status (latest entry: 2026-10-12)
+
+- **Gate 4 local completion checkpoint (2026-10-12).** The isolated candidate now contains the
+  remaining structured Save-refusal path, P5-bounded lifecycle and ticketed Unconfirmed commands,
+  Studio UI consumer, fresh-key repeated-tenure path, repair/runtime integration and both PR #40
+  review corrections. Complete root, native and frontend suites; strict root/desktop Clippy;
+  frontend check/build; `cargo deny`; flow; explicit Git Bash ambient checking; and the focused
+  handoff-priority mutation pass. Full-candidate adversarial review and correction re-reviews have
+  no unresolved finding at any severity. The startup probe passed on the assembled app, then a
+  review-driven harness refinement received focused tests; later local reruns hang before `setup`
+  with no new app log, so a fresh exact-head startup result is still required rather than claimed.
+  PR #41 must now be published against exact baseline
+  `bdcae4a30a0870443db92a14f2d80ff8e4947818` and complete hosted Linux ambient and store/runtime
+  mutation checks. Direct Closing Save and repair commands remain unavailable. Gate 4 is therefore
+  not yet accepted, and Gate 5 remains closed.
+
+- **Gate 4 isolated completion candidate assembled (2026-10-11).** On committed parent
+  `700d1daba4069af69fea4ff76b105c3008e6825c`, Agent 4 has assembled the remaining specialist work:
+  the store-to-actor-to-native structured Save refusal carrier, the fresh-key join-born owner
+  product regression, P5-scoped lifecycle/Unconfirmed command registration and the Studio UI
+  consumer. Awaiting-tenure base history still cannot authorize ordinary Apply; its edits go only
+  to a separately displayed local-only branch. Exact retry identity, explicit re-authoring,
+  destructive confirmations and two-step copy are preserved. Direct Closing Save and every native
+  repair command remain unavailable. The two MEDIUM findings in the review of PR #40 were already
+  closed by `55ff3d93744cd1f965ab083e910d9645f1f6ac26`, including focused regressions and the corrected
+  mutation selector. Gate 4 still awaits the final full suites, exact-head Linux ambient/mutation
+  CI and independent Review 4; Gate 5 remains closed.
 
 - **Gate 4 C-3 adoption decision completed (2026-10-11).** The post-writer-warm release profile
   passed: sampled warm Registry/Studio accounting traversal cost was about 0-8 ms, including the
@@ -200,8 +226,9 @@ and ranks the live hazards in that path.
     ceiling) now exist. The tally sits in `EpochIntentBudget`, built from the inventory's
     authenticated facts and kept current by `write_prepared_intents`. Flow S checks it at S1b,
     before media work, and again at S3, at the exact size of the write. Only growth is refused; an
-    exact retry is answered at capacity. There is no typed `StorageRefused`: the refusal is
-    `Invalid` with its own reason. The share is admission policy at Flow S, not a vault invariant.
+    exact retry is answered at capacity. **Current-candidate correction:** `StorageRefused` is now
+    a typed `StudioOverlaySaveRefusal` carried through store, actor and native conversion; this
+    historical paragraph predates G4-A1-MAP. The share is admission policy at Flow S, not a vault invariant.
     Ordinary edits beside a live branch whose confirmed source is installed grow the counted
     record unrefused, so the tally can pass 8 MiB. After that, every Unconfirmed Save is refused
     until headroom returns.

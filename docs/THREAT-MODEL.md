@@ -11,6 +11,19 @@ table with the commit that closed it.
 
 ## Trust assumptions
 
+- **Renderer access to retained Studio work is local authority, not protocol authority.** The Gate 4
+  completion candidate registers the reviewed overlay lifecycle family and a ticketed Unconfirmed
+  Save for awaiting-tenure previews. The session gate, command allow-list and actor/store custody
+  still enforce the boundary if the renderer is modified. A ticket binds the local target, basis
+  and branch; the request also freezes its nonce and canonical body. Exact retry cannot silently
+  become a new edit, and a replacement ticket requires explicit re-authoring. The resulting branch
+  is local-only and cannot become an installed source, owner receipt, handoff/signing authority or
+  publication claim. Copy preview saves nothing; copy apply rechecks and writes one ordinary
+  provisional edit. Discard and archive release require exact confirmation literals. Direct
+  Closing Save and native repair commands remain absent. A malicious renderer can request the
+  exposed local actions and exhaust their documented bounded quotas, but cannot bypass their
+  membership, tenure, freshness, storage, reference or destructive-confirmation checks.
+
 - **A repair is bound to the repairing owner's tenure, not just their key.** The v2 repair
   transcript adds issuer tenure separately from the fault tenure. Live application checks the
   independently observed current tenure before exact-retry handling; old v1 remains historical

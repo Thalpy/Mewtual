@@ -101,7 +101,32 @@ export type FakeIpc = StudioIpc & {
 
 export function fakeIpc(): FakeIpc {
   const calls: Call[] = [];
-  const responders: Record<string, (args: Record<string, unknown>) => unknown> = {};
+  // Every document read now reconciles the independent retained-draft surface afterward. Most
+  // tests do not care about that surface, so its truthful empty state is the default; tests for a
+  // live branch override these responders explicitly.
+  const responders: Record<string, (args: Record<string, unknown>) => unknown> = {
+    studio_overlay_lifecycle: (args) => ({
+      v: 1,
+      kind: "overlayLifecycle",
+      channel: String(args.channel),
+      object: args.object ?? null,
+      branch: null,
+      prepared: false,
+      eligibility: null,
+      manualReason: null,
+      handoffAttempt: null,
+      unconfirmedState: null,
+      archive: null,
+      disposed: null,
+      transferred: false,
+    }),
+    studio_overlay_read: (args) => ({
+      v: 1,
+      kind: "absent",
+      channel: String(args.channel),
+      object: args.object ?? null,
+    }),
+  };
   const handlers: Record<string, (event: { payload: unknown }) => void> = {};
   const ipc: FakeIpc = {
     calls,

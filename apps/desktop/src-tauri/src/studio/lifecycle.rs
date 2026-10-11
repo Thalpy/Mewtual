@@ -1,11 +1,11 @@
 //! Overlay lifecycle IPC: what a retained draft is, the preserved evidence for it, and the two
 //! destructive ends.
 //!
-//! Three of these four commands are read-only and one of the remaining two destroys evidence that
-//! nothing else in the system can recreate. The renderer therefore never supplies a decision as a
-//! flag: both destructive paths take a typed confirmation that only an exact literal can build, and
-//! both name the exact thing they intend to destroy, so a confirmation cannot be spent on an
-//! archive or a branch the user never saw.
+//! This family mixes read-only inspection/export, provisional copy and ticketed Save with two
+//! operations that destroy local evidence. The renderer therefore never supplies a destructive
+//! decision as a flag: both destructive paths take a typed confirmation that only an exact literal
+//! can build, and both name the exact thing they intend to destroy, so a confirmation cannot be
+//! spent on an archive or a branch the user never saw.
 use super::*;
 use catcoms_app::store::{StudioDisposalRequestMode, StudioOverlayDisposalRequest};
 // The replication-side types (StudioDraftArchive, StudioOverlayDisposal, StudioDisposalMode,
@@ -13,10 +13,11 @@ use catcoms_app::store::{StudioDisposalRequestMode, StudioOverlayDisposalRequest
 use catcoms_app::studio::{
     StudioArchiveReleaseRequest, StudioControlAction as Action, StudioControlRequest,
     StudioControlResponse as Response, StudioOverlayLifecycle, StudioPreparedInspection,
-    StudioReleaseConfirmation, StudioUnconfirmedSaveOutcome,
+    StudioReleaseConfirmation, StudioUnconfirmedOverlaySaveRequest, StudioUnconfirmedSaveOutcome,
 };
 use recovery::{named_hash, target};
 
+#[tauri::command]
 pub(crate) async fn studio_overlay_lifecycle(
     state: State<'_, AppState>,
     server: u64,
@@ -32,6 +33,7 @@ pub(crate) async fn studio_overlay_lifecycle(
     .await
 }
 
+#[tauri::command]
 pub(crate) async fn studio_overlay_archive_read(
     state: State<'_, AppState>,
     server: u64,
@@ -50,6 +52,7 @@ pub(crate) async fn studio_overlay_archive_read(
 /// The same read, converted to carry the canonical envelope bytes. A separate command rather than a
 /// flag on the read: exporting hands the caller the whole archive, and that is a different thing to
 /// ask for than looking at what one is.
+#[tauri::command]
 pub(crate) async fn studio_overlay_archive_export(
     state: State<'_, AppState>,
     server: u64,
@@ -74,6 +77,7 @@ pub(crate) async fn studio_overlay_archive_export(
 /// The same two visits and the same rebuild as archiving. That sharing is the point rather than an
 /// economy: a draft that cannot be replayed must still be exportable, and two serializers would
 /// drift, with the one that drifted being the one a user reaches for when their work will not open.
+#[tauri::command]
 pub(crate) async fn studio_overlay_export(
     state: State<'_, AppState>,
     server: u64,
@@ -97,6 +101,7 @@ pub(crate) async fn studio_overlay_export(
 ///
 /// Not confirmed: this only ever adds evidence. The confirmations in this module guard the two
 /// commands that remove it.
+#[tauri::command]
 pub(crate) async fn studio_overlay_archive(
     state: State<'_, AppState>,
     server: u64,
@@ -192,6 +197,7 @@ fn archive_failure(error: String) -> String {
 
 /// Destroy the preserved archive. `archive` is the id from the read that populated the dialog, so a
 /// confirmation typed against one archive cannot destroy a different one.
+#[tauri::command]
 pub(crate) async fn studio_overlay_archive_release(
     state: State<'_, AppState>,
     server: u64,
@@ -312,6 +318,7 @@ impl DisposalRequestInput {
 }
 
 /// Drop the live branch.
+#[tauri::command]
 pub(crate) async fn studio_overlay_dispose(
     state: State<'_, AppState>,
     server: u64,
@@ -328,6 +335,90 @@ pub(crate) async fn studio_overlay_dispose(
         )
         .await,
     )
+}
+
+/// The renderer payload for one byte-stable Unconfirmed Save retry.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct UnconfirmedOverlaySaveInput {
+    basis: String,
+    branch: String,
+    nonce: String,
+    body: String,
+}
+
+impl UnconfirmedOverlaySaveInput {
+    fn checked(self) -> Result<StudioUnconfirmedOverlaySaveRequest, String> {
+        // Keep the native adapter's early rejection aligned with the existing Apply adapter and
+        // the app-layer request validation. The app validates again at the custody boundary; this
+        // check only avoids enqueueing a renderer payload which can never be accepted.
+        if self.body.len() > 64 * 1024 {
+            return Err("draft body exceeds the operation bound".into());
+        }
+        Ok(StudioUnconfirmedOverlaySaveRequest {
+            basis: named_hash("overlay basis", &self.basis)?,
+            branch: named_hash("overlay branch", &self.branch)?,
+            nonce: id(&self.nonce)?,
+            body: self.body.into_bytes(),
+        })
+    }
+}
+
+/// Mint the ticket a subsequent Unconfirmed Save must echo. The ticket is not durable authority:
+/// every Save stage mints again from the current live preview and rechecks its echoed identity.
+#[tauri::command]
+pub(crate) async fn studio_unconfirmed_overlay_save_begin(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    object: Option<String>,
+) -> Result<Value, String> {
+    recovery::invoke_control(
+        &state,
+        server,
+        target(&channel, object.as_deref())?,
+        Action::BeginUnconfirmedOverlaySave,
+    )
+    .await
+}
+
+/// Run one visit of an Unconfirmed Save. `pending` is intentionally a successful response: the
+/// renderer repeats the identical payload until the actor reports a terminal outcome.
+#[tauri::command]
+pub(crate) async fn studio_unconfirmed_overlay_save(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    object: Option<String>,
+    save: UnconfirmedOverlaySaveInput,
+) -> Result<Value, String> {
+    save_classified(
+        recovery::invoke_control(
+            &state,
+            server,
+            target(&channel, object.as_deref())?,
+            Action::SaveUnconfirmedOverlay(Box::new(save.checked()?)),
+        )
+        .await,
+    )
+}
+
+/// Errors that escape before a typed Save response exists still need the write classification.
+/// Once the actor owns the custody lease, an uncertain store result or a dropped reply may follow
+/// a durable commit. Pre-lease validation/capacity errors remain ordinary errors, and an outcome
+/// already classified by `invoke_with_context` is never wrapped twice.
+fn save_classified(result: Result<Value, String>) -> Result<Value, String> {
+    result.map_err(|error| {
+        if error.starts_with("outcome=uncertain; ") {
+            error
+        } else if error.contains(catcoms_app::UNCERTAIN_OUTCOME)
+            || error == catcoms_app::studio::CONTROL_REPLY_DROPPED
+        {
+            format!("{} ({error})", super::UNDELIVERED_SAVE)
+        } else {
+            error
+        }
+    })
 }
 
 async fn invoke_archive(
@@ -442,6 +533,7 @@ fn lifecycle_value(v: &StudioOverlayLifecycle) -> Result<Value, String> {
         "prepared":v.prepared,
         "eligibility":eligibility,
         "manualReason":manual_reason,
+        "handoffAttempt":handoff_attempt_value(v.handoff_attempt),
         "unconfirmedState":unconfirmed_state_value(v.unconfirmed),
         "archive":v.archive.as_ref().map(|a| json!({"archive":hex::encode(a.id),
             "branch":hex::encode(a.branch),"generation":a.generation.to_string(),
@@ -453,6 +545,30 @@ fn lifecycle_value(v: &StudioOverlayLifecycle) -> Result<Value, String> {
             value
         }),
         "transferred":v.transferred}))
+}
+
+/// Runtime transfer evidence beside eligibility. A manual reason reuses the exact durable literal
+/// table; transient failures deliberately expose no diagnostic text or internal error class.
+pub(super) fn handoff_attempt_value(
+    attempt: Option<catcoms_app::studio::StudioHandoffAttempt>,
+) -> Value {
+    use catcoms_app::studio::{
+        StudioHandoffAttemptReason as R, StudioHandoffAttemptState as S,
+    };
+    let Some(attempt) = attempt else {
+        return Value::Null;
+    };
+    json!({
+        "state": match attempt.state {
+            S::Refused => "refused",
+            S::BackingOff => "backingOff",
+        },
+        "reason": match attempt.reason {
+            R::Manual(reason) => manual_reason_value(reason),
+            R::Transient => "transient",
+        },
+        "retryAt": attempt.retry_at_ms.to_string(),
+    })
 }
 
 /// Design 8.6's `unconfirmedState`, one function for both reads like [`eligibility_fields`].
@@ -482,35 +598,85 @@ pub(super) fn unconfirmed_state_value(
 pub(super) fn eligibility_fields(
     eligibility: Option<catcoms_app::studio::types::StudioOverlayEligibility>,
 ) -> (Value, Value) {
-    use catcoms_app::studio::types::{
-        StudioOverlayEligibility as E, StudioOverlayManualReason as R,
-    };
+    use catcoms_app::studio::types::StudioOverlayEligibility as E;
     match eligibility {
         None => (Value::Null, Value::Null),
         Some(E::Transferable) => ("transferable".into(), Value::Null),
-        Some(E::Manual(reason)) => (
-            "manual".into(),
-            match reason {
-                R::NotReplayable => "notReplayable",
-                R::Unconfirmed => "unconfirmed",
-                R::NotCurrentAuthor => "notCurrentAuthor",
-                R::SourceMissing => "sourceMissing",
-                R::SourceUnreadable => "sourceUnreadable",
-                R::Fault => "fault",
-                R::SourceRewound => "sourceRewound",
-                R::SourceNotClosing => "sourceNotClosing",
-                R::SuccessorMissing => "successorMissing",
-                R::ReceiptChanged => "receiptChanged",
-                R::SourceReplaced => "sourceReplaced",
-                R::SuccessorNotPristine => "successorNotPristine",
-                R::ObjectMissing => "objectMissing",
-                R::TenureUnknown => "tenureUnknown",
-                R::TenureImported => "tenureImported",
-                R::PreparedStuck => "preparedStuck",
-            }
-            .into(),
-        ),
+        Some(E::Manual(reason)) => ("manual".into(), manual_reason_value(reason).into()),
     }
+}
+
+/// One literal table for every surface that reports the durable handoff vocabulary. Save's
+/// `Durable` variant delegates here so lifecycle and authoring can never spell the same fact
+/// differently.
+fn manual_reason_value(reason: catcoms_app::studio::types::StudioOverlayManualReason) -> &'static str {
+    use catcoms_app::studio::types::StudioOverlayManualReason as R;
+    match reason {
+        R::NotReplayable => "notReplayable",
+        R::Unconfirmed => "unconfirmed",
+        R::NotCurrentAuthor => "notCurrentAuthor",
+        R::SourceMissing => "sourceMissing",
+        R::SourceUnreadable => "sourceUnreadable",
+        R::Fault => "fault",
+        R::SourceRewound => "sourceRewound",
+        R::SourceNotClosing => "sourceNotClosing",
+        R::SuccessorMissing => "successorMissing",
+        R::ReceiptChanged => "receiptChanged",
+        R::SourceReplaced => "sourceReplaced",
+        R::SuccessorNotPristine => "successorNotPristine",
+        R::ObjectMissing => "objectMissing",
+        R::TenureUnknown => "tenureUnknown",
+        R::TenureImported => "tenureImported",
+        R::PreparedStuck => "preparedStuck",
+    }
+}
+
+/// Stable native literals for typed Save refusals. Diagnostic text is intentionally omitted from
+/// JSON: it can contain internal storage/context detail and is not a product contract.
+fn save_refusal_fields(
+    reason: catcoms_app::studio::types::StudioOverlaySaveRefusal,
+) -> (&'static str, &'static str) {
+    use catcoms_app::studio::types::{
+        StudioOverlaySaveAction as A, StudioOverlaySaveRefusal as R,
+    };
+    let literal = match reason {
+        R::Durable(reason) => manual_reason_value(reason),
+        R::NotMember => "notMember",
+        R::SourceAdopting => "sourceAdopting",
+        R::InstalledSource => "installedSource",
+        R::PreviewUnavailable => "previewUnavailable",
+        R::PreviewExpired => "previewExpired",
+        R::TailIncomplete => "tailIncomplete",
+        R::PreviewReplaced => "previewReplaced",
+        R::MembershipChanged => "membershipChanged",
+        R::BasisChanged {
+            during_detach: false,
+        } => "basisChanged",
+        R::BasisChanged {
+            during_detach: true,
+        } => "basisChangedDuringDetach",
+        R::TransferInProgress => "transferInProgress",
+        R::OtherKindDraft => "otherKindDraft",
+        R::LiveBranchSuperseded => "liveBranchSuperseded",
+        R::StaleBranch => "staleBranch",
+        R::NonceConflict => "nonceConflict",
+        R::OrdinaryIntentPending => "ordinaryIntentPending",
+        R::BranchFull => "branchFull",
+        R::PixelUnpublished => "pixelUnpublished",
+        R::PixelInvalid => "pixelInvalid",
+        R::PixelMissing => "pixelMissing",
+        R::UnconfirmedBranchesPerServer => "unconfirmedBranchesPerServer",
+        R::UnconfirmedBytesVaultWide => "unconfirmedBytesVaultWide",
+        R::ReferenceCapacity => "referenceCapacity",
+        R::StorageRefused => "storageRefused",
+        R::Retry => "retry",
+    };
+    let action = match reason.action() {
+        A::SameRequest => "sameRequest",
+        A::NewTicket => "newTicket",
+        A::None => "none",
+    };
+    (literal, action)
 }
 
 fn disposal_value(v: &StudioOverlayDisposal) -> Result<Value, String> {
@@ -553,6 +719,13 @@ fn unconfirmed_save_value(
         StudioUnconfirmedSaveOutcome::HandedOff(outcome) => json!({"state":"handedOff",
             "basis":hex::encode(outcome.basis),"epoch":outcome.epoch.to_string(),
             "docId":format!("{:032x}",outcome.doc_id),"accepted":outcome.accepted}),
+        StudioUnconfirmedSaveOutcome::Refused {
+            reason,
+            message: _,
+        } => {
+            let (reason, retry) = save_refusal_fields(reason);
+            json!({"state":"refused","reason":reason,"retry":retry})
+        }
         StudioUnconfirmedSaveOutcome::Scheduled => {
             json!({"state":"pending","retry":"sameRequest"})
         }

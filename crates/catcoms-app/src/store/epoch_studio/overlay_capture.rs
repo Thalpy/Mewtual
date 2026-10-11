@@ -8,15 +8,16 @@
 //! new-authoring path only, and are taken before custody is released, never before an accepted
 //! request has been recognised.
 use super::*;
-use crate::store::creative_references::CreativeHold;
+use crate::store::creative_references::{CreativeHold, CreativeHoldError};
 use crate::store::epoch_intents::{self, EpochIntentState};
 use crate::studio::StudioOwnerTenure;
 use catcoms_crypto::DeviceId;
 use catcoms_replication::studio::{
     StudioClosingOverlayBasis, StudioLocalDraft, StudioOverlayAdmission, StudioOverlayBasis,
-    StudioOverlayProvenance, StudioOverlayState, StudioUnconfirmedOverlayBasis,
+    StudioOverlayManualReason, StudioOverlayProvenance, StudioOverlaySaveRefusal,
+    StudioOverlayState, StudioUnconfirmedOverlayBasis,
 };
-use catcoms_replication::{CloseRecord, LocalIntent};
+use catcoms_replication::{CloseRecord, LocalIntent, ReplError};
 
 /// How S1b and S3 obtain the fresh basis an authoring request is authorized against (G4-A1-S).
 ///
@@ -86,13 +87,63 @@ impl From<StudioUnconfirmedOverlayBasis> for OwnedOverlayBasis {
 
 /// The stale-basis refusal, worded for the fresh basis's kind. The Closing wording is exactly what
 /// it was before Flow S was parameterized, so every existing caller and test reads the same text.
-pub(in crate::store) fn basis_changed(fresh: &OwnedOverlayBasis) -> AppError {
+pub(in crate::store) fn basis_changed(fresh: &OwnedOverlayBasis, during_detach: bool) -> AppError {
+    let reason = StudioOverlaySaveRefusal::BasisChanged { during_detach };
     match fresh {
-        OwnedOverlayBasis::Closing(_) => invalid("Closing overlay basis changed"),
-        OwnedOverlayBasis::Unconfirmed(_) => {
-            invalid("unconfirmed overlay basis changed; prepare again from the current preview")
-        }
+        OwnedOverlayBasis::Closing(_) => studio_refused(reason, "Closing overlay basis changed"),
+        OwnedOverlayBasis::Unconfirmed(_) => studio_refused(
+            reason,
+            "unconfirmed overlay basis changed; prepare again from the current preview",
+        ),
     }
+}
+
+/// Require current local membership at a Flow S stage without changing the shared helper used by
+/// non-Save transactions.
+pub(in crate::store) fn current_save_member(
+    group: &ServerGroup,
+    device: &MlsDevice,
+) -> Result<(), AppError> {
+    current_member(group, device)
+        .map_err(|error| studio_refused(StudioOverlaySaveRefusal::NotMember, error))
+}
+
+/// Flow S's typed tenure requirement. The value is kept distinct all the way from sync so an
+/// imported snapshot can never be reported as merely missing evidence.
+fn require_save_tenure(tenure: StudioOwnerTenure) -> Result<u64, AppError> {
+    match tenure {
+        StudioOwnerTenure::Known(start) => Ok(start),
+        StudioOwnerTenure::Imported(_) => Err(studio_refused(
+            StudioOverlaySaveRefusal::Durable(StudioOverlayManualReason::TenureImported),
+            "this device holds an unverified owner tenure from an imported snapshot and cannot author under it",
+        )),
+        StudioOwnerTenure::Unknown => Err(studio_refused(
+            StudioOverlaySaveRefusal::Durable(StudioOverlayManualReason::TenureUnknown),
+            "this device has not observed the current owner's tenure and cannot author under it",
+        )),
+    }
+}
+
+/// Mint a Closing basis while retaining the reason selected from the exact restored source. The
+/// source-state probe and the authoritative mint are adjacent under one mutable custody borrow.
+pub(in crate::store) fn prepare_closing_basis(
+    source: &mut StudioEpoch,
+    close: &CloseRecord,
+    group: &ServerGroup,
+    tenure: u64,
+) -> Result<StudioClosingOverlayBasis, AppError> {
+    if let Some(reason) = source.closing_overlay_save_refusal() {
+        return Err(studio_refused(reason, ReplError::EpochClosed));
+    }
+    source
+        .prepare_closing_overlay(close, group, tenure)
+        .map_err(|error| match error {
+            ReplError::EpochAuthority | ReplError::ReceiptConflict => studio_refused(
+                StudioOverlaySaveRefusal::Durable(StudioOverlayManualReason::ReceiptChanged),
+                error,
+            ),
+            error => invalid(error),
+        })
 }
 
 /// Which branch an authorized new acceptance joins, as S1b decided it under custody.
@@ -285,22 +336,60 @@ impl StudioOverlayCapture {
         let op_id = self.intent.operation.id(&self.intent.author);
         if let Some(metadata) = &state.overlay {
             if metadata.target() != self.stamp.target {
-                return Err(invalid("overlay belongs to another channel"));
+                return Err(studio_refused(
+                    StudioOverlaySaveRefusal::OtherKindDraft,
+                    "overlay belongs to another channel",
+                ));
             }
         }
         // Repeated from the classification stage: a worker must not rely on a decision taken
         // against bytes it cannot itself see.
         if state.pending().any(|(id, _)| *id == op_id) {
-            return Err(invalid("ordinary intent cannot become an accepted overlay"));
+            return Err(studio_refused(
+                StudioOverlaySaveRefusal::OrdinaryIntentPending,
+                "ordinary intent cannot become an accepted overlay",
+            ));
         }
         let mut overlay = self.joined_branch(state.overlay.as_ref())?;
         state
             .ledger
             .prepare(self.intent.author, self.intent.operation.clone())
-            .map_err(invalid)?;
+            .map_err(|error| match error {
+                // The detached S2 plan is the first place the new operation is inserted into the
+                // complete ordinary-intent ledger. Reaching either ledger rail is a stable local
+                // storage-policy refusal, not an invariant failure, so the actor may retain it
+                // against this exact stamped request instead of rebuilding the same doomed plan.
+                ReplError::EpochBound => {
+                    studio_refused(StudioOverlaySaveRefusal::StorageRefused, error)
+                }
+                // Classification checked the captured record, but S2 remains authoritative over
+                // the bytes it decodes. Keep a nonce collision typed if those bytes disagree.
+                ReplError::IntentConflict => {
+                    studio_refused(StudioOverlaySaveRefusal::NonceConflict, error)
+                }
+                // Scope/codec failures here contradict the already validated capture. They stay
+                // on the error channel and must not be presented as proof that no write was due to
+                // an ordinary user-facing policy refusal.
+                error => invalid(error),
+            })?;
         let draft = overlay
             .append(self.basis.as_basis(), &state.ledger, op_id, self.ts)
-            .map_err(invalid)?;
+            .map_err(|error| match error {
+                ReplError::EpochClosed => {
+                    studio_refused(StudioOverlaySaveRefusal::TransferInProgress, error)
+                }
+                ReplError::EpochBound => {
+                    studio_refused(StudioOverlaySaveRefusal::BranchFull, error)
+                }
+                ReplError::EpochScope => {
+                    studio_refused(StudioOverlaySaveRefusal::StaleBranch, error)
+                }
+                ReplError::IntentConflict => {
+                    studio_refused(StudioOverlaySaveRefusal::NonceConflict, error)
+                }
+                ReplError::Malformed => studio_refused(StudioOverlaySaveRefusal::Retry, error),
+                error => invalid(error),
+            })?;
         state.overlay = Some(overlay);
         Ok(StudioOverlayPlan {
             stamp: self.stamp,
@@ -405,24 +494,48 @@ impl ServerStore {
             });
         };
         let mut blobs = self.blob_store(&hex::encode(&document.server_id))?;
-        let pixels = blobs
-            .get_bounded(&cid, bytes as usize)?
-            .ok_or_else(|| invalid("publish the frame PIX before saving its reference"))?;
+        let pixels = blobs.get_bounded(&cid, bytes as usize)?.ok_or_else(|| {
+            studio_refused(
+                StudioOverlaySaveRefusal::PixelUnpublished,
+                "publish the frame PIX before saving its reference",
+            )
+        })?;
         if pixels.len() as u64 != bytes {
-            return Err(invalid("frame byte declaration differs from PIX"));
+            return Err(studio_refused(
+                StudioOverlaySaveRefusal::PixelInvalid,
+                "frame byte declaration differs from PIX",
+            ));
         }
-        crate::creative::validate_pix(&pixels)?;
+        crate::creative::validate_pix(&pixels)
+            .map_err(|error| studio_refused(StudioOverlaySaveRefusal::PixelInvalid, error))?;
         if pixels[4] != 191 || pixels[5] != 143 {
-            return Err(invalid("Flipnote frames must be 192x144"));
+            return Err(studio_refused(
+                StudioOverlaySaveRefusal::PixelInvalid,
+                "Flipnote frames must be 192x144",
+            ));
         }
         blobs.put_staged(&pixels)?;
         if !blobs.promote_staged_bounded(&cid, pixels.len())? {
-            return Err(invalid("frame promotion failed"));
+            return Err(studio_refused(
+                StudioOverlaySaveRefusal::Retry,
+                "frame promotion failed",
+            ));
         }
-        let hold = self.hold_creative_transient(
-            &document.server_id,
-            std::collections::BTreeSet::from([*cid.as_bytes()]),
-        )?;
+        let hold = self
+            .hold_creative_transient(
+                &document.server_id,
+                std::collections::BTreeSet::from([*cid.as_bytes()]),
+            )
+            .map_err(|error| match error {
+                CreativeHoldError::Capacity => studio_refused(
+                    StudioOverlaySaveRefusal::ReferenceCapacity,
+                    "creative reference capacity is occupied",
+                ),
+                CreativeHoldError::Unavailable => {
+                    invalid("creative reference protection is unavailable")
+                }
+                CreativeHoldError::Scope => invalid("creative reference scope is invalid"),
+            })?;
         Ok(AdmittedOverlayMedia {
             origin,
             frame: Some((cid, bytes)),
@@ -444,8 +557,12 @@ impl ServerStore {
         let blobs = self.blob_store(&hex::encode(group))?;
         match blobs.get_bounded(cid, bytes as usize)? {
             Some(pixels) if pixels.len() as u64 == bytes => Ok(()),
-            Some(_) => Err(invalid("frame byte declaration differs from PIX")),
-            None => Err(invalid(
+            Some(_) => Err(studio_refused(
+                StudioOverlaySaveRefusal::PixelInvalid,
+                "frame byte declaration differs from PIX",
+            )),
+            None => Err(studio_refused(
+                StudioOverlaySaveRefusal::PixelMissing,
                 "accepted frame PIX is no longer held; republish it",
             )),
         }
@@ -468,7 +585,7 @@ impl ServerStore {
         ts: u64,
     ) -> Result<StudioOverlayCapture, AppError> {
         let basis = basis.into();
-        current_member(group, device)?;
+        current_save_member(group, device)?;
         let document = target.document(&group.group_id()).map_err(invalid)?;
         let AdmittedOverlayAuthoring { intent, media } = authoring;
         // A-001. The combined value already makes a cross-operation pairing inexpressible; this
@@ -583,16 +700,17 @@ impl ServerStore {
     ) -> Result<OwnedOverlayBasis, AppError> {
         match mint {
             StudioOverlayMint::Closing { close, tenure } => {
-                let tenure = crate::studio::require_owner_tenure(tenure)?;
+                let tenure = require_save_tenure(tenure)?;
                 let (mut source, observed, _) =
                     self.checked_studio_source(server, group, target, device, false, storage)?;
                 if observed.is_none() {
-                    return Err(invalid("Closing overlay source is missing"));
+                    return Err(studio_refused(
+                        StudioOverlaySaveRefusal::Durable(StudioOverlayManualReason::SourceMissing),
+                        "Closing overlay source is missing",
+                    ));
                 }
-                source
-                    .prepare_closing_overlay(close, group, tenure)
+                prepare_closing_basis(&mut source, close, group, tenure)
                     .map(OwnedOverlayBasis::Closing)
-                    .map_err(invalid)
             }
             StudioOverlayMint::Unconfirmed(minted) => {
                 let logical = target.document(&group.group_id()).map_err(invalid)?;
@@ -613,7 +731,8 @@ impl ServerStore {
                     }
                 })();
                 if probed.inspect_err(|_| storage.invalidate())? {
-                    return Err(invalid(
+                    return Err(studio_refused(
+                        StudioOverlaySaveRefusal::InstalledSource,
                         "this document has an installed source; an unconfirmed draft cannot \
                          start or continue beside it",
                     ));
@@ -653,7 +772,8 @@ impl ServerStore {
                 if observed_mls_epoch != group.epoch()
                     || group.member_signature_key(&provider).is_none()
                 {
-                    return Err(invalid(
+                    return Err(studio_refused(
+                        StudioOverlaySaveRefusal::MembershipChanged,
                         "unconfirmed overlay basis was minted under another membership; prepare \
                          again from the current preview",
                     ));
@@ -736,7 +856,7 @@ impl ServerStore {
                 ))
             }
         }
-        current_member(group, device)?;
+        current_save_member(group, device)?;
         self.enter_studio_budget(server, group, budget)?;
         let StudioOverlayPlan {
             stamp,
@@ -761,7 +881,10 @@ impl ServerStore {
             ));
         }
         if !self.studio_overlay_is_current(group, device, &stamp)? {
-            return Err(invalid("overlay record or context changed; retry"));
+            return Err(studio_refused(
+                StudioOverlaySaveRefusal::Retry,
+                "overlay record or context changed; retry",
+            ));
         }
         let document = stamp.document.clone();
         // Re-derive the basis under the same custody as the write. A changed Closing source, a
@@ -778,7 +901,7 @@ impl ServerStore {
             &mut budget.storage,
         )?;
         if fresh.as_basis().fingerprint() != draft.basis() {
-            return Err(basis_changed(&fresh));
+            return Err(basis_changed(&fresh, true));
         }
         drop(fresh);
         // S3, design 8.3's per-server and vault-wide rails, checked again at the exact size the
@@ -819,12 +942,11 @@ impl ServerStore {
             }
         }
         let old = stamp.intent.map(|(_, physical)| physical);
-        let written = self.write_prepared_intents(
+        let written = self.write_prepared_studio_overlay_intents(
             server,
             &document,
             state,
             old,
-            false,
             rng,
             &mut budget.storage,
             &mut budget.intents,

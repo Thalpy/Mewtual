@@ -34,6 +34,19 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::AppError;
 
+/// Construct a typed Studio Save refusal while preserving the exact diagnostic text callers and
+/// logs already receive. Store code selects the reason from the condition it just checked; no
+/// outer layer is allowed to reverse-engineer it from this message.
+pub(crate) fn studio_refused(
+    reason: catcoms_replication::studio::StudioOverlaySaveRefusal,
+    error: impl std::fmt::Display,
+) -> AppError {
+    AppError::StudioRefused {
+        reason,
+        message: format!("epoch studio: {error}"),
+    }
+}
+
 mod creative_references;
 mod epoch_draft_archive;
 mod epoch_intents;
@@ -104,9 +117,9 @@ pub use epoch_studio::{
 };
 pub(crate) use epoch_studio::{
     PreparedStudioSource, SigningSlice, StudioHandoffCapture, StudioHandoffCommit,
-    StudioHandoffPlan, StudioHandoffStart, StudioOverlayCapture, StudioOverlayPlan,
-    StudioOverlayStamp, StudioOverlayStart, StudioSourceCapture, MAX_SIGNING_TURNS_PER_VISIT,
-    SIGNING_SLICE_BUDGET_MS,
+    StudioHandoffPlan, StudioHandoffPrepareFailure, StudioHandoffStamp, StudioHandoffStart,
+    StudioOverlayCapture, StudioOverlayPlan, StudioOverlayStamp, StudioOverlayStart,
+    StudioSourceCapture, MAX_SIGNING_TURNS_PER_VISIT, SIGNING_SLICE_BUDGET_MS,
 };
 // Flow R, the scheduled resolution of an interrupted Prepared handoff (Agent 1, design 6.4.2).
 pub(crate) use epoch_studio::{

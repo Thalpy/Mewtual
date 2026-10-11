@@ -139,6 +139,15 @@ pub(crate) struct CreativeHold {
     owner: Arc<()>,
     protection: SharedProtection,
 }
+
+/// Why a job-owned reference hold could not be created. Kept typed until the Flow S caller maps
+/// capacity to a user refusal; malformed scope and poisoned protection remain internal failures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CreativeHoldError {
+    Scope,
+    Unavailable,
+    Capacity,
+}
 impl std::fmt::Debug for CreativeHold {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("CreativeHold { .. }")
@@ -206,15 +215,18 @@ impl ServerStore {
         &self,
         group: &[u8],
         cids: BTreeSet<[u8; 32]>,
-    ) -> Result<CreativeHold, AppError> {
+    ) -> Result<CreativeHold, CreativeHoldError> {
         if group.is_empty() || group.len() > 256 {
-            return Err(invalid());
+            return Err(CreativeHoldError::Scope);
         }
         let cids: BTreeSet<Cid> = cids.into_iter().map(Cid::from_bytes).collect();
-        let mut state = self.creative_protection.lock().map_err(|_| invalid())?;
+        let mut state = self
+            .creative_protection
+            .lock()
+            .map_err(|_| CreativeHoldError::Unavailable)?;
         state.reap();
         if state.transient.len() >= MAX_TRANSIENT_HOLD_OWNERS {
-            return Err(invalid());
+            return Err(CreativeHoldError::Capacity);
         }
         // Transient and durable references share the existing rail. Duplicates are counted, not
         // hidden: a caller cannot obtain unbounded protection by repeating the same CID.
@@ -224,7 +236,7 @@ impl ServerStore {
             .and_then(|held| held.checked_add(cids.len()))
             .is_none_or(|total| total > MAX_CREATIVE_REFERENCES)
         {
-            return Err(invalid());
+            return Err(CreativeHoldError::Capacity);
         }
         let owner = Arc::new(());
         state.transient.push(TransientHold {

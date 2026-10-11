@@ -2172,12 +2172,13 @@ authority. Generic page/current-tail service holds Prepared sources, and complet
 flushed before publication or normal source rewrites. Rotation/adoption resolve Prepared before
 journal/recovery/retirement work; the common source writer also fences evidence loss.
 
-The bounded store handoff is accepted; HANDOFF-002 is closed. Read-only `studio_overlay_read`
-is separately accepted, with INSPECTION-TEST-001 now closed. Native overlay writes and manual
-disposition remain unavailable. Automatic Closing handoff scheduling exists, but its selector now
-memoizes Unconfirmed history as quiet rather than attempting to transfer it.
+The bounded store handoff is accepted; HANDOFF-002 is closed. `studio_overlay_read` and the manual
+lifecycle family are separately accepted, with INSPECTION-TEST-001 and the bounded lifecycle review
+closed. The isolated completion candidate registers those commands plus ticketed Unconfirmed Save;
+repair commands and a direct Closing Save remain unavailable. Automatic Closing handoff scheduling
+exists, but its selector memoizes Unconfirmed history as quiet rather than attempting to transfer it.
 
-#### Awaiting-tenure overlay Save slice (Gate 4, internal only)
+#### Awaiting-tenure overlay Save slice (Gate 4 completion candidate)
 
 The internal app/store path generalizes Flow S over an owned typed Closing or Unconfirmed basis.
 `prepare_studio_unconfirmed_overlay` proves the installed source absent against the current
@@ -2205,10 +2206,40 @@ the same record charge. The 8 MiB share is Flow S admission policy rather than a
 invariant: ordinary edits beside a live branch may take the tally over the share, after which new
 Unconfirmed growth refuses until headroom returns.
 Unconfirmed provenance grants no handoff, signing, receipt, installed-source or publication
-authority. The shared baseline now has real Index and Flipnote preview coverage, 8.6 reconciliation,
-an actor/store restart regression, the actor Save and native result conversion types. Its functions
-and ticket remain crate-private; P5 is false, no Save command is registered, and there is no UI
-exposure.
+authority. The shared baseline has real Index and Flipnote preview coverage, 8.6 reconciliation,
+an actor/store restart regression, the actor Save and native result conversion types. The isolated
+completion candidate exposes that existing actor boundary as two commands:
+
+- `studio_unconfirmed_overlay_save_begin({server, channel, object?})` returns either the current
+  `basis`, `branch` and target in an `unconfirmedOverlaySaveTicket`, or a typed `refused` result
+  when no ticket was minted and the visit is known not to have written;
+- `studio_unconfirmed_overlay_save({server, channel, object?, save:{basis, branch, nonce, body}})`
+  returns `saved`, `pending`, `busy`, `paused`, `refused`, `disposed` or `handedOff` without
+  collapsing refusal reasons.
+
+The request is frozen before Save is invoked. `busy` is known not to have written, while `pending`
+means the detached Save may still land and is presented as uncertain; both retain the same request.
+`paused` is known not to have written and requires successful explicit document access before the
+same request is sent again; a `newTicket` refusal permits
+only an explicit re-author that mints a fresh ticket and nonce; `none` is not retried. The UI
+re-reads the overlay and displays its projection as local-only while preserving the base preview's
+awaiting-tenure status. Preview Create remains unavailable because it is a two-target operation and
+there is no atomic Unconfirmed route for both the Index and the new document.
+
+The same lifecycle family is available for both Flipnote and Index local drafts; an Index target
+omits `object` on every request, including the destination embedded in an exact copy Apply. Native
+final-delivery fences classify a completed archive, archive release, disposal and copy Apply as
+uncertain rather than a clean refusal. Release/disposal callers reconcile lifecycle before acting
+again; copy retains and retries the exact prepared edit.
+
+The same candidate registers `studio_overlay_lifecycle`, `studio_overlay_export`,
+`studio_overlay_archive`, `studio_overlay_archive_read`, `studio_overlay_archive_export`,
+`studio_overlay_archive_release`, `studio_overlay_copy_preview`, `studio_overlay_copy_apply` and
+`studio_overlay_dispose` beside the existing `studio_overlay_read`. Read/export/copy-preview are
+read-class commands. Archive, release, copy-apply, dispose and Unconfirmed Save are write-class
+commands. Discard and archive release require their exact literal confirmations. Copy Apply uses
+one previewed ordinary edit and retains it across uncertain delivery; it never consumes or mutates
+the source branch. These commands grant no repair, handoff or source authority.
 
 The [prepared-signing checkpoint](GATE4-HANDOFF-SIGNING-REVIEW.md), awaiting review, adds:
 

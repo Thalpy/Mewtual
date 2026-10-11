@@ -105,6 +105,7 @@ fn view(read: StudioOverlayInspection) -> Result<Value, String> {
             (Some(branch), _) => json!({"v":1,"kind":"local-draft","channel":channel,
                 "eligibility":eligibility,
                 "manualReason":manual_reason,
+                "handoffAttempt":super::lifecycle::handoff_attempt_value(v.handoff_attempt),
                 "unconfirmedState":super::lifecycle::unconfirmed_state_value(v.unconfirmed),
                 "object":object,
                 "basis":v.draft.map(|d| hex::encode(d.basis())),

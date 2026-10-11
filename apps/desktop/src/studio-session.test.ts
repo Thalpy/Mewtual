@@ -56,7 +56,7 @@ test("setting the scope lists the channel once per coalesced window and a stale 
   assert.equal(h.calls("studio_list")[1].args.channel, "9");
 });
 
-test("opening a flipnote reads it; null is absence; a preview is read-only with a stated reason", async () => {
+test("opening a flipnote reads it; null is absence; a preview cannot authorize ordinary Apply", async () => {
   const h = await harness();
   h.ipc.on("studio_list", () => ordinaryView(indexContent()));
   h.ipc.on("studio_read", () => null);
@@ -69,14 +69,345 @@ test("opening a flipnote reads it; null is absence; a preview is read-only with 
   h.session.open(OBJ);
   await h.sync();
   assert.equal(h.session.doc?.view?.awaitingTenureReceipt, true);
-  assert.equal(h.session.canEdit(OBJ), false);
+  assert.equal(h.session.canEdit(OBJ), true, "the separate local-draft Save route is available");
   assert.match((h.session.editableEpoch(OBJ) as { refused: string }).refused, /read-only preview/);
+  assert.equal(h.session.editRefusal(OBJ), "");
   assert.deepEqual(h.session.known.get(OBJ), { awaiting: true, phase: null, epoch: "4" });
-  assert.throws(() => h.session.setFps(OBJ, 8), /read-only preview/);
   h.ipc.on("studio_read", () => docView([], { phase: "closing" }));
   h.session.open(OBJ);
   await h.sync();
   assert.match((h.session.editableEpoch(OBJ) as { refused: string }).refused, /rotating/);
+});
+
+test("an awaiting-tenure edit stays local and retries the exact ticket, nonce and body", async () => {
+  const h = await harness();
+  let saved = false;
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => previewView(flipnoteContent({ frames: [] })));
+  h.ipc.on("studio_overlay_lifecycle", (a) => ({
+    v: 1, kind: "overlayLifecycle", channel: a.channel, object: a.object ?? null,
+    branch: saved ? { branch: id64(2), content: id64(3), generation: "1", accepted: 1 } : null,
+    prepared: false, eligibility: saved ? "manual" : null, manualReason: saved ? "unconfirmed" : null,
+    handoffAttempt: null, unconfirmedState: saved ? "awaitingSource" : null,
+    archive: null, disposed: null, transferred: false,
+  }));
+  h.ipc.on("studio_overlay_read", (a) => saved ? {
+    v: 1, kind: "local-draft", channel: a.channel, object: a.object ?? null,
+    eligibility: "manual", manualReason: "unconfirmed", handoffAttempt: null,
+    unconfirmedState: "awaitingSource", basis: id64(1), branch: id64(2), contentId: id64(3),
+    generation: "1", accepted: 1, transferState: "active", provenance: "unconfirmed",
+    replayable: true, readOnly: true, content: flipnoteContent({ fps: 8, frames: [] }),
+  } : { v: 1, kind: "absent", channel: a.channel, object: a.object ?? null });
+  h.ipc.on("studio_unconfirmed_overlay_save_begin", (a) => ({
+    v: 1, kind: "unconfirmedOverlaySaveTicket", channel: a.channel, object: a.object ?? null,
+    basis: id64(1), branch: id64(2), provenance: "unconfirmed",
+  }));
+  let visits = 0;
+  h.ipc.on("studio_unconfirmed_overlay_save", (a) => {
+    visits++;
+    if (visits === 1) return { v: 1, kind: "unconfirmedOverlaySave", channel: a.channel, object: a.object ?? null, state: "pending", retry: "sameRequest" };
+    saved = true;
+    return { v: 1, kind: "unconfirmedOverlaySave", channel: a.channel, object: a.object ?? null, state: "saved", basis: id64(1), accepted: 1, localOnly: true, provisional: true, provenance: "unconfirmed" };
+  });
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  await h.sync();
+  assert.equal(h.session.canEdit(OBJ), true, "the preview base stays non-authoritative but local drafting is available");
+  assert.match((h.session.editableEpoch(OBJ) as { refused: string }).refused, /read-only preview/, "it still cannot authorize ordinary Apply");
+  h.session.setFps(OBJ, 8);
+  await h.sync();
+  assert.equal(h.session.saves[0]?.status, "uncertain", "a detached pending save may still write");
+  assert.equal(h.session.saves[0]?.kind, "overlayApply");
+  const first = h.calls("studio_unconfirmed_overlay_save")[0].args;
+  h.session.retry(h.session.saves[0].id);
+  await h.sync();
+  assert.deepEqual(h.calls("studio_unconfirmed_overlay_save")[1].args, first, "retry is byte-for-byte the same request");
+  assert.equal(h.calls("studio_unconfirmed_overlay_save_begin").length, 1, "an exact retry does not mint another ticket");
+  assert.equal(h.session.saves.length, 0);
+  assert.equal(h.session.doc?.model?.fps, 8, "the retained branch projection, not the preview base, is displayed");
+  assert.equal(h.session.overlay?.inspection?.kind, "local-draft");
+});
+
+test("an awaiting-tenure Index edit is read back from its local overlay for the sidebar", async () => {
+  const h = await harness();
+  let saved = false;
+  const base = indexContent({ objects: { [OBJ]: indexEntry({ title: "moon cat" }) } });
+  const local = indexContent({ objects: { [OBJ]: indexEntry({ title: "moon cat", expiry: { kind: "never" } }) } });
+  h.ipc.on("studio_list", () => previewView(base));
+  h.ipc.on("studio_overlay_lifecycle", (a) => ({
+    v: 1, kind: "overlayLifecycle", channel: a.channel, object: a.object ?? null,
+    branch: saved ? { branch: id64(2), content: id64(3), generation: "1", accepted: 1 } : null,
+    prepared: false, eligibility: saved ? "manual" : null, manualReason: saved ? "unconfirmed" : null,
+    handoffAttempt: null, unconfirmedState: saved ? "awaitingSource" : null,
+    archive: null, disposed: null, transferred: false,
+  }));
+  h.ipc.on("studio_overlay_read", (a) => saved ? {
+    v: 1, kind: "local-draft", channel: a.channel, object: a.object ?? null,
+    eligibility: "manual", manualReason: "unconfirmed", handoffAttempt: null,
+    unconfirmedState: "awaitingSource", basis: id64(1), branch: id64(2), contentId: id64(3),
+    generation: "1", accepted: 1, transferState: "active", provenance: "unconfirmed",
+    replayable: true, readOnly: true, content: local,
+  } : { v: 1, kind: "absent", channel: a.channel, object: a.object ?? null });
+  h.ipc.on("studio_unconfirmed_overlay_save_begin", (a) => ({
+    v: 1, kind: "unconfirmedOverlaySaveTicket", channel: a.channel, object: a.object ?? null,
+    basis: id64(1), branch: id64(2), provenance: "unconfirmed",
+  }));
+  h.ipc.on("studio_unconfirmed_overlay_save", (a) => {
+    saved = true;
+    return { v: 1, kind: "unconfirmedOverlaySave", channel: a.channel, object: a.object ?? null, state: "saved", basis: id64(1), accepted: 1, localOnly: true, provisional: true, provenance: "unconfirmed" };
+  });
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  await h.sync();
+  h.session.setEntryExpiry(OBJ, { kind: "never" });
+  await h.sync();
+  assert.equal(h.calls("studio_unconfirmed_overlay_save")[0].args.object, undefined, "the Index target omits object at IPC");
+  assert.equal(h.session.indexOverlay?.inspection?.kind, "local-draft");
+  assert.deepEqual(h.session.indexModel?.entries[0].expiry, { kind: "never" });
+
+  const choice = h.session.overlayChoices("copy", null).find((x) => x.choice.kind === "objectTitle");
+  assert.ok(choice, "the Index draft exposes its retained values through the same bounded chooser");
+  h.ipc.on("studio_overlay_copy_preview", (a) => ({
+    v: 1, kind: "overlayCopyPreview",
+    source: { channel: a.channel, object: null }, destination: { channel: a.destination.channel, object: null },
+    epochId: id32(8), expectedProjection: id64(9), disposition: "ready",
+    body: '{"op":"set_title"}', originalAuthor: ME, sourceOps: [id64(10)],
+    preservesBranch: false, provisional: true,
+  }));
+  h.ipc.on("studio_overlay_copy_apply", (a) => ({
+    v: 1, kind: "overlayCopyApplied", channel: a.channel, object: null,
+    contentSaved: true, alreadySaved: false, provisional: true, branchPreserved: false,
+  }));
+  await h.session.copyOverlayChoice(null, choice.choice, choice.label, "copy");
+  const previewArgs = h.calls("studio_overlay_copy_preview")[0].args;
+  assert.equal(previewArgs.object, undefined, "the Index copy source omits object on the wire");
+  assert.equal(previewArgs.destination.object, undefined, "the Index copy destination omits object on the wire");
+  const applyArgs = h.calls("studio_overlay_copy_apply")[0].args;
+  assert.equal(applyArgs.object, undefined, "the Index apply source omits object on the wire");
+  assert.equal(applyArgs.edit.destination.object, undefined, "the retained exact apply also omits an Index object");
+});
+
+test("a new-ticket refusal cannot be retried as the old request and reauthoring is explicit", async () => {
+  const h = await harness();
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => previewView(flipnoteContent({ frames: [] })));
+  let tickets = 0;
+  h.ipc.on("studio_unconfirmed_overlay_save_begin", (a) => ({
+    v: 1, kind: "unconfirmedOverlaySaveTicket", channel: a.channel, object: a.object ?? null,
+    basis: id64(++tickets), branch: id64(20 + tickets), provenance: "unconfirmed",
+  }));
+  let saves = 0;
+  h.ipc.on("studio_unconfirmed_overlay_save", (a) => ++saves === 1
+    ? { v: 1, kind: "unconfirmedOverlaySave", channel: a.channel, object: a.object ?? null, state: "refused", reason: "basisChanged", retry: "newTicket" }
+    : { v: 1, kind: "unconfirmedOverlaySave", channel: a.channel, object: a.object ?? null, state: "saved", basis: id64(2), accepted: 1, localOnly: true, provisional: true, provenance: "unconfirmed" });
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  await h.sync();
+  h.session.setFps(OBJ, 9);
+  await h.sync();
+  const rec = h.session.saves[0];
+  assert.equal(rec.kind, "overlayApply");
+  assert.equal(rec.status, "blocked", "the typed refusal is not delivery uncertainty");
+  if (rec.kind !== "overlayApply") return;
+  const first = structuredClone(rec.request);
+  h.session.retry(rec.id);
+  await h.sync();
+  assert.equal(h.calls("studio_unconfirmed_overlay_save").length, 1, "newTicket is not mislabeled as an exact retry");
+  h.session.reauthor(rec.id);
+  await h.sync();
+  assert.equal(h.calls("studio_unconfirmed_overlay_save_begin").length, 2);
+  const second = h.calls("studio_unconfirmed_overlay_save")[1].args.save as { nonce: string; body: string };
+  assert.notEqual(second.nonce, first?.nonce);
+  assert.equal(second.body, first?.body);
+  assert.equal(h.session.saves.length, 0);
+});
+
+test("a typed Begin refusal is retained as known-not-written and explicit reauthoring obtains a new ticket", async () => {
+  const h = await harness();
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => previewView(flipnoteContent({ frames: [] })));
+  let begins = 0;
+  h.ipc.on("studio_unconfirmed_overlay_save_begin", (a) => ++begins === 1
+    ? { v: 1, kind: "unconfirmedOverlaySave", channel: a.channel, object: a.object ?? null, state: "refused", reason: "previewExpired", retry: "newTicket" }
+    : { v: 1, kind: "unconfirmedOverlaySaveTicket", channel: a.channel, object: a.object ?? null, basis: id64(2), branch: id64(22), provenance: "unconfirmed" });
+  h.ipc.on("studio_unconfirmed_overlay_save", (a) => ({
+    v: 1, kind: "unconfirmedOverlaySave", channel: a.channel, object: a.object ?? null,
+    state: "saved", basis: id64(2), accepted: 1, localOnly: true, provisional: true, provenance: "unconfirmed",
+  }));
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  await h.sync();
+  h.session.setFps(OBJ, 9);
+  await h.sync();
+  const rec = h.session.saves[0];
+  assert.equal(rec.status, "blocked");
+  assert.equal(rec.kind, "overlayApply");
+  if (rec.kind !== "overlayApply") return;
+  assert.equal(rec.request, null, "a refusal cannot be fabricated into a ticketed request");
+  assert.equal(rec.overlayRetry, "newTicket");
+  h.session.retry(rec.id);
+  await h.sync();
+  assert.equal(begins, 1, "normal retry cannot silently replace an expired ticket");
+  h.session.reauthor(rec.id);
+  await h.sync();
+  assert.equal(begins, 2);
+  assert.equal(h.calls("studio_unconfirmed_overlay_save").length, 1);
+  assert.equal(h.session.saves.length, 0);
+});
+
+test("a paused local save is not resent when its required explicit access fails", async () => {
+  const h = await harness();
+  let reads = 0;
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => {
+    if (++reads === 1) return previewView(flipnoteContent({ frames: [] }));
+    throw new Error("read transport failed");
+  });
+  h.ipc.on("studio_overlay_lifecycle", (a) => ({
+    v: 1, kind: "overlayLifecycle", channel: a.channel, object: a.object ?? null,
+    branch: null, prepared: false, eligibility: null, manualReason: null,
+    handoffAttempt: null, unconfirmedState: null, archive: null, disposed: null, transferred: false,
+  }));
+  h.ipc.on("studio_overlay_read", (a) => ({ v: 1, kind: "absent", channel: a.channel, object: a.object ?? null }));
+  h.ipc.on("studio_unconfirmed_overlay_save_begin", (a) => ({
+    v: 1, kind: "unconfirmedOverlaySaveTicket", channel: a.channel, object: a.object ?? null,
+    basis: id64(1), branch: id64(2), provenance: "unconfirmed",
+  }));
+  h.ipc.on("studio_unconfirmed_overlay_save", (a) => ({
+    v: 1, kind: "unconfirmedOverlaySave", channel: a.channel, object: a.object ?? null,
+    state: "paused", retry: "afterExplicitAccess",
+  }));
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  await h.sync();
+  h.session.setFps(OBJ, 9);
+  await h.sync();
+  const rec = h.session.saves[0];
+  assert.equal(rec.status, "blocked");
+  h.session.retry(rec.id);
+  await h.sync();
+  assert.equal(h.calls("studio_unconfirmed_overlay_save").length, 1, "failed access did not resend the paused Save");
+  assert.equal(h.session.saves[0].status, "blocked");
+  assert.match(h.session.saves[0].error, /explicit document access failed/);
+});
+
+test("a scope change during paused-save access cannot mutate the abandoned target", async () => {
+  const h = await harness();
+  const resumedRead = deferred<unknown>();
+  let reads = 0;
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => ++reads === 1
+    ? previewView(flipnoteContent({ frames: [] }))
+    : resumedRead.promise);
+  h.ipc.on("studio_overlay_lifecycle", (a) => ({
+    v: 1, kind: "overlayLifecycle", channel: a.channel, object: a.object ?? null,
+    branch: null, prepared: false, eligibility: null, manualReason: null,
+    handoffAttempt: null, unconfirmedState: null, archive: null, disposed: null, transferred: false,
+  }));
+  h.ipc.on("studio_overlay_read", (a) => ({ v: 1, kind: "absent", channel: a.channel, object: a.object ?? null }));
+  h.ipc.on("studio_unconfirmed_overlay_save_begin", (a) => ({
+    v: 1, kind: "unconfirmedOverlaySaveTicket", channel: a.channel, object: a.object ?? null,
+    basis: id64(1), branch: id64(2), provenance: "unconfirmed",
+  }));
+  h.ipc.on("studio_unconfirmed_overlay_save", (a) => ({
+    v: 1, kind: "unconfirmedOverlaySave", channel: a.channel, object: a.object ?? null,
+    state: "paused", retry: "afterExplicitAccess",
+  }));
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  await h.sync();
+  h.session.setFps(OBJ, 9);
+  await h.sync();
+  h.session.retry(h.session.saves[0].id);
+  await settle(2);
+  assert.equal(h.calls("studio_read").length, 2, "the explicit access is in flight");
+  h.session.setScope({ server: SERVER, channel: "9" });
+  resumedRead.resolve(previewView(flipnoteContent({ frames: [] })));
+  await h.sync();
+  assert.equal(h.calls("studio_unconfirmed_overlay_save").length, 1, "the old target was not retried after its scope was abandoned");
+  assert.equal(h.calls("studio_unconfirmed_overlay_save_begin").length, 1);
+});
+
+test("a pixel refusal re-publishes retained bytes before an explicitly re-authored local frame save", async () => {
+  const h = await harness();
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => previewView(flipnoteContent({ frames: [] })));
+  h.ipc.on("studio_overlay_lifecycle", (a) => ({
+    v: 1, kind: "overlayLifecycle", channel: a.channel, object: a.object ?? null,
+    branch: null, prepared: false, eligibility: null, manualReason: null,
+    handoffAttempt: null, unconfirmedState: null, archive: null, disposed: null, transferred: false,
+  }));
+  h.ipc.on("studio_overlay_read", (a) => ({ v: 1, kind: "absent", channel: a.channel, object: a.object ?? null }));
+  let tickets = 0;
+  h.ipc.on("studio_unconfirmed_overlay_save_begin", (a) => ({
+    v: 1, kind: "unconfirmedOverlaySaveTicket", channel: a.channel, object: a.object ?? null,
+    basis: id64(++tickets), branch: id64(20 + tickets), provenance: "unconfirmed",
+  }));
+  h.ipc.on("publish_pix", (a) => ({ cid: id64(9), bytes: base64ToBytes(String(a.bytesB64)).length }));
+  let saves = 0;
+  h.ipc.on("studio_unconfirmed_overlay_save", (a) => ++saves === 1
+    ? { v: 1, kind: "unconfirmedOverlaySave", channel: a.channel, object: a.object ?? null, state: "refused", reason: "pixelUnpublished", retry: "newTicket" }
+    : { v: 1, kind: "unconfirmedOverlaySave", channel: a.channel, object: a.object ?? null, state: "saved", basis: id64(2), accepted: 1, localOnly: true, provisional: true, provenance: "unconfirmed" });
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  await h.sync();
+  h.session.insertFrame(OBJ, null, pixBytes(5));
+  await h.sync();
+  const rec = h.session.saves[0];
+  assert.equal(rec.status, "blocked");
+  assert.equal(rec.kind, "frame");
+  if (rec.kind !== "frame") return;
+  const first = h.calls("studio_unconfirmed_overlay_save")[0].args.save as { nonce: string };
+  h.session.reauthor(rec.id);
+  await h.sync();
+  assert.equal(h.calls("publish_pix").length, 2, "the stale publication receipt was not reused");
+  assert.equal(h.calls("studio_unconfirmed_overlay_save_begin").length, 2);
+  const second = h.calls("studio_unconfirmed_overlay_save")[1].args.save as { nonce: string };
+  assert.notEqual(second.nonce, first.nonce);
+});
+
+test("a retained-draft copy keeps the exact previewed apply across uncertain delivery", async () => {
+  const h = await harness();
+  const historical = flipnoteContent({ title: "retained", frames: [] });
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => docView([]));
+  h.ipc.on("studio_overlay_lifecycle", (a) => ({
+    v: 1, kind: "overlayLifecycle", channel: a.channel, object: a.object ?? null,
+    branch: { branch: id64(2), content: id64(3), generation: "1", accepted: 1 },
+    prepared: false, eligibility: "manual", manualReason: "sourceReplaced", handoffAttempt: null,
+    unconfirmedState: null, archive: null, disposed: null, transferred: false,
+  }));
+  h.ipc.on("studio_overlay_read", (a) => ({
+    v: 1, kind: "local-draft", channel: a.channel, object: a.object ?? null,
+    eligibility: "manual", manualReason: "sourceReplaced", handoffAttempt: null,
+    unconfirmedState: null, basis: id64(1), branch: id64(2), contentId: id64(3), generation: "1",
+    accepted: 1, transferState: "active", provenance: "closing", replayable: true, readOnly: true,
+    content: historical,
+  }));
+  h.ipc.on("studio_overlay_copy_preview", () => ({
+    v: 1, kind: "overlayCopyPreview",
+    source: { channel: CHANNEL, object: OBJ }, destination: { channel: CHANNEL, object: OBJ },
+    epochId: id32(8), expectedProjection: id64(9), disposition: "ready",
+    body: '{"field":"title","op":"set_header","value":"retained"}',
+    originalAuthor: ME, sourceOps: [id64(10)], preservesBranch: false, provisional: true,
+  }));
+  let applies = 0;
+  h.ipc.on("studio_overlay_copy_apply", (a) => {
+    applies++;
+    if (applies === 1) throw new Error("outcome=uncertain; copy result was not delivered");
+    return { v: 1, kind: "overlayCopyApplied", channel: a.channel, object: a.object ?? null, contentSaved: true, alreadySaved: true, provisional: true, branchPreserved: false };
+  });
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  await h.sync();
+  const choice = h.session.overlayChoices("copy").find((x) => x.choice.kind === "title");
+  assert.ok(choice);
+  await h.session.copyOverlayChoice(OBJ, choice.choice, choice.label, "copy");
+  assert.equal(h.session.overlay?.copy?.status, "uncertain");
+  const first = h.calls("studio_overlay_copy_apply")[0].args;
+  await h.session.retryOverlayCopy(OBJ);
+  assert.deepEqual(h.calls("studio_overlay_copy_apply")[1].args, first);
+  assert.equal(h.calls("studio_overlay_copy_preview").length, 1, "retry never asks for a replacement plan");
+  assert.equal(h.session.overlay?.copy?.status, "applied");
 });
 
 test("a frame save publishes then applies with the view's epoch, and an uncertain save retries the identical request", async () => {

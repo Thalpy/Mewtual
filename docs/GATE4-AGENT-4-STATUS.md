@@ -1,13 +1,34 @@
 # Gate 4 Agent 4 status: integration and completion coordination
 
-Current checkpoint: 2026-10-11. The isolated completion candidate is based on PR #38's
+Current checkpoint: 2026-10-12. The isolated completion candidate is based on PR #38's
 `gate4-agent1-runtime` head `bdcae4a30a0870443db92a14f2d80ff8e4947818`. Gate 4 remains
 incomplete and Gate 5 remains closed.
 
 The detailed live ledger is [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md). This document records the
 integration history, current ownership boundaries and the single remaining execution sequence.
 
-## Current state
+## Completion-candidate override (2026-10-12)
+
+The history below predates the final assembly. The isolated `fix/six-client-recovery-gate4`
+worktree now has one locally verified completion delta on parent
+`700d1daba4069af69fea4ff76b105c3008e6825c`:
+
+- G4-A1-MAP is carried end to end as `StudioOverlaySaveRefusal`, including `StorageRefused`, with
+  exhaustive native and TypeScript conversion.
+- the supported fresh-key join-born owner path is exercised through the actor/receiver and keeps
+  the former history in recovery on the continuously present peer. Same-GroupId self-Welcome is
+  an explicit refusal, not a missing implementation disguised as continuity.
+- P5 is promoted for the bounded lifecycle command family and ticketed Unconfirmed Save only.
+  The command handler, policy, capabilities, native conversions and frontend adapter land together.
+- the Studio surface consumes lifecycle and preview-local state. It preserves exact uncertain
+  requests, requires explicit re-authoring for `newTicket`, keeps local projections separate from
+  the awaiting-tenure base, and provides export/preserve/copy/dispose/release controls.
+
+Direct Closing Save and native repair commands remain unregistered. The final full local suites and
+Review 4 are complete. Publication and exact-head hosted Linux ambient/store/runtime mutation
+evidence, plus a fresh startup result, are still required before merge into the shared baseline.
+
+## Historical state before the completion-candidate override
 
 Agent 4 has assembled the bounded repair integration checkpoint, with its automatic execution
 currently isolated pending the detached runtime boundary:
@@ -63,11 +84,11 @@ currently isolated pending the detached runtime boundary:
   quota counters and adopts a different reviewed ordinary-growth policy, so the reconciliation does
   not carry the historical off-path-writer rule forward.
 
-The newer shared baseline independently contains the generalized Flow S, actor Save, reconciliation,
+At that historical checkpoint, the newer shared baseline independently contained the generalized Flow S, actor Save, reconciliation,
 restart coverage, handoff exclusion and Agent 2's reviewed 3/numeric-server and 8 MiB/vault rails.
 PR #35's merge resolution keeps those implementations and adds only its full-envelope parked-request
 correlation for Closing and Unconfirmed. The code is still intentionally
-unavailable to the renderer. P5 is false; native Save and repair commands remain unregistered.
+unavailable to the renderer. P5 was false; native Save and repair commands were unregistered.
 The reconciled exact head still requires CI and a bounded integration review before merge.
 
 ## Exact branch state
@@ -78,7 +99,7 @@ The reconciled exact head still requires CI and a bounded integration review bef
 | Repair candidate | Historical PR #32 checkpoint `87629d6b72992254911a8e44f698d535bb5d7904`; its reviewed ancestry is in merged PR #33 |
 | Documentation checkpoint | Historical PR #31 checkpoint `f0af61c9b1247fa955300ac50545074e18e9b302`; its documentation ancestry is in merged PR #33 |
 | Archived-tenure branch | PR #34 merged; `gate4-finalization` is historical at `7f80815e...` |
-| Runtime completion branch | PR #35, `gate4-runtime-completion`; original implementation `eef69729...` plus separately identifiable review response `6aee00046...`, now reconciled with exact base `7310b22b...` |
+| Runtime completion branch | Current isolated candidate `fix/six-client-recovery-gate4`, locally verified on committed parent `700d1dab...`; publication commit/PR #41 exact head pending |
 | Agent 3 source | `gate4-agent3-repair` at `15b715a10704a8dafc2cccef65854d4d45ad55ca`; preserved, not rewritten |
 
 PR #28 remains the Agent 3 source record. PR #32 was its first integrated successor; merged PR #33
@@ -179,6 +200,24 @@ The next execution order is:
 
 ## Verification for the current code candidate
 
+For the 2026-10-12 completion delta, the complete root suite, complete desktop/Tauri suite (336
+library plus 5 command-ACL tests), all 1,300 frontend tests, root and desktop strict Clippy, desktop
+`cargo check`, root formatting, Svelte check, production build, `cargo deny`, `test:flows`, an
+explicit Scoop/Git Bash ambient check and the focused `handoff-priority-owed` mutation/restoration
+all pass. The complete-diff adversarial review and correction reviews have no unresolved finding at
+any severity. The review's last LOW was in the startup harness: a target-only filter
+could hide the application's normal diagnostics when `RUST_LOG` was unset. The corrected helper
+preserves that default, canonicalizes the effective key only on Windows, appends the marker override
+only to a nonempty inherited filter, and passes six focused tests plus the full frontend suite.
+
+The startup gate passed once on the assembled application under inherited `RUST_LOG=warn`. Later
+post-review reruns hang before `setup`, create no new application log and fail even with a 60 s
+limit; they are not recorded as final passes. WSL also fails to launch locally with `E_ACCESSDENIED`,
+while the same ambient script passes under installed Git Bash. Consequently the published exact
+head still requires a fresh startup result plus authoritative hosted Linux ambient and complete
+store/runtime mutation workflows. No assertion or product boundary was weakened to obtain local
+evidence.
+
 On `gate4-runtime-completion` through correction
 `6aee00046e35410ba42c9290c0d1f52fd41dd86b`, the definitive complete root suite passes, as do all
 1,282 frontend tests, root and desktop strict all-target/all-feature Clippy, desktop `cargo check`,
@@ -256,7 +295,8 @@ passes. Native is therefore not claimed green locally; exact-head CI remains the
 
 ## Non-negotiable boundaries
 
-- Native Save stays unavailable while P5 is false.
+- P5 authorizes only the ticketed Unconfirmed Save and reviewed lifecycle commands on this isolated
+  candidate. Direct Closing Save stays unavailable.
 - Unfinished repair commands stay unregistered.
 - Imported and Unknown tenure never become authoring authority.
 - Preview-local work never becomes installed source, receipt, handoff or signing authority.
@@ -264,5 +304,6 @@ passes. Native is therefore not claimed green locally; exact-head CI remains the
   not a substitute.
 - The shared preparation pool, source/reference fences, Prepared -> Source -> Completed order and
   exact retry identity remain intact.
-- The shared baseline remains unchanged while `gate4-runtime-completion` is verified and reviewed.
-- Gate 5 remains closed until full Gate 4 Review 4 passes and the user accepts it.
+- The shared baseline remains unchanged while `fix/six-client-recovery-gate4` is published and
+  verified.
+- Gate 5 remains closed until the remaining exact-head evidence passes and the user accepts Gate 4.

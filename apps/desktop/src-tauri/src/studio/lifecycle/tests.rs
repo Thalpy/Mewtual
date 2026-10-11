@@ -96,6 +96,135 @@ fn an_unconfirmed_save_crosses_as_local_unconfirmed_work_with_no_content() {
     );
 }
 
+/// MAP's exhaustive store-to-native vocabulary. Every variant gets one stable literal and action,
+/// and diagnostic text is not serialized. Distinct literals matter: collapsing two cases here
+/// would make the typed store carrier useless to the renderer even though Rust remained typed.
+#[test]
+fn every_typed_save_refusal_has_a_distinct_native_literal_and_action() {
+    use catcoms_app::studio::types::{
+        StudioOverlayManualReason as M, StudioOverlaySaveRefusal as R,
+    };
+
+    let target = StudioTarget::Index {
+        channel: 7u128.to_be_bytes(),
+    };
+    let cases = [
+        (R::Durable(M::NotReplayable), "notReplayable", "none"),
+        (R::Durable(M::Unconfirmed), "unconfirmed", "none"),
+        (R::Durable(M::NotCurrentAuthor), "notCurrentAuthor", "none"),
+        (R::Durable(M::SourceMissing), "sourceMissing", "none"),
+        (R::Durable(M::SourceUnreadable), "sourceUnreadable", "none"),
+        (R::Durable(M::Fault), "fault", "none"),
+        (R::Durable(M::SourceRewound), "sourceRewound", "none"),
+        (R::Durable(M::SourceNotClosing), "sourceNotClosing", "none"),
+        (R::Durable(M::SuccessorMissing), "successorMissing", "none"),
+        (R::Durable(M::ReceiptChanged), "receiptChanged", "newTicket"),
+        (R::Durable(M::SourceReplaced), "sourceReplaced", "none"),
+        (
+            R::Durable(M::SuccessorNotPristine),
+            "successorNotPristine",
+            "none",
+        ),
+        (R::Durable(M::ObjectMissing), "objectMissing", "none"),
+        (R::Durable(M::TenureUnknown), "tenureUnknown", "none"),
+        (R::Durable(M::TenureImported), "tenureImported", "none"),
+        (R::Durable(M::PreparedStuck), "preparedStuck", "none"),
+        (R::NotMember, "notMember", "none"),
+        (R::SourceAdopting, "sourceAdopting", "sameRequest"),
+        (R::InstalledSource, "installedSource", "none"),
+        (R::PreviewUnavailable, "previewUnavailable", "newTicket"),
+        (R::PreviewExpired, "previewExpired", "newTicket"),
+        (R::TailIncomplete, "tailIncomplete", "newTicket"),
+        (R::PreviewReplaced, "previewReplaced", "newTicket"),
+        (R::MembershipChanged, "membershipChanged", "newTicket"),
+        (
+            R::BasisChanged {
+                during_detach: false,
+            },
+            "basisChanged",
+            "newTicket",
+        ),
+        (
+            R::BasisChanged {
+                during_detach: true,
+            },
+            "basisChangedDuringDetach",
+            "newTicket",
+        ),
+        (R::TransferInProgress, "transferInProgress", "sameRequest"),
+        (R::OtherKindDraft, "otherKindDraft", "none"),
+        (R::LiveBranchSuperseded, "liveBranchSuperseded", "none"),
+        (R::StaleBranch, "staleBranch", "newTicket"),
+        (R::NonceConflict, "nonceConflict", "none"),
+        (R::OrdinaryIntentPending, "ordinaryIntentPending", "none"),
+        (R::BranchFull, "branchFull", "none"),
+        (R::PixelUnpublished, "pixelUnpublished", "newTicket"),
+        (R::PixelInvalid, "pixelInvalid", "newTicket"),
+        (R::PixelMissing, "pixelMissing", "newTicket"),
+        (
+            R::UnconfirmedBranchesPerServer,
+            "unconfirmedBranchesPerServer",
+            "none",
+        ),
+        (
+            R::UnconfirmedBytesVaultWide,
+            "unconfirmedBytesVaultWide",
+            "none",
+        ),
+        (R::ReferenceCapacity, "referenceCapacity", "none"),
+        (R::StorageRefused, "storageRefused", "none"),
+        (R::Retry, "retry", "sameRequest"),
+    ];
+
+    let mut literals = std::collections::BTreeSet::new();
+    for (reason, expected_reason, expected_retry) in cases {
+        let value = response_value(Response::UnconfirmedOverlaySaved {
+            target,
+            outcome: StudioUnconfirmedSaveOutcome::Refused {
+                reason,
+                message: "private diagnostic must not cross native JSON".into(),
+            },
+        })
+        .unwrap();
+        assert_eq!(value["state"], "refused");
+        assert_eq!(value["reason"], expected_reason);
+        assert_eq!(value["retry"], expected_retry);
+        assert!(value.get("message").is_none(), "diagnostic leaked: {value}");
+        assert!(
+            literals.insert(expected_reason),
+            "two refusal variants share {expected_reason}"
+        );
+    }
+}
+
+#[test]
+fn handoff_attempt_uses_the_manual_vocabulary_and_hides_transient_detail() {
+    use catcoms_app::studio::{
+        StudioHandoffAttempt, StudioHandoffAttemptReason as R, StudioHandoffAttemptState as S,
+    };
+    use catcoms_app::studio::types::StudioOverlayManualReason as M;
+
+    let refused = handoff_attempt_value(Some(StudioHandoffAttempt {
+        state: S::Refused,
+        reason: R::Manual(M::SuccessorNotPristine),
+        retry_at_ms: 30_001,
+    }));
+    assert_eq!(
+        refused,
+        json!({"state":"refused","reason":"successorNotPristine","retryAt":"30001"})
+    );
+
+    let transient = handoff_attempt_value(Some(StudioHandoffAttempt {
+        state: S::BackingOff,
+        reason: R::Transient,
+        retry_at_ms: u64::MAX,
+    }));
+    assert_eq!(transient["state"], "backingOff");
+    assert_eq!(transient["reason"], "transient");
+    assert_eq!(transient["retryAt"], u64::MAX.to_string());
+    assert!(handoff_attempt_value(None).is_null());
+}
+
 #[test]
 fn releasing_needs_the_exact_literal_the_user_typed() {
     let token = StudioReleaseConfirmation::TOKEN;
@@ -325,6 +454,34 @@ fn an_archive_failure_is_uncertain_exactly_when_it_may_have_followed_the_write()
     assert_eq!(archive_failure(refused.clone()), refused);
     let classified = format!("{} (x)", super::super::UNDELIVERED_ARCHIVE);
     assert_eq!(archive_failure(classified.clone()), classified);
+}
+
+/// MAP K13's error half: unlike a typed response, an actor/store error gives native no outcome to
+/// inspect. The two markers that can follow a write are uncertain; validation remains a refusal,
+/// and final-fence uncertainty from `invoke_with_context` is already classified.
+#[test]
+fn a_save_failure_is_uncertain_only_when_the_actor_may_have_written() {
+    for post_write in [
+        format!("{}: intent rename committed", catcoms_app::UNCERTAIN_OUTCOME),
+        catcoms_app::studio::CONTROL_REPLY_DROPPED.to_string(),
+    ] {
+        assert!(
+            save_classified(Err(post_write.clone()))
+                .unwrap_err()
+                .starts_with(super::super::UNDELIVERED_SAVE),
+            "a failure that may follow Save was reported as a refusal: {post_write}"
+        );
+    }
+    let refused = "draft body exceeds the operation bound".to_string();
+    assert_eq!(
+        save_classified(Err(refused.clone())).unwrap_err(),
+        refused
+    );
+    let classified = format!("{} (x)", super::super::UNDELIVERED_SAVE);
+    assert_eq!(
+        save_classified(Err(classified.clone())).unwrap_err(),
+        classified
+    );
 }
 
 #[test]
@@ -847,6 +1004,112 @@ async fn an_archive_whose_result_expires_before_delivery_is_uncertain_and_is_on_
         after["archive"].is_object(),
         "the write the caller was told is uncertain must really have happened"
     );
+    f.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_release_withheld_by_the_final_session_fence_is_uncertain_and_is_on_disk() {
+    let f = InspectionFixture::new(true).await;
+    let state = state(&f).await;
+    let written = archive(&state, f.target).await.unwrap();
+    let request = release_request(
+        written["archive"].as_str().unwrap(),
+        StudioReleaseConfirmation::TOKEN,
+    )
+    .unwrap();
+    let context = InvokeContext::new(&state, fixture::SERVER, Some(f.target))
+        .await
+        .unwrap();
+    let withheld = invoke_with_context(
+        &state,
+        &context,
+        InvokeRequest::Control(StudioControlRequest {
+            target: f.target,
+            action: Action::ReleaseOverlayArchive(Box::new(request)),
+        }),
+        |response| {
+            state
+                .session_lock_requested
+                .store(true, Ordering::Release);
+            match response {
+                InvokeResponse::Control(response) => response_value(response),
+                _ => Err("mismatched release response".into()),
+            }
+        },
+    )
+    .await
+    .expect_err("a release blocked by the final fence must not be delivered");
+    state
+        .session_lock_requested
+        .store(false, Ordering::Release);
+    assert!(
+        withheld.starts_with(super::super::UNDELIVERED_RELEASE),
+        "a completed release must be reported uncertain, said: {withheld}"
+    );
+    assert!(
+        recovery::invoke_control(
+            &state,
+            fixture::SERVER,
+            f.target,
+            Action::ReadOverlayArchive,
+        )
+        .await
+        .is_err(),
+        "the archive must really be absent after the withheld release"
+    );
+    f.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_disposal_withheld_by_the_final_session_fence_is_uncertain_and_is_on_disk() {
+    let f = InspectionFixture::new(true).await;
+    let state = state(&f).await;
+    let live = studio_overlay_lifecycle_for_test(&state, f.target)
+        .await
+        .unwrap();
+    let request = serde_json::from_value::<DisposalRequestInput>(json!({
+        "branch": live["branch"]["branch"],
+        "content": live["branch"]["content"],
+        "accepted": 1,
+        "mode": {"kind":"discard","confirmation":"destroy-local-draft"},
+    }))
+    .unwrap()
+    .checked()
+    .unwrap();
+    let context = InvokeContext::new(&state, fixture::SERVER, Some(f.target))
+        .await
+        .unwrap();
+    let withheld = invoke_with_context(
+        &state,
+        &context,
+        InvokeRequest::Control(StudioControlRequest {
+            target: f.target,
+            action: Action::DisposeOverlay(Box::new(request)),
+        }),
+        |response| {
+            state
+                .session_lock_requested
+                .store(true, Ordering::Release);
+            match response {
+                InvokeResponse::Control(response) => response_value(response),
+                _ => Err("mismatched disposal response".into()),
+            }
+        },
+    )
+    .await
+    .expect_err("a disposal blocked by the final fence must not be delivered");
+    state
+        .session_lock_requested
+        .store(false, Ordering::Release);
+    assert!(
+        withheld.starts_with(super::super::UNDELIVERED_DISPOSE),
+        "a completed disposal must be reported uncertain, said: {withheld}"
+    );
+    let after = studio_overlay_lifecycle_for_test(&state, f.target)
+        .await
+        .unwrap();
+    assert!(after["branch"].is_null(), "the branch must really be gone");
+    assert_eq!(after["disposed"]["mode"], "discarded");
     f.shutdown().await;
 }
 
