@@ -10,6 +10,17 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-10-11)
 
+- **Windows rapid-restart reconnect correction (2026-10-11).** The recurring six-client final-
+  reunion split was reproduced as a real transport failure rather than accepted as a timing
+  flake: libp2p's default known-peer dial reused the listener's local TCP port, and Windows
+  refused the still-live local/remote four-tuple with `WSAEADDRINUSE` after a quick close/reopen.
+  Windows outbound bootstrap, infrastructure and saved-member-route dials now allocate a fresh
+  ephemeral port; Unix keeps listener-port reuse and its NAT-traversal benefit. Both native
+  six-client scenarios pass on the correction, including reversed reopen, discarded gossip and
+  command load, as does the complete `catcoms-net` suite. This is a bounded recovery checkpoint;
+  the historical candidate failures below remain truthful evidence for their pinned SHAs, and
+  the final combined native suite is still required after all Gate 4 code is assembled.
+
 - **Gate 4 completion candidate: K12 Closing mirror and H3 service order (2026-10-11).** Starting
   from PR #38's shared runtime baseline `bdcae4a30a0870443db92a14f2d80ff8e4947818`, the isolated
   completion branch preserves a detached Flow S plan's exact Closing/Unconfirmed commit authority,

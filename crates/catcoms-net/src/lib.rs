@@ -758,14 +758,25 @@ fn dial_bootstraps(
     for (target, addresses) in peer_groups {
         let opts = DialOpts::peer_id(target)
             .addresses(addresses)
-            .condition(PeerCondition::DisconnectedAndNotDialing)
-            .build();
+            .condition(PeerCondition::DisconnectedAndNotDialing);
+        // libp2p's default known-peer dial reuses the listener port. Windows cannot reuse the
+        // same local/remote TCP four-tuple while the prior connection is in TIME_WAIT, even
+        // though the listener itself has reopened successfully. A quick app restart would then
+        // accept every reconnect command but fail each socket with WSAEADDRINUSE until the kernel
+        // timeout elapsed. Unix keeps port reuse for its NAT-traversal benefit; Windows uses an
+        // ephemeral outbound port so restart recovery is immediately possible.
+        #[cfg(windows)]
+        let opts = opts.allocate_new_port();
+        let opts = opts.build();
         let connection_id = opts.connection_id();
         swarm.dial(opts)?;
         submitted.push((target, connection_id));
     }
     for addr in bare {
-        swarm.dial(addr)?;
+        let opts = DialOpts::unknown_peer_id().address(addr);
+        #[cfg(windows)]
+        let opts = opts.allocate_new_port();
+        swarm.dial(opts.build())?;
     }
     Ok(submitted)
 }
@@ -4395,8 +4406,11 @@ impl Actor {
         let shape = dial_log_shape(std::iter::once(&addr));
         let opts = DialOpts::peer_id(target)
             .addresses(vec![addr])
-            .condition(PeerCondition::DisconnectedAndNotDialing)
-            .build();
+            .condition(PeerCondition::DisconnectedAndNotDialing);
+        // See `dial_bootstraps`: a Windows restart must not inherit an unusable TIME_WAIT tuple.
+        #[cfg(windows)]
+        let opts = opts.allocate_new_port();
+        let opts = opts.build();
         let connection_id = opts.connection_id();
         // Insert before calling into libp2p so another command drained in this same actor turn
         // observes the in-flight attempt. Every immediate error below removes it because no later
@@ -4451,8 +4465,12 @@ impl Actor {
             let shape = dial_log_shape(&addrs);
             let opts = DialOpts::peer_id(peer)
                 .addresses(addrs)
-                .condition(PeerCondition::Always)
-                .build();
+                .condition(PeerCondition::Always);
+            // See `dial_bootstraps`: saved member routes are the path most exposed to a rapid
+            // close/reopen of the same listener and remote endpoint on Windows.
+            #[cfg(windows)]
+            let opts = opts.allocate_new_port();
+            let opts = opts.build();
             match self.swarm.dial(opts) {
                 Ok(()) => tracing::debug!(peer = %peer, addresses = count, ?shape, "dialing"),
                 Err(e) => {

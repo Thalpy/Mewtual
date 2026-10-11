@@ -63,6 +63,12 @@ registration remains downstream of specialist acceptance and P5.
 
 ## Current exact-head checkpoint
 
+- A child checkpoint of PR #40 fixes the previously baseline-observed Windows six-client reunion
+  failure. The saved routes were present, but listener-port reuse made rapid reconnect sockets fail
+  with `WSAEADDRINUSE`; Windows dials now allocate a fresh outbound port while Unix retains the
+  NAT-useful default. Both focused native six-client scenarios and the complete `catcoms-net`
+  suite pass. Historical failed-suite entries below remain evidence about their exact older SHAs,
+  not evidence against this correction. The final combined native suite is still outstanding.
 - PR #27 is open from `gate4-agent1-runtime` at
   `2ab84645b126fafe27a2180d79d9cb6267a0425a` into `Create-suite-2` at
   `5a899c22e7e26a7853c34f8adac4c11246846204`. It is mergeable, but mergeability is not an
