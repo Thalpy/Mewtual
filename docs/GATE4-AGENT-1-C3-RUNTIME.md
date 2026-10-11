@@ -1935,6 +1935,19 @@ attempt did at most one visit's bounded validation work, and the memo keeps that
 | `an_overtaken_finish_whose_attempt_warmed_a_record_is_excused` | the finish path applies the rule. Fails with excuses disabled |
 | `progress_excuses_stop_at_the_ceiling` (on the rule function) | the ceiling, and that a warm past it is still credited. Fails with the ceiling removed |
 
+The held checkpoint's review additions are now part of the integrated candidate:
+
+- `an_uncharged_refresh_credits_a_refused_but_uninstalled_result` proves the runtime's own-write
+  refresh retains the validation in the memo and consumes its per-key credit without installing it
+  into the abandoned inventory or consuming the progress ceiling;
+- `an_overtaken_error_path_uses_the_attempts_prior_warm_as_progress` pins the stale-validation
+  error route to the same rule;
+- the receiver's token-only restart storm pins one new-key excuse, then the complete charged
+  restart budget, then backoff, independently of writer-side warming; its error variant reaches
+  the same terminal backoff;
+- bare cursors no longer retain job-only credit keys; the 64-credit ceiling is explicitly a
+  receive-profile choice and must be reconsidered by any full-profile adopter.
+
 The original held checkpoint's store tests passed before integration. Its required review
 additions and the complete combined suites are tracked at this integration head rather than
 inherited from that earlier result. THREAT-MODEL's replay-move paragraph states the exception.

@@ -470,6 +470,10 @@ pub struct EpochStorageCursor {
     /// with nothing having failed. An inventory that silently omits a record is worse than one
     /// that refuses, because a budget built from it looks usable.
     awaiting: Option<(EpochRecordKind, [u8; 32])>,
+    /// Only restartable jobs need to retain progress-credit keys. Bare cursors and synchronous
+    /// scans still populate the memo, but do not accumulate a second per-record collection that
+    /// no caller can consume (review of MEDIUM-3, LOW-4).
+    track_warms: bool,
     /// The records this cursor found cold and memoized itself: a fresh inline validation, an
     /// installed detached one, or a detached result refused because a write overtook it. Not a
     /// hit, which was warm already, and not a writer's warm, which never passes through a cursor.
@@ -740,6 +744,7 @@ impl ServerStore {
                 mount: self.registry_mount(),
                 parked: None,
                 awaiting: None,
+                track_warms: false,
                 warmed: Vec::new(),
             },
             store: self,
@@ -810,12 +815,23 @@ impl ServerStore {
         profile: EpochInventoryProfile,
     ) -> Result<EpochInventoryJob, AppError> {
         Ok(EpochInventoryJob {
-            cursor: self.begin_epoch_storage_scan_with(profile)?,
+            cursor: self.begin_epoch_inventory_job_cursor(profile)?,
             profile,
             restarts: 0,
             credited: std::collections::BTreeSet::new(),
             progress_restarts: 0,
         })
+    }
+
+    /// Start the cursor owned by a restartable job. Bare cursors deliberately do not collect
+    /// progress-credit keys; only a job has the bounded credit set and restart rule that use them.
+    fn begin_epoch_inventory_job_cursor(
+        &mut self,
+        profile: EpochInventoryProfile,
+    ) -> Result<EpochStorageCursor, AppError> {
+        let mut cursor = self.begin_epoch_storage_scan_with(profile)?;
+        cursor.track_warms = true;
+        Ok(cursor)
     }
 
     /// Step an inventory job, absorbing an invalidation into a restart while the budget allows.
@@ -935,7 +951,7 @@ impl ServerStore {
                 }
                 Ok(EpochInventoryOutcome::Restarted(Box::new(
                     EpochInventoryJob {
-                        cursor: self.begin_epoch_storage_scan_with(profile)?,
+                        cursor: self.begin_epoch_inventory_job_cursor(profile)?,
                         profile,
                         restarts,
                         credited,
@@ -957,7 +973,7 @@ impl ServerStore {
             }
             job.restarts += 1;
         }
-        job.cursor = self.begin_epoch_storage_scan_with(job.profile)?;
+        job.cursor = self.begin_epoch_inventory_job_cursor(job.profile)?;
         Ok(EpochInventoryStep::Restarted)
     }
 
@@ -1041,10 +1057,12 @@ impl ServerStore {
             job.cursor.memoize_refused(self, validated);
         }
         // Credited even though this restart is not charged anyway: a record's warm excuses at
-        // most one restart in the job's life (C-3 runtime 15.8, MEDIUM-3).
+        // most one restart in the job's life (C-3 runtime 15.8, MEDIUM-3). This does not consume
+        // `progress_restarts`: the own-write cap already bounded this refresh. It only prevents
+        // the same key from earning a later progress exception (review LOW-3).
         let warmed = std::mem::take(&mut job.cursor.warmed);
         job.credited.extend(warmed);
-        job.cursor = self.begin_epoch_storage_scan_with(job.profile)?;
+        job.cursor = self.begin_epoch_inventory_job_cursor(job.profile)?;
         Ok(true)
     }
 
@@ -1327,7 +1345,7 @@ impl EpochStorageCursor {
             body.intent,
             Memoize::Replace,
         );
-        if fresh && memoized {
+        if self.track_warms && fresh && memoized {
             self.warmed.push(key);
         }
         if self
@@ -1445,7 +1463,7 @@ impl EpochStorageCursor {
                 validated.body.intent,
                 Memoize::IfVacant,
             );
-        if warmed {
+        if self.track_warms && warmed {
             self.warmed.push(validated.key);
         }
         warmed
@@ -2062,10 +2080,12 @@ pub(super) fn invalid(error: impl std::fmt::Display) -> AppError {
 
 /// How many times one commit attempt may start an invalidated scan again before giving up.
 ///
-/// The bound exists because restarting is only progress if writes eventually stop. A vault under
-/// continuous write pressure would otherwise restart forever, holding the commit open and doing
-/// no useful work. Exhausting it is a signal to back off, **not** permission to fall back to a
-/// single-visit unbounded scan: that would trade the custody bound for the liveness problem.
+/// An attempt that retained a newly validated cold record may instead consume one bounded,
+/// per-key progress credit; an actor may also grant a small, separately bounded set of proven
+/// own-write refreshes. This counter bounds every remaining restart. A vault under continuous
+/// write pressure would otherwise restart forever, holding the commit open and doing no useful
+/// work. Exhausting it is a signal to back off, **not** permission to fall back to a single-visit
+/// unbounded scan: that would trade the custody bound for the liveness problem.
 pub const MAX_INVENTORY_RESTARTS: usize = 3;
 
 /// The families a scan covers and the limits it scans under (C-3 runtime design, S-1).
@@ -2149,7 +2169,9 @@ pub struct EpochInventoryJob {
 /// vault with more cold records than it, under writes between turns. Past it, restarts are charged
 /// against [`MAX_INVENTORY_RESTARTS`] as before, and the job backs off. 64 is the receive profile's
 /// record limit, so a background job, which scans under that profile, can warm its whole vault
-/// without being charged.
+/// without being charged. It is not a general full-profile allowance: any full-vault owner that
+/// adopts this rule must choose and review its own ceiling rather than assuming 64 covers 65,536
+/// records (review LOW-2).
 pub(crate) const MAX_PROGRESS_RESTARTS: usize = 64;
 
 impl EpochInventoryJob {
@@ -6255,6 +6277,127 @@ mod tests {
             (job.progress_restarts_for_test(), job.restarts_for_test()),
             (1, 1),
             "the same record's second warm excused a second restart"
+        );
+    }
+
+    /// Review MEDIUM-2 and LOW-3: the runtime's uncharged own-write refresh must memoize and
+    /// credit the detached result before discarding its cursor. The refused result is useful to
+    /// the next attempt but was never installed into the old attempt's inventory; warming the
+    /// same key again is therefore charged, not granted a second progress excuse.
+    #[test]
+    fn an_uncharged_refresh_credits_a_refused_but_uninstalled_result() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        kept_studio_source(&mut store, 1);
+        store.inventory_cache.clear_for_test();
+        let clock = ManualClock::new(0);
+        let full = EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio;
+        let mut job = store.begin_epoch_inventory_job(full).unwrap();
+
+        let validated = park_studio(&mut store, &mut job, &clock)
+            .validate()
+            .unwrap();
+        let key = validated.key;
+        store.overtake_inventory_for_test();
+        assert!(store
+            .restart_epoch_inventory_job_uncharged(&mut job, Some(&validated))
+            .unwrap());
+        assert!(
+            job.credited.contains(&key),
+            "the uncharged refresh did not consume the result's one progress credit"
+        );
+        assert!(
+            job.cursor.inventory.records.is_empty(),
+            "a refused detached result was installed into the abandoned inventory"
+        );
+        assert!(
+            store.inventory_cache.holds_for_test(key),
+            "the refused-but-valid result was not retained in the memo"
+        );
+
+        // Model eviction, then validate the same physical record again. Its key was credited by
+        // the uncharged refresh, so this overtaking consumes the charged restart budget.
+        store.inventory_cache.clear_for_test();
+        let validated = park_studio(&mut store, &mut job, &clock)
+            .validate()
+            .unwrap();
+        store.overtake_inventory_for_test();
+        assert!(matches!(
+            store
+                .install_validated_job_record(&mut job, validated)
+                .unwrap(),
+            EpochInventoryStep::Restarted
+        ));
+        assert_eq!(
+            (job.progress_restarts_for_test(), job.restarts_for_test()),
+            (0, 1),
+            "a result already credited by the own-write refresh was excused again"
+        );
+    }
+
+    /// Review MEDIUM-2: the validation-error restart path applies the same progress rule. This
+    /// attempt installs one cold record, then parks a second whose worker reports an error after
+    /// a write overtook it. The error describes stale bytes, and the first warm excuses exactly
+    /// this restart.
+    #[test]
+    fn an_overtaken_error_path_uses_the_attempts_prior_warm_as_progress() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        kept_studio_source(&mut store, 1);
+        kept_studio_source(&mut store, 2);
+        store.inventory_cache.clear_for_test();
+        let clock = ManualClock::new(0);
+        let full = EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio;
+        let mut job = store.begin_epoch_inventory_job(full).unwrap();
+
+        let first = park_studio(&mut store, &mut job, &clock)
+            .validate()
+            .unwrap();
+        assert!(matches!(
+            store.install_validated_job_record(&mut job, first).unwrap(),
+            EpochInventoryStep::Stepped(_)
+        ));
+        let _second = park_studio(&mut store, &mut job, &clock);
+        store.overtake_inventory_for_test();
+        assert!(matches!(
+            store
+                .restart_epoch_inventory_job_if_overtaken(&mut job)
+                .unwrap(),
+            Some(EpochInventoryStep::Restarted)
+        ));
+        assert_eq!(
+            (job.progress_restarts_for_test(), job.restarts_for_test()),
+            (1, 0),
+            "the validation-error path charged an attempt that had retained cold work"
+        );
+    }
+
+    /// Review LOW-4: a bare cursor memoizes validation results but retains no progress-credit
+    /// keys, because only an `EpochInventoryJob` has a restart rule that can consume them.
+    #[test]
+    fn a_bare_cursor_does_not_retain_job_progress_credit() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        kept_studio_source(&mut store, 1);
+        store.inventory_cache.clear_for_test();
+        store.detach_every_validation_for_test();
+        let clock = ManualClock::new(0);
+        let full = EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio;
+        let mut cursor = store.begin_epoch_storage_scan(full).unwrap();
+        store
+            .step_epoch_storage_scan(&mut cursor, ENTRIES_PER_STEP, Some((&clock, 250)))
+            .unwrap();
+        let validated = store
+            .take_parked_record(&mut cursor)
+            .expect("the forced-detach cursor did not park")
+            .validate()
+            .unwrap();
+        store
+            .install_validated_record(&mut cursor, validated)
+            .unwrap();
+        assert!(
+            cursor.warmed.is_empty(),
+            "a bare cursor accumulated job-only restart credit"
         );
     }
 
