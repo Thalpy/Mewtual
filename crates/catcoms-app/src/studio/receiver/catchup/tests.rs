@@ -2625,6 +2625,121 @@ async fn a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_serv
     );
 }
 
+/// F2's captured-service term in isolation. A request whose source reconstruction is running has
+/// left sync's queue and has no parked result yet, so only `captured_service_owed` can keep H3
+/// from signing past it. The worker barrier holds that exact state across a real receiver visit.
+#[tokio::test]
+async fn a_running_captured_checkpoint_preparation_alone_makes_a_signing_slice_yield() {
+    let mut o = signing_owner(1417, 4).await;
+
+    // Leave enough H3 work for a later visit to expose an erroneous slice, then make serving the
+    // target require the detached preparation whose lifetime this regression isolates.
+    o.receiver
+        .run(&mut o.server, &mut o.store, 83, None)
+        .unwrap();
+    let after = o
+        .receiver
+        .handoff
+        .remaining_for_test()
+        .expect("the signing job survived its first bounded slice");
+    assert!(after > 0);
+    displace_warm_graph(&mut o);
+
+    let fetch = deliver_head_request(&mut o).await;
+    let before_capture = o.receiver.handoff.remaining_for_test();
+    for _ in 0..4 {
+        o.receiver
+            .run(&mut o.server, &mut o.store, 83, None)
+            .unwrap();
+        assert_eq!(
+            o.receiver.handoff.remaining_for_test(),
+            before_capture,
+            "the queued request did not have priority over signing"
+        );
+        if o.receiver.catchup.service_capture_for_test() == Some(true) {
+            break;
+        }
+    }
+    assert!(
+        !o.server.sync.has_epoch_service_interest(),
+        "the request was not reserved within the bounded service alternation"
+    );
+    assert_eq!(
+        o.receiver.catchup.service_capture_for_test(),
+        Some(true),
+        "the reserved request did not capture its source"
+    );
+    assert!(!o.receiver.catchup.result_parked());
+    assert!(o.receiver.catchup.captured_service_owed(&o.server));
+
+    let work = o
+        .receiver
+        .detach(&mut o.server)
+        .expect("the captured source preparation did not detach");
+    assert_eq!(work.kind_for_test(), "prepare");
+    let (work, entered, release) = work.pause_preparation_for_test();
+    let (result, ()) = tokio::join!(work.run(None), async {
+        tokio::time::timeout(std::time::Duration::from_secs(60), entered)
+            .await
+            .expect("the source preparation worker never reached its barrier")
+            .expect("the source preparation worker dropped its entry signal");
+
+        // These are the other three priority terms at the visit boundary. If any becomes true,
+        // it would mask removal of `captured_service_owed` and the mutation would survive.
+        let queued = o.server.sync.has_epoch_service_interest();
+        let parked = o.receiver.catchup.result_parked();
+        let inbound = o
+            .receiver
+            .watches
+            .iter()
+            .any(|(watch, _)| o.server.sync.studio_has_inbound(&watch.inner));
+        let owed = o.receiver.catchup.captured_service_owed(&o.server);
+
+        let before = o.receiver.handoff.remaining_for_test();
+        let visit = o.receiver.run(&mut o.server, &mut o.store, 83, None);
+        let after_visit = o.receiver.handoff.remaining_for_test();
+        // Release before any assertion can unwind the test-side future. Tokio waits for blocking
+        // workers at runtime shutdown, so stranding this receiver would turn a useful failure
+        // into a hung test process.
+        release
+            .send(())
+            .expect("the source preparation worker is still waiting");
+        visit.unwrap();
+        assert!(!queued);
+        assert!(!parked);
+        assert!(!inbound);
+        assert!(owed);
+        assert_eq!(
+            after_visit, before,
+            "a signing slice ran while a captured checkpoint preparation was still running"
+        );
+    });
+    o.receiver.complete(&mut o.server, result);
+    assert!(
+        o.receiver.catchup.result_parked(),
+        "the released preparation did not park its result"
+    );
+
+    // Installation answers the exact request in this turn. H3 has still not moved; once Bob has
+    // the authenticated answer, ordinary bounded signing is allowed to resume.
+    o.receiver
+        .run(&mut o.server, &mut o.store, 83, None)
+        .unwrap();
+    let answered = o
+        .bob
+        .sync
+        .complete_checkpoint_head(fetch.await.expect("the fetch task"));
+    assert!(
+        answered.is_ok(),
+        "Bob's captured request was not served: {answered:?}"
+    );
+    assert_eq!(o.receiver.handoff.remaining_for_test(), Some(after));
+    assert!(
+        drive_transfer_to_completion(&mut o).await,
+        "the transfer never resumed after the captured request was served"
+    );
+}
+
 /// Production turns, detaching whenever asked, until the transfer reports its target updated.
 /// Returns whether it did, and checks that the transferred branch is no longer retained.
 async fn drive_transfer_to_completion(o: &mut SigningOwner) -> bool {

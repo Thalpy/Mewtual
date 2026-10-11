@@ -206,6 +206,17 @@ pub(crate) enum StudioBackgroundJob<T: MeshTransport> {
         OwnedSemaphorePermit,
         PreparationContext,
     ),
+    /// Test-only form of `Prepare` with a barrier after the blocking worker takes ownership.
+    /// This lets scheduling regressions observe an actually running captured request without
+    /// adding an artificial delay to production preparation.
+    #[cfg(test)]
+    PausedPrepare(
+        StudioSourceCapture,
+        OwnedSemaphorePermit,
+        PreparationContext,
+        tokio::sync::oneshot::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    ),
     PrepareRegistry(ServerRegistryPagePreparation, Option<Arc<()>>),
     /// Flow S, stage S2. The capture moves in whole: nothing here decomposes it or rebuilds its
     /// contents, which is the condition attached to A-001's combined authoring value.
@@ -310,6 +321,28 @@ impl<T: MeshTransport> StudioBackgroundJob<T> {
 }
 
 impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
+    /// Arm a Studio source-preparation barrier. The returned receiver resolves only after the
+    /// blocking worker owns the capture and pool permit; releasing it lets reconstruction run.
+    #[cfg(test)]
+    pub(crate) fn pause_preparation_for_test(
+        self,
+    ) -> (
+        Self,
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let Self::Prepare(capture, permit, context) = self else {
+            panic!("Studio preparation job");
+        };
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        (
+            Self::PausedPrepare(capture, permit, context, entered, released),
+            entry,
+            release,
+        )
+    }
+
     /// Arm the overlay worker's barrier. Returns the job, a receiver that resolves once the
     /// blocking closure has entered while owning the bundle, and the sender that releases it.
     #[cfg(test)]
@@ -341,6 +374,8 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
             Self::Head(..) => "head",
             Self::Seed(..) => "seed",
             Self::Prepare(..) => "prepare",
+            #[cfg(test)]
+            Self::PausedPrepare(..) => "prepare",
             Self::PrepareRegistry(..) => "prepare-registry",
             Self::OverlayPlan(..) => "overlay-plan",
             Self::HandoffPrepare(..) => "handoff-prepare",
@@ -353,8 +388,10 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
 
     #[cfg(test)]
     pub(crate) fn is_preparation_for_test(&self) -> bool {
-        matches!(self, Self::Prepare(..) | Self::PrepareRegistry(..))
-            || matches!(self, Self::Preview(_, job) if job.is_preparation())
+        matches!(
+            self,
+            Self::Prepare(..) | Self::PausedPrepare(..) | Self::PrepareRegistry(..)
+        ) || matches!(self, Self::Preview(_, job) if job.is_preparation())
     }
     pub(crate) async fn run(
         self,
@@ -368,6 +405,10 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                 },
             ),
             Self::Prepare(_, _, context) => StudioBackgroundResult::Cancelled {
+                preparation: Some(context.clone()),
+            },
+            #[cfg(test)]
+            Self::PausedPrepare(_, _, context, _, _) => StudioBackgroundResult::Cancelled {
                 preparation: Some(context.clone()),
             },
             Self::PrepareRegistry(_, generation) => {
@@ -430,6 +471,19 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                 }
                 Self::Prepare(capture, permit, context) => {
                     let result = tokio::task::spawn_blocking(move || {
+                        capture.rebuild().map(|p| (Box::new(p), permit))
+                    })
+                    .await;
+                    StudioBackgroundResult::Prepared(
+                        context,
+                        result.unwrap_or_else(|_| Err(invalid("Studio preparation worker failed"))),
+                    )
+                }
+                #[cfg(test)]
+                Self::PausedPrepare(capture, permit, context, entered, release) => {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let _ = entered.send(());
+                        let _ = release.recv();
                         capture.rebuild().map(|p| (Box::new(p), permit))
                     })
                     .await;
@@ -1330,11 +1384,20 @@ impl CatchupRuntime {
         {
             return Ok(false);
         }
-        let Ok(permit) = self.preparation_pool().try_acquire_owned() else {
-            // A retained Registry graph must not permanently occupy this actor's preparation
-            // capacity while a foreground/receive Studio graph needs the shared worker pool.
-            self.registry_provider = None;
-            return Ok(false);
+        let pool = self.preparation_pool();
+        let permit = match pool.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                // A retained Registry graph must not permanently occupy this actor's preparation
+                // capacity while a foreground/receive Studio graph needs the shared worker pool.
+                // Retry before returning: dropping the provider can release this actor's slot,
+                // and a later service step must not race the waiting page for that exact capacity.
+                self.registry_provider = None;
+                let Ok(permit) = pool.try_acquire_owned() else {
+                    return Ok(false);
+                };
+                permit
+            }
         };
         let capture = server
             .sync
@@ -1803,6 +1866,8 @@ impl StudioReceiver {
                 }
             }
             Some(StudioBackgroundJob::Prepare(..)) => self.catchup.preparing = true,
+            #[cfg(test)]
+            Some(StudioBackgroundJob::PausedPrepare(..)) => self.catchup.preparing = true,
             Some(StudioBackgroundJob::PrepareRegistry(..)) => self.catchup.preparing = true,
             Some(StudioBackgroundJob::OverlayPlan(..)) => self.catchup.overlay_detached = true,
             // The handoff runtime moved its own stage to `Detached` when it produced this job;

@@ -524,6 +524,16 @@ impl StudioReceiver {
         receiver.catchup.registry_cache_for_test(provider, until);
         receiver
     }
+    /// Install a prepared Registry provider into an existing fixture receiver. This is used when
+    /// the provider's retained permit must belong to the same injected pool as the receiver.
+    #[cfg(test)]
+    pub(crate) fn retain_registry_for_test(
+        &mut self,
+        provider: crate::registry_catchup::ServerRegistryPageProvider,
+        until: u64,
+    ) {
+        self.catchup.registry_cache_for_test(provider, until);
+    }
     /// Exercise the pre-install router with a transport-produced pass while keeping all of the
     /// otherwise private runtime custody explicit in the test. The returned pass survives only
     /// when the router permits the ordinary installer to continue.

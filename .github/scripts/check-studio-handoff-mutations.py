@@ -165,7 +165,7 @@ MUTATIONS = [
      RECEIVER + "a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_served",
      "a signing slice ran while a member's checkpoint request waited"),
     # Each term the request exercises, removed alone: first while it is queued as service
-    # interest, then once it is reserved and its source installed but it is still unanswered.
+    # interest, then while its reserved source preparation is captured and still running.
     ("handoff-priority-service", "crates/catcoms-app/src/studio/receiver.rs",
      "        server.sync.has_epoch_service_interest()\n            || self\n",
      "        (false && server.sync.has_epoch_service_interest())\n            || self\n",
@@ -174,8 +174,8 @@ MUTATIONS = [
     ("handoff-priority-owed", "crates/catcoms-app/src/studio/receiver.rs",
      "            || self.catchup.captured_service_owed(server)\n",
      "            || (false && self.catchup.captured_service_owed(server))\n",
-     RECEIVER + "a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_served",
-     "a signing slice ran while a member's checkpoint request waited"),
+     RECEIVER + "a_running_captured_checkpoint_preparation_alone_makes_a_signing_slice_yield",
+     "a signing slice ran while a captured checkpoint preparation was still running"),
     # F2's review, MEDIUM-1: the owed term counts only a request that has captured its source.
     # One still waiting for a pool permit may be waiting for the signing job's own, so yielding
     # to it stalls both; with the conjunct gone, a one-permit pool never completes the transfer.

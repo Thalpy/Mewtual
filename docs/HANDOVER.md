@@ -16,10 +16,15 @@ and ranks the live hazards in that path.
   retains stamped refusals for both provenances and answers a current Closing retry before new
   S1b work. The Studio and Registry catch-up paths now reserve checkpoint service before returning
   a held page that cannot prepare under a full pool, and answer a request in the same turn its
-  exact prepared source is installed. Focused Closing, full-pool Studio/Registry and Registry
-  serve-on-install regressions pass. This is a bounded runtime checkpoint awaiting adversarial
-  review and full-suite/exact-head CI; it does not implement the full structured refusal carrier,
-  promote P5 or register native commands.
+  exact prepared source is installed. The first adversarial re-review found one contention edge:
+  evicting this actor's retained Registry graph could free a permit that fallback Registry service
+  immediately recaptured ahead of the already-fetched Studio page. The page now retries that exact
+  acquisition before service runs. A real four-slot regression proves bounded Studio persistence
+  followed by resumed Registry service. A separate paused-worker regression now isolates H3's
+  captured-service priority term, and the named mutation is detected again. Focused Closing,
+  full-pool Studio/Registry and Registry serve-on-install regressions pass. This is a bounded
+  runtime checkpoint awaiting re-review and full-suite/exact-head CI; it does not implement the
+  full structured refusal carrier, promote P5 or register native commands.
 
 - **Gate 4 exact-head CI refresh (2026-10-11).** The shared line is now
   `2ab84645b126fafe27a2180d79d9cb6267a0425a`. Agent 2 corrected lifecycle mutation shard 2's

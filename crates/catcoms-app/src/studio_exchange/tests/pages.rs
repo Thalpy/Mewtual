@@ -106,12 +106,11 @@ async fn studio_ready_page_saves_before_due_owner_prepares_another_source() {
     }
 }
 
-/// A cold held page has priority over new client work, but when the shared preparation pool is
-/// full it cannot make inbound checkpoint service unreachable. The service step must at least
-/// reserve the request; because capture cannot get a permit either, it stays explicitly
-/// uncaptured and H3 is then allowed to sign past it until capacity returns.
-#[tokio::test]
-async fn a_cold_held_page_with_a_full_pool_still_reserves_checkpoint_service() {
+/// Build a real fetched `PageReady` pass, then displace the exact local graph it must use to
+/// persist. Both full-pool ordering regressions need this same expensive authenticated boundary.
+async fn cold_held_page_fixture(
+    shared: std::sync::Arc<tokio::sync::Semaphore>,
+) -> (Pair, crate::studio::StudioReceiver) {
     let mut p = proven_pair().await;
     let (proof, tick) = tokio::join!(
         p.alice
@@ -146,6 +145,8 @@ async fn a_cold_held_page_with_a_full_pool_still_reserves_checkpoint_service() {
     p.save(&title(182, "local source"));
 
     let mut receiver = crate::studio::StudioReceiver::default();
+    receiver
+        .preparation_pools_for_test(shared, std::sync::Arc::new(tokio::sync::Semaphore::new(3)));
     receiver
         .run(
             &mut p.alice,
@@ -198,6 +199,18 @@ async fn a_cold_held_page_with_a_full_pool_still_reserves_checkpoint_service() {
             StudioRequest::Read { target: other },
         )
         .unwrap();
+
+    (p, receiver)
+}
+
+/// A cold held page has priority over new client work, but when the shared preparation pool is
+/// full it cannot make inbound checkpoint service unreachable. The service step must at least
+/// reserve the request; because capture cannot get a permit either, it stays explicitly
+/// uncaptured and H3 is then allowed to sign past it until capacity returns.
+#[tokio::test]
+async fn a_cold_held_page_with_a_full_pool_still_reserves_checkpoint_service() {
+    let (mut p, mut receiver) =
+        cold_held_page_fixture(std::sync::Arc::new(tokio::sync::Semaphore::new(4))).await;
     let pool = receiver.inject_overlay_pool_for_test(0);
     let request = p
         .bob
@@ -239,6 +252,114 @@ async fn a_cold_held_page_with_a_full_pool_still_reserves_checkpoint_service() {
         "the blocked request was spuriously answered"
     );
     fetch.abort();
+}
+
+/// Review MEDIUM-1 on the completion candidate: dropping this actor's retained Registry graph
+/// can make one shared slot available. The already-fetched Studio page must take that slot before
+/// fallback service can rebuild the Registry graph, or repeated Registry requests can starve the
+/// page forever while staying within the four-slot cap.
+#[tokio::test]
+async fn a_retained_registry_permit_released_for_a_held_page_cannot_be_recaptured_by_service() {
+    let shared = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    let (mut p, mut receiver) = cold_held_page_fixture(shared.clone()).await;
+
+    // This real prepared Registry provider owns one of the same four permits the receiver uses.
+    // Three unrelated holders consume the rest, making provider eviction the only way the held
+    // Studio page can make progress in this visit.
+    let bucket = super::unopened::prepared_registry(&mut p, target(), false);
+    let mut provider = p
+        .alice
+        .begin_registry_page_provider(&p.a_store, SERVER, bucket)
+        .unwrap();
+    let permit = shared.clone().try_acquire_owned().unwrap();
+    let preparation = p
+        .alice
+        .begin_registry_page_preparation_reserved(&p.a_store, &mut provider, permit)
+        .unwrap()
+        .expect("the saved Registry bucket needs preparation");
+    let prepared = preparation.rebuild().await.unwrap();
+    p.alice
+        .finish_registry_page_preparation(&p.a_store, &mut provider, prepared)
+        .unwrap();
+    receiver.retain_registry_for_test(provider, u64::MAX);
+    let held: Vec<_> = (0..3)
+        .map(|_| shared.clone().try_acquire_owned().unwrap())
+        .collect();
+    assert_eq!(shared.available_permits(), 0);
+
+    let request = p
+        .bob
+        .sync
+        .prepare_checkpoint_head(
+            p.alice.local_peer(),
+            catcoms_sync::checkpoint_exchange::CheckpointTarget::Registry(bucket),
+        )
+        .unwrap();
+    let fetch = tokio::spawn(request.fetch());
+    tokio::task::yield_now().await;
+    for _ in 0..8 {
+        if p.alice.sync.has_epoch_service_interest() {
+            break;
+        }
+        p.alice.sync_once().await.unwrap();
+    }
+    assert!(p.alice.sync.has_epoch_service_interest());
+
+    receiver
+        .run(&mut p.alice, &mut p.a_store, SERVER, None)
+        .unwrap();
+    assert!(
+        receiver.has_page_for_test(),
+        "the held Studio page was discarded under contention"
+    );
+    assert_eq!(
+        receiver.service_capture_for_test(),
+        Some(false),
+        "Registry service recaptured the permit released for the waiting Studio page"
+    );
+    assert_eq!(shared.available_permits(), 0);
+    let work = receiver
+        .detach(&mut p.alice)
+        .expect("the waiting Studio page did not capture the released permit");
+    assert_eq!(work.kind_for_test(), "prepare");
+    receiver.complete(&mut p.alice, work.run(None).await);
+
+    let (_, updated) = receiver
+        .run(&mut p.alice, &mut p.a_store, SERVER, None)
+        .unwrap();
+    assert_eq!(updated, Some(target()));
+    let state = p
+        .alice
+        .sync
+        .with_registry_context(|g, d, _, _| p.a_store.load_studio_epoch(SERVER, g, target(), d))
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.op_count(), 2);
+
+    // The Studio preparation released its temporary slot after installation. The retained
+    // authenticated Registry request may now capture that slot and completes normally.
+    let registry_work = (0..4)
+        .find_map(|_| {
+            receiver
+                .run(&mut p.alice, &mut p.a_store, SERVER, None)
+                .unwrap();
+            receiver.detach(&mut p.alice)
+        })
+        .expect("Registry service did not resume after the Studio page persisted");
+    assert_eq!(registry_work.kind_for_test(), "prepare-registry");
+    receiver.complete(&mut p.alice, registry_work.run(None).await);
+    receiver
+        .run(&mut p.alice, &mut p.a_store, SERVER, None)
+        .unwrap();
+    let answered = p
+        .bob
+        .sync
+        .complete_checkpoint_head(fetch.await.expect("the Registry fetch task"));
+    assert!(
+        answered.is_ok(),
+        "Registry service did not complete after yielding the permit: {answered:?}"
+    );
+    drop(held);
 }
 
 pub(super) async fn proven_pair() -> Pair {
