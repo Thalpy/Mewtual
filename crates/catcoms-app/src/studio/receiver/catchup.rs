@@ -1902,8 +1902,8 @@ impl StudioReceiver {
                 //
                 // RT-001. A refusal parks no plan: the worker released admission and the shared
                 // slot when planning failed, and the capture took its media hold with it. The
-                // request stays retryable. A Closing retry reclassifies from durable state; an
-                // Unconfirmed one is answered from the kept refusal while its record is unchanged.
+                // request stays retryable. Either Save provenance is answered from the kept
+                // refusal while its stamped record remains unchanged.
                 // A UI lock released the slot while this job was detached, so its plan is dropped
                 // as it returns rather than parked: nothing may hold draft plaintext through a
                 // lock, and no visit runs while locked to expire it.
