@@ -8,7 +8,23 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-10-10)
+## Status (latest entry: 2026-10-11)
+
+- **Gate 4 exact-head CI refresh (2026-10-11).** The shared line is now
+  `2ab84645b126fafe27a2180d79d9cb6267a0425a`. Agent 2 corrected lifecycle mutation shard 2's
+  assertion ordering in `4a1a1d4c`: the mutation was detected, but a newly earlier `has_room`
+  assertion hid the harness's intended append assertion. PR #39 then merged CI-only sharding for
+  Agent 3's unchanged runtime mutation set after its monolithic Windows job timed out. PR #27's
+  exact-head run is in progress. These CI corrections do not promote P5; native Save and repair
+  commands remain unregistered.
+
+- **Gate 4 core signing coverage closed (2026-10-10).** The short re-review of SIGN-TEST-001b
+  found no issue. A real non-owner member completes Index and Flipnote handoffs of its own work;
+  an identical signed-size shape above the device cap is accepted for the owner and refused before
+  signing for the member. Three isolated mutants pin the owner/author distinction and both cap
+  directions. The production boundary's earlier bounded PASS stands. The separate preflight/
+  framing mutation gap and manual-reason product gap remain non-blocking residuals; see
+  `GATE4-HANDOFF-SIGNING-REVIEW.md`.
 
 - **Gate 4 repair: PR #27 review MEDIUM-1 and two interface points (2026-10-10).** A repair job's
   S3 now builds its storage budget only after installing (or, for a bucket, memoizing) the rebuild,
@@ -19,6 +35,8 @@ and ranks the live hazards in that path.
   without the seed. The repair claim's comment and THREAT-MODEL
   now name the writers that do not consult it (H5, Flow R's R3, Flow S, warm gossip ingest); S3's
   digest recheck still catches them. Details are in `GATE4-AGENT-3-STATUS.md`.
+  PR #37 is merged at `acc43bcf`; the exact combined-head PR #27 run is the remaining hosted
+  authority rather than either repair PR's earlier partial run.
 
 - **Gate 4 repair: real-peer Registry Flow D and plan D (2026-10-09).** A peer now takes a bucket
   repair from a real discovery answer and installs its network-fetched replacement through the
@@ -37,9 +55,12 @@ and ranks the live hazards in that path.
   fetch has come to nothing. S3 now drops a page fetched for the source it rewrote, which before
   could pause catch-up. The PR #36 review added three more: an owner alone (no peer at all)
   still recovers from that crash; the same repair offered again while its job runs completes
-  that job's evidence; and an offered repair's failure at any stage holds only that repair, never
-  its document. Still open: a peer's repaired-seed refetch is not paced (pre-existing), hosted
-  CI on PR #36 and a bounded repair verdict. Details are in `GATE4-AGENT-3-STATUS.md`.
+  that job's evidence; and an offered repair's S1/S2/S3-budget failure or absent local copy holds
+  only that repair, never its document. Once an offer applies, a recovery warning or storage
+  refusal correctly holds the document. Still open: a peer's repaired-seed refetch is not paced (pre-existing), and the
+  bounded repair verdict must be carried into the final combined review without being widened.
+  PR #36 and its PR #37 corrections are merged; exact combined-head CI is running on PR #27.
+  Details are in `GATE4-AGENT-3-STATUS.md`.
 
 - **Gate 4 Agent 1: C-3's prerequisite, the validation memo (2026-10-10).** The project owner
   decided the remaining C-3 owners wait for writer-side warms and then a measurement, after which
@@ -96,8 +117,9 @@ and ranks the live hazards in that path.
       - The inbound term has no actor-level test.
   - **Decision, technical debt:** a Studio handoff's final commit (H5) stays one blocking step.
     At the caps (999 frames, 256 draft operations) it takes about 0.15 s, past the design's
-    0.125 s target, once per handoff. Splitting it (C-3 step 3's remaining route) is deferred, and
-    Flow R is next. See `GATE4-AGENT-1-C3-RUNTIME.md` 15.14.
+    0.125 s target, once per handoff. Splitting it (C-3 step 3's remaining route) is deferred;
+    the now-built Flow R shares that accepted single-visit decision. See
+    `GATE4-AGENT-1-C3-RUNTIME.md` 15.14.
   - **Flow R, built:** an interrupted handoff's Prepared record is now resolved by the background
     scheduler in three stages, with the source restore detached, instead of synchronously under
     custody, where a cold source was restored twice. R3 writes exactly what the synchronous
@@ -111,28 +133,28 @@ and ranks the live hazards in that path.
       was a livelock, found by the implementation review. Replay also drops a pass it had begun on
       such a document, which would otherwise stop replay of every other. A Prepared record held
       back by a Hold is never resolved, so it suspends these rails for its document indefinitely.
-      It no longer strands its shared pointer bucket's held owner decision: since PR #37 Registry
-      maintenance resumes that decision before skipping the document.
+      It no longer strands its shared pointer bucket's held owner decision: since PR #37, Registry
+      maintenance resumes that decision before skipping the Prepared document.
     - **Residual:** while a resolution is in flight the actor's one overlay slot is taken, so a
       Save on that server answers `Busy` for a few turns longer than before.
-  - **PR #36 merged into this line, and the PR #27 review:** Agent 3's repair runtime is merged
+  - **PRs #36 and #37 merged into this line, and the PR #27 review:** Agent 3's repair runtime is merged
     in, and every rail keeps both skips. Rotation and the client pass check the repair claim
     first, then the Prepared record. Registry maintenance checks the Prepared document first,
     then the repair claim on its bucket, a different key. The review's LOW-1 is fixed:
     the handoff probe's per-target bookkeeping is now bounded by the 16-watch rail, plus at most
-    64 unexpired holds of unwatched targets. Its MEDIUM-1, in Agent 3's repair commit (the
-    inventory budget was built before the rebuild was installed, so a cold source over the
-    inline threshold failed S3 and the rebuild was discarded), is fixed by Agent 3 in PR #37,
-    merged into this line: S3 installs, or for a bucket memoizes, the rebuild before it budgets.
+    64 unexpired holds of unwatched targets. Its MEDIUM-1 is closed by PR #37, now merged into
+    this line: S3 installs, or for a bucket memoizes, the rebuild before building the inventory
+    budget, so a cold source over the inline threshold does not discard the detached validation.
+    The same correction resumes a prepared-only bucket after its first B3 guess fails.
   - Native Save and repair commands remain unregistered. This is not Gate 4 acceptance.
 
-- **Gate 4 PR #35 reconciliation (2026-10-08).** The candidate now preserves
+- **Gate 4 PR #35 reconciliation (merged 2026-10-08).** The merged history preserves
   `gate4-agent1-runtime` through `7310b22b76848c4b9f85fec816744cff00c1a64f`. Agent 2's newer
   `EpochIntentBudget` implementation remains the sole owner of the 3-branch/8 MiB rails and their
   mutation coverage. PR #35 contributes the still-missing full-envelope parked-request correlation
   for both Closing and Unconfirmed Flow S: another caller may finish abandoned work to free the
   bounded slot, but receives `Busy` and cannot claim that result. P5 remains false; Save and repair
-  commands remain unregistered. This is incremental integration, not Gate 4 acceptance, and Gate 5
+  commands remain unregistered. This was incremental integration, not Gate 4 acceptance, and Gate 5
   remains closed. Residual LOW coverage gap: the common fingerprint path has the Unconfirmed
   same-nonce/different-body regression, but Closing and cross-provenance parked-plan cases do not yet
   have direct equivalents.
