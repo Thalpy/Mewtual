@@ -624,10 +624,42 @@ mod persistence {
         _store: std::marker::PhantomData<&'a mut ServerStore>,
     }
 
+    /// Result of attempting to replace one inventoried record.
+    ///
+    /// The value is deliberately `must_use`: every byte-replacing writer must hand it to the
+    /// inventory-warm path, even when the directory flush reported
+    /// [`AppError::CommittedButNotDurable`]. In that case the renamed bytes are already visible
+    /// and are safe to memoize, although the original durability error must still be returned.
+    /// Errors before the rename carry `visible = false`, so the same mandatory hand-off cannot
+    /// accidentally warm bytes that never reached their final path.
+    #[must_use = "an inventoried replacement must be passed to an inventory-warm finisher"]
+    pub(crate) struct EpochWrite {
+        visible: bool,
+        result: Result<(), AppError>,
+    }
+
+    impl EpochWrite {
+        pub(in crate::store) fn visible(&self) -> bool {
+            self.visible
+        }
+
+        pub(in crate::store) fn finish(self) -> Result<(), AppError> {
+            self.result
+        }
+    }
+
     impl EpochMutation<'_> {
-        /// Atomically replace an inventoried record.
-        pub(in crate::store) fn write(&self, path: &Path, bytes: &[u8]) -> Result<(), AppError> {
-            atomic_write(path, bytes)
+        /// Atomically replace an inventoried record and consume the mutation guard.
+        ///
+        /// Consuming `self` ends the store borrow before the caller installs the corresponding
+        /// validation memo entry. The returned token must then be consumed by that warm path;
+        /// this gives the eight physical replacement sites the same type-level discipline that
+        /// the guard already gives inventory-generation rotation.
+        pub(in crate::store) fn write(self, path: &Path, bytes: &[u8]) -> EpochWrite {
+            let result = atomic_write(path, bytes);
+            let visible =
+                result.is_ok() || matches!(&result, Err(AppError::CommittedButNotDurable(_)));
+            EpochWrite { visible, result }
         }
 
         /// Unlink, in the `io::Result` shape cleanup's batch uses. The physical removal lives here
@@ -1326,9 +1358,9 @@ mod persistence {
     }
 }
 
-pub(crate) use persistence::EpochMutation;
 #[cfg(test)]
 pub(in crate::store) use persistence::{AfterIntercept, CompletedOperation, FailError, Intercept};
+pub(crate) use persistence::{EpochMutation, EpochWrite};
 pub(in crate::store) use persistence::{WriteHooks, WriteStep, WriteTag};
 // Only the test wrappers leave the module. In a non-test build this import does not exist, so
 // nothing outside `persistence` can name a path-generic physical operation at all.

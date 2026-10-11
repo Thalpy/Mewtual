@@ -20,15 +20,18 @@ fn inventory_cache_reauthenticates_and_revalidates_gate_only_changes() {
     let mut budget = budget(&mut store, &f);
     let first = f.op(1);
     f.ingest(&mut store, &first, &mut budget).unwrap();
-    let (cold, p) = scan(&mut store);
-    assert_eq!(p.reused_records, 0);
-    let (warm, p) = scan(&mut store);
+    let (writer_warm, p) = scan(&mut store);
     assert_eq!(p.reused_records, 1);
     assert_eq!(p.uncached_bytes, 0);
+    store.inventory_cache.clear_for_test();
+    let (fresh, p) = scan(&mut store);
+    assert_eq!(p.reused_records, 0);
     assert_eq!(
-        cold.records_for_server(SERVER, &f.group.group_id())
+        writer_warm
+            .records_for_server(SERVER, &f.group.group_id())
             .unwrap(),
-        warm.records_for_server(SERVER, &f.group.group_id())
+        fresh
+            .records_for_server(SERVER, &f.group.group_id())
             .unwrap()
     );
 
@@ -46,9 +49,8 @@ fn inventory_cache_reauthenticates_and_revalidates_gate_only_changes() {
         )
         .unwrap();
     let (_, p) = scan(&mut store);
-    assert_eq!(p.reused_records, 0);
-    assert!(p.uncached_bytes > 0);
-    assert_eq!(scan(&mut store).1.reused_records, 1);
+    assert_eq!(p.reused_records, 1);
+    assert_eq!(p.uncached_bytes, 0);
 
     let path = f.path(&store);
     // A separately valid owner receipt changes fixed-width hashes/signatures only. Equal
@@ -105,20 +107,11 @@ fn inventory_cache_reauthenticates_and_revalidates_gate_only_changes() {
 }
 
 #[test]
-fn inventory_cache_large_source_needs_explicit_warmup_and_counts_actual_bytes() {
+fn inventory_cache_large_writer_warm_bypasses_only_the_cold_validation_rail() {
     let root = tempfile::tempdir().unwrap();
     let mut store = open(root.path());
     let path = performance::save_inventory_fixture(&mut store);
     let original = fs::read(&path).unwrap();
-    let mut cold = store.scan_studio_receive_inventory().unwrap();
-    assert!(cold
-        .step()
-        .unwrap_err()
-        .to_string()
-        .contains("cold byte limit"));
-    assert!(cold.finish().is_err());
-    let (_, p) = scan(&mut store);
-    assert_eq!(p.reused_records, 0);
     let mut warm = store.scan_studio_receive_inventory().unwrap();
     let p = loop {
         let p = warm.step().unwrap();
@@ -131,6 +124,27 @@ fn inventory_cache_large_source_needs_explicit_warmup_and_counts_actual_bytes() 
     assert_eq!(p.uncached_bytes, 0);
     warm.finish().unwrap();
     assert_eq!(fs::read(&path).unwrap(), original);
+
+    // A remount (represented here by clearing the process-local memo) starts cold. The same
+    // large bytes must still meet the cold-validation rail until an explicit full scan validates
+    // them; writer warmth is neither durable authority nor a way around the aggregate read rail.
+    store.inventory_cache.clear_for_test();
+    let mut cold = store.scan_studio_receive_inventory().unwrap();
+    assert!(cold
+        .step()
+        .unwrap_err()
+        .to_string()
+        .contains("cold byte limit"));
+    assert!(cold.finish().is_err());
+    let (_, p) = scan(&mut store);
+    assert_eq!(p.reused_records, 0);
+    let mut rewarmed = store.scan_studio_receive_inventory().unwrap();
+    loop {
+        if rewarmed.step().unwrap().complete {
+            break;
+        }
+    }
+    assert_eq!(rewarmed.finish().unwrap().records().count(), 1);
 
     // Authenticate a changed, equal-size wrapper whose inner history is deliberately damaged.
     // The second cold check must reject BEFORE attempting its expensive validator. Without

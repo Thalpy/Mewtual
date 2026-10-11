@@ -41,7 +41,8 @@ impl Env {
             rt: InventoryRuntime::default(),
         }
     }
-    /// A real Studio source record. Its first validation is fresh, so a budgeted step parks it.
+    /// A real Studio source record, followed by a simulated remount that makes its first
+    /// validation fresh so a budgeted step parks it.
     ///
     /// Small on purpose: the receive profile this runtime scans under has a 256 KiB cold-byte
     /// limit, and the stock fixture's >256 KiB source is refused by it, which is the rail doing
@@ -59,6 +60,10 @@ impl Env {
             3,
             1_000,
         );
+        // Production writers warm the process-local inventory memo. These state-machine tests
+        // exercise cold validation, detachment and restart accounting, so establish that
+        // boundary explicitly instead of accidentally depending on a writer leaving bytes cold.
+        self.store.forget_inventory_memo_for_test();
     }
     /// One whole visit, as the receiver's `run` makes it: the lifecycle step, one owner's turn,
     /// and the end-of-visit mark.

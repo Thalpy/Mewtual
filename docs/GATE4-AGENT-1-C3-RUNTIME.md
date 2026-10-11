@@ -1166,7 +1166,8 @@ about 14 ms, which raises the full-frame share to about 26 ms. That is item 0 of
 below. The rest of the commit's growth is unattributed, and attributing it is item 0's second
 half.
 
-**Nothing below is built.** It answers 15.7 finding by finding, then orders the work.
+**At this review point nothing below was built.** It answers 15.7 finding by finding, then orders
+the work; sections 16.1 onward record the later implementation checkpoints.
 
 #### HIGH-1: every byte-changing writer warms the memo it invalidated
 
@@ -1813,8 +1814,7 @@ M1 has two halves.
 - **The memo half, here:** entirely in `inventory.rs` and `inventory/cache.rs`. 15.7 judged
   memoizing every family sound on its own, without the warms.
 - **The writer half:** the warms at the eight writers, the forced-warm token and 15.9's M4
-  contract. Five of the eight writer files are Agent 2's or Agent 3's, so it waits on their
-  go-ahead.
+  contract. It is implemented in 16.3 after Agent 2 and Agent 3 approved the shared writer files.
 
 **What changed:**
 - **The value carries the facts.** A memo entry is the accounting record plus, for an Intents
@@ -1873,3 +1873,30 @@ cold rail still bounds each scan's fresh work.
 | LOW-3 | stale "only Registry and Studio are cacheable" comments in `performance.rs` | **fixed** (four comments, and the profile name explained rather than renamed, since docs and run commands quote it) |
 | residual | two replay tests (`studio_exchange/tests/replay.rs`) needed records to park, and the watch's synchronous scan now warms them | **confirmed by the full suite and fixed:** a new `forget_inventory_memo_for_test` empties the memo, and only the memo, after the watch, so each test's job meets the cold records it was written for. The existing hook also drops the retained Studio source, which would change what they test |
 | residual | THREAT-MODEL could say warm bytes still count against the 8 MiB read rail, and that entries (another member's Unconfirmed provider id included) outlive their records until a covering scan prunes | **added** |
+
+### 16.3 M1's writer half, built (2026-10-11)
+
+All eight byte-replacing writers now warm the all-family inventory memo after their replacement
+becomes visible: DraftArchive; both Intents writers; both Recovery writers; OwnerReceipts;
+Registry; and Studio. `EpochMutation::write` consumes the mutation guard and returns a
+`#[must_use]` `EpochWrite`, so a replacement site cannot continue without explicitly handing its
+visibility/result token to a warm finisher.
+
+The warm follows 15.9's M4 contract:
+
+- identity, cache key and digest are derived from authenticated plaintext through the same helper
+  the scanner uses;
+- bytes substituted by a test hook are not warmed;
+- a pre-rename failure warms nothing, while `CommittedButNotDurable` warms the visible rename and
+  still returns the original durability error;
+- validator-produced families use the canonical inventory validator; Registry and Studio use the
+  live writer's accounting record and compare the whole record with canonical validation in test
+  and debug builds;
+- a post-write validation defect is a debug assertion and skipped optimization, not a new
+  production failure after durable state changed.
+
+Focused regressions confirm that first accounting scans reuse Registry and Studio writer entries,
+that a remount-cold large record still meets the cold rail, that reference scans still enumerate
+bytes, and that the detached/performance fixtures explicitly clear the process-local memo when
+they intend to model cold startup. The complete suite and independent bounded review remain part of
+the combined checkpoint rather than being claimed by this implementation entry.

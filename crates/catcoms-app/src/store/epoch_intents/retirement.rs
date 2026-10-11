@@ -354,7 +354,15 @@ impl ServerStore {
         let framed = frame(&sealed);
         let mutation = self.epoch_mutation_guard();
         let framed = hooks.before(WriteTag::Intents, &path, &framed)?;
-        mutation.write(&path, &framed)?;
+        let original_plain =
+            matches!(&framed, std::borrow::Cow::Borrowed(_)).then_some(plain.as_slice());
+        let write = mutation.write(&path, &framed);
+        self.finish_validated_inventory_write(
+            write,
+            super::super::epoch_recovery::inventory::EpochRecordKind::Intents,
+            original_plain,
+            next,
+        )?;
         hooks.after_write(WriteTag::Intents, &path)?;
         reservation.commit();
         intents.records.insert(id, next);

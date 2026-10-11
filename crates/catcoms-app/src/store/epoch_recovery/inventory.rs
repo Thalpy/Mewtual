@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use super::*;
 use crate::store::epoch_budget::MAX_ACCOUNTED_RECORDS;
-use crate::store::{epoch_draft_archive, epoch_intents, epoch_owner};
+use crate::store::{epoch_draft_archive, epoch_intents, epoch_owner, EpochWrite};
 use catcoms_wire::DocType;
 pub(in crate::store) mod cache;
 
@@ -1583,17 +1583,15 @@ impl EpochStorageCursor {
                         .checked_add(size)
                         .filter(|bytes| *bytes <= self.byte_limit)
                         .ok_or_else(|| invalid("epoch storage inventory byte limit reached"))?;
-                    let mut d = Decoder::new(&plain);
-                    let scope = d.get_bytes().map_err(invalid)?;
-                    let (server, document) = decode_record_scope(scope, family)?;
-                    if blake3::hash(scope).as_bytes() != &hash {
+                    let identity = authenticated_record_identity(family, &plain)?;
+                    if identity.key.1 != hash {
                         return Err(invalid(
                             "epoch storage filename does not match its authenticated scope",
                         ));
                     }
                     // The digest includes scope/channel, receipt book, gate, quarantine and ALL
                     // signed history. Stat/filename/snapshot-head equality alone is insufficient.
-                    let digest = blake3::hash(&plain);
+                    let digest = identity.digest;
                     // A cached version these bytes contradict can never hit again, and left in
                     // place it would block a later refused result from warming the record
                     // (C-3 runtime design 14.3, piece 1). On every read of every family, now that
@@ -1634,6 +1632,12 @@ impl EpochStorageCursor {
                             must_detach(store, family, size, self.references.is_some(), remaining)
                         });
                         if detach {
+                            // `identity` borrows the authenticated plaintext. Preserve the
+                            // owned facts needed by the parked record, then end that borrow
+                            // before moving `plain` into resumable inventory state.
+                            let server = identity.server;
+                            let document = identity.document.clone();
+                            drop(identity);
                             self.awaiting = Some((family, hash));
                             self.parked = Some(ParkedEpochRecord {
                                 identity: self.identity.clone(),
@@ -1660,14 +1664,22 @@ impl EpochStorageCursor {
                         validate_record_body(
                             family,
                             &plain,
-                            scope,
-                            server,
-                            &document,
+                            identity.scope,
+                            identity.server,
+                            &identity.document,
                             size,
                             self.references.is_some(),
                         )?
                     };
-                    self.install_body(store, (family, hash), server, document, size, digest, body)?;
+                    self.install_body(
+                        store,
+                        (family, hash),
+                        identity.server,
+                        identity.document,
+                        size,
+                        digest,
+                        body,
+                    )?;
                     break;
                 }
                 RecoveryName::Temporary(destination) => {
@@ -2386,6 +2398,151 @@ fn memoize(
         Memoize::IfVacant => store
             .inventory_cache
             .put_if_vacant(key, size, digest, record, intent),
+    }
+}
+
+/// The authenticated identity shared by inventory traversal and writer-side warming.
+///
+/// Writers do not get to choose the cache key, server or document independently of the bytes
+/// they persisted. Deriving all four here preserves the scan's exact binding and prevents a
+/// caller-argument mix-up from creating a reusable validation entry for another record.
+struct AuthenticatedRecordIdentity<'a> {
+    scope: &'a [u8],
+    server: u64,
+    document: LogicalDocument,
+    key: (EpochRecordKind, [u8; 32]),
+    digest: blake3::Hash,
+}
+
+fn authenticated_record_identity<'a>(
+    family: EpochRecordKind,
+    plain: &'a [u8],
+) -> Result<AuthenticatedRecordIdentity<'a>, AppError> {
+    let mut decoder = Decoder::new(plain);
+    let scope = decoder.get_bytes().map_err(invalid)?;
+    let (server, document) = decode_record_scope(scope, family)?;
+    Ok(AuthenticatedRecordIdentity {
+        scope,
+        server,
+        document,
+        key: (family, *blake3::hash(scope).as_bytes()),
+        digest: blake3::hash(plain),
+    })
+}
+
+impl ServerStore {
+    /// Finish a byte-replacing write whose memo entry must come from the canonical validator.
+    ///
+    /// A failed validation after visible bytes is a writer bug, not a reason to turn a completed
+    /// disk mutation into a new application failure. Debug/test builds fail loudly; production
+    /// skips the optimization and returns the write's original result. `plain = None` is the
+    /// deliberate test-hook substitution path: the original plaintext does not describe the
+    /// bytes the hook persisted and therefore must not be cached.
+    pub(in crate::store) fn finish_validated_inventory_write(
+        &mut self,
+        write: EpochWrite,
+        family: EpochRecordKind,
+        plain: Option<&[u8]>,
+        size: u64,
+    ) -> Result<(), AppError> {
+        if write.visible() {
+            if let Some(plain) = plain {
+                let validated = (|| {
+                    let identity = authenticated_record_identity(family, plain)?;
+                    let body = validate_record_body(
+                        family,
+                        plain,
+                        identity.scope,
+                        identity.server,
+                        &identity.document,
+                        size,
+                        false,
+                    )?;
+                    Ok::<_, AppError>((identity.key, identity.digest, body))
+                })();
+                match validated {
+                    Ok((key, digest, body)) => {
+                        let installed = memoize(
+                            self,
+                            key,
+                            size,
+                            digest,
+                            body.record,
+                            body.intent,
+                            Memoize::Replace,
+                        );
+                        debug_assert!(installed, "a canonical writer warm was refused");
+                    }
+                    Err(error) => {
+                        debug_assert!(
+                            false,
+                            "persisted {family:?} bytes failed their inventory validator: {error}"
+                        );
+                    }
+                }
+            }
+        }
+        write.finish()
+    }
+
+    /// Finish a Registry/Studio write using the live unit's already-computed accounting record.
+    ///
+    /// Restoring either family merely to warm it would put the expensive validation back under
+    /// custody. Debug and test builds nevertheless compare the whole `StorageRecord` with the
+    /// canonical validator on every warm; a divergence is a bug. Identity and digest always come
+    /// from the plaintext, never from writer arguments.
+    pub(in crate::store) fn finish_inventory_write_from_record(
+        &mut self,
+        write: EpochWrite,
+        family: EpochRecordKind,
+        plain: Option<&[u8]>,
+        size: u64,
+        record: StorageRecord,
+    ) -> Result<(), AppError> {
+        if write.visible() {
+            if let Some(plain) = plain {
+                match authenticated_record_identity(family, plain) {
+                    Ok(identity) => {
+                        #[cfg(any(test, debug_assertions))]
+                        match validate_record_body(
+                            family,
+                            plain,
+                            identity.scope,
+                            identity.server,
+                            &identity.document,
+                            size,
+                            false,
+                        ) {
+                            Ok(body) => debug_assert_eq!(
+                                body.record, record,
+                                "writer accounting diverged from inventory validation"
+                            ),
+                            Err(error) => debug_assert!(
+                                false,
+                                "persisted {family:?} bytes failed their inventory validator: {error}"
+                            ),
+                        }
+                        let installed = memoize(
+                            self,
+                            identity.key,
+                            size,
+                            identity.digest,
+                            record,
+                            None,
+                            Memoize::Replace,
+                        );
+                        debug_assert!(installed, "a writer-facts warm was refused");
+                    }
+                    Err(error) => {
+                        debug_assert!(
+                            false,
+                            "persisted {family:?} bytes have an invalid inventory identity: {error}"
+                        );
+                    }
+                }
+            }
+        }
+        write.finish()
     }
 }
 
@@ -3724,6 +3881,7 @@ mod tests {
         store.detach_every_validation_for_test();
         let doc = document(b"group", b"parked");
         stage(&mut store, 7, &doc, 1);
+        store.inventory_cache.clear_for_test();
         let clock = ManualClock::new(0);
 
         let mut cursor = store
@@ -3890,6 +4048,9 @@ mod tests {
             )
             .unwrap();
         }
+        // The writer-populated memo is intentionally process-local. This comparison exercises
+        // cold detached validation, as it would after a remount.
+        store.inventory_cache.clear_for_test();
 
         let clock = ManualClock::new(0);
         let mut cursor = store
@@ -4020,6 +4181,7 @@ mod tests {
         for key in [&b"one"[..], &b"two"[..], &b"three"[..]] {
             stage(&mut store, 7, &document(b"group", key), 1);
         }
+        store.inventory_cache.clear_for_test();
         let clock = ManualClock::new(0);
         let mut cursor = store
             .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryOnly)
@@ -4241,6 +4403,7 @@ mod tests {
         let clock = ManualClock::new(0);
         let park = |store: &mut ServerStore| {
             store.detach_every_validation_for_test();
+            store.inventory_cache.clear_for_test();
             let mut cursor = store
                 .begin_epoch_storage_scan(EpochInventoryCoverage::RecoveryOnly)
                 .unwrap();
@@ -4562,6 +4725,7 @@ mod tests {
         store.detach_every_validation_for_test();
         let doc = document(b"group", b"park");
         stage(&mut store, 7, &doc, 1);
+        store.inventory_cache.clear_for_test();
         let mut job = store
             .begin_epoch_inventory_job(EpochInventoryCoverage::RecoveryOnly)
             .unwrap();
@@ -5267,6 +5431,9 @@ mod tests {
         let mut store = open(root.path());
         stage(&mut store, 7, &document(b"group", b"early"), 1);
         stage(&mut store, 7, &document(b"group", b"late"), 1);
+        // Model a remount/cold process. Production writers now warm their own records, but this
+        // test is specifically about how two fresh validations consume one visit's time slice.
+        store.inventory_cache.clear_for_test();
         let listed = fs::read_dir(root.path().join("servers")).unwrap().count();
         assert_eq!(
             listed, 2,
@@ -5302,6 +5469,7 @@ mod tests {
         let mut store = open(root.path());
         store.detach_every_validation_for_test();
         stage(&mut store, 7, &document(b"group", b"switched"), 1);
+        store.inventory_cache.clear_for_test();
         let clock = ManualClock::new(0);
         let mut job = store
             .begin_epoch_inventory_job(EpochInventoryCoverage::RecoveryOnly)

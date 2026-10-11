@@ -536,6 +536,10 @@ fn case(
     shape: FixtureShape,
     expected_refs: Option<ExpectedRefs>,
 ) -> Case {
+    // Fixture construction uses the production writers, which now warm their own records. A
+    // profiling case starts at the documented cold boundary; Warm then means "first trial
+    // populates, later trials reuse", while Fresh clears again before every trial.
+    store.inventory_cache.clear_for_test();
     store.detach_every_validation_for_test();
     Case {
         label: label.into(),

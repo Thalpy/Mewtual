@@ -6014,9 +6014,11 @@ makes that more important, not less.
      since without them a converted catch-up job provably never finishes under ordinary receive
      (15.7, HIGH-1). After the measurement, each remaining owner is either converted or recorded as
      debt, as H5 was. **M2 is built** (16.1): the memo is indexed, bounded at 65 536 and pruned.
-     **M1's memo half is built** (16.2). Next is M1's writer half, waiting on Agent 2's and
-     Agent 3's go-ahead for their writer files, then MEDIUM-3's progress rule, then section 7's
-     measurement.
+     **M1's memo half is built** (16.2), and **its writer half is now built** (16.3) after Agent 2
+     and Agent 3 approved the shared writer files. All eight replacements consume a forced-warm
+     token; visible uncertain renames warm, pre-rename/test-substitution paths do not, and
+     Registry/Studio writer facts are fully cross-checked in test/debug builds. Next is the held
+     MEDIUM-3 progress rule with its review additions, then section 7's measurement.
    - **MEDIUM-3 is built and reviewed but held, not landed** (2026-10-10, commit `2e7892aa`,
      kept on the local ref `refs/agent1/medium3-held`). It was built out of 15.9's order, before
      the writer warms. Its review (Opus, static) found no blocker or high, but MEDIUM-1 showed why
