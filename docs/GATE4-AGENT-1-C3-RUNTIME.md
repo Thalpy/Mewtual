@@ -1955,3 +1955,29 @@ inherited from that earlier result. THREAT-MODEL's replay-move paragraph states 
 **M1's writer half is now built.** Once the review additions and combined verification pass, the
 next C-3 step is section 7's measurement, from which each remaining owner is converted or recorded
 as debt.
+
+### 16.5 Section 7 measured; remaining owners retained as explicit debt (2026-10-11)
+
+The release visit-cost profile was rerun after the all-family writer warms. Across eight
+interleaved trials, a warm Registry or Studio accounting traversal spent about 0-8 ms in its
+measured stepping phase for the sampled records, including the largest 3.7-3.9 MiB title/Registry
+cases. Fresh cacheable records still park, as designed; the same case then hits the memo on every
+later trial. The profile passed in 586.76 s. These figures are host evidence, not a portable
+latency promise.
+
+The second-actor condition is now pinned by
+`a_foreign_production_write_warms_the_restarted_job_to_completion`. A cold Studio record is out
+for detached validation when another actor publishes a second record through the real writer.
+The live cursor is overtaken and charged as foreign, but the writer's memo warms let its restarted
+job finish and mint in the same next turn, without a second detach or backoff.
+
+**Decision:** replay's manual move remains the production resumable owner. Catch-up persistence,
+checkpoint service/discovery/rotation, receive, H1 and repair commits keep their existing
+synchronous inventory calls as measured technical debt. Converting those owners would require
+new retained per-operation stages (and, for H1/repair, embedded jobs that reuse their existing
+ownership) while their steady-state scans are writer-warm. That larger lifecycle change is not
+justified by the measured common path at this gate. The honest residual is cold/remounted work:
+automatic receive's existing 1024-entry/64-record/8 MiB/256 KiB-cold rails still fail closed, and
+the full-profile H1/repair paths can hold one custody visit while validating a cold vault. This
+decision closes C-3 adoption for Gate 4 without claiming those synchronous paths are latency-
+bounded by `INVENTORY_SLICE_MS`; a future latency gate may split them.

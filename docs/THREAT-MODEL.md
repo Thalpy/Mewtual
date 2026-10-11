@@ -374,6 +374,16 @@ table with the commit that closed it.
   - **Fallback:** a move that the job cannot serve within 60 s falls back to the synchronous scan
     it used before step 2. So the move, and its recovery notice, can be delayed by up to that
     long.
+- **The other automatic Studio inventory owners remain synchronous, as measured debt** (C-3
+  runtime 16.5). After production writers warm every record family, the sampled warm Registry and
+  Studio accounting traversals spent about 0-8 ms in release profiling, and a real foreign writer
+  overtaking a cold shared job leaves enough memo progress for the restarted job to mint on its
+  next turn. These are host measurements, not an `INVENTORY_SLICE_MS` guarantee. A remount makes
+  the memo cold: receive/catch-up retain their 1024-entry, 64-record, 8 MiB and 256 KiB-cold
+  fail-closed rails, while full-profile H1 and repair commits can still hold one custody visit for
+  cold validation. Replay is the only production owner that keeps an inventory cursor across
+  visits; a future latency gate must give H1/repair embedded ownership-aware jobs rather than
+  borrowing a second pool permit.
 - **A Studio handoff's final commit (H5) runs in one custody visit, accepted as technical debt**
   (decision 2026-10-09, `GATE4-AGENT-1-C3-RUNTIME.md` 15.14). It grows with the document and the
   local draft, both capped (999 frames, 256 draft operations). At both caps it measured about

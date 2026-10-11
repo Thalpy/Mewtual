@@ -47,7 +47,7 @@ impl Env {
     /// Small on purpose: the receive profile this runtime scans under has a 256 KiB cold-byte
     /// limit, and the stock fixture's >256 KiB source is refused by it, which is the rail doing
     /// its job rather than anything this runtime should work around.
-    fn source(&mut self, object: u8) {
+    fn write_source(&mut self, object: u8) {
         crate::store::save_studio_source_fixture_ops(
             &mut self.store,
             SERVER,
@@ -60,6 +60,9 @@ impl Env {
             3,
             1_000,
         );
+    }
+    fn source(&mut self, object: u8) {
+        self.write_source(object);
         // Production writers warm the process-local inventory memo. These state-machine tests
         // exercise cold validation, detachment and restart accounting, so establish that
         // boundary explicitly instead of accidentally depending on a writer leaving bytes cold.
@@ -483,6 +486,41 @@ fn a_restart_storm_backs_off_and_recovers() {
         ready(env.turn().unwrap()),
         "a fresh job did not reuse the final validation retained before backoff"
     );
+}
+
+/// C-3 runtime design section 7's second-actor case, after the all-family writer warms landed.
+///
+/// The first record is deliberately cold and has left the actor for detached validation. A
+/// different actor then writes a second Studio record through the production writer. That write
+/// overtakes the live cursor, but it also warms the exact bytes it made visible (and its budget
+/// scan warms the unchanged first record). Installing the detached result must therefore take
+/// one charged restart and finish from memo hits in the same receiver turn, rather than entering
+/// backoff or parking either record again.
+#[test]
+fn a_foreign_production_write_warms_the_restarted_job_to_completion() {
+    let mut env = Env::new(1);
+    env.source(1);
+    assert!(matches!(env.turn().unwrap(), InventoryTurn::NotYet));
+    let detach = env.rt.take_detach().expect("the cold source parked");
+
+    // Outside this actor's visit, so `begin_visit` must classify the token movement as foreign.
+    // Do not clear the memo: the production writer's warm is the behavior under test.
+    env.write_source(2);
+    env.validate_and_complete(detach);
+
+    assert!(
+        ready(env.turn().unwrap()),
+        "the writer-warmed restart parked again or entered backoff"
+    );
+    assert_eq!(
+        env.rt.own_restarts, 0,
+        "a foreign write was treated as this actor's"
+    );
+    assert_eq!(
+        env.rt.minted, 1,
+        "the restarted shared job did not mint the budget"
+    );
+    assert!(matches!(env.rt.state, State::Idle));
 }
 
 /// Run turns, validating every body the runtime detaches, until the job mints. Returns how many

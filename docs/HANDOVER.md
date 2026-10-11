@@ -10,6 +10,15 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-10-11)
 
+- **Gate 4 C-3 adoption decision completed (2026-10-11).** The post-writer-warm release profile
+  passed: sampled warm Registry/Studio accounting traversal cost was about 0-8 ms, including the
+  largest sampled records. A new real-writer regression proves that a foreign actor can overtake
+  a live cold inventory job and the writer-warmed restart still mints on the next turn without
+  another detach or backoff. Replay remains the resumable production owner. Catch-up, receive,
+  H1 and repair inventory calls remain synchronous as explicit measured debt; cold/remounted
+  paths still have the documented fail-closed rails and can hold one custody visit. This closes
+  C-3's Gate 4 adoption decision, not a universal latency guarantee.
+
 - **Windows rapid-restart reconnect correction (2026-10-11).** The recurring six-client final-
   reunion split was reproduced as a real transport failure rather than accepted as a timing
   flake: libp2p's default known-peer dial reused the listener's local TCP port, and Windows
@@ -91,7 +100,8 @@ and ranks the live hazards in that path.
 
 - **Gate 4 Agent 1: C-3's prerequisite, the validation memo (2026-10-10).** The project owner
   decided the remaining C-3 owners wait for writer-side warms and then a measurement, after which
-  each is converted or recorded as debt (`GATE4-AGENT-1-C3-RUNTIME.md` 16).
+  each is converted or recorded as debt (`GATE4-AGENT-1-C3-RUNTIME.md` 16). That measurement and
+  decision are now recorded in section 16.5 and the newer status entry above.
   - **M2, landed:** the memo is indexed, holds up to 65 536 entries and is pruned by every
     inventory-issuing scan, so a vault of more than 64 memoizable records no longer revalidates
     every record on every scan.
