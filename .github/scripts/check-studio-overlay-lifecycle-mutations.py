@@ -357,14 +357,29 @@ MUTATIONS = [
         "an Unconfirmed branch past the rail refuses to read",
     ),
     # MAP K12: the one predicate `append` and S1b both refuse on. The mutant lets a full branch
-    # report room, so S1b would pass it to a plan that `append` then refuses.
+    # report room. `append` asks the same predicate, passes the rail, and its staged read then
+    # refuses the 65 entries as `Malformed` (the read-side cap), so the `append` assertion fails
+    # on the wrong variant. The test checks `append` before `has_room`, so that
+    # `unconfirmed-op-rail` keeps pinning `append` itself.
     (
         "unconfirmed-branch-room-predicate", "catcoms-replication", REPL_TESTS,
         f"{REPL}/overlay.rs",
         "        self.entries.len() < self.max_ops()\n",
         "        self.entries.len() <= self.max_ops()\n",
         "unconfirmed::an_unconfirmed_branch_accepts_sixty_four_operations_and_refuses_the_sixty_fifth",
-        "has_room sees the Unconfirmed rail",
+        "the Unconfirmed rail refuses operation",
+    ),
+    # The predicate is kind-aware, which is what lets S1b refuse a Closing branch at its own cap
+    # (design 8.3). The mutant applies the Unconfirmed rail to both kinds; every Unconfirmed
+    # assertion still holds, and only the Closing branch at 64 is wrongly reported full.
+    # `max_ops` stays used by `checked_entries`.
+    (
+        "unconfirmed-branch-room-kind", "catcoms-replication", REPL_TESTS,
+        f"{REPL}/overlay.rs",
+        "        self.entries.len() < self.max_ops()\n",
+        "        self.entries.len() < MAX_STUDIO_UNCONFIRMED_OVERLAY_OPS\n",
+        "unconfirmed::an_unconfirmed_branch_accepts_sixty_four_operations_and_refuses_the_sixty_fifth",
+        "has_room keeps the Closing cap",
     ),
     # --- design 8.3's per-server and vault-wide rails, at Flow S's S1b and S3 ---
     #

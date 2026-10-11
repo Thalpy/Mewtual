@@ -520,16 +520,6 @@ fn an_unconfirmed_branch_accepts_sixty_four_operations_and_refuses_the_sixty_fif
             .unwrap();
     }
     let last = ids[RAIL];
-    // The predicate S1b refuses on (MAP K12) says the same as `append`, for both kinds: the full
-    // Unconfirmed branch has no room, the Closing one at the same length does.
-    assert!(
-        !unconfirmed.overlay().unwrap().has_room(),
-        "has_room sees the Unconfirmed rail"
-    );
-    assert!(
-        closing.overlay().unwrap().has_room(),
-        "has_room keeps the Closing cap"
-    );
     let before = unconfirmed.encode_vault(&ledger).unwrap();
     assert!(
         matches!(
@@ -543,6 +533,18 @@ fn an_unconfirmed_branch_accepts_sixty_four_operations_and_refuses_the_sixty_fif
         unconfirmed.encode_vault(&ledger).unwrap(),
         before,
         "a refused Save changes nothing"
+    );
+    // The predicate S1b refuses on (MAP K12) says the same as `append`, for both kinds: the full
+    // Unconfirmed branch has no room, the Closing one at the same length does. After the `append`
+    // assertion, not before it: `unconfirmed-op-rail` pins `append` itself, and its mutant breaks
+    // both, so an earlier `has_room` check would fail first and leave `append` unpinned.
+    assert!(
+        !unconfirmed.overlay().unwrap().has_room(),
+        "has_room sees the Unconfirmed rail"
+    );
+    assert!(
+        closing.overlay().unwrap().has_room(),
+        "has_room keeps the Closing cap"
     );
     closing
         .append(&b.closing, &ledger, last, RAIL as u64 + 1)

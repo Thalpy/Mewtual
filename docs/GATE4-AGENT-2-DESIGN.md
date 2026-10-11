@@ -1344,7 +1344,8 @@ persisted-byte accounting. Refusals are `StorageRefused { reason }` and retain a
     `EpochScope` check and before the 8.3 rails and media. A full branch used to be refused by the
     detached plan, after a capture, media admission and a pool permit, all paid again on every
     retry. It applies to both kinds, so the Closing cap is refused at S1b as well. Pinned by
-    `unconfirmed-branch-room-predicate` and `unconfirmed-rail-branch-s1b`. The store test fills a
+    `unconfirmed-branch-room-predicate`, `unconfirmed-branch-room-kind` (the predicate is
+    kind-aware) and `unconfirmed-rail-branch-s1b`. The store test fills a
     real branch with 64 Saves, about a minute in a debug build, because each Save's plan replays
     the branch so far. The Closing cap at S1b is pinned only through the shared predicate: no test
     fills a Closing branch to 256, which would cost about 16 times as much.
