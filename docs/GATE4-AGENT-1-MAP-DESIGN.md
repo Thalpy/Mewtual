@@ -51,12 +51,12 @@ Each variant carries an **action** rather than a class (review M4), extending th
 `retry: "sameRequest"`: `sameRequest` (retry this exact request), `newTicket` (prepare again from
 the current state), or `none` (cannot proceed until something else changes).
 
-A fourth value already exists outside this table: the Unconfirmed Save's `Paused` outcome maps
+A fourth value already exists outside this table: a Save's `Paused` outcome maps
 natively to `retry: "afterExplicitAccess"` (Agent 2, 2026-10-10). The receiver is paused, and only
 an explicit access through `run` ends a pause, so the same request is worth retrying only after
-one. A renderer that shares one parser across both Save kinds must accept all four. The Closing
-`save_overlay` answers `Busy` while paused for now, and should gain the same value when its native
-result registers.
+one. The completion candidate gives Closing the same internal `Paused` result as Unconfirmed; the
+native Closing result remains unregistered with P5 false. A renderer that shares one parser across
+both Save kinds must accept all four.
 
 | variant | action | from | split needed first |
 |---|---|---|---|

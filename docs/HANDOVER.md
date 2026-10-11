@@ -110,8 +110,8 @@ and ranks the live hazards in that path.
     not free, since the visit paid for media admission and, for the Unconfirmed Save, the budget
     scan. The Unconfirmed Save answers it with `Paused` (natively `retry:"afterExplicitAccess"`,
     Agent 2, 2026-10-10), so a caller can tell it from `Busy`, which the paused event alone could
-    not. The Closing `save_overlay` still answers `Busy` while paused, and needs the same
-    distinction before its native result registers.
+    not. The completion candidate gives the internal Closing path the same `Paused` distinction;
+    neither native Save is registered while P5 is false.
   - **F2:** an actor-level test of Flow H's signing yield, with a second member's checkpoint
     request arriving mid-signing. It found that a request catch-up had reserved, and whose source
     it had installed, was invisible to the yield. Signing then ran to the end, and H5's commit
@@ -120,12 +120,11 @@ and ranks the live hazards in that path.
     may be waiting for the signing job's own pool permit, so it is signed past. It is served after
     H5 only if it is still current then (5 s from arrival) and wins the freed permit; otherwise the
     requester retries.
-    - **Still open:**
-      - `replay_ready()`, the gate for H5 and replay, has the same blind spot. A request captured
-        just before H5 or a replay step can still be dropped, costing the requester a retry.
-      - On a full pool, a held client page or Registry page can keep catch-up from serving at all,
-        while H3 yields to a request it cannot reach.
-      - The inbound term has no actor-level test.
+    - **Completion candidate correction:** an exact prepared Studio or Registry source is served
+      in its installation turn, before H5/replay can evict it. A held Studio or Registry page that
+      cannot prepare under a full pool still lets service reserve the inbound request, so H3 sees
+      the real captured/uncaptured state. Actor-level Studio and Registry full-pool regressions and
+      a Registry serve-on-install regression pin those orderings.
   - **Decision, technical debt:** a Studio handoff's final commit (H5) stays one blocking step.
     At the caps (999 frames, 256 draft operations) it takes about 0.15 s, past the design's
     0.125 s target, once per handoff. Splitting it (C-3 step 3's remaining route) is deferred;
@@ -1531,7 +1530,8 @@ and ranks the live hazards in that path.
   test also passes (35.66 seconds; `logs/gate4-succession-expanded-solo.log`). Root formatting and
   `cargo clippy --locked -j 4 -p catcoms-app --tests -- -D warnings` pass
   (`logs/gate4-succession-expanded-clippy.log`). Broader suites were not repeated for this test-only
-  slice; the previous ambient-check limitation remains below. User-provided review passed.
+  slice; Linux CI later passed the ambient-dependency gate on the integrated candidate, as the
+  exact-head entries above record. User-provided review passed.
   This does not cover repeated owner changes, post-succession joining/PIX availability or
   interrupted successor installation. Signed repair and full Gate 4 acceptance remain open.
 

@@ -635,7 +635,7 @@ impl StudioReceiver {
 
     /// Queue a fresh Save capture for its detached plan, unless the receiver is paused. Returns
     /// whether it was queued. If not, the caller records no scheduling request and answers for the
-    /// pause: the Unconfirmed Save with `Paused`, the Closing `save_overlay` (for now) with `Busy`.
+    /// pause as `Paused` for either Save provenance, distinct from ordinary slot contention.
     ///
     /// Design 18.3 review, F4, in the shape Agent 2 asked for. A paused receiver hands out no work,
     /// and only an unrelated explicit access clears the pause, so a capture queued now would hold
@@ -643,7 +643,8 @@ impl StudioReceiver {
     /// media hold for as long as the pause lasts. Dropping it releases all three. Nothing of the
     /// Save is durable; media admission may have promoted the frame's PIX, which the dropped hold
     /// no longer protects, the cost RT-001 already accepts for a refused plan. The paused refusal is
-    /// therefore not free, and `StudioOverlaySaveVisit::Busy` says how each caller reports it.
+    /// therefore not free, and `StudioOverlaySaveVisit::Paused` tells the caller to wait for an
+    /// explicit access instead of immediately resending.
     ///
     /// The check sits here, after classification, not at either Save's entry: an exact retry of
     /// accepted work is answered at S1 before any capture, so it is not refused merely because the
