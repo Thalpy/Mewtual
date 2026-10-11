@@ -1,8 +1,8 @@
 # Gate 4 Agent 4 status: integration and completion coordination
 
-Current checkpoint: 2026-10-08. PR #35 is being reconciled on
-`gate4-runtime-completion` against `gate4-agent1-runtime` at
-`7310b22b76848c4b9f85fec816744cff00c1a64f`. Gate 4 remains incomplete and Gate 5 remains closed.
+Current checkpoint: 2026-10-11. The isolated completion candidate is based on PR #38's
+`gate4-agent1-runtime` head `bdcae4a30a0870443db92a14f2d80ff8e4947818`. Gate 4 remains
+incomplete and Gate 5 remains closed.
 
 The detailed live ledger is [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md). This document records the
 integration history, current ownership boundaries and the single remaining execution sequence.
@@ -12,6 +12,11 @@ integration history, current ownership boundaries and the single remaining execu
 Agent 4 has assembled the bounded repair integration checkpoint, with its automatic execution
 currently isolated pending the detached runtime boundary:
 
+- The completion branch includes the three post-PR-38 inventory progress commits plus the
+  Closing K12 mirror and Studio/Registry H3 service-order correction. The latter keep an
+  actor-global parked plan's own Closing/Unconfirmed authority and prevent a held page from
+  starving an inbound checkpoint request when preparation capacity is full. They are a bounded
+  review candidate, not permission to expose Save.
 - Agent 3 history is preserved by merge `6a2f89792eecbf6ef2e65d683e6b515bbc65181d`.
 - The Windows directory durability gap is fixed at `5f141994a1cd6e54bf67ac6bf34f47296eeff6f3`.
 - Repair high-water is issuer-tenure scoped, with checked exhaustion, at

@@ -1,6 +1,6 @@
 # Gate 4 Agent 1: G4-A1-MAP, structured refusal reasons (design, revision 2)
 
-Status: **proposal, design-reviewed once, nothing built.** It answers acceptance row G4-A1-MAP
+Status: **proposal, design-reviewed once; K12 is built, the structured carrier is not.** It answers acceptance row G4-A1-MAP
 (`GATE4-ACCEPTANCE.md`): "map runtime refusals to `StudioOverlayEligibility` /
 `StudioOverlayManualReason` without collapsing distinct cases", with "store -> actor -> native
 conversion coverage for every reason, including stale final delivery". Decisions that need Agent
@@ -165,11 +165,14 @@ uses cancellation, a session lock or a generation change, not clock expiry.
    the scheduled request is cleared". Clearing at a pause, or at another request's park expiry,
    would forget a refusal that still describes an unchanged record, and the stamp check covers
    every case the clearing was for. So a kept refusal ends only at a lock, a stale stamp, its
-   deadline or a replacement. **Still to do: the Closing mirror** (`save_overlay` and the park
-   site in `complete`). It accepts either fingerprint, which are domain-separated by the
-   provenance tag, so one slot serves both. It waits until Agent 2 has finished in `catchup.rs`.
-   When the carrier lands, the kept refusal keeps its typed reason, so a retry is answered
-   exactly as the first refusal was.
+   deadline or a replacement. **The Closing mirror is built on the completion candidate
+   (2026-10-11).** `save_overlay` answers the retained refusal before S1b; `complete` parks either
+   provenance; their fingerprints are domain-separated; and an actor-global parked plan retains
+   the exact Closing record or Unconfirmed mint kind needed for its eventual commit. The focused
+   Closing regression proves that a current stamped refusal is returned without a second plan or
+   permit. A direct cross-provenance parked-plan regression remains useful LOW coverage. When the
+   carrier lands, the kept refusal must retain its typed reason so a retry is answered exactly as
+   the first refusal was.
 2. **S1b refusals emit no `RefreshRequired`**, so after `InstalledSource` or `SourceNotClosing`
    the row can lag. Emit one on any refusal caused by a durable-state change (review M3).
 

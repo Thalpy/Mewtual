@@ -10,6 +10,17 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-10-11)
 
+- **Gate 4 completion candidate: K12 Closing mirror and H3 service order (2026-10-11).** Starting
+  from PR #38's shared runtime baseline `bdcae4a30a0870443db92a14f2d80ff8e4947818`, the isolated
+  completion branch preserves a detached Flow S plan's exact Closing/Unconfirmed commit authority,
+  retains stamped refusals for both provenances and answers a current Closing retry before new
+  S1b work. The Studio and Registry catch-up paths now reserve checkpoint service before returning
+  a held page that cannot prepare under a full pool, and answer a request in the same turn its
+  exact prepared source is installed. Focused Closing, full-pool Studio/Registry and Registry
+  serve-on-install regressions pass. This is a bounded runtime checkpoint awaiting adversarial
+  review and full-suite/exact-head CI; it does not implement the full structured refusal carrier,
+  promote P5 or register native commands.
+
 - **Gate 4 exact-head CI refresh (2026-10-11).** The shared line is now
   `2ab84645b126fafe27a2180d79d9cb6267a0425a`. Agent 2 corrected lifecycle mutation shard 2's
   assertion ordering in `4a1a1d4c`: the mutation was detected, but a newly earlier `has_room`
@@ -155,9 +166,8 @@ and ranks the live hazards in that path.
   for both Closing and Unconfirmed Flow S: another caller may finish abandoned work to free the
   bounded slot, but receives `Busy` and cannot claim that result. P5 remains false; Save and repair
   commands remain unregistered. This was incremental integration, not Gate 4 acceptance, and Gate 5
-  remains closed. Residual LOW coverage gap: the common fingerprint path has the Unconfirmed
-  same-nonce/different-body regression, but Closing and cross-provenance parked-plan cases do not yet
-  have direct equivalents.
+  remains closed. The completion candidate adds the direct Closing refusal/fingerprint regression;
+  a direct cross-provenance parked-plan case remains a LOW coverage gap.
 
 - **Gate 4 Agent 2: the Unconfirmed aggregate rails, and the parked-plan mutation fix
   (2026-10-07).**

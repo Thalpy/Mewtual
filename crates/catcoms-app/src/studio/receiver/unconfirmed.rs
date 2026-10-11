@@ -112,6 +112,7 @@ impl StudioReceiver {
                     },
                     StudioOverlaySaveVisit::Scheduled => StudioUnconfirmedSaveOutcome::Scheduled,
                     StudioOverlaySaveVisit::Busy => StudioUnconfirmedSaveOutcome::Busy,
+                    StudioOverlaySaveVisit::Paused => StudioUnconfirmedSaveOutcome::Paused,
                 };
                 Ok(StudioControlResponse::UnconfirmedOverlaySaved { target, outcome })
             }
@@ -177,35 +178,21 @@ impl StudioReceiver {
             // The budget before the take: a failed scan then leaves the plan parked for the next
             // visit, instead of destroying a committable plan (re-review of `5ccc4647`, LOW-2).
             let mut budget = save_budget(server, store, id)?;
-            let (planned, plan, ownership) = self
+            let (context, plan, ownership) = self
                 .catchup
                 .take_any_planned_overlay()
                 .expect("checked just above, in the same custody visit");
+            let (planned, provenance, committed) =
+                self.commit_planned_overlay(server, store, id, context, *plan, &mut budget);
             // Whose plan this is. The slot holds one plan whichever request made it, and the plan
             // does not say, so the receiver remembers which request scheduled it.
-            let ours = planned == target && self.unconfirmed_scheduled == Some(request);
+            let ours = planned == target
+                && provenance == OverlayCommitKind::Unconfirmed
+                && self.unconfirmed_scheduled == Some(request);
             self.closing_scheduled = None;
             self.unconfirmed_scheduled = None;
-            let attempt = self.catchup.preview.mint(server, store, id, planned);
-            let committed = server.sync.with_registry_context(|group, device, _, rng| {
-                store.commit_studio_overlay_with(
-                    id,
-                    group,
-                    planned,
-                    device,
-                    StudioOverlayMint::unconfirmed(attempt),
-                    *plan,
-                    rng,
-                    &mut budget,
-                )
-            });
             // Released only after the commit attempt returns, on success and on error alike.
             drop(ownership);
-            // The commit's write is its last step, so even an error may follow a durable change;
-            // the lifecycle row is refreshed either way, as the control transaction does for every
-            // action that can change the vault (review of `b35e23d2`, MEDIUM-2).
-            self.settlement
-                .note(planned, StudioSettlementState::RefreshRequired);
             if !ours {
                 // Nothing of THIS request was saved, whatever the other commit did. Its success or
                 // refusal belongs to its own caller's retry, not to this response, so it is logged
@@ -286,7 +273,12 @@ impl StudioReceiver {
             StudioOverlayStart::Captured(capture) => {
                 // Refused at the capture, not at the door: everything above answers an exact
                 // retry, so only new authoring reaches this (design 18.3 review, F4).
-                if !self.queue_capture_unless_paused(*capture, ownership, target) {
+                if !self.queue_capture_unless_paused(
+                    *capture,
+                    ownership,
+                    target,
+                    OverlayCommit::Unconfirmed,
+                ) {
                     return Ok(UnconfirmedSaveVisit::Paused);
                 }
                 self.unconfirmed_scheduled = Some(request);

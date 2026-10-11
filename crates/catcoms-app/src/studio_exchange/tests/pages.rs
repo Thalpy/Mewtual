@@ -106,6 +106,141 @@ async fn studio_ready_page_saves_before_due_owner_prepares_another_source() {
     }
 }
 
+/// A cold held page has priority over new client work, but when the shared preparation pool is
+/// full it cannot make inbound checkpoint service unreachable. The service step must at least
+/// reserve the request; because capture cannot get a permit either, it stays explicitly
+/// uncaptured and H3 is then allowed to sign past it until capacity returns.
+#[tokio::test]
+async fn a_cold_held_page_with_a_full_pool_still_reserves_checkpoint_service() {
+    let mut p = proven_pair().await;
+    let (proof, tick) = tokio::join!(
+        p.alice
+            .sync
+            .request_catchup(p.bob.local_peer(), catcoms_wire::DocType::Wiki, 43),
+        p.bob.sync_once(),
+    );
+    proof.unwrap();
+    tick.unwrap();
+
+    let other = StudioTarget::Flipnote {
+        channel: channel(),
+        object: [0xA8; 16],
+    };
+    p.alice.sync.with_registry_context(|g, d, _, _| {
+        crate::store::save_studio_source_fixture(&mut p.a_store, SERVER, g, d, other)
+    });
+    let op = title(181, "held while pool full");
+    let logical = target().document(&p.bob.group_id()).unwrap();
+    p.bob
+        .studio_transaction(
+            &mut p.b_store,
+            SERVER,
+            StudioRequest::Apply {
+                target: target(),
+                epoch_id: epoch_zero_id(logical.doc_type, &logical.logical_key),
+                nonce: op.nonce,
+                body: op.body,
+            },
+        )
+        .unwrap();
+    p.save(&title(182, "local source"));
+
+    let mut receiver = crate::studio::StudioReceiver::default();
+    receiver
+        .run(
+            &mut p.alice,
+            &mut p.a_store,
+            SERVER,
+            Some(StudioRequest::Read { target: target() }),
+        )
+        .unwrap();
+    let watch = p
+        .alice
+        .watch_studio_epoch(&p.a_store, SERVER, target())
+        .unwrap();
+    let mut b = budget(&mut p.alice, &mut p.a_store);
+    let mut pass = p
+        .alice
+        .begin_studio_receive(&mut p.a_store, &watch, p.bob.local_peer(), &mut b)
+        .unwrap();
+    let mut provider = p.bob.studio_page_provider(&p.b_store, SERVER);
+    for _ in 0..2 {
+        let job = p
+            .alice
+            .prepare_studio_receive_step(&mut pass)
+            .unwrap()
+            .unwrap();
+        let (result, ()) = tokio::join!(job.fetch(), async {
+            p.bob.sync_once().await.unwrap();
+            p.bob
+                .serve_studio_request_step(&mut p.b_store, &mut provider, &p.watch)
+                .unwrap();
+        });
+        if p.alice
+            .complete_studio_receive_step(&mut pass, result)
+            .unwrap()
+            == StudioReceiveState::PageReady
+        {
+            break;
+        }
+        p.clock.advance_ms(1000);
+    }
+    assert_eq!(pass.state(), StudioReceiveState::PageReady);
+    receiver.hold_page_for_test(target(), pass);
+
+    // Displace the target's sole prepared graph after the page is ready, then make the shared pool
+    // deterministically full. Persisting the page and capturing a cold service request both need a
+    // permit, so the ordering—not eventual completion—is the property under test.
+    p.alice
+        .studio_transaction(
+            &mut p.a_store,
+            SERVER,
+            StudioRequest::Read { target: other },
+        )
+        .unwrap();
+    let pool = receiver.inject_overlay_pool_for_test(0);
+    let request = p
+        .bob
+        .sync
+        .prepare_checkpoint_head(
+            p.alice.local_peer(),
+            catcoms_sync::checkpoint_exchange::CheckpointTarget::Studio(target()),
+        )
+        .unwrap();
+    let fetch = tokio::spawn(request.fetch());
+    tokio::task::yield_now().await;
+    for _ in 0..8 {
+        if p.alice.sync.has_epoch_service_interest() {
+            break;
+        }
+        p.alice.sync_once().await.unwrap();
+    }
+    assert!(p.alice.sync.has_epoch_service_interest());
+
+    receiver
+        .run(&mut p.alice, &mut p.a_store, SERVER, None)
+        .unwrap();
+    assert!(
+        receiver.has_page_for_test(),
+        "the blocked page was discarded"
+    );
+    assert_eq!(pool.available_permits(), 0);
+    assert!(
+        !p.alice.sync.has_epoch_service_interest(),
+        "the early page return left the service request queued and unreachable"
+    );
+    assert_eq!(
+        receiver.service_capture_for_test(),
+        Some(false),
+        "the full-pool service request was not retained as explicitly uncaptured"
+    );
+    assert!(
+        !fetch.is_finished(),
+        "the blocked request was spuriously answered"
+    );
+    fetch.abort();
+}
+
 pub(super) async fn proven_pair() -> Pair {
     let mut p = Pair::new().await;
     let (proof, tick) = tokio::join!(

@@ -1984,6 +1984,120 @@ async fn a_refused_plan_releases_admission_and_its_pool_slot_without_a_second_vi
     assert!(receiver.catchup.reserve_overlay().is_some());
 }
 
+/// MAP K12's Closing mirror. The completion must retain a Closing refusal under the same stamped
+/// record rule as an Unconfirmed refusal, and the Closing entry point must answer it before it
+/// reserves another permit or repeats S1b/S2. The request fingerprint's provenance byte is also
+/// pinned: identical authoring bytes from the other Save domain cannot claim this answer.
+#[tokio::test]
+async fn a_closing_save_answers_its_stamped_refusal_without_replanning() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(2411);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"closing-refusal", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [0xC1; 16],
+    };
+    let capture = server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_closing_capture_fixture(&mut store, 83, g, d, target, true)
+    });
+    let logical = target.document(&server.group_id()).unwrap();
+    let close = catcoms_replication::CloseRecord::sign(
+        &logical,
+        catcoms_replication::epoch_zero_id(logical.doc_type, &logical.logical_key),
+        0,
+        vec![[1; 32]],
+        &MlsDevice::generate().unwrap(),
+    )
+    .unwrap();
+    let basis = [0xB1; 32];
+    let branch = [0xB2; 32];
+    let operation = crate::studio::domain(
+        target,
+        [0xB3; 16],
+        FlipnoteOp::SetHeader(FlipnoteHeader::Title("closing refusal".into()))
+            .encode()
+            .unwrap(),
+    );
+    let request =
+        super::super::overlay_request_fingerprint(0, target, &basis, &branch, &operation).unwrap();
+    let unconfirmed =
+        super::super::overlay_request_fingerprint(1, target, &basis, &branch, &operation).unwrap();
+    assert_ne!(
+        request, unconfirmed,
+        "the two Save domains produced the same request fingerprint"
+    );
+
+    let mut receiver = StudioReceiver::default();
+    let pool = receiver.catchup.inject_overlay_pool_for_test(1);
+    let ownership = receiver
+        .catchup
+        .reserve_overlay()
+        .expect("the Closing plan is admitted");
+    receiver.closing_scheduled = Some(request);
+    receiver.catchup.schedule_overlay(
+        capture,
+        ownership,
+        target,
+        OverlayCommit::Closing(Box::new(close.clone())),
+    );
+    let result = receiver
+        .detach(&mut server)
+        .expect("the Closing plan detaches")
+        .run(None)
+        .await;
+    let refusal = match &result {
+        StudioBackgroundResult::OverlayPlanned(_, Err(error)) => error.to_string(),
+        _ => panic!("the full intent ledger did not refuse the Closing plan"),
+    };
+    receiver.complete(&mut server, result);
+    assert!(receiver.catchup.has_overlay_refusal_for_test());
+    assert_eq!(pool.available_permits(), 1);
+
+    let mut scan = store.scan_epoch_storage_with_studio().unwrap();
+    while !scan.step().unwrap().complete {}
+    let inventory = scan.finish().unwrap();
+    let mut budget = server
+        .sync
+        .with_registry_context(|g, _, _, _| store.studio_storage_budget(83, g, &inventory))
+        .unwrap();
+    let retry = match receiver.save_overlay(
+        &mut server,
+        &mut store,
+        83,
+        target,
+        &close,
+        basis,
+        branch,
+        operation,
+        &mut budget,
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("the identical Closing retry was not answered from its kept refusal"),
+    };
+    assert!(
+        retry.to_string().ends_with(&refusal),
+        "the retry did not carry the kept refusal: {retry}"
+    );
+    assert_eq!(
+        pool.available_permits(),
+        1,
+        "answering the kept Closing refusal reserved another permit"
+    );
+    assert!(
+        receiver.detach(&mut server).is_none(),
+        "answering the kept Closing refusal queued another plan"
+    );
+}
+
 /// Design 18.3 review, F4: `pause` releases a Save capture that was queued but not yet detached.
 ///
 /// A paused receiver hands out no work, and only an unrelated explicit access clears the pause, so
@@ -2431,7 +2545,8 @@ async fn a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_serv
     // parked, for a custody visit. The request then passes through three of the priority answer's
     // four terms in turn: queued service interest, a parked result, and, once the source is
     // installed, a captured request still owed its answer. Catch-up alternates serving with its
-    // own client turns, so that last state lasts at least one turn.
+    // own client turns. The installed source is now served in its installation turn, so the old
+    // "captured, installed and still owed" gap must not appear at a turn boundary.
     displace_warm_graph(&mut o);
 
     // 2. Bob asks the owner for this document's checkpoint head. Until the answer goes back, a
@@ -2474,8 +2589,8 @@ async fn a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_serv
         fetch.is_finished(),
         "the owner never answered Bob's request"
     );
-    // Each term must really have been the reason for some turn, or a mutant removing it would
-    // pass here for want of a turn that needed it.
+    // The queued and parked terms must really have been the reason for some turn, or a mutant
+    // removing either would pass here for want of a turn that needed it.
     assert!(
         queued_yields >= 1,
         "no turn began with the request queued as service interest"
@@ -2484,9 +2599,9 @@ async fn a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_serv
         parked_yields >= 1,
         "no turn began with only the request's preparation result parked"
     );
-    assert!(
-        owed_yields >= 1,
-        "no turn began with the request reserved, installed and still unanswered"
+    assert_eq!(
+        owed_yields, 0,
+        "the installed request was left unanswered for a later signing turn"
     );
     let answered = o
         .bob

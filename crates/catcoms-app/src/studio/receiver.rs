@@ -14,6 +14,7 @@ mod handoff;
 mod inventory;
 mod replay;
 mod unconfirmed;
+use catchup::OverlayCommit;
 pub(crate) use catchup::{HandoffCompletion, StudioBackgroundJob, StudioBackgroundResult};
 
 /// Recently accessed targets, bounded by the existing sync watch rail. Reopening the same exact
@@ -60,16 +61,20 @@ pub(crate) enum StudioOverlaySaveVisit {
     /// instead) before it dropped the capture. The dropped hold leaves any promoted PIX unprotected,
     /// which RT-001 already accepts for a refused plan.
     ///
-    /// **The Unconfirmed Save tells the two apart; the Closing `save_overlay` does not yet.** The
-    /// Unconfirmed Save never returns this visit for a pause. It signals the capture-time refusal
-    /// itself, and answers `StudioUnconfirmedSaveOutcome::Paused`, natively
-    /// `retry:"afterExplicitAccess"` (2026-10-10, closing the batch re-review's M-1). A resend
-    /// into a pause would repeat the work above, and neither Save path clears a pause: only a
-    /// successful explicit Studio document access through `run` does (a Read, an ordinary Save,
-    /// Apply or ApplyOverlayCopy), and `studio-receive-paused` is a one-shot event. The Closing
-    /// `save_overlay` still answers this `Busy` while paused, so its native result, when it has
-    /// one, needs the same distinction before it registers.
+    /// Both Save paths distinguish this state from ordinary contention. A resend into a pause
+    /// would repeat the work above, and neither Save path clears a pause: only a successful
+    /// explicit Studio document access through `run` does (a Read, an ordinary Save, Apply or
+    /// ApplyOverlayCopy), and `studio-receive-paused` is a one-shot event.
     Busy,
+    /// The receiver refused a fresh capture because storage receive is paused. Retry only after
+    /// explicit access has cleared that pause; this is not ordinary slot contention.
+    Paused,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverlayCommitKind {
+    Closing,
+    Unconfirmed,
 }
 
 /// Correlate a detached Flow S result with the complete bounded request envelope.
@@ -157,23 +162,25 @@ impl StudioReceiver {
         budget: &mut crate::store::EpochStudioBudget,
     ) -> Result<StudioOverlaySaveVisit, AppError> {
         let request = overlay_request_fingerprint(0, target, &basis, &branch, &operation)?;
-        // Read, never required here: S1b and S3 require it at their own points, and everything
-        // before them - retries and acknowledgements - must keep working without it (V8).
-        let tenure = server.observed_owner_tenure();
         // A plan this actor already produced is finished first. Its transient hold is the only
-        // thing protecting its pixels, and it occupies admission until it is consumed.
-        if let Some((plan, ownership)) = self.catchup.take_planned_overlay(target) {
+        // thing protecting its pixels, and it occupies admission until it is consumed. The slot is
+        // actor-global, so drain any target and use the authority retained with that plan rather
+        // than this visit's Closing record.
+        if self.catchup.has_planned_overlay() {
+            let (context, plan, ownership) = self
+                .catchup
+                .take_any_planned_overlay()
+                .expect("checked just above, in the same custody visit");
+            let (planned, provenance, committed) =
+                self.commit_planned_overlay(server, store, id, context, *plan, budget);
             // Whatever plan this takes is no longer another request's to claim. Commit it to
             // release its transient media hold and shared slot, but only its exact scheduling
             // request may receive the outcome as its own.
-            let ours = self.closing_scheduled == Some(request);
+            let ours = planned == target
+                && matches!(provenance, OverlayCommitKind::Closing)
+                && self.closing_scheduled == Some(request);
             self.closing_scheduled = None;
             self.unconfirmed_scheduled = None;
-            let committed = server.sync.with_registry_context(|group, device, _, rng| {
-                store.commit_studio_overlay(
-                    id, group, target, device, close, tenure, *plan, rng, budget,
-                )
-            });
             // Explicit: admission and the shared slot are released only after the commit attempt
             // returns, on success and on error alike.
             drop(ownership);
@@ -189,6 +196,21 @@ impl StudioReceiver {
                 ))
             });
         }
+        // MAP K12: a detached plan for this exact Closing request was refused. Answer the kept
+        // refusal only while the authenticated record stamp is still current; otherwise decide
+        // from fresh durable state. This mirrors the Unconfirmed path and prevents a refusal-only
+        // request from paying the S1b/S2 costs forever.
+        let now = server.runtime_clock().monotonic_ms();
+        if let Some(refusal) = self.catchup.overlay_refusal_for(request, now) {
+            let current = refusal.stamp().server() == id
+                && server.sync.with_registry_context(|group, device, _, _| {
+                    store.studio_overlay_is_current(group, device, refusal.stamp())
+                })?;
+            if current {
+                return Err(invalid(refusal.message().to_owned()));
+            }
+            self.catchup.forget_overlay_refusal();
+        }
         // 7.2. Reserve before the first bounded read, and release by dropping if there is nothing
         // to schedule. Nothing below this line reaches a blob until S1b.
         let Some(ownership) = self.catchup.reserve_overlay() else {
@@ -198,6 +220,9 @@ impl StudioReceiver {
                 StudioOverlaySaveVisit::Busy
             });
         };
+        // Read only once new work reaches S1b. Terminal retries and kept refusals above must keep
+        // working without current observed tenure (V8).
+        let tenure = server.observed_owner_tenure();
         let started = server
             .sync
             .with_registry_context(|group, device, clock, rng| {
@@ -222,13 +247,68 @@ impl StudioReceiver {
                 Ok(StudioOverlaySaveVisit::Saved(saved))
             }
             crate::store::StudioOverlayStart::Captured(capture) => {
-                if !self.queue_capture_unless_paused(*capture, ownership, target) {
-                    return Ok(StudioOverlaySaveVisit::Busy);
+                if !self.queue_capture_unless_paused(
+                    *capture,
+                    ownership,
+                    target,
+                    OverlayCommit::Closing(Box::new(close.clone())),
+                ) {
+                    return Ok(StudioOverlaySaveVisit::Paused);
                 }
                 self.closing_scheduled = Some(request);
                 Ok(StudioOverlaySaveVisit::Scheduled)
             }
         }
+    }
+
+    /// Commit one actor-global parked plan with the authority captured for that plan, not with the
+    /// unrelated Save visit that happened to drain it. Returns the target and provenance so only
+    /// the exact scheduling request may claim the result.
+    fn commit_planned_overlay<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        context: catchup::OverlayContext,
+        plan: crate::store::StudioOverlayPlan,
+        budget: &mut crate::store::EpochStudioBudget,
+    ) -> (
+        StudioTarget,
+        OverlayCommitKind,
+        Result<catcoms_replication::studio::StudioLocalDraft, AppError>,
+    ) {
+        let (target, commit) = context.into_save();
+        let (kind, result) = match commit {
+            OverlayCommit::Closing(close) => {
+                let tenure = server.observed_owner_tenure();
+                let result = server.sync.with_registry_context(|group, device, _, rng| {
+                    store.commit_studio_overlay(
+                        id, group, target, device, &close, tenure, plan, rng, budget,
+                    )
+                });
+                (OverlayCommitKind::Closing, result)
+            }
+            OverlayCommit::Unconfirmed => {
+                let attempt = self.catchup.preview.mint(server, store, id, target);
+                let result = server.sync.with_registry_context(|group, device, _, rng| {
+                    store.commit_studio_overlay_with(
+                        id,
+                        group,
+                        target,
+                        device,
+                        crate::store::StudioOverlayMint::unconfirmed(attempt),
+                        plan,
+                        rng,
+                        budget,
+                    )
+                });
+                (OverlayCommitKind::Unconfirmed, result)
+            }
+        };
+        // The write is the last commit step, so even an error can follow a durable change.
+        self.settlement
+            .note(target, StudioSettlementState::RefreshRequired);
+        (target, kind, result)
     }
 
     #[cfg(test)]
@@ -419,6 +499,22 @@ impl StudioReceiver {
     ) {
         self.catchup.hold_page_for_test(target, pass);
     }
+    /// Observe the two pieces of state needed by the full-pool service-order regressions: whether
+    /// the request has been reserved, and whether source capture succeeded.
+    #[cfg(test)]
+    pub(crate) fn service_capture_for_test(&self) -> Option<bool> {
+        self.catchup.service_capture_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_page_for_test(&self) -> bool {
+        self.catchup.has_page_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_client_turn_for_test(&mut self, client_turn: bool) {
+        self.catchup.set_client_turn_for_test(client_turn);
+    }
     #[cfg(test)]
     pub(crate) fn retaining_registry_for_test(
         provider: crate::registry_catchup::ServerRegistryPageProvider,
@@ -558,13 +654,15 @@ impl StudioReceiver {
         capture: crate::store::StudioOverlayCapture,
         ownership: crate::studio::overlay::OverlayOwnership,
         target: StudioTarget,
+        commit: OverlayCommit,
     ) -> bool {
         if self.paused {
             drop(capture);
             drop(ownership);
             return false;
         }
-        self.catchup.schedule_overlay(capture, ownership, target);
+        self.catchup
+            .schedule_overlay(capture, ownership, target, commit);
         true
     }
 

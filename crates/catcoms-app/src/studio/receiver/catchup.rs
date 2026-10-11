@@ -51,6 +51,15 @@ struct ServiceWork {
 }
 type PreparedStudioResult = Result<(Box<PreparedStudioSource>, OwnedSemaphorePermit), AppError>;
 type PreparedRegistryResult = Result<Box<ServerPreparedRegistryPageSource>, AppError>;
+
+/// What the held Registry-page step did this visit. A deferred page must stay ahead of new client
+/// work, but it must not make the service step unreachable: reserving an inbound request while the
+/// shared pool is full removes it from H3's yield predicate and breaks that priority inversion.
+enum RegistryPageVisit {
+    None,
+    Consumed,
+    Deferred,
+}
 /// A plan that can still be committed, and the ownership that must outlive it.
 ///
 /// RT-001: an error carries **no** ownership. A refused plan can never be committed and its media
@@ -70,6 +79,11 @@ pub(super) const OVERLAY_PARK_MS: u64 = 30_000;
 /// only enough to route a completion back to the target that asked for it.
 pub(crate) struct OverlayContext {
     target: StudioTarget,
+    /// Flow S only: the authority material the eventual custody visit must use to commit this
+    /// exact plan. A plan is actor-global, so a visit for another target may have to finish it;
+    /// using that visit's Closing record (or assuming an Unconfirmed mint) would cross the two
+    /// authoring domains. Flow H leaves this absent.
+    commit: Option<OverlayCommit>,
     /// Flow H only: the `HandoffJob::token` this work was detached for, so a completion can be
     /// matched against the job that asked for it rather than against its target. Flow S leaves it
     /// zero: a parked Save capture is user-initiated and there is only ever one.
@@ -95,6 +109,7 @@ impl OverlayContext {
     fn new(target: StudioTarget) -> Self {
         Self {
             target,
+            commit: None,
             token: 0,
             stamp: None,
             #[cfg(test)]
@@ -105,12 +120,37 @@ impl OverlayContext {
     fn handoff(target: StudioTarget, token: u64) -> Self {
         Self {
             target,
+            commit: None,
             token,
             stamp: None,
             #[cfg(test)]
             pause: None,
         }
     }
+
+    fn save(target: StudioTarget, commit: OverlayCommit) -> Self {
+        Self {
+            target,
+            commit: Some(commit),
+            ..Self::new(target)
+        }
+    }
+
+    pub(super) fn into_save(self) -> (StudioTarget, OverlayCommit) {
+        (
+            self.target,
+            self.commit
+                .expect("an overlay plan completion always belongs to Flow S"),
+        )
+    }
+}
+
+/// The two Flow S commit authorities. The Closing record is public signed material, but it is
+/// still request-specific: retaining it here prevents a different Save visit from substituting
+/// its own close when it drains the actor-global parked-plan slot.
+pub(super) enum OverlayCommit {
+    Closing(Box<catcoms_replication::CloseRecord>),
+    Unconfirmed,
 }
 
 /// A detached plan's refusal, kept so the identical retry is answered from it (MAP K12).
@@ -407,14 +447,9 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                 // with the capture holding the job-owned reference hold alongside them. Those are
                 // two owners, not one, and they do not always end together: see the failure arm.
                 Self::OverlayPlan(capture, ownership, context) => {
-                    let OverlayContext {
-                        target,
-                        // Flow S routes on target; the handoff token is not used here.
-                        token: _,
-                        stamp: _,
-                        #[cfg(test)]
-                        pause,
-                    } = context;
+                    let mut context = context;
+                    #[cfg(test)]
+                    let pause = context.pause.take();
                     // Copied before the worker consumes the capture, so a refusal comes back with
                     // the record it describes (MAP K12). Public context only: no plaintext.
                     let stamp = Box::new(capture.stamp().clone());
@@ -439,13 +474,10 @@ impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
                     })
                     .await;
                     match result {
-                        Ok(result) => StudioBackgroundResult::OverlayPlanned(
-                            OverlayContext {
-                                stamp: Some(stamp),
-                                ..OverlayContext::new(target)
-                            },
-                            result,
-                        ),
+                        Ok(result) => {
+                            context.stamp = Some(stamp);
+                            StudioBackgroundResult::OverlayPlanned(context, result)
+                        }
                         // The worker itself died, taking both the bundle and the capture with it.
                         // Unwinding released them, so there is nothing to hand back.
                         Err(_) => StudioBackgroundResult::CancelledOverlay,
@@ -685,6 +717,20 @@ impl CatchupRuntime {
         self.service
             .as_ref()
             .is_some_and(|s| server.sync.epoch_service_interest_is_current(&s.interest))
+    }
+    #[cfg(test)]
+    pub(super) fn service_capture_for_test(&self) -> Option<bool> {
+        self.service.as_ref().map(|work| work.captured)
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_page_for_test(&self) -> bool {
+        self.pass.is_some()
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_client_turn_for_test(&mut self, client_turn: bool) {
+        self.client_turn = client_turn;
     }
     /// [`service_owed`](Self::service_owed), restricted to a request whose source preparation has
     /// started (`captured`): one that can be answered without taking another pool permit.
@@ -1050,23 +1096,13 @@ impl CatchupRuntime {
         capture: StudioOverlayCapture,
         ownership: OverlayOwnership,
         target: StudioTarget,
+        commit: OverlayCommit,
     ) {
-        self.overlay = Some((Box::new(capture), ownership, OverlayContext::new(target)));
-    }
-
-    /// Take a completed plan for the custody visit that will commit it, if it belongs to `target`.
-    /// The ownership comes back with it so the caller releases admission and the shared slot only
-    /// after the commit attempt, not before.
-    pub(super) fn take_planned_overlay(
-        &mut self,
-        target: StudioTarget,
-    ) -> Option<(Box<StudioOverlayPlan>, OverlayOwnership)> {
-        if !matches!(&self.overlay_planned, Some((c, _, _)) if c.target == target) {
-            return None;
-        }
-        self.overlay_planned
-            .take()
-            .map(|(_, plan, ownership)| (plan, ownership))
+        self.overlay = Some((
+            Box::new(capture),
+            ownership,
+            OverlayContext::save(target, commit),
+        ));
     }
 
     /// Whether a plan is parked, for a caller that must prepare before it takes one.
@@ -1122,10 +1158,8 @@ impl CatchupRuntime {
     /// own (design 8.7; review of `b35e23d2`, HIGH-1).
     pub(super) fn take_any_planned_overlay(
         &mut self,
-    ) -> Option<(StudioTarget, Box<StudioOverlayPlan>, OverlayOwnership)> {
-        self.overlay_planned
-            .take()
-            .map(|(context, plan, ownership)| (context.target, plan, ownership))
+    ) -> Option<(OverlayContext, Box<StudioOverlayPlan>, OverlayOwnership)> {
+        self.overlay_planned.take()
     }
 
     /// Drop a capture queued for its detached plan but not yet handed out, releasing admission, its
@@ -1262,7 +1296,11 @@ impl CatchupRuntime {
         ownership: OverlayOwnership,
         target: StudioTarget,
     ) {
-        self.overlay = Some((Box::new(capture), ownership, OverlayContext::new(target)));
+        self.overlay = Some((
+            Box::new(capture),
+            ownership,
+            OverlayContext::save(target, OverlayCommit::Unconfirmed),
+        ));
     }
 
     fn prepare_for<T: MeshTransport, R: CryptoRngCore>(
@@ -1358,7 +1396,19 @@ impl CatchupRuntime {
         watches: &VecDeque<(ServerStudioWatch, u128)>,
     ) -> Result<Option<StudioTarget>, AppError> {
         let now = server.runtime_clock().monotonic_ms();
-        self.complete_registry_preparation(server, store)?;
+        if let Some(generation) = self.complete_registry_preparation(server, store)? {
+            // The prepared Registry source belongs to this exact reserved request. Serve it in the
+            // installation turn before a held page for another bucket can replace the sole
+            // provider. A later turn is too late: that replacement would drop the request after it
+            // already paid for detached preparation.
+            let exact = self
+                .service
+                .as_ref()
+                .is_some_and(|work| Arc::ptr_eq(&work.generation, &generation));
+            if exact && self.serve(server, store, id) {
+                return Ok(None);
+            }
+        }
         // A repair job's S3 is never parked behind catch-up for its own target: that catch-up
         // is deferred until the job ends, so waiting on it would wait on itself (design 10.3).
         self.repair_check_authority(server);
@@ -1366,6 +1416,7 @@ impl CatchupRuntime {
             return Ok(Some(updated));
         }
         if let Some((context, prepared)) = self.prepared.take() {
+            let service_generation = context.service.clone();
             let result = prepared.and_then(|(source, _permit)| {
                 server.sync.with_registry_context(|g, d, _, _| {
                     store.install_prepared_studio_source(g, d, *source)
@@ -1384,6 +1435,17 @@ impl CatchupRuntime {
                 // A concurrent healthy edit/MLS transition is not a storage fault. Discard the
                 // old result and its process permit; future bounded selection captures anew.
                 self.next_at = now.saturating_add(5_000);
+                return Ok(None);
+            }
+            // As for Registry above, answer the exact request immediately after its detached
+            // source becomes current. H5 or replay must not get a turn to evict that source before
+            // the response is signed, and held-page early returns must not make it unreachable.
+            let exact_service = service_generation.as_ref().is_some_and(|generation| {
+                self.service
+                    .as_ref()
+                    .is_some_and(|work| Arc::ptr_eq(&work.generation, generation))
+            });
+            if exact_service && self.serve(server, store, id) {
                 return Ok(None);
             }
         }
@@ -1406,6 +1468,11 @@ impl CatchupRuntime {
                 return Ok(None);
             }
             if !self.prepare(server, store, id, target)? {
+                // The page keeps priority over new client work, but a service request must still be
+                // reserved. If the same full pool blocks it, `serve` retains it as uncaptured and
+                // H3 may sign past it until capacity returns instead of yielding to unreachable
+                // work forever.
+                self.serve(server, store, id);
                 return Ok(None);
             }
             let mut budget = Self::budget(server, store, id)?;
@@ -1429,10 +1496,19 @@ impl CatchupRuntime {
                 .then_some(self.target)
                 .flatten());
         }
-        if self.persist_registry_page(server, store, id)? {
-            // A Registry hint is not a Studio edit. Only a subsequent actual source update
-            // may emit StudioUpdated; otherwise timeline/acceptance observers see false work.
-            return Ok(None);
+        match self.persist_registry_page(server, store, id)? {
+            RegistryPageVisit::None => {}
+            RegistryPageVisit::Consumed => {
+                // A Registry hint is not a Studio edit. Only a subsequent actual source update
+                // may emit StudioUpdated; otherwise timeline/acceptance observers see false work.
+                return Ok(None);
+            }
+            RegistryPageVisit::Deferred => {
+                // As for a cold held Studio page above: do not start new client work, but do let
+                // service reserve its request so the signing gate sees its true captured state.
+                self.serve(server, store, id);
+                return Ok(None);
+            }
         }
         // Owner work also uses the sole prepared source. It must never displace a fetched
         // page before that page has crossed its save-before-cursor barrier.
@@ -1841,29 +1917,29 @@ impl StudioReceiver {
                             .saturating_add(OVERLAY_PARK_MS);
                     }
                     (result, _) => {
-                        // MAP K12: an Unconfirmed request's refusal is kept, against the stamp of
+                        // MAP K12: either Save provenance keeps its refusal against the stamp of
                         // the record it was planned from, so the identical retry hears it instead
-                        // of capturing and planning again. Only for the request that scheduled this
-                        // job: a Closing one is Agent 1's to mirror.
+                        // of capturing and planning again. The provenance retained in the context
+                        // selects the corresponding request slot; the fingerprint itself remains
+                        // domain-separated, so neither Save kind can claim the other's refusal.
                         //
                         // Not across a lock. Today a lock that finds a job detached also forgets
                         // its request, so `unconfirmed_scheduled` is already `None` here and the
                         // `dropped_for_lock` term is redundant: no test can tell it apart, and its
                         // mutant survives. It stays so the rule holds where it is applied, should
                         // the lock ever stop forgetting the request.
+                        let request = match context.commit.as_ref() {
+                            Some(OverlayCommit::Closing(_)) => self.closing_scheduled,
+                            Some(OverlayCommit::Unconfirmed) => self.unconfirmed_scheduled,
+                            None => None,
+                        };
                         if let (
                             Err(AppError::Invalid(message)),
                             false,
                             Some(request),
-                            None,
                             Some(stamp),
-                        ) = (
-                            result,
-                            dropped_for_lock,
-                            self.unconfirmed_scheduled,
-                            self.closing_scheduled,
-                            context.stamp,
-                        ) {
+                        ) = (result, dropped_for_lock, request, context.stamp)
+                        {
                             let now = server.runtime_clock().monotonic_ms();
                             self.catchup
                                 .park_overlay_refusal(request, stamp, message, now);

@@ -19,17 +19,17 @@ impl CatchupRuntime {
         server: &mut Server<T, R>,
         store: &mut ServerStore,
         id: u64,
-    ) -> Result<bool, AppError> {
+    ) -> Result<RegistryPageVisit, AppError> {
         if self
             .registry_pass
             .as_ref()
             .is_none_or(|p| p.state() != RegistryReceiveState::PageReady)
         {
-            return Ok(false);
+            return Ok(RegistryPageVisit::None);
         }
         let Some(target) = self.registry_target else {
             self.registry_pass = None;
-            return Ok(false);
+            return Ok(RegistryPageVisit::None);
         };
         let bucket = pointer(target, &server.group_id())?.bucket();
         if self.repair_claimed(CheckpointTarget::Registry(bucket)) {
@@ -38,10 +38,10 @@ impl CatchupRuntime {
             // discard it like any other superseded page and let the next tail pass refetch.
             self.registry_pass = None;
             self.registry_next_at = server.runtime_clock().monotonic_ms().saturating_add(5_000);
-            return Ok(true);
+            return Ok(RegistryPageVisit::Consumed);
         }
         if !self.prepare_registry_inventory(server, store, id, bucket)? {
-            return Ok(true);
+            return Ok(RegistryPageVisit::Deferred);
         }
         let mut budget = Self::inventory_budget(server, store, id)?;
         let key = pointer(target, &server.group_id())?;
@@ -67,7 +67,7 @@ impl CatchupRuntime {
             // this ordinary per-document transition into a vault-wide receive pause.
             self.registry_pass = None;
             self.registry_next_at = server.runtime_clock().monotonic_ms().saturating_add(5_000);
-            return Ok(true);
+            return Ok(RegistryPageVisit::Consumed);
         }
         let pass = self.registry_pass.as_mut().expect("held page");
         let group_id = server.group_id();
@@ -86,7 +86,7 @@ impl CatchupRuntime {
                 return Err(error);
             }
         }
-        Ok(true)
+        Ok(RegistryPageVisit::Consumed)
     }
 
     pub(super) fn work_registry<T: MeshTransport, R: CryptoRngCore>(

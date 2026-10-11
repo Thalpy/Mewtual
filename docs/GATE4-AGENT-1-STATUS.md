@@ -5,6 +5,16 @@ Proposal: [GATE4-AGENT-1-DESIGN](GATE4-AGENT-1-DESIGN.md), revision 4, **accepte
 `25ce89bb705dfc228c7b32874788ebd062e6fcf4`, 2026-09-15, design boundary only**.
 Review preamble: 1. Current entries override older ones.
 
+**Completion checkpoint, 2026-10-11.** On the isolated branch based on PR #38
+(`bdcae4a30a0870443db92a14f2d80ff8e4947818`), C-3's writer-side warmth and the reviewed
+restart-progress rule are integrated. The Flow S K12 correction now covers Closing as well as
+Unconfirmed: a detached plan retains its exact commit authority, a current stamped refusal is
+answered before new S1b work and the two request fingerprints are domain-separated. H3 service
+ordering also reserves Studio/Registry checkpoint work before a full-pool held-page defer and
+serves an exact prepared source in its installation turn. Focused regressions pass. This bounded
+checkpoint still requires adversarial review, the complete suites and exact-head CI. The full MAP
+carrier, remaining measured C-3 adoption and tenure product paths remain open; P5 stays false.
+
 **The design boundary is complete. Implementation has started** on branch
 `gate4-agent1-runtime`, from `5a899c2`. Progress and executed evidence are in "Implementation
 progress" below. The bounded implementation review uses the request in design 18.3, and must not be
