@@ -410,10 +410,21 @@ suites. It reported no blocker.
 | MEDIUM-1: every draw delivery and paint sample rebuilt the snapshot | Fixed. `rev` moves only on visible changes; refused frames, no-op releases and re-claims leave it alone. The app rebuilds only when `rev` moves or a countdown is live (`withDrawClaims`, `isQuiet`), and the Studio skips `autoClaim` for the frame already claimed. Covered by session tests, a mutation check and source pins. |
 | L1: Pass suppression did not lapse on a selection change | Fixed: `selectionChanged`/`select`. Session test covers the review's probe sequence. |
 | L2: "passed you" overstated intent | The toast now says the holder let go. Section 6.4 documents that moving on also hands over the frame, and that two askers become a collision. |
-| L3: missing HANDOVER entry | Added. |
+| L3: missing HANDOVER entry | Added after the re-review (N2). |
 | L4: stale comments, labels and parameter names | Fixed, and the debug peer view reports fingerprint labels. |
 | L5: silent draw auto-mute | Diagnostic `VOICE.DRAW.ABUSE_MUTED` added (no identity or content); session test. |
 | L6: a rotation inside `flushAsk` desynchronised the Ask | Fixed: rotation marks the Ask unsent instead of dropping it. A test fails under the old behaviour. |
+
+A short re-review of `57683b1..4bd03d6` confirmed those fixes and reported nothing blocking. It
+found two more issues:
+
+| Finding | Resolution |
+|---|---|
+| N1 (MEDIUM, new): a claim expiring inside a refused or no-op delivery left a "1 s" ghost in the view | Fixed: an expiry pruned in `receive` moves `rev`, and the 1 s tick also rebuilds while the last snapshot still shows anything. Regression test (no-op Release and claim-rate cases), mutation-checked. |
+| N2 (LOW): the HANDOVER entry was claimed but missing | Added with the verification results. |
+
+Leaving the claim scope also clears a Pass suppression, because `release()` runs on every scope
+loss. That is intended: the user left.
 
 Residuals carried forward:
 

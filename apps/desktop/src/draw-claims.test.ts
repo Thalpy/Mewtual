@@ -534,3 +534,30 @@ test("a session rotation keeps an outstanding Ask tracked and re-sent", () => {
   b.session.pass(OBJ, FR1);
   assert.deepEqual(a.session.local().claim, { obj: OBJ, fr: FR1 }, "so a Pass after rotation still lands");
 });
+
+test("a claim that expires inside a refused or no-op delivery still leaves the view", () => {
+  // Re-review N1: the prune inside receive used to drop the expired entry without moving rev, and
+  // the next quiet tick found nothing to prune, so the app kept rendering a "1 s" ghost.
+  for (const late of ["noop-release", "claim-rate"] as const) {
+    const clock = new FakeClock();
+    const c = member(C, clock, 3);
+    const fromA = c.session.openEdge(A, () => true)!;
+    const fromB = c.session.openEdge(B, () => true)!;
+    assert.equal(c.session.receive(fromA, frame(SN1, 1, FR1, 1, 0)).ok, true);
+    let q = 0;
+    clock.advance(CLAIM_TTL_MS - 100);
+    if (late === "claim-rate") {
+      // Spend B's whole (refilled) claim burst on one refreshed claim just before A's expires.
+      for (let i = 0; i < 10; i += 1) assert.equal(c.session.receive(fromB, frame(SN2, ++q, FR2, 1, 0)).ok, true);
+    }
+    const before = c.session.rev;
+    clock.advance(200);
+    const r = late === "noop-release"
+      ? c.session.receive(fromB, frame(SN2, ++q, FR3, 0, 0))
+      : c.session.receive(fromB, frame(SN2, ++q, FR3, 1, 0));
+    if (late === "claim-rate") assert.deepEqual(r, { ok: false, reason: "claim-rate" });
+    assert.ok(c.session.rev > before, `${late}: the expiry it pruned is a visible change`);
+    assert.deepEqual(c.session.peerEntries().filter((e) => e.peer === A), []);
+  }
+});
+

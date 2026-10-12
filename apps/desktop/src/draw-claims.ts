@@ -345,7 +345,10 @@ export class DrawClaimsSession {
     } else {
       sessionChange = true;
     }
-    this.prune(now);
+    // Expired entries are already gone in every view, but the snapshot the app last rendered may
+    // still show them: an expiry removed here is a visible change even if this frame is then refused
+    // (otherwise a claim expiring between ticks could stay on screen until something else changed).
+    if (this.prune(now)) this.rev += 1;
     const key = entryKey(peer, frame.obj, frame.fr);
     const before = this.entries.get(key);
     // A session change will drop this channel's entries, so the cap is measured after that.

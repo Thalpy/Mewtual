@@ -12288,8 +12288,11 @@
       if (drawClaims !== session) return;
       const before = session.rev;
       session.tick();
-      // Countdowns move every second while anything is live; otherwise only a change rebuilds.
-      if (session.rev !== before || !session.isQuiet()) syncDrawClaims();
+      // Countdowns move every second while anything is live; otherwise only a change rebuilds. A
+      // snapshot still showing something is rebuilt too, so nothing it shows can outlive the book.
+      const shown = drawClaimSnapshot;
+      const showing = !!shown && (shown.entries.length > 0 || shown.local.ask !== null);
+      if (session.rev !== before || !session.isQuiet() || showing) syncDrawClaims();
     }, 1000);
     syncDrawClaims();
   }
