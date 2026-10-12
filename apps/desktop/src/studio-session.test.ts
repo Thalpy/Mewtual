@@ -254,6 +254,77 @@ test("a typed Begin refusal is retained as known-not-written and explicit reauth
   assert.equal(h.session.saves.length, 0);
 });
 
+test("a proven-no-write Unconfirmed edit re-authors through the document's current ordinary route", async () => {
+  const h = await harness();
+  let ordinary = false;
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => ordinary ? docView([], { epochId: id32(0xe9) }) : previewView(flipnoteContent({ frames: [] })));
+  h.ipc.on("studio_overlay_lifecycle", (a) => ({ v: 1, kind: "overlayLifecycle", channel: a.channel, object: a.object ?? null,
+    branch: null, prepared: false, eligibility: null, manualReason: null, handoffAttempt: null,
+    unconfirmedState: null, archive: null, disposed: null, transferred: false }));
+  h.ipc.on("studio_overlay_read", (a) => ({ v: 1, kind: "absent", channel: a.channel, object: a.object ?? null }));
+  h.ipc.on("studio_unconfirmed_overlay_save_begin", (a) => ({ v: 1, kind: "unconfirmedOverlaySaveTicket",
+    channel: a.channel, object: a.object ?? null, basis: id64(1), branch: id64(2), provenance: "unconfirmed" }));
+  h.ipc.on("studio_unconfirmed_overlay_save", (a) => ({ v: 1, kind: "unconfirmedOverlaySave",
+    channel: a.channel, object: a.object ?? null, state: "refused", reason: "basisChanged", retry: "newTicket" }));
+  h.ipc.on("studio_apply", () => docView([], { epochId: id32(0xe9) }));
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  await h.sync();
+  h.session.setFps(OBJ, 9);
+  await h.sync();
+  const old = h.session.saves[0];
+  assert.equal(old.kind, "overlayApply");
+  assert.equal(old.status, "blocked");
+  const oldNonce = old.kind === "overlayApply" ? old.request?.nonce : null;
+  ordinary = true;
+  await h.session.refreshDoc(OBJ);
+  assert.equal(h.session.canReauthor(old.id), true);
+  h.session.reauthor(old.id);
+  await h.sync();
+  assert.equal(h.calls("studio_unconfirmed_overlay_save_begin").length, 1, "the new ordinary route does not ask for another overlay ticket");
+  const applied = h.calls("studio_apply")[0].args;
+  assert.equal(applied.epochId, id32(0xe9));
+  assert.notEqual(applied.nonce, oldNonce);
+  assert.deepEqual(JSON.parse(String(applied.body)), { field: "fps", op: "set_header", value: 9 });
+  assert.equal(h.session.saves.length, 0);
+});
+
+test("a proven-no-write Unconfirmed frame re-publishes pixels and re-authors as an ordinary save", async () => {
+  const h = await harness();
+  let ordinary = false;
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => ordinary ? docView([], { epochId: id32(0xe9) }) : previewView(flipnoteContent({ frames: [] })));
+  h.ipc.on("studio_overlay_lifecycle", (a) => ({ v: 1, kind: "overlayLifecycle", channel: a.channel, object: a.object ?? null,
+    branch: null, prepared: false, eligibility: null, manualReason: null, handoffAttempt: null,
+    unconfirmedState: null, archive: null, disposed: null, transferred: false }));
+  h.ipc.on("studio_overlay_read", (a) => ({ v: 1, kind: "absent", channel: a.channel, object: a.object ?? null }));
+  h.ipc.on("publish_pix", () => ({ cid: id64(9), bytes: pixBytes(5).length }));
+  h.ipc.on("studio_unconfirmed_overlay_save_begin", (a) => ({ v: 1, kind: "unconfirmedOverlaySaveTicket",
+    channel: a.channel, object: a.object ?? null, basis: id64(1), branch: id64(2), provenance: "unconfirmed" }));
+  h.ipc.on("studio_unconfirmed_overlay_save", (a) => ({ v: 1, kind: "unconfirmedOverlaySave",
+    channel: a.channel, object: a.object ?? null, state: "refused", reason: "pixelUnpublished", retry: "newTicket" }));
+  h.ipc.on("studio_apply", () => docView([], { epochId: id32(0xe9) }));
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  await h.sync();
+  h.session.insertFrame(OBJ, null, pixBytes(5));
+  await h.sync();
+  const old = h.session.saves[0];
+  assert.equal(old.kind, "frame");
+  assert.equal(old.status, "blocked");
+  ordinary = true;
+  await h.session.refreshDoc(OBJ);
+  h.session.reauthor(old.id);
+  await h.sync();
+  assert.equal(h.calls("publish_pix").length, 2, "a stale Unconfirmed publication receipt does not cross routes");
+  assert.equal(h.calls("studio_unconfirmed_overlay_save_begin").length, 1);
+  const applied = h.calls("studio_apply")[0].args;
+  assert.equal(applied.epochId, id32(0xe9));
+  assert.equal(JSON.parse(String(applied.body)).op, "insert_frame");
+  assert.equal(h.session.saves.length, 0);
+});
+
 test("a paused local save is not resent when its required explicit access fails", async () => {
   const h = await harness();
   let reads = 0;
@@ -495,6 +566,109 @@ test("a retained-draft copy keeps the exact previewed apply across uncertain del
   assert.equal(h.session.overlay?.copy?.status, "applied");
 });
 
+test("a clean stale Copy refusal can re-preview with a fresh nonce", async () => {
+  const h = await harness();
+  const historical = flipnoteContent({ title: "retained", frames: [] });
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => docView([]));
+  h.ipc.on("studio_overlay_lifecycle", (a) => ({
+    v: 1, kind: "overlayLifecycle", channel: a.channel, object: a.object ?? null,
+    branch: { branch: id64(2), content: id64(3), generation: "1", accepted: 1 },
+    prepared: false, eligibility: "manual", manualReason: "sourceReplaced", handoffAttempt: null,
+    unconfirmedState: null, archive: null, disposed: null, transferred: false,
+  }));
+  h.ipc.on("studio_overlay_read", (a) => ({
+    v: 1, kind: "local-draft", channel: a.channel, object: a.object ?? null,
+    eligibility: "manual", manualReason: "sourceReplaced", handoffAttempt: null,
+    unconfirmedState: null, basis: id64(1), branch: id64(2), contentId: id64(3), generation: "1",
+    accepted: 1, transferState: "active", provenance: "closing", replayable: true, readOnly: true,
+    content: historical,
+  }));
+  let previews = 0;
+  h.ipc.on("studio_overlay_copy_preview", () => ({
+    v: 1, kind: "overlayCopyPreview", source: { channel: CHANNEL, object: OBJ }, destination: { channel: CHANNEL, object: OBJ },
+    epochId: id32(8 + previews++), expectedProjection: id64(20 + previews), disposition: "ready",
+    body: '{"field":"title","op":"set_header","value":"retained"}', originalAuthor: ME,
+    sourceOps: [id64(10)], preservesBranch: false, provisional: true,
+  }));
+  let applies = 0;
+  h.ipc.on("studio_overlay_copy_apply", (a) => ++applies < 3
+    ? { v: 1, kind: "overlayCopyRefused", channel: a.channel, object: a.object ?? null, reason: "stalePreview", retry: "repreview", written: false }
+    : { v: 1, kind: "overlayCopyApplied", channel: a.channel, object: a.object ?? null, contentSaved: true, alreadySaved: false, provisional: true, branchPreserved: false });
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  await h.sync();
+  const choice = h.session.overlayChoices("copy").find((x) => x.choice.kind === "title");
+  assert.ok(choice);
+  await h.session.copyOverlayChoice(OBJ, choice.choice, choice.label, "copy");
+  assert.equal(h.session.overlay?.copy?.status, "refused", "a projection refusal is proven not written");
+  const first = h.calls("studio_overlay_copy_apply")[0].args.edit;
+  await h.session.repreviewOverlayCopy(OBJ);
+  assert.equal(h.session.overlay?.copy?.status, "refused", "an epoch refusal also offers a new preview");
+  const second = h.calls("studio_overlay_copy_apply")[1].args.edit;
+  assert.notEqual(second.nonce, first.nonce);
+  assert.notEqual(second.epochId, first.epochId);
+  await h.session.repreviewOverlayCopy(OBJ);
+  const third = h.calls("studio_overlay_copy_apply")[2].args.edit;
+  assert.notEqual(third.nonce, second.nonce);
+  assert.equal(h.session.overlay?.copy?.status, "applied");
+  assert.equal(h.calls("studio_overlay_copy_preview").length, 3);
+});
+
+test("a later stale Copy refusal cannot erase an earlier ambiguous Apply", async () => {
+  const h = await harness();
+  const historical = flipnoteContent({ title: "retained", frames: [] });
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => docView([]));
+  h.ipc.on("studio_overlay_lifecycle", (a) => ({ v: 1, kind: "overlayLifecycle", channel: a.channel, object: a.object ?? null,
+    branch: { branch: id64(2), content: id64(3), generation: "1", accepted: 1 }, prepared: false,
+    eligibility: "manual", manualReason: "sourceReplaced", handoffAttempt: null, unconfirmedState: null,
+    archive: null, disposed: null, transferred: false }));
+  h.ipc.on("studio_overlay_read", (a) => ({ v: 1, kind: "local-draft", channel: a.channel, object: a.object ?? null,
+    eligibility: "manual", manualReason: "sourceReplaced", handoffAttempt: null, unconfirmedState: null,
+    basis: id64(1), branch: id64(2), contentId: id64(3), generation: "1", accepted: 1,
+    transferState: "active", provenance: "closing", replayable: true, readOnly: true, content: historical }));
+  h.ipc.on("studio_overlay_copy_preview", () => ({ v: 1, kind: "overlayCopyPreview",
+    source: { channel: CHANNEL, object: OBJ }, destination: { channel: CHANNEL, object: OBJ }, epochId: id32(8),
+    expectedProjection: id64(9), disposition: "ready", body: '{"field":"title","op":"set_header","value":"retained"}',
+    originalAuthor: ME, sourceOps: [id64(10)], preservesBranch: false, provisional: true }));
+  let applies = 0;
+  h.ipc.on("studio_overlay_copy_apply", (a) => {
+    applies++;
+    if (applies === 1 || applies === 3) throw new Error("delivery lost after possible publication");
+    return { v: 1, kind: "overlayCopyRefused", channel: a.channel, object: a.object ?? null, reason: "stalePreview", retry: "repreview", written: false };
+  });
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  await h.sync();
+  const choice = h.session.overlayChoices("copy").find((x) => x.choice.kind === "title");
+  assert.ok(choice);
+  await h.session.copyOverlayChoice(OBJ, choice.choice, choice.label, "copy");
+  const exact = structuredClone(h.calls("studio_overlay_copy_apply")[0].args);
+  await h.session.retryOverlayCopy(OBJ);
+  assert.equal(h.session.overlay?.copy?.status, "uncertain");
+  assert.equal(h.session.overlay?.copy?.mayHaveCommitted, true);
+  assert.match(h.session.overlay?.copy?.error ?? "", /earlier delivery may already have committed/);
+  assert.deepEqual(h.calls("studio_overlay_copy_apply")[1].args, exact);
+  await h.session.repreviewOverlayCopy(OBJ);
+  assert.equal(h.calls("studio_overlay_copy_preview").length, 1, "ambiguous identity cannot be replaced by a new preview");
+  const nativeCallsBeforeFirstForget = h.ipc.calls.length;
+  assert.equal(h.session.forgetOverlayCopy(OBJ, exact.edit.nonce), true);
+  assert.equal(h.session.overlay?.copy, null, "the explicitly forgotten frontend identity releases its slot");
+  assert.equal(h.ipc.calls.length, nativeCallsBeforeFirstForget, "forgetting uncertainty performs no backend mutation");
+  await h.session.copyOverlayChoice(OBJ, choice.choice, choice.label, "copy");
+  assert.equal(h.calls("studio_overlay_copy_preview").length, 2, "the user can deliberately start a new preview");
+  const replacement = h.calls("studio_overlay_copy_apply")[2].args.edit;
+  assert.notEqual(replacement.nonce, exact.edit.nonce, "the new decision cannot reuse the ambiguous operation identity");
+  assert.equal(h.session.overlay?.copy?.status, "uncertain", "the replacement has its own ambiguous delivery");
+  const nativeCallsBeforeReplacementForget = h.ipc.calls.length;
+  assert.equal(h.session.forgetOverlayCopy(OBJ, exact.edit.nonce), false);
+  assert.equal(h.session.overlay?.copy?.edit?.nonce, replacement.nonce, "A's stale confirmation cannot erase uncertain B");
+  assert.equal(h.session.forgetOverlayCopy(OBJ, replacement.nonce), true);
+  assert.equal(h.session.overlay?.copy, null, "B's own confirmation releases B");
+  assert.equal(h.ipc.calls.length, nativeCallsBeforeReplacementForget, "neither stale nor current forget mutates the backend");
+});
+
 test("an applying retained-draft copy survives navigation and fences a newer run from its late response", async () => {
   const h = await harness();
   const other = id32(0x0c);
@@ -587,7 +761,7 @@ test("a frame save publishes then applies with the view's epoch, and an uncertai
   assert.equal(applies, 1);
 });
 
-test("a later read with a different epoch flags the uncertain save; re-authoring is explicit and mints a new nonce", async () => {
+test("a later read cannot re-author over an ambiguous save; its exact identity stays frozen", async () => {
   const h = await harness();
   h.ipc.on("studio_list", () => ordinaryView(indexContent()));
   h.ipc.on("studio_read", () => docView());
@@ -607,12 +781,16 @@ test("a later read with a different epoch flags the uncertain save; re-authoring
   assert.equal(h.session.saves[0].epochChanged, true, "the frozen request now names an older epoch");
   const before = h.calls("studio_apply")[0].args;
   h.ipc.on("studio_apply", () => docView());
+  assert.equal(h.session.canReauthor(rec.id), false, "possible prior publication cannot be relabeled as a clean new edit");
   h.session.reauthor(rec.id);
   await h.sync();
-  const after = h.calls("studio_apply")[1].args;
-  assert.equal(after.epochId, id32(0xe9));
-  assert.notEqual(after.nonce, before.nonce);
-  assert.equal(after.body, before.body);
+  assert.equal(h.calls("studio_apply").length, 1);
+  assert.equal(h.session.saves[0].id, rec.id);
+  const { server: _server, channel: _channel, ...frozen } = before;
+  assert.deepEqual(h.session.saves[0].kind === "apply" ? h.session.saves[0].request : null, frozen);
+  h.session.retry(rec.id);
+  await h.sync();
+  assert.deepEqual(h.calls("studio_apply")[1].args, before, "retry keeps the old epoch, nonce and body");
 });
 
 test("create freezes object, nonce, title and timestamp; a retry after failure reuses all four", async () => {

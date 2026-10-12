@@ -455,6 +455,12 @@ pub enum StudioControlResponse {
         destination: StudioTarget,
         already_saved: bool,
     },
+    /// C4 rejected the preview echo before publication.  A separate response prevents native/UI
+    /// code from treating a normal stale proposal as an ambiguous delivery failure.
+    OverlayCopyRefused {
+        destination: StudioTarget,
+        reason: super::StudioOverlayCopyRefusal,
+    },
     /// Design 8.7: the ticket for an Unconfirmed Save, both values from one fresh mint in one
     /// custody visit. Never authority: the Save mints again at each of its own stages.
     UnconfirmedOverlaySaveTicket {
@@ -508,6 +514,7 @@ impl std::fmt::Debug for StudioControlResponse {
             Self::Preview(_) => "Preview { .. }",
             Self::Applied { .. } => "Applied { .. }",
             Self::OverlayCopyApplied { .. } => "OverlayCopyApplied { .. }",
+            Self::OverlayCopyRefused { .. } => "OverlayCopyRefused { .. }",
             Self::UnconfirmedOverlaySaveTicket { .. } => "UnconfirmedOverlaySaveTicket { .. }",
             Self::UnconfirmedOverlaySaved { .. } => "UnconfirmedOverlaySaved { .. }",
             Self::List(_) => "List { .. }",
@@ -544,6 +551,7 @@ impl StudioControlResponse {
             | Self::Preview(_)
             | Self::Applied { .. }
             | Self::OverlayCopyApplied { .. }
+            | Self::OverlayCopyRefused { .. }
             // Produced entirely in the custody visit, and carrying no document content.
             | Self::UnconfirmedOverlaySaveTicket { .. }
             | Self::UnconfirmedOverlaySaved { .. }
@@ -582,6 +590,7 @@ impl StudioControlResponse {
             | Self::Preview(_)
             | Self::Applied { .. }
             | Self::OverlayCopyApplied { .. }
+            | Self::OverlayCopyRefused { .. }
             | Self::UnconfirmedOverlaySaveTicket { .. }
             | Self::UnconfirmedOverlaySaved { .. }
             | Self::List(_)

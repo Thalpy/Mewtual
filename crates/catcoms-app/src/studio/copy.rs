@@ -94,6 +94,17 @@ impl std::fmt::Debug for StudioOverlayCopyApply {
     }
 }
 
+/// A clean C4 refusal that happened before publication was attempted.
+///
+/// This is intentionally machine-readable.  Native/UI callers must not infer "nothing was
+/// written" from diagnostic text, and they must not turn an ambiguous earlier Apply into a new
+/// operation.  `StalePreview` means the user may make a *new* preview decision with a fresh nonce
+/// when this was the first, conclusively refused Apply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StudioOverlayCopyRefusal {
+    StalePreview,
+}
+
 /// What C3 hands back: a bounded proposed body, or an explicit hold. Saves nothing.
 #[derive(Debug)]
 pub struct StudioOverlayCopyPreview {
@@ -379,7 +390,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         request.validate()?;
         self.copy_context(source)?;
         self.copy_context(apply.destination)?;
-        let capture = self.sync.with_registry_context(|group, device, _, _| {
+        let already_saved = self.sync.with_registry_context(|group, device, _, _| {
             // C1' once more, first, as at C1, and before the capture so a held destination costs
             // nothing. A hold staged after the preview would otherwise surface only as the
             // publication path's generic "overlay handoff must resolve" refusal, after a full
@@ -387,43 +398,64 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             // own retryable reason. It precedes the exact shortcut too: the publication that
             // shortcut leads to refuses under a hold anyway.
             Self::refuse_held_destination(store, server, group, apply.destination)?;
-            store.capture_studio_overlay_copy(server, group, source, apply.destination, device)
-        })?;
-        let already_saved = self.sync.with_registry_context(|group, device, _, _| {
             let op = super::domain(apply.destination, nonce, apply.body.clone());
-            let exact = store
+            store
                 .with_studio_source(server, group, apply.destination, device, |state| {
                     if state.doc_id() != apply.epoch_id || state.phase() != EpochPhase::Open {
-                        return Err(invalid("copy preview epoch is no longer Open/current"));
+                        return Err(AppError::StudioCopyRefused {
+                            reason: StudioOverlayCopyRefusal::StalePreview,
+                            message: "copy preview epoch is no longer Open/current; preview again"
+                                .into(),
+                        });
                     }
                     state.contains_exact_operation(device.device_id(), &op)
                 })?
-                .unwrap_or(false);
-            if exact {
-                return Ok(true);
-            }
+                .ok_or_else(|| AppError::StudioCopyRefused {
+                    reason: StudioOverlayCopyRefusal::StalePreview,
+                    message: "copy destination is no longer installed; preview again".into(),
+                })
+        })?;
+        if already_saved {
+            // The source may have been disposed or transferred after the lost response. Exact
+            // acknowledgement depends only on the destination operation that could have landed;
+            // requiring a still-live source here would make the retained exact retry unusable.
+            return Ok((request, true));
+        }
+        let capture = self.sync.with_registry_context(|group, device, _, _| {
+            store.capture_studio_overlay_copy(server, group, source, apply.destination, device)
+        })?;
+        self.sync.with_registry_context(|group, _device, _, _| {
             let plan = capture.plan(choice, scope)?;
             if plan.epoch_id() != apply.epoch_id || plan.fingerprint() != apply.expected_projection
             {
-                return Err(invalid("copy preview is stale; preview again"));
+                return Err(AppError::StudioCopyRefused {
+                    reason: StudioOverlayCopyRefusal::StalePreview,
+                    message: "copy preview is stale; preview again".into(),
+                });
             }
             if plan.disposition() != StudioRecoveryDisposition::Ready
                 || plan.body() != Some(&apply.body)
             {
-                return Err(invalid("copy choice is no longer Ready or body differs"));
+                return Err(AppError::StudioCopyRefused {
+                    reason: StudioOverlayCopyRefusal::StalePreview,
+                    message: "copy choice is no longer Ready or body differs; preview again".into(),
+                });
             }
             // Refused rather than downgraded here: at C4 there is nothing left to offer the user,
             // and an object that vanished between the preview and the apply is exactly the race
             // this probe exists for.
             if !Self::probe_copy_object(store, server, group, &plan)? {
-                return Err(invalid(
-                    "the object this copy would publish no longer exists in this channel; \
-                     re-preview",
-                ));
+                return Err(AppError::StudioCopyRefused {
+                    reason: StudioOverlayCopyRefusal::StalePreview,
+                    message:
+                        "the object this copy would publish no longer exists in this channel; \
+                              preview again"
+                            .into(),
+                });
             }
-            Ok(false)
+            Ok(())
         })?;
-        Ok((request, already_saved))
+        Ok((request, false))
     }
 }
 

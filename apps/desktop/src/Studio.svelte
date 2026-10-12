@@ -669,8 +669,15 @@
     const archive = overlay?.archive?.archive;
     return objectId && destructiveScopeKey && archive ? `${destructiveScopeKey}:${objectId}:${archive}` : "";
   });
+  const copyForgetKey = $derived.by(() => {
+    const copy = overlay?.copy;
+    return objectId && destructiveScopeKey && copy?.status === "uncertain" && copy.edit
+      ? `${destructiveScopeKey}:${objectId}:copy:${copy.edit.nonce}`
+      : "";
+  });
   let draftDiscardArmed = $state("");
   let archiveReleaseArmed = $state("");
+  let copyForgetArmed = $state("");
   // A confirmation is consent for one observed target/version, not a sticky UI mode. Clear it as
   // soon as navigation, scope, branch content or archive identity changes—even if the user later
   // returns to the same target.
@@ -678,10 +685,12 @@
     const deleteNow = deleteKey;
     const draftNow = draftDestructiveKey;
     const archiveNow = archiveDestructiveKey;
+    const copyNow = copyForgetKey;
     untrack(() => {
       if (deleteArmed && deleteArmed !== deleteNow) deleteArmed = "";
       if (draftDiscardArmed && draftDiscardArmed !== draftNow) draftDiscardArmed = "";
       if (archiveReleaseArmed && archiveReleaseArmed !== archiveNow) archiveReleaseArmed = "";
+      if (copyForgetArmed && copyForgetArmed !== copyNow) copyForgetArmed = "";
     });
   });
   async function draftAction(action: () => Promise<unknown>, success: string) {
@@ -711,6 +720,18 @@
   async function retryDraftCopy() {
     if (!objectId) return;
     try { await session.retryOverlayCopy(objectId); } catch (e) { onnotice(reason(e), "warn"); }
+  }
+  async function repreviewDraftCopy() {
+    if (!objectId) return;
+    try { await session.repreviewOverlayCopy(objectId); } catch (e) { onnotice(reason(e), "warn"); }
+  }
+  function forgetDraftCopy() {
+    // This handler is mounted only for the armed confirmation state. The session performs the
+    // final status check, so a stale click can never remove a resolved or replacement operation.
+    if (!objectId) return;
+    const forgotten = session.forgetOverlayCopy(objectId, copyForgetArmed.slice(-32));
+    copyForgetArmed = "";
+    if (forgotten) onnotice("stopped tracking the uncertain copy; it may already have landed", "warn");
   }
   function words(value: string): string { return value.replace(/[A-Z]/g, (c) => ` ${c.toLowerCase()}`); }
 
@@ -895,7 +916,7 @@
             <button type="button" class="st-btn primary" onclick={() => retrySave(attention[0])}>{overlayRetryOf(attention[0]) === "afterExplicitAccess" ? "access, then retry same request" : "retry same request"}</button>
           {/if}
           {#if attention[0].kind === "frame" || attention[0].kind === "apply" || attention[0].kind === "applyIndex" || attention[0].kind === "overlayApply"}
-            <button type="button" class="st-btn" title="an explicit new operation with a fresh nonce; never an automatic rewrite of an uncertain request" disabled={!!readOnlyWhy || overlayRetryOf(attention[0]) === "none"} onclick={() => reauthorSave(attention[0])}>save again as a new edit</button>
+            <button type="button" class="st-btn" title="available only after the backend proved the old attempt wrote nothing" disabled={!!readOnlyWhy || overlayRetryOf(attention[0]) === "none" || !session.canReauthor(attention[0].id)} onclick={() => reauthorSave(attention[0])}>save again as a new edit</button>
           {/if}
           <button type="button" class="st-btn ghost" onclick={() => discardSave(attention[0])}>{discardArmed === attention[0].id ? "discard for real" : "discard"}</button>
         </span>{/if}
@@ -1152,19 +1173,35 @@
                   <span class="micro wrap">copy one retained value into the current document · this does not preserve or dispose the branch</span>
                   <span class="st-card-acts">
                     {#each draftChoices as choice (JSON.stringify(choice.choice))}
-                      <button type="button" class="st-btn ghost" disabled={overlay.copy?.status === "previewing" || overlay.copy?.status === "applying"} onclick={() => copyDraftItem(choice)}>{choice.label}</button>
+                      <button type="button" class="st-btn ghost" disabled={overlay.copy?.status === "previewing" || overlay.copy?.status === "applying" || overlay.copy?.status === "refused" || overlay.copy?.status === "uncertain"} onclick={() => copyDraftItem(choice)}>{choice.label}</button>
                     {/each}
                   </span>
-                {/if}
-                {#if overlay.copy}
-                  <span class="micro wrap">copy {overlay.copy.label} · {words(overlay.copy.status)}{#if overlay.copy.error} · {overlay.copy.error}{/if}</span>
-                  {#if overlay.copy.status === "uncertain"}<span class="st-card-acts"><button type="button" class="st-btn primary" onclick={retryDraftCopy}>retry exact copy</button></span>{/if}
                 {/if}
               </div>
             {:else if overlay?.inspection?.kind === "disposed"}
               <p class="micro wrap">local draft disposed · {overlay.inspection.mode}{#if overlay.inspection.archive} · archive {overlay.inspection.archive.slice(0, 8)}{/if} · terminal local history, not absence</p>
             {:else if overlay?.lifecycle?.transferred}
               <p class="micro wrap">the retained draft was transferred into the successor history; refresh the document to see the installed result</p>
+            {/if}
+            {#if overlay?.copy}
+              <div class="st-card warn">
+                <span>retained copy {overlay.copy.label} · {words(overlay.copy.status)}</span>
+                <span class="micro wrap">this operation remains independent of the source draft{#if overlay.copy.error} · {overlay.copy.error}{/if}</span>
+                {#if overlay.copy.status === "uncertain"}
+                  <span class="micro wrap">Stopping tracking does not undo the copy or prove that it never landed.</span>
+                  <span class="st-card-acts">
+                    <button type="button" class="st-btn primary" onclick={retryDraftCopy}>retry exact copy</button>
+                    {#if copyForgetKey && copyForgetArmed === copyForgetKey}
+                      <button type="button" class="st-btn danger" onclick={forgetDraftCopy}>stop tracking for real</button>
+                      <button type="button" class="st-btn ghost" onclick={() => (copyForgetArmed = "")}>cancel</button>
+                    {:else}
+                      <button type="button" class="st-btn ghost" onclick={() => (copyForgetArmed = copyForgetKey)}>stop tracking…</button>
+                    {/if}
+                  </span>
+                {:else if overlay.copy.status === "refused"}
+                  <span class="st-card-acts"><button type="button" class="st-btn primary" onclick={repreviewDraftCopy}>preview again as a new copy</button></span>
+                {/if}
+              </div>
             {/if}
             {#if overlay?.archive}
               <div class="st-card">

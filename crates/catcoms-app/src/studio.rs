@@ -15,7 +15,8 @@ mod tenure;
 pub use tenure::StudioOwnerTenure;
 mod copy;
 pub use copy::{
-    StudioCopyPreparation, StudioOverlayCopyApply, StudioOverlayCopyPreview, StudioPreparedCopy,
+    StudioCopyPreparation, StudioOverlayCopyApply, StudioOverlayCopyPreview,
+    StudioOverlayCopyRefusal, StudioPreparedCopy,
 };
 mod inspection;
 mod overlay;

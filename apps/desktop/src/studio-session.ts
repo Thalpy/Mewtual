@@ -171,8 +171,11 @@ export type OverlayState = {
     choice: RecoveryChoice;
     label: string;
     mode: RecoveryMode;
-    status: "previewing" | "applying" | "applied" | "uncertain" | "error" | RecoveryDisposition;
+    status: "previewing" | "applying" | "applied" | "refused" | "uncertain" | "error" | RecoveryDisposition;
     error: string;
+    /// Once any Apply delivery is ambiguous, a later pre-write refusal cannot prove what the
+    /// earlier attempt did. Only an applied acknowledgement may clear this uncertainty.
+    mayHaveCommitted: boolean;
     preview: OverlayCopyPreview | null;
     edit: OverlayCopyApplyEdit | null;
     applied: OverlayCopyApplied | null;
@@ -648,12 +651,12 @@ export class StudioSession {
   private retainOverlayCopy(object: Hex32 | null, run: OverlayCopyRun): void {
     const key = this.overlayCopyKey(object);
     const prior = this.overlayCopies.get(key);
-    if (prior && (prior.status === "previewing" || prior.status === "applying" || prior.status === "uncertain")) {
+    if (prior && (prior.status === "previewing" || prior.status === "applying" || prior.status === "refused" || prior.status === "uncertain")) {
       throw new StudioNativeError("the previous local draft copy is unresolved; retry it before starting another");
     }
     if (!prior && this.overlayCopies.size >= RETAINED_OVERLAY_COPIES) {
       const disposable = [...this.overlayCopies].find(([, copy]) =>
-        copy.status !== "previewing" && copy.status !== "applying" && copy.status !== "uncertain");
+        copy.status !== "previewing" && copy.status !== "applying" && copy.status !== "refused" && copy.status !== "uncertain");
       if (disposable) this.overlayCopies.delete(disposable[0]);
     }
     if (!prior && this.overlayCopies.size >= RETAINED_OVERLAY_COPIES) {
@@ -750,7 +753,7 @@ export class StudioSession {
     const source = { ...this.target(), object };
     const destination = object === null ? { channel: source.channel } : { channel: source.channel, object };
     const run: OverlayCopyRun = {
-      choice, label, mode, status: "previewing", error: "", preview: null, edit: null, applied: null,
+      choice, label, mode, status: "previewing", error: "", mayHaveCommitted: false, preview: null, edit: null, applied: null,
     };
     this.retainOverlayCopy(object, run);
     this.publishOverlayCopy(object, run);
@@ -775,10 +778,21 @@ export class StudioSession {
       await this.applyOverlayCopy(object, run, gen);
     } catch (e) {
       if (!this.current(gen) || this.overlayCopyFor(object) !== run) return;
-      run.status = run.edit ? "uncertain" : "error";
+      if (run.edit) run.mayHaveCommitted = true;
+      run.status = run.mayHaveCommitted ? "uncertain" : "error";
       run.error = reason(e);
       this.publishOverlayCopy(object, run);
     }
+  }
+
+  /// Start a deliberately new Copy decision after C4 proved that the frozen proposal wrote
+  /// nothing. This is not an exact retry: it obtains a fresh preview and later mints a fresh nonce.
+  async repreviewOverlayCopy(object: Hex32 | null): Promise<void> {
+    const run = this.overlayCopyFor(object);
+    if (!run || run.status !== "refused" || run.mayHaveCommitted) return;
+    if (!this.overlayIsCurrent(object)) throw new StudioNativeError("local draft is not open");
+    this.overlayCopies.delete(this.overlayCopyKey(object));
+    await this.copyOverlayChoice(object, run.choice, run.label, run.mode);
   }
 
   async retryOverlayCopy(object: Hex32 | null): Promise<void> {
@@ -789,10 +803,28 @@ export class StudioSession {
       await this.applyOverlayCopy(object, run, gen);
     } catch (e) {
       if (!this.current(gen) || this.overlayCopyFor(object) !== run) return;
+      run.mayHaveCommitted = true;
       run.status = "uncertain";
       run.error = reason(e);
       this.publishOverlayCopy(object, run);
     }
+  }
+
+  /// Forget only the frontend's retained identity for an ambiguous Copy. This deliberately sends
+  /// no native command: the operation may already have landed, and forgetting it neither undoes
+  /// nor disproves that write. The explicit UI confirmation is the user's decision to stop exact
+  /// retries and accept that uncertainty before this bounded slot can be reused.
+  forgetOverlayCopy(object: Hex32 | null, expectedNonce: string): boolean {
+    const key = this.overlayCopyKey(object);
+    const run = this.overlayCopies.get(key);
+    // Bind the confirmation to the exact operation the user saw. A late DOM event must not forget
+    // a different uncertain run that replaced it under the same document key.
+    if (!run || run.status !== "uncertain" || run.edit?.nonce !== expectedNonce) return false;
+    this.overlayCopies.delete(key);
+    const overlay = this.overlayFor(object);
+    if (overlay?.copy === run) this.replaceOverlay(object, { ...overlay, copy: null });
+    this.notify();
+    return true;
   }
 
   private async applyOverlayCopy(object: Hex32 | null, run: OverlayCopyRun, gen: number): Promise<void> {
@@ -802,6 +834,17 @@ export class StudioSession {
     this.publishOverlayCopy(object, run);
     const applied = await overlayCopyApply(this.ipc, { ...this.target(), object }, run.edit);
     if (!this.current(gen) || this.overlayCopyFor(object) !== run) return;
+    if (applied.kind === "overlayCopyRefused") {
+      if (run.mayHaveCommitted) {
+        run.status = "uncertain";
+        run.error = "the current proposal was refused before writing, but an earlier delivery may already have committed; retry the exact request or discard it";
+      } else {
+        run.status = "refused";
+        run.error = "the destination changed after preview; preview again to make a new copy decision";
+      }
+      this.publishOverlayCopy(object, run);
+      return;
+    }
     run.status = "applied";
     run.applied = applied;
     this.publishOverlayCopy(object, run);
@@ -981,38 +1024,50 @@ export class StudioSession {
     this.pump();
   }
 
-  /// Explicit re-authoring: a NEW operation with a fresh nonce against the current epoch. Never
-  /// automatic; the local save under the old identity may already have committed.
-  reauthor(id: number): void {
+  /// Whether the retained operation is proven not to have written and can therefore be replaced
+  /// by a deliberately new authoring decision. Ambiguous operations keep their exact identity;
+  /// the member must reconcile/retry or explicitly discard them rather than having this method
+  /// silently erase their uncertainty.
+  canReauthor(id: number): boolean {
     const s = this.records.find((r) => r.id === id);
-    if (!s || (s.status !== "uncertain" && s.status !== "blocked")) return;
+    return !!s && s.status === "blocked" && !s.mayHaveCommitted
+      && (s.kind === "frame" || s.kind === "apply" || s.kind === "applyIndex" || s.kind === "overlayApply");
+  }
+
+  /// Explicit re-authoring: replace one proven-no-write entry with a NEW operation selected by
+  /// the document's route *now*. This is deliberately not available for an ambiguous request.
+  /// The replacement gets a fresh queue identity and, on the ordinary route, a fresh nonce.
+  reauthor(id: number): void {
+    const at = this.records.findIndex((r) => r.id === id);
+    const s = this.records[at];
+    if (!s || !this.canReauthor(id)) return;
+    if (s.kind !== "frame" && s.kind !== "apply" && s.kind !== "applyIndex" && s.kind !== "overlayApply") return;
+    const object = s.kind === "applyIndex" ? null : s.object;
+    const route = this.editRoute(object);
+    if ("refused" in route) throw new StudioNativeError(route.refused);
+    let next: NewSave;
     if (s.kind === "frame") {
-      if (s.route === "unconfirmed") {
-        s.overlay = null;
-        s.overlayRetry = null;
-        // A new-ticket refusal can mean the published blob disappeared or failed validation.
-        // Re-publish the retained pixels as part of the explicitly new edit instead of looping on
-        // a stale publication receipt. Identical valid bytes are content-addressed and harmless.
-        s.published = null;
-      } else {
-        s.apply = null;
-      }
+      // A ticket refusal can mean the publication disappeared or failed validation. Re-publish
+      // retained pixels even when the new route is ordinary; identical valid bytes are
+      // content-addressed, and no stale receipt crosses the route transition.
+      next = { kind: "frame", object: s.object, frame: s.frame, op: s.op, after: s.after,
+        pix: s.pix, published: s.route === "unconfirmed" ? null : s.published,
+        route: route.kind, apply: null, overlay: null, overlayRetry: null,
+        ...(s.force === undefined ? {} : { force: s.force }), label: s.label };
+    } else if (route.kind === "unconfirmed") {
+      next = { kind: "overlayApply", object, op: s.op, label: s.label, request: null, overlayRetry: null };
+    } else if (object === null) {
+      const op = s.op as IndexOp;
+      next = { kind: "applyIndex", object: op.object, op, label: s.label,
+        request: { epochId: route.epochId, nonce: this.newId(), body: canonicalJson(op) } };
+    } else {
+      next = { kind: "apply", object, op: s.op as FlipnoteOp, label: s.label,
+        request: { object, epochId: route.epochId, nonce: this.newId(), body: canonicalJson(s.op) } };
     }
-    else if (s.kind === "apply") {
-      const ep = this.editableEpoch(s.object);
-      if (!("epochId" in ep)) throw new StudioNativeError(ep.refused);
-      s.request = { ...s.request, epochId: ep.epochId, nonce: this.newId() };
-    } else if (s.kind === "applyIndex") {
-      const ep = this.editableEpoch(null);
-      if (!("epochId" in ep)) throw new StudioNativeError(ep.refused);
-      s.request = { ...s.request, epochId: ep.epochId, nonce: this.newId() };
-    } else if (s.kind === "overlayApply") {
-      s.request = null;
-      s.overlayRetry = null;
-    } else return; // create and recovery apply keep their identity; retry them as they are
-    s.status = "queued";
-    s.error = "";
-    s.epochChanged = false;
+    const replacement = { ...next, id: ++this.saveSeq, status: "queued", attempts: 0,
+      error: "", epochChanged: false, mayHaveCommitted: false } as SaveEntry;
+    this.records[at] = replacement;
+    this.settleRecord(s, "discarded");
     this.notify();
     this.pump();
   }

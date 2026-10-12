@@ -301,6 +301,7 @@ pub(super) fn response_value(response: Response) -> Result<Value, String> {
         | Response::OverlayArchiveReleased
         | Response::OverlayDisposed(_)
         | Response::OverlayCopyApplied { .. }
+        | Response::OverlayCopyRefused { .. }
         | Response::UnconfirmedOverlaySaveTicket { .. }
         | Response::UnconfirmedOverlaySaved { .. }) => {
             return super::lifecycle::response_value(response)

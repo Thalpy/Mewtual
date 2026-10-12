@@ -56,20 +56,31 @@
   let indexDiscardArmed = $state("");
   let indexReleaseArmed = $state("");
   let indexSaveDiscardArmed = $state("");
+  let indexCopyForgetArmed = $state("");
   const indexSaveKey = $derived.by(() => {
     void studio.rev;
     const save = indexAttention[0];
     const scope = session.scope;
     return save && scope ? `${scope.server}:${scope.channel}:index-save:${save.id}` : "";
   });
+  const indexCopyForgetKey = $derived.by(() => {
+    void studio.rev;
+    const copy = indexOverlay?.copy;
+    const scope = session.scope;
+    return scope && copy?.status === "uncertain" && copy.edit
+      ? `${scope.server}:${scope.channel}:index-copy:${copy.edit.nonce}`
+      : "";
+  });
   $effect(() => {
     const draftNow = indexDraftKey;
     const archiveNow = indexArchiveKey;
     const saveNow = indexSaveKey;
+    const copyNow = indexCopyForgetKey;
     untrack(() => {
       if (indexDiscardArmed && indexDiscardArmed !== draftNow) indexDiscardArmed = "";
       if (indexReleaseArmed && indexReleaseArmed !== archiveNow) indexReleaseArmed = "";
       if (indexSaveDiscardArmed && indexSaveDiscardArmed !== saveNow) indexSaveDiscardArmed = "";
+      if (indexCopyForgetArmed && indexCopyForgetArmed !== copyNow) indexCopyForgetArmed = "";
     });
   });
 
@@ -83,6 +94,16 @@
   }
   async function retryIndexDraftCopy() {
     try { await session.retryOverlayCopy(null); } catch (e) { onnotice?.(reason(e), "warn"); }
+  }
+  async function repreviewIndexDraftCopy() {
+    try { await session.repreviewOverlayCopy(null); } catch (e) { onnotice?.(reason(e), "warn"); }
+  }
+  function forgetIndexDraftCopy() {
+    // The confirmation-only button supplies consent; the session still refuses to forget any
+    // operation that is no longer uncertain by the time this click is handled.
+    const forgotten = session.forgetOverlayCopy(null, indexCopyForgetArmed.slice(-32));
+    indexCopyForgetArmed = "";
+    if (forgotten) onnotice?.("stopped tracking the uncertain index copy; it may already have landed", "warn");
   }
   function downloadIndexDraft() {
     const x = indexOverlay?.exported;
@@ -172,7 +193,7 @@
       {#if overlayRetryOf(save) !== "newTicket" && overlayRetryOf(save) !== "none"}
         <button type="button" class="ghost small ctx-action" onclick={() => session.retry(save.id)}>{overlayRetryOf(save) === "afterExplicitAccess" ? "access, then retry index save" : "retry exact index save"}</button>
       {/if}
-      <button type="button" class="ghost small ctx-action" disabled={overlayRetryOf(save) === "none"} onclick={() => session.reauthor(save.id)}>save index edit as new</button>
+      <button type="button" class="ghost small ctx-action" disabled={overlayRetryOf(save) === "none" || !session.canReauthor(save.id)} onclick={() => session.reauthor(save.id)}>save index edit as new</button>
       {#if indexSaveDiscardArmed === indexSaveKey}
         <button type="button" class="ghost small ctx-action danger" onclick={() => indexSaveDiscardArmed === indexSaveKey && session.discard(save.id)}>discard index edit for real</button>
         <button type="button" class="ghost small ctx-action" onclick={() => (indexSaveDiscardArmed = "")}>cancel</button>
@@ -212,19 +233,35 @@
       <span class="micro wrap">copy one retained index value into current history; this does not preserve the branch</span>
       <span class="index-draft-actions">
         {#each indexDraftChoices as choice (JSON.stringify(choice.choice))}
-          <button type="button" class="ghost small ctx-action" disabled={indexOverlay.copy?.status === "previewing" || indexOverlay.copy?.status === "applying"} onclick={() => copyIndexDraftItem(choice)}>{choice.label}</button>
+          <button type="button" class="ghost small ctx-action" disabled={indexOverlay.copy?.status === "previewing" || indexOverlay.copy?.status === "applying" || indexOverlay.copy?.status === "refused" || indexOverlay.copy?.status === "uncertain"} onclick={() => copyIndexDraftItem(choice)}>{choice.label}</button>
         {/each}
       </span>
-    {/if}
-    {#if indexOverlay.copy}
-      <span class="micro wrap">copy {indexOverlay.copy.label} · {words(indexOverlay.copy.status)}{#if indexOverlay.copy.error} · {indexOverlay.copy.error}{/if}</span>
-      {#if indexOverlay.copy.status === "uncertain"}<button type="button" class="ghost small ctx-action" onclick={retryIndexDraftCopy}>retry exact index copy</button>{/if}
     {/if}
   </div>
 {:else if indexOverlay?.inspection?.kind === "disposed"}
   <p class="studio-note">Local index draft disposed · {indexOverlay.inspection.mode} · terminal local history, not absence.</p>
 {:else if indexOverlay?.lifecycle?.transferred}
   <p class="studio-note">The local index draft was transferred into successor history.</p>
+{/if}
+{#if indexOverlay?.copy}
+  <div class="studio-index-draft warn">
+    <span>retained index copy {indexOverlay.copy.label} · {words(indexOverlay.copy.status)}</span>
+    <span class="micro wrap">this operation remains available after the source draft changes{#if indexOverlay.copy.error} · {indexOverlay.copy.error}{/if}</span>
+    {#if indexOverlay.copy.status === "uncertain"}
+      <span class="micro wrap">Stopping tracking does not undo the copy or prove that it never landed.</span>
+      <span class="index-draft-actions">
+        <button type="button" class="ghost small ctx-action" onclick={retryIndexDraftCopy}>retry exact index copy</button>
+        {#if indexCopyForgetKey && indexCopyForgetArmed === indexCopyForgetKey}
+          <button type="button" class="ghost small ctx-action danger" onclick={forgetIndexDraftCopy}>stop tracking index copy for real</button>
+          <button type="button" class="ghost small ctx-action" onclick={() => (indexCopyForgetArmed = "")}>cancel</button>
+        {:else}
+          <button type="button" class="ghost small ctx-action" onclick={() => (indexCopyForgetArmed = indexCopyForgetKey)}>stop tracking index copy…</button>
+        {/if}
+      </span>
+    {:else if indexOverlay.copy.status === "refused"}
+      <button type="button" class="ghost small ctx-action" onclick={repreviewIndexDraftCopy}>preview again as a new index copy</button>
+    {/if}
+  </div>
 {/if}
 {#if indexOverlay?.archive}
   <div class="studio-index-draft">

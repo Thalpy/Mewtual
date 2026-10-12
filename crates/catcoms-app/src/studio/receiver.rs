@@ -427,7 +427,23 @@ impl StudioReceiver {
             let destination = apply.destination;
             self.refuse_while_repairing(destination)?;
             let (edit, already_saved) =
-                server.prepare_studio_copy_apply(store, id, request.target, *apply)?;
+                match server.prepare_studio_copy_apply(store, id, request.target, *apply) {
+                    Ok(prepared) => prepared,
+                    Err(AppError::StudioCopyRefused { reason, .. }) => {
+                        // The preparation path has not called the publication transaction yet.
+                        // Carry that fact as a typed success response; diagnostic text is neither
+                        // stable nor sufficient to distinguish this from a post-write failure.
+                        return Ok((
+                            StudioSavedTransaction::empty(),
+                            None,
+                            Some(StudioControlResponse::OverlayCopyRefused {
+                                destination,
+                                reason,
+                            }),
+                        ));
+                    }
+                    Err(error) => return Err(error),
+                };
             let (saved, updated) = self.run(server, store, id, Some(edit))?;
             Ok((
                 saved,
