@@ -111,6 +111,9 @@ type SaveBase = {
   status: SaveStatus;
   attempts: number;
   error: string;
+  /// A delivery failure on this exact request has not been reconciled. This remains true while a
+  /// later exact retry is queued or in flight, so its latest attempt cannot hide older uncertainty.
+  mayHaveCommitted: boolean;
   /// Set when a later read of the same document carries a different epoch than the frozen
   /// request: the backend decides on retry; the member may instead re-author explicitly.
   epochChanged: boolean;
@@ -138,7 +141,7 @@ class OverlayNoWrite extends Error {}
 export type BlobState = "held" | "fetching" | "queued" | "unavailable" | "failed" | "invalid" | "idle";
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
-type NewSave = DistributiveOmit<SaveRecord, "id" | "status" | "attempts" | "error" | "epochChanged">;
+type NewSave = DistributiveOmit<SaveRecord, "id" | "status" | "attempts" | "error" | "mayHaveCommitted" | "epochChanged">;
 
 export type RecoveryItemState = "pending" | "previewing" | "fetching" | "applying" | "applied" | "alreadySaved" | "uncertain" | RecoveryDisposition | "error";
 export type RecoveryItem = {
@@ -178,6 +181,8 @@ export type OverlayState = {
   error: string;
 };
 
+type OverlayCopyRun = NonNullable<OverlayState["copy"]>;
+
 export type DocState = {
   object: Hex32;
   view: FlipnoteView | null;
@@ -205,6 +210,7 @@ const REFRESH_COALESCE_MS = 120;
 const BLOB_CACHE_BYTES = 8 * 1024 * 1024;
 const BLOB_CACHE_ENTRIES = 512;
 const RECENT_VIEWS = 8;
+const RETAINED_OVERLAY_COPIES = 8;
 
 type BlobJob = {
   key: string;
@@ -242,6 +248,10 @@ export class StudioSession {
   /// The last view of each recently read document, so a queued save still has its epoch after
   /// the member moves to another flipnote. Bounded; the open document is always current.
   private readonly views = new Map<Hex32, { view: FlipnoteView; model: FlipnoteModel }>();
+  /// Exact retained-draft Copy requests are session work, not panel state. Keeping them here means
+  /// navigation cannot lose an uncertain nonce/body or let a late response overwrite a newer run.
+  /// The map is bounded; unresolved entries are never evicted merely to make room.
+  private readonly overlayCopies = new Map<string, OverlayCopyRun>();
 
   /// Mutable queue entries (with their settle callbacks); never handed to a surface.
   private readonly records: SaveEntry[] = [];
@@ -348,6 +358,7 @@ export class StudioSession {
     this.overlay = null;
     this.known.clear();
     this.views.clear();
+    this.overlayCopies.clear();
     for (const s of this.records) s.settle?.("discarded");
     this.records.length = 0;
     this.saving = 0;
@@ -478,7 +489,7 @@ export class StudioSession {
     const target = { ...this.target(), object: null };
     this.indexOverlay = this.indexOverlay
       ? { ...this.indexOverlay, loading: true }
-      : { object: null, inspection: null, lifecycle: null, archive: null, exported: null, copy: null, loading: true, error: "" };
+      : { object: null, inspection: null, lifecycle: null, archive: null, exported: null, copy: this.overlayCopyFor(null), loading: true, error: "" };
     this.notify();
     try {
       const lifecycle = await overlayLifecycle(this.ipc, target);
@@ -491,7 +502,7 @@ export class StudioSession {
         inspection,
         archive,
         exported: this.indexOverlay?.exported ?? null,
-        copy: this.indexOverlay?.copy ?? null,
+        copy: this.overlayCopyFor(null),
         loading: false,
         error: "",
       };
@@ -504,7 +515,7 @@ export class StudioSession {
       this.notify();
     } catch (e) {
       if (!this.current(gen) || req !== this.indexOverlayReq) return;
-      this.indexOverlay = { ...(this.indexOverlay ?? { object: null, inspection: null, lifecycle: null, archive: null, exported: null, copy: null }), object: null, loading: false, error: reason(e) };
+      this.indexOverlay = { ...(this.indexOverlay ?? { object: null, inspection: null, lifecycle: null, archive: null, exported: null, copy: this.overlayCopyFor(null) }), object: null, copy: this.overlayCopyFor(null), loading: false, error: reason(e) };
       this.notify();
     }
   }
@@ -518,7 +529,7 @@ export class StudioSession {
     }
     if (this.doc?.object !== object) {
       this.doc = { object, view: null, model: null, loading: opts.read === false, absent: false, error: "" };
-      this.overlay = { object, inspection: null, lifecycle: null, archive: null, exported: null, copy: null, loading: opts.read !== false, error: "" };
+      this.overlay = { object, inspection: null, lifecycle: null, archive: null, exported: null, copy: this.overlayCopyFor(object), loading: opts.read !== false, error: "" };
       this.notify();
     }
     // A just-created object is filled by its Create result; reading it first would only
@@ -573,7 +584,7 @@ export class StudioSession {
     this.overlayReq.set(object, req);
     const target = { ...this.target(), object };
     if (this.overlay?.object !== object) {
-      this.overlay = { object, inspection: null, lifecycle: null, archive: null, exported: null, copy: null, loading: true, error: "" };
+      this.overlay = { object, inspection: null, lifecycle: null, archive: null, exported: null, copy: this.overlayCopyFor(object), loading: true, error: "" };
     } else {
       this.overlay = { ...this.overlay, loading: true };
     }
@@ -591,7 +602,7 @@ export class StudioSession {
         inspection,
         archive,
         exported: this.overlay?.object === object ? this.overlay.exported : null,
-        copy: this.overlay?.object === object ? this.overlay.copy : null,
+        copy: this.overlayCopyFor(object),
         loading: false,
         error: "",
       };
@@ -606,7 +617,7 @@ export class StudioSession {
       this.notify();
     } catch (e) {
       if (!this.current(gen) || req !== this.overlayReq.get(object) || this.doc?.object !== object) return;
-      this.overlay = { ...(this.overlay ?? { object, inspection: null, lifecycle: null, archive: null, exported: null, copy: null }), object, loading: false, error: reason(e) };
+      this.overlay = { ...(this.overlay ?? { object, inspection: null, lifecycle: null, archive: null, exported: null, copy: this.overlayCopyFor(object) }), object, copy: this.overlayCopyFor(object), loading: false, error: reason(e) };
       this.notify();
     }
   }
@@ -624,6 +635,39 @@ export class StudioSession {
   private replaceOverlay(object: Hex32 | null, state: OverlayState): void {
     if (object === null) this.indexOverlay = state;
     else if (this.doc?.object === object) this.overlay = state;
+  }
+
+  private overlayCopyKey(object: Hex32 | null): string {
+    return object ?? "index";
+  }
+
+  private overlayCopyFor(object: Hex32 | null): OverlayCopyRun | null {
+    return this.overlayCopies.get(this.overlayCopyKey(object)) ?? null;
+  }
+
+  private retainOverlayCopy(object: Hex32 | null, run: OverlayCopyRun): void {
+    const key = this.overlayCopyKey(object);
+    const prior = this.overlayCopies.get(key);
+    if (prior && (prior.status === "previewing" || prior.status === "applying" || prior.status === "uncertain")) {
+      throw new StudioNativeError("the previous local draft copy is unresolved; retry it before starting another");
+    }
+    if (!prior && this.overlayCopies.size >= RETAINED_OVERLAY_COPIES) {
+      const disposable = [...this.overlayCopies].find(([, copy]) =>
+        copy.status !== "previewing" && copy.status !== "applying" && copy.status !== "uncertain");
+      if (disposable) this.overlayCopies.delete(disposable[0]);
+    }
+    if (!prior && this.overlayCopies.size >= RETAINED_OVERLAY_COPIES) {
+      throw new StudioNativeError("too many unresolved local draft copies; resolve one before starting another");
+    }
+    this.overlayCopies.delete(key);
+    this.overlayCopies.set(key, run);
+  }
+
+  private publishOverlayCopy(object: Hex32 | null, run: OverlayCopyRun): void {
+    if (this.overlayCopyFor(object) !== run) return;
+    const overlay = this.overlayFor(object);
+    if (overlay) this.replaceOverlay(object, { ...overlay, copy: run });
+    this.notify();
   }
 
   private async refreshOverlayTarget(object: Hex32 | null): Promise<void> {
@@ -705,19 +749,18 @@ export class StudioSession {
     const gen = this.generation;
     const source = { ...this.target(), object };
     const destination = object === null ? { channel: source.channel } : { channel: source.channel, object };
-    const run: NonNullable<OverlayState["copy"]> = {
+    const run: OverlayCopyRun = {
       choice, label, mode, status: "previewing", error: "", preview: null, edit: null, applied: null,
     };
-    this.replaceOverlay(object, { ...this.overlayFor(object)!, copy: run });
-    this.notify();
+    this.retainOverlayCopy(object, run);
+    this.publishOverlayCopy(object, run);
     try {
       const preview = await overlayCopyPreview(this.ipc, source, destination, choice, mode);
-      if (!this.current(gen) || !this.overlayIsCurrent(object) || this.overlayFor(object)?.copy !== run) return;
+      if (!this.current(gen) || this.overlayCopyFor(object) !== run) return;
       run.preview = preview;
       if (preview.disposition !== "ready" || preview.body === null) {
         run.status = preview.disposition;
-        this.replaceOverlay(object, { ...this.overlayFor(object)!, copy: run });
-        this.notify();
+        this.publishOverlayCopy(object, run);
         return;
       }
       run.edit = {
@@ -731,44 +774,41 @@ export class StudioSession {
       };
       await this.applyOverlayCopy(object, run, gen);
     } catch (e) {
-      if (!this.current(gen) || !this.overlayIsCurrent(object) || this.overlayFor(object)?.copy !== run) return;
+      if (!this.current(gen) || this.overlayCopyFor(object) !== run) return;
       run.status = run.edit ? "uncertain" : "error";
       run.error = reason(e);
-      this.replaceOverlay(object, { ...this.overlayFor(object)!, copy: run });
-      this.notify();
+      this.publishOverlayCopy(object, run);
     }
   }
 
   async retryOverlayCopy(object: Hex32 | null): Promise<void> {
-    const run = this.overlayFor(object)?.copy;
+    const run = this.overlayCopyFor(object);
     if (!run?.edit || run.status !== "uncertain") return;
     const gen = this.generation;
     try {
       await this.applyOverlayCopy(object, run, gen);
     } catch (e) {
-      if (!this.current(gen) || !this.overlayIsCurrent(object) || this.overlayFor(object)?.copy !== run) return;
+      if (!this.current(gen) || this.overlayCopyFor(object) !== run) return;
       run.status = "uncertain";
       run.error = reason(e);
-      this.replaceOverlay(object, { ...this.overlayFor(object)!, copy: run });
-      this.notify();
+      this.publishOverlayCopy(object, run);
     }
   }
 
-  private async applyOverlayCopy(object: Hex32 | null, run: NonNullable<OverlayState["copy"]>, gen: number): Promise<void> {
+  private async applyOverlayCopy(object: Hex32 | null, run: OverlayCopyRun, gen: number): Promise<void> {
     if (!run.edit) throw new StudioNativeError("local draft copy has no prepared edit");
     run.status = "applying";
     run.error = "";
-    const overlay = this.overlayFor(object);
-    if (overlay) this.replaceOverlay(object, { ...overlay, copy: run });
-    this.notify();
+    this.publishOverlayCopy(object, run);
     const applied = await overlayCopyApply(this.ipc, { ...this.target(), object }, run.edit);
-    if (!this.current(gen) || !this.overlayIsCurrent(object)) return;
+    if (!this.current(gen) || this.overlayCopyFor(object) !== run) return;
     run.status = "applied";
     run.applied = applied;
-    this.replaceOverlay(object, { ...this.overlayFor(object)!, copy: run });
-    this.notify();
-    if (object === null) await this.refreshIndex();
-    else await this.refreshDoc(object);
+    this.publishOverlayCopy(object, run);
+    if (this.overlayIsCurrent(object)) {
+      if (object === null) await this.refreshIndex();
+      else await this.refreshDoc(object);
+    }
   }
 
   /// A read carrying a different epoch than an uncertain save used marks that save.
@@ -922,7 +962,7 @@ export class StudioSession {
   }
 
   private enqueue(rec: NewSave): SaveEntry {
-    const record = { ...rec, id: ++this.saveSeq, status: "queued", attempts: 0, error: "", epochChanged: false } as SaveEntry;
+    const record = { ...rec, id: ++this.saveSeq, status: "queued", attempts: 0, error: "", epochChanged: false, mayHaveCommitted: false } as SaveEntry;
     this.records.push(record);
     this.notify();
     this.pump();
@@ -1102,9 +1142,13 @@ export class StudioSession {
       // Typed Flow-S refusals and scheduling replies prove that this attempt did not write. Native
       // errors remain uncertain because they may have crossed a final delivery fence after commit.
       const noWrite = e instanceof OverlayNoWrite;
-      s.status = noWrite ? "blocked" : "uncertain";
-      s.error = reason(e);
-      this.settleRecord(s, noWrite ? "notWritten" : "uncertain");
+      const earlierAttemptWasUncertain = s.mayHaveCommitted;
+      if (!noWrite) s.mayHaveCommitted = true;
+      s.status = s.mayHaveCommitted ? "uncertain" : "blocked";
+      s.error = noWrite && earlierAttemptWasUncertain
+        ? `${reason(e)}; an earlier attempt may already have committed, so the exact request remains uncertain`
+        : reason(e);
+      this.settleRecord(s, s.mayHaveCommitted ? "uncertain" : "notWritten");
       this.notify();
     }
   }

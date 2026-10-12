@@ -2750,6 +2750,29 @@ impl ServerStore {
         self.inventory_cache.clear_for_test();
     }
 
+    /// Install and inspect one real Studio validation in tests that need a deliberately stale
+    /// memo. The input still passes the production accounting validator; this is not a way to
+    /// invent cache contents that no scan could have produced.
+    #[cfg(test)]
+    pub(crate) fn install_studio_inventory_memo_for_test(
+        &mut self,
+        plain: &[u8],
+        size: u64,
+    ) -> bool {
+        let warmth = studio_inventory_warmth(plain, size)
+            .expect("the test Studio record must be valid inventory input");
+        self.warm_studio_inventory(warmth)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn holds_studio_inventory_memo_for_test(&mut self, plain: &[u8], size: u64) -> bool {
+        let warmth = studio_inventory_warmth(plain, size)
+            .expect("the test Studio record must be valid inventory input");
+        self.inventory_cache
+            .get(warmth.key, warmth.size, warmth.digest)
+            .is_some()
+    }
+
     #[cfg(test)]
     pub(crate) fn forget_warm_studio_state_for_test(&mut self) {
         self.inventory_cache.clear_for_test();

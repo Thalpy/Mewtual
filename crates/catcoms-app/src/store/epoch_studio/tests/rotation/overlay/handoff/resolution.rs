@@ -159,12 +159,37 @@ fn flow_r_restores_nothing_under_custody_from_a_stale_cache() {
     let f = Fixture::new(true);
     let mut store = open(root.path());
     let (_, basis, _) = prepare(&f, &mut store);
-    // The interruption builds its own budget, which caches the pre-H5 source.
+    let stale = store
+        .read_studio_record(&scope_bytes(SERVER, &f.logical).unwrap())
+        .unwrap()
+        .unwrap();
+    // The interruption writes a successor and its writer warms that new version. Reinstall the
+    // older, valid validation explicitly so this test cannot accidentally become a warm-current
+    // writer test again.
     super::fences::interrupt(&f, &mut store, basis, WriteTag::Completed);
     assert!(store
         .load_epoch_intents(SERVER, &f.logical)
         .unwrap()
         .handoff_prepared());
+    let current = store
+        .read_studio_record(&scope_bytes(SERVER, &f.logical).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        blake3::hash(&stale.plain),
+        blake3::hash(&current.plain),
+        "the fixture did not produce an older cacheable source version"
+    );
+    store.forget_inventory_memo_for_test();
+    assert!(store.install_studio_inventory_memo_for_test(&stale.plain, stale.physical_bytes));
+    assert!(
+        store.holds_studio_inventory_memo_for_test(&stale.plain, stale.physical_bytes),
+        "the precondition is a genuine stale Studio memo"
+    );
+    assert!(
+        !store.holds_studio_inventory_memo_for_test(&current.plain, current.physical_bytes),
+        "the writer's current memo survived the stale-cache fixture setup"
+    );
 
     let plan = capture(&f, &mut store).resolve().unwrap();
     let inline = inline_studio_validations_for_test(source_key(&f));

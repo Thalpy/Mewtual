@@ -61,7 +61,7 @@ MUTATIONS = [
     # the request accepted.
     ("retry-floor", CORE, "if closed < floor {", "if closed < floor && false {",
      "metadata::studio_overlay_handoff_rollover_floor_rejects_forgotten_retry_after_rewind",
-     "a freshly prepared request on a rewound basis crossed the persisted floor"),
+     "a freshly prepared request crossed the persisted rollover floor"),
     ("acceptance-order", "crates/catcoms-replication/src/studio/epoch/handoff/preparation.rs",
      "for (intent, ts) in overlay.ordered(ledger)? {",
      "for (intent, ts) in overlay.ordered(ledger)?.into_iter().rev() {",
@@ -269,13 +269,18 @@ def main():
     if selected - {m[0] for m in MUTATIONS}:
         raise ValueError("unknown mutation selector")
     mutations = [m for m in MUTATIONS if not selected or m[0] in selected]
+    # Check the complete selection up front, before an early mutant spends minutes compiling.
+    originals = {}
+    for name, path, before, _, _, _ in mutations:
+        original = (ROOT / path).read_bytes()
+        if original.count(before.encode()) != 1:
+            raise AssertionError(f"mutation anchor is not unique: {name}")
+        originals[name] = original
     logs = ROOT / "logs"
     logs.mkdir(exist_ok=True)
     for name, path, before, after, test, assertion in mutations:
         source = ROOT / path
-        original = source.read_bytes()
-        if original.count(before.encode()) != 1:
-            raise AssertionError(f"mutation anchor is not unique: {name}")
+        original = originals[name]
         changed = original.replace(before.encode(), after.encode(), 1)
         try:
             source.write_bytes(changed)

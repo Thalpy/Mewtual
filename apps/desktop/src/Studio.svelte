@@ -92,7 +92,7 @@
   const isScore = $derived(entry?.kind === "score");
   const readOnlyWhy = $derived.by(() => { void studio.rev; return objectId ? session.editRefusal(objectId) : ""; });
   const pending = $derived.by(() => { void studio.rev; return objectId ? session.pendingFor(objectId) : []; });
-  const attention = $derived(pending.filter((s) => s.status === "uncertain" || s.status === "blocked"));
+  const attention = $derived(pending.filter((s) => s.mayHaveCommitted || s.status === "uncertain" || s.status === "blocked"));
   const inflight = $derived(pending.some((s) => s.status === "queued" || s.status === "inflight"));
   const blockedCount = $derived.by(() => { void studio.rev; return attention.length ? session.blockedBehind(attention[0].id) : 0; });
   const pendingInserts = $derived(pending.filter((s): s is Extract<SaveRecord, { kind: "frame" }> => s.kind === "frame" && s.op === "insert"));
@@ -888,9 +888,9 @@
 
     {#if attention.length}
       <div class="st-banner warn st-save">
-        <span><b>{attention[0].status === "blocked" ? "local save not written" : "save uncertain"}</b> · {attention[0].label}{#if attention.length > 1} · and {attention.length - 1} more{/if}</span>
-        <span class="micro wrap">{attention[0].error}{#if attention[0].status === "blocked"} · the backend confirmed that this attempt wrote nothing{:else if attention[0].epochChanged} · the document moved to a newer epoch since; a retry resends the original request and the backend decides{/if} · attempt {attention[0].attempts} · your work is kept{#if blockedCount} · {blockedCount} later {blockedCount === 1 ? "save waits" : "saves wait"} behind it{/if}</span>
-        <span class="st-card-acts">
+        <span><b>{attention[0].mayHaveCommitted || attention[0].status !== "blocked" ? "save uncertain" : "local save not written"}</b> · {attention[0].label}{#if attention.length > 1} · and {attention.length - 1} more{/if}</span>
+        <span class="micro wrap">{attention[0].error}{#if attention[0].status === "blocked" && !attention[0].mayHaveCommitted} · the backend confirmed that this attempt wrote nothing{:else if attention[0].epochChanged} · the document moved to a newer epoch since; a retry resends the original request and the backend decides{/if} · attempt {attention[0].attempts} · your work is kept{#if blockedCount} · {blockedCount} later {blockedCount === 1 ? "save waits" : "saves wait"} behind it{/if}</span>
+        {#if attention[0].status === "uncertain" || attention[0].status === "blocked"}<span class="st-card-acts">
           {#if overlayRetryOf(attention[0]) !== "newTicket" && overlayRetryOf(attention[0]) !== "none"}
             <button type="button" class="st-btn primary" onclick={() => retrySave(attention[0])}>{overlayRetryOf(attention[0]) === "afterExplicitAccess" ? "access, then retry same request" : "retry same request"}</button>
           {/if}
@@ -898,7 +898,7 @@
             <button type="button" class="st-btn" title="an explicit new operation with a fresh nonce; never an automatic rewrite of an uncertain request" disabled={!!readOnlyWhy || overlayRetryOf(attention[0]) === "none"} onclick={() => reauthorSave(attention[0])}>save again as a new edit</button>
           {/if}
           <button type="button" class="st-btn ghost" onclick={() => discardSave(attention[0])}>{discardArmed === attention[0].id ? "discard for real" : "discard"}</button>
-        </span>
+        </span>{/if}
       </div>
     {/if}
     {#if overCapCount}
@@ -1074,7 +1074,7 @@
             {/if}
             {#if pendingHere}
               <div class="st-card accent">
-                <span>New frame{#if pendingHere.status === "uncertain"} · save uncertain{:else if pendingHere.status === "blocked"} · not written{:else} · saving{/if}</span>
+                <span>New frame{#if pendingHere.mayHaveCommitted || pendingHere.status === "uncertain"} · save uncertain{:else if pendingHere.status === "blocked"} · not written{:else} · saving{/if}</span>
                 <span class="micro it">it joins the timeline when the save lands</span>
               </div>
             {:else if frameRec}
@@ -1296,7 +1296,7 @@
           </button>
         {/each}
         {#each pendingInserts as s (s.id)}
-          <button type="button" class="st-thumb" class:cur={s.frame === frameId} onclick={() => openFrame(s.frame)} title={s.status === "uncertain" ? `save uncertain: ${s.error}` : s.status === "blocked" ? `save not written: ${s.error}` : "saving this new frame"}>
+          <button type="button" class="st-thumb" class:cur={s.frame === frameId} onclick={() => openFrame(s.frame)} title={s.mayHaveCommitted || s.status === "uncertain" ? `save uncertain: ${s.error}` : s.status === "blocked" ? `save not written: ${s.error}` : "saving this new frame"}>
             <span class="ix">{s.status === "uncertain" || s.status === "blocked" ? "?" : "…"}</span>
             <span class="fr pending" class:uncertain={s.status === "uncertain" || s.status === "blocked"}>
               <canvas width="64" height="48" use:thumbBytes={{ bytes: s.pix, rev: studio.rev }}></canvas>

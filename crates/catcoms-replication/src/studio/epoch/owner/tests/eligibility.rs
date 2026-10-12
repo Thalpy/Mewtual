@@ -6,7 +6,7 @@
 //! a hold that reported `None` where the handoff would refuse would tell a user their draft is
 //! about to transfer when it never will.
 use super::archive::branch as sealed_branch;
-use super::handoff::branch as transferable_branch;
+use super::handoff::{branch as transferable_branch, repair_bound_branch};
 use super::*;
 use crate::studio::{StudioOverlayManualReason as R, StudioOverlayState};
 use crate::IntentLedger;
@@ -94,6 +94,118 @@ fn a_pristine_successor_is_transferable_and_anything_else_names_why_not() {
         classify(&mut f.source, &f.group, &metadata, &ledger),
         Some(R::SuccessorNotPristine)
     );
+}
+
+/// Historical loser evidence retained by a repair is not a live competing opening.
+///
+/// The branch is based on the selected receipt and the installed successor is otherwise pristine.
+/// All three gates must therefore accept the repair-bound (vault form 3) source exactly as they
+/// accept form 2. This records the Agent 3 policy answer for the older review question: a repair
+/// resolves the loser; its retained evidence alone is not a handoff refusal.
+#[test]
+fn a_repair_bound_successor_of_the_selected_receipt_is_transferable() {
+    for art in [false, true] {
+        let mut f = Fixture::new(art);
+        let (metadata, ledger, _) = repair_bound_branch(&mut f, 1);
+        assert_eq!(classify(&mut f.source, &f.group, &metadata, &ledger), None);
+    }
+}
+
+/// A cross-tenure repair does not turn its retained loser label into a successor hold.
+///
+/// This is the exact A -> B -> A' shape raised during Agent 1/3 integration. A's branch is based
+/// on the receipt whose successor was installed. A later conflicting receipt faults that source;
+/// when the same device becomes owner again, its repair selects the rival and deliberately leaves
+/// the already-installed opening in place. Ordinary edits can continue there, so all three
+/// successor predicates must keep accepting it. The separate live-authority check still refuses
+/// the old receipt under A's *new* tenure; retained history is not allowed to erase the anti-replay
+/// tenure boundary or mint current authority.
+#[test]
+fn cross_tenure_repair_keeps_a_loser_successor_eligible_without_reauthorizing_its_receipt() {
+    for art in [false, true] {
+        let mut f = Fixture::new(art);
+        let returning = f.rejoining_owner.take().unwrap();
+        f.fill();
+        let losing_decision = f.decide(None);
+        let losing = losing_decision.receipt().clone();
+        f.edit(f.title_body("late work outside the losing close"));
+        let selected_decision = f.decide(None);
+        let selected = selected_decision.receipt().clone();
+        assert_ne!(selected.hash(), losing.hash());
+
+        let losing_plan = f.plan(&losing_decision);
+        let basis = f
+            .source
+            .prepare_closing_overlay(losing_decision.close(), &f.group, 0)
+            .unwrap();
+        let mut ledger = IntentLedger::new(f.source.document().clone());
+        let mut metadata = StudioOverlayState::new(&basis);
+        let op = f.domain(f.title_body("retained work on the losing close"));
+        let id = ledger.prepare(f.owner.device_id(), op).unwrap();
+        metadata.append(&basis, &ledger, id, 500).unwrap();
+        f.source = f
+            .source
+            .checkpoint_successor(&losing_plan, &f.group, 0)
+            .unwrap();
+        assert_eq!(f.source.opening(), Some(&losing));
+        assert_eq!(
+            f.source.seal(selected.clone(), &f.group, 0).unwrap(),
+            ReceiptIngest::Fault
+        );
+
+        // A -> B, then the same A identity rejoins as A' in a later observed tenure.
+        let next = MlsDevice::generate().unwrap();
+        let welcome = f
+            .group
+            .add_member(&f.owner, next.key_package().unwrap())
+            .unwrap()
+            .welcome;
+        let mut next_group = ServerGroup::join(&next, &welcome).unwrap();
+        next_group
+            .remove_member(&next, &f.owner.device_id())
+            .unwrap();
+        let welcome = next_group
+            .add_member(&next, returning.key_package().unwrap())
+            .unwrap()
+            .welcome;
+        f.group = ServerGroup::join(&returning, &welcome).unwrap();
+        f.owner = returning;
+        let returned_tenure = f.group.epoch();
+        assert!(returned_tenure > 0);
+        assert_eq!(f.group.designated_committer(), Some(f.owner.device_id()));
+        f.restart();
+
+        let repair = crate::ReceiptRepair::sign_in_tenure(
+            selected.document.clone(),
+            selected.tenure_id,
+            [selected.hash(), losing.hash()],
+            selected.hash(),
+            1,
+            returned_tenure,
+            &f.owner,
+        )
+        .unwrap();
+        f.source
+            .apply_receipt_repair(&repair, &selected, &losing, &f.group, returned_tenure)
+            .unwrap();
+        f.restart();
+        assert_eq!(f.source.phase(), EpochPhase::Open);
+        assert_eq!(f.source.opening(), Some(&losing));
+        assert_eq!(
+            f.source.repair_state().unwrap().disposition,
+            crate::RepairDisposition::Transitioned
+        );
+        assert_eq!(f.source.snapshot().unwrap()[0], 3);
+        assert_eq!(
+            classify(&mut f.source, &f.group, &metadata, &ledger),
+            None,
+            "the historical loser label alone became a successor hold"
+        );
+        assert!(matches!(
+            metadata.handoff_authority(&f.owner, &f.group, returned_tenure),
+            Err(ReplError::EpochAuthority)
+        ));
+    }
 }
 
 #[test]
