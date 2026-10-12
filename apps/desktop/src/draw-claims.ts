@@ -200,10 +200,16 @@ export type DrawClaimsOptions = Readonly<{
  */
 export class DrawClaimsSession {
   readonly self: string;
-  /** Bumped on every change a view could show; the app mirrors it into reactive state. */
+  /**
+   * Bumped on every change a view could show, and ONLY then: refused frames, a release that removed
+   * nothing, an `autoClaim` of the frame already claimed and a quiet tick leave it alone, so the app
+   * rebuilds its snapshot only when this moves (or while a countdown is running).
+   */
   rev = 0;
   /** Called (synchronously) when a Pass hands this device a frame it asked for. */
   onnotice: ((notice: ClaimNotice) => void) | null = null;
+  /** Called once when a peer's draw channel auto-mutes for the call (a diagnostic, no content). */
+  onmuted: ((peer: string) => void) | null = null;
 
   private readonly now: () => number;
   private readonly randomHex: (bytes: number) => string;
@@ -319,6 +325,7 @@ export class DrawClaimsSession {
         // A flood that auto-mutes the channel also retracts what that peer was asserting.
         budget.muted = true;
         this.dropEntries((e) => e.peer === peer);
+        this.onmuted?.(peer);
       }
       return { ok: false, reason: admitted.reason };
     }
@@ -374,8 +381,9 @@ export class DrawClaimsSession {
       changed = changed || !current || current.kind !== action;
       this.entries.set(key, { peer, obj: frame.obj, fr: frame.fr, kind: action, seenMs: now, channel });
     }
-    // A refresh moves the countdown, so it is always a visible change.
-    this.rev += 1;
+    // A claim or ask refresh moves its countdown, so it is visible even when nothing else changed;
+    // a release that removed nothing is not.
+    if (changed || action !== "release") this.rev += 1;
     return { ok: true, action, changed };
   }
 
@@ -429,6 +437,27 @@ export class DrawClaimsSession {
     this.localAsk = null;
     if (ask.sent) this.emit(ask.obj, ask.fr, 0, 0);
     this.rev += 1;
+  }
+
+  /**
+   * The Studio's selection moved to `(obj, fr)` (or to nothing). A claim or ask for any other frame
+   * is withdrawn, and a Pass suppression for another frame lapses: having passed F, going to G and
+   * back to F and painting claims F again. Selecting the same frame changes nothing.
+   */
+  selectionChanged(obj: string, fr: string): void {
+    if (this.disposed) return;
+    if (this.passed && (this.passed.obj !== obj || this.passed.fr !== fr)) this.passed = null;
+    if (this.localClaim && (this.localClaim.obj !== obj || this.localClaim.fr !== fr)) {
+      const passed = this.passed;
+      this.release();
+      this.passed = passed;
+    }
+    if (this.localAsk && (this.localAsk.obj !== obj || this.localAsk.fr !== fr)) this.cancelAsk();
+  }
+
+  /** True when nothing is counting down, so a periodic view rebuild would show nothing new. */
+  isQuiet(): boolean {
+    return this.disposed || (this.entries.size === 0 && this.localAsk === null);
   }
 
   /** Pass my claim on this frame: release it and do not auto-claim it again right away. */
@@ -541,7 +570,10 @@ export class DrawClaimsSession {
   /**
    * Exhausting the uint32 sequence space starts a new sender session. Receivers treat the new
    * `sn` as a session change and drop this device's old entries, so the current claim is re-sent
-   * under the new session (an outstanding ask simply lapses).
+   * under the new session and an outstanding ask is marked unsent, so the caller that triggered the
+   * rotation (or the next tick) sends it again under the new session. Keeping the ask object, rather
+   * than dropping it, means a rotation in the middle of `flushAsk` cannot leave receivers showing an
+   * Ask this device no longer tracks.
    */
   private rotateSession(): void {
     this.sn = this.freshSession();
@@ -555,7 +587,7 @@ export class DrawClaimsSession {
         try { edge.send(raw); } catch { /* closing */ }
       }
     }
-    if (this.localAsk) this.localAsk = null;
+    if (this.localAsk) this.localAsk.sent = false;
   }
 
   private freshSession(): string {
@@ -635,6 +667,8 @@ export type StudioClaimSnapshot = Readonly<{
 
 /** What the Studio may ask the call's claim session to do. Every call is advisory. */
 export type StudioClaimActions = Readonly<{
+  /** The selected frame changed (obj "" / fr "" for none); see `DrawClaimsSession.selectionChanged`. */
+  select(obj: string, fr: string): void;
   claim(obj: string, fr: string): void;
   autoClaim(obj: string, fr: string): void;
   release(): void;

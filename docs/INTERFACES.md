@@ -3834,18 +3834,24 @@ The four `on`/`ask` combinations:
 - Claims and Asks are paced by a local mirror of the receiver's claim bucket. A burst coalesces to
   the latest claim.
 - **Pass.** A holder's Pass is a Release, plus local suppression of auto-claim on that frame until
-  the selection changes. An asker takes a frame only when an explicit Release of a live claim
-  arrives from its holder while the asker's own Ask is live and nobody else claims it.
+  the selection moves to another frame. An asker takes a frame only when an explicit Release of a
+  live claim arrives from its holder while the asker's own Ask is live and nobody else claims it.
+  A holder moving on also sends such a Release, so it hands the frame over too.
 
 **Studio contract.**
 
 - `Studio.svelte` receives `claims: StudioClaimSnapshot | null` and `claimActions:
   StudioClaimActions`.
   - The snapshot is a frozen `{self, entries, local, asksOnMine}`.
-  - The actions are `claim`, `autoClaim`, `release`, `ask`, `cancelAsk` and `pass`.
+  - The actions are `select`, `claim`, `autoClaim`, `release`, `ask`, `cancelAsk` and `pass`.
 - The app supplies a snapshot only while `inCall && activeServerId === callServer && view ===
   "studio"`. Every asserting action re-checks that scope, and losing the scope releases the claim and
   cancels the ask.
-- Painting calls `autoClaim`. Changing frame or object releases the claim and cancels a stale ask.
+- Painting calls `autoClaim` unless that frame is already claimed. Every selection change calls
+  `select`, which releases a claim and cancels an ask for any other frame and lapses Pass
+  suppression.
+- The app rebuilds the snapshot only when the session's `rev` moves, or once a second while a
+  countdown is live. A refused or no-op frame does no view work.
+- A draw auto-mute records `VOICE.DRAW.ABUSE_MUTED`, with no identity or content.
 - No Studio edit, save or native path consults claims.
 

@@ -262,21 +262,22 @@
     dirty = true;
     paintRev++;
     // Painting says "I am drawing this frame" to the call (advisory; it gates nothing). The session
-    // ignores it outside a call and after this device Passed the frame away.
-    if (claims && objectId && frameId) claimActions?.autoClaim(objectId, frameId);
+    // ignores it outside a call and after this device Passed the frame away. Every pointer sample
+    // lands here, so a frame already claimed costs nothing further.
+    if (claims && objectId && frameId && (claims.local.claim?.obj !== objectId || claims.local.claim?.fr !== frameId)) {
+      claimActions?.autoClaim(objectId, frameId);
+    }
   }
 
   // --- Frame claims (Gate 5): who is drawing which frame, never a lock ---------------------------
-  // Moving to another frame or object withdraws my claim, and any ask for a frame I am no longer
-  // looking at, so a claim always names the frame I actually have open.
+  // Moving to another frame or object withdraws my claim, any ask for a frame I am no longer
+  // looking at, and a Pass suppression for another frame, so a claim always names the frame I
+  // actually have open (the session decides; see selectionChanged).
   $effect(() => {
-    const obj = objectId;
+    const obj = objectId ?? "";
     const fr = frameId;
     untrack(() => {
-      const local = claims?.local;
-      if (!local) return;
-      if (local.claim && (local.claim.obj !== obj || local.claim.fr !== fr)) claimActions?.release();
-      if (local.ask && (local.ask.obj !== obj || local.ask.fr !== fr)) claimActions?.cancelAsk();
+      if (claims) claimActions?.select(obj, fr);
     });
   });
   const frameClaims = $derived(frameClaimState(claims, objectId ?? "", frameId));

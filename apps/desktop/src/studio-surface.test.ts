@@ -720,7 +720,7 @@ function recordingActions() {
   return {
     calls,
     actions: Object.freeze({
-      claim: log("claim"), autoClaim: log("autoClaim"), release: log("release"),
+      select: log("select"), claim: log("claim"), autoClaim: log("autoClaim"), release: log("release"),
       ask: log("ask"), cancelAsk: log("cancelAsk"), pass: log("pass"),
     }),
   };
@@ -760,7 +760,8 @@ test("CLAIM-UI-001: a peer's claim shows on the timeline and frame card with its
     assert.ok(ask, "a frame someone else claims offers Ask, not a lock");
     ask!.click();
     flushSync();
-    assert.deepEqual(calls, [`ask ${OBJ} ${F1}`]);
+    assert.ok(calls.includes(`select ${OBJ} ${F1}`), "opening the frame reported the selection to the session");
+    assert.deepEqual(calls.filter((c) => !c.startsWith("select")), [`ask ${OBJ} ${F1}`]);
     // The canvas is still editable: a claim never locks a frame.
     assert.equal(m.target.querySelector(".st-canvas-wrap")?.classList.contains("locked"), false);
   } finally {

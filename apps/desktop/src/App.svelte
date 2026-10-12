@@ -8142,7 +8142,7 @@
    */
   function debugVoicePeers(): DebugVoicePeer[] {
     return Object.entries(callPeers).map(([fp, p]) => ({
-      fingerprint: fp,
+      fingerprint: displayKey(fp), // call keys are full identities; this view reports the label
       connection: p.pc.connectionState,
       ice: p.pc.iceConnectionState,
       signaling: p.pc.signalingState,
@@ -9371,10 +9371,14 @@
 
   // A peer row on the voice stage: their two levels (for you only), the two mutes, and who they
   // are. Toggles keep the menu open and rebuild it so the row says what it now does.
+  // `fp` is the CALL key: the peer's full identity (Gate 5). Every per-peer control below must get
+  // exactly the key callPeers, the audio chains and the jam engine use; only the profile card, the
+  // copied fingerprint and the menu head's avatar want the fingerprint those surfaces are keyed by.
   function peerMenu(fp: string): MenuItem[] {
     const again = () => refreshMenu(() => peerMenu(fp));
+    const label = displayKey(fp);
     return [
-      { head: true, kind: "in call", title: `${nameOf(fp)}${speaking[fp] ? " · speaking" : ""}`, fp },
+      { head: true, kind: "in call", title: `${nameOf(fp)}${speaking[fp] ? " · speaking" : ""}`, fp: label },
       {
         slider: true, icon: "vol", label: `Voice volume for ${nameOf(fp)}`,
         value: peerLevelFor(fp, "voice"), max: MAX_PEER_LEVEL,
@@ -9397,8 +9401,8 @@
         onSelect: () => { toggleInstPeer(fp); return again(); },
       },
       { divider: true },
-      { label: "Profile card", icon: "user", onSelect: () => showProfile(fp) },
-      { label: "Copy fingerprint", icon: "fp", onSelect: () => copyText(fp) },
+      { label: "Profile card", icon: "user", onSelect: () => showProfile(label) },
+      { label: "Copy fingerprint", icon: "fp", onSelect: () => copyText(label) },
     ];
   }
 
@@ -12167,7 +12171,7 @@
   // Whether this device has a microphone in the room at all, as distinct from having muted one.
   // Being in a room without one is a supported state, not a failed join.
   let micOn = $state(false);
-  let callParticipants = $state<string[]>([]); // peer fingerprints, for the call UI
+  let callParticipants = $state<string[]>([]); // peer full identities (call keys), for the call UI
   let callPeerStates = $state<Record<string, string>>({}); // fp -> RTCPeerConnectionState
   // A voice room is per-CHANNEL: the channel id doubles as the call id (for signalling + the media
   // key). You join a channel's room; others see it via presence (below) and join the same room.
@@ -12257,17 +12261,35 @@
   function syncDrawClaims() {
     drawClaimSnapshot = drawClaims ? snapshotClaims(drawClaims) : null;
   }
+  // Run one session operation and rebuild the Studio snapshot only if it changed something
+  // visible. Every draw delivery and every paint sample goes through here, so an unconditional
+  // rebuild would let a peer's flood (or ordinary painting) re-render the whole timeline.
+  function withDrawClaims(op: (session: DrawClaimsSession) => void) {
+    const session = drawClaims;
+    if (!session) return;
+    const before = session.rev;
+    op(session);
+    if (session.rev !== before) syncDrawClaims();
+  }
   function startDrawClaims(selfId: string) {
     stopDrawClaims();
     const session = new DrawClaimsSession({ self: selfId, now: () => performance.now(), randomHex });
     session.onnotice = (notice) => {
-      toast(`${callNameOf(notice.from)} passed you the frame you asked for`, "ok", 5000);
+      // Any explicit release of a frame I asked for hands it over: a Pass, or the holder moving on.
+      toast(`${callNameOf(notice.from)} let go of the frame you asked for; it's yours now`, "ok", 5000);
+    };
+    session.onmuted = () => {
+      // No identity or content: the receiver-side flood mute is policy, and its cost is that peer's
+      // claims disappearing for the rest of the call.
+      diagRecord({ section: "voice", code: "VOICE.DRAW.ABUSE_MUTED", level: "warn", fields: {} });
     };
     drawClaims = session;
     drawClaimTimer = setInterval(() => {
       if (drawClaims !== session) return;
+      const before = session.rev;
       session.tick();
-      syncDrawClaims();
+      // Countdowns move every second while anything is live; otherwise only a change rebuilds.
+      if (session.rev !== before || !session.isQuiet()) syncDrawClaims();
     }, 1000);
     syncDrawClaims();
   }
@@ -12281,27 +12303,26 @@
   // Every action goes through the live session and is re-checked against the scope, so a Studio
   // that outlived its call or wandered to another server cannot send anything.
   const studioClaimActions: StudioClaimActions = Object.freeze({
-    claim: (obj: string, fr: string) => { if (studioClaimScope) drawClaims?.claim(obj, fr); syncDrawClaims(); },
-    autoClaim: (obj: string, fr: string) => { if (studioClaimScope) drawClaims?.autoClaim(obj, fr); syncDrawClaims(); },
-    release: () => { drawClaims?.release(); syncDrawClaims(); },
-    ask: (obj: string, fr: string) => { if (studioClaimScope) drawClaims?.ask(obj, fr); syncDrawClaims(); },
-    cancelAsk: () => { drawClaims?.cancelAsk(); syncDrawClaims(); },
-    pass: (obj: string, fr: string) => { drawClaims?.pass(obj, fr); syncDrawClaims(); },
+    select: (obj: string, fr: string) => withDrawClaims((s) => s.selectionChanged(obj, fr)),
+    claim: (obj: string, fr: string) => withDrawClaims((s) => { if (studioClaimScope) s.claim(obj, fr); }),
+    autoClaim: (obj: string, fr: string) => withDrawClaims((s) => { if (studioClaimScope) s.autoClaim(obj, fr); }),
+    release: () => withDrawClaims((s) => s.release()),
+    ask: (obj: string, fr: string) => withDrawClaims((s) => { if (studioClaimScope) s.ask(obj, fr); }),
+    cancelAsk: () => withDrawClaims((s) => s.cancelAsk()),
+    pass: (obj: string, fr: string) => withDrawClaims((s) => s.pass(obj, fr)),
   });
   // Leaving the Studio, or viewing another server, withdraws my claim and ask at once.
   $effect(() => {
     if (studioClaimScope) return;
     untrack(() => {
-      if (!drawClaims) return;
-      const mine = drawClaims.local();
-      if (!mine.claim && !mine.ask) return;
-      drawClaims.release();
-      drawClaims.cancelAsk();
-      syncDrawClaims();
+      withDrawClaims((s) => {
+        s.release();
+        s.cancelAsk();
+      });
     });
   });
 
-  // Voice-room presence: `${server}:${channel}` -> { fp: lastSeenMs }, from periodic pings members in
+  // Voice-room presence: `${server}:${channel}` -> { identity: lastSeenMs }, from periodic pings members in
   // a room broadcast. Drives the per-channel "in voice" indicators + the room-active notification.
   let voiceRooms = $state<Record<string, Record<string, number>>>({});
   let voiceAlert = $state<{ server: number; channel: string; name: string } | null>(null);
@@ -12311,7 +12332,7 @@
   function roomKey(server: number, channel: string) {
     return `${server}:${channel}`;
   }
-  // Fingerprints currently in a room (presence fresher than VOICE_STALE_MS).
+  // Full identities currently in a room (presence fresher than VOICE_STALE_MS).
   function roomMembers(server: number, channel: string): string[] {
     const r = voiceRooms[roomKey(server, channel)];
     if (!r) return [];
@@ -17914,18 +17935,26 @@
         if (drawChan) {
           peer.drawDc = drawDc;
           peer.drawChan = drawChan;
+          // Each callback rebuilds the snapshot only when the session changed something visible:
+          // a refused or no-op frame (a flood, an auto-muted peer) costs no view work.
+          const syncIfChanged = (before: number) => {
+            if (drawClaims === claims && claims.rev !== before) syncDrawClaims();
+          };
           drawDc.onopen = () => {
             if (callPeers[fp] !== peer) return;
+            const before = claims.rev;
             claims.edgeReady(drawChan);
-            syncDrawClaims();
+            syncIfChanged(before);
           };
           drawDc.onmessage = (e) => {
+            const before = claims.rev;
             claims.receive(drawChan, e.data);
-            syncDrawClaims();
+            syncIfChanged(before);
           };
           drawDc.onclose = () => {
+            const before = claims.rev;
             claims.closeEdge(drawChan);
-            syncDrawClaims();
+            syncIfChanged(before);
           };
         } else {
           drawDc.close();
@@ -17978,13 +18007,14 @@
       callPeerStates = { ...callPeerStates, [fp]: pc.connectionState };
       // Claims never outlive a dead link: a peer whose connection drops stops showing as drawing
       // at once rather than for up to 90 s. A recovered link re-sends my current claim to it.
-      if (claims && callPeers[fp] === peer) {
-        if (pc.connectionState === "connected") {
-          if (peer.drawChan && peer.drawDc?.readyState === "open") claims.edgeReady(peer.drawChan);
-        } else if (pc.connectionState !== "new" && pc.connectionState !== "connecting") {
-          claims.peerUnreachable(fp);
-        }
-        syncDrawClaims();
+      if (claims && callPeers[fp] === peer && drawClaims === claims) {
+        withDrawClaims((s) => {
+          if (pc.connectionState === "connected") {
+            if (peer.drawChan && peer.drawDc?.readyState === "open") s.edgeReady(peer.drawChan);
+          } else if (pc.connectionState !== "new" && pc.connectionState !== "connecting") {
+            s.peerUnreachable(fp);
+          }
+        });
       }
       if (pc.connectionState === "connected") void sniffTransport(fp, pc);
       if (pc.connectionState === "failed") recoverPeer(peer);
@@ -18013,8 +18043,7 @@
     const { [fp]: _budget, ...budgets } = peerVideoBudget;
     peerVideoBudget = budgets;
     // Their frame claims and asks go with them, immediately (Gate 5).
-    drawClaims?.removePeer(fp);
-    syncDrawClaims();
+    withDrawClaims((s) => s.removePeer(fp));
     // Silence and forget anything they were sounding; a dead edge must not drone on.
     jamEngine?.removeSource(fp);
     clearPeerJamUi(fp);
@@ -18057,13 +18086,13 @@
   // a name and fill four bars, and it costs nothing next to the codecs already running. Analysers
   // are never wired to the destination: tapping a remote stream must not double it into the ears.
   let stageOpen = $state(false); // the expanded stage (vs. the collapsed call bar)
-  let speaking = $state<Record<string, boolean>>({}); // "me" or a peer fp -> above the talk floor
+  let speaking = $state<Record<string, boolean>>({}); // "me" or a peer identity -> above the talk floor
   let micLevel = $state(0); // 0..1, drives the meter
   // How far each voice's ears are up: the same RMS the ring uses, quantised to four steps. It is
   // quantised for the same reason the mic meter is drawn as four bars rather than a continuous
   // fill: a value that changes every tick would re-render the stage eight times a second for a
   // difference no eye can see. Four steps is enough for ears to read as twitching.
-  let earPerk = $state<Record<string, number>>({}); // "me" or a peer fp -> 0..3
+  let earPerk = $state<Record<string, number>>({}); // "me" or a peer identity -> 0..3
   const perkOf = (rms: number): number =>
     rms <= SPEAK_FLOOR ? 0 : Math.min(3, 1 + Math.floor((rms / METER_FULL) * 2.4));
   let linksUp = $derived(callParticipants.filter((fp) => callPeerStates[fp] === "connected").length);
@@ -27312,7 +27341,7 @@
               {@const vol = peerVolumes[fp] ?? DEFAULT_PEER_LEVEL}
               {@const shareVol = peerShareVolumes[fp] ?? DEFAULT_PEER_LEVEL}
               {@const hasShare = peerHasShareAudio(fp)}
-              <li class="stage-peer" use:contextMenu={() => peerMenu(callFingerprint(fp))}>
+              <li class="stage-peer" use:contextMenu={() => peerMenu(fp)}>
                 <div class="stage-row">
                   <span class="stage-av" class:talking={speaking[fp]}>{@render catEars(fp)}{@render callAvatarTag(fp)}</span>
                   <span class="stage-nm">{@render callNameTag(fp)}</span>

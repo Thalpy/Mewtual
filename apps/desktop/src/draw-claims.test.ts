@@ -447,3 +447,90 @@ test("the Studio snapshot is plain frozen data and the frame card sees collision
   b.session.dispose();
   assert.equal(snapshotClaims(b.session), null);
 });
+
+test("refused frames, no-op releases and quiet ticks never bump the view revision", () => {
+  const clock = new FakeClock();
+  const c = member(C, clock, 3);
+  const ch = c.session.openEdge(A, () => true)!;
+  const rev = () => c.session.rev;
+  let r = rev();
+  c.session.receive(ch, "{");
+  c.session.receive(ch, frame(SN1, 1, FR1, 1, 1));
+  c.session.receive(ch, new Uint8Array([1]));
+  assert.equal(rev(), r, "refused frames are not view changes");
+  assert.equal(c.session.receive(ch, frame(SN1, 2, FR1, 0, 0)).ok, true);
+  assert.equal(rev(), r, "a release that removed nothing is not a view change");
+  c.session.tick();
+  assert.equal(rev(), r, "a quiet tick is not a view change");
+  assert.equal(c.session.isQuiet(), true);
+  assert.equal(c.session.receive(ch, frame(SN1, 3, FR1, 1, 0)).ok, true);
+  assert.ok(rev() > r, "a claim is");
+  assert.equal(c.session.isQuiet(), false, "a live entry is counting down");
+  r = rev();
+  assert.equal(c.session.receive(ch, frame(SN1, 4, FR1, 1, 0)).ok, true);
+  assert.ok(rev() > r, "a refresh moves the countdown");
+  // Painting the frame already claimed costs nothing.
+  c.session.claim(OBJ, FR2);
+  r = rev();
+  assert.equal(c.session.autoClaim(OBJ, FR2), false);
+  assert.equal(rev(), r);
+});
+
+test("an auto-muted draw channel is reported once, without content", () => {
+  const clock = new FakeClock();
+  const c = member(C, clock, 3);
+  const muted: string[] = [];
+  c.session.onmuted = (peer) => muted.push(peer);
+  const ch = c.session.openEdge(A, () => true)!;
+  for (let ms = 0; ms < 30_000; ms += 1) { clock.advance(1); c.session.receive(ch, "{"); }
+  assert.deepEqual(muted, [A]);
+});
+
+test("selection drives claims: moving off a frame releases it and lapses a Pass suppression", () => {
+  const clock = new FakeClock();
+  const a = member(A, clock, 1);
+  const b = member(B, clock, 2);
+  connect(a, A, b, B);
+  a.session.selectionChanged(OBJ, FR1);
+  a.session.autoClaim(OBJ, FR1);
+  a.session.selectionChanged(OBJ, FR1);
+  assert.deepEqual(a.session.local().claim, { obj: OBJ, fr: FR1 }, "re-selecting the same frame keeps the claim");
+  // Pass F, look at G without painting, come back to F and paint: F is claimed again.
+  a.session.pass(OBJ, FR1);
+  assert.equal(a.session.autoClaim(OBJ, FR1), false, "suppressed right after passing");
+  a.session.selectionChanged(OBJ, FR2);
+  a.session.selectionChanged(OBJ, FR1);
+  assert.equal(a.session.autoClaim(OBJ, FR1), true);
+  assert.equal(b.session.peerEntries(OBJ)[0]?.fr, FR1);
+  // Moving away releases at once; an ask for another frame is withdrawn too.
+  b.session.ask(OBJ, FR1);
+  a.session.selectionChanged(OBJ, FR3);
+  assert.equal(a.session.local().claim, null);
+  assert.deepEqual(b.session.local().claim, { obj: OBJ, fr: FR1 }, "moving on is an explicit release, so the asker takes it");
+  b.session.ask(OBJ, FR3);
+  b.session.selectionChanged(OBJ, FR2);
+  assert.equal(b.session.local().ask, null);
+  assert.equal(b.session.local().claim, null, "and its own claim on FR1 went with the move");
+  assert.deepEqual(a.session.peerEntries(OBJ), [], "the holder saw both withdrawn");
+});
+
+test("a session rotation keeps an outstanding Ask tracked and re-sent", () => {
+  const clock = new FakeClock();
+  const a = member(A, clock, 1, 3); // q may be 0, 1, 2; the fourth frame rotates the session
+  const b = member(B, clock, 2);
+  connect(a, A, b, B);
+  b.session.claim(OBJ, FR1);
+  const first = a.session.sessionNonce();
+  a.session.ask(OBJ, FR1); // q 0
+  a.session.claim(OBJ, FR2); // q 1
+  clock.advance(CLAIM_RESEND_MS);
+  a.session.tick(); // refresh, q 2
+  clock.advance(CLAIM_RESEND_MS);
+  a.session.tick(); // rotation: claim re-sent, the ask marked unsent and re-sent in the same tick
+  assert.notEqual(a.session.sessionNonce(), first);
+  assert.notEqual(a.session.local().ask, null, "the ask is still tracked after rotating");
+  assert.deepEqual(b.session.asksOnMine().map((e) => e.peer), [A], "and the holder still sees it");
+  assert.deepEqual(b.session.peerEntries(OBJ).filter((e) => e.kind === "claim").map((e) => e.fr), [FR2]);
+  b.session.pass(OBJ, FR1);
+  assert.deepEqual(a.session.local().claim, { obj: OBJ, fr: FR1 }, "so a Pass after rotation still lands");
+});

@@ -218,7 +218,9 @@ completes the hand-over by claiming (6.4).
 - **Claim.**
   - Painting a frame calls `autoClaim`, and the "claim this frame" button claims explicitly.
   - Selecting another frame or object, leaving the Studio, viewing another server or leaving the
-    call releases the claim.
+    call releases the claim. The Studio reports every selection change to the session (`select`),
+    which withdraws a claim or ask for any other frame and lapses a Pass suppression for another
+    frame.
   - The claim is refreshed every 30 s and re-sent to an edge that opens or whose connection
     recovers.
 - **Ask.**
@@ -228,10 +230,12 @@ completes the hand-over by claiming (6.4).
   - The holder sees a sticky "X asks for frame N · 52 s · pass" notice in the always-visible
     transport bar.
   - Pass releases the frame and suppresses `autoClaim` on it until the user selects another frame or
-    claims explicitly.
+    claims explicitly. Coming back to that frame and painting claims it again.
   - The asker takes the frame only when an **explicit Release of a live claim** arrives from the
-    holder while its own Ask is live and nobody else still claims the frame (review M4). The asker
-    then sees "passed you the frame".
+    holder while its own Ask is live and nobody else still claims the frame (review M4). Pass is the
+    deliberate way to send that Release, but a holder moving to another frame or leaving the Studio
+    sends one too, and that also hands the frame over. The asker sees "X let go of the frame you
+    asked for; it's yours now". Two askers can both take it, which then shows as contested.
   - Expiry, a dropped channel, a reconnect, a session change, an auto-mute, or a peer withdrawing its
     own Ask is never a Pass.
 - **Pacing.** The sender mirrors the receiver's claim bucket and coalesces a burst to its latest
@@ -394,3 +398,28 @@ Residuals the review listed as pre-existing are recorded in THREAT-MODEL:
 - Signal replay of a stale `bye`.
 - DM-invite deduplication by fingerprint.
 - `voiceRooms`/`alertedRooms` keyed by unvalidated call ids.
+
+## 12. Final diff review response (2026-10-12)
+
+A read-only adversarial reviewer inspected `e8aad1a..57683b1` and reran the focused frontend
+suites. It reported no blocker.
+
+| Finding | Resolution |
+|---|---|
+| HIGH-1: the stage context menu was keyed by fingerprint, so its mute, volume and instrument actions silently did nothing | Fixed: `peerMenu` takes the call key, and only the profile card, the copied fingerprint and the head avatar use `displayKey`. Pinned in `call-wiring.test.ts`. |
+| MEDIUM-1: every draw delivery and paint sample rebuilt the snapshot | Fixed. `rev` moves only on visible changes; refused frames, no-op releases and re-claims leave it alone. The app rebuilds only when `rev` moves or a countdown is live (`withDrawClaims`, `isQuiet`), and the Studio skips `autoClaim` for the frame already claimed. Covered by session tests, a mutation check and source pins. |
+| L1: Pass suppression did not lapse on a selection change | Fixed: `selectionChanged`/`select`. Session test covers the review's probe sequence. |
+| L2: "passed you" overstated intent | The toast now says the holder let go. Section 6.4 documents that moving on also hands over the frame, and that two askers become a collision. |
+| L3: missing HANDOVER entry | Added. |
+| L4: stale comments, labels and parameter names | Fixed, and the debug peer view reports fingerprint labels. |
+| L5: silent draw auto-mute | Diagnostic `VOICE.DRAW.ABUSE_MUTED` added (no identity or content); session test. |
+| L6: a rotation inside `flushAsk` desynchronised the Ask | Fixed: rotation marks the Ask unsent instead of dropping it. A test fails under the old behaviour. |
+
+Residuals carried forward:
+
+- A transient "disconnected" can hide a peer's claims for up to 30 s if only the receiver saw the
+  blip.
+- The L9 WebView check is still open.
+- A routing test against a *member* prefix twin is impractical: it needs a ground key.
+- There is no live two-client WebRTC run.
+

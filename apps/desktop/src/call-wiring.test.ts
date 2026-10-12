@@ -54,9 +54,9 @@ test("every edge gets a negotiated draw channel bound to a claim capability, tor
   assert.match(create, /createDataChannel\(DRAW_CHANNEL_LABEL, \{ negotiated: true, id: DRAW_CHANNEL_ID, ordered: true \}\)/);
   assert.match(create, /claims\.openEdge\(fp,/);
   assert.match(create, /claims\.receive\(drawChan, e\.data\)/);
-  assert.match(create, /drawDc\.onclose = \(\) => \{\s*claims\.closeEdge\(drawChan\)/);
-  assert.match(create, /claims\.peerUnreachable\(fp\)/, "a dead link drops that peer's claims at once");
-  assert.match(body(app, "function removePeer("), /drawClaims\?\.removePeer\(fp\)/);
+  assert.match(create, /drawDc\.onclose = \(\) => \{[^}]*claims\.closeEdge\(drawChan\)/);
+  assert.match(create, /s\.peerUnreachable\(fp\)/, "a dead link drops that peer's claims at once");
+  assert.match(body(app, "function removePeer("), /withDrawClaims\(\(s\) => s\.removePeer\(fp\)\)/);
   const leave = body(app, "function leaveVoice(");
   assert.match(leave, /stopDrawClaims\(\)/);
   assert.match(body(app, "async function joinVoice("), /startDrawClaims\(selfId\)/);
@@ -68,7 +68,7 @@ test("the Studio receives claims only while it is open on the call's own server"
   assert.match(app, /claims=\{studioClaimScope \? drawClaimSnapshot : null\} claimActions=\{studioClaimActions\}/);
   // Every asserting action is re-checked against the scope at call time.
   for (const action of ["claim", "autoClaim", "ask"]) {
-    assert.match(app, new RegExp(`${action}: \\(obj: string, fr: string\\) => \\{ if \\(studioClaimScope\\)`));
+    assert.match(app, new RegExp(`${action}: \\(obj: string, fr: string\\) => withDrawClaims\\(\\(s\\) => \\{ if \\(studioClaimScope\\) s\\.${action}\\(obj, fr\\)`));
   }
   // Painting claims; claims never gate painting or saving.
   assert.match(body(studio, "function edited("), /claimActions\?\.autoClaim\(objectId, frameId\)/);
@@ -83,3 +83,26 @@ test("local per-peer trims stay keyed by fingerprint, so saved levels survive th
   assert.match(body(app, "function nameOf("), /const fp = displayKey\(key\)/);
   assert.match(body(app, "function callNameOf("), /identityLabel\(name, key, callSharedIds\)/);
 });
+
+test("the stage context menu acts on the same full-identity key as every per-peer map", () => {
+  // Re-keyed to the fingerprint, the menu's mute/volume/instrument actions silently addressed no
+  // chain, engine source or budget, and reported a mute that never happened.
+  assert.match(app, /use:contextMenu=\{\(\) => peerMenu\(fp\)\}/);
+  assert.doesNotMatch(app, /peerMenu\(callFingerprint\(/);
+  const menu = body(app, "function peerMenu(");
+  assert.match(menu, /setPeerVolume\(fp, v\)/);
+  assert.match(menu, /toggleVoicePeer\(fp\)/);
+  assert.match(menu, /toggleInstPeer\(fp\)/);
+  assert.match(menu, /showProfile\(label\)/, "only the profile card wants the fingerprint");
+});
+
+test("claim snapshots are rebuilt only when the session changed something visible", () => {
+  // A refused or no-op frame (a flood, an auto-muted peer) and a paint sample on a frame already
+  // claimed must not re-render the timeline.
+  assert.match(body(app, "function withDrawClaims("), /if \(session\.rev !== before\) syncDrawClaims\(\)/);
+  const create = body(app, "function createPeer(");
+  assert.match(create, /const before = claims\.rev;\s*claims\.receive\(drawChan, e\.data\);\s*syncIfChanged\(before\)/);
+  assert.match(body(app, "function startDrawClaims("), /session\.rev !== before \|\| !session\.isQuiet\(\)/);
+  assert.match(body(studio, "function edited("), /claims\.local\.claim\?\.obj !== objectId \|\| claims\.local\.claim\?\.fr !== frameId/);
+});
+
