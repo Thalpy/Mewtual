@@ -119,6 +119,16 @@ pub enum AppError {
         reason: catcoms_replication::studio::StudioOverlaySaveRefusal,
         message: String,
     },
+    /// A retained-draft Copy proposal was refused before publication.  This is separate from
+    /// `Invalid`: the actor/native boundary must carry the no-write fact and retry class without
+    /// parsing prose.  An earlier delivery failure can still make the overall UI operation
+    /// uncertain; the frontend retains that earlier identity instead of trusting this later
+    /// refusal as proof that the first Apply did not land.
+    #[error("{message}")]
+    StudioCopyRefused {
+        reason: crate::studio::StudioOverlayCopyRefusal,
+        message: String,
+    },
     /// The destination rename committed, but flushing its directory failed. The caller must not
     /// report a clean rollback: the new complete record is visible, although it may not survive
     /// sudden power loss. Retrying the same save is safe and reconciles the durability state.

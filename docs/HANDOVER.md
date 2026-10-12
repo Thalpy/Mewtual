@@ -10,6 +10,28 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-10-12)
 
+- **PR #27 recovery-workflow corrections (2026-10-12; local verification complete).** Review of exact
+  head `b8cda2a047b01f75664603c9e0fd96ed5341b6c6` found three reachable Studio progress failures.
+  Implementation checkpoint `f6d67f4304b75922e3da93980699a0b6adf252a4` contains their reviewed
+  correction, the adjacent rereview fix, regressions and the exact-lock security update.
+  The isolated `fix/pr27-studio-recovery` candidate now carries C4's stale Copy rejection as a
+  typed pre-publication `written:false` result; permits a new preview/fresh nonce only when no
+  earlier delivery is ambiguous; keeps unresolved Copy actions visible after source disposal,
+  transfer and navigation; and re-evaluates the current ordinary/Unconfirmed route when explicitly
+  re-authoring a proven-no-write Save. Ambiguous Save and Copy identities remain exact and cannot be
+  silently replaced. The first bounded re-review found one adjacent progress defect: an ambiguous
+  Copy whose exact retry is now stale had no way to release its bounded frontend slot. Both Studio
+  surfaces now offer a two-step, local-only "stop tracking" action which warns that the Copy may
+  already have landed, sends no native mutation and permits a later deliberate preview with a fresh
+  nonce. Focused native-adapter, session and compiled-component regressions cover the findings. The
+  complete root (including the 10,000-operation catch-up case), desktop/Tauri and 1,310-test frontend
+  suites pass, as do both strict Clippy commands, desktop check, Svelte check/build, formatting,
+  root `cargo deny` and the local Git Bash ambient check. Final bounded re-reviews report no finding
+  at any severity. The unchanged locks initially failed three newly published `quinn-proto 0.11.17`
+  advisories; both root and desktop locks now resolve `0.11.18`, the exact-lock suites pass, and the
+  generated dependency delta also received a finding-free bounded review. Hosted Linux ambient and
+  ordinary exact-head CI remain required before merge. Gate 5 remains closed.
+
 - **Gate 4 merge-readiness checkpoint (2026-10-12).** Code checkpoint
   `610c45e323bf018c2a3ffa91bbf359faaf707be3` closes the four latest MEDIUM findings. A retained-draft
   Copy run now survives document navigation, fences a replacement and owns its late response; an
@@ -24,8 +46,9 @@ and ranks the live hazards in that path.
   flow harness is outside the changed Studio paths; its Windows CDP timeout remains disclosed as
   neither a pass nor a product failure. Final review also found and closed mutation-harness
   concurrent-edit safety and stale current documentation; short re-review reports no finding at any
-  severity. PR #41 may merge after normal checks pass on that final harness/docs delta. Gate 5
-  remains closed.
+  severity. PR #41 subsequently merged as `b8cda2a047b01f75664603c9e0fd96ed5341b6c6`
+  from exact head `dd77f01e0aa28bb4f4cfcbc47fa8401ea6093565`; those results belong to that
+  historical candidate and do not cover the newer PR #27 recovery correction. Gate 5 remains closed.
 
 - **Gate 4 local completion checkpoint (2026-10-12).** The isolated candidate now contains the
   remaining structured Save-refusal path, P5-bounded lifecycle and ticketed Unconfirmed commands,

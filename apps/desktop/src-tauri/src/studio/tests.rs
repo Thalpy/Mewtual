@@ -71,6 +71,16 @@ fn every_destructive_or_copy_success_is_classified_before_a_final_fence() {
         })),
         Some(WithheldWrite::Copy)
     );
+    assert_eq!(
+        withheld_write(&InvokeResponse::Control(R::OverlayCopyRefused {
+            destination: StudioTarget::Index {
+                channel: 7u128.to_be_bytes(),
+            },
+            reason: app::studio::StudioOverlayCopyRefusal::StalePreview,
+        })),
+        None,
+        "a typed refusal is emitted before publication and must not be relabeled uncertain"
+    );
 }
 
 #[tokio::test]

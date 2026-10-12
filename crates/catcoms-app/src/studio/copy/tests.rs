@@ -5,11 +5,12 @@
 //! back under custody. These tests reach it with an otherwise valid `Ready` plan - the planner's own
 //! verdict is asserted first - so that a refusal or downgrade can only be the probe's.
 use super::*;
-use crate::store::EpochStudioBudget;
+use crate::store::{EpochStudioBudget, StudioDisposalRequestMode, StudioOverlayDisposalRequest};
 use crate::studio::StudioRequest;
 use catcoms_mls::MlsDevice;
 use catcoms_replication::studio::{
-    FlipnoteHeader, FlipnoteOp, IndexOp, StudioExpiry, StudioKind, StudioOverlaySave,
+    FlipnoteHeader, FlipnoteOp, IndexOp, StudioDiscardConfirmation, StudioExpiry, StudioKind,
+    StudioOverlaySave,
 };
 use catcoms_replication::DomainOp;
 use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
@@ -440,6 +441,26 @@ impl Fixture {
         self.store = ServerStore::open(self._root.path(), b"copy-probe", &mut rng()).unwrap();
     }
 
+    /// Remove the live source branch through the production disposal control. An exact retry of a
+    /// copy that already landed must not depend on this source still existing.
+    fn discard_branch(&mut self) {
+        let (branch, content, accepted, _) = self.branch_identity();
+        let response = self.finish(StudioControlAction::DisposeOverlay(Box::new(
+            StudioOverlayDisposalRequest {
+                branch,
+                content,
+                accepted,
+                mode: StudioDisposalRequestMode::Discard(
+                    StudioDiscardConfirmation::parse(StudioDiscardConfirmation::TOKEN).unwrap(),
+                ),
+            },
+        )));
+        assert!(matches!(
+            response,
+            StudioControlResponse::OverlayDisposed(_)
+        ));
+    }
+
     /// A durable transfer hold on the index document, staged through the real handoff.
     fn stage_transfer_hold(&mut self) {
         let mut b = budget(&mut self.store, &mut self.server);
@@ -608,15 +629,16 @@ async fn export_archive_and_copy_preview_keep_their_slot_and_fence_through_deliv
     }
 }
 
-/// M3's missing half, N6 for a same-document copy, and the same retry across a store restart.
+/// M3's missing half, N6 for a same-document copy, and the same retry across a store restart and
+/// source disposal.
 ///
 /// The copy is carried all the way through: C4's request is published exactly as the actor
 /// publishes it, so "landed" is an operation in the destination rather than an accepted echo.
 /// Then the identical echo is sent again, as a renderer does after an uncertain result. It must
 /// be acknowledged as already saved rather than refused, and it must write nothing. The same
-/// holds after the store is reopened. Throughout, the branch the value came from is untouched in
-/// everything that records it (N6): its id, its content, its accepted count and its metadata
-/// bytes.
+/// holds after the store is reopened and, once the copy is known to have landed, after the source
+/// is deliberately disposed. Until that deliberate disposal, the branch the value came from is
+/// untouched in everything that records it (N6): its id, content, accepted count and metadata.
 #[tokio::test]
 async fn a_copy_lands_once_and_its_exact_retry_is_acknowledged_without_a_second_operation() {
     let mut f = Fixture::new().await;
@@ -667,6 +689,12 @@ async fn a_copy_lands_once_and_its_exact_retry_is_acknowledged_without_a_second_
         .expect("the exact retry is acknowledged after a restart too");
     assert!(already);
     assert_eq!(f.branch_identity(), branch);
+
+    f.discard_branch();
+    let (_, already) = f
+        .apply(f.echo_for(&echo))
+        .expect("an already-landed copy remains acknowledgeable after its source is disposed");
+    assert!(already);
 }
 
 /// L4: an ordinary Save is never reported as this copy having landed.
@@ -685,6 +713,7 @@ async fn an_ordinary_save_of_the_same_bytes_is_never_reported_as_this_copy() {
     let echo = f.echo(&prepared.plan);
     drop(prepared);
 
+    let before = f.destination_ops();
     f.publish(StudioRequest::Apply {
         target: f.index,
         epoch_id: echo.epoch_id,
@@ -696,10 +725,21 @@ async fn an_ordinary_save_of_the_same_bytes_is_never_reported_as_this_copy() {
         !matches!(result, Ok((_, true))),
         "an ordinary Save must not be acknowledged as this copy having landed"
     );
-    let refused = result.unwrap_err().to_string();
+    let refused = match result.unwrap_err() {
+        AppError::StudioCopyRefused { reason, message } => {
+            assert_eq!(reason, StudioOverlayCopyRefusal::StalePreview);
+            message
+        }
+        other => panic!("a stale preview needs a typed known-no-write refusal, got {other}"),
+    };
     assert!(
         refused.contains("copy preview is stale"),
         "the echo must be re-planned against the destination the Save moved: {refused}"
+    );
+    assert_eq!(
+        f.destination_ops(),
+        before + 1,
+        "the refusal wrote no additional operation"
     );
 }
 

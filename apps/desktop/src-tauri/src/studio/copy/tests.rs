@@ -227,24 +227,21 @@ async fn an_apply_with_a_stale_echo_is_refused_and_writes_nothing() {
     // "each value is checked by its own guard" are different claims and only the second is useful.
     // The epoch is caught by the preflight that establishes the destination is the Open epoch this
     // proposal was built for, before the plan is even re-derived.
-    for (reason, field, wrong, says) in [
+    for (reason, field, wrong) in [
         (
             "another epoch",
             "epochId",
             json!(HEX[..32].to_string()),
-            "epoch is no longer Open/current",
         ),
         (
             "another projection",
             "expectedProjection",
             json!(HEX),
-            "stale; preview again",
         ),
         (
             "another body",
             "body",
             Value::from(other.clone()),
-            "Ready or body differs",
         ),
     ] {
         let mut payload = json!({
@@ -261,18 +258,18 @@ async fn an_apply_with_a_stale_echo_is_refused_and_writes_nothing() {
             .expect("a well-formed payload")
             .checked()
             .expect("a well-formed payload");
-        let error = recovery::invoke_control(
+        let refused = recovery::invoke_control(
             &state,
             fixture::SERVER,
             f.target,
             Action::ApplyOverlayCopy(Box::new(edit)),
         )
         .await
-        .expect_err(reason);
-        assert!(
-            error.contains(says),
-            "{reason} must be refused by the guard that names {says:?}, said: {error}"
-        );
+        .unwrap_or_else(|error| panic!("{reason} must cross as a typed refusal: {error}"));
+        assert_eq!(refused["kind"], "overlayCopyRefused", "{reason}");
+        assert_eq!(refused["reason"], "stalePreview", "{reason}");
+        assert_eq!(refused["retry"], "repreview", "{reason}");
+        assert_eq!(refused["written"], false, "{reason}");
         assert_eq!(f.records(), before, "a refused apply wrote: {reason}");
     }
     f.shutdown().await;

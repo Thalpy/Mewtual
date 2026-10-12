@@ -15,6 +15,23 @@ async fn state(f: &InspectionFixture) -> AppState {
 
 const HEX: &str = "aa00000000000000000000000000000000000000000000000000000000000011";
 
+#[test]
+fn a_stale_copy_crosses_as_a_typed_proven_no_write_result() {
+    let value = response_value(Response::OverlayCopyRefused {
+        destination: StudioTarget::Flipnote {
+            channel: 7u128.to_be_bytes(),
+            object: [9; 16],
+        },
+        reason: catcoms_app::studio::StudioOverlayCopyRefusal::StalePreview,
+    })
+    .unwrap();
+    assert_eq!(value["kind"], "overlayCopyRefused");
+    assert_eq!(value["reason"], "stalePreview");
+    assert_eq!(value["retry"], "repreview");
+    assert_eq!(value["written"], false);
+    assert!(value.get("contentSaved").is_none());
+}
+
 fn parse_mode(value: Value) -> Result<StudioDisposalRequestMode, String> {
     serde_json::from_value::<DisposalInput>(value)
         .map_err(|e| e.to_string())?

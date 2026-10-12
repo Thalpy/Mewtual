@@ -234,6 +234,11 @@ export type OverlayCopyApplied = {
   v: 1; kind: "overlayCopyApplied"; channel: Decimal; object: Hex32 | null;
   contentSaved: true; alreadySaved: boolean; provisional: true; branchPreserved: false;
 };
+export type OverlayCopyRefused = {
+  v: 1; kind: "overlayCopyRefused"; channel: Decimal; object: Hex32 | null;
+  reason: "stalePreview"; retry: "repreview"; written: false;
+};
+export type OverlayCopyApplyResult = OverlayCopyApplied | OverlayCopyRefused;
 export type UnconfirmedOverlaySaveTicket = {
   v: 1; kind: "unconfirmedOverlaySaveTicket"; channel: Decimal; object: Hex32 | null;
   basis: Hex64; branch: Hex64; provenance: "unconfirmed";
@@ -774,6 +779,12 @@ export function parseOverlayCopyApplied(v: unknown): OverlayCopyApplied {
   if (r.v !== 1 || r.kind !== "overlayCopyApplied" || r.contentSaved !== true || r.provisional !== true || r.branchPreserved !== false) fail("not an overlay copy apply result");
   return { v: 1, kind: "overlayCopyApplied", ...overlayTarget(r, "overlay copy applied"), contentSaved: true, alreadySaved: flag(r.alreadySaved, "overlay copy applied.alreadySaved"), provisional: true, branchPreserved: false };
 }
+export function parseOverlayCopyApplyResult(v: unknown): OverlayCopyApplyResult {
+  const r = record(v, "overlay copy apply result");
+  if (r.kind === "overlayCopyApplied") return parseOverlayCopyApplied(v);
+  if (r.v !== 1 || r.kind !== "overlayCopyRefused" || r.reason !== "stalePreview" || r.retry !== "repreview" || r.written !== false) fail("not an overlay copy refusal");
+  return { v: 1, kind: "overlayCopyRefused", ...overlayTarget(r, "overlay copy refused"), reason: "stalePreview", retry: "repreview", written: false };
+}
 export function parseUnconfirmedOverlaySaveTicket(v: unknown): UnconfirmedOverlaySaveTicket {
   const r = record(v, "unconfirmed overlay save ticket");
   if (r.v !== 1 || r.kind !== "unconfirmedOverlaySaveTicket" || r.provenance !== "unconfirmed") fail("not an unconfirmed overlay save ticket");
@@ -941,8 +952,8 @@ export async function overlayArchiveRelease(ipc: StudioIpc, t: RecoveryTargetArg
 export async function overlayCopyPreview(ipc: StudioIpc, source: RecoveryTargetArgs, destination: OverlayDestination, choice: RecoveryChoice, mode: RecoveryMode): Promise<OverlayCopyPreview> {
   return parseOverlayCopyPreview(await ipc.invoke<unknown>("studio_overlay_copy_preview", { ...recoveryArgs(source), destination, choice, mode }));
 }
-export async function overlayCopyApply(ipc: StudioIpc, source: RecoveryTargetArgs, edit: OverlayCopyApplyEdit): Promise<OverlayCopyApplied> {
-  return parseOverlayCopyApplied(await ipc.invoke<unknown>("studio_overlay_copy_apply", { ...recoveryArgs(source), edit }));
+export async function overlayCopyApply(ipc: StudioIpc, source: RecoveryTargetArgs, edit: OverlayCopyApplyEdit): Promise<OverlayCopyApplyResult> {
+  return parseOverlayCopyApplyResult(await ipc.invoke<unknown>("studio_overlay_copy_apply", { ...recoveryArgs(source), edit }));
 }
 export async function overlayDispose(ipc: StudioIpc, t: RecoveryTargetArgs, disposal: OverlayDisposalRequest): Promise<OverlayDisposed> {
   return parseOverlayDisposed(await ipc.invoke<unknown>("studio_overlay_dispose", { ...recoveryArgs(t), disposal }));

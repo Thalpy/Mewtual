@@ -797,6 +797,16 @@ pub(super) fn response_value(response: Response) -> Result<Value, String> {
             "channel":channel_of(destination),"object":object_of(destination),
             "contentSaved":true,"alreadySaved":already_saved,"provisional":true,
             "branchPreserved":false}),
+        // This response is emitted only before the publication transaction is entered.  Carry
+        // `written: false` across the native boundary so the renderer may safely offer a new
+        // preview without guessing from error text.  A renderer that already observed an
+        // ambiguous attempt must still keep that earlier request frozen.
+        Response::OverlayCopyRefused {
+            destination,
+            reason: catcoms_app::studio::StudioOverlayCopyRefusal::StalePreview,
+        } => json!({"v":1,"kind":"overlayCopyRefused",
+            "channel":channel_of(destination),"object":object_of(destination),
+            "reason":"stalePreview","retry":"repreview","written":false}),
         // Design 8.7. Never authority: the Save mints again from the live preview at each stage.
         Response::UnconfirmedOverlaySaveTicket {
             target,

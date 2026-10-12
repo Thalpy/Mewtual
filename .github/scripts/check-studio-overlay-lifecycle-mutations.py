@@ -235,8 +235,10 @@ MUTATIONS = [
     (
         "copy-exact-retry", "catcoms-app", "studio::copy::tests::",
         "crates/catcoms-app/src/studio/copy.rs",
-        "            if exact {\n                return Ok(true);\n            }\n",
-        "            let _ = exact;\n",
+        "        if already_saved {\n"
+        "            // The source may have been disposed or transferred after the lost response. Exact\n",
+        "        if already_saved && false {\n"
+        "            // The source may have been disposed or transferred after the lost response. Exact\n",
         "a_copy_lands_once_and_its_exact_retry_is_acknowledged_without_a_second_operation",
         "an exact retry is acknowledged, not refused as stale",
     ),

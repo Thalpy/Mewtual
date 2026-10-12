@@ -2230,7 +2230,22 @@ The same lifecycle family is available for both Flipnote and Index local drafts;
 omits `object` on every request, including the destination embedded in an exact copy Apply. Native
 final-delivery fences classify a completed archive, archive release, disposal and copy Apply as
 uncertain rather than a clean refusal. Release/disposal callers reconcile lifecycle before acting
-again; copy retains and retries the exact prepared edit.
+again; copy retains and retries the exact prepared edit. Copy's C4 freshness checks are the narrow
+exception: an epoch/projection/object refusal before the publication transaction returns
+`overlayCopyRefused { reason: "stalePreview", retry: "repreview", written: false }`. A first clean
+refusal permits an explicit new preview and fresh nonce. It may also be cancelled locally using
+that refused proposal's exact nonce. Clean cancellation deletes only its retained frontend entry,
+sends no native command and releases the bounded slot because C4 has proved the attempt wrote
+nothing; a stale nonce cannot cancel a replacement. If an earlier delivery of that same Apply was
+ambiguous, the session keeps the earlier request uncertain and byte-identical even when a later
+exact retry receives this clean refusal; the later answer cannot prove whether the earlier attempt
+committed. Outstanding Copy status/actions render independently of the source branch, so disposal,
+transfer and navigation do not hide the exact-retry control. When that exact uncertain request can
+no longer make progress, the user may instead use a two-step **stop tracking** action. It deletes
+only the session's retained frontend request, sends no native command, and explicitly warns that
+the Copy may already have landed. The confirmation is bound to the frozen nonce, so a stale
+confirmation cannot forget a newer uncertain Copy; a new Copy, if the source is still available,
+starts with a fresh preview and nonce.
 
 The same candidate registers `studio_overlay_lifecycle`, `studio_overlay_export`,
 `studio_overlay_archive`, `studio_overlay_archive_read`, `studio_overlay_archive_export`,
@@ -2239,7 +2254,10 @@ The same candidate registers `studio_overlay_lifecycle`, `studio_overlay_export`
 read-class commands. Archive, release, copy-apply, dispose and Unconfirmed Save are write-class
 commands. Discard and archive release require their exact literal confirmations. Copy Apply uses
 one previewed ordinary edit and retains it across uncertain delivery; it never consumes or mutates
-the source branch. These commands grant no repair, handoff or source authority.
+the source branch. Explicit Save re-authoring is available only for a typed known-no-write entry,
+re-evaluates the document's current ordinary/Unconfirmed route, and creates a fresh queue identity.
+An ambiguous Save keeps its old route, epoch, nonce and body until exact retry or explicit discard.
+These commands grant no repair, handoff or source authority.
 
 The reviewed [prepared-signing checkpoint](GATE4-HANDOFF-SIGNING-REVIEW.md) adds:
 

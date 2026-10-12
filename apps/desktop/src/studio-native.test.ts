@@ -27,6 +27,7 @@ import {
   parseFlipnoteView,
   parseIndexView,
   parseOverlayArchive,
+  parseOverlayCopyApplyResult,
   parseOverlayInspection,
   parseOverlayLifecycle,
   parseRecoveryApplied,
@@ -53,6 +54,20 @@ import {
 } from "./studio-native.ts";
 
 const F1 = id32(0x11), F2 = id32(0x12), F3 = id32(0x13);
+
+test("a Copy refusal crosses as a typed proven-no-write re-preview result", () => {
+  assert.deepEqual(parseOverlayCopyApplyResult({
+    v: 1, kind: "overlayCopyRefused", channel: CHANNEL, object: id32(7),
+    reason: "stalePreview", retry: "repreview", written: false,
+  }), {
+    v: 1, kind: "overlayCopyRefused", channel: CHANNEL, object: id32(7),
+    reason: "stalePreview", retry: "repreview", written: false,
+  });
+  assert.throws(() => parseOverlayCopyApplyResult({
+    v: 1, kind: "overlayCopyRefused", channel: CHANNEL, object: id32(7),
+    reason: "stalePreview", retry: "repreview", written: true,
+  }), /not an overlay copy refusal/);
+});
 
 test("an ordinary flipnote view keeps conflicts, insertions, tombstones and over-cap evidence", () => {
   const raw = ordinaryView(flipnoteContent({
