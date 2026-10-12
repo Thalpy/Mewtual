@@ -48,8 +48,9 @@
   import { base64ToBytes, type FrameConflictValue, type FrameView, type NativeExpiry, type RecoveryMode, type RecoveryVersion } from "./studio-native.ts";
   import { reason, type RecoveryItem, type SaveRecord } from "./studio-session.ts";
   import { ensureStudio, setStudioScope, studio } from "./studio-state.svelte.ts";
+  import { frameClaimState, type ClaimView, type StudioClaimActions, type StudioClaimSnapshot } from "./draw-claims.ts";
 
-  let { me, server, channel, nameOf, colorOf, adapt = true, onnotice } = $props<{
+  let { me, server, channel, nameOf, colorOf, adapt = true, onnotice, claims = null, claimActions = null } = $props<{
     me: string;
     server: number | null;
     channel: string;
@@ -57,6 +58,10 @@
     colorOf: (identity: string) => string;
     adapt?: boolean;
     onnotice: (text: string, kind: "info" | "warn" | "error") => void;
+    /// Gate 5 frame claims of the call this Studio's server is in, or null outside such a call.
+    /// Advisory only: nothing in this component lets a claim decide whether an edit may happen.
+    claims?: StudioClaimSnapshot | null;
+    claimActions?: StudioClaimActions | null;
   }>();
 
   // Built once per mount (state may be written during init, never inside a derived); the
@@ -256,6 +261,44 @@
     if (!changedCells) return;
     dirty = true;
     paintRev++;
+    // Painting says "I am drawing this frame" to the call (advisory; it gates nothing). The session
+    // ignores it outside a call and after this device Passed the frame away.
+    if (claims && objectId && frameId) claimActions?.autoClaim(objectId, frameId);
+  }
+
+  // --- Frame claims (Gate 5): who is drawing which frame, never a lock ---------------------------
+  // Moving to another frame or object withdraws my claim, and any ask for a frame I am no longer
+  // looking at, so a claim always names the frame I actually have open.
+  $effect(() => {
+    const obj = objectId;
+    const fr = frameId;
+    untrack(() => {
+      const local = claims?.local;
+      if (!local) return;
+      if (local.claim && (local.claim.obj !== obj || local.claim.fr !== fr)) claimActions?.release();
+      if (local.ask && (local.ask.obj !== obj || local.ask.fr !== fr)) claimActions?.cancelAsk();
+    });
+  });
+  const frameClaims = $derived(frameClaimState(claims, objectId ?? "", frameId));
+  // Live peer claims per frame of the open object, for the timeline markers.
+  const claimsByFrame = $derived.by(() => {
+    const out = new Map<string, ClaimView[]>();
+    for (const e of claims?.entries ?? []) {
+      if (e.obj !== objectId || e.kind !== "claim") continue;
+      const list = out.get(e.fr) ?? [];
+      list.push(e);
+      out.set(e.fr, list);
+    }
+    return out;
+  });
+  // Asks on the frame I am drawing: each is a sticky notice with its countdown and Pass.
+  const askNotices = $derived((claims?.asksOnMine ?? []).filter((a: ClaimView) => a.obj === objectId));
+  function frameNumber(fr: string): string {
+    const i = frameIds.indexOf(fr);
+    return i >= 0 ? String(i + 1) : "?";
+  }
+  function claimTitle(list: readonly ClaimView[]): string {
+    return list.map((c) => `${who(c.peer)} is drawing this frame · ${c.secondsLeft} s unless refreshed`).join("\n");
   }
 
   // --- Pointer input on the canvas ----------------------------------------------------------------
@@ -807,7 +850,7 @@
     const t = setInterval(() => { tick++; }, 1000);
     return () => clearInterval(t);
   });
-  onDestroy(() => { commit(); });
+  onDestroy(() => { commit(); claimActions?.release(); claimActions?.cancelAsk(); });
 
   // --- Keys --------------------------------------------------------------------------------------
   function onKey(e: KeyboardEvent) {
@@ -1107,7 +1150,37 @@
             {:else if frameRec}
               <p class="micro">by {who(frameRec.author)} · {rel(frameRec.ts)} · {fmtKib(frameRec.bytes)}{#if frameRec.insertions > 1} · inserted {frameRec.insertions}× concurrently{/if}{#if frameRec.overCap} · over cap{/if}</p>
             {/if}
-            <p class="micro wrap it">claims (who is drawing what) arrive with the call draw channel; nothing here is a lock</p>
+            {#if !claims}
+              <p class="micro wrap it">claims (who is drawing which frame) appear while you are in a call on this server · they never lock a frame</p>
+            {:else if frameId && objectId}
+              {#if frameClaims.contested}
+                <div class="st-card warn">
+                  <span>more than one person is drawing this frame</span>
+                  <span class="micro">claims are advisory · nothing is locked · the last save of each frame is kept as another version</span>
+                </div>
+              {/if}
+              {#if frameClaims.mine}
+                <p class="micro">you are drawing this frame <button type="button" class="st-link" onclick={() => claimActions?.release()}>stop</button></p>
+              {/if}
+              {#each frameClaims.claimants as c (c.peer)}
+                <p class="micro"><b style="color: {tint(c.peer)}">{who(c.peer)}</b> is drawing this frame · {c.secondsLeft} s</p>
+              {/each}
+              {#each frameClaims.askers as a (a.peer)}
+                <p class="micro"><b style="color: {tint(a.peer)}">{who(a.peer)}</b> asked for this frame · {a.secondsLeft} s</p>
+              {/each}
+              {#if !frameClaims.mine}
+                {#if frameClaims.claimants.length}
+                  {#if frameClaims.myAsk !== null}
+                    <p class="micro">you asked for it · {frameClaims.myAsk} s <button type="button" class="st-link" onclick={() => claimActions?.cancelAsk()}>cancel</button></p>
+                  {:else}
+                    <button type="button" class="st-btn ghost" title="ask them to pass this frame to you; you can still draw on it either way" onclick={() => claimActions?.ask(objectId, frameId)}>ask to draw it</button>
+                  {/if}
+                {:else}
+                  <button type="button" class="st-btn ghost" title="tell the call you are drawing this frame (painting does this too)" onclick={() => claimActions?.claim(objectId, frameId)}>claim this frame</button>
+                {/if}
+              {/if}
+              <p class="micro wrap it">claims show who is drawing what during this call · they never lock a frame</p>
+            {/if}
           {:else if inspectorTab === "sound"}
             <div class="st-sec">frame {frameIndex >= 0 ? frameIndex + 1 : "·"}</div>
             <p class="muted small">No sound on this frame.</p>
@@ -1319,6 +1392,12 @@
         <span class="mono strong">{frameIndex >= 0 ? frameIndex + 1 : "·"} / {frames.length}</span>
         <span class="micro">{((Math.max(0, frameIndex) + 1) / Math.max(1, model.fps)).toFixed(2)} s of {(frames.length / Math.max(1, model.fps)).toFixed(2)} s</span>
         <span class="grow"></span>
+        {#each askNotices as a (a.peer + a.fr)}
+          <span class="st-ask" role="status">
+            <b style="color: {tint(a.peer)}">{who(a.peer)}</b> asks for frame {frameNumber(a.fr)} · {a.secondsLeft} s
+            <button type="button" class="st-link" title="stop drawing this frame and let them have it (nothing is locked either way)" onclick={() => claimActions?.pass(a.obj, a.fr)}>pass</button>
+          </span>
+        {/each}
         <button type="button" class="st-btn ghost" disabled={!!readOnlyWhy || overCapCount > 0} onclick={() => addFrameAfter(false)}>+ frame after</button>
         <button type="button" class="st-btn ghost" disabled={!canEdit} onclick={() => addFrameAfter(true)}>duplicate</button>
         <button type="button" class="st-btn ghost" disabled={!frameId || !!readOnlyWhy || !!pendingHere} onclick={deleteFrame}>delete</button>
@@ -1326,6 +1405,8 @@
       <div class="st-strip">
         {#each frames as f, i (f.id)}
           {@const st = blobStateOf(f.cid, f.bytes)}
+          {@const fc = claimsByFrame.get(f.id) ?? []}
+          {@const mineHere = claims?.local.claim?.obj === objectId && claims?.local.claim?.fr === f.id}
           <button type="button" class="st-thumb" class:cur={f.id === frameId} class:over={!!f.overCap} class:conflict={f.conflicts.length > 0} onclick={() => openFrame(f.id)} title={f.overCap ? "over the cap: skipped in playback, greyed until trimmed" : st === "invalid" ? `pixels rejected: ${blobProblemOf(f.cid, f.bytes)}` : st === "unavailable" ? "pixels not available yet" : ""}>
             <span class="ix">{i + 1}</span>
             <span class="fr" class:fetching={st === "fetching" || st === "queued" || st === "idle"} class:missing={st === "unavailable" || st === "invalid" || st === "failed"}>
@@ -1343,6 +1424,9 @@
               {/if}
               <i class="dot" style="background: {tint(f.author)}"></i>
               {#if f.conflicts.length}<i class="corner"></i>{/if}
+              {#if fc.length || mineHere}
+                <i class="claim" class:contested={fc.length + (mineHere ? 1 : 0) > 1} style="background: {fc.length ? tint(fc[0].peer) : tint(me)}" title={mineHere ? (fc.length ? `you and ${claimTitle(fc)}` : "you are drawing this frame") : claimTitle(fc)}></i>
+              {/if}
             </span>
           </button>
         {/each}
@@ -1519,6 +1603,9 @@
   .st-thumb.over .fr { opacity: 0.45; background: repeating-linear-gradient(135deg, var(--bg-elev) 0 6px, var(--panel) 6px 12px); }
   .st-thumb.conflict .fr { border-color: var(--warn); }
   .st-thumb .dot { position: absolute; left: 3px; bottom: 3px; width: 7px; height: 7px; border-radius: 2px; }
+  .st-thumb .claim { position: absolute; right: 3px; bottom: 3px; width: 7px; height: 7px; border-radius: 50%; box-shadow: 0 0 0 1px var(--bg-0); }
+  .st-thumb .claim.contested { box-shadow: 0 0 0 2px var(--warn); }
+  .st-ask { display: inline-flex; align-items: center; gap: 6px; font-size: 0.7rem; padding: 2px 8px; border: 1px solid var(--accent); border-radius: 4px; background: color-mix(in oklab, var(--accent) 12%, transparent); }
   .st-thumb .corner { position: absolute; right: 0; top: 0; width: 0; height: 0; border-top: 9px solid var(--warn); border-left: 9px solid transparent; }
   .st-sfxlane { display: flex; align-items: center; gap: 6px; }
   .st-sfxlane .lb { width: 24px; font-size: 0.5rem; }

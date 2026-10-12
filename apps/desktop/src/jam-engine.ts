@@ -336,18 +336,35 @@ export class JamEngine {
   private readonly seedDrum: (input: JamDrumSeedInput) => Promise<number>;
   private readonly hashPatch: (patch: JamPatch) => Promise<string>;
 
-  /** Mint the capability an exact authenticated data-channel callback must close over. */
-  openSource(source: string): JamSourceChannel {
+  /**
+   * Mint the capability an exact authenticated data-channel callback must close over.
+   *
+   * `source` is the authority key: the peer's full authenticated identity in a call (Gate 5,
+   * design-creative-suite.md 2.18), so it keys the capability registry, sequencing, voice
+   * ownership and fairness. `seedLabel`, when given, is the jam:v2 performer label used ONLY as
+   * drum seed material: INTERFACES.md 12 fixes that material as the sender's fingerprint, so a
+   * room mixing builds still renders byte-identical noise for the same hit.
+   */
+  openSource(source: string, seedLabel?: string): JamSourceChannel {
     if (this.disposed) throw new Error("jam engine is disposed");
+    if (seedLabel !== undefined && !boundedTakeIdentity(seedLabel)) throw new TypeError("invalid jam seed label");
     if (this.sourceChannels.current(source)) {
       this.releaseSource(source);
       const state = this.states.get(source);
       if (state) state.lastSequence = null;
     }
-    return this.sourceChannels.open(source);
+    const channel = this.sourceChannels.open(source);
+    if (seedLabel !== undefined && seedLabel !== source) {
+      this.channelProvenance.set(channel, { owner: liveVoiceOwner(source), seedSource: seedLabel });
+    }
+    return channel;
   }
 
-  /** Open the reserved local lane while retaining the authenticated self identity for seeds. */
+  /**
+   * Open the reserved local lane while retaining the authenticated self label for seeds. Callers
+   * pass the same performer label (the fingerprint) peers derive for this device, so local echo
+   * and every receiver seed the same noise.
+   */
   openLocalSource(authenticatedSelf: string): JamSourceChannel {
     if (!boundedTakeIdentity(authenticatedSelf)) throw new TypeError("invalid local jam identity");
     const channel = this.openSource("me");
