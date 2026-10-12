@@ -1,8 +1,9 @@
 # Gate 4 Agent 4 status: integration and completion coordination
 
-Current checkpoint: 2026-10-12. The isolated completion candidate is based on PR #38's
-`gate4-agent1-runtime` head `bdcae4a30a0870443db92a14f2d80ff8e4947818`. Gate 4 remains
-incomplete and Gate 5 remains closed.
+Current checkpoint: 2026-10-12. PR #41's isolated completion candidate is based on PR #38's
+`gate4-agent1-runtime` head `bdcae4a30a0870443db92a14f2d80ff8e4947818`. Implementation and
+review are complete; merge waits only for normal checks on the final harness/docs head. Gate 5
+remains closed.
 
 The detailed live ledger is [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md). This document records the
 integration history, current ownership boundaries and the single remaining execution sequence.
@@ -23,11 +24,12 @@ weakening a product assertion:
   while form-3 and A -> B -> A' regressions pin repair-bound eligibility and tenure anti-replay.
 
 Complete root and desktop/native suites, both strict Clippy commands, desktop check, 1,303 frontend
-tests, Svelte check/build, formatting, `cargo deny` and Git Bash ambient checking pass locally. Two
-local flow attempts failed before an assertion because Edge did not answer CDP `Runtime.enable`; the
-startup probe produced neither its marker nor panic text. Exact-head hosted flow/startup, Linux
-ambient and complete mutation workflows remain required. The correction needs bounded re-review
-before PR #41 may merge into `gate4-agent1-runtime`.
+tests, Svelte check/build, formatting, `cargo deny` and Git Bash ambient checking pass locally. All
+28 hosted jobs pass on published head `a6e8b07...`; the startup probe now passes locally within its
+documented cold-start allowance. The browser flow harness does not exercise Studio and its Windows
+CDP failure remains a disclosed non-applicable environment gap. Bounded re-review closed the four
+code findings, then a mutation-harness concurrent-edit risk and stale documentation; their shared
+guard/regression and reconciliation received a final PASS with no finding at any severity.
 
 ## Completion-candidate override (2026-10-12)
 
@@ -46,10 +48,9 @@ worktree now has one locally verified completion delta on parent
   requests, requires explicit re-authoring for `newTicket`, keeps local projections separate from
   the awaiting-tenure base, and provides export/preserve/copy/dispose/release controls.
 
-Direct Closing Save and native repair commands remain unregistered. The final full local suites
-pass. The newer response checkpoint above supersedes this paragraph's earlier Review 4 completion
-claim: correction re-review, publication and exact-head hosted evidence remain required before
-merge into the shared baseline.
+Direct Closing Save and native repair commands remain unregistered. The final full local suites and
+published hosted evidence pass. PR #41 may merge only after the normal checks on its final
+harness/docs head are green.
 
 ## Historical state before the completion-candidate override
 
@@ -122,7 +123,7 @@ The reconciled exact head still requires CI and a bounded integration review bef
 | Repair candidate | Historical PR #32 checkpoint `87629d6b72992254911a8e44f698d535bb5d7904`; its reviewed ancestry is in merged PR #33 |
 | Documentation checkpoint | Historical PR #31 checkpoint `f0af61c9b1247fa955300ac50545074e18e9b302`; its documentation ancestry is in merged PR #33 |
 | Archived-tenure branch | PR #34 merged; `gate4-finalization` is historical at `7f80815e...` |
-| Runtime completion branch | Current isolated candidate `fix/six-client-recovery-gate4`, locally verified on committed parent `700d1dab...`; publication commit/PR #41 exact head pending |
+| Runtime completion branch | PR #41 from `fix/six-client-recovery-gate4`; runtime/UI checkpoint `610c45e3...`, published evidence head `a6e8b07...` with 28/28 hosted jobs passing; final reviewed harness/docs delta awaiting normal exact-head checks |
 | Agent 3 source | `gate4-agent3-repair` at `15b715a10704a8dafc2cccef65854d4d45ad55ca`; preserved, not rewritten |
 
 PR #28 remains the Agent 3 source record. PR #32 was its first integrated successor; merged PR #33
@@ -227,19 +228,19 @@ For review-response checkpoint `610c45e3...`, the complete root suite, complete 
 (336 library plus 5 command-ACL tests), all 1,303 frontend tests, root and desktop strict Clippy,
 desktop `cargo check`, root formatting, Svelte check, production build, `cargo deny` and an explicit
 Scoop/Git Bash ambient check all pass. The relevant corrected mutation entries detect their mutants
-and their restored controls pass. The latest complete-diff review returned four MEDIUM findings;
-the checkpoint addresses all four and awaits bounded re-review. An earlier review LOW in the startup
-harness is also still closed: the helper preserves the application's default when `RUST_LOG` is
-unset, canonicalizes the effective key only on Windows, appends the marker override only to a
-nonempty inherited filter, and passes six focused tests plus the full frontend suite.
+and their restored controls pass. The complete-diff review's four MEDIUM findings are closed. Its
+final harness/documentation findings are also corrected and the short re-review reports no finding.
+The startup helper preserves the application's default when `RUST_LOG` is unset, canonicalizes the
+effective key only on Windows, appends the marker override only to a nonempty inherited filter, and
+passes six focused tests plus the full frontend suite.
 
-The startup gate passed once on the assembled application under inherited `RUST_LOG=warn`. The
-current rerun produced neither its marker nor panic text within 20 s. Two current `test:flows` runs
-failed before a product assertion because Edge never answered CDP `Runtime.enable` within 60 s.
-They are not recorded as passes or code failures. WSL also fails to launch locally with
-`E_ACCESSDENIED`, while the same ambient script passes under installed Git Bash. Consequently the
-published exact head still requires hosted flow/startup, Linux ambient and complete store/runtime
-mutation workflows. No assertion or product boundary was weakened to obtain local evidence.
+The startup gate passes on the assembled application with a 60-second cold-start allowance. Two
+`test:flows` runs failed before a product assertion because Edge never answered CDP
+`Runtime.enable`; that harness covers chat send/friend acceptance rather than the changed Studio
+paths, so it is recorded as a non-applicable environment gap, not a pass or code failure. WSL also
+fails to launch locally with `E_ACCESSDENIED`, while the same ambient script passes under installed
+Git Bash. All 28 hosted jobs, including Linux ambient and the complete mutation workflows, pass on
+the code-identical published head. No assertion or product boundary was weakened.
 
 On `gate4-runtime-completion` through correction
 `6aee00046e35410ba42c9290c0d1f52fd41dd86b`, the definitive complete root suite passes, as do all

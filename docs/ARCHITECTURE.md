@@ -129,9 +129,10 @@ atomic across files; a different nonce cannot rename an existing object through 
 Native projections retain conflict/deletion evidence and three-state expiry. Local update events
 invalidate views, while responses explicitly label local publication and provisional edits.
 Create keeps the new object in epoch zero but obtains the Index's actual Open epoch under the
-same transaction, including after rotation. Automatic Index/art sync and watched-owner rotation
-are connected; the remaining recovery/succession integration is tracked in the backend roadmap.
-Dense-source latency remains unqualified. UI is unchanged.
+same transaction, including after rotation. Automatic Index/art sync, watched-owner rotation,
+repeated-tenure recovery and detached Studio/Registry repair are connected. Dense-source latency
+remains unqualified. The Studio UI consumes the reviewed local lifecycle and ticketed Unconfirmed
+Save boundary; it does not expose direct Closing Save or native repair controls.
 Persistent blob handles now share one mount-local deletion guard outside the kept-copy adapter.
 The derived reference union is keyed by full group bytes (including numeric-server aliases).
 Studio source/intent/recovery writes add holds before I/O; only a complete, generation-current,

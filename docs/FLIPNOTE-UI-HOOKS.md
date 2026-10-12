@@ -1,21 +1,23 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-10-11 against the isolated Gate 4 completion candidate based on
-`700d1daba4069af69fea4ff76b105c3008e6825c`. **Gate 4 is not yet accepted; Gate 5 remains
-closed.** The exact current ledger is [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md); historical
+Last checked: 2026-10-12 against PR #41's isolated Gate 4 completion candidate, whose reviewed
+runtime/UI code checkpoint is `610c45e323bf018c2a3ffa91bbf359faaf707be3`. **Gate 4 is pending
+the final integration checkpoint; Gate 5 remains closed.** The exact current ledger is
+[GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md); historical
 implementation and verification detail is in [HANDOVER](HANDOVER.md).
 
 The completion candidate promotes P5 for the reviewed local-draft lifecycle and ticketed
 awaiting-tenure Save boundary. Its lifecycle/read/export/archive/copy/dispose commands and the
 Unconfirmed Save begin/visit pair are registered, permissioned, parsed exhaustively and consumed
-by the real Studio surface. This promotion is isolated pending final suites and Review 4; it has
-not changed the shared `gate4-agent1-runtime` branch. Native repair commands remain unregistered.
+by the real Studio surface. This promotion remains isolated from the shared
+`gate4-agent1-runtime` branch; final review is complete and merge waits for normal checks on the
+final harness/docs head. Native repair commands remain unregistered.
 
 The [handoff signing checkpoint](GATE4-HANDOFF-SIGNING-REVIEW.md) has its bounded production PASS,
-and the 2026-10-10 short re-review closes its last test-coverage finding. That verdict does not
-promote P5 or accept the combined gate. Remaining work includes C-3 runtime adoption, structured
-runtime refusal mapping, the named repeated-tenure product paths, native/UI exposure after P5,
-the seven combined scenarios and Review 4. This documentation checkpoint enables no new control.
+and the 2026-10-10 short re-review closes its last test-coverage finding. Later integrated work now
+includes C-3 runtime adoption, structured refusal mapping, repeated-tenure product paths, bounded
+P5 exposure and the combined scenarios. That earlier bounded verdict remains evidence for its own
+scope rather than acceptance of the complete candidate.
 
 Earlier accepted scheduling/preview evidence: combined scheduling at `6b71d96` passed user
 review without required changes. That earlier block 1 is accepted. The new four-agent split above
@@ -38,9 +40,9 @@ records the handoff scope; do not introduce a second adapter or restart the mock
 Use the command/result and event tables below as the backend contract and
 `design-creative-suite.md` for visual behavior. Preserve the separation between native views
 and the editor model in `studio-store.ts`. Reuse the existing PIX codec and canonical operation
-encoding. Backend review acceptance does not independently accept the UI implementation or
-establish live two-client UI acceptance. Gate 4 backend work continues separately; coordinate
-Rust/native and shared-document edits.
+encoding. Earlier backend review acceptance did not independently accept the UI implementation or
+establish live two-client UI acceptance; PR #41's final review covers the combined boundary.
+Coordinate Rust/native and shared-document edits.
 
 Connect list/open/create, frame and header edits, Index edits, pixel publication/bounded fetching,
 refresh events, recovery list/read/preview/apply/backup export and eviction acknowledgement.
@@ -51,11 +53,11 @@ lossless, fence obsolete async results, and preserve conflicts/overflow/deletion
 also appears on ordinary editable local views; it is not the read-only discriminator. Do not
 invent a phase, settlement receipt, author confirmation or publication claim for a preview.
 
-Leave backend-dependent actions unavailable for durable Closing/Unconfirmed overlay Save and
-manual lifecycle actions, signed repair,
-claims/Ask/Pass (Gate 5), and sound/linked Music/`.pixa` export (Gate 6). Recovery backup export
-is already available and uses a different format. These gaps and full Gate 4 acceptance do not
-block the core UI hookup, but full-suite behavior is not ready for release acceptance yet.
+Keep direct Closing Save, native repair controls, claims/Ask/Pass (Gate 5), and
+sound/linked Music/`.pixa` export (Gate 6) unavailable. The reviewed lifecycle family and ticketed
+Unconfirmed Save are now connected to the real Studio surface; they grant only bounded local-draft
+authority. Recovery backup export is also available and uses a different format. These controls do
+not imply later-gate or release acceptance.
 
 The actor now schedules the reviewed provisional head, seed and signed-tail adapters through
 its detached job queue. A ready preview owns its shared seed reservation, releases its parser
@@ -372,7 +374,7 @@ installation; the UI should not implement a second catch-up scheduler or derive 
 | Current owner has not confirmed history | Native Read/List return the distinct `awaitingTenureReceipt: true` preview documented above. Its base is never ordinary authoring authority. The candidate UI can retain edits in the separately labelled local-only Unconfirmed overlay, with exact retry or explicit re-authoring as the typed result directs. |
 | History fault / repair progress | Actual `phase:"fault"` and `fault` invalidations are available. The detached bounded repair runtime is merged and reviewed at its stated boundary, but it has no native command or `repairing` event. Restore/Copy saves ordinary content in an Open target and cannot clear Fault. Historical Read/Export remain available. |
 | Local overlay while rotating | Closing Flow S/handoff remains automatic and Shared Apply still refuses Closing/Fault. The registered lifecycle UI can inspect, export, preserve, copy or explicitly dispose retained work; it does not expose a direct Closing Save command. |
-| Manual lifecycle and preview-local Save | Registered on the isolated candidate. `eligibility`, `manualReason` and `unconfirmedState` drive truthful actions; awaiting-tenure edits use the ticketed Unconfirmed Save pair. `pending`/`busy` retry the same bytes, `paused` requires explicit access before the same request, `newTicket` requires explicit re-authoring, and `none` cannot be retried as success. Final suites and Review 4 remain pending. |
+| Manual lifecycle and preview-local Save | Registered on the isolated candidate. `eligibility`, `manualReason` and `unconfirmedState` drive truthful actions; awaiting-tenure edits use the ticketed Unconfirmed Save pair. `pending`/`busy` retry the same bytes, `paused` requires explicit access before the same request, `newTicket` requires explicit re-authoring, and `none` cannot be retried as success. Final review is complete; preserve this boundary through the final head's normal checks and merge. |
 | Recovery rail: Restore / Copy / Export | List/inspect/backup export, per-item Restore/Copy and conservative own-intent replay are connected. Unsafe replay is manual recovery, never settlement. Final Gate 4 acceptance remains pending; backup export is not `.pixa`. |
 | Eviction warning / countdown | Use the listing's actual warning pair/deadline and `studio_recovery_acknowledge`. Refresh after the action and matching `settlement-changed` events. |
 | Claims, Ask, Pass, countdown | Pending Gate 5. Local fixture claims are not peer claims and never locks. |

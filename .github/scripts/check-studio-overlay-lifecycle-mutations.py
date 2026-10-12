@@ -28,6 +28,8 @@ import os
 import subprocess
 import sys
 
+from mutation_harness_guard import write_if_unchanged
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -868,7 +870,9 @@ def main():
         before, after = before.encode(), after.encode()
         changed = original.replace(before, after, 1)
         try:
-            source.write_bytes(changed)
+            # Preflight happened before any selected mutant compiled. Refuse to install this later
+            # mutant if a developer changed its source while an earlier entry was running.
+            write_if_unchanged(source, original, changed)
             result = run(package, prefix, test)
             (log_dir / f"gate4-overlay-lifecycle-mutation-{name}.log").write_text(
                 result.stdout, encoding="utf-8"

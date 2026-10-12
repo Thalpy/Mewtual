@@ -1,5 +1,9 @@
 # Gate 4 Agent 1 status: local Save and automatic handoff runtime
 
+This is the historical Agent 1 ownership ledger. The integrated current state and final evidence
+are maintained in [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md); its completion checkpoint supersedes the
+older open/awaiting-review entries below without erasing their review history.
+
 Owner: Agent 1 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-1-local-save-and-automatic-handoff-runtime)).
 Proposal: [GATE4-AGENT-1-DESIGN](GATE4-AGENT-1-DESIGN.md), revision 4, **accepted (PASS) at
 `25ce89bb705dfc228c7b32874788ebd062e6fcf4`, 2026-09-15, design boundary only**.

@@ -12,6 +12,8 @@ import os
 import subprocess
 import sys
 
+from mutation_harness_guard import write_if_unchanged
+
 ROOT = Path(__file__).resolve().parents[2]
 STORE = "store::epoch_studio::tests::rotation::overlay::handoff::resolution::"
 RECEIVER = "studio::receiver::catchup::tests::"
@@ -189,7 +191,9 @@ def main():
         original = originals[name]
         changed = original.replace(before.encode(), after.encode(), 1)
         try:
-            source.write_bytes(changed)
+            # Keep the up-front anchor check without letting its snapshot overwrite edits made
+            # while an earlier selected mutant was compiling.
+            write_if_unchanged(source, original, changed)
             result = run(test)
             (logs / f"gate4-resolution-mutation-{name}.log").write_text(result.stdout,
                                                                          encoding="utf-8")

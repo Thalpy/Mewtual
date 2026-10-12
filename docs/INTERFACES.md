@@ -2241,7 +2241,7 @@ commands. Discard and archive release require their exact literal confirmations.
 one previewed ordinary edit and retains it across uncertain delivery; it never consumes or mutates
 the source branch. These commands grant no repair, handoff or source authority.
 
-The [prepared-signing checkpoint](GATE4-HANDOFF-SIGNING-REVIEW.md), awaiting review, adds:
+The reviewed [prepared-signing checkpoint](GATE4-HANDOFF-SIGNING-REVIEW.md) adds:
 
 ```rust
 StudioOverlayState::handoff_authority(&self, &MlsDevice, &ServerGroup, observed_tenure)
@@ -2260,7 +2260,7 @@ context on each turn. No signed prefix escapes. The existing synchronous `prepar
 adapter uses these stages too. Runtime callers still owe original shared-permit ownership and
 current incarnation/mount/full source-and-intent stamps before signing and durable commit.
 
-### Durable registry edits, sealing and checkpoint installation (P1, not yet live-wired)
+### Durable registry edits, sealing and checkpoint installation (P1, runtime-wired)
 
 `ServerStore` now exposes:
 
@@ -2349,8 +2349,10 @@ even if newer edits or a newer closing receipt arrived. It does not repeat old r
 reinstall the seed. Fault and stale/other receipt scopes refuse. Failed writes/flushes poison the
 affected inventories; reconcile actual files before retry. No new journal or record family is
 introduced. Full-quota progress is still limited by per-record content reservations and the
-64-MiB physical intent ceiling: a shrinking ledger also needs its full replacement copy.
-Automatic replay, repair, discovery and actor/network orchestration remain separate work.
+64-MiB physical intent ceiling: a shrinking ledger also needs its full replacement copy. This
+store transaction does not itself schedule replay, repair, discovery or networking; the Gate 4
+actor layer now connects those responsibilities behind separate authority, capacity and detached-
+work gates.
 
 Delayed current-owner equivocation against the retained opening receipt faults the successor
 even while a newer receipt seals it. Accepted content, seed, opening receipt and high-water are
@@ -2369,8 +2371,9 @@ the ephemeral whole-source fingerprint, quarantine and quota-owner metadata. The
 scope, canonical ordering, disjoint key sets, bounds and excluded-id membership in `applied_ops`.
 `RecoverySnapshot` Debug now redacts content even when nested in a generic Option/Result. These are
 vault-local records, not independently signed replay requests. Rewound whole-version records are
-saved by the scoped registry adoption installer below. Pointer verification, Restore,
-repair-specific typed records and actor/bridge integration remain unwired.
+saved by the scoped registry adoption installer below. Pointer verification and Restore remain
+separate operations. Repair-specific typed records and the bounded actor/bridge integration are
+wired by the Gate 4 runtime; this recovery payload does not itself grant their authority.
 
 Local editing uses two ordered barriers under the exclusive store borrow: validate the canonical
 registry operation and current local author, save/flush its intent, then reload, apply and save/flush
@@ -2602,9 +2605,10 @@ historical reads. The exact-frontier path need not reconstruct each dependency a
 semantic validator's redundant presence check. No wire/snapshot field enables it, no prefix is
 truncated, and all signatures, semantic checks, gate verification and final projection preflight
 still run. See `P1-PERFORMANCE.md`
-for measured costs rather than inferring latency from the byte cap.
-Historical authority transfer and automatic receiver scheduling remain unwired. Cooperative durable
-receive, keyed head/seed exchange and explicit registry installation are described below.
+for measured costs rather than inferring latency from the byte cap. Gate 4 wires archived-Observed
+authority admission and bounded automatic receiver scheduling through separate app-layer witnesses
+and detached jobs. Cooperative durable receive, keyed head/seed exchange and explicit registry
+installation are described below; none is authorized by the saved-source optimization itself.
 
 The direct trusted-local page API imposes no aggregate call-rate limit. One prepared call rereads
 the bounded saved record, then walks its bounded change index/ancestor sets. It grants no delivery
@@ -2667,16 +2671,17 @@ records in that order; empty fields mean None and each non-empty canonical recor
 provider transport and answer. Caps apply after transport frame buffering, before copying or
 parsing records. Scope, trailing bytes and proof/receipt hash mismatch reject. Fresh proof
 acceptance also requires the response signer to be the current owner, the exact internally minted
-nonce/full requester, and independently known tenure when available. Repair records remain hints;
-the current provider sends None because durable signed repair retention/serving is not wired.
+nonce/full requester, and independently known tenure when available. Repair records remain hints,
+not authority by themselves. The Gate 4 provider can return its exact durably applied repair; an
+absent or ineligible repair is encoded as None and never synthesized from a report.
 
 `Server::prepare_owner_head_snapshot(store, server)` is EXPLICIT LOCAL persistence work: it saves
 the current whole-server snapshot and returns `ServerOwnerSnapshot` only after its durable write.
 Never invoke it as a consequence of a remote query: legacy whole-server serialization is not
 bounded by P1's per-query budget. The permit binds runtime, MLS epoch, full owner, independently
 observed tenure, mount and numeric server. It can be reused across buckets until any of these
-changes. Unknown tenure or save failure yields no permit. Runtime/lock ownership must discard it
-on lifecycle replacement; automatic lifecycle scheduling is still a later integration step.
+changes. Unknown tenure or save failure yields no permit. Runtime/lock ownership discards it on
+lifecycle replacement; Gate 4's actor runtime schedules that lifecycle under the same scope fences.
 
 `serve_registry_head_step(store, watch, optional_snapshot, budget)` drains one authenticated
 request. It never serializes or writes the whole-server snapshot. Source/journal reads check the
@@ -2778,8 +2783,9 @@ Provider limits: 256 logical watches, eight five-second metadata requests, one p
 10/s burst-20 preauth, 1/s burst-2 per requester (4096 debt rows), 1/s burst-2 aggregate source work.
 Watch replacement does not reset rate debt. Crypto/parser temporaries and a bounded source rebuild
 are additional to the four retained raw-seed bodies. Provider responder handoff is not delivery;
-the four outgoing client slots do not account for provider transport response buffers.
-Automatic actor/lock scheduling and source latency acceptance remain unfinished.
+the four outgoing client slots do not account for provider transport response buffers. Automatic
+actor/lock scheduling is connected through the Gate 4 detached runtime. Dense-source latency
+acceptance remains unfinished and is not implied by the byte caps.
 
 ### Authenticated registry page exchange (cooperative, kind 20)
 

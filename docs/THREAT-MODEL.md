@@ -649,9 +649,9 @@ table with the commit that closed it.
   selected ids pause even when normally retired by a receipt. Holds count as visited only.
   A private stable physical-mount token rejects use after reopen but is NOT a native UI-lock or
   server-incarnation permit (native lock may keep the store mounted). No ciphertext queue is held;
-  Debug omits scope, ids and content. This is trusted local orchestration, not a peer-facing API:
-  aggregate pass concurrency/work limits, native lifecycle cancellation and automatic wakeups
-  remain required before live actor integration. The cooperative sender adds the checks below.
+  Debug omits scope, ids and content. This is trusted local orchestration, not a peer-facing API.
+  Gate 4's live actor integration adds aggregate pass/work limits, lifecycle cancellation and
+  bounded wakeups outside this cursor; the cooperative sender adds the checks below.
 - **The cooperative registry sender binds known local state, not remote currency.** Its cursor
   captures the exact sync-instance allocation at begin; a same-device/group restore refuses the
   old cursor. Exclusive sync/store borrows cover checked saved-intent preparation and awaited
@@ -662,10 +662,11 @@ table with the commit that closed it.
   A private exact-ticket guard advances only on Submitted. Duplicate, errors, cancellation and
   unwind preserve the saved id and charged deadline for fresh resealing; every outcome retains
   the durable intent. Cancellation after driver admission cannot retract gossip/cache effects.
-  This is a cooperative backend call, not live actor orchestration, a native lock lease, a bound
-  on aggregate passes, a driver deadline or evidence that a remote receipt has already arrived.
-  Managed catch-up and automatic wakeup remain unwired. Cursor/result Debug redact scope
-  and content; the sync token is process-local and never persisted or transmitted.
+  This cooperative backend call is not by itself live actor orchestration, a native lock lease, a
+  bound on aggregate passes, a driver deadline or evidence that a remote receipt has already
+  arrived. Gate 4 wires managed catch-up and bounded wakeups through separate actor custody and
+  scheduling. Cursor/result Debug redact scope and content; the sync token is process-local and
+  never persisted or transmitted.
 - **Registry gossip authentication is not saved admission.** Explicit concrete-epoch watches use
   fresh sync/watch generations; their app handles also bind physical mount and captured local
   server/bucket. Rewatch/unwatch discards old queued packets without refunding rate debt. Desired
@@ -931,9 +932,11 @@ table with the commit that closed it.
   quota; fresh complete inventory reconstructs it. The common `EpochIntentBudget` writer tracks
   ordinary and Flow S replacements alike. The 8 MiB share is an admission limit on Unconfirmed
   growth, not a hard vault invariant: an ordinary edit can take the tally over the share, after
-  which new Unconfirmed growth refuses until headroom returns. The
-  internal actor path and native result types exist, but no native command or UI exposes them;
-  this slice grants no permission to promote P5.
+  which new Unconfirmed growth refuses until headroom returns. Gate 4 promotes P5 only for the
+  reviewed lifecycle family and ticketed Unconfirmed Save: native commands and the Studio UI expose
+  those local-authority operations behind the session gate and command allow-list. Direct Closing
+  Save and unfinished repair commands remain unavailable; this exposure grants no source, signing,
+  publication or settlement authority.
   The new explicit native Index/art transactions lend the sole mounted store only AFTER the
   actor's Ready rendezvous. Numeric-server persistence, UI commit and exact registry-incarnation
   locks are acquired without awaiting; a busy fence drops Ready and writes nothing. The blocking
@@ -947,8 +950,11 @@ table with the commit that closed it.
   possession. Create is two-file and can leave an unlisted
   object on index refusal. A cancelled operation already running may finish durably; cancellation
   suppresses stale results, not committed content. Finite scans/restores run off-executor but
-  retain lifecycle locks and have no accepted-size latency guarantee. Views say local/provisional;
-  automatic receive, owner settlement, expiry enforcement and UI wiring remain separate gates.
+  retain lifecycle locks and have no accepted-size latency guarantee. Views say local/provisional.
+  Automatic receive, watched-owner settlement and detached repair run through their own actor
+  authority/custody gates; the UI wiring exposes only the bounded local
+  lifecycle/ticketed-Unconfirmed path above. Expiry remains enforced by store/actor checks rather
+  than renderer timing.
   Successful native saves now attempt initial publication of at most two actual store-returned
   packets. Complete Save plus final-view success is required; partial Create exposes no batch.
   The same sole Server/store/native guards remain held from save through one-shot dispatch, so

@@ -9,6 +9,8 @@ import os
 import subprocess
 import sys
 
+from mutation_harness_guard import write_if_unchanged
+
 ROOT = Path(__file__).resolve().parents[2]
 PREFIX = "store::epoch_studio::tests::rotation::overlay::handoff::"
 # The receiver's actor-level tests live outside PREFIX; an entry names one in full from here.
@@ -283,7 +285,9 @@ def main():
         original = originals[name]
         changed = original.replace(before.encode(), after.encode(), 1)
         try:
-            source.write_bytes(changed)
+            # A selected source may have changed while an earlier mutant compiled. Never replace
+            # live bytes with the now-stale preflight snapshot in that case.
+            write_if_unchanged(source, original, changed)
             result = run(test)
             (logs / f"gate4-handoff-mutation-{name}.log").write_text(result.stdout, encoding="utf-8")
             if not (result.returncode != 0 and assertion in result.stdout
