@@ -98,6 +98,11 @@
   async function repreviewIndexDraftCopy() {
     try { await session.repreviewOverlayCopy(null); } catch (e) { onnotice?.(reason(e), "warn"); }
   }
+  function cancelRefusedIndexDraftCopy(expectedNonce: string) {
+    if (session.cancelRefusedOverlayCopy(null, expectedNonce)) {
+      onnotice?.("cancelled the refused index copy; the backend confirmed that it wrote nothing", "info");
+    }
+  }
   function forgetIndexDraftCopy() {
     // The confirmation-only button supplies consent; the session still refuses to forget any
     // operation that is no longer uncertain by the time this click is handled.
@@ -259,7 +264,15 @@
         {/if}
       </span>
     {:else if indexOverlay.copy.status === "refused"}
-      <button type="button" class="ghost small ctx-action" onclick={repreviewIndexDraftCopy}>preview again as a new index copy</button>
+      <span class="index-draft-actions">
+        <button type="button" class="ghost small ctx-action" onclick={repreviewIndexDraftCopy}>preview again as a new index copy</button>
+        {#if indexOverlay.copy.edit}
+          {#key indexOverlay.copy.edit.nonce}
+            {@const refusedNonce = indexOverlay.copy.edit.nonce}
+            <button type="button" class="ghost small ctx-action" onclick={() => cancelRefusedIndexDraftCopy(refusedNonce)}>cancel this index copy</button>
+          {/key}
+        {/if}
+      </span>
     {/if}
   </div>
 {/if}

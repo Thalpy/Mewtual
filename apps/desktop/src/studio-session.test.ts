@@ -615,6 +615,120 @@ test("a clean stale Copy refusal can re-preview with a fresh nonce", async () =>
   assert.equal(h.calls("studio_overlay_copy_preview").length, 3);
 });
 
+test("a clean Copy refusal can be cancelled locally and a stale nonce cannot cancel its replacement", async () => {
+  const h = await harness();
+  const historical = flipnoteContent({ title: "retained", fps: 6, frames: [] });
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => docView([]));
+  h.ipc.on("studio_overlay_lifecycle", (a) => ({
+    v: 1, kind: "overlayLifecycle", channel: a.channel, object: a.object ?? null,
+    branch: { branch: id64(2), content: id64(3), generation: "1", accepted: 1 },
+    prepared: false, eligibility: "manual", manualReason: "sourceReplaced", handoffAttempt: null,
+    unconfirmedState: null, archive: null, disposed: null, transferred: false,
+  }));
+  h.ipc.on("studio_overlay_read", (a) => ({
+    v: 1, kind: "local-draft", channel: a.channel, object: a.object ?? null,
+    eligibility: "manual", manualReason: "sourceReplaced", handoffAttempt: null,
+    unconfirmedState: null, basis: id64(1), branch: id64(2), contentId: id64(3), generation: "1",
+    accepted: 1, transferState: "active", provenance: "closing", replayable: true, readOnly: true,
+    content: historical,
+  }));
+  h.ipc.on("studio_overlay_copy_preview", (a) => ({
+    v: 1, kind: "overlayCopyPreview",
+    source: { channel: CHANNEL, object: OBJ }, destination: { channel: CHANNEL, object: OBJ },
+    epochId: id32(8), expectedProjection: id64(9), disposition: "ready",
+    body: JSON.stringify({ op: "set_header", field: a.choice.kind, value: a.choice.kind === "title" ? "retained" : 6 }),
+    originalAuthor: ME, sourceOps: [id64(10)], preservesBranch: false, provisional: true,
+  }));
+  h.ipc.on("studio_overlay_copy_apply", (a) => ({
+    v: 1, kind: "overlayCopyRefused", channel: a.channel, object: a.object ?? null,
+    reason: "stalePreview", retry: "repreview", written: false,
+  }));
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  await h.sync();
+  const title = h.session.overlayChoices("copy").find((x) => x.choice.kind === "title");
+  const fps = h.session.overlayChoices("copy").find((x) => x.choice.kind === "fps");
+  assert.ok(title && fps);
+
+  await h.session.copyOverlayChoice(OBJ, title.choice, title.label, "copy");
+  const firstNonce = h.session.overlay?.copy?.edit?.nonce;
+  assert.ok(firstNonce);
+  assert.equal(h.session.overlay?.copy?.status, "refused");
+  assert.equal(h.session.overlay?.copy?.mayHaveCommitted, false);
+  const callsBeforeCancel = h.ipc.calls.length;
+  assert.equal(h.session.cancelRefusedOverlayCopy(OBJ, id32(0xff)), false, "the exact refused nonce is required");
+  assert.equal(h.session.overlay?.copy?.edit?.nonce, firstNonce);
+  assert.equal(h.session.cancelRefusedOverlayCopy(OBJ, firstNonce), true);
+  assert.equal(h.session.overlay?.copy, null);
+  assert.equal(h.ipc.calls.length, callsBeforeCancel, "cancelling a known-no-write request makes no native call");
+
+  await h.session.copyOverlayChoice(OBJ, fps.choice, fps.label, "copy");
+  const replacementNonce = h.session.overlay?.copy?.edit?.nonce;
+  assert.ok(replacementNonce);
+  assert.notEqual(replacementNonce, firstNonce);
+  assert.equal(h.session.cancelRefusedOverlayCopy(OBJ, firstNonce), false, "a delayed click for A cannot cancel B");
+  assert.equal(h.session.overlay?.copy?.edit?.nonce, replacementNonce);
+  assert.equal(h.session.cancelRefusedOverlayCopy(OBJ, replacementNonce), true);
+});
+
+test("cancelling one of eight clean Copy refusals releases capacity for a ninth document", async () => {
+  const h = await harness();
+  const objects = Array.from({ length: 9 }, (_, i) => id32(0x40 + i));
+  const historical = flipnoteContent({ title: "retained", frames: [] });
+  h.ipc.on("studio_list", () => ordinaryView(indexContent({
+    objects: Object.fromEntries(objects.map((object, i) => [object, indexEntry({ title: `copy ${i}` })])),
+  })));
+  h.ipc.on("studio_read", () => docView([]));
+  h.ipc.on("studio_overlay_lifecycle", (a) => ({
+    v: 1, kind: "overlayLifecycle", channel: a.channel, object: a.object ?? null,
+    branch: { branch: id64(2), content: id64(3), generation: "1", accepted: 1 },
+    prepared: false, eligibility: "manual", manualReason: "sourceReplaced", handoffAttempt: null,
+    unconfirmedState: null, archive: null, disposed: null, transferred: false,
+  }));
+  h.ipc.on("studio_overlay_read", (a) => ({
+    v: 1, kind: "local-draft", channel: a.channel, object: a.object ?? null,
+    eligibility: "manual", manualReason: "sourceReplaced", handoffAttempt: null,
+    unconfirmedState: null, basis: id64(1), branch: id64(2), contentId: id64(3), generation: "1",
+    accepted: 1, transferState: "active", provenance: "closing", replayable: true, readOnly: true,
+    content: historical,
+  }));
+  h.ipc.on("studio_overlay_copy_preview", (a) => ({
+    v: 1, kind: "overlayCopyPreview",
+    source: { channel: a.channel, object: a.object ?? null }, destination: a.destination,
+    epochId: id32(8), expectedProjection: id64(9), disposition: "ready",
+    body: '{"field":"title","op":"set_header","value":"retained"}', originalAuthor: ME,
+    sourceOps: [id64(10)], preservesBranch: false, provisional: true,
+  }));
+  h.ipc.on("studio_overlay_copy_apply", (a) => ({
+    v: 1, kind: "overlayCopyRefused", channel: a.channel, object: a.object ?? null,
+    reason: "stalePreview", retry: "repreview", written: false,
+  }));
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  let firstNonce = "";
+  for (const [i, object] of objects.slice(0, 8).entries()) {
+    h.session.open(object);
+    await h.sync();
+    const choice = h.session.overlayChoices("copy").find((x) => x.choice.kind === "title");
+    assert.ok(choice);
+    await h.session.copyOverlayChoice(object, choice.choice, choice.label, "copy");
+    assert.equal(h.session.overlay?.copy?.status, "refused");
+    if (i === 0) firstNonce = h.session.overlay?.copy?.edit?.nonce ?? "";
+  }
+  assert.ok(firstNonce);
+  const callsBeforeCancel = h.ipc.calls.length;
+  assert.equal(h.session.cancelRefusedOverlayCopy(objects[0], firstNonce), true);
+  assert.equal(h.ipc.calls.length, callsBeforeCancel, "capacity release is frontend-only");
+
+  h.session.open(objects[8]);
+  await h.sync();
+  const ninth = h.session.overlayChoices("copy").find((x) => x.choice.kind === "title");
+  assert.ok(ninth);
+  await h.session.copyOverlayChoice(objects[8], ninth.choice, ninth.label, "copy");
+  assert.equal(h.session.overlay?.copy?.status, "refused");
+  assert.equal(h.calls("studio_overlay_copy_apply").length, 9);
+});
+
 test("a later stale Copy refusal cannot erase an earlier ambiguous Apply", async () => {
   const h = await harness();
   const historical = flipnoteContent({ title: "retained", frames: [] });
@@ -650,6 +764,10 @@ test("a later stale Copy refusal cannot erase an earlier ambiguous Apply", async
   assert.equal(h.session.overlay?.copy?.mayHaveCommitted, true);
   assert.match(h.session.overlay?.copy?.error ?? "", /earlier delivery may already have committed/);
   assert.deepEqual(h.calls("studio_overlay_copy_apply")[1].args, exact);
+  const nativeCallsBeforeCancel = h.ipc.calls.length;
+  assert.equal(h.session.cancelRefusedOverlayCopy(OBJ, exact.edit.nonce), false, "a correct nonce cannot cancel uncertainty");
+  assert.equal(h.session.overlay?.copy?.edit?.nonce, exact.edit.nonce, "the ambiguous exact request remains retained");
+  assert.equal(h.ipc.calls.length, nativeCallsBeforeCancel, "a refused cancellation attempt cannot mutate native state");
   await h.session.repreviewOverlayCopy(OBJ);
   assert.equal(h.calls("studio_overlay_copy_preview").length, 1, "ambiguous identity cannot be replaced by a new preview");
   const nativeCallsBeforeFirstForget = h.ipc.calls.length;
@@ -711,6 +829,12 @@ test("an applying retained-draft copy survives navigation and fences a newer run
   const first = h.session.copyOverlayChoice(OBJ, title.choice, title.label, "copy");
   await settle(2);
   assert.equal(h.calls("studio_overlay_copy_apply").length, 1);
+  const applyingNonce = h.session.overlay?.copy?.edit?.nonce;
+  assert.ok(applyingNonce);
+  assert.equal(h.session.overlay?.copy?.status, "applying");
+  assert.equal(h.session.cancelRefusedOverlayCopy(OBJ, applyingNonce), false, "an in-flight Apply cannot be cancelled locally");
+  assert.equal(h.session.overlay?.copy?.edit?.nonce, applyingNonce);
+  assert.equal(h.calls("studio_overlay_copy_apply").length, 1, "the rejected cancellation makes no second Apply call");
   h.session.open(other);
   await h.sync();
   h.session.open(OBJ);

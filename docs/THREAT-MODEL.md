@@ -21,12 +21,14 @@ table with the commit that closed it.
   publication claim. Copy preview saves nothing; copy apply rechecks and writes one ordinary
   provisional edit. C4 reports a typed `written:false` stale-preview refusal only before entering
   publication. The honest session may explicitly preview again after that first clean refusal, but
-  never uses a later clean refusal to erase an earlier may-have-committed Apply. Save re-authoring
-  likewise changes route/nonce only for a typed known-no-write attempt; ambiguous identities remain
-  frozen unless the user explicitly stops tracking one through the two-step UI. That local-only
-  action is bound to the exact Copy nonce, performs no native mutation and does not claim to undo
-  or disprove a Copy that may already have landed. Discard and archive release require exact
-  confirmation literals. Direct
+  never uses a later clean refusal to erase an earlier may-have-committed Apply. The same exact
+  nonce may cancel a first clean refusal locally, freeing only its bounded frontend slot and making
+  no native call because the refusal proves nothing was written; a stale nonce cannot cancel its
+  replacement. Save re-authoring likewise changes route/nonce only for a typed known-no-write
+  attempt; ambiguous identities remain frozen unless the user explicitly stops tracking one
+  through the separately worded two-step UI. That uncertain local-only action is also bound to the
+  exact Copy nonce, performs no native mutation and does not claim to undo or disprove a Copy that
+  may already have landed. Discard and archive release require exact confirmation literals. Direct
   Closing Save and native repair commands remain absent. A malicious renderer can request the
   exposed local actions and exhaust their documented bounded quotas, but cannot bypass their
   membership, tenure, freshness, storage, reference or destructive-confirmation checks.

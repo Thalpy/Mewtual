@@ -725,6 +725,12 @@
     if (!objectId) return;
     try { await session.repreviewOverlayCopy(objectId); } catch (e) { onnotice(reason(e), "warn"); }
   }
+  function cancelRefusedDraftCopy(expectedNonce: string) {
+    if (!objectId) return;
+    if (session.cancelRefusedOverlayCopy(objectId, expectedNonce)) {
+      onnotice("cancelled the refused copy; the backend confirmed that it wrote nothing", "info");
+    }
+  }
   function forgetDraftCopy() {
     // This handler is mounted only for the armed confirmation state. The session performs the
     // final status check, so a stale click can never remove a resolved or replacement operation.
@@ -1199,7 +1205,15 @@
                     {/if}
                   </span>
                 {:else if overlay.copy.status === "refused"}
-                  <span class="st-card-acts"><button type="button" class="st-btn primary" onclick={repreviewDraftCopy}>preview again as a new copy</button></span>
+                  <span class="st-card-acts">
+                    <button type="button" class="st-btn primary" onclick={repreviewDraftCopy}>preview again as a new copy</button>
+                    {#if overlay.copy.edit}
+                      {#key overlay.copy.edit.nonce}
+                        {@const refusedNonce = overlay.copy.edit.nonce}
+                        <button type="button" class="st-btn ghost" onclick={() => cancelRefusedDraftCopy(refusedNonce)}>cancel this copy</button>
+                      {/key}
+                    {/if}
+                  </span>
                 {/if}
               </div>
             {/if}

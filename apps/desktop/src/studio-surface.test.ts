@@ -527,6 +527,97 @@ test("UI-007: an Index Copy keeps its exact retry control after source transfer"
   }
 });
 
+test("UI-008: a cleanly refused Flipnote Copy has an explicit local-only cancel action", async () => {
+  const ipc = fakeIpc();
+  ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ title: "moon cat" }) } })));
+  ipc.on("studio_read", () => ordinaryView(flipnoteContent({ frames: [] })));
+  ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ }));
+  ipc.on("studio_overlay_lifecycle", (a) => ({ v: 1, kind: "overlayLifecycle", channel: a.channel, object: a.object ?? null,
+    branch: { branch: id64(2), content: id64(3), generation: "1", accepted: 1 }, prepared: false,
+    eligibility: "manual", manualReason: "sourceReplaced", handoffAttempt: null, unconfirmedState: null,
+    archive: null, disposed: null, transferred: false }));
+  ipc.on("studio_overlay_read", (a) => ({ v: 1, kind: "local-draft", channel: a.channel, object: a.object ?? null,
+    eligibility: "manual", manualReason: "sourceReplaced", handoffAttempt: null, unconfirmedState: null,
+    basis: id64(1), branch: id64(2), contentId: id64(3), generation: "1", accepted: 1,
+    transferState: "active", provenance: "closing", replayable: true, readOnly: true,
+    content: flipnoteContent({ title: "retained", frames: [] }) }));
+  ipc.on("studio_overlay_copy_preview", (a) => ({ v: 1, kind: "overlayCopyPreview",
+    source: { channel: a.channel, object: a.object ?? null }, destination: a.destination,
+    epochId: id32(8), expectedProjection: id64(9),
+    disposition: "ready", body: '{"field":"title","op":"set_header","value":"retained"}',
+    originalAuthor: ME, sourceOps: [id64(10)], preservesBranch: false, provisional: true }));
+  ipc.on("studio_overlay_copy_apply", (a) => ({ v: 1, kind: "overlayCopyRefused",
+    channel: a.channel, object: a.object ?? null, reason: "stalePreview", retry: "repreview", written: false }));
+  const m = mountStudio(ipc);
+  try {
+    await settled();
+    state.studio.selected = OBJ;
+    flushSync();
+    await settled(400);
+    const session = state.ensureStudio(ME);
+    const choice = session.overlayChoices("copy", OBJ).find((x) => x.choice.kind === "title");
+    assert.ok(choice);
+    await session.copyOverlayChoice(OBJ, choice.choice, choice.label, "copy");
+    flushSync();
+    m.click("button.st-itab", "music");
+    await settled();
+    assert.match(m.text(), /retained copy title.*refused/s);
+    assert.match(m.text(), /preview again as a new copy/);
+    assert.match(m.text(), /cancel this copy/);
+    const appliesBeforeCancel = m.count("studio_overlay_copy_apply");
+    m.click("button.st-btn", "cancel this copy");
+    await settled();
+    assert.equal(session.overlay?.copy, null);
+    assert.doesNotMatch(m.text(), /retained copy title/);
+    assert.equal(m.count("studio_overlay_copy_apply"), appliesBeforeCancel, "cancel did not retry Apply");
+    assert.ok(m.notices.some((n) => /backend confirmed that it wrote nothing/.test(n)));
+  } finally {
+    m.done();
+  }
+});
+
+test("UI-009: a cleanly refused Index Copy has an explicit local-only cancel action", async () => {
+  const ipc = fakeIpc();
+  ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ title: "moon cat" }) } })));
+  ipc.on("studio_overlay_lifecycle", (a) => ({ v: 1, kind: "overlayLifecycle", channel: a.channel, object: null,
+    branch: { branch: id64(2), content: id64(3), generation: "1", accepted: 1 }, prepared: false,
+    eligibility: "manual", manualReason: "sourceReplaced", handoffAttempt: null, unconfirmedState: null,
+    archive: null, disposed: null, transferred: false }));
+  ipc.on("studio_overlay_read", (a) => ({ v: 1, kind: "local-draft", channel: a.channel, object: null,
+    eligibility: "manual", manualReason: "sourceReplaced", handoffAttempt: null, unconfirmedState: null,
+    basis: id64(1), branch: id64(2), contentId: id64(3), generation: "1", accepted: 1,
+    transferState: "active", provenance: "closing", replayable: true, readOnly: true,
+    content: indexContent({ objects: { [OBJ]: indexEntry({ title: "retained" }) } }) }));
+  ipc.on("studio_overlay_copy_preview", (a) => ({ v: 1, kind: "overlayCopyPreview",
+    source: { channel: a.channel, object: a.object ?? null }, destination: a.destination,
+    epochId: id32(8), expectedProjection: id64(9),
+    disposition: "ready", body: '{"op":"set_title"}', originalAuthor: ME,
+    sourceOps: [id64(10)], preservesBranch: false, provisional: true }));
+  ipc.on("studio_overlay_copy_apply", (a) => ({ v: 1, kind: "overlayCopyRefused",
+    channel: a.channel, object: null, reason: "stalePreview", retry: "repreview", written: false }));
+  const m = mountStudioNav(ipc);
+  try {
+    await settled(400);
+    const session = state.ensureStudio(ME);
+    const choice = session.overlayChoices("copy", null).find((x) => x.choice.kind === "objectTitle");
+    assert.ok(choice);
+    await session.copyOverlayChoice(null, choice.choice, choice.label, "copy");
+    flushSync();
+    assert.match(m.text(), /retained index copy.*refused/s);
+    assert.match(m.text(), /preview again as a new index copy/);
+    assert.match(m.text(), /cancel this index copy/);
+    const appliesBeforeCancel = m.count("studio_overlay_copy_apply");
+    m.click("cancel this index copy");
+    await settled();
+    assert.equal(session.indexOverlay?.copy, null);
+    assert.doesNotMatch(m.text(), /retained index copy/);
+    assert.equal(m.count("studio_overlay_copy_apply"), appliesBeforeCancel, "cancel did not retry Index Apply");
+    assert.ok(m.notices.some((n) => /backend confirmed that it wrote nothing/.test(n)));
+  } finally {
+    m.done();
+  }
+});
+
 test("FETCH-004: a loaded raster follows the frame's reference; a changed declaration or cid locks the canvas until valid bytes exist", async () => {
   const ipc = fakeIpc();
   const N = pix.length;

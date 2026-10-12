@@ -810,6 +810,21 @@ export class StudioSession {
     }
   }
 
+  /// Cancel a Copy only after C4 conclusively refused its exact proposal without writing it.
+  /// This is intentionally separate from `forgetOverlayCopy`: an uncertain request may have
+  /// committed and needs explicit stop-tracking consent, while a refused request has no native
+  /// state to undo. The expected nonce fences a delayed click from cancelling a replacement run.
+  cancelRefusedOverlayCopy(object: Hex32 | null, expectedNonce: string): boolean {
+    const key = this.overlayCopyKey(object);
+    const run = this.overlayCopies.get(key);
+    if (!run || run.status !== "refused" || run.mayHaveCommitted || run.edit?.nonce !== expectedNonce) return false;
+    this.overlayCopies.delete(key);
+    const overlay = this.overlayFor(object);
+    if (overlay?.copy === run) this.replaceOverlay(object, { ...overlay, copy: null });
+    this.notify();
+    return true;
+  }
+
   /// Forget only the frontend's retained identity for an ambiguous Copy. This deliberately sends
   /// no native command: the operation may already have landed, and forgetting it neither undoes
   /// nor disproves that write. The explicit UI confirmation is the user's decision to stop exact
@@ -840,7 +855,7 @@ export class StudioSession {
         run.error = "the current proposal was refused before writing, but an earlier delivery may already have committed; retry the exact request or discard it";
       } else {
         run.status = "refused";
-        run.error = "the destination changed after preview; preview again to make a new copy decision";
+        run.error = "the destination changed after preview; preview again or cancel this copy";
       }
       this.publishOverlayCopy(object, run);
       return;
