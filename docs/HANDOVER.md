@@ -10,19 +10,35 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-10-12)
 
+- **Gate 4 Review 4 response checkpoint (2026-10-12).** Code checkpoint
+  `610c45e323bf018c2a3ffa91bbf359faaf707be3` closes the four latest MEDIUM findings. A retained-draft
+  Copy run now survives document navigation, fences a replacement and owns its late response; an
+  earlier uncertain Save delivery remains visibly uncertain even when a later exact retry receives
+  `Busy`; the lifecycle, handoff and resolution mutation harnesses preflight every selected anchor
+  before compiling; and Flow R's stale-cache regression now explicitly installs an old valid memo
+  after clearing the writer-warmed cache. Form-3 repair-bound handoff, unconfirmed-base and returning-
+  key anti-replay regressions cover the neighboring boundary. Complete root and native suites,
+  strict root/desktop Clippy, desktop check, 1,303 frontend tests, Svelte check/build, `cargo deny`,
+  formatting and Git Bash ambient checking pass locally. The local flow and startup harnesses did
+  not reach product assertions (Edge CDP timeout; no `setup` marker), so exact-head hosted results
+  remain mandatory. Bounded correction re-review and exact-head CI are the remaining merge gates;
+  Gate 4 is not yet accepted and Gate 5 remains closed.
+
 - **Gate 4 local completion checkpoint (2026-10-12).** The isolated candidate now contains the
   remaining structured Save-refusal path, P5-bounded lifecycle and ticketed Unconfirmed commands,
   Studio UI consumer, fresh-key repeated-tenure path, repair/runtime integration and both PR #40
   review corrections. Complete root, native and frontend suites; strict root/desktop Clippy;
   frontend check/build; `cargo deny`; flow; explicit Git Bash ambient checking; and the focused
-  handoff-priority mutation pass. Full-candidate adversarial review and correction re-reviews have
-  no unresolved finding at any severity. The startup probe passed on the assembled app, then a
+  handoff-priority mutation pass. The initial full-candidate adversarial review and its earlier
+  correction re-reviews had no unresolved finding at that checkpoint; the newer Review 4 response
+  entry above supersedes that verdict. The startup probe passed on the assembled app, then a
   review-driven harness refinement received focused tests; later local reruns hang before `setup`
   with no new app log, so a fresh exact-head startup result is still required rather than claimed.
   PR #41 must now be published against exact baseline
   `bdcae4a30a0870443db92a14f2d80ff8e4947818` and complete hosted Linux ambient and store/runtime
   mutation checks. Direct Closing Save and repair commands remain unavailable. Gate 4 is therefore
-  not yet accepted, and Gate 5 remains closed.
+  not yet accepted, and Gate 5 remains closed. The newer Review 4 response entry above supersedes
+  this entry's earlier claim that no review finding remained.
 
 - **Gate 4 isolated completion candidate assembled (2026-10-11).** On committed parent
   `700d1daba4069af69fea4ff76b105c3008e6825c`, Agent 4 has assembled the remaining specialist work:

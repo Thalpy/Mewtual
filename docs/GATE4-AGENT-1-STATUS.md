@@ -3296,11 +3296,12 @@ blocker or high.
   structural hold, the full hold and `check_overlay_successor` together on a repaired source;
   `evidence_in_vault` and `unconfirmed_base_state_in_vault` on form 3; and an app-level handoff
   into a repaired Flipnote, asserting Completed and P2 eligibility.
-- **A design question for Agents 1 and 3:** `check_overlay_successor` and both holds never ask
-  whether the overlay's receipt is a repaired loser (`ReceiptBook::is_repaired_loser`).
-  Same-tenure repairs are covered, but a cross-tenure Transitioned repair whose source opening is
-  the losing receipt appears restorable, and would then accept a handoff of work based on the
-  loser. Not confirmed against the design.
+- **Closed on the final candidate:** the repaired-loser label alone is not authority and therefore
+  must not make the repair-bound successor ineligible. What prevents replay after A -> B -> A' is
+  the receipt's issuer-tenure binding: the old receipt cannot authorize the returning key's new
+  tenure. `cross_tenure_repair_keeps_a_loser_successor_eligible_without_reauthorizing_its_receipt`
+  pins both halves, alongside the form-3 classifier/hold/store handoff regressions. This resolves
+  the earlier design question without rejecting valid repair-bound successors.
 
 ## C-3 classifier and refused-result memo, built (2026-10-08)
 

@@ -7,6 +7,28 @@ incomplete and Gate 5 remains closed.
 The detailed live ledger is [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md). This document records the
 integration history, current ownership boundaries and the single remaining execution sequence.
 
+## Review 4 response checkpoint (2026-10-12)
+
+The latest review of the complete candidate returned four MEDIUM residuals. Code checkpoint
+`610c45e323bf018c2a3ffa91bbf359faaf707be3` addresses all four without exposing another command or
+weakening a product assertion:
+
+- unresolved Copy runs are session-owned, bounded and navigation-safe; a late response can finish
+  its own exact request but cannot overwrite a replacement;
+- Save records retain the fact that an earlier delivery may have committed, so a later `Busy`
+  response cannot turn uncertainty into a known no-write result;
+- every selected lifecycle/handoff/resolution mutation anchor is validated before the first mutant
+  compiles, and the stale entries named by review again detect their mutations; and
+- Flow R's stale-cache regression clears writer warmth and plants a valid old memo before capture,
+  while form-3 and A -> B -> A' regressions pin repair-bound eligibility and tenure anti-replay.
+
+Complete root and desktop/native suites, both strict Clippy commands, desktop check, 1,303 frontend
+tests, Svelte check/build, formatting, `cargo deny` and Git Bash ambient checking pass locally. Two
+local flow attempts failed before an assertion because Edge did not answer CDP `Runtime.enable`; the
+startup probe produced neither its marker nor panic text. Exact-head hosted flow/startup, Linux
+ambient and complete mutation workflows remain required. The correction needs bounded re-review
+before PR #41 may merge into `gate4-agent1-runtime`.
+
 ## Completion-candidate override (2026-10-12)
 
 The history below predates the final assembly. The isolated `fix/six-client-recovery-gate4`
@@ -24,9 +46,10 @@ worktree now has one locally verified completion delta on parent
   requests, requires explicit re-authoring for `newTicket`, keeps local projections separate from
   the awaiting-tenure base, and provides export/preserve/copy/dispose/release controls.
 
-Direct Closing Save and native repair commands remain unregistered. The final full local suites and
-Review 4 are complete. Publication and exact-head hosted Linux ambient/store/runtime mutation
-evidence, plus a fresh startup result, are still required before merge into the shared baseline.
+Direct Closing Save and native repair commands remain unregistered. The final full local suites
+pass. The newer response checkpoint above supersedes this paragraph's earlier Review 4 completion
+claim: correction re-review, publication and exact-head hosted evidence remain required before
+merge into the shared baseline.
 
 ## Historical state before the completion-candidate override
 
@@ -200,23 +223,23 @@ The next execution order is:
 
 ## Verification for the current code candidate
 
-For the 2026-10-12 completion delta, the complete root suite, complete desktop/Tauri suite (336
-library plus 5 command-ACL tests), all 1,300 frontend tests, root and desktop strict Clippy, desktop
-`cargo check`, root formatting, Svelte check, production build, `cargo deny`, `test:flows`, an
-explicit Scoop/Git Bash ambient check and the focused `handoff-priority-owed` mutation/restoration
-all pass. The complete-diff adversarial review and correction reviews have no unresolved finding at
-any severity. The review's last LOW was in the startup harness: a target-only filter
-could hide the application's normal diagnostics when `RUST_LOG` was unset. The corrected helper
-preserves that default, canonicalizes the effective key only on Windows, appends the marker override
-only to a nonempty inherited filter, and passes six focused tests plus the full frontend suite.
+For review-response checkpoint `610c45e3...`, the complete root suite, complete desktop/Tauri suite
+(336 library plus 5 command-ACL tests), all 1,303 frontend tests, root and desktop strict Clippy,
+desktop `cargo check`, root formatting, Svelte check, production build, `cargo deny` and an explicit
+Scoop/Git Bash ambient check all pass. The relevant corrected mutation entries detect their mutants
+and their restored controls pass. The latest complete-diff review returned four MEDIUM findings;
+the checkpoint addresses all four and awaits bounded re-review. An earlier review LOW in the startup
+harness is also still closed: the helper preserves the application's default when `RUST_LOG` is
+unset, canonicalizes the effective key only on Windows, appends the marker override only to a
+nonempty inherited filter, and passes six focused tests plus the full frontend suite.
 
-The startup gate passed once on the assembled application under inherited `RUST_LOG=warn`. Later
-post-review reruns hang before `setup`, create no new application log and fail even with a 60 s
-limit; they are not recorded as final passes. WSL also fails to launch locally with `E_ACCESSDENIED`,
-while the same ambient script passes under installed Git Bash. Consequently the published exact
-head still requires a fresh startup result plus authoritative hosted Linux ambient and complete
-store/runtime mutation workflows. No assertion or product boundary was weakened to obtain local
-evidence.
+The startup gate passed once on the assembled application under inherited `RUST_LOG=warn`. The
+current rerun produced neither its marker nor panic text within 20 s. Two current `test:flows` runs
+failed before a product assertion because Edge never answered CDP `Runtime.enable` within 60 s.
+They are not recorded as passes or code failures. WSL also fails to launch locally with
+`E_ACCESSDENIED`, while the same ambient script passes under installed Git Bash. Consequently the
+published exact head still requires hosted flow/startup, Linux ambient and complete store/runtime
+mutation workflows. No assertion or product boundary was weakened to obtain local evidence.
 
 On `gate4-runtime-completion` through correction
 `6aee00046e35410ba42c9290c0d1f52fd41dd86b`, the definitive complete root suite passes, as do all
