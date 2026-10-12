@@ -3458,7 +3458,8 @@ UI says so, manual unmute allowed). The musical bucket is unchanged: 30 note-ons
 note-offs never charged. Auto-mute does not freeze consent or media state: exact bounded `t:"s"`
 frames retain a separate pre-parse control lane (refill 2/s, burst 4); no jam frame or unknown
 extension can use that lane.
-The main peer budget and auto-mute state belong to the authenticated fingerprint for the local
+The main peer budget and auto-mute state belong to the authenticated full device identity (64-hex,
+section 13; it was the 8-hex fingerprint before Gate 5) for the local
 call epoch, not to one reconnectable channel: reconnecting cannot refill its bursts or clear an
 auto-mute. Only the receiver's explicit unmute resets it; leaving clears the call epoch.
 
@@ -3743,3 +3744,108 @@ from their saved manifest after unlisting. They do not enter `files()` or author
 The additive `BlobStore` keep methods fail closed on unsupported stores. `KeptBlobStore` reserves,
 verifies, flushes and separately owns copies; ordinary put/delete/staging target primary storage.
 Remote confirmations and automated retention/eviction are not part of this interface.
+
+## 13. Call identity and Flipnote frame claims  *(Gate 5; desktop WebRTC; docs/GATE5-DESIGN.md)*
+
+**Call signal identity (C0d).** `KIND_CALL_SIGNAL`'s wire is unchanged: the sender's Ed25519 key is
+already in the authenticated request, and the receiver derives `DeviceId` from it.
+
+- **Sync.** `ChannelSync::take_call_signals() -> Vec<(DeviceId, Vec<u8>)>` queues and drains the
+  full verified id. Queue fairness keeps one share per `DeviceId`, with ties going to the lowest id.
+  `send_call_signal(&DeviceId, payload) -> Result<bool>` returns `Ok(false)` unless `target` is a
+  current member with a signed peer record stored under exactly that id (`peer_for_device`).
+- **Actor.** `AppEvent::CallSignal { from, from_fp, payload }`. `from` is `DeviceId::to_string()`,
+  64 lowercase hex, which is the `MemberView::identity` encoding. `from_fp` is the 8-hex
+  `roles::fingerprint` of the same id, for display only. `ServerActor::send_call_signal(target:
+  String, payload)` parses `target` with `DeviceId::from_canonical_hex`, which accepts exactly
+  64 lowercase hex, and returns `Err` before queuing anything else.
+- **Bridge.** The `call-signal` event payload is `{server, from, from_fp, payload(base64)}`. Command
+  `send_call_signal({server, target, payload, trace?}) -> bool` refuses a malformed `target` with
+  `VOICE.SIGNAL.FAILED`.
+- **Frontend.** It refuses an event unless `from` is 64 lowercase hex and `from_fp ===
+  from.slice(0, 8)` (diagnostic `VOICE.SIGNAL.BAD_SENDER`).
+  - Every call authority, session, budget, consent, claim and slot key is `from`.
+  - Display, per-peer volume/instrument trims (`catcoms.call.*level.<fp>`) and logs use the
+    fingerprint of that identity.
+  - Jam drum seed material and `jam-take:v1` `parts` keep the fingerprint label from section 12, so
+    their contract and golden behaviour are unchanged.
+- **Legacy route.** `peer_for_fingerprint` serves DM invites only and returns no route when more
+  than one current member carries the fingerprint.
+
+**`draw` data channel.** `pc.createDataChannel("draw", {negotiated: true, id: 8, ordered: true})`
+is created per peer connection beside `inst` (id 7), before the first offer. Older builds never open
+it.
+
+- **Capability.** Each generation gets an opaque `RtSourceChannel<"draw">` (`rt-admission.ts`) for
+  the authenticated peer identity, minted when the peer connection is created. Reopen replaces it;
+  close, removal and the end of the call retire it.
+- **Admission.** Every delivery is charged against the identity's call-epoch gate before any parse:
+  - UTF-8 cap of 1024 bytes;
+  - all-frame bucket refilling 80/s with burst 160;
+  - auto-mute after 10 s exhausted inside a rolling 60 s, for the rest of the call. Reconnecting
+    does not reset it.
+  - Then a frame must fit 200 bytes before `JSON.parse`.
+  - Only `t:"c"` is accepted; any other `t` is charged and refused.
+
+**Claim frame** (`draw-claims.ts`): exactly these seven keys, in any order.
+
+```
+{"t":"c","sn":<16 lowercase hex, not all zero>,"q":<integer 0..0xfffffffe>,
+ "obj":<32 lowercase hex>,"fr":<32 lowercase hex>,"on":0|1,"ask":0|1}
+```
+
+The four `on`/`ask` combinations:
+
+| `on` | `ask` | Meaning |
+|---|---|---|
+| 1 | 0 | Claim, or refresh of a claim |
+| 0 | 1 | Ask |
+| 0 | 0 | Release; also Pass |
+| 1 | 1 | Malformed |
+
+**Receiver rules:**
+
+- **Session and sequence.** Per capability, the first valid frame binds `sn`. Within it `q` must
+  strictly increase (`replay`). A new `sn` drops that capability's entries and retires the old one.
+  A retired `sn` is refused (`stale-session`), as is a fifth `sn` on one capability
+  (`session-limit`). A refused frame changes nothing.
+- **Entries.** Keyed by `(sender identity, obj, fr)`. A Claim replaces that sender's Ask and vice
+  versa; a Release deletes both.
+- **Expiry.** An entry lives while less than `CLAIM_TTL_MS` (90 000 ms) has passed since its last
+  accepted receipt on the receiver's monotonic clock.
+- **Caps.** At most `CLAIM_MAX_LIVE_PER_SENDER` (4) live entries per sender. Claims and Asks spend a
+  per-identity bucket refilling 2/s with burst 10; Releases are never charged.
+- **Collisions.** Every live claimant is shown, sorted by identity. Two or more, counting this
+  device, is "contested". Nothing resolves them.
+- **Clearing.** A peer's entries are dropped at once when:
+  - its connection leaves "connected";
+  - its channel closes or is replaced;
+  - it is removed (bye, roster revocation, closed);
+  - it is auto-muted;
+  - the call ends.
+
+**Sender rules:**
+
+- `sn` is minted once per call join from the injected RNG. One `q` per frame, however many edges
+  carry it. Exhausting `q` rotates `sn` and re-sends the current claim.
+- The claim is re-sent every `CLAIM_RESEND_MS` (30 000 ms), and to a channel that opens or whose
+  connection recovers.
+- An Ask is sent once and never re-sent.
+- Claims and Asks are paced by a local mirror of the receiver's claim bucket. A burst coalesces to
+  the latest claim.
+- **Pass.** A holder's Pass is a Release, plus local suppression of auto-claim on that frame until
+  the selection changes. An asker takes a frame only when an explicit Release of a live claim
+  arrives from its holder while the asker's own Ask is live and nobody else claims it.
+
+**Studio contract.**
+
+- `Studio.svelte` receives `claims: StudioClaimSnapshot | null` and `claimActions:
+  StudioClaimActions`.
+  - The snapshot is a frozen `{self, entries, local, asksOnMine}`.
+  - The actions are `claim`, `autoClaim`, `release`, `ask`, `cancelAsk` and `pass`.
+- The app supplies a snapshot only while `inCall && activeServerId === callServer && view ===
+  "studio"`. Every asserting action re-checks that scope, and losing the scope releases the claim and
+  cancels the ask.
+- Painting calls `autoClaim`. Changing frame or object releases the claim and cancels a stale ask.
+- No Studio edit, save or native path consults claims.
+

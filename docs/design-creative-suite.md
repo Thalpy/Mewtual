@@ -3,7 +3,16 @@
 **Current Gate 4 update (2026-10-12).** PR #41 assembles the rotation/recovery candidate through
 the real actor, native and Studio UI paths. It exposes only the reviewed lifecycle family and
 ticketed Unconfirmed Save; direct Closing Save and native repair controls remain unavailable.
-Gate 5 remains closed. Acceptance evidence is maintained in `GATE4-ACCEPTANCE.md`.
+Acceptance evidence is maintained in `GATE4-ACCEPTANCE.md`.
+
+**Gate 5 (2026-10-12): implementation candidate on `gate5-frame-claims`, not accepted.** It
+implements 2.18 (C0d full identity), the 2.3 admission extraction (C0b), and the 2.7/2.10
+claim frame on the `draw` channel. Two choices go beyond the text above:
+
+- The claim frame always carries all seven keys `{t, sn, q, obj, fr, on, ask}`.
+- Pass is a Release that the asker completes by claiming.
+
+`GATE5-DESIGN.md` records the decisions and their review; INTERFACES section 13 is the contract.
 
 **Historical Gate 4 position (2026-09-15).** HANDOFF-002 is closed and the corrected bounded
 Closing-overlay core/store handoff is accepted at `62f06d4` (review/evidence head `aa0a81f`).
