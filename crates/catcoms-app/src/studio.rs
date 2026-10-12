@@ -12,7 +12,6 @@ use catcoms_rt::{CryptoRngCore, MeshTransport};
 use tokio::sync::{oneshot, OwnedMutexGuard};
 
 mod tenure;
-pub(crate) use tenure::require as require_owner_tenure;
 pub use tenure::StudioOwnerTenure;
 mod copy;
 pub use copy::{
@@ -42,7 +41,8 @@ pub(crate) mod restore;
 mod settlement;
 pub use control::{
     StudioArchiveReleaseRequest, StudioControlAction, StudioControlReady, StudioControlRequest,
-    StudioControlResponse, StudioOverlayArchived, StudioOverlayExport, StudioOverlayLifecycle,
+    StudioControlResponse, StudioHandoffAttempt, StudioHandoffAttemptReason,
+    StudioHandoffAttemptState, StudioOverlayArchived, StudioOverlayExport, StudioOverlayLifecycle,
     StudioRecoveryApply, StudioRecoveryListing, StudioRecoveryPreview, StudioRecoverySummary,
     StudioRecoveryVersion, StudioReleaseConfirmation, StudioSettlementSource,
     StudioUnconfirmedOverlaySaveRequest, StudioUnconfirmedSaveOutcome, CONTROL_REPLY_DROPPED,
@@ -55,10 +55,10 @@ pub use settlement::StudioSettlementState;
 mod dispatch;
 pub(crate) use dispatch::{StudioDispatch, StudioReply, StudioResponse};
 mod receiver;
-#[cfg(test)]
-pub(crate) use receiver::PreviewHarness;
 pub(crate) use receiver::StudioBackgroundResult;
 pub(crate) use receiver::StudioReceiver;
+#[cfg(test)]
+pub(crate) use receiver::{PreviewHarness, StudioOverlaySaveVisit};
 
 /// Bounded before entering the actor queue. Bodies are the existing canonical Studio JSON,
 /// not renderer-authored Automerge changes. Keep ids/nonces/bodies stable across retries.

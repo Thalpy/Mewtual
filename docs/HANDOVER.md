@@ -8,7 +8,86 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-10-11)
+## Status (latest entry: 2026-10-12)
+
+- **Gate 4 merge-readiness checkpoint (2026-10-12).** Code checkpoint
+  `610c45e323bf018c2a3ffa91bbf359faaf707be3` closes the four latest MEDIUM findings. A retained-draft
+  Copy run now survives document navigation, fences a replacement and owns its late response; an
+  earlier uncertain Save delivery remains visibly uncertain even when a later exact retry receives
+  `Busy`; the lifecycle, handoff and resolution mutation harnesses preflight every selected anchor
+  before compiling; and Flow R's stale-cache regression now explicitly installs an old valid memo
+  after clearing the writer-warmed cache. Form-3 repair-bound handoff, unconfirmed-base and returning-
+  key anti-replay regressions cover the neighboring boundary. Complete root and native suites,
+  strict root/desktop Clippy, desktop check, 1,303 frontend tests, Svelte check/build, `cargo deny`,
+  formatting and Git Bash ambient checking pass locally. All 28 hosted jobs pass on published head
+  `a6e8b07...`, and a fresh local startup run reaches its completion marker. The chat/friend browser
+  flow harness is outside the changed Studio paths; its Windows CDP timeout remains disclosed as
+  neither a pass nor a product failure. Final review also found and closed mutation-harness
+  concurrent-edit safety and stale current documentation; short re-review reports no finding at any
+  severity. PR #41 may merge after normal checks pass on that final harness/docs delta. Gate 5
+  remains closed.
+
+- **Gate 4 local completion checkpoint (2026-10-12).** The isolated candidate now contains the
+  remaining structured Save-refusal path, P5-bounded lifecycle and ticketed Unconfirmed commands,
+  Studio UI consumer, fresh-key repeated-tenure path, repair/runtime integration and both PR #40
+  review corrections. Complete root, native and frontend suites; strict root/desktop Clippy;
+  frontend check/build; `cargo deny`; flow; explicit Git Bash ambient checking; and the focused
+  handoff-priority mutation pass. The initial full-candidate adversarial review and its earlier
+  correction re-reviews had no unresolved finding at that checkpoint; the newer Review 4 response
+  entry above supersedes that verdict. The startup probe passed on the assembled app, then a
+  review-driven harness refinement received focused tests; a fresh local run now passes with the
+  documented cold-start allowance. PR #41 is published against exact baseline
+  `bdcae4a30a0870443db92a14f2d80ff8e4947818`; Linux ambient and all store/runtime mutation jobs pass
+  on its code-identical evidence head. Direct Closing Save and repair commands remain unavailable.
+  The merge-readiness entry above supersedes this earlier checkpoint.
+
+- **Gate 4 isolated completion candidate assembled (2026-10-11).** On committed parent
+  `700d1daba4069af69fea4ff76b105c3008e6825c`, Agent 4 has assembled the remaining specialist work:
+  the store-to-actor-to-native structured Save refusal carrier, the fresh-key join-born owner
+  product regression, P5-scoped lifecycle/Unconfirmed command registration and the Studio UI
+  consumer. Awaiting-tenure base history still cannot authorize ordinary Apply; its edits go only
+  to a separately displayed local-only branch. Exact retry identity, explicit re-authoring,
+  destructive confirmations and two-step copy are preserved. Direct Closing Save and every native
+  repair command remain unavailable. The two MEDIUM findings in the review of PR #40 were already
+  closed by `55ff3d93744cd1f965ab083e910d9645f1f6ac26`, including focused regressions and the corrected
+  mutation selector. Gate 4 still awaits the final full suites, exact-head Linux ambient/mutation
+  CI and independent Review 4; Gate 5 remains closed.
+
+- **Gate 4 C-3 adoption decision completed (2026-10-11).** The post-writer-warm release profile
+  passed: sampled warm Registry/Studio accounting traversal cost was about 0-8 ms, including the
+  largest sampled records. A new real-writer regression proves that a foreign actor can overtake
+  a live cold inventory job and the writer-warmed restart still mints on the next turn without
+  another detach or backoff. Replay remains the resumable production owner. Catch-up, receive,
+  H1 and repair inventory calls remain synchronous as explicit measured debt; cold/remounted
+  paths still have the documented fail-closed rails and can hold one custody visit. This closes
+  C-3's Gate 4 adoption decision, not a universal latency guarantee.
+
+- **Windows rapid-restart reconnect correction (2026-10-11).** The recurring six-client final-
+  reunion split was reproduced as a real transport failure rather than accepted as a timing
+  flake: libp2p's default known-peer dial reused the listener's local TCP port, and Windows
+  refused the still-live local/remote four-tuple with `WSAEADDRINUSE` after a quick close/reopen.
+  Windows outbound bootstrap, infrastructure and saved-member-route dials now allocate a fresh
+  ephemeral port; Unix keeps listener-port reuse and its NAT-traversal benefit. Both native
+  six-client scenarios pass on the correction, including reversed reopen, discarded gossip and
+  command load, as does the complete `catcoms-net` suite. This is a bounded recovery checkpoint;
+  the historical candidate failures below remain truthful evidence for their pinned SHAs, and
+  the final combined native suite is still required after all Gate 4 code is assembled.
+
+- **Gate 4 completion candidate: K12 Closing mirror and H3 service order (2026-10-11).** Starting
+  from PR #38's shared runtime baseline `bdcae4a30a0870443db92a14f2d80ff8e4947818`, the isolated
+  completion branch preserves a detached Flow S plan's exact Closing/Unconfirmed commit authority,
+  retains stamped refusals for both provenances and answers a current Closing retry before new
+  S1b work. The Studio and Registry catch-up paths now reserve checkpoint service before returning
+  a held page that cannot prepare under a full pool, and answer a request in the same turn its
+  exact prepared source is installed. The first adversarial re-review found one contention edge:
+  evicting this actor's retained Registry graph could free a permit that fallback Registry service
+  immediately recaptured ahead of the already-fetched Studio page. The page now retries that exact
+  acquisition before service runs. A real four-slot regression proves bounded Studio persistence
+  followed by resumed Registry service. A separate paused-worker regression now isolates H3's
+  captured-service priority term, and the named mutation is detected again. Focused Closing,
+  full-pool Studio/Registry and Registry serve-on-install regressions pass. This is a bounded
+  runtime checkpoint awaiting re-review and full-suite/exact-head CI; it does not implement the
+  full structured refusal carrier, promote P5 or register native commands.
 
 - **Gate 4 exact-head CI refresh (2026-10-11).** The shared line is now
   `2ab84645b126fafe27a2180d79d9cb6267a0425a`. Agent 2 corrected lifecycle mutation shard 2's
@@ -64,7 +143,8 @@ and ranks the live hazards in that path.
 
 - **Gate 4 Agent 1: C-3's prerequisite, the validation memo (2026-10-10).** The project owner
   decided the remaining C-3 owners wait for writer-side warms and then a measurement, after which
-  each is converted or recorded as debt (`GATE4-AGENT-1-C3-RUNTIME.md` 16).
+  each is converted or recorded as debt (`GATE4-AGENT-1-C3-RUNTIME.md` 16). That measurement and
+  decision are now recorded in section 16.5 and the newer status entry above.
   - **M2, landed:** the memo is indexed, holds up to 65 536 entries and is pruned by every
     inventory-issuing scan, so a vault of more than 64 memoizable records no longer revalidates
     every record on every scan.
@@ -99,8 +179,8 @@ and ranks the live hazards in that path.
     not free, since the visit paid for media admission and, for the Unconfirmed Save, the budget
     scan. The Unconfirmed Save answers it with `Paused` (natively `retry:"afterExplicitAccess"`,
     Agent 2, 2026-10-10), so a caller can tell it from `Busy`, which the paused event alone could
-    not. The Closing `save_overlay` still answers `Busy` while paused, and needs the same
-    distinction before its native result registers.
+    not. The completion candidate gives the internal Closing path the same `Paused` distinction;
+    neither native Save is registered while P5 is false.
   - **F2:** an actor-level test of Flow H's signing yield, with a second member's checkpoint
     request arriving mid-signing. It found that a request catch-up had reserved, and whose source
     it had installed, was invisible to the yield. Signing then ran to the end, and H5's commit
@@ -109,12 +189,11 @@ and ranks the live hazards in that path.
     may be waiting for the signing job's own pool permit, so it is signed past. It is served after
     H5 only if it is still current then (5 s from arrival) and wins the freed permit; otherwise the
     requester retries.
-    - **Still open:**
-      - `replay_ready()`, the gate for H5 and replay, has the same blind spot. A request captured
-        just before H5 or a replay step can still be dropped, costing the requester a retry.
-      - On a full pool, a held client page or Registry page can keep catch-up from serving at all,
-        while H3 yields to a request it cannot reach.
-      - The inbound term has no actor-level test.
+    - **Completion candidate correction:** an exact prepared Studio or Registry source is served
+      in its installation turn, before H5/replay can evict it. A held Studio or Registry page that
+      cannot prepare under a full pool still lets service reserve the inbound request, so H3 sees
+      the real captured/uncaptured state. Actor-level Studio and Registry full-pool regressions and
+      a Registry serve-on-install regression pin those orderings.
   - **Decision, technical debt:** a Studio handoff's final commit (H5) stays one blocking step.
     At the caps (999 frames, 256 draft operations) it takes about 0.15 s, past the design's
     0.125 s target, once per handoff. Splitting it (C-3 step 3's remaining route) is deferred;
@@ -155,9 +234,8 @@ and ranks the live hazards in that path.
   for both Closing and Unconfirmed Flow S: another caller may finish abandoned work to free the
   bounded slot, but receives `Busy` and cannot claim that result. P5 remains false; Save and repair
   commands remain unregistered. This was incremental integration, not Gate 4 acceptance, and Gate 5
-  remains closed. Residual LOW coverage gap: the common fingerprint path has the Unconfirmed
-  same-nonce/different-body regression, but Closing and cross-provenance parked-plan cases do not yet
-  have direct equivalents.
+  remains closed. The completion candidate adds the direct Closing refusal/fingerprint regression;
+  a direct cross-provenance parked-plan case remains a LOW coverage gap.
 
 - **Gate 4 Agent 2: the Unconfirmed aggregate rails, and the parked-plan mutation fix
   (2026-10-07).**
@@ -165,8 +243,9 @@ and ranks the live hazards in that path.
     ceiling) now exist. The tally sits in `EpochIntentBudget`, built from the inventory's
     authenticated facts and kept current by `write_prepared_intents`. Flow S checks it at S1b,
     before media work, and again at S3, at the exact size of the write. Only growth is refused; an
-    exact retry is answered at capacity. There is no typed `StorageRefused`: the refusal is
-    `Invalid` with its own reason. The share is admission policy at Flow S, not a vault invariant.
+    exact retry is answered at capacity. **Current-candidate correction:** `StorageRefused` is now
+    a typed `StudioOverlaySaveRefusal` carried through store, actor and native conversion; this
+    historical paragraph predates G4-A1-MAP. The share is admission policy at Flow S, not a vault invariant.
     Ordinary edits beside a live branch whose confirmed source is installed grow the counted
     record unrefused, so the tally can pass 8 MiB. After that, every Unconfirmed Save is refused
     until headroom returns.
@@ -1521,7 +1600,8 @@ and ranks the live hazards in that path.
   test also passes (35.66 seconds; `logs/gate4-succession-expanded-solo.log`). Root formatting and
   `cargo clippy --locked -j 4 -p catcoms-app --tests -- -D warnings` pass
   (`logs/gate4-succession-expanded-clippy.log`). Broader suites were not repeated for this test-only
-  slice; the previous ambient-check limitation remains below. User-provided review passed.
+  slice; Linux CI later passed the ambient-dependency gate on the integrated candidate, as the
+  exact-head entries above record. User-provided review passed.
   This does not cover repeated owner changes, post-succession joining/PIX availability or
   interrupted successor installation. Signed repair and full Gate 4 acceptance remain open.
 

@@ -1,6 +1,6 @@
 use super::*;
 use catcoms_mls::MlsDevice;
-use catcoms_rt::{Hub, ManualClock, PeerId};
+use catcoms_rt::{Clock, Hub, ManualClock, PeerId};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
@@ -499,6 +499,121 @@ async fn studio_handoff_runs_through_every_scheduled_stage_and_notifies() {
             .iter()
             .any(|(t, _)| *t == target),
         "H6 published no settlement notice for the completed transfer"
+    );
+}
+
+/// MAP Flow H: a worker refusal is runtime evidence beside eligibility. It is retained with the
+/// exact H1 stamp, exposed while that stamp is current, and disappears across a vault remount even
+/// though the same target and durable records remain readable.
+#[tokio::test]
+async fn handoff_attempt_reports_a_typed_worker_refusal_only_for_its_current_stamp() {
+    use crate::studio::{
+        StudioControlAction, StudioControlRequest, StudioControlResponse,
+        StudioHandoffAttemptReason, StudioHandoffAttemptState,
+    };
+    use catcoms_replication::studio::StudioOverlayManualReason;
+
+    let clock = ManualClock::new(1_000);
+    let mut rng = ChaCha20Rng::seed_from_u64(930);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock.clone()),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"flow-h-attempt", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [10; 16],
+    };
+    server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_handoff_ready_fixture(&mut store, 83, g, d, target, 1)
+    });
+    let mut receiver = StudioReceiver::default();
+    receiver
+        .run(
+            &mut server,
+            &mut store,
+            83,
+            Some(StudioRequest::Read { target }),
+        )
+        .unwrap();
+    receiver.catchup.inject_overlay_pool_for_test(4);
+
+    for _ in 0..10 {
+        receiver.run(&mut server, &mut store, 83, None).unwrap();
+        if let Some(work) = receiver.detach(&mut server) {
+            receiver.complete(&mut server, work.run(None).await);
+        }
+        if receiver.handoff.stage_for_test() == Some("signing") {
+            break;
+        }
+    }
+    assert_eq!(receiver.handoff.stage_for_test(), Some("signing"));
+    receiver.fail_live_handoff_for_test(
+        Some(StudioOverlayManualReason::SuccessorNotPristine),
+        clock.monotonic_ms(),
+    );
+
+    let read_attempt =
+        |receiver: &mut StudioReceiver, server: &mut Server<_, _>, store: &mut ServerStore| {
+            let (_, _, response) = receiver
+                .control(
+                    server,
+                    store,
+                    83,
+                    StudioControlRequest {
+                        target,
+                        action: StudioControlAction::OverlayLifecycle,
+                    },
+                )
+                .unwrap();
+            let Some(StudioControlResponse::OverlayLifecycle(lifecycle)) = response else {
+                panic!("expected lifecycle response")
+            };
+            lifecycle.handoff_attempt
+        };
+    let attempt = read_attempt(&mut receiver, &mut server, &mut store)
+        .expect("current worker refusal was not reported");
+    assert_eq!(attempt.state, StudioHandoffAttemptState::Refused);
+    assert_eq!(
+        attempt.reason,
+        StudioHandoffAttemptReason::Manual(StudioOverlayManualReason::SuccessorNotPristine)
+    );
+    assert!(attempt.retry_at_ms > clock.monotonic_ms());
+
+    // Once the backoff expires, selecting this target starts a new attempt. The old report must
+    // disappear before H1 runs: H1 can refuse synchronously while the old stamp is still current,
+    // and keeping that report would make the lifecycle row describe the previous worker as if it
+    // were the result of the new retry.
+    clock.advance_ms(30_000);
+    receiver.handoff_probe_for_test(&mut server, &mut store, 83);
+    assert_eq!(receiver.handoff.stage_for_test(), Some("captured"));
+    assert_eq!(
+        read_attempt(&mut receiver, &mut server, &mut store),
+        None,
+        "a fresh H1 retry retained the previous attempt's result"
+    );
+    let work = receiver
+        .detach(&mut server)
+        .expect("the replacement H2 did not detach");
+    receiver.complete(&mut server, work.run(None).await);
+    assert_eq!(receiver.handoff.stage_for_test(), Some("signing"));
+    receiver.fail_live_handoff_for_test(
+        Some(StudioOverlayManualReason::SuccessorNotPristine),
+        clock.monotonic_ms(),
+    );
+    assert!(read_attempt(&mut receiver, &mut server, &mut store).is_some());
+
+    drop(store);
+    let mut store = ServerStore::open(root.path(), b"flow-h-attempt", &mut rng).unwrap();
+    assert_eq!(
+        read_attempt(&mut receiver, &mut server, &mut store),
+        None,
+        "a report from the previous mount survived its H1 stamp"
     );
 }
 
@@ -1984,6 +2099,126 @@ async fn a_refused_plan_releases_admission_and_its_pool_slot_without_a_second_vi
     assert!(receiver.catchup.reserve_overlay().is_some());
 }
 
+/// MAP K12's Closing mirror. The completion must retain a Closing refusal under the same stamped
+/// record rule as an Unconfirmed refusal, and the Closing entry point must answer it before it
+/// reserves another permit or repeats S1b/S2. The request fingerprint's provenance byte is also
+/// pinned: identical authoring bytes from the other Save domain cannot claim this answer.
+#[tokio::test]
+async fn a_closing_save_answers_its_stamped_refusal_without_replanning() {
+    let clock = ManualClock::new(1000);
+    let mut rng = ChaCha20Rng::seed_from_u64(2411);
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng.clone(),
+        Box::new(clock),
+        "owner",
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(root.path(), b"closing-refusal", &mut rng).unwrap();
+    let target = StudioTarget::Flipnote {
+        channel: crate::channel_id("general").to_be_bytes(),
+        object: [0xC1; 16],
+    };
+    let capture = server.sync.with_registry_context(|g, d, _, _| {
+        crate::store::studio_closing_capture_fixture(&mut store, 83, g, d, target, true)
+    });
+    let logical = target.document(&server.group_id()).unwrap();
+    let close = catcoms_replication::CloseRecord::sign(
+        &logical,
+        catcoms_replication::epoch_zero_id(logical.doc_type, &logical.logical_key),
+        0,
+        vec![[1; 32]],
+        &MlsDevice::generate().unwrap(),
+    )
+    .unwrap();
+    let basis = [0xB1; 32];
+    let branch = [0xB2; 32];
+    let operation = crate::studio::domain(
+        target,
+        [0xB3; 16],
+        FlipnoteOp::SetHeader(FlipnoteHeader::Title("closing refusal".into()))
+            .encode()
+            .unwrap(),
+    );
+    let request =
+        super::super::overlay_request_fingerprint(0, target, &basis, &branch, &operation).unwrap();
+    let unconfirmed =
+        super::super::overlay_request_fingerprint(1, target, &basis, &branch, &operation).unwrap();
+    assert_ne!(
+        request, unconfirmed,
+        "the two Save domains produced the same request fingerprint"
+    );
+
+    let mut receiver = StudioReceiver::default();
+    let pool = receiver.catchup.inject_overlay_pool_for_test(1);
+    let ownership = receiver
+        .catchup
+        .reserve_overlay()
+        .expect("the Closing plan is admitted");
+    receiver.closing_scheduled = Some(request);
+    receiver.catchup.schedule_overlay(
+        capture,
+        ownership,
+        target,
+        OverlayCommit::Closing(Box::new(close.clone())),
+    );
+    let result = receiver
+        .detach(&mut server)
+        .expect("the Closing plan detaches")
+        .run(None)
+        .await;
+    let refusal = match &result {
+        StudioBackgroundResult::OverlayPlanned(
+            _,
+            Err(AppError::StudioRefused {
+                reason: catcoms_replication::studio::StudioOverlaySaveRefusal::StorageRefused,
+                message,
+            }),
+        ) => message.clone(),
+        _ => panic!("the full intent ledger did not refuse the Closing plan"),
+    };
+    receiver.complete(&mut server, result);
+    assert!(receiver.catchup.has_overlay_refusal_for_test());
+    assert_eq!(pool.available_permits(), 1);
+
+    let mut scan = store.scan_epoch_storage_with_studio().unwrap();
+    while !scan.step().unwrap().complete {}
+    let inventory = scan.finish().unwrap();
+    let mut budget = server
+        .sync
+        .with_registry_context(|g, _, _, _| store.studio_storage_budget(83, g, &inventory))
+        .unwrap();
+    let retry = match receiver.save_overlay(
+        &mut server,
+        &mut store,
+        83,
+        target,
+        &close,
+        basis,
+        branch,
+        operation,
+        &mut budget,
+    ) {
+        Ok(StudioOverlaySaveVisit::Refused {
+            reason: catcoms_replication::studio::StudioOverlaySaveRefusal::StorageRefused,
+            message,
+        }) => message,
+        _ => panic!("the identical Closing retry was not answered from its kept refusal"),
+    };
+    assert_eq!(retry, refusal, "the retry did not carry the kept refusal");
+    assert_eq!(
+        pool.available_permits(),
+        1,
+        "answering the kept Closing refusal reserved another permit"
+    );
+    assert!(
+        receiver.detach(&mut server).is_none(),
+        "answering the kept Closing refusal queued another plan"
+    );
+}
+
 /// Design 18.3 review, F4: `pause` releases a Save capture that was queued but not yet detached.
 ///
 /// A paused receiver hands out no work, and only an unrelated explicit access clears the pause, so
@@ -2431,7 +2666,8 @@ async fn a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_serv
     // parked, for a custody visit. The request then passes through three of the priority answer's
     // four terms in turn: queued service interest, a parked result, and, once the source is
     // installed, a captured request still owed its answer. Catch-up alternates serving with its
-    // own client turns, so that last state lasts at least one turn.
+    // own client turns. The installed source is now served in its installation turn, so the old
+    // "captured, installed and still owed" gap must not appear at a turn boundary.
     displace_warm_graph(&mut o);
 
     // 2. Bob asks the owner for this document's checkpoint head. Until the answer goes back, a
@@ -2474,8 +2710,8 @@ async fn a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_serv
         fetch.is_finished(),
         "the owner never answered Bob's request"
     );
-    // Each term must really have been the reason for some turn, or a mutant removing it would
-    // pass here for want of a turn that needed it.
+    // The queued and parked terms must really have been the reason for some turn, or a mutant
+    // removing either would pass here for want of a turn that needed it.
     assert!(
         queued_yields >= 1,
         "no turn began with the request queued as service interest"
@@ -2484,9 +2720,9 @@ async fn a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_serv
         parked_yields >= 1,
         "no turn began with only the request's preparation result parked"
     );
-    assert!(
-        owed_yields >= 1,
-        "no turn began with the request reserved, installed and still unanswered"
+    assert_eq!(
+        owed_yields, 0,
+        "the installed request was left unanswered for a later signing turn"
     );
     let answered = o
         .bob
@@ -2507,6 +2743,121 @@ async fn a_signing_visit_yields_to_a_members_checkpoint_request_until_it_is_serv
     assert!(
         drive_transfer_to_completion(&mut o).await,
         "the transfer never completed after the yield"
+    );
+}
+
+/// F2's captured-service term in isolation. A request whose source reconstruction is running has
+/// left sync's queue and has no parked result yet, so only `captured_service_owed` can keep H3
+/// from signing past it. The worker barrier holds that exact state across a real receiver visit.
+#[tokio::test]
+async fn a_running_captured_checkpoint_preparation_alone_makes_a_signing_slice_yield() {
+    let mut o = signing_owner(1417, 4).await;
+
+    // Leave enough H3 work for a later visit to expose an erroneous slice, then make serving the
+    // target require the detached preparation whose lifetime this regression isolates.
+    o.receiver
+        .run(&mut o.server, &mut o.store, 83, None)
+        .unwrap();
+    let after = o
+        .receiver
+        .handoff
+        .remaining_for_test()
+        .expect("the signing job survived its first bounded slice");
+    assert!(after > 0);
+    displace_warm_graph(&mut o);
+
+    let fetch = deliver_head_request(&mut o).await;
+    let before_capture = o.receiver.handoff.remaining_for_test();
+    for _ in 0..4 {
+        o.receiver
+            .run(&mut o.server, &mut o.store, 83, None)
+            .unwrap();
+        assert_eq!(
+            o.receiver.handoff.remaining_for_test(),
+            before_capture,
+            "the queued request did not have priority over signing"
+        );
+        if o.receiver.catchup.service_capture_for_test() == Some(true) {
+            break;
+        }
+    }
+    assert!(
+        !o.server.sync.has_epoch_service_interest(),
+        "the request was not reserved within the bounded service alternation"
+    );
+    assert_eq!(
+        o.receiver.catchup.service_capture_for_test(),
+        Some(true),
+        "the reserved request did not capture its source"
+    );
+    assert!(!o.receiver.catchup.result_parked());
+    assert!(o.receiver.catchup.captured_service_owed(&o.server));
+
+    let work = o
+        .receiver
+        .detach(&mut o.server)
+        .expect("the captured source preparation did not detach");
+    assert_eq!(work.kind_for_test(), "prepare");
+    let (work, entered, release) = work.pause_preparation_for_test();
+    let (result, ()) = tokio::join!(work.run(None), async {
+        tokio::time::timeout(std::time::Duration::from_secs(60), entered)
+            .await
+            .expect("the source preparation worker never reached its barrier")
+            .expect("the source preparation worker dropped its entry signal");
+
+        // These are the other three priority terms at the visit boundary. If any becomes true,
+        // it would mask removal of `captured_service_owed` and the mutation would survive.
+        let queued = o.server.sync.has_epoch_service_interest();
+        let parked = o.receiver.catchup.result_parked();
+        let inbound = o
+            .receiver
+            .watches
+            .iter()
+            .any(|(watch, _)| o.server.sync.studio_has_inbound(&watch.inner));
+        let owed = o.receiver.catchup.captured_service_owed(&o.server);
+
+        let before = o.receiver.handoff.remaining_for_test();
+        let visit = o.receiver.run(&mut o.server, &mut o.store, 83, None);
+        let after_visit = o.receiver.handoff.remaining_for_test();
+        // Release before any assertion can unwind the test-side future. Tokio waits for blocking
+        // workers at runtime shutdown, so stranding this receiver would turn a useful failure
+        // into a hung test process.
+        release
+            .send(())
+            .expect("the source preparation worker is still waiting");
+        visit.unwrap();
+        assert!(!queued);
+        assert!(!parked);
+        assert!(!inbound);
+        assert!(owed);
+        assert_eq!(
+            after_visit, before,
+            "a signing slice ran while a captured checkpoint preparation was still running"
+        );
+    });
+    o.receiver.complete(&mut o.server, result);
+    assert!(
+        o.receiver.catchup.result_parked(),
+        "the released preparation did not park its result"
+    );
+
+    // Installation answers the exact request in this turn. H3 has still not moved; once Bob has
+    // the authenticated answer, ordinary bounded signing is allowed to resume.
+    o.receiver
+        .run(&mut o.server, &mut o.store, 83, None)
+        .unwrap();
+    let answered = o
+        .bob
+        .sync
+        .complete_checkpoint_head(fetch.await.expect("the fetch task"));
+    assert!(
+        answered.is_ok(),
+        "Bob's captured request was not served: {answered:?}"
+    );
+    assert_eq!(o.receiver.handoff.remaining_for_test(), Some(after));
+    assert!(
+        drive_transfer_to_completion(&mut o).await,
+        "the transfer never resumed after the captured request was served"
     );
 }
 

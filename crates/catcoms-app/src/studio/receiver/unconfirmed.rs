@@ -56,9 +56,14 @@ impl StudioReceiver {
             StudioControlAction::BeginUnconfirmedOverlaySave => {
                 // Every Save under a ticket for a Closing draft would be refused anyway; naming
                 // the reason here, before a ticket exists, is the truthful place for it.
-                refuse_closing_draft(server, store, id, target)?;
+                if let Err(error) = refuse_closing_draft(server, store, id, target) {
+                    return unconfirmed_refusal(target, error);
+                }
                 let (basis, branch) =
-                    self.begin_unconfirmed_overlay_save(server, store, id, target)?;
+                    match self.begin_unconfirmed_overlay_save(server, store, id, target) {
+                        Ok(ticket) => ticket,
+                        Err(error) => return unconfirmed_refusal(target, error),
+                    };
                 Ok(StudioControlResponse::UnconfirmedOverlaySaveTicket {
                     target,
                     basis,
@@ -71,7 +76,9 @@ impl StudioReceiver {
                 // acknowledged by the store's kind-blind exact retry and then reported here as
                 // Unconfirmed work. Refused first instead, by what the document's live draft is
                 // (review of `b35e23d2`, MEDIUM-1).
-                refuse_closing_draft(server, store, id, target)?;
+                if let Err(error) = refuse_closing_draft(server, store, id, target) {
+                    return unconfirmed_refusal(target, error);
+                }
                 let operation = crate::studio::domain(target, save.nonce, save.body);
                 let visit = self.save_unconfirmed_overlay(
                     server,
@@ -110,8 +117,12 @@ impl StudioReceiver {
                             StudioUnconfirmedSaveOutcome::HandedOff(outcome)
                         }
                     },
+                    StudioOverlaySaveVisit::Refused { reason, message } => {
+                        StudioUnconfirmedSaveOutcome::Refused { reason, message }
+                    }
                     StudioOverlaySaveVisit::Scheduled => StudioUnconfirmedSaveOutcome::Scheduled,
                     StudioOverlaySaveVisit::Busy => StudioUnconfirmedSaveOutcome::Busy,
+                    StudioOverlaySaveVisit::Paused => StudioUnconfirmedSaveOutcome::Paused,
                 };
                 Ok(StudioControlResponse::UnconfirmedOverlaySaved { target, outcome })
             }
@@ -139,7 +150,10 @@ impl StudioReceiver {
             .sync
             .with_registry_context(|g, d, _, _| g.contains_device(&d.device_id()))
         {
-            return Err(invalid("this device is no longer a member"));
+            return Err(AppError::StudioRefused {
+                reason: catcoms_replication::studio::StudioOverlaySaveRefusal::NotMember,
+                message: "Studio: this device is no longer a member".into(),
+            });
         }
         let basis = self.catchup.preview.mint(server, store, id, target)?;
         let mut budget = save_budget(server, store, id)?;
@@ -177,35 +191,21 @@ impl StudioReceiver {
             // The budget before the take: a failed scan then leaves the plan parked for the next
             // visit, instead of destroying a committable plan (re-review of `5ccc4647`, LOW-2).
             let mut budget = save_budget(server, store, id)?;
-            let (planned, plan, ownership) = self
+            let (context, plan, ownership) = self
                 .catchup
                 .take_any_planned_overlay()
                 .expect("checked just above, in the same custody visit");
+            let (planned, provenance, committed) =
+                self.commit_planned_overlay(server, store, id, context, *plan, &mut budget);
             // Whose plan this is. The slot holds one plan whichever request made it, and the plan
             // does not say, so the receiver remembers which request scheduled it.
-            let ours = planned == target && self.unconfirmed_scheduled == Some(request);
+            let ours = planned == target
+                && provenance == OverlayCommitKind::Unconfirmed
+                && self.unconfirmed_scheduled == Some(request);
             self.closing_scheduled = None;
             self.unconfirmed_scheduled = None;
-            let attempt = self.catchup.preview.mint(server, store, id, planned);
-            let committed = server.sync.with_registry_context(|group, device, _, rng| {
-                store.commit_studio_overlay_with(
-                    id,
-                    group,
-                    planned,
-                    device,
-                    StudioOverlayMint::unconfirmed(attempt),
-                    *plan,
-                    rng,
-                    &mut budget,
-                )
-            });
             // Released only after the commit attempt returns, on success and on error alike.
             drop(ownership);
-            // The commit's write is its last step, so even an error may follow a durable change;
-            // the lifecycle row is refreshed either way, as the control transaction does for every
-            // action that can change the vault (review of `b35e23d2`, MEDIUM-2).
-            self.settlement
-                .note(planned, StudioSettlementState::RefreshRequired);
             if !ours {
                 // Nothing of THIS request was saved, whatever the other commit did. Its success or
                 // refusal belongs to its own caller's retry, not to this response, so it is logged
@@ -215,11 +215,12 @@ impl StudioReceiver {
                 }
                 return Ok(Visit(StudioOverlaySaveVisit::Busy));
             }
-            return committed.map(|draft| {
-                Visit(StudioOverlaySaveVisit::Saved(Box::new(
+            return match committed {
+                Ok(draft) => Ok(Visit(StudioOverlaySaveVisit::Saved(Box::new(
                     StudioOverlaySave::Local(draft),
-                )))
-            });
+                )))),
+                Err(error) => refused_save_visit(error).map(Visit),
+            };
         }
         // MAP K12: this request's plan was refused, and the record it was planned from is unchanged,
         // so the refusal is answered again. It goes before the reservation and every stage after it:
@@ -240,7 +241,10 @@ impl StudioReceiver {
                     store.studio_overlay_is_current(group, device, refusal.stamp())
                 })?;
             if current {
-                return Err(invalid(refusal.message().to_owned()));
+                return Ok(Visit(StudioOverlaySaveVisit::Refused {
+                    reason: refusal.reason(),
+                    message: refusal.message().to_owned(),
+                }));
             }
             // The record moved on, by a commit, a disposal or anything else. Decide afresh.
             self.catchup.forget_overlay_refusal();
@@ -258,7 +262,7 @@ impl StudioReceiver {
         };
         let attempt = self.catchup.preview.mint(server, store, id, target);
         let mut budget = save_budget(server, store, id)?;
-        let started = server
+        let started = match server
             .sync
             .with_registry_context(|group, device, clock, rng| {
                 store.start_studio_overlay(
@@ -274,7 +278,21 @@ impl StudioReceiver {
                     rng,
                     &mut budget,
                 )
-            })?;
+            }) {
+            Ok(started) => started,
+            Err(error) => {
+                let refused = refused_save_visit(error)?;
+                if matches!(
+                    refused,
+                    StudioOverlaySaveVisit::Refused { reason, .. }
+                        if super::refused_save_requires_refresh(reason)
+                ) {
+                    self.settlement
+                        .note(target, StudioSettlementState::RefreshRequired);
+                }
+                return Ok(Visit(refused));
+            }
+        };
         match started {
             StudioOverlayStart::Settled(saved) => {
                 // An acknowledgement or a disposal manifest. Neither changed the vault, but a
@@ -286,7 +304,12 @@ impl StudioReceiver {
             StudioOverlayStart::Captured(capture) => {
                 // Refused at the capture, not at the door: everything above answers an exact
                 // retry, so only new authoring reaches this (design 18.3 review, F4).
-                if !self.queue_capture_unless_paused(*capture, ownership, target) {
+                if !self.queue_capture_unless_paused(
+                    *capture,
+                    ownership,
+                    target,
+                    OverlayCommit::Unconfirmed,
+                ) {
                     return Ok(UnconfirmedSaveVisit::Paused);
                 }
                 self.unconfirmed_scheduled = Some(request);
@@ -294,6 +317,22 @@ impl StudioReceiver {
             }
         }
     }
+}
+
+/// Lift a classified refusal into the stable control response without laundering any other error.
+/// Invariant, I/O and uncertain-write failures must remain on the error channel; only the app's
+/// typed `StudioRefused` variant is safe to present as proof that this request wrote nothing.
+fn unconfirmed_refusal(
+    target: StudioTarget,
+    error: AppError,
+) -> Result<StudioControlResponse, AppError> {
+    let StudioOverlaySaveVisit::Refused { reason, message } = refused_save_visit(error)? else {
+        unreachable!("the refusal converter returned a non-refusal visit")
+    };
+    Ok(StudioControlResponse::UnconfirmedOverlaySaved {
+        target,
+        outcome: StudioUnconfirmedSaveOutcome::Refused { reason, message },
+    })
 }
 
 impl StudioReceiver {
@@ -345,7 +384,8 @@ fn refuse_closing_draft<T: MeshTransport + 'static, R: CryptoRngCore>(
         if metadata.overlay().is_some()
             && matches!(metadata.provenance(), StudioOverlayProvenance::Closing)
         {
-            return Err(invalid(
+            return Err(crate::store::studio_refused(
+                catcoms_replication::studio::StudioOverlaySaveRefusal::OtherKindDraft,
                 "this document's live draft was not made on a preview; it cannot take an \
                  unconfirmed Save",
             ));

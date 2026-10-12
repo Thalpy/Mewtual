@@ -324,9 +324,10 @@ impl StudioEpoch {
     /// Ordered most-permanent first. A faulted, rewound or replaced source is reported as such even
     /// when the successor would also be unpristine, because "wait" is the wrong advice for it.
     ///
-    /// Test-only: production classifies from the record header and never restores for it.
-    #[cfg(test)]
-    pub(in crate::studio) fn overlay_successor_hold(
+    /// The automatic handoff worker also calls this on the exact restored successor it is about
+    /// to consume. The header-only probe is an optimization; this full oracle is what prevents a
+    /// projection-only mismatch from being flattened into an unclassified worker failure.
+    pub fn overlay_successor_hold(
         &mut self,
         overlay: &StudioOverlay,
         ledger: &IntentLedger,

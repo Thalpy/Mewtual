@@ -7,7 +7,8 @@ fn studio_inventory_cache_never_skips_reference_enumeration() {
     let f = Fixture::new(true);
     let mut b = budget(&mut store, &f);
     f.edit(&mut store, &mut b, f.insert());
-    inventory(&mut store); // Warm the exact complete Studio wrapper.
+    // No preparatory scan: the Studio and Intents writers must have warmed the exact wrappers
+    // they just installed. This pins the writer-side half of the all-family memo contract.
     let mut warm = store.scan_epoch_storage_with_studio().unwrap();
     let p = loop {
         let p = warm.step().unwrap();

@@ -1,10 +1,17 @@
 # Gate 4 Agent 1: G4-A1-MAP, structured refusal reasons (design, revision 2)
 
-Status: **proposal, design-reviewed once, nothing built.** It answers acceptance row G4-A1-MAP
+Status: **implemented on the isolated completion candidate; final integration review pending.** It answers acceptance row G4-A1-MAP
 (`GATE4-ACCEPTANCE.md`): "map runtime refusals to `StudioOverlayEligibility` /
 `StudioOverlayManualReason` without collapsing distinct cases", with "store -> actor -> native
 conversion coverage for every reason, including stale final delivery". Decisions that need Agent
 2's agreement, because the types or files are theirs, are marked **[A2]**.
+
+Implementation addendum, 2026-10-11: `StudioOverlaySaveRefusal` is now the typed source of truth
+from store through actor and native conversion, including `StorageRefused`. The native adapter and
+TypeScript parser match every variant exhaustively and reject unknown values. K12 retains the
+stamped refusal beside its exact Closing/Unconfirmed plan. The registered renderer action is only
+the ticketed Unconfirmed Save; Closing uses the same internal carrier but has no direct command.
+The inventory below describes the pre-implementation problem and remains useful design history.
 
 Revision 1's design review (Opus, static, 2026-10-07) returned **ready with changes**: three highs
 (the handoff classification could not run where it was placed; a runtime reason in `eligibility`
@@ -13,7 +20,7 @@ lows. Section 9 maps each to its answer. The evidence is a read-only inventory o
 Flow H refusal at `9c63bd6e`; its row ids (S1 to S26, H1a to H5, K1 to K13) are summarised in
 appendix A.
 
-## 1. What exists
+## 1. Baseline inventory before implementation
 
 - **The reason types** are Agent 2's (`catcoms-replication/src/studio/overlay/eligibility.rs`):
   `StudioOverlayEligibility { Transferable, Manual(StudioOverlayManualReason) }`, sixteen manual
@@ -51,12 +58,11 @@ Each variant carries an **action** rather than a class (review M4), extending th
 `retry: "sameRequest"`: `sameRequest` (retry this exact request), `newTicket` (prepare again from
 the current state), or `none` (cannot proceed until something else changes).
 
-A fourth value already exists outside this table: the Unconfirmed Save's `Paused` outcome maps
+A fourth value already exists outside this table: a Save's `Paused` outcome maps
 natively to `retry: "afterExplicitAccess"` (Agent 2, 2026-10-10). The receiver is paused, and only
 an explicit access through `run` ends a pause, so the same request is worth retrying only after
-one. A renderer that shares one parser across both Save kinds must accept all four. The Closing
-`save_overlay` answers `Busy` while paused for now, and should gain the same value when its native
-result registers.
+one. The completion candidate gives Closing the same internal `Paused` result as Unconfirmed; the
+native Closing result remains unregistered. The Unconfirmed renderer parser accepts all four.
 
 | variant | action | from | split needed first |
 |---|---|---|---|
@@ -165,11 +171,14 @@ uses cancellation, a session lock or a generation change, not clock expiry.
    the scheduled request is cleared". Clearing at a pause, or at another request's park expiry,
    would forget a refusal that still describes an unchanged record, and the stamp check covers
    every case the clearing was for. So a kept refusal ends only at a lock, a stale stamp, its
-   deadline or a replacement. **Still to do: the Closing mirror** (`save_overlay` and the park
-   site in `complete`). It accepts either fingerprint, which are domain-separated by the
-   provenance tag, so one slot serves both. It waits until Agent 2 has finished in `catchup.rs`.
-   When the carrier lands, the kept refusal keeps its typed reason, so a retry is answered
-   exactly as the first refusal was.
+   deadline or a replacement. **The Closing mirror is built on the completion candidate
+   (2026-10-11).** `save_overlay` answers the retained refusal before S1b; `complete` parks either
+   provenance; their fingerprints are domain-separated; and an actor-global parked plan retains
+   the exact Closing record or Unconfirmed mint kind needed for its eventual commit. The focused
+   Closing regression proves that a current stamped refusal is returned without a second plan or
+   permit. A direct cross-provenance parked-plan regression remains useful LOW coverage. When the
+   carrier lands, the kept refusal must retain its typed reason so a retry is answered exactly as
+   the first refusal was.
 2. **S1b refusals emit no `RefreshRequired`**, so after `InstalledSource` or `SourceNotClosing`
    the row can lag. Emit one on any refusal caused by a durable-state change (review M3).
 

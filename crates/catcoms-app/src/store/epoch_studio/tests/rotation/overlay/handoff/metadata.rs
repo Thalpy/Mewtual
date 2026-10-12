@@ -353,10 +353,11 @@ fn studio_overlay_handoff_rollover_floor_rejects_forgotten_retry_after_rewind() 
         &mut rng(),
         &mut b,
     );
-    assert!(
-        matches!(result, Err(AppError::Invalid(ref s)) if s.contains("stale branch")),
-        "a forgotten retry naming a long-gone branch was not refused by the namespace: {result:?}"
+    let message = refusal(
+        result.expect_err("a forgotten retry naming a long-gone branch was accepted"),
+        StudioOverlaySaveRefusal::StaleBranch,
     );
+    assert!(message.contains("stale branch"));
     assert_eq!(fs::read(store.epoch_intent_path(&scope)).unwrap(), original);
 
     // The second is the rollover floor, now isolated. A request prepared *after* the rewind is
@@ -386,10 +387,11 @@ fn studio_overlay_handoff_rollover_floor_rejects_forgotten_retry_after_rewind() 
         &mut rng(),
         &mut b,
     );
-    assert!(
-        matches!(result, Err(AppError::Invalid(ref s)) if s.contains(&ReplError::EpochScope.to_string())),
-        "a freshly prepared request on a rewound basis crossed the persisted floor: {result:?}"
+    let message = refusal(
+        result.expect_err("a freshly prepared request crossed the persisted rollover floor"),
+        StudioOverlaySaveRefusal::StaleBranch,
     );
+    assert!(message.contains(&ReplError::EpochScope.to_string()));
     assert_eq!(fs::read(store.epoch_intent_path(&scope)).unwrap(), original);
 }
 

@@ -110,6 +110,15 @@ pub enum AppError {
     /// A persistence I/O error (reading/writing the on-disk store).
     #[error("persistence i/o: {0}")]
     Io(String),
+    /// A Studio Save refusal with a stable machine-readable reason. `message` deliberately keeps
+    /// the previous Display text so existing logs and callers do not change while the Save
+    /// boundary carries `reason` to native code. Only a Save boundary converts this to an `Ok`
+    /// refusal outcome; invariant, I/O and uncertain-write failures remain errors.
+    #[error("{message}")]
+    StudioRefused {
+        reason: catcoms_replication::studio::StudioOverlaySaveRefusal,
+        message: String,
+    },
     /// The destination rename committed, but flushing its directory failed. The caller must not
     /// report a clean rollback: the new complete record is visible, although it may not survive
     /// sudden power loss. Retrying the same save is safe and reconciles the durability state.

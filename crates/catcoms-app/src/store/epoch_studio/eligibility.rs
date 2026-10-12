@@ -168,12 +168,14 @@ impl ServerStore {
             }
             for object in objects {
                 let flipnote = StudioTarget::Flipnote { channel, object };
-                // An unreadable record is as unusable to the handoff as an absent one.
-                if !matches!(
-                    self.studio_object_holds_work(server, group, flipnote),
-                    Ok(true)
-                ) {
-                    return manual(R::ObjectMissing);
+                // An authenticated record that cannot be opened is as unusable to the handoff as
+                // absence. Transient local-storage failures are not durable evidence about the
+                // object, so both P2 and H1 return an error and let runtime back off.
+                match self.studio_object_holds_work(server, group, flipnote) {
+                    Ok(true) => {}
+                    Ok(false) => return manual(R::ObjectMissing),
+                    Err(error @ (AppError::Io(_) | AppError::Storage(_))) => return Err(error),
+                    Err(_) => return manual(R::ObjectMissing),
                 }
             }
         }

@@ -34,9 +34,10 @@
 //!   marks the vault's inventory token at the end of each visit and compares it at the start of the
 //!   next, and a job is only refreshed uncharged if no visit since its cursor began has found the
 //!   token moved in between. This softens own-write restarts; it does not make the job immune to
-//!   them. Under writes between most turns (sustained receive, a user saving steadily, another
-//!   actor) the job can still reach `Unstable`, because the uncached families are re-validated on
-//!   every fresh cursor. The owner must therefore have a way forward that does not depend on this
+//!   them. Every production byte-replacing writer warms its record, and a scan restart that
+//!   retains a newly validated cold record receives one bounded, per-key progress credit. A
+//!   token-only storm, repeated eviction, or writes after those bounded exceptions can still
+//!   reach `Unstable`. The owner must therefore have a way forward that does not depend on this
 //!   job completing: replay's is its synchronous fallback (`receiver/replay.rs`).
 //! - **Only a parked body is pending work** for the driver. Every other state is consumed by an
 //!   owner's turn, and owners are paced by their own schedules; advertising a state no turn this

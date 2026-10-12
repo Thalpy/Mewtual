@@ -1166,7 +1166,8 @@ about 14 ms, which raises the full-frame share to about 26 ms. That is item 0 of
 below. The rest of the commit's growth is unattributed, and attributing it is item 0's second
 half.
 
-**Nothing below is built.** It answers 15.7 finding by finding, then orders the work.
+**At this review point nothing below was built.** It answers 15.7 finding by finding, then orders
+the work; sections 16.1 onward record the later implementation checkpoints.
 
 #### HIGH-1: every byte-changing writer warms the memo it invalidated
 
@@ -1813,8 +1814,7 @@ M1 has two halves.
 - **The memo half, here:** entirely in `inventory.rs` and `inventory/cache.rs`. 15.7 judged
   memoizing every family sound on its own, without the warms.
 - **The writer half:** the warms at the eight writers, the forced-warm token and 15.9's M4
-  contract. Five of the eight writer files are Agent 2's or Agent 3's, so it waits on their
-  go-ahead.
+  contract. It is implemented in 16.3 after Agent 2 and Agent 3 approved the shared writer files.
 
 **What changed:**
 - **The value carries the facts.** A memo entry is the accounting record plus, for an Intents
@@ -1873,3 +1873,111 @@ cold rail still bounds each scan's fresh work.
 | LOW-3 | stale "only Registry and Studio are cacheable" comments in `performance.rs` | **fixed** (four comments, and the profile name explained rather than renamed, since docs and run commands quote it) |
 | residual | two replay tests (`studio_exchange/tests/replay.rs`) needed records to park, and the watch's synchronous scan now warms them | **confirmed by the full suite and fixed:** a new `forget_inventory_memo_for_test` empties the memo, and only the memo, after the watch, so each test's job meets the cold records it was written for. The existing hook also drops the retained Studio source, which would change what they test |
 | residual | THREAT-MODEL could say warm bytes still count against the 8 MiB read rail, and that entries (another member's Unconfirmed provider id included) outlive their records until a covering scan prunes | **added** |
+
+### 16.3 M1's writer half, built (2026-10-11)
+
+All eight byte-replacing writers now warm the all-family inventory memo after their replacement
+becomes visible: DraftArchive; both Intents writers; both Recovery writers; OwnerReceipts;
+Registry; and Studio. `EpochMutation::write` consumes the mutation guard and returns a
+`#[must_use]` `EpochWrite`, so a replacement site cannot continue without explicitly handing its
+visibility/result token to a warm finisher.
+
+The warm follows 15.9's M4 contract:
+
+- identity, cache key and digest are derived from authenticated plaintext through the same helper
+  the scanner uses;
+- bytes substituted by a test hook are not warmed;
+- a pre-rename failure warms nothing, while `CommittedButNotDurable` warms the visible rename and
+  still returns the original durability error;
+- validator-produced families use the canonical inventory validator; Registry and Studio use the
+  live writer's accounting record and compare the whole record with canonical validation in test
+  and debug builds;
+- a post-write validation defect is a debug assertion and skipped optimization, not a new
+  production failure after durable state changed.
+
+Focused regressions confirm that first accounting scans reuse Registry and Studio writer entries,
+that a remount-cold large record still meets the cold rail, that reference scans still enumerate
+bytes, and that the detached/performance fixtures explicitly clear the process-local memo when
+they intend to model cold startup. The complete suite and independent bounded review remain part of
+the combined checkpoint rather than being claimed by this implementation entry.
+
+### 16.4 MEDIUM-3, the restart progress rule, integrated after M1 (2026-10-11)
+
+15.8's MEDIUM-3 with 15.9's M2 corrections, landed after M2 as 15.9 required. **An overtaken
+attempt's restart is charged against `MAX_INVENTORY_RESTARTS` only if the attempt warmed no
+record it found cold.**
+- **What counts as warming:** the cursor's own memoizing of a record it validated, either inline
+  or as an installed detached result, or of a detached result refused because a write overtook
+  it (`EpochStorageCursor::warmed`). A memo hit does not count, since the record was warm already.
+  Neither does a writer's warm, which never passes through a cursor.
+- **Per-key credit, per job:** `EpochInventoryJob::credited` holds every record already credited.
+  A record's warm excuses at most one restart in the job's life, so a record evicted and warmed
+  again cannot excuse restarts for ever (15.9 M2's LRU concern; M2 makes eviction rare, and this
+  makes it harmless).
+- **A ceiling:** `MAX_PROGRESS_RESTARTS` (64), the receive profile's record limit, so a background
+  job can warm its whole vault without being charged. Past it, restarts are charged as before.
+- **One rule, every restart point:** `excused_as_progress` is applied by `restart_job`, which
+  covers a step and an install overtaken, and by the finish path. The runtime's uncharged
+  own-write refresh credits what its old cursor warmed, so those records cannot excuse a later
+  restart either.
+
+**Why it is bounded** (15.9's M2): every excused restart credits at least one record not credited
+before, and credits are capped by the ceiling and by the vault's record count. Each excused
+attempt did at most one visit's bounded validation work, and the memo keeps that work.
+
+**Tests, each guard broken on purpose:**
+
+| test | guards; the mutants that fail it |
+|---|---|
+| `a_job_warmed_record_by_record_across_restarts_is_never_charged` (five cold Studio records, a write overtaking every detached validation) | the job completes with no charged restart and five excused, where before it went `Unstable` at the fourth. Fails with excuses disabled, or with a refused result's warm unrecorded |
+| `an_attempt_that_warmed_nothing_is_charged` (a warm vault, each attempt reading its records as hits, overtaken at finish) | restarts are charged and the job goes `Unstable` once the budget is spent. Fails with excuses always granted, or with hits counted as warming. Its first draft wrote before every step, so no attempt read a record at all and the hits mutant survived; it was rewritten |
+| `a_record_warmed_again_after_eviction_excuses_no_second_restart` | per-key credit. Fails with the credit set ignored |
+| `an_overtaken_finish_whose_attempt_warmed_a_record_is_excused` | the finish path applies the rule. Fails with excuses disabled |
+| `progress_excuses_stop_at_the_ceiling` (on the rule function) | the ceiling, and that a warm past it is still credited. Fails with the ceiling removed |
+
+The held checkpoint's review additions are now part of the integrated candidate:
+
+- `an_uncharged_refresh_credits_a_refused_but_uninstalled_result` proves the runtime's own-write
+  refresh retains the validation in the memo and consumes its per-key credit without installing it
+  into the abandoned inventory or consuming the progress ceiling;
+- `an_overtaken_error_path_uses_the_attempts_prior_warm_as_progress` pins the stale-validation
+  error route to the same rule;
+- the receiver's token-only restart storm pins one new-key excuse, then the complete charged
+  restart budget, then backoff, independently of writer-side warming; its error variant reaches
+  the same terminal backoff;
+- bare cursors no longer retain job-only credit keys; the 64-credit ceiling is explicitly a
+  receive-profile choice and must be reconsidered by any full-profile adopter.
+
+The original held checkpoint's store tests passed before integration. Its required review
+additions and the complete combined suites are tracked at this integration head rather than
+inherited from that earlier result. THREAT-MODEL's replay-move paragraph states the exception.
+
+**M1's writer half is now built.** Once the review additions and combined verification pass, the
+next C-3 step is section 7's measurement, from which each remaining owner is converted or recorded
+as debt.
+
+### 16.5 Section 7 measured; remaining owners retained as explicit debt (2026-10-11)
+
+The release visit-cost profile was rerun after the all-family writer warms. Across eight
+interleaved trials, a warm Registry or Studio accounting traversal spent about 0-8 ms in its
+measured stepping phase for the sampled records, including the largest 3.7-3.9 MiB title/Registry
+cases. Fresh cacheable records still park, as designed; the same case then hits the memo on every
+later trial. The profile passed in 586.76 s. These figures are host evidence, not a portable
+latency promise.
+
+The second-actor condition is now pinned by
+`a_foreign_production_write_warms_the_restarted_job_to_completion`. A cold Studio record is out
+for detached validation when another actor publishes a second record through the real writer.
+The live cursor is overtaken and charged as foreign, but the writer's memo warms let its restarted
+job finish and mint in the same next turn, without a second detach or backoff.
+
+**Decision:** replay's manual move remains the production resumable owner. Catch-up persistence,
+checkpoint service/discovery/rotation, receive, H1 and repair commits keep their existing
+synchronous inventory calls as measured technical debt. Converting those owners would require
+new retained per-operation stages (and, for H1/repair, embedded jobs that reuse their existing
+ownership) while their steady-state scans are writer-warm. That larger lifecycle change is not
+justified by the measured common path at this gate. The honest residual is cold/remounted work:
+automatic receive's existing 1024-entry/64-record/8 MiB/256 KiB-cold rails still fail closed, and
+the full-profile H1/repair paths can hold one custody visit while validating a cold vault. This
+decision closes C-3 adoption for Gate 4 without claiming those synchronous paths are latency-
+bounded by `INVENTORY_SLICE_MS`; a future latency gate may split them.

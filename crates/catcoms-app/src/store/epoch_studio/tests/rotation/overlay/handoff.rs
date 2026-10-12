@@ -1,5 +1,7 @@
 use super::*;
-use catcoms_replication::studio::{StudioHandoffOutcome, StudioOverlaySave};
+use catcoms_replication::studio::{
+    StudioHandoffOutcome, StudioOverlayEligibility, StudioOverlaySave,
+};
 use catcoms_replication::ReplError;
 
 mod classification;
@@ -144,6 +146,9 @@ fn studio_overlay_handoff_signing_slice_reports_yield_bound_and_completion_apart
         crate::store::epoch_studio::handoff::StudioHandoffStart::Settled(_) => {
             panic!("the fixture branch was classified as already transferred")
         }
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Refused(reason) => {
+            panic!("the transferable fixture was refused: {reason:?}")
+        }
     };
     let mut plan = capture.prepare().expect("H2 reconstructs the candidate");
     assert_eq!(plan.remaining(), 40);
@@ -260,6 +265,9 @@ fn studio_overlay_handoff_assembly_refuses_a_partly_signed_batch() {
         crate::store::epoch_studio::handoff::StudioHandoffStart::Settled(_) => {
             panic!("the fixture branch was classified as already transferred")
         }
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Refused(reason) => {
+            panic!("the transferable fixture was refused: {reason:?}")
+        }
     };
     let mut plan = capture.prepare().unwrap();
     // One bounded slice, deliberately short of the whole branch.
@@ -310,6 +318,9 @@ fn studio_overlay_handoff_plan_is_refused_when_its_records_changed() {
         crate::store::epoch_studio::handoff::StudioHandoffStart::Captured(capture) => capture,
         crate::store::epoch_studio::handoff::StudioHandoffStart::Settled(_) => {
             panic!("the fixture branch was classified as already transferred")
+        }
+        crate::store::epoch_studio::handoff::StudioHandoffStart::Refused(reason) => {
+            panic!("the transferable fixture was refused: {reason:?}")
         }
     };
     let mut plan = capture.prepare().expect("H2 reconstructs the candidate");
@@ -458,6 +469,123 @@ fn studio_overlay_handoff_signs_the_whole_branch_once_and_keeps_pending_intents(
             .unwrap();
         assert!(matches!(retry, StudioOverlaySave::HandedOff(ref value) if value == &outcome));
     }
+}
+
+/// The real store can classify and complete a handoff into a repair-bound Flipnote successor.
+///
+/// Core header-reader tests alone do not exercise the sealed record, P2's custody-held reader, or
+/// H1-H5's Prepared/Source/Completed transaction. Build the branch before fault repair, select the
+/// receipt it was based on, install the ordinary successor with the repair binding retained, and
+/// require both the pre-flight classification and the durable completion to agree.
+#[test]
+fn studio_overlay_handoff_into_a_repair_bound_flipnote_completes() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (close, basis) = closing(&f, &mut store);
+    let basis = basis.fingerprint();
+    save(&f, &mut store, &close, basis, f.title(), 123);
+
+    let selected = f
+        .load(&store)
+        .unwrap()
+        .unit
+        .receipt_head()
+        .unwrap()
+        .cloned()
+        .expect("the Closing source has its selected receipt");
+    let losing = Receipt::sign(
+        selected.document.clone(),
+        selected.closed_epoch,
+        [99; 32],
+        selected.seed_change_hash,
+        selected.tenure_start_group_epoch,
+        selected.inherited.clone(),
+        &f.device,
+    )
+    .unwrap();
+    let mut b = budget(&mut store, &f);
+    assert_eq!(
+        store
+            .seal_studio_epoch(
+                SERVER,
+                &f.group,
+                f.target,
+                &f.device,
+                losing.clone(),
+                0,
+                &mut rng(),
+                &mut b,
+            )
+            .unwrap()
+            .0,
+        ReceiptIngest::Fault
+    );
+    let mut pair = [selected.clone(), losing];
+    pair.sort_by_key(Receipt::hash);
+    // `closing` warmed the pre-fault source for rotation. The second receipt deliberately changed
+    // that durable source underneath the retained preparation, so follow the production contract
+    // named by the stale-version error and reopen before starting the repair transaction.
+    drop(store);
+    let mut store = open(root.path());
+    warm(&f, &mut store);
+    let mut b = budget(&mut store, &f);
+    let (_, repaired, state) = store
+        .issue_studio_repair(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            0,
+            StudioRepairRequest {
+                receipt_a: pair[0].hash(),
+                receipt_b: pair[1].hash(),
+                selected: selected.hash(),
+            },
+            None,
+            &catcoms_rt::ManualClock::new(1_000),
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    assert_eq!(repaired, StudioRepairOutcome::Repaired);
+    assert_eq!(state.phase(), EpochPhase::Closing);
+
+    let mut installed = install(&f, &mut store, &close);
+    let installed_bytes = installed.unit.snapshot().unwrap();
+    assert_eq!(
+        installed_bytes[0], 3,
+        "precondition: the store persisted the repair-bound vault form"
+    );
+    assert_eq!(
+        store
+            .studio_overlay_eligibility(
+                SERVER,
+                &f.group,
+                f.target,
+                &f.device,
+                StudioOwnerTenure::Known(0),
+            )
+            .unwrap(),
+        Some(StudioOverlayEligibility::Transferable),
+        "P2 refused the same repair-bound successor H1 can consume"
+    );
+
+    let outcome = transfer(&f, &mut store, basis);
+    assert_eq!(outcome.accepted, 1);
+    let intents = store.load_epoch_intents(SERVER, &f.logical).unwrap();
+    let metadata = intents
+        .handoff_metadata()
+        .expect("the terminal transfer manifest is retained");
+    assert!(metadata.has_completed());
+    assert!(metadata.overlay().is_none());
+    let mut final_source = f.load(&store).unwrap();
+    assert_eq!((final_source.epoch(), final_source.op_count()), (1, 1));
+    assert_eq!(
+        final_source.unit.snapshot().unwrap()[0],
+        3,
+        "handoff completion dropped the durable repair binding"
+    );
 }
 
 fn copy_vault(from: &Path, to: &Path) {
@@ -893,10 +1021,11 @@ fn studio_overlay_handoff_completed_retry_keeps_channel_after_real_receipt_retir
             after: None,
         },
     );
-    assert!(
-        matches!(negative, Err(AppError::Invalid(ref s)) if s == &format!("epoch studio: {}",ReplError::EpochScope)),
-        "completed retry acknowledged a different channel: {negative:?}"
+    let message = refusal(
+        negative.expect_err("completed retry acknowledged a different channel"),
+        StudioOverlaySaveRefusal::OtherKindDraft,
     );
+    assert_eq!(message, format!("epoch studio: {}", ReplError::EpochScope));
     assert_eq!(syncs, 0, "wrong-channel retry reached its sync callback");
     assert_eq!(fs::read(&path).unwrap(), original);
     assert!(store

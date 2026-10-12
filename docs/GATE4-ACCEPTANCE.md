@@ -1,6 +1,7 @@
 # Gate 4 acceptance matrix
 
-Current checkpoint: 2026-10-11. Gate 4 is **not accepted** and Gate 5 remains closed.
+Current checkpoint: 2026-10-12. The Gate 4 candidate is **implementation/review complete** and may
+merge after normal exact-head checks pass. Gate 5 remains closed.
 
 This is the current completion ledger. Historical implementation notes remain in the four agent
 status documents and in Git history; they do not override this matrix.
@@ -9,7 +10,8 @@ status documents and in Git history; they do not override this matrix.
 
 | Item | Exact state |
 |---|---|
-| Shared baseline | `gate4-agent1-runtime` at `2ab84645b126fafe27a2180d79d9cb6267a0425a` |
+| Shared baseline | `gate4-agent1-runtime` at `bdcae4a30a0870443db92a14f2d80ff8e4947818` (PR #38) |
+| Isolated completion candidate | PR #41 from `fix/six-client-recovery-gate4`; runtime/UI correction checkpoint `610c45e323bf018c2a3ffa91bbf359faaf707be3`, published evidence head `a6e8b07aa0ecbc1fafae410e8ecebb74c14c97b8`. All 28 hosted checks passed on that code-identical head. The final delta adds only reviewed mutation-harness source preservation and documentation reconciliation; merge waits for its normal exact-head checks. |
 | Suite integration PR | PR #27 targets `Create-suite-2` at `5a899c22e7e26a7853c34f8adac4c11246846204` from exact head `2ab84645...`; it is open and mergeable, but that is not Gate 4 acceptance |
 | Flow S integration | PR #35 is merged as `a62a7f80913866c402de297b6121ef9e074ebf6b`; it preserved Agent 3's reviewed ancestry, Agent 2's rail implementation and the separately identifiable full-envelope parked-request correction |
 | Archived-tenure integration | PR #34 is merged; its archived Observed-tenure consumer and reviewed Registry B0-before-Fault ordering are in the shared baseline |
@@ -24,59 +26,88 @@ instructions.
 
 ## Dependency order
 
-The remaining work is one ordered chain rather than four independent agent queues:
+The specialist chain has been assembled on the isolated candidate. What remains is one acceptance
+sequence rather than four independent agent queues:
 
-1. **Agent 1 runtime foundation:** generalized Closing/Unconfirmed Flow S, non-Closing handoff
-   exclusion and Flow R are implemented. Complete the remaining C-3 runtime adoption and the
-   structured refusal mapping recorded in Agent 1's current status.
-2. **Agent 2 product paths:** preview Save through the actor, reconciliation, restart reconstruction
-   and native result types are implemented but unregistered. Complete the remaining repeated-tenure
-   product paths and whole-boundary lifecycle review.
-3. **Agent 3 completion:** the CORE-005 archived Observed-tenure consumer and detached repair
-   runtime are merged, including the PR #37 corrections. Finish exact-head hosted evidence and
-   carry the bounded verdict into the combined acceptance review without broadening its claim.
-4. **Agent 4 exposure and acceptance:** only after P1-P4 pass, change P5, register the approved
-   native commands, update UI/interface truth, run the combined scenarios and request Review 4.
+1. **Code completion:** generalized Flow S/R, C-3's adoption decision, structured Save refusal
+   mapping, lifecycle/repeated-tenure evidence and detached repair are incorporated. The fresh-key
+   join-born owner path is pinned through the real actor/receiver; the same-key Welcome case is an
+   intentional product refusal because a provider cannot consume a Welcome for a GroupId it owns.
+2. **Bounded exposure:** the candidate promotes P5 only for the reviewed lifecycle and ticketed
+   Unconfirmed Save commands. It keeps direct Closing Save and every unfinished repair command
+   unavailable. Typed parsers, command ACLs and the Studio consumer land together.
+3. **Acceptance evidence:** the relevant handoff/lifecycle/resolution mutants and their restored
+   controls, complete root/native/frontend gates, strict Clippy, dependency policy and an explicit
+   Git Bash ambient check pass locally. All 28 hosted jobs passed on published head `a6e8b07...`.
+   The native startup gate now passes locally with its documented cold-start allowance. The browser
+   flow harness covers chat send and friend acceptance rather than the changed Studio paths; its
+   Windows CDP failure remains disclosed and is neither a pass nor a product failure.
+4. **Review 4:** checkpoint `610c45e3...` closes the complete-diff review's four MEDIUM findings.
+   Re-review confirmed those boundaries, then found a mutation-harness concurrent-edit risk and
+   stale current documentation. The shared pre-write byte guard, focused regression and current-doc
+   reconciliation close both; final short re-review reports no finding at any severity.
 
-Agent 1's first two seams and Agent 3's historical consumer landed independently. Native
-registration remains downstream of specialist acceptance and P5.
+The shared baseline stays unchanged until the final PR head's normal checks pass. Gate 5 remains
+closed.
 
 ## Requirement matrix
 
 | ID | Requirement | Current state | Precise next action | Acceptance evidence still required |
 |---|---|---|---|---|
-| G4-A1-CORE | Detached typed handoff preparation and finite signing | **Implemented; SHA-pinned production review and both test-finding re-reviews are complete.** The 2026-10-06 review returned a bounded PASS for `8190dc4...e65bfd8`. SIGN-TEST-002 and SIGN-TEST-001's editor-cap/aggregate halves closed in the first re-review. The 2026-10-10 short re-review closes **SIGN-TEST-001b**: real Index and Flipnote member-authored handoffs succeed, while the per-device cap charges a non-owner and exempts the owner, pinned by three isolated mutants. Verdict: `GATE4-HANDOFF-SIGNING-REVIEW.md`. | Preserve the accepted production boundary and closed regressions through final exact-head CI and Review 4. | The bounded PASS does not absorb later runtime work. Residual non-blockers remain explicit: no isolated preflight/framing mutant and the product mapping for valid-but-untransferable member work. |
-| G4-A1-S | Durable local Save through Flow S | **Implemented internally for Closing and Unconfirmed; native unavailable.** The actor is a production caller of the generalized store stages. Every authenticated Intents row reports exact sealed-file bytes and live-branch provenance. The shared baseline owns the 3/numeric-server and 8 MiB/vault rails; merged PR #35 adds full-envelope parked-request correlation so one caller cannot claim another request's detached result. Its bounded correction review passed. | Keep the command unregistered while P5 is false and carry the merged behavior through exact-head CI and combined review. | The combined head still needs its final evidence. Residual LOW coverage: direct Closing and cross-provenance equivalents of the common fingerprint regression. |
-| G4-A1-C3 | Resumable bounded inventory | **Partly implemented.** The storage cursor is implemented and reviewed, and replay's manual evidence move is the first production owner to use a shared cross-visit inventory job. H5's measured approximately 0.15 s single visit was accepted as technical debt rather than split. The remaining runtime-adoption steps are not complete. | Complete the remaining measured C-3 adoption in `GATE4-AGENT-1-C3-RUNTIME.md`; steps 4 and 5 still require section 7's measurements. Coordinate the already-merged repair writers. | Cursor invalidation, bounded progress, retained-input ownership and another-server progress on each adopted owner; preserve the documented 60 s replay fallback limits. |
-| G4-A1-R | Resolve interrupted Prepared state | **Implemented and reviewed.** Flow R resolves Prepared records in three scheduler stages with the source restore detached; its barriers and byte-for-byte equivalence are covered. Four background rails skip a Prepared document rather than pausing unrelated receive. | Preserve the reviewed boundary through exact-head CI and combined scenarios. Keep the documented repair-claim collision cost and temporarily occupied overlay slot explicit. | Combined restart/repair/concurrency evidence on the final head; no claim that the residual `Busy` window or wasted stale rebuild is eliminated. |
-| G4-A1-MAP | Structured eligibility/manual reasons | **Agent 2 types exist; Agent 1 runtime still returns string refusals in relevant paths.** Agent 2 closed K12 for Unconfirmed Save by retaining a stamped refusal and moved the full-branch rail to S1b; the Closing `save_overlay` mirror remains open. | Mirror K12 for Closing, then map runtime refusals to `StudioOverlayEligibility` / `StudioOverlayManualReason` without collapsing distinct cases. | Store -> actor -> native conversion coverage for every reason, including stale final delivery. |
-| G4-A2-P1 | Inspect/export/copy/dispose lifecycle | **Implemented and bounded-review PASS; not natively exposed.** Every recorded P1 finding is closed, including exact retry/restart, transfer-hold, provenance, result-kind, same/cross-document copy and wrong-object-channel coverage. This bounded PASS is one P5 input, not full Gate 4 acceptance. | Preserve the reviewed boundary while completing the remaining P2-P4/product work; register only after P5. | Full integrated native/UI and combined-scenario evidence remains downstream of P5. |
-| G4-A2-PREVIEW | Durable work from awaiting-tenure preview | **Implemented internally, not natively registered.** Custody admission, S3 re-entry, actor Save, 8.6 reconciliation, actor/store restart, native result conversion, aggregate rails, non-Closing handoff exclusion and merged PR #35's detached-result correlation are in the shared baseline. The Unconfirmed path now retains a stamped S2 refusal for an identical retry and refuses a full branch at S1b. P5 remains false. | Retain the internal boundary until the remaining P1-P4/product evidence permits P5. | Final exact-head lifecycle evidence, then native/UI evidence only after promotion; no handoff/signing authority is granted by a preview. |
-| G4-A2-TENURE | Real repeated owner/rejoin/newcomer | **Bounded PASS on the narrowed reviewed claim, not on the whole product path.** Actor succession and first receipts cover both same-key tenures; hidden higher history crosses the real discovery wire; the product's fresh-key A', same-key refusal through actor discovery and N-T5 through the receiver scheduler remain missing. | Complete those three honestly named product/actor paths and settle the fresh-key owner's document-continuation decision. | Distinct observed tenures, old key/receipt refusal and convergence through the production actor/scheduler boundaries, not only hand-ticked servers or bare checks. |
-| G4-A2-P5 | Permission to expose native Save | **FALSE.** P1 is a bounded PASS and P2/P4 exist, but P3/native truth is partial and the full product-path evidence above is not complete. | Change only after Agent 2 records implementation/review PASS for the required P1-P4 boundary. | Security allow/deny negatives while false; positive native evidence only after promotion. |
+| G4-A1-CORE | Detached typed handoff preparation and finite signing | **Implemented; SHA-pinned production review and both test-finding re-reviews are complete.** The 2026-10-06 review returned a bounded PASS for `8190dc4...e65bfd8`. SIGN-TEST-002 and SIGN-TEST-001's editor-cap/aggregate halves closed in the first re-review. The 2026-10-10 short re-review closes **SIGN-TEST-001b**: real Index and Flipnote member-authored handoffs succeed, while the per-device cap charges a non-owner and exempts the owner, pinned by three isolated mutants. Verdict: `GATE4-HANDOFF-SIGNING-REVIEW.md`. | Preserve the accepted production boundary and closed regressions through the final head's normal checks and merge. | The bounded PASS does not absorb later runtime work. Residual non-blockers remain explicit: no isolated preflight/framing mutant and the product mapping for valid-but-untransferable member work. |
+| G4-A1-S | Durable local Save through Flow S | **Implemented and review complete.** Closing remains an internal automatic path; Unconfirmed is exposed only through the ticketed Save pair. The actor is a production caller of the generalized store stages. Exact sealed-file bytes, live provenance, aggregate rails, full-envelope correlation, retained commit authority and stamped refusals are preserved. The frontend retains older may-have-committed truth across later typed no-write retries. | Preserve the direct-Closing prohibition through merge. | Local combined suites and published hosted mutation evidence pass; a direct cross-provenance parked-plan regression is a recorded LOW coverage gap. |
+| G4-A1-C3 | Resumable bounded inventory | **Implemented with measured synchronous debt.** The storage cursor is implemented and reviewed, and replay's manual evidence move uses the shared cross-visit inventory job. All-family writer warms, bounded per-key restart credit and the section 7 release profile are complete. A real foreign writer overtaking a cold job now has a regression proving the writer-warmed restart mints on the next turn. H5, catch-up, receive, H1 and repair keep their existing single-visit scans as explicitly documented debt rather than acquiring unsafe second permits or new unreviewed retained stages. | Preserve the shared-job invariants and the synchronous-debt statement through the final head's normal checks and merge. A future latency gate may split the retained owners; Gate 4 does not claim their cold/remount paths fit `INVENTORY_SLICE_MS`. | Cursor invalidation, bounded progress, retained-input ownership, real-writer restart progress and the 60 s replay fallback; cold automatic work retains its fail-closed rails. |
+| G4-A1-R | Resolve interrupted Prepared state | **Implemented and review complete; stale-cache fixture corrected at `610c45e3...`.** Flow R resolves Prepared records in three scheduler stages with the source restore detached; its barriers and byte-for-byte equivalence are covered. Four background rails skip a Prepared document rather than pausing unrelated receive. The Flow R stale-cache regression clears the writer-warmed entry, installs a valid old memo and proves current absence before R1. | Preserve the boundary and keep the documented repair-claim collision cost and temporarily occupied overlay slot explicit. | Combined restart/repair/concurrency evidence passes; no claim that the residual `Busy` window or wasted stale rebuild is eliminated. |
+| G4-A1-MAP | Structured eligibility/manual reasons | **Implemented and review complete.** Store refusals carry `StudioOverlaySaveRefusal`; the actor preserves that type; native maps it exhaustively; TypeScript rejects unknown variants. Closing and Unconfirmed plans retain their own authority and stamped refusal without repeating detached work. The reachable `EpochBound` and `IntentConflict` paths map to typed refusals; invariant failures remain errors. | Preserve exhaustive matches through merge. | Local full suites and published store/runtime mutation evidence pass. |
+| G4-A2-P1 | Inspect/export/copy/dispose lifecycle | **Implemented and review complete; latest navigation/lifecycle findings corrected at `610c45e3...`.** The UI presents local-only provenance, uses two-step copy and requires destructive confirmations. Exact unresolved Copy runs belong to the scoped session rather than the currently rendered panel, survive navigation, fence replacements and late responses, and remain bounded without evicting unresolved work. | Preserve the corrected boundary through merge. | Complete local native/frontend and combined evidence pass. The unrelated chat/friend browser flow harness remains an explicitly disclosed Windows CDP environment gap. |
+| G4-A2-PREVIEW | Durable work from awaiting-tenure preview | **Implemented and exposed on the isolated candidate.** Custody admission, S3 re-entry, reconciliation, restart, rails and detached-result correlation remain intact. The UI freezes the exact ticket/basis/branch/nonce/body, follows typed retry actions and displays the re-read overlay separately from its non-authoritative base. | Preserve the local full-suite evidence through exact-head CI. | No handoff, signing, receipt, source or publication authority may be inferred from the overlay. |
+| G4-A2-TENURE | Real repeated owner/rejoin/newcomer | **Implemented and review complete at the supported product boundary.** Actor succession/receipts cover distinct same-key tenures; hidden higher history crosses discovery; a fresh-key join-born owner starts a fresh product history while a continuously present receiver retains the former history in recovery. A same-GroupId provider is refused rather than pretending it can consume its own Welcome. The final cross-tenure regression pins that a repaired loser may remain structurally eligible while its old receipt cannot authorize A's later tenure. | Preserve that explicit product decision through merge. | The final local suite passes; there is no claim of impossible same-key self-Welcome continuity. |
+| G4-A2-P5 | Permission to expose native Save | **TRUE on the isolated candidate for the ticketed Unconfirmed Save and reviewed lifecycle family.** P1-P4 code/evidence are assembled and P3 includes command policy, exhaustive native/frontend conversion and a truthful UI. Complete local native/frontend/security evidence passes. This is not permission for direct Closing Save or repair commands. | Preserve this exact bounded exposure through merge. | Review complete; published code head's required check set passes. |
 | G4-A3-CURRENT | Signed current-tenure Studio/Registry repair | **Core/store and automatic execution are integrated through the detached job.** The fail-closed PR #33 corrections, prepared-state classifier and fresh-small-source scheduling remain preserved; PR #36 re-enabled execution only with shared-pool/job ownership, and PR #37 corrected S3 install-before-budget plus Registry resume. | Preserve the merged ordering, durability retries and fail-closed authority checks through exact-head CI and combined review. | Final-head interrupted-B2/B3, full-pool, cancellation/result-holding, unrelated-actor and real-peer replacement evidence without broadening the bounded verdict. |
-| G4-A3-HIST | Historical report admission with archived Observed witness | **Implemented, independently accepted and merged through PR #34.** The durable head-service context carries CORE-005's private, non-cloneable witness to shared Studio/Registry admission. Exact retained attestations survive archive lookup loss; new historical evidence must match the full archived tuple and is never treated as live overflow/source authority. Studio and both Registry head adapters authenticate/account their exact source before B0, propagate failed or uncertain B0, and only then retain Fault as a service refusal. Real A -> B -> C and restart regressions cover both document families, absent/wrong authority before capacity is occupied, explicit/prepared adapters, no prepared reconstruction, exact retained retry and unchanged Fault state. | Preserve the merged behavior through exact-head CI and the final combined review. | Historical pair accepted only for the archived Observed tenure; Imported/Unknown/wrong/older tenure and malformed evidence refuse without writes. |
-| G4-A3-BOUND | Detached bounded repair runtime | **Implemented, merged and bounded-review clean through PR #37; not a full Gate 4 verdict.** S1-S4 use shared-pool and per-target ownership, detached rebuild, exact S3 revalidation and token-routed completion. Real-peer Flow D, restart/newcomer coverage, per-target fairness and 36 runtime mutants are present. PR #37's external review and short re-review closed its one MEDIUM and one LOW; no blocker/high/medium remains in that bounded delta. PR #39 changes only CI execution, sharding the same mutation set after the monolithic Windows job timed out. | Finish the exact `2ab84645...` hosted run on PR #27 and carry the precise bounded verdict into Review 4. | Full combined actor/native delivery remains downstream. Recorded residuals include unpaced peer repaired-seed refetch, no runtime crash injection between B1/B2 or B2/B3, and no large cold bucket through the whole job. |
-| G4-I-NATIVE | Shared registrations and truthful interfaces | **Correctly fail-closed.** Save and unfinished repair commands are unregistered. | Register only reviewed commands after P5; update command ACL, invoke handler, interfaces and UI hooks together. | Command-security allow/deny tests, session/final-delivery tests and production conversion for each command. |
-| G4-I-E2E | Combined Gate 4 scenarios | **Not yet complete because C-3/MAP, P5/product-tenure and native exposure prerequisites remain open.** | After specialist completion and P5, run the seven scenarios in the handoff document. | Rotate/save/restart/handoff/catch-up; stale/unconfirmed lifecycle; succession; repair; concurrency; references/quotas; earlier regressions. |
-| G4-I-REVIEW | Full Review 4 | **Not ready.** | Pin the final integrated SHA after all implementation and suites, then send the filled Review 4 preamble. | Independent full-gate PASS. |
+| G4-A3-HIST | Historical report admission with archived Observed witness | **Implemented, independently accepted and merged through PR #34.** The durable head-service context carries CORE-005's private, non-cloneable witness to shared Studio/Registry admission. Exact retained attestations survive archive lookup loss; new historical evidence must match the full archived tuple and is never treated as live overflow/source authority. Studio and both Registry head adapters authenticate/account their exact source before B0, propagate failed or uncertain B0, and only then retain Fault as a service refusal. Real A -> B -> C and restart regressions cover both document families, absent/wrong authority before capacity is occupied, explicit/prepared adapters, no prepared reconstruction, exact retained retry and unchanged Fault state. | Preserve the merged behavior through the final head's normal checks and merge. | Historical pair accepted only for the archived Observed tenure; Imported/Unknown/wrong/older tenure and malformed evidence refuse without writes. |
+| G4-A3-BOUND | Detached bounded repair runtime | **Implemented, merged and bounded-review clean through PR #37; preserved by the final review.** S1-S4 use shared-pool and per-target ownership, detached rebuild, exact S3 revalidation and token-routed completion. Real-peer Flow D, restart/newcomer coverage, per-target fairness and 36 runtime mutants are present. PR #39 shards the unchanged set. | Preserve the runtime and mutation workflow through merge. | All published runtime mutation shards pass. Recorded residuals include unpaced peer repaired-seed refetch, no runtime crash injection between B1/B2 or B2/B3, and no large cold bucket through the whole job. |
+| G4-I-NATIVE | Shared registrations and truthful interfaces | **Implemented and verified on the isolated candidate.** Eleven lifecycle/Save additions are registered and permissioned; read/write classification and module-scoped session gates are tested. Direct Closing Save and repair stay absent. | Preserve the registration/ACL boundary through merge. | The native suite (336 library plus 5 ACL tests), 1,303 frontend tests, check/build and the local startup gate pass. |
+| G4-I-E2E | Combined Gate 4 scenarios | **Implemented and verified.** Focused store/actor/native/frontend scenarios are present, including fresh-key tenure, local-only Save and lifecycle/copy; complete root, native and frontend suites pass. | Require normal exact-head checks for the final harness/docs commit. | All 28 hosted jobs passed on the code-identical published head without weakened assertions. |
+| G4-I-REVIEW | Full Review 4 | **PASS.** The complete-diff review's four MEDIUMs were corrected at `610c45e3...`; the final review's harness-safety and documentation MEDIUMs are also corrected. Short re-review reports no finding at any severity. | Preserve the reviewed tree through merge. | Earlier bounded reviews remain inputs, not substitutes; the final reviewer inspected the actual combined diff and neighboring paths. |
 
 ## Current exact-head checkpoint
 
-- PR #27 is open from `gate4-agent1-runtime` at
-  `2ab84645b126fafe27a2180d79d9cb6267a0425a` into `Create-suite-2` at
-  `5a899c22e7e26a7853c34f8adac4c11246846204`. It is mergeable, but mergeability is not an
-  acceptance result.
-- The exact-head hosted run started on 2026-10-11. At this checkpoint the long root, native,
-  frontend/Tauri, repair and mutation jobs are still running; only completed checks may be
-  recorded as evidence. The prior shard-2 lifecycle failure was an assertion-order mismatch in
-  the mutation harness, corrected in `4a1a1d4c`; its exact-head rerun remains the authority.
+- The candidate's runtime/UI correction checkpoint is
+  `610c45e323bf018c2a3ffa91bbf359faaf707be3`; publication head
+  `a6e8b07aa0ecbc1fafae410e8ecebb74c14c97b8` passed all 28 hosted jobs. The final delta adds the
+  reviewed concurrent-edit guard for the three mutation harnesses, its two focused tests, workflow
+  wiring and current-document reconciliation; it changes no Rust or TypeScript product behavior.
+- The two PR #40 review MEDIUMs are already closed by
+  `55ff3d93744cd1f965ab083e910d9645f1f6ac26`: a held Studio page reacquires the permit released by
+  evicting its retained Registry provider before service may compete, and the
+  `handoff-priority-owed` mutant targets a dedicated running-preparation regression.
+- A child checkpoint of PR #40 fixes the previously baseline-observed Windows six-client reunion
+  failure. The saved routes were present, but listener-port reuse made rapid reconnect sockets fail
+  with `WSAEADDRINUSE`; Windows dials now allocate a fresh outbound port while Unix retains the
+  NAT-useful default. Both focused native six-client scenarios and the complete `catcoms-net`
+  suite pass. Historical failed-suite entries below remain evidence about their exact older SHAs,
+  not evidence against this correction. The final combined native suite now passes locally.
+- The final working tree passes `cargo test --all --all-features`; the desktop/Tauri suite
+  (336 library plus 5 command-ACL tests); both strict root and desktop Clippy commands; desktop
+  `cargo check`; root formatting; all 1,303 frontend tests; Svelte check; production build;
+  `cargo deny`; and `scripts/check-no-ambient.sh` under the installed Scoop/Git Bash. The relevant
+  `retry-floor`, stale-eviction, kept-refusal and Closing-ticket mutants are detected and their
+  restored controls pass. Complete mutation workflows remain CI-owned.
+- The startup helper preserves unset diagnostics, appends only to a nonempty inherited filter and
+  has six cross-platform tests. A fresh local run reaches `STARTUP.SETUP.COMPLETE` within the
+  documented 60-second cold-start allowance. The two browser-flow attempts failed at Windows CDP
+  `Runtime.enable`; that harness tests chat send/friend acceptance rather than the changed Studio
+  paths, so it is recorded as a non-applicable environment gap, not as a pass or product failure.
+- PR #41 targets exact baseline `bdcae4a30a0870443db92a14f2d80ff8e4947818` and preserves PR #28's
+  Agent 3 ancestry. It may merge once the normal checks on its final harness/docs head are green.
 - A repository ruleset object contains PR and signed-commit rules, but its branch condition matches
   no ref. The branch-rules endpoint returns no active rules for `Create-suite-2`, and classic
   branch protection is absent. Therefore PRs, signatures and status checks are **not automatic
   merge fences**. The renamed `lifecycle-mutations (1..3)` checks need no ruleset-name migration,
   but Gate 4 must require the complete named check set manually unless protection is configured.
-- This document-only refresh does not promote P5, register a command, or imply Review 4.
+- This candidate promotes P5 only for the bounded lifecycle/ticketed-Unconfirmed family described
+  above. It does not expose direct Closing Save or repair commands, imply Gate 5 acceptance, or make
+  a hosted check pass before that exact candidate SHA actually runs it.
 
 ## Historical verified candidate evidence
 
@@ -184,6 +215,10 @@ pushed correction head.
   unchanged Fault refusal, and the negative runs against an empty owner record. Final re-review of
   the implementation plus the uncertain-write and no-reconstruction additions found no remaining
   BLOCKER, HIGH, MEDIUM or LOW finding.
-- These bounded reviews accept the candidate work they inspected; they do not supply the missing
-  Agent 1/2 completion verdicts, final combined evidence or Review 4.
-- P5 remains false, Gate 4 remains open, and Gate 5 remains closed.
+- These bounded reviews accept the work they inspected; they do not substitute for the final
+  combined evidence or Review 4.
+- P5 is promoted only on the isolated completion candidate and only for the listed lifecycle and
+  Unconfirmed Save commands. Gate 4 closes when the reviewed candidate merges after normal
+  exact-head checks; Gate 5 remains closed.
+- Review 4 and the final short re-review report no remaining finding. The shared baseline must not
+  receive the candidate until the final PR head's normal checks are green.

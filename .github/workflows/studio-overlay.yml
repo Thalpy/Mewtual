@@ -6,6 +6,8 @@ on:
       - '.github/workflows/studio-overlay.yml'
       - '.github/scripts/check-studio-overlay-mutations.py'
       - '.github/scripts/check-studio-overlay-lifecycle-mutations.py'
+      - '.github/scripts/mutation_harness_guard.py'
+      - '.github/scripts/test_mutation_harness_guard.py'
       - 'crates/catcoms-app/**'
       - 'crates/catcoms-mls/**'
       - 'crates/catcoms-sync/**'
@@ -104,6 +106,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2
+      - name: Test mutation source-preservation guard
+        run: python3 .github/scripts/test_mutation_harness_guard.py
       # N comes from the matrix itself, so growing the matrix cannot leave entries unassigned.
       - name: Verify isolated lifecycle mutations and restored regressions (shard ${{ matrix.shard }} of ${{ strategy.job-total }})
         run: python3 .github/scripts/check-studio-overlay-lifecycle-mutations.py --shard ${{ matrix.shard }}/${{ strategy.job-total }}

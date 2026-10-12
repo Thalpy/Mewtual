@@ -8,7 +8,7 @@
 // (ii)). These tests are the other place that legitimately calls them.
 #![allow(clippy::disallowed_methods)]
 use super::archive::branch;
-use super::handoff::{branch as transferable_branch, signing};
+use super::handoff::{branch as transferable_branch, repair_bound_branch, signing};
 use super::*;
 use crate::studio::{
     StudioDiscardConfirmation, StudioDisposalDecision, StudioDraftArchive, StudioOverlayAdmission,
@@ -641,6 +641,49 @@ fn reconciliation_reads_the_installed_source_header_against_the_branch_base() {
         f.source = f.source.checkpoint_successor(&plan, &f.group, 0).unwrap();
         assert_eq!(f.source.epoch(), 2);
         assert_eq!(state(&mut f, &unconfirmed).unwrap(), U::BaseSuperseded);
+    }
+}
+
+/// The cheap reconciliation reader accepts the same repair-bound vault prefix as full restore.
+///
+/// An Unconfirmed branch can outlive the repair that resolved its preview receipt. If the selected
+/// receipt is the installed opening, the retained repair evidence does not change the base: form 3
+/// must still report `BaseConfirmed`, never `SourceUnreadable` or `BaseSuperseded` merely because
+/// the header carries a repair binding.
+#[test]
+fn reconciliation_confirms_a_repair_bound_installed_base() {
+    use crate::studio::StudioOverlayUnconfirmedState as U;
+    for art in [false, true] {
+        let mut f = Fixture::new(art);
+        let (closing, _, _) = repair_bound_branch(&mut f, 1);
+        let overlay = closing.overlay().unwrap();
+        let receipt = overlay.receipt().clone();
+        let seed =
+            UnconfirmedStudioSeed::parse_live_transfer(overlay.target(), &receipt, overlay.seed())
+                .unwrap();
+        let owner = f.owner.device_id();
+        let basis = StudioUnconfirmedOverlayBasis::mint_from_live_preview(
+            &seed,
+            &receipt,
+            owner,
+            owner,
+            1,
+            1_700_000_000_000,
+        )
+        .unwrap();
+        let (ledger, id) = one_intent(&mut f, "repair-bound preview work");
+        let mut unconfirmed = StudioOverlayState::new(&basis);
+        unconfirmed.append(&basis, &ledger, id, 1).unwrap();
+        let snapshot = f.source.snapshot().unwrap();
+        assert_eq!(snapshot[0], 3, "precondition: repair-bound vault form");
+        assert_eq!(
+            StudioEpoch::unconfirmed_base_state_in_vault(
+                &snapshot,
+                unconfirmed.overlay().unwrap(),
+            )
+            .unwrap(),
+            U::BaseConfirmed
+        );
     }
 }
 

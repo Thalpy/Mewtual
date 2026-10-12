@@ -28,6 +28,8 @@ import os
 import subprocess
 import sys
 
+from mutation_harness_guard import write_if_unchanged
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -609,8 +611,8 @@ MUTATIONS = [
         "studio_exchange::tests::provisional::seed::tail::unconfirmed_actor::",
         "crates/catcoms-app/src/studio/receiver/catchup.rs",
         "                            self.catchup\n"
-        "                                .park_overlay_refusal(request, stamp, message, now);\n",
-        "                            let _ = (request, stamp, message, now, CatchupRuntime::park_overlay_refusal);\n",
+        "                                .park_overlay_refusal(request, stamp, reason, message, now);\n",
+        "                            let _ = (request, stamp, reason, message, now, CatchupRuntime::park_overlay_refusal);\n",
         "studio_actor_unconfirmed_save_a_refused_plan_is_answered_without_another_capture",
         "retry 1 of a refused plan: answered",
     ),
@@ -715,10 +717,10 @@ MUTATIONS = [
     (
         "unconfirmed-ticket-refuses-closing-draft", "catcoms-app", "studio::copy::tests::",
         "crates/catcoms-app/src/studio/receiver/unconfirmed.rs",
-        "                // the reason here, before a ticket exists, is the truthful place for it.\n                refuse_closing_draft(server, store, id, target)?;\n",
-        "                // the reason here, before a ticket exists, is the truthful place for it.\n                let _ = refuse_closing_draft(server, store, id, target);\n",
+        "                // the reason here, before a ticket exists, is the truthful place for it.\n                if let Err(error) = refuse_closing_draft(server, store, id, target) {\n                    return unconfirmed_refusal(target, error);\n                }\n",
+        "                // the reason here, before a ticket exists, is the truthful place for it.\n                if let Err(error) = refuse_closing_draft(server, store, id, target) {\n                    let _ = error;\n                }\n",
         "a_closing_drafts_operation_resent_as_an_unconfirmed_save_is_refused",
-        "the ticket names the Closing draft before it mints",
+        "the ticket refusal lost its stable native classification",
     ),
     # Review of `b35e23d2`, LOW-1: a retry of this request's own in-flight plan is `Scheduled`.
     (
@@ -852,17 +854,25 @@ def main():
     ]
     if not mutations:
         raise ValueError("this selection runs no mutation entry")
+    # Validate every selected anchor before compiling the first mutant. A stale late-shard entry
+    # should fail in seconds, not after the earlier entries have consumed most of the CI hour.
+    originals = {}
+    for name, _, _, path, before, _, _, _ in mutations:
+        original = (ROOT / path).read_bytes()
+        if original.count(before.encode()) != 1:
+            raise AssertionError(f"mutation anchor is not unique: {name}")
+        originals[name] = original
     log_dir = ROOT / "logs"
     log_dir.mkdir(exist_ok=True)
     for name, package, prefix, path, before, after, test, assertion in mutations:
         source = ROOT / path
-        original = source.read_bytes()
+        original = originals[name]
         before, after = before.encode(), after.encode()
-        if original.count(before) != 1:
-            raise AssertionError(f"mutation anchor is not unique: {name}")
         changed = original.replace(before, after, 1)
         try:
-            source.write_bytes(changed)
+            # Preflight happened before any selected mutant compiled. Refuse to install this later
+            # mutant if a developer changed its source while an earlier entry was running.
+            write_if_unchanged(source, original, changed)
             result = run(package, prefix, test)
             (log_dir / f"gate4-overlay-lifecycle-mutation-{name}.log").write_text(
                 result.stdout, encoding="utf-8"

@@ -308,6 +308,9 @@ fn measure(case: &str, build: impl FnOnce(&mut Source), clock: &dyn Clock, max_p
             .unwrap()
     });
     let before = fs::read(&path).unwrap();
+    // Profile a remount-cold first pass followed by warm passes. The production writer has just
+    // populated the process-local memo, so clear that optimization at the measurement boundary.
+    store.inventory_cache.clear_for_test();
     let (cold, inventory_cold_ms) = timed(clock, || {
         let mut scan = store.scan_epoch_storage_with_studio().unwrap();
         let progress = loop {

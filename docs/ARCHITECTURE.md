@@ -21,6 +21,15 @@ code was written), the honest residual risks, and the phased build plan.
 
 ## 2. Corrections from the adversarial review (must hold in the implementation)
 
+The Gate 4 completion candidate exposes retained Studio work without promoting it into shared
+history. Awaiting-tenure views remain non-authoritative bases: their edits use a ticketed
+Unconfirmed overlay, are shown as local-only and follow typed exact-retry instructions. The
+lifecycle surface can inspect/export/archive/copy/dispose retained work; copy is preview then one
+ordinary provisional Save, and destructive actions require literal confirmations. The registration,
+command policy, native conversion, frontend parser and consumer move together. Direct Closing Save
+and repair commands stay unavailable. This preserves the existing ownership model rather than
+creating a second source, receipt or repair authority in the renderer.
+
 Creative immutable blobs are independent of the P1 document lifecycle. The C0c native seam uses
 the existing blob staging/store and authenticated fetch protocol, with PIX1 validation and bounded
 reads/response decoding added at the relevant boundaries. Publication returns a real CID only after
@@ -120,9 +129,10 @@ atomic across files; a different nonce cannot rename an existing object through 
 Native projections retain conflict/deletion evidence and three-state expiry. Local update events
 invalidate views, while responses explicitly label local publication and provisional edits.
 Create keeps the new object in epoch zero but obtains the Index's actual Open epoch under the
-same transaction, including after rotation. Automatic Index/art sync and watched-owner rotation
-are connected; the remaining recovery/succession integration is tracked in the backend roadmap.
-Dense-source latency remains unqualified. UI is unchanged.
+same transaction, including after rotation. Automatic Index/art sync, watched-owner rotation,
+repeated-tenure recovery and detached Studio/Registry repair are connected. Dense-source latency
+remains unqualified. The Studio UI consumes the reviewed local lifecycle and ticketed Unconfirmed
+Save boundary; it does not expose direct Closing Save or native repair controls.
 Persistent blob handles now share one mount-local deletion guard outside the kept-copy adapter.
 The derived reference union is keyed by full group bytes (including numeric-server aliases).
 Studio source/intent/recovery writes add holds before I/O; only a complete, generation-current,

@@ -186,13 +186,24 @@ fn a_prepared_branch_over_a_faulted_source_is_manual_exactly_while_the_handoff_r
     // that is H1's header probe, in the row's own terms, before anything is captured; it used to
     // be H2's `check_overlay_successor` ("epoch does not accept operations"), after a detached
     // reconstruction. A recorded contract change: the reason is the same, the stage is earlier.
-    let refused = handoff(&f, &mut store, basis, Some(0)).unwrap_err();
-    assert!(
-        refused
-            .to_string()
-            .contains("overlay handoff successor is not transferable: Fault"),
-        "the handoff refuses the state the row calls faulted: {refused}"
-    );
+    let mut budget = budget(&mut store, &f);
+    let refused = store
+        .start_studio_handoff_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            basis,
+            Some(0),
+            &mut rng(),
+            &mut budget,
+            &mut WriteHooks::None,
+        )
+        .expect("H1 returned an unclassified error");
+    assert!(matches!(
+        refused,
+        crate::store::StudioHandoffStart::Refused(R::Fault)
+    ));
 }
 
 /// Prepared against the successor, but the source record is now the Closing one the branch was

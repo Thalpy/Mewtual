@@ -197,6 +197,25 @@ impl StudioEpoch {
     pub fn phase(&self) -> EpochPhase {
         self.gate.phase()
     }
+
+    /// The durable source-state reason a Closing overlay mint would refuse before checking its
+    /// particular receipt. This is descriptive only: the Save still calls
+    /// [`Self::prepare_closing_overlay`] under custody and that method remains the authority.
+    pub fn closing_overlay_save_refusal(&self) -> Option<StudioOverlaySaveRefusal> {
+        if self.phase() == EpochPhase::Fault || self.receipts.is_faulted() {
+            Some(StudioOverlaySaveRefusal::Durable(
+                StudioOverlayManualReason::Fault,
+            ))
+        } else if self.adopting {
+            Some(StudioOverlaySaveRefusal::SourceAdopting)
+        } else if self.phase() != EpochPhase::Closing {
+            Some(StudioOverlaySaveRefusal::Durable(
+                StudioOverlayManualReason::SourceNotClosing,
+            ))
+        } else {
+            None
+        }
+    }
     /// Cheap local scheduling hint; owner decision validation remains the authority boundary.
     pub fn close_candidate_ready(&self) -> bool {
         self.gate.close_candidate_ready()

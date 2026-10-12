@@ -1,6 +1,11 @@
 # Design: the creative suite (draw, doodle, flipnote, emoji sound, play, knock)
 
-**Current Gate 4 position (2026-09-15).** HANDOFF-002 is closed and the corrected bounded
+**Current Gate 4 update (2026-10-12).** PR #41 assembles the rotation/recovery candidate through
+the real actor, native and Studio UI paths. It exposes only the reviewed lifecycle family and
+ticketed Unconfirmed Save; direct Closing Save and native repair controls remain unavailable.
+Gate 5 remains closed. Acceptance evidence is maintained in `GATE4-ACCEPTANCE.md`.
+
+**Historical Gate 4 position (2026-09-15).** HANDOFF-002 is closed and the corrected bounded
 Closing-overlay core/store handoff is accepted at `62f06d4` (review/evidence head `aa0a81f`).
 This is implementation acceptance for that boundary, not full Gate 4 acceptance. The user
 clarified that Gate 4 must finish before Gate 5 starts; Gate 5 remains untouched.

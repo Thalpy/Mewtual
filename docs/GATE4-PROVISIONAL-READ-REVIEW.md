@@ -1,6 +1,6 @@
 # Gate 4: post-succession newcomer review
 
-**Current Gate 4 position (2026-09-15).** HANDOFF-002 is closed and the corrected bounded
+**Historical Gate 4 position (2026-09-15).** HANDOFF-002 is closed and the corrected bounded
 Closing-overlay core/store handoff is accepted at `62f06d4` (review/evidence head `aa0a81f`).
 This is implementation acceptance for that boundary, not full Gate 4 acceptance. The user
 clarified that Gate 4 must finish before Gate 5 starts; Gate 5 remains untouched.

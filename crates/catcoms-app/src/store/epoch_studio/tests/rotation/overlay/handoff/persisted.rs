@@ -169,13 +169,15 @@ fn studio_overlay_handoff_h1_refuses_a_non_pristine_index_successor_before_resto
             &mut b,
             &mut WriteHooks::None,
         )
-        .map(|_| ())
-        .expect_err("H1 accepted a non-pristine Index successor");
+        .expect("H1 returned an unclassified error");
     assert!(
-        refused
-            .to_string()
-            .contains("successor is not transferable: SuccessorNotPristine"),
-        "refused for another reason: {refused}"
+        matches!(
+            refused,
+            crate::store::StudioHandoffStart::Refused(
+                StudioOverlayManualReason::SuccessorNotPristine
+            )
+        ),
+        "H1 accepted the non-pristine Index successor or refused for another reason"
     );
     assert_eq!(
         studio_full_restores_for_test() - before,

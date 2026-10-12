@@ -44,7 +44,8 @@ pub use disposal::{
     StudioDiscardConfirmation, StudioDisposalDecision, StudioDisposalMode, StudioOverlayDisposal,
 };
 pub use eligibility::{
-    StudioOverlayEligibility, StudioOverlayManualReason, StudioOverlayUnconfirmedState,
+    StudioOverlayEligibility, StudioOverlayManualReason, StudioOverlaySaveAction,
+    StudioOverlaySaveRefusal, StudioOverlayUnconfirmedState,
 };
 pub use handoff::{
     StudioHandoffAuthority, StudioHandoffCandidate, StudioHandoffEvidence, StudioHandoffOutcome,

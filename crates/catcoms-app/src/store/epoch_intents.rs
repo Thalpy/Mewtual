@@ -12,7 +12,8 @@ use catcoms_replication::{
 };
 
 use super::epoch_budget::{
-    EpochStorageBudget, Footprint, Replacement, StorageRecord, StorageScope, WritePurpose,
+    BudgetError, EpochStorageBudget, Footprint, Replacement, StorageRecord, StorageScope,
+    WritePurpose,
 };
 use super::epoch_recovery::inventory::{is_link, regular_file};
 use super::epoch_recovery::AuthenticatedEpochFileBytes;
@@ -418,8 +419,8 @@ impl EpochIntentBudget {
     /// archive sub-cap this is admission policy, so nothing here makes an existing budget unusable
     /// and an exact retry, which is answered before any rail, never reaches it.
     ///
-    /// Refused as `Invalid` with a reason of its own, as the archive sub-cap and the class ceiling
-    /// are. A typed `StorageRefused` outcome is not built (design 8.3).
+    /// The two rails remain distinct in the typed Save result; a renderer must not collapse a
+    /// per-server branch-count decision into the vault-wide byte-share decision.
     pub(in crate::store) fn admit_unconfirmed(
         &self,
         server: u64,
@@ -434,7 +435,8 @@ impl EpochIntentBudget {
             )
         });
         if !self.unconfirmed.contains_key(&id) && branches >= MAX_UNCONFIRMED_BRANCHES_PER_SERVER {
-            return Err(invalid(
+            return Err(studio_refused(
+                catcoms_replication::studio::StudioOverlaySaveRefusal::UnconfirmedBranchesPerServer,
                 "unconfirmed draft limit reached: this server already holds as many drafts made \
                  on a preview as it may",
             ));
@@ -443,7 +445,8 @@ impl EpochIntentBudget {
             .checked_add(next)
             .is_none_or(|total| total > MAX_VAULT_UNCONFIRMED_BYTES)
         {
-            return Err(invalid(
+            return Err(studio_refused(
+                catcoms_replication::studio::StudioOverlaySaveRefusal::UnconfirmedBytesVaultWide,
                 "unconfirmed draft storage limit reached: drafts made on a preview already use \
                  their share of this vault",
             ));
@@ -559,6 +562,56 @@ impl EpochIntentBudget {
         {
             return Err(invalid("vault intent limit reached"));
         }
+        self.bytes
+            .checked_sub(old.unwrap_or(0))
+            .and_then(|v| v.checked_add(next))
+            .ok_or_else(|| invalid("vault intent accounting mismatch"))
+    }
+
+    /// Flow S's form of [`Self::preflight`]. A stale inventory is a retryable observation race;
+    /// the hard byte/record rails are policy refusals. The checks stay here, beside the state they
+    /// inspect, so the writer never guesses a category from `AppError::Display` text.
+    fn preflight_studio_save(
+        &mut self,
+        generation: &Arc<()>,
+        id: [u8; 32],
+        old: Option<u64>,
+        next: u64,
+        sync_only: bool,
+    ) -> Result<u64, AppError> {
+        if !self.ready
+            || !Arc::ptr_eq(generation, &self.generation)
+            || self.records.get(&id).copied() != old
+        {
+            self.ready = false;
+            return Err(intent_save_refused(
+                catcoms_replication::studio::StudioOverlaySaveRefusal::Retry,
+                "vault intent inventory must be reconciled",
+            ));
+        }
+        // These two are expected policy rails and therefore safe to expose as a typed refusal.
+        if old.is_none()
+            && !sync_only
+            && self.record_slots >= super::epoch_budget::MAX_ACCOUNTED_RECORDS
+        {
+            return Err(intent_save_refused(
+                catcoms_replication::studio::StudioOverlaySaveRefusal::StorageRefused,
+                "vault intent inventory has too many records",
+            ));
+        }
+        if self
+            .bytes
+            .checked_add(if sync_only { 0 } else { next })
+            .is_none_or(|peak| peak > MAX_VAULT_INTENT_BYTES)
+        {
+            return Err(intent_save_refused(
+                catcoms_replication::studio::StudioOverlaySaveRefusal::StorageRefused,
+                "vault intent limit reached",
+            ));
+        }
+        // A total that cannot account for the record it claims to contain is an internal
+        // invariant failure, not storage policy. Do not make the renderer tell a user that the
+        // vault simply refused capacity when the inventory itself is inconsistent.
         self.bytes
             .checked_sub(old.unwrap_or(0))
             .and_then(|v| v.checked_add(next))
@@ -800,6 +853,47 @@ impl ServerStore {
         step: WriteStep,
         hooks: &mut WriteHooks<'_>,
     ) -> Result<EpochIntentState, AppError> {
+        self.write_prepared_intents_inner(
+            server, document, state, old, unchanged, rng, budget, intents, step, hooks, false,
+        )
+    }
+
+    /// Flow S's writer. It is byte-for-byte the shared intent transaction, with only its
+    /// pre-write capacity decisions mapped to the typed Save refusal channel. Encoding, sealing,
+    /// I/O, hook and post-commit failures remain errors, including uncertain durable outcomes.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store) fn write_prepared_studio_overlay_intents(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        state: EpochIntentState,
+        old: Option<u64>,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        intents: &mut EpochIntentBudget,
+        step: WriteStep,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<EpochIntentState, AppError> {
+        self.write_prepared_intents_inner(
+            server, document, state, old, false, rng, budget, intents, step, hooks, true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_prepared_intents_inner(
+        &mut self,
+        server: u64,
+        document: &LogicalDocument,
+        state: EpochIntentState,
+        old: Option<u64>,
+        unchanged: bool,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        intents: &mut EpochIntentBudget,
+        step: WriteStep,
+        hooks: &mut WriteHooks<'_>,
+        studio_save: bool,
+    ) -> Result<EpochIntentState, AppError> {
         let scope = scope_bytes(server, document)?;
         let storage_scope = StorageScope::new(server, &document.server_id).map_err(invalid)?;
         let id = *blake3::hash(&scope).as_bytes();
@@ -808,16 +902,20 @@ impl ServerStore {
             .transpose()?;
         budget
             .verify_record(&storage_scope, id, observed)
-            .map_err(invalid)?;
+            .map_err(|error| storage_admission_error(studio_save, error))?;
         if unchanged {
             // `prepare` compares all author/body bytes for an existing id. The loaded file is
             // therefore already the exact required ledger, possibly including newer intents.
             let record = observed.ok_or_else(|| invalid("missing retry record"))?;
             let bytes = old.expect("an observed record has a physical size");
-            intents.preflight(&self.intent_generation, id, old, bytes, true)?;
+            if studio_save {
+                intents.preflight_studio_save(&self.intent_generation, id, old, bytes, true)?;
+            } else {
+                intents.preflight(&self.intent_generation, id, old, bytes, true)?;
+            }
             let reservation = budget
                 .reserve_sync(&storage_scope, record)
-                .map_err(invalid)?;
+                .map_err(|error| storage_admission_error(studio_save, error))?;
             intents.ready = false;
             self.intent_generation = Arc::new(());
             // I-4: a sync repair changes no bytes and still invalidates a captured inventory.
@@ -837,7 +935,11 @@ impl ServerStore {
         // A step that was only ever allowed to flush must not reach a replacement. Refused
         // before the preflight, so it charges nothing and disturbs no held record.
         step.permit_replacement()?;
-        let final_bytes = intents.preflight(&self.intent_generation, id, old, next, false)?;
+        let final_bytes = if studio_save {
+            intents.preflight_studio_save(&self.intent_generation, id, old, next, false)?
+        } else {
+            intents.preflight(&self.intent_generation, id, old, next, false)?
+        };
         let record = storage_record(server, document, &scope, next)?;
         let reservation = budget
             .reserve(
@@ -848,7 +950,7 @@ impl ServerStore {
                     purpose: WritePurpose::Ordinary,
                 },
             )
-            .map_err(invalid)?;
+            .map_err(|error| storage_admission_error(studio_save, error))?;
         let sealed = match self.keys.db_key().and_then(|key| seal(&key, &plain, rng)) {
             Ok(sealed) => sealed,
             Err(error) => {
@@ -865,7 +967,15 @@ impl ServerStore {
         let framed = frame(&sealed);
         let mutation = self.epoch_mutation_guard();
         let framed = hooks.before(step.tag(), &path, &framed)?;
-        mutation.write(&path, &framed)?;
+        let original_plain =
+            matches!(&framed, std::borrow::Cow::Borrowed(_)).then_some(plain.as_slice());
+        let write = mutation.write(&path, &framed);
+        self.finish_validated_inventory_write(
+            write,
+            super::epoch_recovery::inventory::EpochRecordKind::Intents,
+            original_plain,
+            next,
+        )?;
         hooks.after_write(step.tag(), &path)?;
         reservation.commit();
         if old.is_none() {
@@ -1024,6 +1134,37 @@ pub(super) fn storage_record(
 
 fn invalid(error: impl std::fmt::Display) -> AppError {
     AppError::Invalid(format!("epoch intent: {error}"))
+}
+
+/// Map a storage-budget decision by its call site, never by matching its Display text. Only Flow
+/// S opts into a clean refusal; every other intent writer retains its historical error variant.
+fn storage_admission_error(studio_save: bool, error: BudgetError) -> AppError {
+    use catcoms_replication::studio::StudioOverlaySaveRefusal as R;
+    if !studio_save {
+        return invalid(error);
+    }
+    match error {
+        // These say the caller's completed inventory no longer describes the record. Re-entering
+        // through a fresh ticket/visit can reconcile it; they are not storage-policy denials.
+        BudgetError::Reconcile | BudgetError::Inventory => intent_save_refused(R::Retry, error),
+        // A malformed/wrong local scope is an invariant error. Turning it into `refused` would
+        // hide a caller/store mismatch as an ordinary user-facing capacity decision.
+        BudgetError::Scope => invalid(error),
+        BudgetError::Limit | BudgetError::RecordLimit | BudgetError::SettlementBusy => {
+            intent_save_refused(R::StorageRefused, error)
+        }
+    }
+}
+
+/// Preserve the intent writer's historical diagnostic prefix while carrying a typed Save reason.
+fn intent_save_refused(
+    reason: catcoms_replication::studio::StudioOverlaySaveRefusal,
+    error: impl std::fmt::Display,
+) -> AppError {
+    AppError::StudioRefused {
+        reason,
+        message: format!("epoch intent: {error}"),
+    }
 }
 
 // Re-sync only: no new ciphertext, nonce, staging file, or free-space requirement. Mounted-store

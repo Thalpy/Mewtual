@@ -63,7 +63,8 @@ impl CatchupRuntime {
         &mut self,
         server: &mut Server<T, R>,
         store: &mut ServerStore,
-    ) -> Result<(), AppError> {
+    ) -> Result<Option<Arc<()>>, AppError> {
+        let mut installed_for_service = None;
         if let Some((generation, result)) = self.registry_prepared.take() {
             let installed = result.and_then(|prepared| {
                 let provider = self
@@ -87,6 +88,7 @@ impl CatchupRuntime {
             } else if matches!(installed, Ok(true)) {
                 self.registry_retained_until =
                     server.runtime_clock().monotonic_ms().saturating_add(30_000);
+                installed_for_service = generation;
             } else {
                 if let Some(generation) = generation {
                     self.drop_registry_service(&generation);
@@ -94,7 +96,7 @@ impl CatchupRuntime {
                 self.next_at = server.runtime_clock().monotonic_ms().saturating_add(5_000);
             }
         }
-        Ok(())
+        Ok(installed_for_service)
     }
     /// Local discovery also needs a valid footprint for a large saved bucket, even when its
     /// adoption is deferred. Reuse exactly the provider's bounded detached preparation; no

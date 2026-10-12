@@ -264,6 +264,9 @@ async fn studio_receiver_warm_large_unrelated_history_accepts_small_target() {
     p.bob.sync_once().await.unwrap();
     let path = crate::store::save_inventory_fixture(&mut p.b_store);
     let before = std::fs::read(&path).unwrap();
+    // Model the receiver after a remount. The fixture uses the production Registry writer,
+    // which now warms this process's memo; this leg intentionally verifies the cold-byte pause.
+    p.b_store.forget_inventory_memo_for_test();
     assert!(receiver
         .run(&mut p.bob, &mut p.b_store, SERVER, None)
         .err()

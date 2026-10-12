@@ -79,6 +79,12 @@ pub(super) struct HandoffJob {
     pub(super) authority: Option<(u64, u64)>,
 }
 
+#[derive(Clone)]
+struct HandoffAttemptReport {
+    stamp: crate::store::StudioHandoffStamp,
+    reason: Option<catcoms_replication::studio::StudioOverlayManualReason>,
+}
+
 /// Per-actor handoff scheduling. Holds at most one job.
 #[derive(Default)]
 pub(super) struct HandoffRuntime {
@@ -93,6 +99,9 @@ pub(super) struct HandoffRuntime {
     /// Design 7.3's pacing: 30 s doubling to 300 s, reset on durable progress.
     next_at: BTreeMap<StudioTarget, u64>,
     hold_ms: BTreeMap<StudioTarget, u64>,
+    /// Failed runtime attempts only. One per live watch at most, and each retains the exact H1
+    /// stamp so a control read can drop it instead of reporting old state about a new branch.
+    attempts: BTreeMap<StudioTarget, HandoffAttemptReport>,
     /// Round-robin cursor over the watch rail, so selection rotates instead of always taking the
     /// first eligible target.
     selection: usize,
@@ -182,6 +191,7 @@ impl HandoffRuntime {
     fn progressed(&mut self, target: StudioTarget) {
         self.hold_ms.remove(&target);
         self.next_at.remove(&target);
+        self.attempts.remove(&target);
     }
 
     /// Make `target` due for a probe now, without touching its doubling state.
@@ -331,6 +341,20 @@ impl HandoffRuntime {
         }
     }
 
+    fn report_attempt(
+        &mut self,
+        target: StudioTarget,
+        stamp: crate::store::StudioHandoffStamp,
+        reason: Option<catcoms_replication::studio::StudioOverlayManualReason>,
+    ) {
+        self.attempts
+            .insert(target, HandoffAttemptReport { stamp, reason });
+    }
+
+    pub(super) fn forget_attempt(&mut self, target: StudioTarget) {
+        self.attempts.remove(&target);
+    }
+
     /// Keep the per-target bookkeeping to the watch rail (the PR #27 review, LOW-1).
     ///
     /// The receiver caps its watches at 16, but evicting a watch did not touch the targets
@@ -348,6 +372,10 @@ impl HandoffRuntime {
         let live = self.job.as_ref().map(|job| job.target);
         let kept = |target: &StudioTarget| rail.contains(target) || live == Some(*target);
         self.quiet.retain(|target| rail.contains(target));
+        // Unlike pacing, an attempt report has no use off the live 16-watch rail. Dropping it at
+        // eviction is both the privacy bound and what prevents a later re-watch from inheriting a
+        // report about a branch it never observed.
+        self.attempts.retain(|target, _| rail.contains(target));
         let expired: Vec<StudioTarget> = self
             .next_at
             .iter()
@@ -498,6 +526,49 @@ impl HandoffRuntime {
 }
 
 impl StudioReceiver {
+    /// Return a runtime handoff report only while its original H1 stamp still names this mounted
+    /// vault, live membership/tenure and exact source/intent bytes. Any mismatch consumes the
+    /// report; stale diagnostics are not carried forward to a replacement branch.
+    pub(super) fn handoff_attempt<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &ServerStore,
+        target: StudioTarget,
+    ) -> Option<crate::studio::StudioHandoffAttempt> {
+        if !self.watches.iter().any(|(watch, _)| watch.target == target) {
+            self.handoff.forget_attempt(target);
+            return None;
+        }
+        let report = self.handoff.attempts.get(&target)?.clone();
+        let tenure = match server.observed_owner_tenure() {
+            crate::studio::StudioOwnerTenure::Known(start) => Some(start),
+            crate::studio::StudioOwnerTenure::Imported(_)
+            | crate::studio::StudioOwnerTenure::Unknown => None,
+        };
+        let current = server.sync.with_registry_context(|group, device, _, _| {
+            store
+                .studio_handoff_stamp_is_current(group, device, tenure, &report.stamp)
+                .unwrap_or(false)
+        });
+        if !current {
+            self.handoff.forget_attempt(target);
+            return None;
+        }
+        let retry_at_ms = self.handoff.next_at.get(&target).copied()?;
+        Some(crate::studio::StudioHandoffAttempt {
+            state: if report.reason.is_some() {
+                crate::studio::StudioHandoffAttemptState::Refused
+            } else {
+                crate::studio::StudioHandoffAttemptState::BackingOff
+            },
+            reason: report.reason.map_or(
+                crate::studio::StudioHandoffAttemptReason::Transient,
+                crate::studio::StudioHandoffAttemptReason::Manual,
+            ),
+            retry_at_ms,
+        })
+    }
+
     /// Whether the H1 probe is holding `target` back with a per-target backoff.
     #[cfg(test)]
     pub(crate) fn handoff_held_for_test(&self, target: StudioTarget, now: u64) -> bool {
@@ -514,6 +585,28 @@ impl StudioReceiver {
     #[cfg(test)]
     pub(crate) fn handoff_has_job_for_test(&self) -> bool {
         self.handoff.job.is_some()
+    }
+
+    /// Inject only the worker's classified result after a real H1/H2 plan exists. The stamp,
+    /// abandonment, pacing and report retention are production; tests choose the reason so they
+    /// need not corrupt an authenticated source merely to exercise the reporting boundary.
+    #[cfg(test)]
+    pub(crate) fn fail_live_handoff_for_test(
+        &mut self,
+        reason: Option<catcoms_replication::studio::StudioOverlayManualReason>,
+        now: u64,
+    ) {
+        let Some(job) = self.handoff.job.as_ref() else {
+            panic!("no live handoff job");
+        };
+        let target = job.target;
+        let stamp = match &job.stage {
+            HandoffStage::Signing(plan, _) => plan.stamp().clone(),
+            HandoffStage::Ready(commit, _) => commit.stamp().clone(),
+            _ => panic!("handoff has no completed H2 stamp"),
+        };
+        self.handoff.abandon(now);
+        self.handoff.report_attempt(target, stamp, reason);
     }
 
     /// One H1 probe, exactly as a background turn runs it, without the catch-up and network work
@@ -703,6 +796,12 @@ impl StudioReceiver {
             return;
         };
 
+        // Selecting a target starts a fresh paced attempt. Any retained result belongs to the
+        // preceding attempt, even when its durable H1 stamp happens to remain current. Clear it
+        // before Flow R or H1 so a synchronous refusal or transient start failure cannot leave
+        // the UI reporting the older worker result as if it described the new retry.
+        self.handoff.forget_attempt(target);
+
         // Flow R (design 6.4.2). A Prepared record is what an interrupted H5 leaves, and H1 would
         // resolve it synchronously, restoring the source under custody, twice when it is cold.
         // R1 instead captures it with no inventory, R2 restores it detached, and R3 commits under
@@ -745,9 +844,14 @@ impl StudioReceiver {
         // Prepared-without-tenure arm (design 9.1.1 step 4b) is now reached only by its own unit
         // test. It is kept as the statement of the rule should the probe ever route a Prepared
         // branch to H1 again.
-        let Some(tenure) = probe_tenure(server.sync.authoring_owner_tenure_start(), false) else {
-            self.handoff.hold_target(target, now);
-            return;
+        let tenure = match probe_tenure(server.observed_owner_tenure(), false) {
+            HandoffProbeTenure::Enter(tenure) => tenure,
+            HandoffProbeTenure::Refused(_reason) => {
+                // Eligibility exposes the exact durable tenure reason. No H1 stamp exists yet,
+                // so runtime deliberately retains no `handoffAttempt` that could outlive it.
+                self.handoff.hold_target(target, now);
+                return;
+            }
         };
         let Ok(mut budget) = self.handoff_budget(server, store, id) else {
             self.handoff.hold_target(target, now);
@@ -780,6 +884,12 @@ impl StudioReceiver {
                 self.handoff.progressed(target);
                 self.settlement
                     .note(target, StudioSettlementState::RefreshRequired);
+            }
+            Ok(crate::store::StudioHandoffStart::Refused(_reason)) => {
+                // As for the tenure refusal above: this is already represented by the durable
+                // eligibility classifier. Without a completed capture there is no exact H1 stamp
+                // with which a separate runtime report could safely be retained.
+                self.handoff.hold_target(target, now);
             }
             Err(_) => {
                 // Not eligible yet, or not eligible at all. Both are ordinary; back off.
@@ -854,9 +964,11 @@ impl StudioReceiver {
             return None;
         }
         let job = self.handoff.job.as_mut()?;
+        let target = job.target;
         let HandoffStage::Signing(plan, _) = &mut job.stage else {
             return None;
         };
+        let stamp = plan.stamp().clone();
         let clock = server.runtime_clock();
         let slice = server.sync.with_registry_context(|group, device, _, _| {
             plan.sign_slice(
@@ -878,6 +990,7 @@ impl StudioReceiver {
             Err(_) => {
                 let now = server.runtime_clock().monotonic_ms();
                 self.handoff.abandon(now);
+                self.handoff.report_attempt(target, stamp, None);
                 None
             }
         }
@@ -927,6 +1040,10 @@ impl StudioReceiver {
             .as_ref()
             .expect("checked just above")
             .target;
+        let transfer_stamp = match self.handoff.job.as_ref().map(|job| &job.stage) {
+            Some(HandoffStage::Ready(commit, _)) => Some(commit.stamp().clone()),
+            _ => None,
+        };
         // R3's first half: memoize R2's validation of the source before the budget's synchronous
         // scan runs, so the scan finds it warm instead of restoring it inline (design 6.4.2). The
         // cache is content-addressed, so this can only ever serve the bytes R2 validated.
@@ -952,6 +1069,9 @@ impl StudioReceiver {
                 self.handoff.abandon(now);
             } else {
                 self.handoff.hold_target(target, now);
+                if let Some(stamp) = transfer_stamp {
+                    self.handoff.report_attempt(target, stamp, None);
+                }
             }
             return None;
         };
@@ -966,6 +1086,7 @@ impl StudioReceiver {
             }
             _ => unreachable!("can_commit checked the stage"),
         };
+        let stamp = commit.stamp().clone();
         let tenure = server.sync.authoring_owner_tenure_start();
         let committed = server.sync.with_registry_context(|group, device, _, rng| {
             store.commit_studio_handoff(
@@ -998,6 +1119,7 @@ impl StudioReceiver {
                 // three-write preflights and the reference check — so this is reachable and not
                 // self-limiting.
                 self.handoff.hold_target(target, now);
+                self.handoff.report_attempt(target, stamp, None);
                 None
             }
         }
@@ -1060,11 +1182,20 @@ impl StudioReceiver {
                 self.handoff.job.as_mut().expect("checked").stage =
                     HandoffStage::Signing(plan, ownership);
             }
-            HandoffCompletion::Assembled(token, Ok((commit, ownership)))
-                if mine(&self.handoff.job, token) =>
-            {
-                self.handoff.job.as_mut().expect("checked").stage =
-                    HandoffStage::Ready(commit, ownership);
+            HandoffCompletion::Assembled(token, result) if mine(&self.handoff.job, token) => {
+                match *result {
+                    Ok((commit, ownership)) => {
+                        self.handoff.job.as_mut().expect("checked").stage =
+                            HandoffStage::Ready(commit, ownership);
+                    }
+                    // H4 has no stable policy reason: its failure is a transient/invariant runtime
+                    // fact, but the stamp still proves which branch that fact belonged to.
+                    Err((stamp, _)) => {
+                        let target = self.handoff.job.as_ref().expect("checked").target;
+                        self.handoff.abandon(now);
+                        self.handoff.report_attempt(target, stamp, None);
+                    }
+                }
             }
             HandoffCompletion::Resolved(token, Ok((plan, ownership)))
                 if mine(&self.handoff.job, token) =>
@@ -1072,13 +1203,17 @@ impl StudioReceiver {
                 self.handoff.job.as_mut().expect("checked").stage =
                     HandoffStage::ResolveReady(plan, ownership);
             }
-            // A stage this actor asked for refused (for R2, a Hold only a restore could see). The
-            // worker already released its bundle.
-            HandoffCompletion::Prepared(token, Err(_))
-            | HandoffCompletion::Assembled(token, Err(_))
-            | HandoffCompletion::Resolved(token, Err(_))
-                if mine(&self.handoff.job, token) =>
-            {
+            // H2 classified on the exact restored successor. Retain that bounded reason beside
+            // the stamp, after abandoning has installed this target's retry deadline.
+            HandoffCompletion::Prepared(token, Err(failure)) if mine(&self.handoff.job, token) => {
+                let target = self.handoff.job.as_ref().expect("checked").target;
+                let stamp = failure.stamp().clone();
+                let reason = failure.reason();
+                self.handoff.abandon(now);
+                self.handoff.report_attempt(target, stamp, reason);
+            }
+            // R2 is not a handoff attempt and therefore never appears in `handoffAttempt`.
+            HandoffCompletion::Resolved(token, Err(_)) if mine(&self.handoff.job, token) => {
                 self.handoff.abandon(now);
             }
             // The waiter was cancelled. The worker still owns its bundle and releases it when it
@@ -1134,18 +1269,33 @@ impl StudioReceiver {
 /// needs only current membership. That is what stops a Prepared record left by a refused H5 from
 /// holding the target's page and tail service until a fence runs. Any other branch without a
 /// tenure has nothing H1 can do, so it is held as before.
-fn probe_tenure(live: Option<u64>, prepared: bool) -> Option<Option<u64>> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HandoffProbeTenure {
+    Enter(Option<u64>),
+    Refused(catcoms_replication::studio::StudioOverlayManualReason),
+}
+
+fn probe_tenure(live: crate::studio::StudioOwnerTenure, prepared: bool) -> HandoffProbeTenure {
+    use catcoms_replication::studio::StudioOverlayManualReason as R;
     match (live, prepared) {
-        (Some(tenure), _) => Some(Some(tenure)),
-        (None, true) => Some(None),
-        (None, false) => None,
+        (crate::studio::StudioOwnerTenure::Known(tenure), _) => {
+            HandoffProbeTenure::Enter(Some(tenure))
+        }
+        (_, true) => HandoffProbeTenure::Enter(None),
+        (crate::studio::StudioOwnerTenure::Imported(_), false) => {
+            HandoffProbeTenure::Refused(R::TenureImported)
+        }
+        (crate::studio::StudioOwnerTenure::Unknown, false) => {
+            HandoffProbeTenure::Refused(R::TenureUnknown)
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        probe_tenure, HandoffJob, HandoffRuntime, HandoffStage, FIRST_HOLD_MS, MAX_UNWATCHED_HOLDS,
+        probe_tenure, HandoffJob, HandoffProbeTenure, HandoffRuntime, HandoffStage, FIRST_HOLD_MS,
+        MAX_UNWATCHED_HOLDS,
     };
     use catcoms_replication::studio::StudioTarget;
     use std::sync::Arc;
@@ -1278,17 +1428,30 @@ mod tests {
     /// with no tenure, is pinned by `a_durable_prepared_handoff_is_resolved_with_no_observed_tenure`.
     #[test]
     fn the_probe_enters_h1_without_a_tenure_only_to_resolve_a_prepared_branch() {
-        assert_eq!(probe_tenure(Some(7), false), Some(Some(7)));
-        assert_eq!(probe_tenure(Some(7), true), Some(Some(7)));
+        use crate::studio::StudioOwnerTenure as T;
+        use catcoms_replication::studio::StudioOverlayManualReason as R;
         assert_eq!(
-            probe_tenure(None, true),
-            Some(None),
+            probe_tenure(T::Known(7), false),
+            HandoffProbeTenure::Enter(Some(7))
+        );
+        assert_eq!(
+            probe_tenure(T::Known(7), true),
+            HandoffProbeTenure::Enter(Some(7))
+        );
+        assert_eq!(
+            probe_tenure(T::Unknown, true),
+            HandoffProbeTenure::Enter(None),
             "a Prepared branch without a tenure was held instead of resolved"
         );
         assert_eq!(
-            probe_tenure(None, false),
-            None,
-            "a branch with nothing to resolve entered H1 without a tenure"
+            probe_tenure(T::Unknown, false),
+            HandoffProbeTenure::Refused(R::TenureUnknown),
+            "an unknown tenure lost its stable reason"
+        );
+        assert_eq!(
+            probe_tenure(T::Imported(9), false),
+            HandoffProbeTenure::Refused(R::TenureImported),
+            "an imported tenure was collapsed into unknown"
         );
     }
 }

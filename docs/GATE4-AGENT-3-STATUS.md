@@ -1,5 +1,9 @@
 # Gate 4 Agent 3 status: runtime signed fault repair
 
+This is the historical Agent 3 ownership ledger. The integrated current state and final evidence
+are maintained in [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md); its completion checkpoint supersedes the
+older pending-check entries below without erasing their review history.
+
 Owner: Agent 3 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-3-runtime-signed-fault-repair)).
 Proposal: [GATE4-AGENT-3-DESIGN](GATE4-AGENT-3-DESIGN.md), revision 16 follow-up.
 Review preamble: 3. Current entries override older ones.

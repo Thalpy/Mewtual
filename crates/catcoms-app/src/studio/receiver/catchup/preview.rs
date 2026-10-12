@@ -347,12 +347,43 @@ impl PreviewRuntime {
         id: u64,
         target: StudioTarget,
     ) -> Result<catcoms_replication::studio::StudioUnconfirmedOverlayBasis, AppError> {
+        use catcoms_replication::studio::StudioOverlaySaveRefusal as Rf;
+
         let ready = self
             .ready
             .iter()
             .find(|r| r.target == target)
-            .ok_or_else(|| invalid("no live preview of this document; refresh it to save"))?;
-        server.mint_unconfirmed_overlay_basis(store, id, &ready.seed)
+            .ok_or_else(|| AppError::StudioRefused {
+                reason: Rf::PreviewUnavailable,
+                message: "Studio: no live preview of this document; refresh it to save".into(),
+            })?;
+        if !ready.seed.unconfirmed_is_unexpired() {
+            return Err(AppError::StudioRefused {
+                reason: Rf::PreviewExpired,
+                message: "Studio: the preview expired; refresh it to save".into(),
+            });
+        }
+        if !ready.seed.tail_complete() {
+            return Err(AppError::StudioRefused {
+                reason: Rf::TailIncomplete,
+                message: "Studio: the preview history is incomplete; refresh it to save".into(),
+            });
+        }
+        if !ready.seed.scope_matches(store, id, target) {
+            return Err(AppError::StudioRefused {
+                reason: Rf::PreviewReplaced,
+                message: "Studio: provisional seed belongs to a replaced mount/server".into(),
+            });
+        }
+        server
+            .mint_unconfirmed_overlay_basis(store, id, &ready.seed)
+            .map_err(|error| match error {
+                AppError::Sync(catcoms_sync::SyncError::Unauthorized) => AppError::StudioRefused {
+                    reason: Rf::PreviewReplaced,
+                    message: catcoms_sync::SyncError::Unauthorized.to_string(),
+                },
+                error => error,
+            })
     }
     /// Called only after held authoritative pages/checkpoints/preparations have had their turn.
     pub(in crate::studio::receiver) fn schedule<T: MeshTransport + 'static, R: CryptoRngCore>(

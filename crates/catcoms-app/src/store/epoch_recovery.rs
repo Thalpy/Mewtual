@@ -373,7 +373,15 @@ impl ServerStore {
         let framed = frame(&sealed);
         let mutation = self.epoch_mutation_guard();
         let framed = hooks.before(WriteTag::Recovery, &path, &framed)?;
-        mutation.write(&path, &framed)?;
+        let original_plain =
+            matches!(&framed, std::borrow::Cow::Borrowed(_)).then_some(plain.as_slice());
+        let write = mutation.write(&path, &framed);
+        self.finish_validated_inventory_write(
+            write,
+            inventory::EpochRecordKind::Recovery,
+            original_plain,
+            plain.len() as u64 + 40,
+        )?;
         hooks.after_write(WriteTag::Recovery, &path)?;
         reservation.commit();
         Ok(EpochRecoveryUpdate { transition, state })
@@ -484,7 +492,15 @@ impl ServerStore {
         let framed = frame(&sealed);
         let mutation = self.epoch_mutation_guard();
         let framed = hooks.before(WriteTag::Recovery, &path, &framed)?;
-        mutation.write(&path, &framed)?;
+        let original_plain =
+            matches!(&framed, std::borrow::Cow::Borrowed(_)).then_some(plain.as_slice());
+        let write = mutation.write(&path, &framed);
+        self.finish_validated_inventory_write(
+            write,
+            inventory::EpochRecordKind::Recovery,
+            original_plain,
+            plain.len() as u64 + 40,
+        )?;
         hooks.after_write(WriteTag::Recovery, &path)?;
         Ok(EpochRecoveryUpdate { transition, state })
     }

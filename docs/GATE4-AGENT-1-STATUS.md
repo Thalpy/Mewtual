@@ -1,9 +1,23 @@
 # Gate 4 Agent 1 status: local Save and automatic handoff runtime
 
+This is the historical Agent 1 ownership ledger. The integrated current state and final evidence
+are maintained in [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md); its completion checkpoint supersedes the
+older open/awaiting-review entries below without erasing their review history.
+
 Owner: Agent 1 ([assignment](GATE4-AGENT-HANDOFFS.md#agent-1-local-save-and-automatic-handoff-runtime)).
 Proposal: [GATE4-AGENT-1-DESIGN](GATE4-AGENT-1-DESIGN.md), revision 4, **accepted (PASS) at
 `25ce89bb705dfc228c7b32874788ebd062e6fcf4`, 2026-09-15, design boundary only**.
 Review preamble: 1. Current entries override older ones.
+
+**Completion checkpoint, 2026-10-11.** On the isolated branch based on PR #38
+(`bdcae4a30a0870443db92a14f2d80ff8e4947818`), C-3's writer-side warmth and the reviewed
+restart-progress rule are integrated. The Flow S K12 correction now covers Closing as well as
+Unconfirmed: a detached plan retains its exact commit authority, a current stamped refusal is
+answered before new S1b work and the two request fingerprints are domain-separated. H3 service
+ordering also reserves Studio/Registry checkpoint work before a full-pool held-page defer and
+serves an exact prepared source in its installation turn. Focused regressions pass. This bounded
+checkpoint still requires adversarial review, the complete suites and exact-head CI. The full MAP
+carrier, remaining measured C-3 adoption and tenure product paths remain open; P5 stays false.
 
 **The design boundary is complete. Implementation has started** on branch
 `gate4-agent1-runtime`, from `5a899c2`. Progress and executed evidence are in "Implementation
@@ -3286,11 +3300,12 @@ blocker or high.
   structural hold, the full hold and `check_overlay_successor` together on a repaired source;
   `evidence_in_vault` and `unconfirmed_base_state_in_vault` on form 3; and an app-level handoff
   into a repaired Flipnote, asserting Completed and P2 eligibility.
-- **A design question for Agents 1 and 3:** `check_overlay_successor` and both holds never ask
-  whether the overlay's receipt is a repaired loser (`ReceiptBook::is_repaired_loser`).
-  Same-tenure repairs are covered, but a cross-tenure Transitioned repair whose source opening is
-  the losing receipt appears restorable, and would then accept a handoff of work based on the
-  loser. Not confirmed against the design.
+- **Closed on the final candidate:** the repaired-loser label alone is not authority and therefore
+  must not make the repair-bound successor ineligible. What prevents replay after A -> B -> A' is
+  the receipt's issuer-tenure binding: the old receipt cannot authorize the returning key's new
+  tenure. `cross_tenure_repair_keeps_a_loser_successor_eligible_without_reauthorizing_its_receipt`
+  pins both halves, alongside the form-3 classifier/hold/store handoff regressions. This resolves
+  the earlier design question without rejecting valid repair-bound successors.
 
 ## C-3 classifier and refused-result memo, built (2026-10-08)
 
@@ -6014,26 +6029,19 @@ makes that more important, not less.
      since without them a converted catch-up job provably never finishes under ordinary receive
      (15.7, HIGH-1). After the measurement, each remaining owner is either converted or recorded as
      debt, as H5 was. **M2 is built** (16.1): the memo is indexed, bounded at 65 536 and pruned.
-     **M1's memo half is built** (16.2). Next is M1's writer half, waiting on Agent 2's and
-     Agent 3's go-ahead for their writer files, then MEDIUM-3's progress rule, then section 7's
-     measurement.
-   - **MEDIUM-3 is built and reviewed but held, not landed** (2026-10-10, commit `2e7892aa`,
-     kept on the local ref `refs/agent1/medium3-held`). It was built out of 15.9's order, before
-     the writer warms. Its review (Opus, static) found no blocker or high, but MEDIUM-1 showed why
-     the order matters. Without writer warms, a write leaves the record it touched cold, and the
-     next attempt re-warms it. That counts as progress, so up to 64 restarts per job are excused
-     with no real progress, and replay's manual move would then wait out its full 60 s patience
-     rather than reach the faster fallback through backoff. **To land it, after the writer warms:**
-     - rebase it onto the line;
-     - add the review's MEDIUM-2 tests: the own-write refresh's credit, the error path's excuse,
-       and a store-level refused-but-unstored check;
-     - add a runtime storm with token-only foreign writes that pins the excused count, then
-       charged restarts, then backoff;
-     - fix LOW-1's stale comments and `MAX_INVENTORY_RESTARTS`'s doc;
-     - state LOW-2 in 16.3 (the ceiling suits the receive profile only; a full-profile owner must
-       revisit it);
-     - order or document LOW-3's own-write refresh against the rule;
-     - restrict `warmed` to job cursors (LOW-4).
+     **M1's memo half is built** (16.2), and **its writer half is now built** (16.3) after Agent 2
+     and Agent 3 approved the shared writer files. All eight replacements consume a forced-warm
+     token; visible uncertain renames warm, pre-rename/test-substitution paths do not, and
+     Registry/Studio writer facts are fully cross-checked in test/debug builds. Next is the held
+     MEDIUM-3 progress rule with its review additions, then section 7's measurement.
+   - **MEDIUM-3 is integrated after the writer warms** (original held commit `2e7892aa`, preserved
+     in the candidate's ancestry as the next commit). The review additions are implemented:
+     own-write refresh credit and refused-but-uninstalled state, the validation-error progress
+     path, a token-only foreign-write storm that pins one excuse then charged restarts and
+     backoff, corrected restart documentation, the receive-only meaning of the 64-credit ceiling,
+     explicit ordering against the own-write cap, and job-only collection of warmed keys. Focused
+     store and receiver-runtime suites pass; combined full-suite and independent review evidence
+     remain required at the final candidate head.
 2. **Flow R is built** (2026-10-09; see "Flow R: the staged resolution of an interrupted handoff,
    built" above, and design 6.4.2 to 6.4.5). With H5's single visit accepted (C-3 runtime 15.14),
    R3 joins H5 in the deferred split if that target is ever restored. Still to do: its

@@ -41,12 +41,13 @@ impl Env {
             rt: InventoryRuntime::default(),
         }
     }
-    /// A real Studio source record. Its first validation is fresh, so a budgeted step parks it.
+    /// A real Studio source record, followed by a simulated remount that makes its first
+    /// validation fresh so a budgeted step parks it.
     ///
     /// Small on purpose: the receive profile this runtime scans under has a 256 KiB cold-byte
     /// limit, and the stock fixture's >256 KiB source is refused by it, which is the rail doing
     /// its job rather than anything this runtime should work around.
-    fn source(&mut self, object: u8) {
+    fn write_source(&mut self, object: u8) {
         crate::store::save_studio_source_fixture_ops(
             &mut self.store,
             SERVER,
@@ -59,6 +60,13 @@ impl Env {
             3,
             1_000,
         );
+    }
+    fn source(&mut self, object: u8) {
+        self.write_source(object);
+        // Production writers warm the process-local inventory memo. These state-machine tests
+        // exercise cold validation, detachment and restart accounting, so establish that
+        // boundary explicitly instead of accidentally depending on a writer leaving bytes cold.
+        self.store.forget_inventory_memo_for_test();
     }
     /// One whole visit, as the receiver's `run` makes it: the lifecycle step, one owner's turn,
     /// and the end-of-visit mark.
@@ -100,6 +108,20 @@ impl Env {
             .lifecycle(&self.store, SERVER, self.clock.monotonic_ms());
         self.source(object);
         self.rt.end_visit(&self.store);
+    }
+    /// Rotate the inventory token without changing record bytes. When `own` is true, bracket the
+    /// rotation as this actor's custody visit; otherwise it models another actor writing in the
+    /// gap. This isolates restart classification from production writers' memo warming.
+    fn token_write(&mut self, own: bool) {
+        if own {
+            self.rt.begin_visit(&self.store);
+            self.rt
+                .lifecycle(&self.store, SERVER, self.clock.monotonic_ms());
+        }
+        self.store.overtake_inventory_for_test();
+        if own {
+            self.rt.end_visit(&self.store);
+        }
     }
     /// Validate a detached body the way the background worker does, and hand the result back,
     /// outside custody: the runtime installs it on its next turn.
@@ -310,28 +332,13 @@ fn a_validation_error_about_overtaken_bytes_is_a_charged_restart() {
 fn a_validation_error_at_the_restart_limit_backs_off() {
     let mut env = Env::new(1);
     env.source(1);
-    for n in 0..crate::store::MAX_INVENTORY_RESTARTS {
-        assert!(matches!(env.turn().unwrap(), InventoryTurn::NotYet));
-        let detach = env.rt.take_detach().expect("a park every cycle");
-        env.source(2 + n as u8); // another actor's write
-        env.validate_and_complete(detach);
-    }
-    // This turn spends the last charged restart and parks again.
-    assert!(matches!(env.turn().unwrap(), InventoryTurn::NotYet));
-    let detach = env.rt.take_detach().expect("a park after the last restart");
-    env.source(9);
-    env.rt
-        .complete(detach.token, Box::new(Err(invalid("validation failed"))));
-    drop(detach);
-
-    match env.turn() {
-        Ok(InventoryTurn::Unstable) => {}
-        Err(error) => panic!("an error about overtaken bytes was surfaced: {error}"),
-        Ok(_) => panic!("a job past its restart limit was restarted again"),
-    }
-    assert!(
-        env.rt.backoff_until_for_test().is_some(),
-        "Unstable without a backoff"
+    let (detached, progress, charged, _) = token_only_storm(&mut env, false, true);
+    assert_eq!(progress, 1, "the first cold warm was not credited");
+    assert_eq!(charged, crate::store::MAX_INVENTORY_RESTARTS);
+    assert_eq!(
+        detached,
+        1 + crate::store::MAX_INVENTORY_RESTARTS + 1,
+        "the stale validation error did not hit the bounded charged branch"
     );
 }
 
@@ -376,29 +383,63 @@ fn an_own_write_past_its_cap_with_a_validation_error_is_charged() {
     );
 }
 
-/// Overtake the job once per cycle with `write` while each body is out, until it is `Unstable`.
-/// Returns how many bodies were detached on the way and when the backoff ends.
-fn storm(env: &mut Env, write: fn(&mut Env, u8)) -> (usize, u64) {
-    env.source(1);
+/// Overtake one cold record repeatedly with token-only writes until the runtime backs off.
+///
+/// Holding the process permit during each install makes the restarted cursor wait for the next
+/// turn. The test can then evict the process-local memo, modelling repeated cache eviction while
+/// keeping the physical record and its key unchanged. The first refused validation is progress;
+/// every later warm is the same already-credited key and therefore charged. This separates the
+/// restart rule from production writers, which now warm their own bytes.
+///
+/// With `error_at_limit`, the final worker result is an error instead of a validated record. It
+/// still describes bytes overtaken by the token write, so the same bounded restart rule applies.
+fn token_only_storm(env: &mut Env, own: bool, error_at_limit: bool) -> (usize, usize, usize, u64) {
     let mut detached = 0;
+    let mut progress = 0;
+    let mut charged = 0;
     loop {
-        // Each turn installs the previous cycle's overtaken result (a restart), steps the
-        // restarted job, and parks the newest uncached record again.
-        if let InventoryTurn::Unstable = env.turn().unwrap() {
-            let until = env
-                .rt
-                .backoff_until_for_test()
-                .expect("Unstable means a backoff");
-            return (detached, until);
-        }
-        let Some(detach) = env.rt.take_detach() else {
-            panic!("expected a park every cycle");
-        };
+        assert!(matches!(env.turn().unwrap(), InventoryTurn::NotYet));
+        let detach = env.rt.take_detach().expect("expected a park every cycle");
         detached += 1;
-        // A five-family write while the body is out: the install is overtaken.
-        write(env, 1 + detached as u8);
-        env.validate_and_complete(detach);
-        assert!(detached < 16, "the restart budget never ran out");
+        env.token_write(own);
+        if error_at_limit && charged == crate::store::MAX_INVENTORY_RESTARTS {
+            env.rt.complete(
+                detach.token,
+                Box::new(Err(invalid(
+                    "validation failed after the bytes were overtaken",
+                ))),
+            );
+            drop(detach);
+        } else {
+            env.validate_and_complete(detach);
+        }
+
+        // Installation/restart happens before the runtime asks for a permit. Occupying it leaves
+        // the fresh cursor in `Stepping`, giving the test a real between-visit boundary.
+        let held = env.pool.clone().try_acquire_owned().unwrap();
+        match env.turn() {
+            Ok(InventoryTurn::Unstable) => {
+                drop(held);
+                let until = env
+                    .rt
+                    .backoff_until_for_test()
+                    .expect("Unstable means a backoff");
+                return (detached, progress, charged, until);
+            }
+            Err(error) => panic!("an error about overtaken bytes was surfaced: {error}"),
+            Ok(InventoryTurn::NotYet) => {}
+            Ok(InventoryTurn::Ready(_)) => panic!("the overtaken job completed"),
+        }
+        let State::Stepping(job) = &env.rt.state else {
+            panic!("a restarted job was not left ready to step");
+        };
+        progress = job.progress_restarts_for_test();
+        charged = job.restarts_for_test();
+        // Make the same key cold again. Because the key stays credited, this can never create an
+        // unbounded sequence of progress excuses.
+        env.store.forget_inventory_memo_for_test();
+        drop(held);
+        assert!(detached < 16, "the bounded restart storm never backed off");
     }
 }
 
@@ -408,12 +449,15 @@ fn storm(env: &mut Env, write: fn(&mut Env, u8)) -> (usize, u64) {
 #[test]
 fn a_restart_storm_backs_off_and_recovers() {
     let mut env = Env::new(1);
-    let (detached, retry_at) = storm(&mut env, |env, object| env.source(object));
+    env.source(1);
+    let (detached, progress, charged, retry_at) = token_only_storm(&mut env, false, false);
     assert_eq!(
         detached,
-        crate::store::MAX_INVENTORY_RESTARTS + 1,
-        "a foreign write went uncharged"
+        1 + crate::store::MAX_INVENTORY_RESTARTS + 1,
+        "progress or charged restarts were not bounded as specified"
     );
+    assert_eq!(progress, 1, "the one new key was not excused exactly once");
+    assert_eq!(charged, crate::store::MAX_INVENTORY_RESTARTS);
     assert_eq!(env.rt.own_restarts, 0);
     assert!(matches!(env.rt.state, State::Backoff { .. }));
     assert_eq!(retry_at, env.clock.monotonic_ms() + BACKOFF_FIRST_MS);
@@ -439,9 +483,44 @@ fn a_restart_storm_backs_off_and_recovers() {
     env.visit();
     assert!(matches!(env.rt.state, State::Idle));
     assert!(
-        matches!(env.turn().unwrap(), InventoryTurn::NotYet),
-        "a fresh job began"
+        ready(env.turn().unwrap()),
+        "a fresh job did not reuse the final validation retained before backoff"
     );
+}
+
+/// C-3 runtime design section 7's second-actor case, after the all-family writer warms landed.
+///
+/// The first record is deliberately cold and has left the actor for detached validation. A
+/// different actor then writes a second Studio record through the production writer. That write
+/// overtakes the live cursor, but it also warms the exact bytes it made visible (and its budget
+/// scan warms the unchanged first record). Installing the detached result must therefore take
+/// one charged restart and finish from memo hits in the same receiver turn, rather than entering
+/// backoff or parking either record again.
+#[test]
+fn a_foreign_production_write_warms_the_restarted_job_to_completion() {
+    let mut env = Env::new(1);
+    env.source(1);
+    assert!(matches!(env.turn().unwrap(), InventoryTurn::NotYet));
+    let detach = env.rt.take_detach().expect("the cold source parked");
+
+    // Outside this actor's visit, so `begin_visit` must classify the token movement as foreign.
+    // Do not clear the memo: the production writer's warm is the behavior under test.
+    env.write_source(2);
+    env.validate_and_complete(detach);
+
+    assert!(
+        ready(env.turn().unwrap()),
+        "the writer-warmed restart parked again or entered backoff"
+    );
+    assert_eq!(
+        env.rt.own_restarts, 0,
+        "a foreign write was treated as this actor's"
+    );
+    assert_eq!(
+        env.rt.minted, 1,
+        "the restarted shared job did not mint the budget"
+    );
+    assert!(matches!(env.rt.state, State::Idle));
 }
 
 /// Run turns, validating every body the runtime detaches, until the job mints. Returns how many
@@ -515,13 +594,19 @@ fn an_own_write_refresh_memoizes_the_overtaken_result() {
 #[test]
 fn own_writes_are_uncharged_up_to_their_cap() {
     let mut env = Env::new(1);
-    let (detached, _) = storm(&mut env, |env, object| env.own_write(object));
+    env.source(1);
+    let (detached, progress, charged, _) = token_only_storm(&mut env, true, false);
     assert_eq!(
         detached,
         crate::store::MAX_INVENTORY_RESTARTS + OWN_RESTARTS + 1,
         "own writes were charged, or uncharged without a cap"
     );
     assert_eq!(env.rt.own_restarts, OWN_RESTARTS);
+    assert_eq!(
+        progress, 0,
+        "a result credited by an uncharged own-write refresh was later excused again"
+    );
+    assert_eq!(charged, crate::store::MAX_INVENTORY_RESTARTS);
 }
 
 /// N-M1. A foreign write anywhere since the cursor began taints it, even when the gap just before
@@ -584,13 +669,18 @@ fn a_cursor_that_never_stepped_is_refreshed_for_free() {
     assert!(matches!(env.turn().unwrap(), InventoryTurn::NotYet));
     assert!(matches!(env.rt.state, State::Stepping(_)));
     drop(held);
-    // `storm` begins with a foreign write, which overtakes the cursor that never stepped.
-    let (detached, _) = storm(&mut env, |env, object| env.source(object));
+    // This foreign source write overtakes the cursor that never stepped. Its refresh is free;
+    // the token-only storm that follows still gets one progress credit and the whole charged
+    // restart budget.
+    env.source(1);
+    let (detached, progress, charged, _) = token_only_storm(&mut env, false, false);
     assert_eq!(
         detached,
-        crate::store::MAX_INVENTORY_RESTARTS + 1,
+        1 + crate::store::MAX_INVENTORY_RESTARTS + 1,
         "refreshing a cursor that had done nothing was charged"
     );
+    assert_eq!(progress, 1);
+    assert_eq!(charged, crate::store::MAX_INVENTORY_RESTARTS);
     assert_eq!(
         env.rt.own_restarts, 0,
         "and it was counted as an own restart"

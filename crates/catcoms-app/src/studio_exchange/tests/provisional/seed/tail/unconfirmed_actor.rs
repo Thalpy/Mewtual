@@ -13,7 +13,7 @@ use crate::studio::{
     StudioUnconfirmedSaveOutcome,
 };
 use crate::studio_exchange::ServerStudioWatch;
-use catcoms_replication::studio::StudioOverlayProvenance;
+use catcoms_replication::studio::{StudioOverlayProvenance, StudioOverlaySaveRefusal};
 
 fn control(
     receiver: &mut StudioReceiver,
@@ -272,9 +272,11 @@ async fn studio_actor_unconfirmed_save_schedules_commits_and_retries_from_the_li
     // The preview alone goes, not a lock: a lock would release the parked plan too, and then
     // this would be S1b's refusal rather than the commit visit's.
     receiver.forget_previews_for_test();
-    let refused = save(&mut receiver, &mut p, target, &second)
-        .unwrap_err()
-        .to_string();
+    let (reason, refused) = refusal(
+        save(&mut receiver, &mut p, target, &second),
+        "the commit visit after its preview was lost",
+    );
+    assert_eq!(reason, StudioOverlaySaveRefusal::PreviewUnavailable);
     assert!(
         refused.contains("no live preview"),
         "the commit visit mints from the live preview, not a parked basis: {refused}"
@@ -304,17 +306,223 @@ async fn studio_actor_unconfirmed_save_schedules_commits_and_retries_from_the_li
         target,
         StudioControlAction::BeginUnconfirmedOverlaySave,
     )
-    .unwrap_err()
-    .to_string();
+    .expect("a preview refusal is a typed control response");
+    let StudioControlResponse::UnconfirmedOverlaySaved {
+        outcome: StudioUnconfirmedSaveOutcome::Refused { reason, message },
+        ..
+    } = refused
+    else {
+        panic!("expected a typed ticket refusal, got {refused:?}")
+    };
+    assert_eq!(reason, StudioOverlaySaveRefusal::PreviewUnavailable);
+    let refused = message;
     assert!(refused.contains("no live preview"), "{refused}");
     // The same new work again: its plan was consumed by the refused commit, so this is a fresh
     // first visit, and S1b refuses it.
-    let refused = save(&mut receiver, &mut p, target, &second)
-        .unwrap_err()
-        .to_string();
+    let (reason, refused) = refusal(
+        save(&mut receiver, &mut p, target, &second),
+        "new authoring without a preview",
+    );
+    assert_eq!(reason, StudioOverlaySaveRefusal::PreviewUnavailable);
     assert!(
         refused.contains("no live preview"),
         "new authoring with no preview surfaces the mint's refusal: {refused}"
+    );
+}
+
+/// MAP's stable carrier starts at ticket minting, not only after a Save envelope exists. A removed
+/// device can retain a previously ready preview in memory, but the live membership check must win
+/// and its refusal must remain typed across the actor boundary.
+#[tokio::test]
+async fn studio_actor_unconfirmed_ticket_reports_not_member_as_a_typed_refusal() {
+    let (mut p, mut receiver, target, _, _) = ready_receiver().await;
+    let removed = p.bob.my_fingerprint();
+    // The general Pair fixture only subscribes the founder to control traffic. Subscribe Bob
+    // before the commit is published so this test observes the real removal transition.
+    p.bob.subscribe_control().await.unwrap();
+    p.alice.remove_member(&removed).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), p.bob.sync_once())
+        .await
+        .expect("Bob receives his removal")
+        .unwrap();
+    assert!(
+        !p.bob
+            .sync
+            .with_registry_context(|group, device, _, _| group.contains_device(&device.device_id())),
+        "precondition: Bob processed his removal"
+    );
+
+    let response = control(
+        &mut receiver,
+        &mut p,
+        target,
+        StudioControlAction::BeginUnconfirmedOverlaySave,
+    )
+    .expect("membership refusal is a typed control response");
+    let StudioControlResponse::UnconfirmedOverlaySaved {
+        outcome: StudioUnconfirmedSaveOutcome::Refused { reason, message },
+        ..
+    } = response
+    else {
+        panic!("expected a typed ticket refusal, got {response:?}")
+    };
+    assert_eq!(reason, StudioOverlaySaveRefusal::NotMember);
+    assert!(message.contains("no longer a member"), "{message}");
+}
+
+/// A renderer must not be able to relabel a Closing draft as preview-authored by choosing the
+/// Unconfirmed action. Both the ticket and Save actor boundaries report the same stable refusal;
+/// neither leaks the diagnostic-only `AppError` string that originally crossed this boundary.
+#[tokio::test]
+async fn studio_actor_unconfirmed_actions_type_a_closing_draft_refusal() {
+    let (mut p, mut receiver, target, _, _) = ready_receiver().await;
+
+    // Build one genuine Closing source and draft through the ordinary store APIs. The source is
+    // authored by Alice, the current owner; Bob's actor then attempts the wrong Save kind.
+    p.alice.sync.with_registry_context(|group, device, _, _| {
+        crate::store::fill_studio_epoch_fixture(&mut p.b_store, SERVER, group, device, target)
+    });
+    let decision = p.alice.sync.with_registry_context(|group, device, _, _| {
+        crate::store::studio_owner_decision_fixture(&p.b_store, SERVER, group, device, target, None)
+    });
+    let close = decision.close().clone();
+    let source_path = p
+        .alice
+        .sync
+        .with_registry_context(|group, _, _, _| {
+            p.b_store.studio_source_path_for_test(SERVER, group, target)
+        })
+        .unwrap();
+    let open_source = std::fs::read(&source_path).unwrap();
+    let mut b = budget(&mut p.alice, &mut p.b_store);
+    p.alice.sync.with_registry_context(|group, device, _, rng| {
+        p.b_store
+            .seal_studio_epoch(
+                SERVER,
+                group,
+                target,
+                device,
+                decision.receipt().clone(),
+                0,
+                rng,
+                &mut b,
+            )
+            .unwrap();
+    });
+    let mut b = budget(&mut p.alice, &mut p.b_store);
+    let ticket = p
+        .alice
+        .prepare_studio_closing_overlay(&mut p.b_store, SERVER, target, &close, &mut b)
+        .unwrap();
+    let closing_basis = ticket.basis.fingerprint();
+    let closing_branch = ticket.branch;
+    let owner = p
+        .alice
+        .sync
+        .with_registry_context(|_, device, _, _| device.device_id());
+    let closing = StudioUnconfirmedOverlaySaveRequest {
+        basis: closing_basis,
+        branch: closing_branch,
+        nonce: [0x6d; 16],
+        body: IndexOp::PutObject {
+            object: [0x6e; 16],
+            kind: StudioKind::Flipnote,
+            title: "closing work".into(),
+            created_by: owner,
+            ts: 1,
+            expiry: StudioExpiry::Never,
+        }
+        .encode()
+        .unwrap(),
+    };
+    let mut b = budget(&mut p.alice, &mut p.b_store);
+    let accepted = p
+        .alice
+        .save_studio_closing_overlay(
+            &mut p.b_store,
+            SERVER,
+            target,
+            &close,
+            closing.basis,
+            closing.branch,
+            domain(target, closing.body.clone(), 0x6d),
+            &mut b,
+        )
+        .unwrap();
+    assert!(matches!(
+        accepted,
+        catcoms_replication::studio::StudioOverlaySave::Local(_)
+    ));
+
+    for response in [
+        control(
+            &mut receiver,
+            &mut p,
+            target,
+            StudioControlAction::BeginUnconfirmedOverlaySave,
+        ),
+        control(
+            &mut receiver,
+            &mut p,
+            target,
+            StudioControlAction::SaveUnconfirmedOverlay(Box::new(closing)),
+        ),
+    ] {
+        let response = response.expect("wrong-kind refusal is a typed control response");
+        let StudioControlResponse::UnconfirmedOverlaySaved {
+            outcome: StudioUnconfirmedSaveOutcome::Refused { reason, message },
+            ..
+        } = response
+        else {
+            panic!("expected a typed wrong-kind refusal, got {response:?}")
+        };
+        assert_eq!(reason, StudioOverlaySaveRefusal::OtherKindDraft);
+        assert!(message.contains("not made on a preview"), "{message}");
+    }
+
+    // Restore the exact authenticated Open predecessor while retaining the Closing branch. The
+    // next Closing Save must classify `SourceNotClosing` at S1b and invalidate the lifecycle row,
+    // rather than returning a generic actor error or leaving the old eligibility visible.
+    std::fs::write(&source_path, open_source).unwrap();
+    let next = domain(
+        target,
+        IndexOp::SetTitle {
+            object: [0x6e; 16],
+            title: "must not land".into(),
+        }
+        .encode()
+        .unwrap(),
+        0x6f,
+    );
+    let _ = receiver.take_settlement_notices();
+    let mut b = budget(&mut p.alice, &mut p.b_store);
+    let visit = receiver
+        .save_overlay(
+            &mut p.alice,
+            &mut p.b_store,
+            SERVER,
+            target,
+            &close,
+            closing_basis,
+            closing_branch,
+            next,
+            &mut b,
+        )
+        .unwrap();
+    assert!(matches!(
+        visit,
+        crate::studio::StudioOverlaySaveVisit::Refused {
+            reason: StudioOverlaySaveRefusal::Durable(
+                catcoms_replication::studio::StudioOverlayManualReason::SourceNotClosing
+            ),
+            ..
+        }
+    ));
+    assert!(
+        receiver
+            .take_settlement_notices()
+            .contains(&(target, StudioSettlementState::RefreshRequired)),
+        "the durable source transition did not invalidate the lifecycle row"
     );
 }
 
@@ -383,9 +591,11 @@ async fn studio_actor_unconfirmed_save_correlates_same_nonce_requests_by_full_en
         save(&mut receiver, &mut p, target, &a).unwrap(),
         StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
     ));
-    let refused = save(&mut receiver, &mut p, target, &b)
-        .unwrap_err()
-        .to_string();
+    let (reason, refused) = refusal(
+        save(&mut receiver, &mut p, target, &b),
+        "the conflicting nonce",
+    );
+    assert_eq!(reason, StudioOverlaySaveRefusal::NonceConflict);
     assert!(
         refused.contains("nonce was reused with conflicting bytes"),
         "the conflicting nonce must be rejected by the durable ledger: {refused}"
@@ -436,9 +646,11 @@ async fn studio_actor_unconfirmed_save_a_parked_plan_never_blocks_another_target
     );
     assert_eq!(pending(&mut p, index), 1, "A's work landed in B's visit");
 
-    let refused = save(&mut receiver, &mut p, flipnote, &b)
-        .unwrap_err()
-        .to_string();
+    let (reason, refused) = refusal(
+        save(&mut receiver, &mut p, flipnote, &b),
+        "B after the other target's plan was drained",
+    );
+    assert_eq!(reason, StudioOverlaySaveRefusal::PreviewUnavailable);
     assert!(
         refused.contains("no live preview"),
         "B is no longer blocked by the slot; it reaches its own mint: {refused}"
@@ -805,11 +1017,19 @@ fn retitle_missing(
 const PLAN_REFUSAL: &str = "malformed op";
 
 /// What a retry is answered: the refusal's text, or a panic naming what came instead.
-fn refused_text(answer: Result<StudioUnconfirmedSaveOutcome, AppError>, what: &str) -> String {
+fn refusal(
+    answer: Result<StudioUnconfirmedSaveOutcome, AppError>,
+    what: &str,
+) -> (StudioOverlaySaveRefusal, String) {
     match answer {
-        Err(error) => error.to_string(),
+        Ok(StudioUnconfirmedSaveOutcome::Refused { reason, message }) => (reason, message),
+        Err(error) => panic!("{what}: returned error {error}, not a typed refusal"),
         Ok(outcome) => panic!("{what}: answered {outcome:?}, not refused"),
     }
+}
+
+fn refused_text(answer: Result<StudioUnconfirmedSaveOutcome, AppError>, what: &str) -> String {
+    refusal(answer, what).1
 }
 
 /// MAP K12. A plan refused for a reason that cannot change while its record does not is answered
@@ -1011,11 +1231,14 @@ async fn studio_actor_unconfirmed_save_a_kept_refusal_answers_only_its_own_serve
     // prepared under `SERVER`. Nothing is captured.
     let elsewhere = save_on(&mut receiver, &mut p, SERVER + 1, target, &request);
     assert!(
-        !matches!(&elsewhere, Err(error) if error.to_string().contains(PLAN_REFUSAL)),
+        !matches!(&elsewhere, Ok(StudioUnconfirmedSaveOutcome::Refused { message, .. }) if message.contains(PLAN_REFUSAL)),
         "a refusal kept under one server answered a Save under another: {elsewhere:?}"
     );
     assert!(
-        matches!(&elsewhere, Err(error) if error.to_string().contains("replaced mount/server")),
+        matches!(&elsewhere, Ok(StudioUnconfirmedSaveOutcome::Refused {
+            reason: StudioOverlaySaveRefusal::PreviewReplaced,
+            message,
+        }) if message.contains("replaced mount/server")),
         "under another server the Save was not decided afresh by S1b: {elsewhere:?}"
     );
     assert!(
@@ -1176,6 +1399,29 @@ async fn studio_actor_unconfirmed_branch_reconciles_from_awaiting_to_confirmed_o
         "a confirmed base promotes nothing: the branch is still Unconfirmed"
     );
     assert_eq!(pending(&mut p, target), 1);
+}
+
+/// MAP M3: a Save is often the first actor visit to discover that an Unconfirmed document gained
+/// an installed source. Its typed refusal must also invalidate the lifecycle row; otherwise the UI
+/// can keep presenting the old awaiting-source state after being told that state is impossible.
+#[tokio::test]
+async fn studio_actor_installed_source_refusal_requests_a_lifecycle_refresh() {
+    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    let request = new_entry(&mut p, (basis, branch), 0x6a, [8; 16]);
+    install_confirmed_checkpoint(&mut p, target);
+    let _ = receiver.take_settlement_notices();
+
+    let (reason, _) = refusal(
+        save(&mut receiver, &mut p, target, &request),
+        "Save beside the newly installed source",
+    );
+    assert_eq!(reason, StudioOverlaySaveRefusal::InstalledSource);
+    assert!(
+        receiver
+            .take_settlement_notices()
+            .contains(&(target, StudioSettlementState::RefreshRequired)),
+        "the durable source transition did not invalidate the lifecycle row"
+    );
 }
 
 /// The other two app-level arms of design 8.6 (re-review of `5ccc4647`, LOW-5). A confirmed source
@@ -1342,9 +1588,11 @@ async fn studio_actor_unconfirmed_branch_resumes_after_a_restart_from_what_it_pe
         );
     }
     let fresh = new_entry(&mut p, (basis, branch), 103, [10; 16]);
-    let refused = save(&mut receiver, &mut p, target, &fresh)
-        .unwrap_err()
-        .to_string();
+    let (reason, refused) = refusal(
+        save(&mut receiver, &mut p, target, &fresh),
+        "new authoring after restart without a preview",
+    );
+    assert_eq!(reason, StudioOverlaySaveRefusal::PreviewUnavailable);
     assert!(refused.contains("no live preview"), "{refused}");
     assert_eq!(pending(&mut p, target), 2);
 

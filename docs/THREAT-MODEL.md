@@ -11,6 +11,19 @@ table with the commit that closed it.
 
 ## Trust assumptions
 
+- **Renderer access to retained Studio work is local authority, not protocol authority.** The Gate 4
+  completion candidate registers the reviewed overlay lifecycle family and a ticketed Unconfirmed
+  Save for awaiting-tenure previews. The session gate, command allow-list and actor/store custody
+  still enforce the boundary if the renderer is modified. A ticket binds the local target, basis
+  and branch; the request also freezes its nonce and canonical body. Exact retry cannot silently
+  become a new edit, and a replacement ticket requires explicit re-authoring. The resulting branch
+  is local-only and cannot become an installed source, owner receipt, handoff/signing authority or
+  publication claim. Copy preview saves nothing; copy apply rechecks and writes one ordinary
+  provisional edit. Discard and archive release require exact confirmation literals. Direct
+  Closing Save and native repair commands remain absent. A malicious renderer can request the
+  exposed local actions and exhaust their documented bounded quotas, but cannot bypass their
+  membership, tenure, freshness, storage, reference or destructive-confirmation checks.
+
 - **A repair is bound to the repairing owner's tenure, not just their key.** The v2 repair
   transcript adds issuer tenure separately from the fault tenure. Live application checks the
   independently observed current tenure before exact-retry handling; old v1 remains historical
@@ -363,12 +376,27 @@ table with the commit that closed it.
     released at pause, at the lock reset and on context change. The job takes permits from the
     same four-slot process pool as catch-up preparation.
   - **Under writes:** a write by another actor charges the job's restart budget, and an exhausted
-    budget backs off; this actor's own writes refresh it uncharged, within a cap.
+    budget backs off; this actor's own writes refresh it uncharged, within a cap. **Except a
+    restart whose attempt warmed a record it found cold** (C-3 runtime 16.3): that is progress,
+    since the next attempt finds the record warm, so it is not charged. Each record excuses at most
+    one restart in a job's life, and a job has at most 64 restarts excused, so a peer writing
+    between every turn still drives the job to back off once it has nothing cold left to warm.
+    Each excused restart did at most one visit's bounded validation work, which the memo keeps.
   - **Errors:** a detached validation's error pauses background receive only if it is about bytes
     still current. An error about bytes a later write replaced restarts the job.
   - **Fallback:** a move that the job cannot serve within 60 s falls back to the synchronous scan
     it used before step 2. So the move, and its recovery notice, can be delayed by up to that
     long.
+- **The other automatic Studio inventory owners remain synchronous, as measured debt** (C-3
+  runtime 16.5). After production writers warm every record family, the sampled warm Registry and
+  Studio accounting traversals spent about 0-8 ms in release profiling, and a real foreign writer
+  overtaking a cold shared job leaves enough memo progress for the restarted job to mint on its
+  next turn. These are host measurements, not an `INVENTORY_SLICE_MS` guarantee. A remount makes
+  the memo cold: receive/catch-up retain their 1024-entry, 64-record, 8 MiB and 256 KiB-cold
+  fail-closed rails, while full-profile H1 and repair commits can still hold one custody visit for
+  cold validation. Replay is the only production owner that keeps an inventory cursor across
+  visits; a future latency gate must give H1/repair embedded ownership-aware jobs rather than
+  borrowing a second pool permit.
 - **A Studio handoff's final commit (H5) runs in one custody visit, accepted as technical debt**
   (decision 2026-10-09, `GATE4-AGENT-1-C3-RUNTIME.md` 15.14). It grows with the document and the
   local draft, both capped (999 frames, 256 draft operations). At both caps it measured about
@@ -621,9 +649,9 @@ table with the commit that closed it.
   selected ids pause even when normally retired by a receipt. Holds count as visited only.
   A private stable physical-mount token rejects use after reopen but is NOT a native UI-lock or
   server-incarnation permit (native lock may keep the store mounted). No ciphertext queue is held;
-  Debug omits scope, ids and content. This is trusted local orchestration, not a peer-facing API:
-  aggregate pass concurrency/work limits, native lifecycle cancellation and automatic wakeups
-  remain required before live actor integration. The cooperative sender adds the checks below.
+  Debug omits scope, ids and content. This is trusted local orchestration, not a peer-facing API.
+  Gate 4's live actor integration adds aggregate pass/work limits, lifecycle cancellation and
+  bounded wakeups outside this cursor; the cooperative sender adds the checks below.
 - **The cooperative registry sender binds known local state, not remote currency.** Its cursor
   captures the exact sync-instance allocation at begin; a same-device/group restore refuses the
   old cursor. Exclusive sync/store borrows cover checked saved-intent preparation and awaited
@@ -634,10 +662,11 @@ table with the commit that closed it.
   A private exact-ticket guard advances only on Submitted. Duplicate, errors, cancellation and
   unwind preserve the saved id and charged deadline for fresh resealing; every outcome retains
   the durable intent. Cancellation after driver admission cannot retract gossip/cache effects.
-  This is a cooperative backend call, not live actor orchestration, a native lock lease, a bound
-  on aggregate passes, a driver deadline or evidence that a remote receipt has already arrived.
-  Managed catch-up and automatic wakeup remain unwired. Cursor/result Debug redact scope
-  and content; the sync token is process-local and never persisted or transmitted.
+  This cooperative backend call is not by itself live actor orchestration, a native lock lease, a
+  bound on aggregate passes, a driver deadline or evidence that a remote receipt has already
+  arrived. Gate 4 wires managed catch-up and bounded wakeups through separate actor custody and
+  scheduling. Cursor/result Debug redact scope and content; the sync token is process-local and
+  never persisted or transmitted.
 - **Registry gossip authentication is not saved admission.** Explicit concrete-epoch watches use
   fresh sync/watch generations; their app handles also bind physical mount and captured local
   server/bucket. Rewatch/unwatch discards old queued packets without refunding rate debt. Desired
@@ -903,9 +932,11 @@ table with the commit that closed it.
   quota; fresh complete inventory reconstructs it. The common `EpochIntentBudget` writer tracks
   ordinary and Flow S replacements alike. The 8 MiB share is an admission limit on Unconfirmed
   growth, not a hard vault invariant: an ordinary edit can take the tally over the share, after
-  which new Unconfirmed growth refuses until headroom returns. The
-  internal actor path and native result types exist, but no native command or UI exposes them;
-  this slice grants no permission to promote P5.
+  which new Unconfirmed growth refuses until headroom returns. Gate 4 promotes P5 only for the
+  reviewed lifecycle family and ticketed Unconfirmed Save: native commands and the Studio UI expose
+  those local-authority operations behind the session gate and command allow-list. Direct Closing
+  Save and unfinished repair commands remain unavailable; this exposure grants no source, signing,
+  publication or settlement authority.
   The new explicit native Index/art transactions lend the sole mounted store only AFTER the
   actor's Ready rendezvous. Numeric-server persistence, UI commit and exact registry-incarnation
   locks are acquired without awaiting; a busy fence drops Ready and writes nothing. The blocking
@@ -919,8 +950,11 @@ table with the commit that closed it.
   possession. Create is two-file and can leave an unlisted
   object on index refusal. A cancelled operation already running may finish durably; cancellation
   suppresses stale results, not committed content. Finite scans/restores run off-executor but
-  retain lifecycle locks and have no accepted-size latency guarantee. Views say local/provisional;
-  automatic receive, owner settlement, expiry enforcement and UI wiring remain separate gates.
+  retain lifecycle locks and have no accepted-size latency guarantee. Views say local/provisional.
+  Automatic receive, watched-owner settlement and detached repair run through their own actor
+  authority/custody gates; the UI wiring exposes only the bounded local
+  lifecycle/ticketed-Unconfirmed path above. Expiry remains enforced by store/actor checks rather
+  than renderer timing.
   Successful native saves now attempt initial publication of at most two actual store-returned
   packets. Complete Save plus final-view success is required; partial Create exposes no batch.
   The same sole Server/store/native guards remain held from save through one-shot dispatch, so

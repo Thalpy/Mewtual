@@ -11,6 +11,14 @@ use catcoms_replication::studio::{
 pub(crate) enum StudioHandoffStart {
     Settled(StudioHandoffOutcome),
     Captured(Box<StudioHandoffCapture>),
+    /// H1 classified a durable reason the automatic transfer cannot proceed. Runtime paces this
+    /// target; synchronous callers keep their legacy error channel.
+    Refused(catcoms_replication::studio::StudioOverlayManualReason),
+}
+
+enum IndexHandoffHold {
+    NotReplayable,
+    ObjectMissing,
 }
 
 /// The rule `check_handoff_references` enforces, kept pure so it can be tested on its own (C-3
@@ -85,27 +93,38 @@ impl ServerStore {
         device: &MlsDevice,
         document: &LogicalDocument,
         state: &EpochIntentState,
-    ) -> Result<(), AppError> {
+    ) -> Result<Option<IndexHandoffHold>, AppError> {
         let StudioTarget::Index { channel } = target else {
-            return Ok(());
+            return Ok(None);
         };
         for (_, intent) in state.pending().filter(|(id, _)| state.is_overlay(id)) {
-            if let IndexOp::PutObject { object, .. } =
-                IndexOp::decode_domain(document, &intent.operation, &intent.author)
-                    .map_err(invalid)?
-            {
-                let referenced = self.load_studio_epoch(
+            let operation =
+                match IndexOp::decode_domain(document, &intent.operation, &intent.author) {
+                    Ok(operation) => operation,
+                    Err(_) => return Ok(Some(IndexHandoffHold::NotReplayable)),
+                };
+            if let IndexOp::PutObject { object, .. } = operation {
+                let referenced = match self.load_studio_epoch(
                     server,
                     group,
                     StudioTarget::Flipnote { channel, object },
                     device,
-                )?;
+                ) {
+                    Ok(referenced) => referenced,
+                    // A transient local-storage failure is not evidence that the object is
+                    // absent; let runtime back off instead of persisting a manual diagnosis.
+                    Err(error @ (AppError::Io(_) | AppError::Storage(_))) => return Err(error),
+                    // An authenticated record that cannot be opened/restored is unusable to this
+                    // handoff in exactly the same way as absence. This intentionally matches P2's
+                    // bounded header classifier without exposing corruption detail in lifecycle.
+                    Err(_) => return Ok(Some(IndexHandoffHold::ObjectMissing)),
+                };
                 if referenced.is_none_or(|s| s.op_count() == 0 && s.epoch() == 0) {
-                    return Err(invalid("overlay references an unavailable Flipnote"));
+                    return Ok(Some(IndexHandoffHold::ObjectMissing));
                 }
             }
         }
-        Ok(())
+        Ok(None)
     }
 
     /// H5's form of the Index object check, without a restore (design 9.1.1, amendment A1).
@@ -235,6 +254,9 @@ impl ServerStore {
         )? {
             StudioHandoffStart::Settled(outcome) => return Ok(outcome),
             StudioHandoffStart::Captured(capture) => capture,
+            StudioHandoffStart::Refused(reason) => {
+                return Err(invalid(format!("overlay handoff refused: {reason:?}")))
+            }
         };
         // H1 already required a live tenure to mint the authority, so this cannot be absent here.
         let tenure =
@@ -242,7 +264,9 @@ impl ServerStore {
         // H2, then H3 with no turn cap, no deadline and nothing to yield to, then H4. The
         // scheduled runtime runs these same four with custody released around H2 and H4 and the
         // signing paged across visits.
-        let mut plan = capture.prepare()?;
+        let mut plan = capture
+            .prepare()
+            .map_err(|failure| (*failure).into_error())?;
         let slice = plan.sign_slice(device, group, tenure, false, usize::MAX, None)?;
         if !slice.complete() {
             return Err(invalid("handoff signing did not complete"));
@@ -315,8 +339,15 @@ impl ServerStore {
         let overlay = metadata
             .overlay()
             .ok_or_else(|| invalid("saved overlay basis is stale or unknown"))?;
-        if overlay.author() != device.device_id() || overlay.basis() != basis {
-            return Err(invalid("overlay author or basis mismatch"));
+        if overlay.author() != device.device_id() {
+            return Ok(StudioHandoffStart::Refused(
+                catcoms_replication::studio::StudioOverlayManualReason::NotCurrentAuthor,
+            ));
+        }
+        if overlay.basis() != basis {
+            // The structural probe selected another generation and raced this H1 visit. That is
+            // transient runtime state, not a durable authorship claim about the current branch.
+            return Err(invalid("overlay basis changed after the handoff probe"));
         }
         if state.handoff_prepared() {
             self.resolve_studio_handoff_with_io(
@@ -342,11 +373,20 @@ impl ServerStore {
         // The short live-authority mint. Structural metadata is enough: this reads the target,
         // the active branch's author and its receipt, and checks them against live membership,
         // MLS epoch and the observed tenure. It reconstructs nothing.
-        let authority = state
+        let metadata = state
             .handoff_metadata()
-            .ok_or_else(|| invalid("overlay metadata missing"))?
-            .handoff_authority(device, group, tenure)
-            .map_err(invalid)?;
+            .ok_or_else(|| invalid("overlay metadata missing"))?;
+        metadata.check_target(target).map_err(invalid)?;
+        let authority = match metadata.handoff_authority(device, group, tenure) {
+            Ok(authority) => authority,
+            // Membership and the target were checked in this custody visit, and authorship was
+            // checked above. What remains is the branch receipt no longer naming the live owner.
+            Err(_) => {
+                return Ok(StudioHandoffStart::Refused(
+                    catcoms_replication::studio::StudioOverlayManualReason::ReceiptChanged,
+                ))
+            }
+        };
         // The pristine-successor probe (design 14, the guard M6 removes), from the record header
         // alone: a bounded authenticated read, never a restore. H2's `check_overlay_successor`
         // stays authoritative. This refuses, before anything is captured or scheduled, a successor
@@ -367,17 +407,30 @@ impl ServerStore {
         let owner = group.designated_committer();
         match self.with_vault_source(server, group, target, |bytes| {
             StudioEpoch::overlay_successor_hold_in_vault(bytes, target, owner, overlay)
-        })? {
-            None => return Err(invalid("overlay handoff successor source missing")),
-            Some(Some(reason)) => {
-                return Err(invalid(format!(
-                    "overlay handoff successor is not transferable: {reason:?}"
-                )))
+        }) {
+            Err(_) => {
+                return Ok(StudioHandoffStart::Refused(
+                    catcoms_replication::studio::StudioOverlayManualReason::SourceUnreadable,
+                ))
             }
-            Some(None) => {}
+            Ok(None) => {
+                return Ok(StudioHandoffStart::Refused(
+                    catcoms_replication::studio::StudioOverlayManualReason::SourceMissing,
+                ))
+            }
+            Ok(Some(Some(reason))) => return Ok(StudioHandoffStart::Refused(reason)),
+            Ok(Some(None)) => {}
         }
         // Index creation still requires the actual independently saved object source.
-        self.check_index_object_sources(server, group, target, device, &document, &state)?;
+        if let Some(hold) =
+            self.check_index_object_sources(server, group, target, device, &document, &state)?
+        {
+            use catcoms_replication::studio::StudioOverlayManualReason as R;
+            return Ok(StudioHandoffStart::Refused(match hold {
+                IndexHandoffHold::NotReplayable => R::NotReplayable,
+                IndexHandoffHold::ObjectMissing => R::ObjectMissing,
+            }));
+        }
         self.capture_studio_handoff(
             server, group, target, device, &document, basis, tenure, authority,
         )

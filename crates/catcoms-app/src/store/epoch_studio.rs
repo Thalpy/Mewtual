@@ -28,7 +28,8 @@ mod eligibility;
 mod handoff_capture;
 pub(crate) use handoff_capture::{
     SigningSlice, StudioHandoffCapture, StudioHandoffCommit, StudioHandoffPlan,
-    MAX_SIGNING_TURNS_PER_VISIT, SIGNING_SLICE_BUDGET_MS,
+    StudioHandoffPrepareFailure, StudioHandoffStamp, MAX_SIGNING_TURNS_PER_VISIT,
+    SIGNING_SLICE_BUDGET_MS,
 };
 mod overlay;
 pub(crate) use overlay::StudioOverlayStart;
@@ -709,7 +710,16 @@ impl ServerStore {
             let framed = frame(&sealed);
             let mutation = self.epoch_mutation_guard();
             let framed = hooks.before(step.tag(), &path, &framed)?;
-            mutation.write(&path, &framed)?;
+            let original_plain =
+                matches!(&framed, std::borrow::Cow::Borrowed(_)).then_some(plain.as_slice());
+            let write = mutation.write(&path, &framed);
+            self.finish_inventory_write_from_record(
+                write,
+                super::epoch_recovery::inventory::EpochRecordKind::Studio,
+                original_plain,
+                plain.len() as u64 + 40,
+                record,
+            )?;
             hooks.after_write(step.tag(), &path)?;
             reservation.commit();
             Some(self.studio_source_version(server, &unit, &plain, plain.len() as u64 + 40)?)

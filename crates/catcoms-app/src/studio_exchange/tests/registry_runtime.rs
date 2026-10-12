@@ -193,6 +193,145 @@ async fn studio_held_registry_page_is_discarded_after_fault_or_checkpoint_replac
     }
 }
 
+/// The Registry counterpart of the held-Studio-page ordering regression. A PageReady bucket that
+/// cannot acquire the shared preparation permit remains held, but the same visit must still reach
+/// checkpoint service so an H3 owner does not keep yielding to a queued request that catch-up can
+/// never even reserve.
+#[tokio::test]
+async fn a_cold_held_registry_page_with_a_full_pool_still_reaches_checkpoint_service() {
+    use crate::registry_catchup::RegistryReceiveState;
+
+    let mut p = super::pages::proven_pair().await;
+    let (proof, tick) = tokio::join!(
+        p.alice
+            .sync
+            .request_catchup(p.bob.local_peer(), catcoms_wire::DocType::Wiki, 43),
+        p.bob.sync_once(),
+    );
+    proof.unwrap();
+    tick.unwrap();
+
+    let logical = target().document(&p.alice.group_id()).unwrap();
+    let key = PointerKey::new(logical.doc_type, logical.logical_key).unwrap();
+    let bucket = key.bucket();
+    let packets = p.alice.sync.with_registry_context(|g, d, _, rng| {
+        let mut unit = RegistryEpoch::new(g, bucket, d.device_id()).unwrap();
+        [1, 2]
+            .into_iter()
+            .map(|n| {
+                unit.edit(
+                    d,
+                    g,
+                    rng,
+                    &RegistryOp::Put {
+                        key: key.clone(),
+                        epoch: n,
+                    }
+                    .domain_op(&g.group_id(), [n as u8; 16])
+                    .unwrap(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>()
+    });
+    for (node, store, slice) in [
+        (&mut p.alice, &mut p.a_store, packets.as_slice()),
+        (&mut p.bob, &mut p.b_store, &packets[..1]),
+    ] {
+        let mut b = budget(node, store);
+        node.sync.with_registry_context(|g, d, _, rng| {
+            store
+                .with_studio_protocol_budget(SERVER, g, &mut b, |store, budget| {
+                    for op in slice {
+                        store.ingest_registry_epoch(SERVER, g, bucket, d, op, rng, budget)?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        });
+    }
+    let awatch = p
+        .alice
+        .watch_registry_epoch(&p.a_store, SERVER, bucket)
+        .unwrap();
+    let bwatch = p
+        .bob
+        .watch_registry_epoch(&p.b_store, SERVER, bucket)
+        .unwrap();
+    let mut provider = p
+        .alice
+        .begin_registry_page_provider(&p.a_store, SERVER, bucket)
+        .unwrap();
+    crate::registry_catchup::prepare_test_source(&mut p.alice, &p.a_store, &mut provider)
+        .await
+        .unwrap();
+    let mut b = budget(&mut p.bob, &mut p.b_store);
+    let group = p.bob.group_id();
+    let mut pass = p
+        .b_store
+        .with_studio_protocol_scope(SERVER, &group, &mut b, |store, budget| {
+            p.bob
+                .begin_registry_receive(store, &bwatch, p.alice.local_peer(), budget)
+        })
+        .unwrap();
+    let (fetched, ()) = tokio::join!(p.bob.fetch_registry_receive_step(&mut pass), async {
+        p.alice.sync_once().await.unwrap();
+        p.alice
+            .serve_registry_request_step(&p.a_store, &mut provider, &awatch)
+            .unwrap()
+            .unwrap();
+    });
+    assert_eq!(fetched.unwrap(), RegistryReceiveState::PageReady);
+
+    let mut receiver = crate::studio::StudioReceiver::default();
+    receiver
+        .run(
+            &mut p.bob,
+            &mut p.b_store,
+            SERVER,
+            Some(StudioRequest::Read { target: target() }),
+        )
+        .unwrap();
+    receiver.hold_registry_page_for_test(target(), pass);
+    let pool = receiver.inject_overlay_pool_for_test(0);
+
+    let request = p
+        .alice
+        .sync
+        .prepare_checkpoint_head(
+            p.bob.local_peer(),
+            catcoms_sync::checkpoint_exchange::CheckpointTarget::Studio(target()),
+        )
+        .unwrap();
+    let fetch = tokio::spawn(request.fetch());
+    tokio::task::yield_now().await;
+    for _ in 0..8 {
+        if p.bob.sync.has_epoch_service_interest() {
+            break;
+        }
+        p.bob.sync_once().await.unwrap();
+    }
+    assert!(p.bob.sync.has_epoch_service_interest());
+
+    receiver
+        .run(&mut p.bob, &mut p.b_store, SERVER, None)
+        .unwrap();
+    assert!(
+        receiver.has_registry_page_for_test(),
+        "the blocked Registry page was discarded"
+    );
+    assert_eq!(pool.available_permits(), 0);
+    assert!(
+        !p.bob.sync.has_epoch_service_interest(),
+        "the Registry early return left checkpoint service queued and unreachable"
+    );
+    assert!(
+        receiver.service_capture_for_test().is_some() || fetch.is_finished(),
+        "the request was neither retained nor answered when service became reachable"
+    );
+    fetch.abort();
+}
+
 #[tokio::test]
 async fn studio_faulted_registry_bucket_does_not_pause_healthy_studio_receive() {
     let mut p = Pair::new().await;

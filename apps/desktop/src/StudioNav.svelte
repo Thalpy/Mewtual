@@ -7,8 +7,8 @@
   import { PixRaster } from "./pix-canvas.ts";
   import { DEFAULT_PALETTE } from "./studio-store.ts";
   import { FLIPNOTE_H, FLIPNOTE_W } from "./studio-contract.ts";
-  import { reason, type KnownView } from "./studio-session.ts";
-  import type { NativeExpiry } from "./studio-native.ts";
+  import { reason, type KnownView, type SaveRecord } from "./studio-session.ts";
+  import { base64ToBytes, type NativeExpiry } from "./studio-native.ts";
 
   let { me, server, channel, onopen, onnotice } = $props<{
     me: string;
@@ -30,11 +30,73 @@
   const model = $derived.by(() => { void studio.rev; return session.indexModel; });
   const indexView = $derived.by(() => { void studio.rev; return session.index; });
   const indexError = $derived.by(() => { void studio.rev; return session.indexError; });
+  const indexOverlay = $derived.by(() => { void studio.rev; return session.indexOverlay; });
   const loading = $derived.by(() => { void studio.rev; return session.indexLoading && !session.index; });
   const pendingCreates = $derived.by(() => { void studio.rev; return session.saves.filter((s) => s.kind === "create"); });
+  const indexAttention = $derived.by(() => {
+    void studio.rev;
+    return session.pendingFor(null).filter((s) => s.status === "blocked" || s.status === "uncertain");
+  });
   // Read through the revision, and first in the expression below: a non-reactive read that
   // short-circuits on the first render would leave the template never subscribed to the rest.
   const hasScope = $derived.by(() => { void studio.rev; return session.scope !== null; });
+  const indexDraftChoices = $derived.by(() => { void studio.rev; return session.overlayChoices("copy", null); });
+  const indexDraftKey = $derived.by(() => {
+    void studio.rev;
+    const branch = indexOverlay?.lifecycle?.branch;
+    const scope = session.scope;
+    return scope && branch ? `${scope.server}:${scope.channel}:index:${branch.branch}:${branch.content}` : "";
+  });
+  const indexArchiveKey = $derived.by(() => {
+    void studio.rev;
+    const archive = indexOverlay?.archive?.archive;
+    const scope = session.scope;
+    return scope && archive ? `${scope.server}:${scope.channel}:index:${archive}` : "";
+  });
+  let indexDiscardArmed = $state("");
+  let indexReleaseArmed = $state("");
+  let indexSaveDiscardArmed = $state("");
+  const indexSaveKey = $derived.by(() => {
+    void studio.rev;
+    const save = indexAttention[0];
+    const scope = session.scope;
+    return save && scope ? `${scope.server}:${scope.channel}:index-save:${save.id}` : "";
+  });
+  $effect(() => {
+    const draftNow = indexDraftKey;
+    const archiveNow = indexArchiveKey;
+    const saveNow = indexSaveKey;
+    untrack(() => {
+      if (indexDiscardArmed && indexDiscardArmed !== draftNow) indexDiscardArmed = "";
+      if (indexReleaseArmed && indexReleaseArmed !== archiveNow) indexReleaseArmed = "";
+      if (indexSaveDiscardArmed && indexSaveDiscardArmed !== saveNow) indexSaveDiscardArmed = "";
+    });
+  });
+
+  function overlayRetryOf(s: SaveRecord) { return s.kind === "frame" || s.kind === "overlayApply" ? s.overlayRetry : null; }
+
+  async function indexDraftAction(action: () => Promise<unknown>, success: string) {
+    try { await action(); onnotice?.(success, "info"); } catch (e) { onnotice?.(reason(e), "warn"); }
+  }
+  async function copyIndexDraftItem(choice: (typeof indexDraftChoices)[number]) {
+    try { await session.copyOverlayChoice(null, choice.choice, choice.label, "copy"); } catch (e) { onnotice?.(reason(e), "warn"); }
+  }
+  async function retryIndexDraftCopy() {
+    try { await session.retryOverlayCopy(null); } catch (e) { onnotice?.(reason(e), "warn"); }
+  }
+  function downloadIndexDraft() {
+    const x = indexOverlay?.exported;
+    if (!x?.bytesB64) return;
+    try {
+      const url = URL.createObjectURL(new Blob([base64ToBytes(x.bytesB64)], { type: "application/octet-stream" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "studio-index-draft.catcoms-studio-draft-v1.bin";
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } catch (e) { onnotice?.(`could not hand the index draft archive to the browser: ${reason(e)}`, "warn"); }
+  }
+  function words(value: string): string { return value.replace(/[A-Z]/g, (c) => ` ${c.toLowerCase()}`); }
 
   function known(id: string): KnownView | null {
     void studio.rev;
@@ -52,7 +114,12 @@
 
   function indexNote(): { text: string; tone: "warn" | "danger" | "" } {
     if (!indexView) return { text: "", tone: "" };
-    if (indexView.awaitingTenureReceipt) return { text: "read-only preview · owner has not confirmed this channel's history", tone: "warn" };
+    if (indexView.awaitingTenureReceipt) return {
+      text: indexOverlay?.inspection?.kind === "local-draft"
+        ? "unconfirmed base · showing this device's local-only index draft"
+        : "read-only base · owner has not confirmed this channel's history",
+      tone: "warn",
+    };
     if (indexView.phase === "fault") return { text: "index history fault", tone: "danger" };
     if (indexView.phase === "closing") return { text: "index rotating · new entries wait for the owner", tone: "warn" };
     return { text: "", tone: "" };
@@ -95,6 +162,90 @@
 {/if}
 {#if indexError}
   <p class="studio-note danger">{indexError}</p>
+{/if}
+{#if indexAttention.length}
+  {@const save = indexAttention[0]}
+  <div class="studio-index-draft warn">
+    <span><b>{save.status === "blocked" ? "index save not written" : "index save uncertain"}</b> · {save.label}</span>
+    <span class="micro wrap">{save.error}{#if save.status === "blocked"} · the backend confirmed that this attempt wrote nothing{/if} · your edit is retained and later Index saves wait behind it</span>
+    <span class="index-draft-actions">
+      {#if overlayRetryOf(save) !== "newTicket" && overlayRetryOf(save) !== "none"}
+        <button type="button" class="ghost small ctx-action" onclick={() => session.retry(save.id)}>{overlayRetryOf(save) === "afterExplicitAccess" ? "access, then retry index save" : "retry exact index save"}</button>
+      {/if}
+      <button type="button" class="ghost small ctx-action" disabled={overlayRetryOf(save) === "none"} onclick={() => session.reauthor(save.id)}>save index edit as new</button>
+      {#if indexSaveDiscardArmed === indexSaveKey}
+        <button type="button" class="ghost small ctx-action danger" onclick={() => indexSaveDiscardArmed === indexSaveKey && session.discard(save.id)}>discard index edit for real</button>
+        <button type="button" class="ghost small ctx-action" onclick={() => (indexSaveDiscardArmed = "")}>cancel</button>
+      {:else}
+        <button type="button" class="ghost small ctx-action" onclick={() => (indexSaveDiscardArmed = indexSaveKey)}>discard index edit…</button>
+      {/if}
+    </span>
+  </div>
+{/if}
+{#if indexOverlay?.loading}
+  <p class="studio-note">Checking this device for a local-only index draft…</p>
+{:else if indexOverlay?.error}
+  <div class="studio-index-draft warn">
+    <span>Index draft status could not be read</span>
+    <span class="micro wrap">{indexOverlay.error}</span>
+    <button type="button" class="ghost small ctx-action" onclick={() => session.refreshIndex()}>retry status</button>
+  </div>
+{:else if indexOverlay?.inspection?.kind === "local-draft"}
+  {@const draft = indexOverlay.inspection}
+  <div class="studio-index-draft warn">
+    <span>local-only index draft · {draft.accepted} saved {draft.accepted === 1 ? "edit" : "edits"}</span>
+    <span class="micro wrap">{draft.provenance === "unconfirmed" ? "created while the owner's tenure was unconfirmed" : "retained from a closing rotation"}{#if draft.manualReason} · manual: {words(draft.manualReason)}{/if}</span>
+    <span class="index-draft-actions">
+      <button type="button" class="ghost small ctx-action" onclick={() => indexDraftAction(() => session.exportOverlay(null), "index draft export ready")}>export index draft</button>
+      <button type="button" class="ghost small ctx-action" onclick={() => indexDraftAction(() => session.archiveOverlay(null), "index draft preserved in an archive")}>preserve index draft</button>
+      {#if indexOverlay.archive}
+        <button type="button" class="ghost small ctx-action" onclick={() => indexDraftAction(() => session.disposeOverlay(null, "preserve"), "live index draft removed; archive preserved")}>remove live index draft</button>
+      {/if}
+      {#if indexDraftKey && indexDiscardArmed === indexDraftKey}
+        <button type="button" class="ghost small ctx-action danger" onclick={() => indexDiscardArmed === indexDraftKey && indexDraftAction(() => session.disposeOverlay(null, "discard"), "local index draft discarded")}>discard index draft for real</button>
+        <button type="button" class="ghost small ctx-action" onclick={() => (indexDiscardArmed = "")}>cancel</button>
+      {:else}
+        <button type="button" class="ghost small ctx-action" onclick={() => (indexDiscardArmed = indexDraftKey)}>discard index draft…</button>
+      {/if}
+    </span>
+    {#if indexView && !indexView.awaitingTenureReceipt && indexView.phase !== "closing" && indexView.phase !== "fault" && indexDraftChoices.length}
+      <span class="micro wrap">copy one retained index value into current history; this does not preserve the branch</span>
+      <span class="index-draft-actions">
+        {#each indexDraftChoices as choice (JSON.stringify(choice.choice))}
+          <button type="button" class="ghost small ctx-action" disabled={indexOverlay.copy?.status === "previewing" || indexOverlay.copy?.status === "applying"} onclick={() => copyIndexDraftItem(choice)}>{choice.label}</button>
+        {/each}
+      </span>
+    {/if}
+    {#if indexOverlay.copy}
+      <span class="micro wrap">copy {indexOverlay.copy.label} · {words(indexOverlay.copy.status)}{#if indexOverlay.copy.error} · {indexOverlay.copy.error}{/if}</span>
+      {#if indexOverlay.copy.status === "uncertain"}<button type="button" class="ghost small ctx-action" onclick={retryIndexDraftCopy}>retry exact index copy</button>{/if}
+    {/if}
+  </div>
+{:else if indexOverlay?.inspection?.kind === "disposed"}
+  <p class="studio-note">Local index draft disposed · {indexOverlay.inspection.mode} · terminal local history, not absence.</p>
+{:else if indexOverlay?.lifecycle?.transferred}
+  <p class="studio-note">The local index draft was transferred into successor history.</p>
+{/if}
+{#if indexOverlay?.archive}
+  <div class="studio-index-draft">
+    <span>retained index draft archive · {indexOverlay.archive.accepted} edits</span>
+    <span class="micro wrap">terminal read-only recovery evidence · no authoring authority</span>
+    <span class="index-draft-actions">
+      <button type="button" class="ghost small ctx-action" onclick={() => indexDraftAction(() => session.exportOverlayArchive(null), "index draft archive export ready")}>export index archive</button>
+      {#if indexArchiveKey && indexReleaseArmed === indexArchiveKey}
+        <button type="button" class="ghost small ctx-action danger" onclick={() => indexReleaseArmed === indexArchiveKey && indexDraftAction(() => session.releaseOverlayArchive(null), "index archive released and status reconciled")}>release index archive for real</button>
+        <button type="button" class="ghost small ctx-action" onclick={() => (indexReleaseArmed = "")}>cancel</button>
+      {:else}
+        <button type="button" class="ghost small ctx-action" onclick={() => (indexReleaseArmed = indexArchiveKey)}>release index archive…</button>
+      {/if}
+    </span>
+  </div>
+{/if}
+{#if indexOverlay?.exported?.bytesB64}
+  <div class="studio-index-draft">
+    <span>index draft backup ready · {indexOverlay.exported.format}</span>
+    <button type="button" class="ghost small ctx-action" onclick={downloadIndexDraft}>save index draft file</button>
+  </div>
 {/if}
 <ul class="channel-list studio-nav">
   {#each model?.entries ?? [] as o (o.id)}
@@ -240,6 +391,21 @@
   }
   .studio-note.warn { background: var(--warn-dim); border-color: var(--warn-brd); }
   .studio-note.danger { background: var(--danger-dim); border-color: var(--danger-brd); }
+  .studio-index-draft {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin: 0 0 7px;
+    padding: 7px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    color: var(--text-2);
+    font-size: 0.72rem;
+  }
+  .studio-index-draft.warn { background: var(--warn-dim); border-color: var(--warn-brd); }
+  .index-draft-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+  .wrap { white-space: normal; overflow: visible; }
+  .danger { color: var(--danger); }
   .studio-deleted { margin: 2px 8px 6px; }
   .studio-new {
     border-style: dashed;

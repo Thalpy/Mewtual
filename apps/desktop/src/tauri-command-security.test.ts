@@ -506,6 +506,12 @@ test("every non-bootstrap native command visibly crosses the unlocked-session ga
   // that defines it keeps the audit honest in both directions.
   const moduleGatekeepers = new Map([
     ["studio.rs", "invoke|invoke_custody"],
+    // These modules expose the bounded Gate 4 overlay surface. Their commands either create an
+    // `InvokeContext` themselves for a multi-visit operation, or delegate to one of the named
+    // helpers whose complete path to that context is proved below. Keep the names module-scoped:
+    // `invoke_control` in an unrelated file must not accidentally become a session bypass.
+    ["studio/copy.rs", "InvokeContext::new|invoke_control"],
+    ["studio/lifecycle.rs", "invoke_control|invoke_archive|two_visit_archive"],
     ["studio/recovery.rs", "invoke_control|invoke_custody"],
     ["studio/inspection.rs", "read"],
   ]);
@@ -570,12 +576,17 @@ test("every helper the session-gate audit trusts does the checking itself", () =
   const studio = readFileSync(join(nativeDir, "studio.rs"), "utf8");
   const recovery = readFileSync(join(nativeDir, "studio", "recovery.rs"), "utf8");
   const inspection = readFileSync(join(nativeDir, "studio", "inspection.rs"), "utf8");
+  const lifecycle = readFileSync(join(nativeDir, "studio", "lifecycle.rs"), "utf8");
   const chain = [
     ["studio.rs", studio, "invoke_custody", "InvokeContext::new"],
     ["studio.rs", studio, "invoke", "invoke_custody"],
     ["studio/recovery.rs", recovery, "invoke_control", "invoke_custody"],
     ["studio/inspection.rs", inspection, "read(", "read_with"],
     ["studio/inspection.rs", inspection, "read_with", "InvokeContext::new"],
+    // Archive/export are two-visit operations. They retain one context across the detached
+    // rebuild so both custody visits and the final delivery fence belong to the same session.
+    ["studio/lifecycle.rs", lifecycle, "two_visit_archive", "InvokeContext::new"],
+    ["studio/lifecycle.rs", lifecycle, "invoke_archive", "invoke_custody"],
   ] as const;
   for (const [file, source, helper, reaches] of chain) {
     const start = source.indexOf(`async fn ${helper}`);

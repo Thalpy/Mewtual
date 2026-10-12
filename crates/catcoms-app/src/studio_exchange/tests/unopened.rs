@@ -3,6 +3,87 @@ use crate::studio::StudioReceiver;
 use crate::studio_exchange::discovery::ServerCheckpointDiscovery;
 use catcoms_sync::checkpoint_exchange::CheckpointTarget;
 
+/// A Registry service preparation is attached to the actor's sole provider. Once attached, the
+/// exact request must be answered in that same custody turn: otherwise the ordinary client/service
+/// alternation (or a held page for another bucket) can replace the provider before the request is
+/// reached. The forced client turn makes the old one-turn gap deterministic.
+#[tokio::test]
+async fn registry_service_is_answered_in_the_turn_its_source_is_installed() {
+    let mut p = super::pages::proven_pair().await;
+    super::discovery::prepared_checkpoint(&mut p, target());
+    let (bucket, _, _) = prepared_registry_material(&mut p, target(), false);
+    drop(p.a_store);
+    p.a_store = open(p._a_root.path());
+
+    let mut receiver = StudioReceiver::default();
+    receiver.preparation_pools_for_test(
+        std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(3)),
+    );
+    // Keep one real watch so the normal alternation can choose the client turn. Without the
+    // serve-on-install rule that makes the request wait at least one more turn.
+    receiver
+        .run(
+            &mut p.alice,
+            &mut p.a_store,
+            SERVER,
+            Some(StudioRequest::Read { target: target() }),
+        )
+        .unwrap();
+    let attempt = p
+        .bob
+        .prepare_checkpoint_discovery(
+            &p.b_store,
+            SERVER,
+            p.alice.local_peer(),
+            CheckpointTarget::Registry(bucket),
+        )
+        .unwrap();
+    let fetch = tokio::spawn(attempt.fetch());
+    tokio::task::yield_now().await;
+    for _ in 0..8 {
+        if p.alice.sync.has_epoch_service_interest() {
+            break;
+        }
+        p.alice.sync_once().await.unwrap();
+    }
+    assert!(p.alice.sync.has_epoch_service_interest());
+
+    let mut service_job = None;
+    for _ in 0..12 {
+        receiver
+            .run(&mut p.alice, &mut p.a_store, SERVER, None)
+            .unwrap();
+        let captured = receiver.service_capture_for_test() == Some(true);
+        if let Some(job) = receiver.detach(&mut p.alice) {
+            if captured {
+                service_job = Some(job);
+                break;
+            }
+            receiver.complete(&mut p.alice, job.run(None).await);
+        }
+    }
+    let job = service_job.expect("cold Registry service did not detach its preparation");
+    assert!(job.is_preparation_for_test());
+    receiver.complete(&mut p.alice, job.run(None).await);
+    receiver.set_client_turn_for_test(true);
+    receiver
+        .run(&mut p.alice, &mut p.a_store, SERVER, None)
+        .unwrap();
+    tokio::task::yield_now().await;
+    assert!(
+        fetch.is_finished(),
+        "the installed Registry source was left for a later service turn"
+    );
+    let completed = fetch.await.expect("Registry fetch task panicked");
+    assert!(
+        p.bob
+            .complete_checkpoint_discovery(&p.b_store, SERVER, completed)
+            .is_ok(),
+        "the same-turn Registry response was not valid"
+    );
+}
+
 #[tokio::test]
 async fn studio_registry_preparation_outliving_head_needs_a_fresh_request() {
     let mut p = super::pages::proven_pair().await;
@@ -649,11 +730,6 @@ async fn actor_newcomer(selected_target: StudioTarget, restart_closing: bool) {
         // keep driving its ORIGINAL bounded window so the independent Registry maintenance
         // path also gets a turn. The final assertions still require BOTH durable outcomes.
     }
-    assert!(
-        count.load(Ordering::SeqCst) >= 3,
-        "Closing, installation and remote tail each repaint: got {}",
-        count.load(Ordering::SeqCst)
-    );
     let view = super::actor_save::save(
         &b,
         &b_store,
@@ -680,6 +756,15 @@ async fn actor_newcomer(selected_target: StudioTarget, restart_closing: bool) {
     bt.await.unwrap();
     ad.await.unwrap();
     bd.await.unwrap();
+    // The event drain runs independently of the request actor. Join it before inspecting the
+    // count: during a heavily parallel suite the durable work can finish before this observer is
+    // scheduled, even though every repaint is already queued. Actor shutdown closes the stream,
+    // so the join is a deterministic delivery barrier rather than a timing concession.
+    assert!(
+        count.load(Ordering::SeqCst) >= 3,
+        "Closing, installation and remote tail each repaint: got {}",
+        count.load(Ordering::SeqCst)
+    );
     drop(b_store.lock().await.take());
     let reopened = open(p.b_root.path());
     let mut verifier = Node::restore(

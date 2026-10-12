@@ -72,6 +72,13 @@ pub enum StudioUnconfirmedSaveOutcome {
     /// (design 8.5), so this means the request named a Closing branch's transferred work. It is
     /// reported as it is rather than relabelled.
     HandedOff(catcoms_replication::studio::StudioHandoffOutcome),
+    /// Nothing was written. The reason and recovery action are stable typed values; the message is
+    /// retained for diagnostics but native conversion deliberately exposes only the bounded reason
+    /// vocabulary rather than arbitrary internal text.
+    Refused {
+        reason: catcoms_replication::studio::StudioOverlaySaveRefusal,
+        message: String,
+    },
     /// New authoring was captured and scheduled. Ask again with the identical request.
     Scheduled,
     /// Nothing of THIS request was saved; send the identical request again. Either admission or
@@ -104,6 +111,47 @@ pub enum StudioUnconfirmedSaveOutcome {
     /// Never the answer to an exact retry: that is answered at S1, before any capture, and stays
     /// `Saved` while paused. Only new authoring reaches the refusal.
     Paused,
+}
+
+impl StudioUnconfirmedSaveOutcome {
+    /// Whether losing this response after the actor visit must be reported as uncertain.
+    ///
+    /// `Scheduled` is included even though its write is still detached: once native has the
+    /// response, the actor owns the job and may commit it after the UI request is cancelled or its
+    /// session changes. `Busy`, `Paused`, and a typed `Refused` state promise that this request did
+    /// not write and therefore remain ordinary responses when delivery is withheld.
+    pub fn may_have_durable_effect(&self) -> bool {
+        matches!(
+            self,
+            Self::Saved { .. } | Self::Disposed(_) | Self::HandedOff(_) | Self::Scheduled
+        )
+    }
+}
+
+/// What the most recent automatic handoff attempt did. This is runtime truth beside, never inside,
+/// the durable [`types::StudioOverlayEligibility`] classification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StudioHandoffAttemptState {
+    /// The worker classified a durable successor condition with a stable manual reason.
+    Refused,
+    /// A transient read, race, authority change, assembly, budget, or write failure was paced.
+    BackingOff,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StudioHandoffAttemptReason {
+    Manual(types::StudioOverlayManualReason),
+    Transient,
+}
+
+/// A bounded, stamp-validated report of one failed automatic transfer attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StudioHandoffAttempt {
+    pub state: StudioHandoffAttemptState,
+    pub reason: StudioHandoffAttemptReason,
+    /// Monotonic actor time. It is useful for relative retry presentation only and is serialized
+    /// as a decimal string so JavaScript cannot lose precision.
+    pub retry_at_ms: u64,
 }
 
 pub struct StudioRecoveryApply {
@@ -294,6 +342,9 @@ pub struct StudioOverlayLifecycle {
     /// exactly when `branch` is. Structural: `NotReplayable` is only known after a rebuild, so it
     /// appears on an inspection and never here.
     pub eligibility: Option<types::StudioOverlayEligibility>,
+    /// The latest failed runtime transfer attempt, only while its H1 stamp is still current.
+    /// `eligibility` remains the source classifier and can legitimately differ.
+    pub handoff_attempt: Option<StudioHandoffAttempt>,
     /// Design 8.6: how an Unconfirmed branch's base relates to the installed source, derived on
     /// read from the source's header. `None` for a Closing branch or no branch. Cheap enough for
     /// this row, which is why it is here as well as on the inspection.
@@ -838,6 +889,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                                 branch,
                                 prepared: metadata.is_some_and(|m| m.is_prepared()),
                                 eligibility,
+                                handoff_attempt: None,
                                 unconfirmed,
                                 archive,
                                 disposed: metadata.and_then(|m| m.disposed()).map(|d| {

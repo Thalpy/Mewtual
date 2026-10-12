@@ -111,3 +111,18 @@ real driver lifetime signal. The reviews also required negative isolated-history
 assertions, exact accepted IDs/authors, production discovery cadence, and convergence while
 command producers remain active. Root integration runs Cargo serially with dev/test debug
 information and incremental compilation disabled and a shared `target` directory.
+
+### Windows rapid-restart correction
+
+Later Gate 4 integration repeatedly reproduced a final-reunion split into clients 1-3 and 4-6.
+Transport logging identified `WSAEADDRINUSE`, not a missing saved route or a scheduler timeout.
+By default, libp2p known-peer dials reuse the listener's local TCP port. After rapid shutdown and
+reopen, Windows can keep the prior local/remote four-tuple in `TIME_WAIT` even though the listener
+has reopened, so every accepted reconnect command can fail before Noise authentication.
+
+On Windows, bootstrap, infrastructure and saved-member-route dials therefore request a fresh
+ephemeral outbound port. Other platforms retain the default port reuse because it can help NAT
+traversal. The production change is exercised by both existing native scenarios: the normal
+restart/partition recovery case passed in 87.03 seconds, and the reversed-reopen, gossip-loss and
+command-load case passed in 125.59 seconds. These focused results establish the corrected failure
+sequence; they do not replace the final combined native suite required for Gate 4.

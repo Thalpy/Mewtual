@@ -27,17 +27,18 @@ adapters; bounded provider cursors and durable receiver continuation are impleme
 owner-tenure observations persist with MLS, and keyed registry receipt-head queries/proofs now
 use explicit local snapshot preparation plus checked source/decision barriers. Expected-seed
 fetch and recovery-first registry installation now connect that selection to the vault and a
-fresh open-epoch catch-up pass. Automatic wakeups/global replay scheduling, other
-managed-file families and production orchestration are not wired yet. The Studio slices named as
+fresh open-epoch catch-up pass. Gate 4 adds bounded automatic wakeups/replay, detached
+Studio/Registry repair and the real actor/native/UI orchestration for its supported document
+families. Other managed-file families remain separate work. The Studio slices named as
 later work in earlier revisions have since landed: the typed Index/frames materializers
 (`crates/catcoms-replication/src/studio/{index,frames}/snapshot.rs`), settlement orchestration
 (`.../studio/epoch/settlement.rs` and `crates/catcoms-app/src/studio/settlement.rs`), checkpoint
 discovery (`crates/catcoms-app/src/studio_exchange/discovery.rs`,
 `crates/catcoms-sync/src/checkpoint_exchange.rs`) and the app/UI event path, which forwards phase
-observations through `settlement-changed` (section 13). What remains later slices is the rest:
-the specialized settlement states, the Registry/repair producers, the other managed document
-families and complete storage integration. No frontend consumes any of this, so
-the feature is not usable yet. Revision 4
+observations through `settlement-changed` (section 13). The PR #41 candidate also connects the
+Registry/repair producers and exposes the reviewed Studio lifecycle/ticketed-Unconfirmed controls.
+Specialized states outside that bounded product path, other managed document families and complete
+storage integration remain later work. Revision 4
 dialled the protocol back to a bounded checkpoint-and-recovery mechanism. Revision 5 makes the
 five remaining lifecycle corrections: adoption is folded into the first crash-safe receipt of
 each owner tenure (section 11); a newcomer reads old-owner heads provisionally and gets
@@ -380,7 +381,8 @@ current-owner journal and flushing both records. This records head/seed availabi
 delivery, and allows a solo owner to rotate repeatedly. Only durable completion permits another
 eligible owner decision. Recently watched Studio and associated Registry maintenance now use the
 existing idle worker; conservative own-intent replay and native recovery controls are connected.
-Running-app succession, signed repair and final Gate 4 acceptance remain unfinished.
+The PR #41 completion candidate also connects running-app succession and detached signed repair;
+its final review and exact-head evidence are tracked in `GATE4-ACCEPTANCE.md`.
 
 ## 9. Intents and markers
 
@@ -779,8 +781,9 @@ document's settlement state: `Open`, `Closing`, `AwaitingReceipt`, `Settled`,
 observations `Open`, `Closing`, `Settled`, `Fault`, recovery availability/warnings and a
 `RefreshRequired` invalidation through `settlement-changed`, with payload and lifecycle tests.
 These are independent observations, not an exclusive combined state machine or receipt evidence.
-The remaining specialized states and Registry/repair producers are not yet connected; the UI
-must re-read actual state rather than synthesize them. See `FLIPNOTE-UI-HOOKS.md` for the payload.
+Gate 4 connects the Registry/repair producers and the Studio consumer for its bounded lifecycle;
+the UI must still re-read actual state rather than synthesize a phase. Specialized states outside
+that path remain later work. See `FLIPNOTE-UI-HOOKS.md` for the payload.
 
 ## 14. Tests
 

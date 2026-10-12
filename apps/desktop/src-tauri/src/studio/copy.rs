@@ -43,6 +43,7 @@ impl DestinationInput {
     }
 }
 
+#[tauri::command]
 pub(crate) async fn studio_overlay_copy_preview(
     state: State<'_, AppState>,
     server: u64,
@@ -127,6 +128,7 @@ impl CopyApplyInput {
     }
 }
 
+#[tauri::command]
 pub(crate) async fn studio_overlay_copy_apply(
     state: State<'_, AppState>,
     server: u64,

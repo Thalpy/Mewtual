@@ -34,6 +34,106 @@ fn intent_retirement_shrink_still_needs_physical_replacement_headroom() {
     );
 }
 
+/// MAP S2/S24/S25: a stale inventory asks for the same request again after reconciliation, while
+/// a known hard rail says storage policy refused it. These are adjacent branches in the writer and
+/// used to be collapsed into `StorageRefused` by converting the shared `AppError` afterwards.
+#[test]
+fn studio_save_preflight_keeps_retryable_inventory_drift_apart_from_storage_policy() {
+    use catcoms_replication::studio::StudioOverlaySaveRefusal as R;
+
+    let generation = Arc::new(());
+    let stale_generation = Arc::new(());
+    let mut stale = EpochIntentBudget {
+        generation: generation.clone(),
+        records: BTreeMap::from([([1; 32], 1024)]),
+        record_slots: 1,
+        bytes: 1024,
+        archive_bytes: 0,
+        unconfirmed: BTreeMap::new(),
+        ready: true,
+    };
+    assert!(matches!(
+        stale
+            .preflight_studio_save(&stale_generation, [1; 32], Some(1024), 2048, false)
+            .unwrap_err(),
+        AppError::StudioRefused {
+            reason: R::Retry,
+            ..
+        }
+    ));
+    assert!(!stale.ready, "stale accounting was left usable");
+
+    let mut full = EpochIntentBudget {
+        generation: generation.clone(),
+        records: BTreeMap::from([([1; 32], MAX_VAULT_INTENT_BYTES)]),
+        record_slots: 1,
+        bytes: MAX_VAULT_INTENT_BYTES,
+        archive_bytes: 0,
+        unconfirmed: BTreeMap::new(),
+        ready: true,
+    };
+    assert!(matches!(
+        full.preflight_studio_save(&generation, [1; 32], Some(MAX_VAULT_INTENT_BYTES), 1, false)
+            .unwrap_err(),
+        AppError::StudioRefused {
+            reason: R::StorageRefused,
+            ..
+        }
+    ));
+    assert!(
+        full.ready,
+        "a known capacity refusal poisoned the inventory"
+    );
+}
+
+#[test]
+fn studio_save_preflight_does_not_disguise_corrupt_accounting_as_storage_policy() {
+    let generation = Arc::new(());
+    let mut corrupt = EpochIntentBudget {
+        generation: generation.clone(),
+        records: BTreeMap::from([([1; 32], 1024)]),
+        record_slots: 1,
+        // The inventory claims the record is larger than its aggregate. This cannot be caused by
+        // an ordinary capacity rail and must retain the invariant-error classification.
+        bytes: 100,
+        archive_bytes: 0,
+        unconfirmed: BTreeMap::new(),
+        ready: true,
+    };
+    let error = corrupt
+        .preflight_studio_save(&generation, [1; 32], Some(1024), 1, false)
+        .unwrap_err();
+    assert!(
+        matches!(error, AppError::Invalid(ref message) if message.contains("accounting mismatch"))
+    );
+}
+
+/// The outer physical-storage budget has the same split, plus a scope mismatch which remains an
+/// invariant error rather than a user-facing refusal.
+#[test]
+fn studio_save_storage_budget_mapping_does_not_hide_scope_or_inventory_drift() {
+    use catcoms_replication::studio::StudioOverlaySaveRefusal as R;
+
+    assert!(matches!(
+        storage_admission_error(true, BudgetError::Reconcile),
+        AppError::StudioRefused {
+            reason: R::Retry,
+            ..
+        }
+    ));
+    assert!(matches!(
+        storage_admission_error(true, BudgetError::Limit),
+        AppError::StudioRefused {
+            reason: R::StorageRefused,
+            ..
+        }
+    ));
+    assert!(matches!(
+        storage_admission_error(true, BudgetError::Scope),
+        AppError::Invalid(_)
+    ));
+}
+
 /// The archive sub-cap's arithmetic. The wiring, that the real writer actually consults this
 /// rather than the ordinary class preflight, is anchored separately by
 /// `the_archive_writer_refuses_at_the_sub_cap_not_the_class_ceiling`; neither test substitutes
@@ -354,7 +454,15 @@ impl ServerStore {
         let framed = frame(&sealed);
         let mutation = self.epoch_mutation_guard();
         let framed = hooks.before(WriteTag::Intents, &path, &framed)?;
-        mutation.write(&path, &framed)?;
+        let original_plain =
+            matches!(&framed, std::borrow::Cow::Borrowed(_)).then_some(plain.as_slice());
+        let write = mutation.write(&path, &framed);
+        self.finish_validated_inventory_write(
+            write,
+            super::super::epoch_recovery::inventory::EpochRecordKind::Intents,
+            original_plain,
+            next,
+        )?;
         hooks.after_write(WriteTag::Intents, &path)?;
         reservation.commit();
         intents.records.insert(id, next);

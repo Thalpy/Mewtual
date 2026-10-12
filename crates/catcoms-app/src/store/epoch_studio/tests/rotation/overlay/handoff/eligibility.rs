@@ -116,7 +116,7 @@ fn studio_overlay_handoff_index_put_requires_the_actual_flipnote_source() {
             &mut b,
         )
         .unwrap_err();
-    assert!(error.to_string().contains("unavailable Flipnote"));
+    assert!(error.to_string().contains("ObjectMissing"));
     assert_eq!(canonical(&store), original);
     let target = StudioTarget::Flipnote {
         channel: f.target.channel(),
@@ -145,6 +145,40 @@ fn studio_overlay_handoff_index_put_requires_the_actual_flipnote_source() {
             &mut b,
         )
         .unwrap();
+    // A referenced source that exists but cannot be authenticated is unusable to the handoff and
+    // receives the same bounded ObjectMissing diagnosis as P2. Genuinely transient storage/I/O
+    // errors remain errors in both paths and are not persisted as a manual reason.
+    let path = store.studio_epoch_path(&scope_bytes(SERVER, &logical).unwrap());
+    let original_source = std::fs::read(&path).unwrap();
+    let before_corrupt_attempt = canonical(&store);
+    let mut b = budget(&mut store, &f);
+    let mut corrupt = original_source.clone();
+    let middle = corrupt.len() / 2;
+    corrupt[middle] ^= 0xff;
+    std::fs::write(&path, corrupt).unwrap();
+    let error = store
+        .handoff_studio_overlay(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            basis.fingerprint(),
+            Some(0),
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("ObjectMissing"),
+        "corruption did not retain the classifier's bounded diagnosis: {error}"
+    );
+    assert!(store
+        .load_epoch_intents(SERVER, &f.logical)
+        .unwrap()
+        .overlay()
+        .is_some());
+    std::fs::write(&path, original_source).unwrap();
+    assert_eq!(canonical(&store), before_corrupt_attempt);
     transfer(&f, &mut store, basis.fingerprint());
     assert_eq!(f.load(&store).unwrap().projection().unwrap(), expected);
 }
@@ -183,6 +217,9 @@ fn studio_overlay_handoff_refuses_a_batch_signed_under_a_superseded_tenure() {
         crate::store::StudioHandoffStart::Captured(capture) => capture,
         crate::store::StudioHandoffStart::Settled(_) => {
             panic!("H1 settled instead of capturing, so there is no H5 to test")
+        }
+        crate::store::StudioHandoffStart::Refused(reason) => {
+            panic!("H1 refused a transferable fixture: {reason:?}")
         }
     };
     let mut plan = capture.prepare().unwrap();
@@ -296,6 +333,9 @@ fn studio_overlay_handoff_rechecks_index_object_sources_at_commit_not_only_at_ca
         crate::store::StudioHandoffStart::Captured(capture) => capture,
         crate::store::StudioHandoffStart::Settled(_) => {
             panic!("H1 settled instead of capturing, so there is no H5 to test")
+        }
+        crate::store::StudioHandoffStart::Refused(reason) => {
+            panic!("H1 refused a transferable fixture: {reason:?}")
         }
     };
 
@@ -478,13 +518,12 @@ fn studio_overlay_handoff_old_owner_receipt_refuses_even_when_original_author_is
         (1, 0, EpochPhase::Open)
     );
     let receipt = source.unit.receipt_head().unwrap().unwrap();
-    let expected = receipt
+    receipt
         .verify_current_owner(&f.group, tenure)
-        .unwrap_err()
-        .to_string();
+        .expect_err("the old-owner receipt unexpectedly verifies for the live tenure");
     let original = canonical(&store);
     let mut b = budget(&mut store, &f);
-    let result = store.handoff_studio_overlay(
+    let result = store.start_studio_handoff_with_io(
         SERVER,
         &f.group,
         f.target,
@@ -493,10 +532,16 @@ fn studio_overlay_handoff_old_owner_receipt_refuses_even_when_original_author_is
         Some(tenure),
         &mut rng(),
         &mut b,
+        &mut WriteHooks::None,
     );
     assert!(
-        matches!(result,Err(AppError::Invalid(ref s)) if s==&format!("epoch studio: {expected}")),
-        "old owner receipt authorized handoff: {result:?}"
+        matches!(
+            result,
+            Ok(crate::store::StudioHandoffStart::Refused(
+                StudioOverlayManualReason::ReceiptChanged
+            ))
+        ),
+        "old owner receipt was not classified as ReceiptChanged"
     );
     assert_eq!(canonical(&store), original);
     assert!(store

@@ -34,6 +34,19 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::AppError;
 
+/// Construct a typed Studio Save refusal while preserving the exact diagnostic text callers and
+/// logs already receive. Store code selects the reason from the condition it just checked; no
+/// outer layer is allowed to reverse-engineer it from this message.
+pub(crate) fn studio_refused(
+    reason: catcoms_replication::studio::StudioOverlaySaveRefusal,
+    error: impl std::fmt::Display,
+) -> AppError {
+    AppError::StudioRefused {
+        reason,
+        message: format!("epoch studio: {error}"),
+    }
+}
+
 mod creative_references;
 mod epoch_draft_archive;
 mod epoch_intents;
@@ -104,9 +117,9 @@ pub use epoch_studio::{
 };
 pub(crate) use epoch_studio::{
     PreparedStudioSource, SigningSlice, StudioHandoffCapture, StudioHandoffCommit,
-    StudioHandoffPlan, StudioHandoffStart, StudioOverlayCapture, StudioOverlayPlan,
-    StudioOverlayStamp, StudioOverlayStart, StudioSourceCapture, MAX_SIGNING_TURNS_PER_VISIT,
-    SIGNING_SLICE_BUDGET_MS,
+    StudioHandoffPlan, StudioHandoffPrepareFailure, StudioHandoffStamp, StudioHandoffStart,
+    StudioOverlayCapture, StudioOverlayPlan, StudioOverlayStamp, StudioOverlayStart,
+    StudioSourceCapture, MAX_SIGNING_TURNS_PER_VISIT, SIGNING_SLICE_BUDGET_MS,
 };
 // Flow R, the scheduled resolution of an interrupted Prepared handoff (Agent 1, design 6.4.2).
 pub(crate) use epoch_studio::{
@@ -624,10 +637,42 @@ mod persistence {
         _store: std::marker::PhantomData<&'a mut ServerStore>,
     }
 
+    /// Result of attempting to replace one inventoried record.
+    ///
+    /// The value is deliberately `must_use`: every byte-replacing writer must hand it to the
+    /// inventory-warm path, even when the directory flush reported
+    /// [`AppError::CommittedButNotDurable`]. In that case the renamed bytes are already visible
+    /// and are safe to memoize, although the original durability error must still be returned.
+    /// Errors before the rename carry `visible = false`, so the same mandatory hand-off cannot
+    /// accidentally warm bytes that never reached their final path.
+    #[must_use = "an inventoried replacement must be passed to an inventory-warm finisher"]
+    pub(crate) struct EpochWrite {
+        visible: bool,
+        result: Result<(), AppError>,
+    }
+
+    impl EpochWrite {
+        pub(in crate::store) fn visible(&self) -> bool {
+            self.visible
+        }
+
+        pub(in crate::store) fn finish(self) -> Result<(), AppError> {
+            self.result
+        }
+    }
+
     impl EpochMutation<'_> {
-        /// Atomically replace an inventoried record.
-        pub(in crate::store) fn write(&self, path: &Path, bytes: &[u8]) -> Result<(), AppError> {
-            atomic_write(path, bytes)
+        /// Atomically replace an inventoried record and consume the mutation guard.
+        ///
+        /// Consuming `self` ends the store borrow before the caller installs the corresponding
+        /// validation memo entry. The returned token must then be consumed by that warm path;
+        /// this gives the eight physical replacement sites the same type-level discipline that
+        /// the guard already gives inventory-generation rotation.
+        pub(in crate::store) fn write(self, path: &Path, bytes: &[u8]) -> EpochWrite {
+            let result = atomic_write(path, bytes);
+            let visible =
+                result.is_ok() || matches!(&result, Err(AppError::CommittedButNotDurable(_)));
+            EpochWrite { visible, result }
         }
 
         /// Unlink, in the `io::Result` shape cleanup's batch uses. The physical removal lives here
@@ -1326,9 +1371,9 @@ mod persistence {
     }
 }
 
-pub(crate) use persistence::EpochMutation;
 #[cfg(test)]
 pub(in crate::store) use persistence::{AfterIntercept, CompletedOperation, FailError, Intercept};
+pub(crate) use persistence::{EpochMutation, EpochWrite};
 pub(in crate::store) use persistence::{WriteHooks, WriteStep, WriteTag};
 // Only the test wrappers leave the module. In a non-test build this import does not exist, so
 // nothing outside `persistence` can name a path-generic physical operation at all.

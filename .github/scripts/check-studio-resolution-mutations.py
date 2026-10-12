@@ -12,6 +12,8 @@ import os
 import subprocess
 import sys
 
+from mutation_harness_guard import write_if_unchanged
+
 ROOT = Path(__file__).resolve().parents[2]
 STORE = "store::epoch_studio::tests::rotation::overlay::handoff::resolution::"
 RECEIVER = "studio::receiver::catchup::tests::"
@@ -175,16 +177,23 @@ def main():
     if selected - {m[0] for m in MUTATIONS}:
         raise ValueError("unknown mutation selector")
     mutations = [m for m in MUTATIONS if not selected or m[0] in selected]
+    # Check the complete selection up front, before an early mutant spends minutes compiling.
+    originals = {}
+    for name, path, before, _, _, _ in mutations:
+        original = (ROOT / path).read_bytes()
+        if original.count(before.encode()) != 1:
+            raise AssertionError(f"mutation anchor is not unique: {name}")
+        originals[name] = original
     logs = ROOT / "logs"
     logs.mkdir(exist_ok=True)
     for name, path, before, after, test, assertion in mutations:
         source = ROOT / path
-        original = source.read_bytes()
-        if original.count(before.encode()) != 1:
-            raise AssertionError(f"mutation anchor is not unique: {name}")
+        original = originals[name]
         changed = original.replace(before.encode(), after.encode(), 1)
         try:
-            source.write_bytes(changed)
+            # Keep the up-front anchor check without letting its snapshot overwrite edits made
+            # while an earlier selected mutant was compiling.
+            write_if_unchanged(source, original, changed)
             result = run(test)
             (logs / f"gate4-resolution-mutation-{name}.log").write_text(result.stdout,
                                                                          encoding="utf-8")

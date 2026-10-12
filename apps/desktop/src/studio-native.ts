@@ -143,6 +143,129 @@ export type RecoveryApplyEdit = {
 export type RecoveryApplied = { v: 1; kind: "recoveryApplied"; contentSaved: true; alreadySaved: boolean; provisional: true; pointerRestored: false };
 export type PointerRestored = { v: 1; kind: "recoveryPointerRestored"; channel: Decimal; object: Hex32 | null; checkpointEpoch: Decimal; registryEpochId: Hex32; provisional: true };
 
+// --- Retained local drafts ----------------------------------------------------------------------
+
+export type OverlayManualReason =
+  | "sourceMissing" | "sourceUnreadable" | "sourceNotClosing" | "sourceReplaced"
+  | "sourceRewound" | "successorNotPristine" | "successorMissing" | "receiptChanged"
+  | "objectMissing" | "tenureUnknown" | "tenureImported" | "preparedStuck" | "fault"
+  | "notCurrentAuthor" | "unconfirmed" | "notReplayable";
+export type OverlaySaveRefusal = OverlayManualReason
+  | "notMember" | "sourceAdopting" | "installedSource" | "previewUnavailable"
+  | "previewExpired" | "tailIncomplete" | "previewReplaced" | "membershipChanged"
+  | "basisChanged" | "basisChangedDuringDetach" | "transferInProgress" | "otherKindDraft"
+  | "liveBranchSuperseded" | "staleBranch" | "nonceConflict" | "ordinaryIntentPending"
+  | "branchFull" | "pixelUnpublished" | "pixelInvalid" | "pixelMissing"
+  | "unconfirmedBranchesPerServer" | "unconfirmedBytesVaultWide" | "referenceCapacity"
+  | "storageRefused" | "retry";
+export type OverlaySaveRetry = "sameRequest" | "newTicket" | "none" | "afterExplicitAccess";
+export type OverlayUnconfirmedState = "awaitingSource" | "baseConfirmed" | "baseSuperseded" | "sourceUnreadable";
+export type OverlayHandoffAttempt = {
+  state: "refused" | "backingOff";
+  reason: OverlayManualReason | "transient";
+  retryAt: Decimal;
+};
+export type OverlayProvenance =
+  | { kind: "closing" }
+  | { kind: "unconfirmed"; provider: Hex64; observedMlsEpoch: Decimal; observedAtMs: Decimal };
+export type OverlayTarget = { channel: Decimal; object: Hex32 | null };
+export type OverlayInspection =
+  | ({ v: 1; kind: "absent" } & OverlayTarget)
+  | ({ v: 1; kind: "local-draft"; eligibility: "transferable" | "manual" | null;
+      manualReason: OverlayManualReason | null; handoffAttempt: OverlayHandoffAttempt | null;
+      unconfirmedState: OverlayUnconfirmedState | null; basis: Hex64 | null; branch: Hex64;
+      contentId: Hex64 | null; generation: Decimal; accepted: number;
+      transferState: "active" | "prepared"; provenance: "closing" | "unconfirmed" | null;
+      replayable: boolean; readOnly: true; content: StudioContent | null } & OverlayTarget)
+  | ({ v: 1; kind: "disposed"; basis: Hex64; branch: Hex64; generation: Decimal;
+      accepted: number; mode: "preserved" | "discarded"; archive: Hex64 | null;
+      readOnly: true } & OverlayTarget);
+export type OverlayLifecycle = {
+  v: 1;
+  kind: "overlayLifecycle";
+  channel: Decimal;
+  object: Hex32 | null;
+  branch: { branch: Hex64; content: Hex64; generation: Decimal; accepted: number } | null;
+  prepared: boolean;
+  eligibility: "transferable" | "manual" | null;
+  manualReason: OverlayManualReason | null;
+  handoffAttempt: OverlayHandoffAttempt | null;
+  unconfirmedState: OverlayUnconfirmedState | null;
+  archive: { archive: Hex64; branch: Hex64; generation: Decimal; replayable: boolean } | null;
+  disposed: ({ branch: Hex64; generation: Decimal } & ({ mode: "preserved"; archive: Hex64 } | { mode: "discarded" })) | null;
+  transferred: boolean;
+};
+export type OverlayArchive = {
+  v: 1;
+  kind: "overlayArchive" | "overlayArchived" | "overlayArchiveExport" | "overlayExport";
+  archive: Hex64;
+  basis: Hex64;
+  content: Hex64;
+  branch: Hex64;
+  generation: Decimal;
+  author: Hex64;
+  accepted: number;
+  provenance: OverlayProvenance;
+  replayable: boolean;
+  readOnly: true;
+  authority: false;
+  terminal: true;
+  physicalBytes?: Decimal;
+  preserved?: boolean;
+  notReplayable?: string | null;
+  format?: "catcoms-studio-draft-v1";
+  bytes?: number;
+  bytesB64?: string;
+};
+export type OverlayArchiveReleased = { v: 1; kind: "overlayArchiveReleased"; reconcileRequired: true };
+export type OverlayDisposed = {
+  v: 1; kind: "overlayDisposed"; channel: Decimal; object: Hex32 | null; author: Hex64;
+  provenance: OverlayProvenance; basis: Hex64; branch: Hex64; content: Hex64;
+  generation: Decimal; disposal: { mode: "preserved"; archive: Hex64 } | { mode: "discarded" };
+  accepted: number; sequence: Decimal; atMs: Decimal; terminal: true;
+};
+export type OverlayCopyPreview = {
+  v: 1; kind: "overlayCopyPreview"; source: OverlayTarget; destination: OverlayTarget;
+  epochId: Hex32; expectedProjection: Hex64; disposition: RecoveryDisposition;
+  body: string | null; originalAuthor: Hex64 | null; sourceOps: Hex64[];
+  preservesBranch: false; provisional: true;
+};
+export type OverlayCopyApplied = {
+  v: 1; kind: "overlayCopyApplied"; channel: Decimal; object: Hex32 | null;
+  contentSaved: true; alreadySaved: boolean; provisional: true; branchPreserved: false;
+};
+export type UnconfirmedOverlaySaveTicket = {
+  v: 1; kind: "unconfirmedOverlaySaveTicket"; channel: Decimal; object: Hex32 | null;
+  basis: Hex64; branch: Hex64; provenance: "unconfirmed";
+};
+export type UnconfirmedOverlaySave = ({
+  v: 1; kind: "unconfirmedOverlaySave"; channel: Decimal; object: Hex32 | null;
+} & (
+  | { state: "saved"; basis: Hex64; accepted: number; localOnly: true; provisional: true; provenance: "unconfirmed" }
+  | { state: "pending" | "busy"; retry: "sameRequest" }
+  | { state: "paused"; retry: "afterExplicitAccess" }
+  | { state: "refused"; reason: OverlaySaveRefusal; retry: "sameRequest" | "newTicket" | "none" }
+  | { state: "disposed"; disposal: OverlayDisposed }
+  | { state: "handedOff"; basis: Hex64; epoch: Decimal; docId: Hex32; accepted: number }
+));
+/// Begin normally returns a ticket, but a preview that ceased to authorize a local branch is a
+/// typed, known-no-write refusal. Keeping that refusal in the public union prevents the renderer
+/// from inventing ticket fields or misreporting a clean refusal as delivery uncertainty.
+export type UnconfirmedOverlaySaveBegin =
+  | UnconfirmedOverlaySaveTicket
+  | Extract<UnconfirmedOverlaySave, { state: "refused" }>;
+
+export type OverlayDestination = { channel: Decimal; object?: Hex32 };
+export type OverlayCopyApplyEdit = {
+  destination: OverlayDestination; choice: RecoveryChoice; mode: RecoveryMode; epochId: Hex32;
+  expectedProjection: Hex64; nonce: Hex32; body: string;
+};
+export type OverlayDisposalRequest = {
+  branch: Hex64; content: Hex64; accepted: number;
+  mode: { kind: "preserve" } | { kind: "discard"; confirmation: "destroy-local-draft" };
+};
+export type UnconfirmedOverlaySaveInput = { basis: Hex64; branch: Hex64; nonce: Hex32; body: string };
+
 // --- Events --------------------------------------------------------------------------------------
 
 export type StudioUpdatedEvent = { server: number; channel: Decimal; object: Hex32 | null };
@@ -470,6 +593,224 @@ export function parsePointerRestored(v: unknown): PointerRestored {
   };
 }
 
+const OVERLAY_MANUAL_REASONS = new Set<OverlayManualReason>([
+  "sourceMissing", "sourceUnreadable", "sourceNotClosing", "sourceReplaced", "sourceRewound",
+  "successorNotPristine", "successorMissing", "receiptChanged", "objectMissing", "tenureUnknown",
+  "tenureImported", "preparedStuck", "fault", "notCurrentAuthor", "unconfirmed", "notReplayable",
+]);
+const OVERLAY_SAVE_REFUSALS = new Set<OverlaySaveRefusal>([
+  ...OVERLAY_MANUAL_REASONS,
+  "notMember", "sourceAdopting", "installedSource", "previewUnavailable", "previewExpired",
+  "tailIncomplete", "previewReplaced", "membershipChanged", "basisChanged",
+  "basisChangedDuringDetach", "transferInProgress", "otherKindDraft", "liveBranchSuperseded",
+  "staleBranch", "nonceConflict", "ordinaryIntentPending", "branchFull", "pixelUnpublished",
+  "pixelInvalid", "pixelMissing", "unconfirmedBranchesPerServer", "unconfirmedBytesVaultWide",
+  "referenceCapacity", "storageRefused", "retry",
+]);
+
+function overlayManualReason(v: unknown, what: string): OverlayManualReason {
+  if (typeof v !== "string" || !OVERLAY_MANUAL_REASONS.has(v as OverlayManualReason)) fail(`${what} is unknown`);
+  return v as OverlayManualReason;
+}
+function overlaySaveRefusal(v: unknown, what: string): OverlaySaveRefusal {
+  if (typeof v !== "string" || !OVERLAY_SAVE_REFUSALS.has(v as OverlaySaveRefusal)) fail(`${what} is unknown`);
+  return v as OverlaySaveRefusal;
+}
+function overlayTarget(v: unknown, what: string): OverlayTarget {
+  const r = record(v, what);
+  return { channel: decimal(r.channel, `${what}.channel`), object: nullable(r.object, (x) => hex32(x, `${what}.object`)) };
+}
+function overlayUnconfirmedState(v: unknown, what: string): OverlayUnconfirmedState {
+  if (v !== "awaitingSource" && v !== "baseConfirmed" && v !== "baseSuperseded" && v !== "sourceUnreadable") fail(`${what} is unknown`);
+  return v;
+}
+function overlayHandoffAttempt(v: unknown, what: string): OverlayHandoffAttempt {
+  const r = record(v, what);
+  if (r.state !== "refused" && r.state !== "backingOff") fail(`${what}.state is unknown`);
+  const reason = r.reason === "transient" ? "transient" : overlayManualReason(r.reason, `${what}.reason`);
+  return { state: r.state, reason, retryAt: decimal(r.retryAt, `${what}.retryAt`) };
+}
+function overlayProvenance(v: unknown, what: string): OverlayProvenance {
+  const r = record(v, what);
+  if (r.kind === "closing") return { kind: "closing" };
+  if (r.kind !== "unconfirmed") fail(`${what}.kind is unknown`);
+  return {
+    kind: "unconfirmed",
+    provider: hex64(r.provider, `${what}.provider`),
+    observedMlsEpoch: decimal(r.observedMlsEpoch, `${what}.observedMlsEpoch`),
+    observedAtMs: decimal(r.observedAtMs, `${what}.observedAtMs`),
+  };
+}
+function overlayEligibility(r: Record<string, unknown>, what: string): {
+  eligibility: "transferable" | "manual" | null;
+  manualReason: OverlayManualReason | null;
+} {
+  const eligibility = nullable(r.eligibility, (v) => {
+    if (v !== "transferable" && v !== "manual") fail(`${what}.eligibility is unknown`);
+    return v;
+  });
+  const manualReason = nullable(r.manualReason, (v) => overlayManualReason(v, `${what}.manualReason`));
+  if ((eligibility === "manual") !== (manualReason !== null)) fail(`${what} must carry a reason exactly when manual`);
+  return { eligibility, manualReason };
+}
+
+export function parseOverlayInspection(v: unknown): OverlayInspection {
+  const r = record(v, "overlay inspection");
+  if (r.v !== 1) fail("overlay inspection.v is not 1");
+  const target = overlayTarget(r, "overlay inspection");
+  if (r.kind === "absent") return { v: 1, kind: "absent", ...target };
+  if (r.kind === "disposed") {
+    if (r.readOnly !== true) fail("disposed overlay is not read-only");
+    if (r.mode !== "preserved" && r.mode !== "discarded") fail("disposed overlay mode is unknown");
+    const archive = nullable(r.archive, (x) => hex64(x, "overlay inspection.archive"));
+    if ((r.mode === "preserved") !== (archive !== null)) fail("disposed overlay archive disagrees with its mode");
+    return { v: 1, kind: "disposed", ...target, basis: hex64(r.basis, "overlay inspection.basis"), branch: hex64(r.branch, "overlay inspection.branch"), generation: decimal(r.generation, "overlay inspection.generation"), accepted: count(r.accepted, "overlay inspection.accepted"), mode: r.mode, archive, readOnly: true };
+  }
+  if (r.kind !== "local-draft") fail("overlay inspection.kind is unknown");
+  if (r.readOnly !== true) fail("local draft is not read-only");
+  if (r.transferState !== "active" && r.transferState !== "prepared") fail("overlay inspection.transferState is unknown");
+  if (r.provenance !== null && r.provenance !== "closing" && r.provenance !== "unconfirmed") fail("overlay inspection.provenance is unknown");
+  const classified = overlayEligibility(r, "overlay inspection");
+  const content = nullable(r.content, (x) => parseContent(x, "overlay inspection.content"));
+  const replayable = flag(r.replayable, "overlay inspection.replayable");
+  if (replayable !== (content !== null)) fail("overlay inspection replayability disagrees with content");
+  return {
+    v: 1, kind: "local-draft", ...target, ...classified,
+    handoffAttempt: nullable(r.handoffAttempt, (x) => overlayHandoffAttempt(x, "overlay inspection.handoffAttempt")),
+    unconfirmedState: nullable(r.unconfirmedState, (x) => overlayUnconfirmedState(x, "overlay inspection.unconfirmedState")),
+    basis: nullable(r.basis, (x) => hex64(x, "overlay inspection.basis")),
+    branch: hex64(r.branch, "overlay inspection.branch"),
+    contentId: nullable(r.contentId, (x) => hex64(x, "overlay inspection.contentId")),
+    generation: decimal(r.generation, "overlay inspection.generation"),
+    accepted: count(r.accepted, "overlay inspection.accepted"), transferState: r.transferState,
+    provenance: r.provenance, replayable, readOnly: true, content,
+  };
+}
+
+export function parseOverlayLifecycle(v: unknown): OverlayLifecycle {
+  const r = record(v, "overlay lifecycle");
+  if (r.v !== 1 || r.kind !== "overlayLifecycle") fail("not an overlay lifecycle");
+  const target = overlayTarget(r, "overlay lifecycle");
+  const classified = overlayEligibility(r, "overlay lifecycle");
+  const branch = nullable(r.branch, (x) => {
+    const b = record(x, "overlay lifecycle.branch");
+    return { branch: hex64(b.branch, "overlay lifecycle.branch.branch"), content: hex64(b.content, "overlay lifecycle.branch.content"), generation: decimal(b.generation, "overlay lifecycle.branch.generation"), accepted: count(b.accepted, "overlay lifecycle.branch.accepted") };
+  });
+  const archive = nullable(r.archive, (x) => {
+    const a = record(x, "overlay lifecycle.archive");
+    return { archive: hex64(a.archive, "overlay lifecycle.archive.archive"), branch: hex64(a.branch, "overlay lifecycle.archive.branch"), generation: decimal(a.generation, "overlay lifecycle.archive.generation"), replayable: flag(a.replayable, "overlay lifecycle.archive.replayable") };
+  });
+  const disposed = nullable(r.disposed, (x) => {
+    const d = record(x, "overlay lifecycle.disposed");
+    const common = { branch: hex64(d.branch, "overlay lifecycle.disposed.branch"), generation: decimal(d.generation, "overlay lifecycle.disposed.generation") };
+    if (d.mode === "preserved") return { ...common, mode: "preserved" as const, archive: hex64(d.archive, "overlay lifecycle.disposed.archive") };
+    if (d.mode === "discarded") return { ...common, mode: "discarded" as const };
+    return fail("overlay lifecycle.disposed.mode is unknown");
+  });
+  return {
+    v: 1, kind: "overlayLifecycle", ...target, branch,
+    prepared: flag(r.prepared, "overlay lifecycle.prepared"), ...classified,
+    handoffAttempt: nullable(r.handoffAttempt, (x) => overlayHandoffAttempt(x, "overlay lifecycle.handoffAttempt")),
+    unconfirmedState: nullable(r.unconfirmedState, (x) => overlayUnconfirmedState(x, "overlay lifecycle.unconfirmedState")),
+    archive, disposed, transferred: flag(r.transferred, "overlay lifecycle.transferred"),
+  };
+}
+
+export function parseOverlayArchive(v: unknown): OverlayArchive {
+  const r = record(v, "overlay archive");
+  if (r.v !== 1 || (r.kind !== "overlayArchive" && r.kind !== "overlayArchived" && r.kind !== "overlayArchiveExport" && r.kind !== "overlayExport")) fail("not an overlay archive");
+  if (r.readOnly !== true || r.authority !== false || r.terminal !== true) fail("overlay archive authority labels are invalid");
+  const out: OverlayArchive = {
+    v: 1, kind: r.kind, archive: hex64(r.archive, "overlay archive.archive"),
+    basis: hex64(r.basis, "overlay archive.basis"), content: hex64(r.content, "overlay archive.content"),
+    branch: hex64(r.branch, "overlay archive.branch"), generation: decimal(r.generation, "overlay archive.generation"),
+    author: hex64(r.author, "overlay archive.author"), accepted: count(r.accepted, "overlay archive.accepted"),
+    provenance: overlayProvenance(r.provenance, "overlay archive.provenance"),
+    replayable: flag(r.replayable, "overlay archive.replayable"), readOnly: true, authority: false, terminal: true,
+  };
+  if (r.physicalBytes !== undefined) out.physicalBytes = decimal(r.physicalBytes, "overlay archive.physicalBytes");
+  if (r.preserved !== undefined) out.preserved = flag(r.preserved, "overlay archive.preserved");
+  if (r.notReplayable !== undefined) out.notReplayable = nullable(r.notReplayable, (x) => text(x, "overlay archive.notReplayable"));
+  if (r.format !== undefined || r.bytes !== undefined || r.bytesB64 !== undefined) {
+    if (r.format !== "catcoms-studio-draft-v1") fail("overlay archive.format is unknown");
+    out.format = "catcoms-studio-draft-v1";
+    out.bytes = count(r.bytes, "overlay archive.bytes");
+    out.bytesB64 = text(r.bytesB64, "overlay archive.bytesB64");
+    if (base64Length(out.bytesB64) !== out.bytes) fail("overlay archive bytes do not match the payload");
+  }
+  return out;
+}
+
+export function parseOverlayArchiveReleased(v: unknown): OverlayArchiveReleased {
+  const r = record(v, "overlay archive release");
+  if (r.v !== 1 || r.kind !== "overlayArchiveReleased" || r.reconcileRequired !== true) fail("not an overlay archive release");
+  return { v: 1, kind: "overlayArchiveReleased", reconcileRequired: true };
+}
+
+function overlayDisposal(v: unknown, what: string): OverlayDisposed["disposal"] {
+  const r = record(v, what);
+  if (r.mode === "preserved") return { mode: "preserved", archive: hex64(r.archive, `${what}.archive`) };
+  if (r.mode === "discarded") return { mode: "discarded" };
+  return fail(`${what}.mode is unknown`);
+}
+export function parseOverlayDisposed(v: unknown): OverlayDisposed {
+  const r = record(v, "overlay disposal");
+  if (r.v !== 1 || r.kind !== "overlayDisposed" || r.terminal !== true) fail("not an overlay disposal");
+  const target = overlayTarget(r, "overlay disposal");
+  return { v: 1, kind: "overlayDisposed", ...target, author: hex64(r.author, "overlay disposal.author"), provenance: overlayProvenance(r.provenance, "overlay disposal.provenance"), basis: hex64(r.basis, "overlay disposal.basis"), branch: hex64(r.branch, "overlay disposal.branch"), content: hex64(r.content, "overlay disposal.content"), generation: decimal(r.generation, "overlay disposal.generation"), disposal: overlayDisposal(r.disposal, "overlay disposal.disposal"), accepted: count(r.accepted, "overlay disposal.accepted"), sequence: decimal(r.sequence, "overlay disposal.sequence"), atMs: decimal(r.atMs, "overlay disposal.atMs"), terminal: true };
+}
+
+export function parseOverlayCopyPreview(v: unknown): OverlayCopyPreview {
+  const r = record(v, "overlay copy preview");
+  if (r.v !== 1 || r.kind !== "overlayCopyPreview" || r.preservesBranch !== false || r.provisional !== true) fail("not an overlay copy preview");
+  const d = r.disposition;
+  if (d !== "ready" && d !== "unchanged" && d !== "conflict" && d !== "deleted" && d !== "full" && d !== "missingTarget") fail("overlay copy preview.disposition is unknown");
+  const body = nullable(r.body, (x) => text(x, "overlay copy preview.body"));
+  if (d === "ready" && body === null) fail("a ready overlay copy preview carries a body");
+  return { v: 1, kind: "overlayCopyPreview", source: overlayTarget(r.source, "overlay copy preview.source"), destination: overlayTarget(r.destination, "overlay copy preview.destination"), epochId: hex32(r.epochId, "overlay copy preview.epochId"), expectedProjection: hex64(r.expectedProjection, "overlay copy preview.expectedProjection"), disposition: d, body, originalAuthor: nullable(r.originalAuthor, (x) => hex64(x, "overlay copy preview.originalAuthor")), sourceOps: list(r.sourceOps, "overlay copy preview.sourceOps").map((x, i) => hex64(x, `overlay copy preview.sourceOps[${i}]`)), preservesBranch: false, provisional: true };
+}
+export function parseOverlayCopyApplied(v: unknown): OverlayCopyApplied {
+  const r = record(v, "overlay copy applied");
+  if (r.v !== 1 || r.kind !== "overlayCopyApplied" || r.contentSaved !== true || r.provisional !== true || r.branchPreserved !== false) fail("not an overlay copy apply result");
+  return { v: 1, kind: "overlayCopyApplied", ...overlayTarget(r, "overlay copy applied"), contentSaved: true, alreadySaved: flag(r.alreadySaved, "overlay copy applied.alreadySaved"), provisional: true, branchPreserved: false };
+}
+export function parseUnconfirmedOverlaySaveTicket(v: unknown): UnconfirmedOverlaySaveTicket {
+  const r = record(v, "unconfirmed overlay save ticket");
+  if (r.v !== 1 || r.kind !== "unconfirmedOverlaySaveTicket" || r.provenance !== "unconfirmed") fail("not an unconfirmed overlay save ticket");
+  return { v: 1, kind: "unconfirmedOverlaySaveTicket", ...overlayTarget(r, "unconfirmed overlay save ticket"), basis: hex64(r.basis, "unconfirmed overlay save ticket.basis"), branch: hex64(r.branch, "unconfirmed overlay save ticket.branch"), provenance: "unconfirmed" };
+}
+export function parseUnconfirmedOverlaySave(v: unknown): UnconfirmedOverlaySave {
+  const r = record(v, "unconfirmed overlay save");
+  if (r.v !== 1 || r.kind !== "unconfirmedOverlaySave") fail("not an unconfirmed overlay save result");
+  const common = { v: 1 as const, kind: "unconfirmedOverlaySave" as const, ...overlayTarget(r, "unconfirmed overlay save") };
+  if (r.state === "saved") {
+    if (r.localOnly !== true || r.provisional !== true || r.provenance !== "unconfirmed") fail("unconfirmed overlay saved claims are invalid");
+    return { ...common, state: "saved", basis: hex64(r.basis, "unconfirmed overlay save.basis"), accepted: count(r.accepted, "unconfirmed overlay save.accepted"), localOnly: true, provisional: true, provenance: "unconfirmed" };
+  }
+  if (r.state === "pending" || r.state === "busy") {
+    if (r.retry !== "sameRequest") fail("unconfirmed overlay save retry is invalid");
+    return { ...common, state: r.state, retry: "sameRequest" };
+  }
+  if (r.state === "paused") {
+    if (r.retry !== "afterExplicitAccess") fail("paused overlay save retry is invalid");
+    return { ...common, state: "paused", retry: "afterExplicitAccess" };
+  }
+  if (r.state === "refused") {
+    if (r.retry !== "sameRequest" && r.retry !== "newTicket" && r.retry !== "none") fail("refused overlay save retry is invalid");
+    return { ...common, state: "refused", reason: overlaySaveRefusal(r.reason, "unconfirmed overlay save.reason"), retry: r.retry };
+  }
+  if (r.state === "disposed") return { ...common, state: "disposed", disposal: parseOverlayDisposed(r.disposal) };
+  if (r.state === "handedOff") return { ...common, state: "handedOff", basis: hex64(r.basis, "unconfirmed overlay save.basis"), epoch: decimal(r.epoch, "unconfirmed overlay save.epoch"), docId: hex32(r.docId, "unconfirmed overlay save.docId"), accepted: count(r.accepted, "unconfirmed overlay save.accepted") };
+  return fail("unconfirmed overlay save.state is unknown");
+}
+export function parseUnconfirmedOverlaySaveBegin(v: unknown): UnconfirmedOverlaySaveBegin {
+  const r = record(v, "unconfirmed overlay save begin");
+  if (r.kind === "unconfirmedOverlaySaveTicket") return parseUnconfirmedOverlaySaveTicket(v);
+  const result = parseUnconfirmedOverlaySave(v);
+  if (result.state !== "refused") fail("an unconfirmed overlay save begin result must be a ticket or refusal");
+  return result;
+}
+
 export function parseStudioUpdated(v: unknown): StudioUpdatedEvent {
   const r = record(v, "studio-updated");
   return { server: count(r.server, "event.server"), channel: decimal(r.channel, "event.channel"), object: nullable(r.object, (o) => hex32(o, "event.object")) };
@@ -574,6 +915,43 @@ export async function requestBlobBounded(ipc: StudioIpc, server: number, cid: He
 export type RecoveryTargetArgs = StudioTargetArgs & { object: Hex32 | null };
 function recoveryArgs(t: RecoveryTargetArgs): Record<string, unknown> {
   return t.object === null ? { server: t.server, channel: t.channel } : { server: t.server, channel: t.channel, object: t.object };
+}
+
+export async function overlayRead(ipc: StudioIpc, t: RecoveryTargetArgs): Promise<OverlayInspection> {
+  return parseOverlayInspection(await ipc.invoke<unknown>("studio_overlay_read", recoveryArgs(t)));
+}
+export async function overlayLifecycle(ipc: StudioIpc, t: RecoveryTargetArgs): Promise<OverlayLifecycle> {
+  return parseOverlayLifecycle(await ipc.invoke<unknown>("studio_overlay_lifecycle", recoveryArgs(t)));
+}
+export async function overlayExport(ipc: StudioIpc, t: RecoveryTargetArgs): Promise<OverlayArchive> {
+  return parseOverlayArchive(await ipc.invoke<unknown>("studio_overlay_export", recoveryArgs(t)));
+}
+export async function overlayArchive(ipc: StudioIpc, t: RecoveryTargetArgs): Promise<OverlayArchive> {
+  return parseOverlayArchive(await ipc.invoke<unknown>("studio_overlay_archive", recoveryArgs(t)));
+}
+export async function overlayArchiveRead(ipc: StudioIpc, t: RecoveryTargetArgs): Promise<OverlayArchive> {
+  return parseOverlayArchive(await ipc.invoke<unknown>("studio_overlay_archive_read", recoveryArgs(t)));
+}
+export async function overlayArchiveExport(ipc: StudioIpc, t: RecoveryTargetArgs): Promise<OverlayArchive> {
+  return parseOverlayArchive(await ipc.invoke<unknown>("studio_overlay_archive_export", recoveryArgs(t)));
+}
+export async function overlayArchiveRelease(ipc: StudioIpc, t: RecoveryTargetArgs, archive: Hex64, confirmation: "release-local-archive"): Promise<OverlayArchiveReleased> {
+  return parseOverlayArchiveReleased(await ipc.invoke<unknown>("studio_overlay_archive_release", { ...recoveryArgs(t), archive, confirmation }));
+}
+export async function overlayCopyPreview(ipc: StudioIpc, source: RecoveryTargetArgs, destination: OverlayDestination, choice: RecoveryChoice, mode: RecoveryMode): Promise<OverlayCopyPreview> {
+  return parseOverlayCopyPreview(await ipc.invoke<unknown>("studio_overlay_copy_preview", { ...recoveryArgs(source), destination, choice, mode }));
+}
+export async function overlayCopyApply(ipc: StudioIpc, source: RecoveryTargetArgs, edit: OverlayCopyApplyEdit): Promise<OverlayCopyApplied> {
+  return parseOverlayCopyApplied(await ipc.invoke<unknown>("studio_overlay_copy_apply", { ...recoveryArgs(source), edit }));
+}
+export async function overlayDispose(ipc: StudioIpc, t: RecoveryTargetArgs, disposal: OverlayDisposalRequest): Promise<OverlayDisposed> {
+  return parseOverlayDisposed(await ipc.invoke<unknown>("studio_overlay_dispose", { ...recoveryArgs(t), disposal }));
+}
+export async function unconfirmedOverlaySaveBegin(ipc: StudioIpc, t: RecoveryTargetArgs): Promise<UnconfirmedOverlaySaveBegin> {
+  return parseUnconfirmedOverlaySaveBegin(await ipc.invoke<unknown>("studio_unconfirmed_overlay_save_begin", recoveryArgs(t)));
+}
+export async function unconfirmedOverlaySave(ipc: StudioIpc, t: RecoveryTargetArgs, save: UnconfirmedOverlaySaveInput): Promise<UnconfirmedOverlaySave> {
+  return parseUnconfirmedOverlaySave(await ipc.invoke<unknown>("studio_unconfirmed_overlay_save", { ...recoveryArgs(t), save }));
 }
 
 export async function recoveryList(ipc: StudioIpc, t: RecoveryTargetArgs): Promise<RecoveryListing> {

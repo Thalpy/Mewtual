@@ -1,17 +1,67 @@
 # Gate 4 Agent 4 status: integration and completion coordination
 
-Current checkpoint: 2026-10-08. PR #35 is being reconciled on
-`gate4-runtime-completion` against `gate4-agent1-runtime` at
-`7310b22b76848c4b9f85fec816744cff00c1a64f`. Gate 4 remains incomplete and Gate 5 remains closed.
+Current checkpoint: 2026-10-12. PR #41's isolated completion candidate is based on PR #38's
+`gate4-agent1-runtime` head `bdcae4a30a0870443db92a14f2d80ff8e4947818`. Implementation and
+review are complete; merge waits only for normal checks on the final harness/docs head. Gate 5
+remains closed.
 
 The detailed live ledger is [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md). This document records the
 integration history, current ownership boundaries and the single remaining execution sequence.
 
-## Current state
+## Review 4 response checkpoint (2026-10-12)
+
+The latest review of the complete candidate returned four MEDIUM residuals. Code checkpoint
+`610c45e323bf018c2a3ffa91bbf359faaf707be3` addresses all four without exposing another command or
+weakening a product assertion:
+
+- unresolved Copy runs are session-owned, bounded and navigation-safe; a late response can finish
+  its own exact request but cannot overwrite a replacement;
+- Save records retain the fact that an earlier delivery may have committed, so a later `Busy`
+  response cannot turn uncertainty into a known no-write result;
+- every selected lifecycle/handoff/resolution mutation anchor is validated before the first mutant
+  compiles, and the stale entries named by review again detect their mutations; and
+- Flow R's stale-cache regression clears writer warmth and plants a valid old memo before capture,
+  while form-3 and A -> B -> A' regressions pin repair-bound eligibility and tenure anti-replay.
+
+Complete root and desktop/native suites, both strict Clippy commands, desktop check, 1,303 frontend
+tests, Svelte check/build, formatting, `cargo deny` and Git Bash ambient checking pass locally. All
+28 hosted jobs pass on published head `a6e8b07...`; the startup probe now passes locally within its
+documented cold-start allowance. The browser flow harness does not exercise Studio and its Windows
+CDP failure remains a disclosed non-applicable environment gap. Bounded re-review closed the four
+code findings, then a mutation-harness concurrent-edit risk and stale documentation; their shared
+guard/regression and reconciliation received a final PASS with no finding at any severity.
+
+## Completion-candidate override (2026-10-12)
+
+The history below predates the final assembly. The isolated `fix/six-client-recovery-gate4`
+worktree now has one locally verified completion delta on parent
+`700d1daba4069af69fea4ff76b105c3008e6825c`:
+
+- G4-A1-MAP is carried end to end as `StudioOverlaySaveRefusal`, including `StorageRefused`, with
+  exhaustive native and TypeScript conversion.
+- the supported fresh-key join-born owner path is exercised through the actor/receiver and keeps
+  the former history in recovery on the continuously present peer. Same-GroupId self-Welcome is
+  an explicit refusal, not a missing implementation disguised as continuity.
+- P5 is promoted for the bounded lifecycle command family and ticketed Unconfirmed Save only.
+  The command handler, policy, capabilities, native conversions and frontend adapter land together.
+- the Studio surface consumes lifecycle and preview-local state. It preserves exact uncertain
+  requests, requires explicit re-authoring for `newTicket`, keeps local projections separate from
+  the awaiting-tenure base, and provides export/preserve/copy/dispose/release controls.
+
+Direct Closing Save and native repair commands remain unregistered. The final full local suites and
+published hosted evidence pass. PR #41 may merge only after the normal checks on its final
+harness/docs head are green.
+
+## Historical state before the completion-candidate override
 
 Agent 4 has assembled the bounded repair integration checkpoint, with its automatic execution
 currently isolated pending the detached runtime boundary:
 
+- The completion branch includes the three post-PR-38 inventory progress commits plus the
+  Closing K12 mirror and Studio/Registry H3 service-order correction. The latter keep an
+  actor-global parked plan's own Closing/Unconfirmed authority and prevent a held page from
+  starving an inbound checkpoint request when preparation capacity is full. They are a bounded
+  review candidate, not permission to expose Save.
 - Agent 3 history is preserved by merge `6a2f89792eecbf6ef2e65d683e6b515bbc65181d`.
 - The Windows directory durability gap is fixed at `5f141994a1cd6e54bf67ac6bf34f47296eeff6f3`.
 - Repair high-water is issuer-tenure scoped, with checked exhaustion, at
@@ -58,11 +108,11 @@ currently isolated pending the detached runtime boundary:
   quota counters and adopts a different reviewed ordinary-growth policy, so the reconciliation does
   not carry the historical off-path-writer rule forward.
 
-The newer shared baseline independently contains the generalized Flow S, actor Save, reconciliation,
+At that historical checkpoint, the newer shared baseline independently contained the generalized Flow S, actor Save, reconciliation,
 restart coverage, handoff exclusion and Agent 2's reviewed 3/numeric-server and 8 MiB/vault rails.
 PR #35's merge resolution keeps those implementations and adds only its full-envelope parked-request
 correlation for Closing and Unconfirmed. The code is still intentionally
-unavailable to the renderer. P5 is false; native Save and repair commands remain unregistered.
+unavailable to the renderer. P5 was false; native Save and repair commands were unregistered.
 The reconciled exact head still requires CI and a bounded integration review before merge.
 
 ## Exact branch state
@@ -73,7 +123,7 @@ The reconciled exact head still requires CI and a bounded integration review bef
 | Repair candidate | Historical PR #32 checkpoint `87629d6b72992254911a8e44f698d535bb5d7904`; its reviewed ancestry is in merged PR #33 |
 | Documentation checkpoint | Historical PR #31 checkpoint `f0af61c9b1247fa955300ac50545074e18e9b302`; its documentation ancestry is in merged PR #33 |
 | Archived-tenure branch | PR #34 merged; `gate4-finalization` is historical at `7f80815e...` |
-| Runtime completion branch | PR #35, `gate4-runtime-completion`; original implementation `eef69729...` plus separately identifiable review response `6aee00046...`, now reconciled with exact base `7310b22b...` |
+| Runtime completion branch | PR #41 from `fix/six-client-recovery-gate4`; runtime/UI checkpoint `610c45e3...`, published evidence head `a6e8b07...` with 28/28 hosted jobs passing; final reviewed harness/docs delta awaiting normal exact-head checks |
 | Agent 3 source | `gate4-agent3-repair` at `15b715a10704a8dafc2cccef65854d4d45ad55ca`; preserved, not rewritten |
 
 PR #28 remains the Agent 3 source record. PR #32 was its first integrated successor; merged PR #33
@@ -174,6 +224,24 @@ The next execution order is:
 
 ## Verification for the current code candidate
 
+For review-response checkpoint `610c45e3...`, the complete root suite, complete desktop/Tauri suite
+(336 library plus 5 command-ACL tests), all 1,303 frontend tests, root and desktop strict Clippy,
+desktop `cargo check`, root formatting, Svelte check, production build, `cargo deny` and an explicit
+Scoop/Git Bash ambient check all pass. The relevant corrected mutation entries detect their mutants
+and their restored controls pass. The complete-diff review's four MEDIUM findings are closed. Its
+final harness/documentation findings are also corrected and the short re-review reports no finding.
+The startup helper preserves the application's default when `RUST_LOG` is unset, canonicalizes the
+effective key only on Windows, appends the marker override only to a nonempty inherited filter, and
+passes six focused tests plus the full frontend suite.
+
+The startup gate passes on the assembled application with a 60-second cold-start allowance. Two
+`test:flows` runs failed before a product assertion because Edge never answered CDP
+`Runtime.enable`; that harness covers chat send/friend acceptance rather than the changed Studio
+paths, so it is recorded as a non-applicable environment gap, not a pass or code failure. WSL also
+fails to launch locally with `E_ACCESSDENIED`, while the same ambient script passes under installed
+Git Bash. All 28 hosted jobs, including Linux ambient and the complete mutation workflows, pass on
+the code-identical published head. No assertion or product boundary was weakened.
+
 On `gate4-runtime-completion` through correction
 `6aee00046e35410ba42c9290c0d1f52fd41dd86b`, the definitive complete root suite passes, as do all
 1,282 frontend tests, root and desktop strict all-target/all-feature Clippy, desktop `cargo check`,
@@ -251,7 +319,8 @@ passes. Native is therefore not claimed green locally; exact-head CI remains the
 
 ## Non-negotiable boundaries
 
-- Native Save stays unavailable while P5 is false.
+- P5 authorizes only the ticketed Unconfirmed Save and reviewed lifecycle commands on this isolated
+  candidate. Direct Closing Save stays unavailable.
 - Unfinished repair commands stay unregistered.
 - Imported and Unknown tenure never become authoring authority.
 - Preview-local work never becomes installed source, receipt, handoff or signing authority.
@@ -259,5 +328,6 @@ passes. Native is therefore not claimed green locally; exact-head CI remains the
   not a substitute.
 - The shared preparation pool, source/reference fences, Prepared -> Source -> Completed order and
   exact retry identity remain intact.
-- The shared baseline remains unchanged while `gate4-runtime-completion` is verified and reviewed.
-- Gate 5 remains closed until full Gate 4 Review 4 passes and the user accepts it.
+- The shared baseline remains unchanged while `fix/six-client-recovery-gate4` is published and
+  verified.
+- Gate 5 remains closed until the remaining exact-head evidence passes and the user accepts Gate 4.

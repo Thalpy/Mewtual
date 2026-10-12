@@ -26,6 +26,78 @@ pub(super) fn branch(
     assert_eq!((f.source.epoch(), f.source.op_count()), (1, 0));
     (metadata, ledger, ordered)
 }
+
+/// A transferable branch whose installed successor carries repair-bound vault form 3.
+///
+/// The selected receipt remains the branch's basis. The source also retains the losing receipt as
+/// authenticated historical evidence, but that is not a second live opening and must not turn an
+/// otherwise exact successor into a refusal. This is the same policy as an ordinary repaired
+/// source: the repair resolves the pair; it does not retroactively discard work based on the
+/// selected receipt.
+pub(super) fn repair_bound_branch(
+    f: &mut Fixture,
+    count: usize,
+) -> (StudioOverlayState, IntentLedger, Vec<(DomainOp, u64)>) {
+    f.fill();
+    let decision = f.decide(None);
+    let selected = decision.receipt().clone();
+    f.source.seal(selected.clone(), &f.group, 0).unwrap();
+    let losing = Receipt::sign(
+        selected.document.clone(),
+        selected.closed_epoch,
+        [99; 32],
+        selected.seed_change_hash,
+        0,
+        selected.inherited.clone(),
+        &f.owner,
+    )
+    .unwrap();
+    assert_eq!(
+        f.source.seal(losing.clone(), &f.group, 0).unwrap(),
+        ReceiptIngest::Fault
+    );
+    let repair = crate::ReceiptRepair::sign_in_tenure(
+        selected.document.clone(),
+        selected.tenure_id,
+        [selected.hash(), losing.hash()],
+        selected.hash(),
+        1,
+        0,
+        &f.owner,
+    )
+    .unwrap();
+    f.source
+        .apply_receipt_repair(&repair, &selected, &losing, &f.group, 0)
+        .unwrap();
+
+    let plan = f.plan(&decision);
+    let basis = f
+        .source
+        .prepare_closing_overlay(decision.close(), &f.group, 0)
+        .unwrap();
+    let mut ledger = IntentLedger::new(f.source.document().clone());
+    let mut metadata = StudioOverlayState::new(&basis);
+    let mut ordered = Vec::new();
+    for n in 0..count {
+        let op = f.domain(f.title_body(&format!("repair-bound title {n}")));
+        let ts = 223 + n as u64;
+        let id = ledger.prepare(f.owner.device_id(), op.clone()).unwrap();
+        metadata.append(&basis, &ledger, id, ts).unwrap();
+        ordered.push((op, ts));
+    }
+    f.source = f.source.checkpoint_successor(&plan, &f.group, 0).unwrap();
+    f.restart();
+    assert_eq!(
+        f.source.snapshot().unwrap()[0],
+        3,
+        "precondition: the installed successor retains its repair binding"
+    );
+    assert_eq!(
+        f.source.repair_state().unwrap().disposition,
+        crate::RepairDisposition::Transitioned
+    );
+    (metadata, ledger, ordered)
+}
 // Widened for the disposal tests' transfer-hold case. The successor checkpoint above is the part
 // that matters and the part the archive module's own `branch` deliberately skips: without a
 // successor epoch there is nothing to hand off into, so `handoff_authority` refuses and a test
@@ -114,6 +186,42 @@ fn studio_handoff_preparation_one_turn_and_full_output_match_ordinary_edits() {
         .unwrap();
         assert_eq!(restored.projection().unwrap(), expected);
         assert_eq!(restored.doc.signed_log(), ordinary.doc.signed_log());
+    }
+}
+
+/// A form-3 successor follows the same handoff lifecycle as an ordinary successor.
+///
+/// This pins both header readers used after H2: the source can be signed into privately, and the
+/// Prepared manifest's structural evidence agrees with the restored source before completion.
+/// Keeping only the earlier header smoke test would miss a repair-prefix regression in the actual
+/// signing or completion path.
+#[test]
+fn studio_handoff_completes_into_a_repair_bound_successor() {
+    for art in [false, true] {
+        let mut f = Fixture::new(art);
+        let (metadata, ledger, _) = repair_bound_branch(&mut f, 2);
+        let mut batch = signing(&mut f, &metadata, &ledger);
+        while batch.sign_next(&f.owner, &f.group, 0).unwrap() {}
+        let (mut candidate, prepared) = batch.finish().unwrap().into_parts();
+        let candidate_bytes = candidate.snapshot().unwrap();
+        assert_eq!(
+            candidate_bytes[0], 3,
+            "handoff dropped the destination's repair binding"
+        );
+        assert_eq!(
+            prepared.evidence(&candidate, &ledger).unwrap(),
+            StudioHandoffEvidence::Complete
+        );
+        assert_eq!(
+            prepared
+                .evidence_in_vault(&candidate_bytes, &ledger)
+                .unwrap(),
+            StudioHandoffEvidence::Complete,
+            "the form-3 structural reader disagreed with the restored resolution path"
+        );
+        let completed = prepared.complete(&candidate, &ledger).unwrap();
+        assert!(completed.overlay().is_none());
+        assert!(completed.has_completed());
     }
 }
 

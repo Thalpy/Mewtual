@@ -859,7 +859,18 @@ async fn a_closing_drafts_operation_resent_as_an_unconfirmed_save_is_refused() {
         )
         .map(|(_, _, response)| response);
     let refused = match answered {
-        Err(error) => error.to_string(),
+        Ok(Some(crate::studio::StudioControlResponse::UnconfirmedOverlaySaved {
+            outcome: crate::studio::StudioUnconfirmedSaveOutcome::Refused { reason, message },
+            ..
+        })) => {
+            assert_eq!(
+                reason,
+                catcoms_replication::studio::StudioOverlaySaveRefusal::OtherKindDraft,
+                "the refusal lost its stable native classification"
+            );
+            message
+        }
+        Err(error) => panic!("the actor leaked a typed Save refusal through Err: {error}"),
         Ok(response) => {
             panic!("a Closing draft must be refused by the Unconfirmed Save, got {response:?}")
         }
@@ -884,7 +895,18 @@ async fn a_closing_drafts_operation_resent_as_an_unconfirmed_save_is_refused() {
         )
         .map(|(_, _, response)| response);
     let refused = match ticket {
-        Err(error) => error.to_string(),
+        Ok(Some(crate::studio::StudioControlResponse::UnconfirmedOverlaySaved {
+            outcome: crate::studio::StudioUnconfirmedSaveOutcome::Refused { reason, message },
+            ..
+        })) => {
+            assert_eq!(
+                reason,
+                catcoms_replication::studio::StudioOverlaySaveRefusal::OtherKindDraft,
+                "the ticket refusal lost its stable native classification"
+            );
+            message
+        }
+        Err(error) => panic!("the actor leaked a typed ticket refusal through Err: {error}"),
         Ok(response) => panic!("a ticket for a Closing draft must be refused, got {response:?}"),
     };
     assert!(
