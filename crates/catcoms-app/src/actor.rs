@@ -629,9 +629,11 @@ pub enum AppCommand {
         invite: Vec<u8>,
         reply: oneshot::Sender<Result<bool, String>>,
     },
-    /// Push a call-signalling message (opaque payload) to a member; `true` if reached.
+    /// Push a call-signalling message (opaque payload) to the member with exactly this device id;
+    /// `true` if addressed. Built only by [`ServerActor::send_call_signal`], which parses the
+    /// canonical identity text at the string boundary.
     SendCallSignal {
-        target_fp: String,
+        target: DeviceId,
         payload: Vec<u8>,
         reply: oneshot::Sender<Result<bool, String>>,
     },
@@ -1168,9 +1170,18 @@ pub enum AppEvent {
     },
     /// The set of pending incoming DM (friend) requests changed; the UI should re-fetch them.
     DmRequestsChanged,
-    /// An inbound call-signalling message arrived: `(sender fingerprint, opaque payload)`. One event
-    /// per signal; the UI decodes the payload (`{callId, type, data}`) and drives WebRTC.
-    CallSignal { from_fp: String, payload: Vec<u8> },
+    /// An inbound call-signalling message arrived. One event per signal; the UI decodes the
+    /// payload (`{callId, type, data}`) and drives WebRTC.
+    ///
+    /// `from` is the verified sender's **full** device id as 64 lowercase hex characters (the
+    /// `DeviceId` `Display` form, the same encoding as `MemberView::identity`); every call
+    /// authority, session, budget and claim key must use it. `from_fp` is the 8-hex display
+    /// fingerprint of that same id, for labels only (design-creative-suite.md 2.18).
+    CallSignal {
+        from: String,
+        from_fp: String,
+        payload: Vec<u8>,
+    },
     /// The actor has stopped (transport closed or shutdown requested).
     Closed,
 }
@@ -2568,17 +2579,21 @@ impl ServerActor {
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
-    /// Push a call-signalling message (opaque payload) to a member; `Ok(true)` if reached.
-    pub async fn send_call_signal(
-        &self,
-        target_fp: String,
-        payload: Vec<u8>,
-    ) -> Result<bool, String> {
+    /// Push a call-signalling message (opaque payload) to the member whose full device id is
+    /// `target` (64 lowercase hex); `Ok(true)` if addressed.
+    ///
+    /// A malformed or short identity is refused here, before anything is queued: the old
+    /// 8-hex fingerprint is not accepted, so a caller can never fall back to the ambiguous
+    /// route. Whether the id is a current member is decided by the sync layer.
+    pub async fn send_call_signal(&self, target: String, payload: Vec<u8>) -> Result<bool, String> {
+        let Some(target) = DeviceId::from_canonical_hex(&target) else {
+            return Err("call-signal target is not a full device identity".into());
+        };
         let (reply, rx) = oneshot::channel();
         if self
             .cmd_tx
             .send(AppCommand::SendCallSignal {
-                target_fp,
+                target,
                 payload,
                 reply,
             })
@@ -4600,12 +4615,12 @@ where
                         let _ = reply.send(res);
                     }
                     Some(AppCommand::SendCallSignal {
-                        target_fp,
+                        target,
                         payload,
                         reply,
                     }) => {
                         let res = server
-                            .send_call_signal(&target_fp, &payload)
+                            .send_call_signal(&target, &payload)
                             .await
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
@@ -5489,9 +5504,16 @@ where
                         }
                         // Drain any inbound call-signalling messages, one event each, so the UI's
                         // WebRTC layer can process offers/answers/ICE promptly.
-                        for (from_fp, payload) in server.take_call_signals() {
+                        for (from, payload) in server.take_call_signals() {
+                            // Both strings derive from the one verified id, so they can never
+                            // disagree; the fingerprint exists only for display.
+                            let from_fp = catcoms_sync::fingerprint(&from);
                             let _ = event_tx
-                                .send(AppEvent::CallSignal { from_fp, payload })
+                                .send(AppEvent::CallSignal {
+                                    from: from.to_string(),
+                                    from_fp,
+                                    payload,
+                                })
                                 .await;
                         }
                     }
@@ -7713,7 +7735,7 @@ mod tests {
             .publish_self_record(vec!["/ip4/203.0.113.1/tcp/1".into()], 1)
             .unwrap();
         let alice_record = alice_srv.sync.self_record().unwrap().clone();
-        let alice_fp = alice_srv.my_fingerprint();
+        let alice_id = alice_srv.device_id().to_string();
         let invite = alice_srv.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
         let (alice, mut alice_events, alice_handle) = spawn(alice_srv);
 
@@ -7730,11 +7752,27 @@ mod tests {
         .unwrap();
         assert!(bob_srv.sync.ingest_peer_record(alice_record));
         let bob_fp = bob_srv.my_fingerprint();
+        let bob_id = bob_srv.device_id().to_string();
         let (bob, _bob_events, bob_handle) = spawn(bob_srv);
+
+        // The command boundary takes only the canonical full identity: the legacy fingerprint,
+        // an uppercase spelling and garbage are refused before anything is queued.
+        for bad in [
+            alice_id[..8].to_string(),
+            alice_id.to_uppercase(),
+            "zz".repeat(32),
+        ] {
+            assert!(
+                bob.send_call_signal(bad.clone(), b"x".to_vec())
+                    .await
+                    .is_err(),
+                "{bad} must not be accepted as a call-signal target"
+            );
+        }
 
         let payload = br#"{"type":"offer","sdp":"opaque-to-actor"}"#.to_vec();
         assert!(bob
-            .send_call_signal(alice_fp, payload.clone())
+            .send_call_signal(alice_id, payload.clone())
             .await
             .unwrap());
 
@@ -7742,9 +7780,14 @@ mod tests {
             loop {
                 match alice_events.recv().await {
                     Some(TracedEvent {
-                        event: AppEvent::CallSignal { from_fp, payload },
+                        event:
+                            AppEvent::CallSignal {
+                                from,
+                                from_fp,
+                                payload,
+                            },
                         ..
-                    }) => break (from_fp, payload),
+                    }) => break (from, from_fp, payload),
                     Some(_) => continue,
                     None => panic!("alice actor closed"),
                 }
@@ -7752,7 +7795,12 @@ mod tests {
         })
         .await
         .expect("Alice did not surface the call signal");
-        assert_eq!(received, (bob_fp, payload));
+        assert_eq!(bob_id.len(), 64);
+        assert!(
+            bob_id.starts_with(&bob_fp),
+            "the label is a prefix of the identity"
+        );
+        assert_eq!(received, (bob_id, bob_fp, payload));
 
         alice.shutdown().await;
         bob.shutdown().await;

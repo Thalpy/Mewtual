@@ -5770,18 +5770,20 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(self.sync.send_dm_invite(target_fp, invite).await?)
     }
 
-    /// Push a call-signalling message (opaque payload) to a current member. `Ok(true)` if delivered,
-    /// `Ok(false)` if the target isn't reachable.
+    /// Push a call-signalling message (opaque payload) to the current member with exactly this
+    /// device id. `Ok(true)` if it was addressed and handed to the transport, `Ok(false)` if
+    /// `target` is not a current member or isn't reachable. Never addressed by fingerprint: see
+    /// `ChannelSync::send_call_signal`.
     pub async fn send_call_signal(
         &mut self,
-        target_fp: &str,
+        target: &DeviceId,
         payload: &[u8],
     ) -> Result<bool, AppError> {
-        Ok(self.sync.send_call_signal(target_fp, payload).await?)
+        Ok(self.sync.send_call_signal(target, payload).await?)
     }
 
-    /// Drain inbound call-signalling messages: `(sender fingerprint, opaque payload)`.
-    pub fn take_call_signals(&mut self) -> Vec<(String, Vec<u8>)> {
+    /// Drain inbound call-signalling messages: `(verified sender device id, opaque payload)`.
+    pub fn take_call_signals(&mut self) -> Vec<(DeviceId, Vec<u8>)> {
         self.sync.take_call_signals()
     }
 

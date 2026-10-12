@@ -1719,9 +1719,15 @@ struct ServerEvt {
     server: u64,
 }
 /// An inbound call-signalling message forwarded to the UI (payload is base64 of the opaque bytes).
+///
+/// `from` is the verified sender's full device identity (64 lowercase hex): the only key the
+/// frontend may use for call authority, sessions, budgets and claims. `from_fp` is the 8-hex
+/// display fingerprint of the same id, carried for labels (design-creative-suite.md 2.18). The
+/// frontend refuses an event whose two fields disagree.
 #[derive(Serialize, Clone)]
 struct CallSignalEvt {
     server: u64,
+    from: String,
     from_fp: String,
     payload: String,
 }
@@ -2387,12 +2393,17 @@ fn forward_events(
                 AppEvent::DmRequestsChanged => {
                     emit_tracked(&app, "dm-requests-changed", ServerEvt { server }, trace);
                 }
-                AppEvent::CallSignal { from_fp, payload } => {
+                AppEvent::CallSignal {
+                    from,
+                    from_fp,
+                    payload,
+                } => {
                     emit_tracked(
                         &app,
                         "call-signal",
                         CallSignalEvt {
                             server,
+                            from,
                             from_fp,
                             payload: B64.encode(payload),
                         },
@@ -8725,7 +8736,12 @@ async fn send_dm_invite(
     actor.send_dm_invite(target_fp, invite).await
 }
 
-/// Push a call-signalling message (base64 payload) to member `target_fp`. `true` if reached.
+/// Push a call-signalling message (base64 payload) to the member whose full device identity is
+/// `target` (64 lowercase hex, `MemberView.identity`). `true` if addressed.
+///
+/// The target used to be an 8-hex fingerprint, which a member can collide with a victim's by
+/// grinding a device key; the actor now refuses anything but the canonical full identity, and a
+/// refusal is a typed `VOICE_SIGNAL_FAILED` error rather than a silent `false`.
 ///
 /// The path behind one of the two incidents that started all of this: a call died while the roster
 /// still showed the peer online. That is exactly a run of these returning `false`, which the caller
@@ -8738,7 +8754,7 @@ async fn send_dm_invite(
 async fn send_call_signal(
     state: State<'_, AppState>,
     server: u64,
-    target_fp: String,
+    target: String,
     payload: String,
     trace: Option<String>,
 ) -> Result<bool, AppError> {
@@ -8754,7 +8770,7 @@ async fn send_call_signal(
         .map_err(|e| op.fail(codes::VOICE_SIGNAL_FAILED, format!("bad payload: {e}")))?;
     let actor = op.actor(&state, server).await?;
     let delivered = actor
-        .send_call_signal(target_fp, bytes)
+        .send_call_signal(target, bytes)
         .await
         .map_err(|e| op.fail(codes::VOICE_SIGNAL_FAILED, e))?;
     if delivered {

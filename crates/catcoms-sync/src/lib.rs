@@ -580,9 +580,9 @@ const MAX_PEX_ENTRIES: usize = 64;
 /// Cap on peer records **retained locally**, which is a different question from what fits in one
 /// response and needs a lot more headroom.
 ///
-/// Dropping a record is not merely a dark presence dot: `peer_for_fingerprint` reads this map, so
-/// an evicted member silently cannot be sent a call signal or a DM invite (both just return
-/// `Ok(false)`). At 64 that was reachable by an ordinary group once multi-device grants multiply
+/// Dropping a record is not merely a dark presence dot: `peer_for_device` (call signals) and
+/// `peer_for_fingerprint` (DM invites) read this map, so an evicted member silently cannot be sent
+/// a call signal or a DM invite (both just return `Ok(false)`). At 64 that was reachable by an ordinary group once multi-device grants multiply
 /// each person by their devices, and the eviction that got there was `HashMap` iteration order,
 /// which Rust randomises per process: which member's calls broke would differ every launch.
 const MAX_PEER_RECORDS: usize = 512;
@@ -2431,6 +2431,32 @@ pub enum ManualRedialOutcome {
     NoRoutes,
     /// Routes existed, but shared endpoint/process safety limits deferred every one.
     DeferredBySafetyLimit,
+}
+
+/// The single current member whose display fingerprint is `fp`, or `None` when no member or more
+/// than one member carries it.
+///
+/// A fingerprint is only four bytes of a `DeviceId`, and any member can grind a device key whose
+/// id shares a victim's first four bytes. A caller that still addresses members by fingerprint
+/// (the legacy DM-invite route) must therefore refuse an ambiguous name rather than guess. Pure
+/// over the member list so the ambiguity rule is testable with crafted ids.
+fn unique_member_for_fingerprint(
+    members: impl IntoIterator<Item = DeviceId>,
+    fp: &str,
+) -> Option<DeviceId> {
+    let mut found: Option<DeviceId> = None;
+    for device in members {
+        if roles::fingerprint(&device) != fp {
+            continue;
+        }
+        match found {
+            // The same device listed twice is still one member.
+            Some(existing) if existing == device => {}
+            Some(_) => return None,
+            None => found = Some(device),
+        }
+    }
+    found
 }
 
 fn peer_descriptor_hash(descriptor: &PeerDescriptor) -> [u8; 32] {
@@ -4466,10 +4492,15 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// fingerprint, opaque DM-group invite bytes)`, deduped on the sender. Surfaced to the recipient
     /// as pending friend requests; transient + bounded (`MAX_PENDING_DM_INVITES`).
     pending_dm_invites: Vec<(String, Vec<u8>)>,
-    /// Inbound call-signalling messages received via `KIND_CALL_SIGNAL`: `(sender fingerprint,
-    /// opaque payload)`. Drained by the actor (which emits a `CallSignal` event per item); FIFO,
-    /// bounded (`MAX_PENDING_CALL_SIGNALS`). NOT deduped.
-    pending_call_signals: Vec<(String, Vec<u8>)>,
+    /// Inbound call-signalling messages received via `KIND_CALL_SIGNAL`: `(verified sender
+    /// device, opaque payload)`. Drained by the actor (which emits a `CallSignal` event per item);
+    /// FIFO, bounded (`MAX_PENDING_CALL_SIGNALS`). NOT deduped.
+    ///
+    /// The sender is the **full** `DeviceId` derived from the signature key that authenticated the
+    /// request (Gate 5, design-creative-suite.md 2.18). It used to be cut down to the 4-byte
+    /// display fingerprint right here, which let any member who generated a device key sharing a
+    /// victim's first four bytes be indistinguishable from the victim to every call surface above.
+    pending_call_signals: Vec<(DeviceId, Vec<u8>)>,
     /// Known **member** peer records (this node's own + those learned via PEX), each
     /// self-signed by a current member. The discovery layer turns these into
     /// PEX-sourced dial candidates. Bounded by `MAX_PEER_RECORDS`.
@@ -8778,12 +8809,32 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// The transport peer id for a current member by fingerprint, taken from its signed peer record
-    /// (the dial target). `None` if we hold no record for that member yet (no PEX).
+    /// (the dial target). `None` if we hold no record for that member yet (no PEX), **or if the
+    /// fingerprint is ambiguous**.
+    ///
+    /// Legacy route: only the DM-invite path still addresses members by their 4-byte fingerprint.
+    /// A member can generate a device key sharing another member's first four bytes, and this used
+    /// to return whichever colliding record `HashMap` iteration yielded first, which Rust
+    /// randomises per process. It now refuses whenever more than one current member carries the
+    /// fingerprint (design-creative-suite.md 2.18), whether or not each holds a record, so the
+    /// answer can never depend on which of them happened to publish one. Call signalling uses the
+    /// exact [`Self::peer_for_device`] instead.
     fn peer_for_fingerprint(&self, fp: &str) -> Option<PeerId> {
-        self.peer_records.iter().find_map(|(device, desc)| {
-            (self.group.contains_device(device) && roles::fingerprint(device) == fp)
-                .then(|| PeerId::new(desc.peer_id))
-        })
+        let device = unique_member_for_fingerprint(self.group.member_device_ids(), fp)?;
+        self.peer_for_device(&device)
+    }
+
+    /// The transport peer id for exactly this current member, taken from the signed peer record
+    /// stored under its full `DeviceId`. `None` when `device` is not a current member or we hold
+    /// no record for it. A different device that merely shares a display fingerprint can never
+    /// match, because the lookup is keyed by all 32 bytes.
+    fn peer_for_device(&self, device: &DeviceId) -> Option<PeerId> {
+        if !self.group.contains_device(device) {
+            return None;
+        }
+        self.peer_records
+            .get(device)
+            .map(|desc| PeerId::new(desc.peer_id))
     }
 
     /// Deliver a DM (friend) invite to current member `target_fp` over this group, so they receive
@@ -8832,10 +8883,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         true
     }
 
-    /// Push a call-signalling message (opaque payload) to current member `target_fp` over this group.
-    /// `Ok(true)` if it was addressed and queued, `Ok(false)` if we hold no peer record for the
-    /// target. Authenticated as coming from a current member (the recipient learns the verified
-    /// sender fingerprint).
+    /// Push a call-signalling message (opaque payload) to current member `target` over this group.
+    /// `Ok(true)` if it was addressed and queued, `Ok(false)` if `target` is not a current member or
+    /// we hold no peer record for it. Authenticated as coming from a current member (the recipient
+    /// learns the verified sender's full `DeviceId`).
+    ///
+    /// The target is the member's **full** device id, never a fingerprint: routing goes through
+    /// [`Self::peer_for_device`], so a forged identity sharing a victim's first four bytes cannot
+    /// pull the victim's call traffic toward itself, nor push its own to the victim.
     ///
     /// Sent through [`MeshTransport::notify`], never `request`: `serve_call_signal` deliberately
     /// answers with no data, so there is nothing in the reply worth blocking for, and blocking is
@@ -8849,10 +8904,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// of it.
     pub async fn send_call_signal(
         &mut self,
-        target_fp: &str,
+        target: &DeviceId,
         payload: &[u8],
     ) -> Result<bool, SyncError> {
-        let Some(peer) = self.peer_for_fingerprint(target_fp) else {
+        let Some(peer) = self.peer_for_device(target) else {
             return Ok(false);
         };
         let (req, _auth) = self.build_authed_request(KIND_CALL_SIGNAL, payload)?;
@@ -8882,8 +8937,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             tracing::trace!("call signal rate-limited; dropped");
             return;
         }
-        let from = roles::fingerprint(&device);
-        self.pending_call_signals.push((from, payload));
+        // Queue the full verified device id. The 4-byte fingerprint is a display label and is
+        // derived later, by the actor, only for display (design-creative-suite.md 2.18).
+        self.pending_call_signals.push((device, payload));
         self.bound_call_signals();
     }
 
@@ -8949,17 +9005,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// oldest one, so a flooder can only starve itself: with `k` senders active nobody is ever
     /// squeezed below `MAX_PENDING_CALL_SIGNALS / k` slots.
     ///
-    /// Ties go to the lowest fingerprint, so the behaviour is deterministic and testable.
+    /// Senders are counted by their **full** `DeviceId`. Keyed by fingerprint, two devices sharing
+    /// four bytes used to share one fair share, so a colliding member could make a victim pay for
+    /// its own flood. Ties go to the lowest `DeviceId` in byte order, so the behaviour is
+    /// deterministic and testable; where fingerprints differ that is also the lowest fingerprint,
+    /// the order this rule always had.
     fn bound_call_signals(&mut self) {
         while self.pending_call_signals.len() > MAX_PENDING_CALL_SIGNALS {
-            let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+            let mut counts: BTreeMap<DeviceId, usize> = BTreeMap::new();
             for (from, _) in &self.pending_call_signals {
-                *counts.entry(from.as_str()).or_default() += 1;
+                *counts.entry(*from).or_default() += 1;
             }
             let Some(worst) = counts
                 .into_iter()
-                .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0)))
-                .map(|(fp, _)| fp.to_string())
+                .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+                .map(|(device, _)| device)
             else {
                 break;
             };
@@ -8976,9 +9036,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
-    /// Drain (return + clear) the buffered inbound call signals; the actor calls this each loop and
-    /// emits a `CallSignal` event per item.
-    pub fn take_call_signals(&mut self) -> Vec<(String, Vec<u8>)> {
+    /// Drain (return + clear) the buffered inbound call signals as `(verified sender device,
+    /// payload)`; the actor calls this each loop and emits a `CallSignal` event per item.
+    pub fn take_call_signals(&mut self) -> Vec<(DeviceId, Vec<u8>)> {
         std::mem::take(&mut self.pending_call_signals)
     }
 
@@ -24157,21 +24217,118 @@ mod tests {
             .unwrap();
         assert!(bob.ingest_peer_record(alice.self_record().unwrap().clone()));
 
-        let alice_fp = roles::fingerprint(&ids[0]);
-        let bob_fp = roles::fingerprint(&ids[1]);
         let payload = br#"{"type":"offer","sdp":"opaque-to-sync"}"#;
-        let (sent, _) = tokio::join!(bob.send_call_signal(&alice_fp, payload), alice.run_once());
+        let (sent, _) = tokio::join!(bob.send_call_signal(&ids[0], payload), alice.run_once());
 
         assert!(sent.unwrap(), "the sender had a verified route to Alice");
         assert_eq!(
             alice.take_call_signals(),
-            vec![(bob_fp, payload.to_vec())],
-            "the recipient keeps the authenticated sender and opaque payload intact"
+            vec![(ids[1], payload.to_vec())],
+            "the recipient keeps the full authenticated sender id and opaque payload intact"
         );
         assert!(
             alice.take_call_signals().is_empty(),
             "draining a call signal emits it only once"
         );
+    }
+
+    /// A device id sharing `real`'s first four bytes (its display fingerprint) and nothing else.
+    /// Grinding an actual key for this takes about 2^32 attempts; the routing and fairness code
+    /// only ever sees the id, so a crafted id exercises exactly the collision a member could buy.
+    fn prefix_twin(real: &DeviceId) -> DeviceId {
+        let mut bytes = *real.as_bytes();
+        for b in &mut bytes[4..] {
+            *b ^= 0x5a;
+        }
+        let twin = DeviceId::from_bytes(bytes);
+        assert_eq!(roles::fingerprint(&twin), roles::fingerprint(real));
+        assert_ne!(twin, *real);
+        twin
+    }
+
+    #[tokio::test]
+    async fn a_call_signal_for_a_prefix_twin_never_routes_to_the_real_member() {
+        // Design 2.18 / Gate 5: the target is the full device id. A member who presents an id
+        // sharing Alice's fingerprint must not be able to address (or receive) Alice's calls.
+        let (_hub, members, ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        alice
+            .publish_self_record(vec![member_route(&alice, "/ip4/203.0.113.1/tcp/1")], 1)
+            .unwrap();
+        assert!(bob.ingest_peer_record(alice.self_record().unwrap().clone()));
+
+        let twin = prefix_twin(&ids[0]);
+        // Nothing is sent, so Alice is not driven here: there is no request for her to serve.
+        assert!(
+            !bob.send_call_signal(&twin, b"misrouted").await.unwrap(),
+            "a non-member id is never routed, even though its fingerprint matches Alice's"
+        );
+        assert!(alice.take_call_signals().is_empty());
+
+        // The exact id still routes, so the refusal above is about identity, not reachability.
+        let (sent, _) = tokio::join!(bob.send_call_signal(&ids[0], b"routed"), alice.run_once());
+        assert!(sent.unwrap());
+        assert_eq!(
+            alice.take_call_signals(),
+            vec![(ids[1], b"routed".to_vec())]
+        );
+    }
+
+    #[tokio::test]
+    async fn colliding_senders_keep_separate_fair_shares_of_the_signal_queue() {
+        // Keyed by fingerprint, a flooder and the quiet member it collides with shared one share,
+        // so the flood's eviction rule removed the quiet member's older offer. Keyed by the full
+        // id, only the flooder pays.
+        let (_hub, members, ids) = build_members(1).await;
+        let mut alice = members.into_iter().next().unwrap();
+        let quiet = DeviceId::from_public_key_bytes(&[7u8; 32]);
+        let flooder = prefix_twin(&quiet);
+        let _ = ids;
+
+        alice
+            .pending_call_signals
+            .push((quiet, b"quiet-offer".to_vec()));
+        for i in 0..MAX_PENDING_CALL_SIGNALS {
+            alice
+                .pending_call_signals
+                .push((flooder, format!("flood-{i}").into_bytes()));
+        }
+        alice.bound_call_signals();
+
+        let queued = alice.take_call_signals();
+        assert_eq!(queued.len(), MAX_PENDING_CALL_SIGNALS);
+        assert_eq!(
+            queued.first(),
+            Some(&(quiet, b"quiet-offer".to_vec())),
+            "the colliding quiet member's offer survives; the flooder lost its own oldest entry"
+        );
+        assert_eq!(
+            queued.iter().filter(|(from, _)| *from == flooder).count(),
+            MAX_PENDING_CALL_SIGNALS - 1
+        );
+    }
+
+    #[test]
+    fn the_legacy_fingerprint_route_refuses_an_ambiguous_fingerprint() {
+        let a = DeviceId::from_public_key_bytes(&[1u8; 32]);
+        let twin = prefix_twin(&a);
+        let c = DeviceId::from_public_key_bytes(&[2u8; 32]);
+        let fp_a = roles::fingerprint(&a);
+        let fp_c = roles::fingerprint(&c);
+        assert_ne!(fp_a, fp_c);
+
+        assert_eq!(unique_member_for_fingerprint([a, c], &fp_a), Some(a));
+        assert_eq!(
+            unique_member_for_fingerprint([a, twin, c], &fp_a),
+            None,
+            "two current members share the fingerprint, so neither may be guessed"
+        );
+        assert_eq!(unique_member_for_fingerprint([a, twin, c], &fp_c), Some(c));
+        assert_eq!(unique_member_for_fingerprint([a, a], &fp_a), Some(a));
+        assert_eq!(unique_member_for_fingerprint([c], &fp_a), None);
+        assert_eq!(unique_member_for_fingerprint(Vec::new(), &fp_a), None);
     }
 
     /// A transport whose `request` never answers: the peer that has gone away, without the test
@@ -24260,7 +24417,7 @@ mod tests {
 
         let sent = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            node.send_call_signal(&roles::fingerprint(&own), b"sdp-offer"),
+            node.send_call_signal(&own, b"sdp-offer"),
         )
         .await
         .expect("a call signal must return without waiting for the peer to answer")
@@ -24281,10 +24438,8 @@ mod tests {
         let mut it = members.into_iter();
         let mut alice = it.next().unwrap();
         let mut bob = it.next().unwrap();
-        let alice_fp = roles::fingerprint(&ids[0]);
-
         assert!(!bob
-            .send_call_signal(&alice_fp, b"unroutable-offer")
+            .send_call_signal(&ids[0], b"unroutable-offer")
             .await
             .unwrap());
         assert!(alice.take_call_signals().is_empty());
@@ -24299,8 +24454,8 @@ mod tests {
         let mut alice = it.next().unwrap();
         let mut bob = it.next().unwrap();
         let mut carol = it.next().unwrap();
-        let bob_fp = roles::fingerprint(&ids[1]);
-        let carol_fp = roles::fingerprint(&ids[2]);
+        let bob_id = ids[1];
+        let carol_id = ids[2];
 
         // Everyone can address Alice.
         alice
@@ -24309,18 +24464,18 @@ mod tests {
         for n in [&mut bob, &mut carol] {
             assert!(n.ingest_peer_record(alice.self_record().unwrap().clone()));
         }
-        let alice_fp = roles::fingerprint(&ids[0]);
+        let alice_id = ids[0];
 
         // Carol's offer lands first, then Bob floods far past the queue bound.
         let (sent, _) = tokio::join!(
-            carol.send_call_signal(&alice_fp, b"carol-sdp-offer"),
+            carol.send_call_signal(&alice_id, b"carol-sdp-offer"),
             alice.run_once()
         );
         assert!(sent.unwrap());
         for i in 0..(MAX_PENDING_CALL_SIGNALS + 64) {
             let payload = format!("bob-flood-{i}");
             let (_, _) = tokio::join!(
-                bob.send_call_signal(&alice_fp, payload.as_bytes()),
+                bob.send_call_signal(&alice_id, payload.as_bytes()),
                 alice.run_once()
             );
         }
@@ -24333,12 +24488,12 @@ mod tests {
         assert!(
             queued
                 .iter()
-                .any(|(from, p)| *from == carol_fp && p == b"carol-sdp-offer"),
+                .any(|(from, p)| *from == carol_id && p == b"carol-sdp-offer"),
             "the quiet member's offer survived a flood that used to evict it"
         );
         // The flooder is squeezed by its own token bucket: it cannot have banked more than one
         // burst plus whatever the (unmoving) test clock refilled, which is nothing.
-        let from_bob = queued.iter().filter(|(from, _)| *from == bob_fp).count();
+        let from_bob = queued.iter().filter(|(from, _)| *from == bob_id).count();
         assert!(
             from_bob <= CALL_SIGNAL_BURST as usize,
             "the flooder was capped at its burst, got {from_bob}"
