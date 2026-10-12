@@ -12,6 +12,8 @@ and ranks the live hazards in that path.
 
 - **PR #27 recovery-workflow corrections (2026-10-12; local verification complete).** Review of exact
   head `b8cda2a047b01f75664603c9e0fd96ed5341b6c6` found three reachable Studio progress failures.
+  Implementation checkpoint `f6d67f4304b75922e3da93980699a0b6adf252a4` contains their reviewed
+  correction, the adjacent rereview fix, regressions and the exact-lock security update.
   The isolated `fix/pr27-studio-recovery` candidate now carries C4's stale Copy rejection as a
   typed pre-publication `written:false` result; permits a new preview/fresh nonce only when no
   earlier delivery is ambiguous; keeps unresolved Copy actions visible after source disposal,
