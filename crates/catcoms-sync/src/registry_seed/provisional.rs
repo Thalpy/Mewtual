@@ -39,7 +39,11 @@ pub struct ProvisionalStudioHint {
 }
 /// Short-lived inspection of unconfirmed candidate metadata after all current-scope checks.
 /// A copied receipt remains raw data and cannot reconstruct the private discovery context.
+///
+/// `non_exhaustive` so only this crate builds one, and a provider and receipt read from it were
+/// really re-checked against the live hint (design 8.1 (ii)). The fields stay public for reading.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ProvisionalStudioHintUse<'a> {
     pub target: StudioTarget,
     pub peer: PeerId,

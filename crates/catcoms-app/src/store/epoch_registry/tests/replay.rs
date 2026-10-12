@@ -1,5 +1,4 @@
 //! Saved-intent authority, retry identity and conservative recovery screening share real vault IO.
-use super::super::replay::ReplaySync;
 use super::*;
 use catcoms_replication::SignedOp;
 use catcoms_rt::ManualClock;
@@ -294,12 +293,6 @@ fn signed(f: &Fixture, result: (RegistryReplayOutcome, EpochRegistryState)) -> S
     )
     .unwrap()
 }
-pub(super) fn sync(step: ReplaySync, path: &Path, bytes: u64) -> Result<(), AppError> {
-    match step {
-        ReplaySync::Intent => crate::store::epoch_intents::sync_intent(path, bytes),
-        _ => sync_registry(path, bytes),
-    }
-}
 pub(super) fn intent_bytes(store: &ServerStore, f: &Fixture) -> Vec<u8> {
     let scope = crate::store::epoch_intents::scope_bytes(SERVER, &f.document).unwrap();
     fs::read(
@@ -411,16 +404,28 @@ fn registry_replay_failed_tombstone_save_and_flush_retry_the_exact_signed_change
                 &mut rng(),
                 &mut budget,
                 &mut intents,
-                |path, bytes| {
-                    if mode == 1 {
-                        atomic_write(path, bytes)?;
-                    }
-                    if mode == 2 {
-                        panic!("injected replay writer unwind");
-                    }
-                    Err(AppError::Io("injected replay save failure".into()))
+                &mut WriteHooks::Hooked {
+                    before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                        if mode == 1 {
+                            return Intercept::Continue;
+                        }
+                        if mode == 2 {
+                            panic!("injected replay writer unwind");
+                        }
+                        Intercept::Fail(AppError::Io("injected replay save failure".into()))
+                    }),
+                    before_sync: None,
+                    before_unlink: None,
+                    // Only the epoch replacement: the source and intent flushes precede it.
+                    after: Some(&mut |op: CompletedOperation, tag: WriteTag, _: &Path| {
+                        if op == CompletedOperation::Write && mode == 1 && tag == WriteTag::Epoch {
+                            return AfterIntercept::Fail(AppError::Io(
+                                "injected replay save failure".into(),
+                            ));
+                        }
+                        AfterIntercept::Continue
+                    }),
                 },
-                &mut sync,
             )
         }));
         assert!(result.is_err() || result.unwrap().is_err());
@@ -473,13 +478,18 @@ fn registry_replay_failed_tombstone_save_and_flush_retry_the_exact_signed_change
             &mut rng(),
             &mut budget,
             &mut intents,
-            |_, _| panic!("retry must not rewrite"),
-            &mut |step, path, bytes| {
-                if step == ReplaySync::Intent {
-                    Err(AppError::Io("intent sync failed".into()))
-                } else {
-                    sync(step, path, bytes)
-                }
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                    panic!("retry must not rewrite")
+                }),
+                before_sync: Some(&mut |step: WriteTag, _: &Path, _: u64| {
+                    if step == WriteTag::Intents {
+                        return AfterIntercept::Fail(AppError::Io("intent sync failed".into()));
+                    }
+                    AfterIntercept::Continue
+                }),
+                before_unlink: None,
+                after: None,
             },
         );
         assert!(result.is_err());
@@ -505,7 +515,7 @@ fn registry_replay_every_flush_failure_and_unwind_withholds_ciphertext() {
     let ledger = intent_bytes(&store, &f);
     // Even a byte-identical retry must cross all three barriers. A sync error or unwind must
     // never expose Prepared, trust stale accounting, rewrite the change, or retire the intent.
-    for target in [ReplaySync::Source, ReplaySync::Intent, ReplaySync::Epoch] {
+    for target in [WriteTag::Source, WriteTag::Intents, WriteTag::Epoch] {
         for unwind in [false, true] {
             let (mut budget, mut intents) = budgets(&mut store, &f);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -519,16 +529,23 @@ fn registry_replay_every_flush_failure_and_unwind_withholds_ciphertext() {
                     &mut rng(),
                     &mut budget,
                     &mut intents,
-                    |_, _| panic!("exact replay must not rewrite the epoch"),
-                    &mut |step, path, bytes| {
-                        if step == target {
+                    &mut WriteHooks::Hooked {
+                        before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                            panic!("exact replay must not rewrite the epoch")
+                        }),
+                        before_sync: Some(&mut |step: WriteTag, _: &Path, _: u64| {
+                            if step != target {
+                                return AfterIntercept::Continue;
+                            }
                             if unwind {
                                 panic!("injected {target:?} sync unwind");
                             }
-                            Err(AppError::Io(format!("injected {target:?} sync failure")))
-                        } else {
-                            sync(step, path, bytes)
-                        }
+                            AfterIntercept::Fail(AppError::Io(format!(
+                                "injected {target:?} sync failure"
+                            )))
+                        }),
+                        before_unlink: None,
+                        after: None,
                     },
                 )
             }));

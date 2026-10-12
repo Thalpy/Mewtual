@@ -180,7 +180,7 @@ async fn studio_discovery_actual_join_bootstrap_checkpoint_recovery_tail_and_res
         .bob
         .prepare_checkpoint_discovery(&p.b_store, SERVER, p.alice.local_peer(), scope)
         .is_err());
-    assert!(p.bob.sync.observed_owner_tenure_start().is_none());
+    assert!(p.bob.sync.authoring_owner_tenure_start().is_none());
     // This is the same authenticated directory catch-up used by the desktop join command,
     // not promote_member_peer_bound or a fixture-only proof API.
     let (bootstrap, tick) = tokio::join!(

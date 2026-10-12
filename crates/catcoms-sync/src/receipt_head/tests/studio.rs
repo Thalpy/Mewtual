@@ -12,7 +12,7 @@ fn studio_head_wire_golden_caps_kind_and_index_aliases() {
         } else {
             StudioTarget::Index { channel: [3; 16] }
         });
-        let bytes = encode_scoped_query(target, &[8; 16], [9; 16]).unwrap();
+        let bytes = encode_scoped_query(target, &[8; 16], [9; 16], None).unwrap();
         let mut golden = vec![1, 0, if art { 16 } else { 15 }, 0, 0, 0, 16];
         golden.extend([3; 16]);
         golden.extend([0, 0, 0, 16]);
@@ -22,7 +22,7 @@ fn studio_head_wire_golden_caps_kind_and_index_aliases() {
         assert_eq!(bytes, golden);
         assert_eq!(
             decode_scoped_query(KIND_STUDIO_HEAD, &bytes, &[8; 16]).unwrap(),
-            (target, [9; 16])
+            (target, [9; 16], None)
         );
         assert!(decode_scoped_query(KIND_RECEIPT_HEAD, &bytes, &[8; 16]).is_err());
         for len in 0..bytes.len() {

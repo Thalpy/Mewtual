@@ -431,13 +431,24 @@ fn studio_pages_write_and_flush_failure_require_exact_retry_after_reconciliation
             &page,
             &mut rng(),
             &mut b,
-            |path, bytes| {
-                if failure == 1 {
-                    atomic_write(path, bytes)?;
-                }
-                Err(invalid("injected write failure"))
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                    if failure == 1 {
+                        return Intercept::Continue;
+                    }
+                    Intercept::Fail(invalid("injected write failure"))
+                }),
+                before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                    AfterIntercept::Fail(invalid("injected flush failure"))
+                }),
+                before_unlink: None,
+                after: Some(&mut |op: CompletedOperation, _: WriteTag, _: &Path| {
+                    if op == CompletedOperation::Write && failure == 1 {
+                        return AfterIntercept::Fail(invalid("injected write failure"));
+                    }
+                    AfterIntercept::Continue
+                }),
             },
-            |_, _| Err(invalid("injected flush failure")),
         );
         assert!(result.is_err());
         assert!(b.requires_reconciliation());

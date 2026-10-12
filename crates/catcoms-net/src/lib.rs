@@ -108,6 +108,7 @@ mod publication;
 
 /// Max request/response frame size.
 const MAX_FRAME: usize = 16 * 1024 * 1024;
+
 /// Cap on discovered records surfaced from a single rendezvous Discover response, so a
 /// hostile rendezvous cannot flood the never-dropping discovered queue (the higher
 /// layer ranks/dials with its own bounds, but those sit downstream of this queue).
@@ -557,7 +558,7 @@ impl MeshBehaviour {
                 StreamProtocol::new(RR_PROTOCOL),
                 request_response::ProtocolSupport::Full,
             )],
-            request_response::Config::default(),
+            request_response::Config::default().with_request_timeout(catcoms_rt::REQUEST_TIMEOUT),
         );
         let dcutr = dcutr::Behaviour::new(key.public().to_peer_id());
         let identify = identify::Behaviour::new(identify_config(key));
@@ -757,14 +758,25 @@ fn dial_bootstraps(
     for (target, addresses) in peer_groups {
         let opts = DialOpts::peer_id(target)
             .addresses(addresses)
-            .condition(PeerCondition::DisconnectedAndNotDialing)
-            .build();
+            .condition(PeerCondition::DisconnectedAndNotDialing);
+        // libp2p's default known-peer dial reuses the listener port. Windows cannot reuse the
+        // same local/remote TCP four-tuple while the prior connection is in TIME_WAIT, even
+        // though the listener itself has reopened successfully. A quick app restart would then
+        // accept every reconnect command but fail each socket with WSAEADDRINUSE until the kernel
+        // timeout elapsed. Unix keeps port reuse for its NAT-traversal benefit; Windows uses an
+        // ephemeral outbound port so restart recovery is immediately possible.
+        #[cfg(windows)]
+        let opts = opts.allocate_new_port();
+        let opts = opts.build();
         let connection_id = opts.connection_id();
         swarm.dial(opts)?;
         submitted.push((target, connection_id));
     }
     for addr in bare {
-        swarm.dial(addr)?;
+        let opts = DialOpts::unknown_peer_id().address(addr);
+        #[cfg(windows)]
+        let opts = opts.allocate_new_port();
+        swarm.dial(opts.build())?;
     }
     Ok(submitted)
 }
@@ -3292,6 +3304,15 @@ struct PendingRequest {
     /// Deliberately unread: ownership is the accounting action. It survives a dropped waiter and
     /// is released only by the matching response/failure event.
     _keepalive: Option<SharedRequestKeepalive>,
+    /// First byte of the request frame and its length, retained only to describe a failure.
+    ///
+    /// This layer deliberately does not know what the byte *means*; the sync layer's request
+    /// kinds are its own business. But "outbound request failed" with no discriminator at all
+    /// made a real report unattributable: twenty-four identical timeouts, and the only way to
+    /// tell a blob fetch from a PEX round was to notice which *other* log lines were missing.
+    /// One opaque number and a length turn that into a reading.
+    kind: Option<u8>,
+    bytes: usize,
 }
 
 struct Actor {
@@ -3965,6 +3986,8 @@ impl Actor {
                                 PendingRequest {
                                     reply,
                                     _keepalive: keepalive,
+                                    kind: data.first().copied(),
+                                    bytes: data.len(),
                                 },
                             );
                         }
@@ -4012,6 +4035,8 @@ impl Actor {
                             PendingRequest {
                                 reply,
                                 _keepalive: keepalive,
+                                kind: data.first().copied(),
+                                bytes: data.len(),
                             },
                         );
                     }
@@ -4381,8 +4406,11 @@ impl Actor {
         let shape = dial_log_shape(std::iter::once(&addr));
         let opts = DialOpts::peer_id(target)
             .addresses(vec![addr])
-            .condition(PeerCondition::DisconnectedAndNotDialing)
-            .build();
+            .condition(PeerCondition::DisconnectedAndNotDialing);
+        // See `dial_bootstraps`: a Windows restart must not inherit an unusable TIME_WAIT tuple.
+        #[cfg(windows)]
+        let opts = opts.allocate_new_port();
+        let opts = opts.build();
         let connection_id = opts.connection_id();
         // Insert before calling into libp2p so another command drained in this same actor turn
         // observes the in-flight attempt. Every immediate error below removes it because no later
@@ -4437,8 +4465,12 @@ impl Actor {
             let shape = dial_log_shape(&addrs);
             let opts = DialOpts::peer_id(peer)
                 .addresses(addrs)
-                .condition(PeerCondition::Always)
-                .build();
+                .condition(PeerCondition::Always);
+            // See `dial_bootstraps`: saved member routes are the path most exposed to a rapid
+            // close/reopen of the same listener and remote endpoint on Windows.
+            #[cfg(windows)]
+            let opts = opts.allocate_new_port();
+            let opts = opts.build();
             match self.swarm.dial(opts) {
                 Ok(()) => tracing::debug!(peer = %peer, addresses = count, ?shape, "dialing"),
                 Err(e) => {
@@ -4901,8 +4933,19 @@ impl Actor {
                 // which reads as a local shutdown; a dial that never landed, a peer that went away
                 // mid-request and a request that simply timed out are three different problems and
                 // a log that spells them all the same way sends you looking in the wrong place.
-                tracing::warn!(peer = %peer, error = %error, "outbound request failed");
-                if let Some(pending) = self.pending_req.remove(&request_id) {
+                //
+                // The kind/size come from the pending entry, so the removal happens first: which
+                // request failed is as load-bearing as why, and a bare peer+reason line cannot
+                // separate a bulk transfer from a control round on the same connection.
+                let pending = self.pending_req.remove(&request_id);
+                tracing::warn!(
+                    peer = %peer,
+                    error = %error,
+                    kind = ?pending.as_ref().and_then(|entry| entry.kind),
+                    request_bytes = ?pending.as_ref().map(|entry| entry.bytes),
+                    "outbound request failed"
+                );
+                if let Some(pending) = pending {
                     let _ = pending.reply.send(Err(match error {
                         request_response::OutboundFailure::Timeout => {
                             TransportError::Timeout(to_peer(&peer))

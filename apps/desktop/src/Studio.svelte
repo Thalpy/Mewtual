@@ -90,11 +90,11 @@
     return m ? [...m.entries, ...m.overflow].find((e) => e.id === objectId) ?? null : null;
   });
   const isScore = $derived(entry?.kind === "score");
-  const readOnlyWhy = $derived.by(() => { void studio.rev; if (!objectId) return ""; const ep = session.editableEpoch(objectId); return "refused" in ep ? ep.refused : ""; });
+  const readOnlyWhy = $derived.by(() => { void studio.rev; return objectId ? session.editRefusal(objectId) : ""; });
   const pending = $derived.by(() => { void studio.rev; return objectId ? session.pendingFor(objectId) : []; });
-  const uncertain = $derived(pending.filter((s) => s.status === "uncertain"));
-  const inflight = $derived(pending.some((s) => s.status !== "uncertain"));
-  const blockedCount = $derived.by(() => { void studio.rev; return uncertain.length ? session.blockedBehind(uncertain[0].id) : 0; });
+  const attention = $derived(pending.filter((s) => s.mayHaveCommitted || s.status === "uncertain" || s.status === "blocked"));
+  const inflight = $derived(pending.some((s) => s.status === "queued" || s.status === "inflight"));
+  const blockedCount = $derived.by(() => { void studio.rev; return attention.length ? session.blockedBehind(attention[0].id) : 0; });
   const pendingInserts = $derived(pending.filter((s): s is Extract<SaveRecord, { kind: "frame" }> => s.kind === "frame" && s.op === "insert"));
   const receivePaused = $derived.by(() => { void studio.rev; return session.receivePaused; });
 
@@ -624,6 +624,7 @@
   // --- Saves: retry the same request, re-author on purpose, or discard on purpose ---------------
   function retrySave(s: SaveRecord) { guard(() => session.retry(s.id)); }
   function reauthorSave(s: SaveRecord) { guard(() => session.reauthor(s.id)); }
+  function overlayRetryOf(s: SaveRecord) { return s.kind === "frame" || s.kind === "overlayApply" ? s.overlayRetry : null; }
   let discardArmed = $state(0);
   function discardSave(s: SaveRecord) {
     if (discardArmed !== s.id) { discardArmed = s.id; return; }
@@ -634,11 +635,16 @@
 
   // --- Index entry: expiry and deletion are Index operations ------------------------------------
   function setExpiry(e: NativeExpiry) { if (objectId) guard(() => session.setEntryExpiry(objectId, e)); }
-  let deleteArmed = $state(false);
+  const destructiveScopeKey = $derived.by(() => {
+    void studio.rev;
+    return session.scope ? `${session.scope.server}:${session.scope.channel}` : "";
+  });
+  const deleteKey = $derived(objectId && destructiveScopeKey ? `${destructiveScopeKey}:${objectId}` : "");
+  let deleteArmed = $state("");
   function deleteFlipnote() {
-    if (!objectId) return;
+    if (!objectId || deleteArmed !== deleteKey) return;
     commit();
-    guard(() => { session.deleteEntry(objectId); deleteArmed = false; studio.selected = ""; });
+    guard(() => { session.deleteEntry(objectId); deleteArmed = ""; studio.selected = ""; });
   }
   function expiryDate(e: NativeExpiry): string {
     if (e.kind !== "at") return "";
@@ -651,6 +657,89 @@
     const d = Math.ceil((e.ms - Date.now()) / 86_400_000);
     return d <= 0 ? `expired ${new Date(e.ms).toLocaleDateString()}` : `expires in ${d}d`;
   }
+
+  // --- Retained local draft ----------------------------------------------------------------------
+  const overlay = $derived.by(() => { void studio.rev; return session.overlay?.object === objectId ? session.overlay : null; });
+  const draftChoices = $derived.by(() => { void studio.rev; return session.overlayChoices("copy"); });
+  const draftDestructiveKey = $derived.by(() => {
+    const branch = overlay?.lifecycle?.branch;
+    return objectId && destructiveScopeKey && branch ? `${destructiveScopeKey}:${objectId}:${branch.branch}:${branch.content}` : "";
+  });
+  const archiveDestructiveKey = $derived.by(() => {
+    const archive = overlay?.archive?.archive;
+    return objectId && destructiveScopeKey && archive ? `${destructiveScopeKey}:${objectId}:${archive}` : "";
+  });
+  const copyForgetKey = $derived.by(() => {
+    const copy = overlay?.copy;
+    return objectId && destructiveScopeKey && copy?.status === "uncertain" && copy.edit
+      ? `${destructiveScopeKey}:${objectId}:copy:${copy.edit.nonce}`
+      : "";
+  });
+  let draftDiscardArmed = $state("");
+  let archiveReleaseArmed = $state("");
+  let copyForgetArmed = $state("");
+  // A confirmation is consent for one observed target/version, not a sticky UI mode. Clear it as
+  // soon as navigation, scope, branch content or archive identity changes—even if the user later
+  // returns to the same target.
+  $effect(() => {
+    const deleteNow = deleteKey;
+    const draftNow = draftDestructiveKey;
+    const archiveNow = archiveDestructiveKey;
+    const copyNow = copyForgetKey;
+    untrack(() => {
+      if (deleteArmed && deleteArmed !== deleteNow) deleteArmed = "";
+      if (draftDiscardArmed && draftDiscardArmed !== draftNow) draftDiscardArmed = "";
+      if (archiveReleaseArmed && archiveReleaseArmed !== archiveNow) archiveReleaseArmed = "";
+      if (copyForgetArmed && copyForgetArmed !== copyNow) copyForgetArmed = "";
+    });
+  });
+  async function draftAction(action: () => Promise<unknown>, success: string) {
+    try { await action(); onnotice(success, "info"); } catch (e) { onnotice(reason(e), "warn"); }
+  }
+  function downloadDraftExport() {
+    const x = overlay?.exported;
+    if (!x?.bytesB64) return;
+    try {
+      const url = URL.createObjectURL(new Blob([base64ToBytes(x.bytesB64)], { type: "application/octet-stream" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${(model?.title || "draft").replace(/[^\w.-]+/g, "_")}.catcoms-studio-draft-v1.bin`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } catch (e) { onnotice(`could not hand the draft archive to the browser: ${reason(e)}`, "warn"); }
+  }
+  async function copyDraftExport() {
+    const x = overlay?.exported;
+    if (!x?.bytesB64) return;
+    try { await navigator.clipboard.writeText(x.bytesB64); onnotice("local draft archive copied as base64", "info"); } catch (e) { onnotice(reason(e), "warn"); }
+  }
+  async function copyDraftItem(choice: (typeof draftChoices)[number]) {
+    if (!objectId) return;
+    try { await session.copyOverlayChoice(objectId, choice.choice, choice.label, "copy"); } catch (e) { onnotice(reason(e), "warn"); }
+  }
+  async function retryDraftCopy() {
+    if (!objectId) return;
+    try { await session.retryOverlayCopy(objectId); } catch (e) { onnotice(reason(e), "warn"); }
+  }
+  async function repreviewDraftCopy() {
+    if (!objectId) return;
+    try { await session.repreviewOverlayCopy(objectId); } catch (e) { onnotice(reason(e), "warn"); }
+  }
+  function cancelRefusedDraftCopy(expectedNonce: string) {
+    if (!objectId) return;
+    if (session.cancelRefusedOverlayCopy(objectId, expectedNonce)) {
+      onnotice("cancelled the refused copy; the backend confirmed that it wrote nothing", "info");
+    }
+  }
+  function forgetDraftCopy() {
+    // This handler is mounted only for the armed confirmation state. The session performs the
+    // final status check, so a stale click can never remove a resolved or replacement operation.
+    if (!objectId) return;
+    const forgotten = session.forgetOverlayCopy(objectId, copyForgetArmed.slice(-32));
+    copyForgetArmed = "";
+    if (forgotten) onnotice("stopped tracking the uncertain copy; it may already have landed", "warn");
+  }
+  function words(value: string): string { return value.replace(/[A-Z]/g, (c) => ` ${c.toLowerCase()}`); }
 
   // --- Recovery rail -------------------------------------------------------------------------------
   const listing = $derived.by(() => { void studio.rev; return session.recoveryTarget === objectId ? session.recoveryListing : null; });
@@ -756,7 +845,7 @@
       if (doc.absent && !pending.some((s) => s.kind === "create")) return { text: "not on this device", tone: "warn", title: "studio_read found no local copy; this is not a deletion and not proof nobody has it" };
       return { text: "reading…", tone: "", title: "" };
     }
-    if (view.awaitingTenureReceipt) return { text: "read-only preview", tone: "warn", title: "current owner has not yet confirmed this document's history; no phase, receipt or publication is claimed" };
+    if (view.awaitingTenureReceipt) return { text: overlay?.inspection?.kind === "local-draft" ? "local-only draft" : "awaiting tenure", tone: "warn", title: "the base history is an unconfirmed preview; edits save only into a bounded local draft and grant no receipt, publication or authoring authority" };
     if (view.phase === "fault") return { text: "history fault", tone: "danger", title: "history fault: conflicting owner receipts" };
     if (view.phase === "closing") return { text: "rotating", tone: "warn", title: "rotating: durable edits resume when the owner settles this rotation" };
     if (view.phase === "settled") return { text: `settled · epoch ${view.epoch}`, tone: "ok", title: "stored phase settled; a settled phase is not a receipt for every displayed edit" };
@@ -790,9 +879,9 @@
         <button type="button" class="st-btn" onclick={() => session.open(objectId)}>read again</button>
       {:else}
         <p class="muted">{pending.some((s) => s.kind === "create") ? "Creating…" : "Reading…"}</p>
-        {#each uncertain as s (s.id)}
+        {#each attention as s (s.id)}
           <div class="st-card warn">
-            <span>{s.label} · uncertain</span>
+            <span>{s.label} · {s.status === "blocked" ? "not written" : "uncertain"}</span>
             <span class="micro wrap">{s.error}</span>
             <span class="st-card-acts">
               <button type="button" class="st-btn primary" onclick={() => retrySave(s)}>retry same request</button>
@@ -824,17 +913,19 @@
       <button type="button" class="st-btn primary" title=".pixa export arrives with the backend's Gate 6; recovery backups are exported from the music tab" disabled>export .pixa</button>
     </div>
 
-    {#if uncertain.length}
+    {#if attention.length}
       <div class="st-banner warn st-save">
-        <span><b>save uncertain</b> · {uncertain[0].label}{#if uncertain.length > 1} · and {uncertain.length - 1} more{/if}</span>
-        <span class="micro wrap">{uncertain[0].error}{#if uncertain[0].epochChanged} · the document moved to a newer epoch since; a retry resends the original request and the backend decides{/if} · attempt {uncertain[0].attempts} · your work is kept{#if blockedCount} · {blockedCount} later {blockedCount === 1 ? "save waits" : "saves wait"} behind it{/if}</span>
-        <span class="st-card-acts">
-          <button type="button" class="st-btn primary" onclick={() => retrySave(uncertain[0])}>retry same request</button>
-          {#if uncertain[0].kind === "frame" || uncertain[0].kind === "apply" || uncertain[0].kind === "applyIndex"}
-            <button type="button" class="st-btn" title="a new operation with a fresh nonce against the current epoch; only if you are sure the first never committed" disabled={!!readOnlyWhy} onclick={() => reauthorSave(uncertain[0])}>save again as a new edit</button>
+        <span><b>{attention[0].mayHaveCommitted || attention[0].status !== "blocked" ? "save uncertain" : "local save not written"}</b> · {attention[0].label}{#if attention.length > 1} · and {attention.length - 1} more{/if}</span>
+        <span class="micro wrap">{attention[0].error}{#if attention[0].status === "blocked" && !attention[0].mayHaveCommitted} · the backend confirmed that this attempt wrote nothing{:else if attention[0].epochChanged} · the document moved to a newer epoch since; a retry resends the original request and the backend decides{/if} · attempt {attention[0].attempts} · your work is kept{#if blockedCount} · {blockedCount} later {blockedCount === 1 ? "save waits" : "saves wait"} behind it{/if}</span>
+        {#if attention[0].status === "uncertain" || attention[0].status === "blocked"}<span class="st-card-acts">
+          {#if overlayRetryOf(attention[0]) !== "newTicket" && overlayRetryOf(attention[0]) !== "none"}
+            <button type="button" class="st-btn primary" onclick={() => retrySave(attention[0])}>{overlayRetryOf(attention[0]) === "afterExplicitAccess" ? "access, then retry same request" : "retry same request"}</button>
           {/if}
-          <button type="button" class="st-btn ghost" onclick={() => discardSave(uncertain[0])}>{discardArmed === uncertain[0].id ? "discard for real" : "discard"}</button>
-        </span>
+          {#if attention[0].kind === "frame" || attention[0].kind === "apply" || attention[0].kind === "applyIndex" || attention[0].kind === "overlayApply"}
+            <button type="button" class="st-btn" title="available only after the backend proved the old attempt wrote nothing" disabled={!!readOnlyWhy || overlayRetryOf(attention[0]) === "none" || !session.canReauthor(attention[0].id)} onclick={() => reauthorSave(attention[0])}>save again as a new edit</button>
+          {/if}
+          <button type="button" class="st-btn ghost" onclick={() => discardSave(attention[0])}>{discardArmed === attention[0].id ? "discard for real" : "discard"}</button>
+        </span>{/if}
       </div>
     {/if}
     {#if overCapCount}
@@ -892,7 +983,7 @@
               <div class="st-veil"><span>fetching {fmtKib(frameRec.bytes)}</span><span class="micro">bounded by the declared size · validated before it is shown</span></div>
             {/if}
           {:else if pendingHere}
-            <div class="st-veil soft"><span class="micro">{pendingHere.status === "uncertain" ? "this frame's save is uncertain · see the card above" : "saving this frame…"}</span></div>
+            <div class="st-veil soft"><span class="micro">{pendingHere.status === "uncertain" ? "this frame's save is uncertain · see the card above" : pendingHere.status === "blocked" ? "this frame was not written · see the card above" : "saving this frame…"}</span></div>
           {/if}
           <span class="st-readout left">{zoom}× · {hover ? `${hover[0]},${hover[1]}` : "…"}{#if tool === "shape"} · {shape}{/if}</span>
           <span class="st-readout right">layer · {LAYER_NAMES[layer]}{#if dirty} · unsaved{:else if rasterRef === "unsaved"} · saving{/if}</span>
@@ -1010,7 +1101,7 @@
             {/if}
             {#if pendingHere}
               <div class="st-card accent">
-                <span>New frame{#if pendingHere.status === "uncertain"} · save uncertain{:else} · saving{/if}</span>
+                <span>New frame{#if pendingHere.mayHaveCommitted || pendingHere.status === "uncertain"} · save uncertain{:else if pendingHere.status === "blocked"} · not written{:else} · saving{/if}</span>
                 <span class="micro it">it joins the timeline when the save lands</span>
               </div>
             {:else if frameRec}
@@ -1039,11 +1130,11 @@
               </div>
               <p class="micro wrap">{expiryText(entry.expiry)}{#if entry.expiryConflicts} · another expiry was set at the same time{/if} · recorded now, enforced later</p>
               <div class="st-opt"><span class="lb">delete</span>
-                {#if deleteArmed}
+                {#if deleteArmed === deleteKey && deleteKey}
                   <button type="button" class="st-btn danger" onclick={deleteFlipnote}>delete this flipnote</button>
-                  <button type="button" class="st-btn ghost" onclick={() => (deleteArmed = false)}>cancel</button>
+                  <button type="button" class="st-btn ghost" onclick={() => (deleteArmed = "")}>cancel</button>
                 {:else}
-                  <button type="button" class="st-btn ghost" disabled={!!readOnlyWhy} onclick={() => (deleteArmed = true)}>delete…</button>
+                  <button type="button" class="st-btn ghost" disabled={!!readOnlyWhy} onclick={() => (deleteArmed = deleteKey)}>delete…</button>
                 {/if}
               </div>
               <p class="micro wrap">a deletion is a tombstone in the channel index: the entry leaves the list, its history stays in recovery</p>
@@ -1056,7 +1147,97 @@
               <p class="st-hist"><i class={view.awaitingTenureReceipt ? "warn" : view.phase === "settled" ? "ok" : view.phase === "fault" ? "danger" : view.phase === "closing" ? "warn" : "info"}></i>
                 {#if view.awaitingTenureReceipt}awaiting the owner's tenure receipt · epoch {view.epoch}{:else}{view.phase} · epoch {view.epoch} · saved locally, provisional{/if}
               </p>
-              <p class="micro wrap">{view.awaitingTenureReceipt ? "current owner has not yet confirmed this document's history" : view.phase === "closing" ? "rotating: local edits only until the owner settles this rotation" : view.phase === "fault" ? "history fault: conflicting owner receipts" : view.phase === "settled" ? "the owner settled this epoch; later edits are provisional until the next receipt" : "an owner receipt settles these edits later"}</p>
+              <p class="micro wrap">{view.awaitingTenureReceipt ? "the base is unconfirmed; edits stay in a bounded local-only draft until the history is installed or you dispose of it" : view.phase === "closing" ? "rotating: durable edits resume when the owner settles this rotation" : view.phase === "fault" ? "history fault: conflicting owner receipts" : view.phase === "settled" ? "the owner settled this epoch; later edits are provisional until the next receipt" : "an owner receipt settles these edits later"}</p>
+            {/if}
+            {#if overlay?.loading}
+              <p class="micro wrap">checking this device for a retained local draft…</p>
+            {:else if overlay?.error}
+              <div class="st-card warn">
+                <span>local draft status could not be read</span>
+                <span class="micro wrap">{overlay.error}</span>
+                <span class="st-card-acts"><button type="button" class="st-btn" onclick={() => objectId && session.refreshOverlay(objectId)}>retry status</button></span>
+              </div>
+            {:else if overlay?.inspection?.kind === "local-draft"}
+              {@const draft = overlay.inspection}
+              <div class="st-card warn">
+                <span>local-only draft · {draft.accepted} saved {draft.accepted === 1 ? "edit" : "edits"} · {draft.transferState}</span>
+                <span class="micro wrap">{draft.provenance === "unconfirmed" ? "created while the owner's tenure was unconfirmed" : "retained from a closing rotation"} · read-only evidence, not a receipt or shared publication{#if draft.eligibility === "manual" && draft.manualReason} · manual: {words(draft.manualReason)}{/if}{#if draft.handoffAttempt} · handoff {words(draft.handoffAttempt.state)} ({words(draft.handoffAttempt.reason)}){/if}</span>
+                <span class="st-card-acts">
+                  <button type="button" class="st-btn" onclick={() => objectId && draftAction(() => session.exportOverlay(objectId), "local draft export ready below")}>export</button>
+                  <button type="button" class="st-btn" onclick={() => objectId && draftAction(() => session.archiveOverlay(objectId), "local draft preserved in an archive")}>preserve archive</button>
+                  {#if overlay.archive}
+                    <button type="button" class="st-btn ghost" onclick={() => objectId && draftAction(() => session.disposeOverlay(objectId, "preserve"), "live draft removed; archive preserved")}>remove live copy</button>
+                  {/if}
+                  {#if draftDestructiveKey && draftDiscardArmed === draftDestructiveKey}
+                    <button type="button" class="st-btn danger" onclick={() => objectId && draftDiscardArmed === draftDestructiveKey && draftAction(() => session.disposeOverlay(objectId, "discard"), "local draft discarded")}>discard local draft for real</button>
+                    <button type="button" class="st-btn ghost" onclick={() => (draftDiscardArmed = "")}>cancel</button>
+                  {:else}
+                    <button type="button" class="st-btn ghost" onclick={() => (draftDiscardArmed = draftDestructiveKey)}>discard…</button>
+                  {/if}
+                </span>
+                {#if view && !view.awaitingTenureReceipt && view.phase !== "closing" && view.phase !== "fault" && draftChoices.length}
+                  <span class="micro wrap">copy one retained value into the current document · this does not preserve or dispose the branch</span>
+                  <span class="st-card-acts">
+                    {#each draftChoices as choice (JSON.stringify(choice.choice))}
+                      <button type="button" class="st-btn ghost" disabled={overlay.copy?.status === "previewing" || overlay.copy?.status === "applying" || overlay.copy?.status === "refused" || overlay.copy?.status === "uncertain"} onclick={() => copyDraftItem(choice)}>{choice.label}</button>
+                    {/each}
+                  </span>
+                {/if}
+              </div>
+            {:else if overlay?.inspection?.kind === "disposed"}
+              <p class="micro wrap">local draft disposed · {overlay.inspection.mode}{#if overlay.inspection.archive} · archive {overlay.inspection.archive.slice(0, 8)}{/if} · terminal local history, not absence</p>
+            {:else if overlay?.lifecycle?.transferred}
+              <p class="micro wrap">the retained draft was transferred into the successor history; refresh the document to see the installed result</p>
+            {/if}
+            {#if overlay?.copy}
+              <div class="st-card warn">
+                <span>retained copy {overlay.copy.label} · {words(overlay.copy.status)}</span>
+                <span class="micro wrap">this operation remains independent of the source draft{#if overlay.copy.error} · {overlay.copy.error}{/if}</span>
+                {#if overlay.copy.status === "uncertain"}
+                  <span class="micro wrap">Stopping tracking does not undo the copy or prove that it never landed.</span>
+                  <span class="st-card-acts">
+                    <button type="button" class="st-btn primary" onclick={retryDraftCopy}>retry exact copy</button>
+                    {#if copyForgetKey && copyForgetArmed === copyForgetKey}
+                      <button type="button" class="st-btn danger" onclick={forgetDraftCopy}>stop tracking for real</button>
+                      <button type="button" class="st-btn ghost" onclick={() => (copyForgetArmed = "")}>cancel</button>
+                    {:else}
+                      <button type="button" class="st-btn ghost" onclick={() => (copyForgetArmed = copyForgetKey)}>stop tracking…</button>
+                    {/if}
+                  </span>
+                {:else if overlay.copy.status === "refused"}
+                  <span class="st-card-acts">
+                    <button type="button" class="st-btn primary" onclick={repreviewDraftCopy}>preview again as a new copy</button>
+                    {#if overlay.copy.edit}
+                      {#key overlay.copy.edit.nonce}
+                        {@const refusedNonce = overlay.copy.edit.nonce}
+                        <button type="button" class="st-btn ghost" onclick={() => cancelRefusedDraftCopy(refusedNonce)}>cancel this copy</button>
+                      {/key}
+                    {/if}
+                  </span>
+                {/if}
+              </div>
+            {/if}
+            {#if overlay?.archive}
+              <div class="st-card">
+                <span>retained draft archive · {overlay.archive.accepted} edits · {fmtKib(Number(overlay.archive.physicalBytes ?? "0"))}</span>
+                <span class="micro wrap">terminal read-only recovery evidence · no authoring authority · branch {overlay.archive.branch.slice(0, 8)}</span>
+                <span class="st-card-acts">
+                  <button type="button" class="st-btn" onclick={() => objectId && draftAction(() => session.exportOverlayArchive(objectId), "retained draft archive export ready below")}>export archive</button>
+                  {#if archiveDestructiveKey && archiveReleaseArmed === archiveDestructiveKey}
+                    <button type="button" class="st-btn danger" onclick={() => objectId && archiveReleaseArmed === archiveDestructiveKey && draftAction(() => session.releaseOverlayArchive(objectId), "archive released and status reconciled")}>release archive for real</button>
+                    <button type="button" class="st-btn ghost" onclick={() => (archiveReleaseArmed = "")}>cancel</button>
+                  {:else}
+                    <button type="button" class="st-btn ghost" onclick={() => (archiveReleaseArmed = archiveDestructiveKey)}>release…</button>
+                  {/if}
+                </span>
+              </div>
+            {/if}
+            {#if overlay?.exported?.bytesB64}
+              <div class="st-card">
+                <span>local draft backup ready · {fmtKib(overlay.exported.bytes ?? 0)}</span>
+                <span class="micro wrap">{overlay.exported.format} · private operation history, not playable media or a .pixa</span>
+                <span class="st-card-acts"><button type="button" class="st-btn" onclick={downloadDraftExport}>save file</button><button type="button" class="st-btn ghost" onclick={copyDraftExport}>copy base64</button></span>
+              </div>
             {/if}
             {#if listing}
               {#if listing.pendingIntents}<p class="micro wrap">{listing.pendingIntents} of your saves await an owner receipt · not lost, not excluded</p>{/if}
@@ -1166,9 +1347,9 @@
           </button>
         {/each}
         {#each pendingInserts as s (s.id)}
-          <button type="button" class="st-thumb" class:cur={s.frame === frameId} onclick={() => openFrame(s.frame)} title={s.status === "uncertain" ? `save uncertain: ${s.error}` : "saving this new frame"}>
-            <span class="ix">{s.status === "uncertain" ? "?" : "…"}</span>
-            <span class="fr pending" class:uncertain={s.status === "uncertain"}>
+          <button type="button" class="st-thumb" class:cur={s.frame === frameId} onclick={() => openFrame(s.frame)} title={s.mayHaveCommitted || s.status === "uncertain" ? `save uncertain: ${s.error}` : s.status === "blocked" ? `save not written: ${s.error}` : "saving this new frame"}>
+            <span class="ix">{s.status === "uncertain" || s.status === "blocked" ? "?" : "…"}</span>
+            <span class="fr pending" class:uncertain={s.status === "uncertain" || s.status === "blocked"}>
               <canvas width="64" height="48" use:thumbBytes={{ bytes: s.pix, rev: studio.rev }}></canvas>
               <i class="dot" style="background: var(--accent)"></i>
             </span>

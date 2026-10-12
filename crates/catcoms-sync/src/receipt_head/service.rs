@@ -69,6 +69,30 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             ReceiptHeadSource<'_>,
         ) -> Result<ReceiptHeadSelection, E>,
     ) -> Result<Option<Result<ReceiptHeadServed, E>>, SyncError> {
+        self.serve_epoch_head_interest_with_fault_repair(interest, snapshot, |g, d, rng, source| {
+            serve(g, d, rng, source).map(|selected| (selected, None))
+        })
+    }
+
+    /// The same prepaid service, additionally carrying a durably applied fault repair. Serving
+    /// it claims availability only; the receiver verifies it under its own observed tenure.
+    pub fn serve_epoch_head_interest_with_fault_repair<E>(
+        &mut self,
+        interest: &EpochServiceInterest,
+        snapshot: Option<&DurableOwnerSnapshot>,
+        serve: impl FnOnce(
+            &ServerGroup,
+            &MlsDevice,
+            &mut R,
+            ReceiptHeadSource<'_>,
+        ) -> Result<
+            (
+                ReceiptHeadSelection,
+                Option<catcoms_replication::ReceiptRepair>,
+            ),
+            E,
+        >,
+    ) -> Result<Option<Result<ReceiptHeadServed, E>>, SyncError> {
         if interest.kind != EpochServiceKind::Head
             || !self.epoch_service_interest_is_current(interest)
         {
@@ -80,6 +104,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             generation: interest.generation.clone(),
             request: Some(interest.request.clone()),
         };
-        self.serve_receipt_head_with_handoff(&watch, snapshot, serve)
+        self.serve_receipt_head_with_fault_repair(&watch, snapshot, serve)
     }
 }

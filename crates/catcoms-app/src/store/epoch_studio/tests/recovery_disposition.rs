@@ -26,7 +26,12 @@ fn studio_manual_recovery_disposition_is_recovery_first_crash_safe_and_not_seed_
                 let before = store.load_epoch_recovery(SERVER, &f.logical).unwrap();
                 let snapshot = before.retained().next().unwrap().id().unwrap();
                 let mut b = budget(&mut store, &f);
-                let mut hit = false;
+                let hit = std::cell::Cell::new(false);
+                let wanted = if recovery_boundary {
+                    WriteTag::Recovery
+                } else {
+                    WriteTag::Intents
+                };
                 assert!(store
                     .move_studio_intents_to_recovery_with_io(
                         SERVER,
@@ -38,20 +43,34 @@ fn studio_manual_recovery_disposition_is_recovery_first_crash_safe_and_not_seed_
                         &ManualClock::new(1000),
                         &mut rng(),
                         &mut b,
-                        &mut |recovery, path, bytes| {
-                            if recovery == recovery_boundary {
-                                hit = true;
-                                if after_write {
-                                    atomic_write(path, bytes)?;
+                        // The boundary used to be a bare bool threaded through the writer:
+                        // true meant the recovery record, false the intent ledger. The tag
+                        // says which directly.
+                        &mut WriteHooks::Hooked {
+                            before: Some(&mut |tag: WriteTag, _: &Path, _: &[u8]| {
+                                if tag == wanted && !after_write {
+                                    hit.set(true);
+                                    return Intercept::Fail(AppError::Io(
+                                        "injected disposition barrier".into(),
+                                    ));
                                 }
-                                return Err(AppError::Io("injected disposition barrier".into()));
-                            }
-                            atomic_write(path, bytes)
+                                Intercept::Continue
+                            }),
+                            before_sync: None,
+                            before_unlink: None,
+                            after: Some(&mut |op: CompletedOperation, tag: WriteTag, _: &Path| {
+                                if op == CompletedOperation::Write && tag == wanted && after_write {
+                                    hit.set(true);
+                                    return AfterIntercept::Fail(AppError::Io(
+                                        "injected disposition barrier".into(),
+                                    ));
+                                }
+                                AfterIntercept::Continue
+                            }),
                         },
-                        &mut super::super::super::epoch_intents::sync_intent,
                     )
                     .is_err());
-                assert!(hit);
+                assert!(hit.get());
                 drop(store);
                 store = open(root.path());
                 assert_eq!(
@@ -86,10 +105,14 @@ fn studio_manual_recovery_disposition_is_recovery_first_crash_safe_and_not_seed_
                         &ManualClock::new(1000),
                         &mut rng(),
                         &mut b,
-                        &mut |_, p, b| atomic_write(p, b),
-                        &mut |p, b| {
-                            synced = true;
-                            super::super::super::epoch_intents::sync_intent(p, b)
+                        &mut WriteHooks::Hooked {
+                            before: None,
+                            before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                                synced = true;
+                                AfterIntercept::Continue
+                            }),
+                            before_unlink: None,
+                            after: None,
                         },
                     )
                     .unwrap();

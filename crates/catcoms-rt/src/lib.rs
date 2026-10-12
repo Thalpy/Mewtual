@@ -27,5 +27,5 @@ pub use transport::{
     ProtocolId, PublishOnceError, PublishSubmission, RendezvousRegistration, RequestCancellation,
     RequestKeepalive, Responder, ResponderRx, SharedRequestKeepalive, Topic, TransportError,
     TransportEvent, MAX_CONNECTED_PEER_SNAPSHOT, MAX_CONNECTION_PATH_SNAPSHOT, MAX_PEER_DIAL_BATCH,
-    MAX_PUBLISH_ONCE_BYTES, MAX_PUBLISH_ONCE_TOPIC_BYTES,
+    MAX_PUBLISH_ONCE_BYTES, MAX_PUBLISH_ONCE_TOPIC_BYTES, REQUEST_TIMEOUT, REQUEST_TIMEOUT_MS,
 };

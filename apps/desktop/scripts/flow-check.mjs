@@ -1,5 +1,4 @@
-// Browser flow checks for the two chat paths a broken switch/backend most often takes down:
-// sending a message and accepting an in-band friend request. They drive the REAL Svelte app
+// Browser flow checks for chat, pending-message recovery and in-band friend requests. They drive the REAL Svelte app
 // (the visual fixture build) in headless Edge over plain CDP: no automation framework, the
 // same stance as the screenshot tooling. The fixture's deterministic data stays untouched;
 // each scenario patches window.__TAURI_INTERNALS__.invoke at runtime to stand in for the
@@ -40,7 +39,7 @@ const isWindows = process.platform === "win32";
 function killTree(pid) {
   if (!pid) return;
   if (isWindows) {
-    spawnSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore" });
+    spawnSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore", windowsHide: true });
     return;
   }
   try {
@@ -58,7 +57,7 @@ function killPortListener(port) {
     for (const pid of (found.stdout ?? "").split("\n").filter(Boolean)) killTree(Number(pid));
     return;
   }
-  const found = spawnSync("netstat", ["-ano", "-p", "TCP"], { encoding: "utf8" });
+  const found = spawnSync("netstat", ["-ano", "-p", "TCP"], { encoding: "utf8", windowsHide: true });
   const pids = new Set();
   for (const line of (found.stdout ?? "").split("\n")) {
     const m = line.match(/:(\d+)\s+\S+\s+LISTENING\s+(\d+)/i);
@@ -81,9 +80,10 @@ async function findEdge() {
 }
 
 async function waitForVite() {
-  for (let i = 0; i < 80; i++) {
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
     try {
-      const res = await fetch(`http://localhost:${PORT}/`);
+      const res = await fetch(`http://localhost:${PORT}/`, { signal: AbortSignal.timeout(5_000) });
       if (res.ok) return;
     } catch {
       /* not up yet */
@@ -99,11 +99,13 @@ class Cdp {
   #pending = new Map();
   consoleErrors = [];
 
-  static async connect() {
+  static async connect(browserFailure = () => null) {
     let wsUrl = null;
-    for (let i = 0; i < 60 && !wsUrl; i++) {
+    const deadline = Date.now() + 15_000;
+    while (!wsUrl && Date.now() < deadline) {
+      if (browserFailure()) throw browserFailure();
       try {
-        const list = await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`)).json();
+        const list = await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`, { signal: AbortSignal.timeout(2_000) })).json();
         wsUrl = list.find((t) => t.type === "page" && t.url.includes("localhost"))?.webSocketDebuggerUrl ?? null;
       } catch {
         /* browser still starting */
@@ -115,8 +117,9 @@ class Cdp {
     cdp.ws = new WebSocket(wsUrl);
     cdp.ws.onmessage = (ev) => cdp.#onMessage(JSON.parse(ev.data));
     await new Promise((resolve, reject) => {
-      cdp.ws.onopen = resolve;
-      cdp.ws.onerror = reject;
+      const timer = setTimeout(() => reject(new Error("CDP WebSocket did not open within ten seconds")), 10_000);
+      cdp.ws.onopen = () => { clearTimeout(timer); resolve(); };
+      cdp.ws.onerror = (error) => { clearTimeout(timer); reject(error); };
     });
     await cdp.send("Runtime.enable");
     await cdp.send("Page.enable");
@@ -141,9 +144,13 @@ class Cdp {
   }
 
   send(method, params = {}) {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const id = ++this.#seq;
-      this.#pending.set(id, resolve);
+      const timer = setTimeout(() => {
+        this.#pending.delete(id);
+        reject(new Error(`CDP ${method} did not answer within sixty seconds`));
+      }, 60_000);
+      this.#pending.set(id, (reply) => { clearTimeout(timer); resolve(reply); });
       this.ws.send(JSON.stringify({ id, method, params }));
     });
   }
@@ -199,6 +206,7 @@ const SEND_SCENARIO = `(async () => {
   const base = internals.invoke.bind(internals);
   const sent = [];
   internals.invoke = async (cmd, payload, opts) => {
+    if (cmd === "durable_send_context") return "a".repeat(64);
     if (cmd === "send_message") {
       sent.push({
         id: "sent-" + sent.length,
@@ -210,7 +218,7 @@ const SEND_SCENARIO = `(async () => {
         reply_to: payload.replyTo ?? "",
         pinned: false,
       });
-      return null;
+      return { accepted: true, persistence: { status: "durable" } };
     }
     if (cmd === "get_messages" && payload.server === 1 && payload.channel === "general") {
       const rows = await base(cmd, payload, opts);
@@ -354,6 +362,99 @@ const ACCEPT_SCENARIO = `(async () => {
   return out;
 })();`;
 
+// Exercise the full App's locked -> hydrated zero-server -> founding -> Settings path. The
+// three orphaned requests are already paused; uncertainty is not evidence of non-acceptance.
+// Only the native boundary is mocked. No Svelte state, token or DOM is inserted directly.
+const ORPHANED_PENDING_SCENARIO = `(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const wait = async (ready, label) => {
+    for (let n = 0; n < 100; n++) { if (ready()) return; await sleep(50); }
+    throw new Error("pending flow timed out: " + label);
+  };
+  const out = {};
+  const tokens = ["1".repeat(32), "2".repeat(32), "3".repeat(32)];
+  const fullText = "Full orphaned text: " + "x".repeat(40000) + String.fromCharCode(10) + "complete tail";
+  const pending = Object.fromEntries(tokens.map((token, index) => [token, {
+    token, server: 999, channel: String(index + 1), expectedContext: "a".repeat(64),
+    text: index === 0 ? fullText : "Orphaned request " + index, replyTo: "original-reply",
+    retryBlock: ["invalid", "conflict", "context_changed"][index],
+    ...(index === 2 ? { acceptance: "ambiguous" } : {}),
+  }]));
+  let sealed = { version: 1, drafts: {}, readMarks: {}, pendingSends: pending };
+  let unlocks = 0, sends = 0, contexts = 0, newTokens = 0;
+  const writes = [];
+  const internals = window.__TAURI_INTERNALS__, base = internals.invoke.bind(internals);
+  const originalUuid = crypto.randomUUID.bind(crypto);
+  crypto.randomUUID = () => { newTokens++; return originalUuid(); };
+  internals.invoke = async (cmd, payload, opts) => {
+    if (cmd === "unlock") { unlocks++; return []; }
+    if (cmd === "lock_session") {
+      // The first lock leaves the starting chat fixture; subsequent locks save this fixture vault.
+      if (unlocks && payload.uiStateJson) sealed = JSON.parse(payload.uiStateJson);
+      return { continuity_error: null };
+    }
+    if (cmd === "get_ui_state") return JSON.stringify(sealed);
+    if (cmd === "save_ui_state") {
+      if (unlocks) { sealed = JSON.parse(payload.json); writes.push(structuredClone(sealed)); }
+      return null;
+    }
+    if (cmd === "send_message") { sends++; throw new Error("Unexpected orphan publication"); }
+    if (cmd === "durable_send_context") { contexts++; return "b".repeat(64); }
+    return base(cmd, payload, opts);
+  };
+  const unlock = async () => {
+    document.querySelector("button.sb-lock")?.click();
+    await wait(() => document.querySelector('input[placeholder="passphrase"]'), "lock gate");
+    const input = document.querySelector('input[placeholder="passphrase"]');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, "fixture secret");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await wait(() => document.querySelector(".start-wide"), "hydrated founding screen");
+  };
+  const openManager = async () => {
+    const button = [...document.querySelectorAll(".start-wide button")].find(b => b.textContent.includes("Pending messages & saved drafts"));
+    if (!button) throw new Error("No pending-manager entry on the zero-server founding screen");
+    button.click();
+    await wait(() => document.querySelector('[aria-label="Vault pending messages"]'), "vault manager");
+  };
+  const click = (token, text) => {
+    const card = document.querySelector('[data-pending-token="' + token + '"]');
+    const button = [...(card?.querySelectorAll("button") ?? [])].find(b => b.textContent.trim() === text);
+    if (!button || button.disabled) throw new Error("Missing enabled action: " + text);
+    button.click();
+  };
+  await unlock();
+  out.zeroServerFounding = !!document.querySelector(".start-wide") && !document.querySelector(".composer");
+  await openManager();
+  out.hydratedOrphans = document.querySelectorAll("[data-pending-token]").length;
+  out.uncertainWarning = document.querySelector('[aria-label="Vault pending messages"]').textContent.includes("may already have been accepted");
+  click(tokens[0], "Recover to saved draft");
+  await wait(() => [...document.querySelectorAll("button")].some(b => b.textContent.trim() === "Confirm recovery"), "recovery confirmation");
+  out.beforeConfirmationRetained = Object.keys(sealed.pendingSends).length === 3
+    && writes.every(saved => tokens.every(token => saved.pendingSends[token]));
+  click(tokens[0], "Confirm recovery");
+  await wait(() => !document.querySelector('[data-pending-token="' + tokens[0] + '"]'), "sealed recovery");
+  out.savedFullText = sealed.recoveredSendDrafts?.[tokens[0]]?.text === fullText;
+  out.savedOriginalIdentity = sealed.recoveredSendDrafts?.[tokens[0]]?.token === tokens[0]
+    && sealed.recoveredSendDrafts?.[tokens[0]]?.replyTo === "original-reply";
+  out.recoveryReleasedOne = Object.keys(sealed.pendingSends).length === 2;
+  for (const token of tokens.slice(1)) {
+    click(token, "Stop retrying");
+    await wait(() => [...document.querySelectorAll("button")].some(b => b.textContent.trim() === "Confirm stop retrying"), "stop confirmation");
+    click(token, "Confirm stop retrying");
+    await wait(() => !document.querySelector('[data-pending-token="' + token + '"]'), "sealed stop retrying");
+  }
+  out.savedQueueEmpty = Object.keys(sealed.pendingSends).length === 0;
+  out.onlyOriginalRecovery = Object.keys(sealed.recoveredSendDrafts).join() === tokens[0];
+  await unlock(); await openManager();
+  out.reopenedQueueEmpty = document.querySelectorAll("[data-pending-token]").length === 0;
+  out.reopenedFullText = document.querySelector('[data-recovered-token="' + tokens[0] + '"] textarea')?.value === fullText;
+  out.unlocks = unlocks;
+  out.sendInvocations = sends; out.contextInvocations = contexts; out.newRetryTokens = newTokens;
+  crypto.randomUUID = originalUuid;
+  return out;
+})();`;
+
 /**
  * Open the debug console and visit every section.
  *
@@ -473,6 +574,7 @@ const vite = spawn("npm", ["run", "dev", "--", "--port", String(PORT), "--strict
   cwd: new URL("..", import.meta.url),
   stdio: "ignore",
   shell: true,
+  windowsHide: true,
 });
 const profileDir = mkdtempSync(join(tmpdir(), "catcoms-flow-"));
 let edge = null;
@@ -516,9 +618,14 @@ try {
       "--window-size=1280,800",
       URL_UNDER_TEST,
     ],
-    { stdio: "ignore" },
+    { stdio: "ignore", windowsHide: true },
   );
-  connected = await Cdp.connect();
+  let browserFailure = null;
+  edge.once("error", error => { browserFailure = new Error("Edge launch failed: " + error.message); });
+  edge.once("exit", (code, signal) => {
+    if (!cleanedUp) browserFailure = new Error(`Edge exited before completion (code ${code}, signal ${signal})`);
+  });
+  connected = await Cdp.connect(() => browserFailure);
   const cdp = connected;
 
   await cdp.waitReady();
@@ -559,6 +666,17 @@ try {
     requestGone: true,
     newDmInRail: true,
     errorToast: null,
+  });
+
+  await cdp.navigate(URL_UNDER_TEST);
+  await cdp.waitReady();
+  const orphaned = await cdp.eval(ORPHANED_PENDING_SCENARIO);
+  failed |= !assertEqual("zero-server pending-message recovery flow", orphaned, {
+    zeroServerFounding: true, hydratedOrphans: 3, uncertainWarning: true,
+    beforeConfirmationRetained: true, savedFullText: true, savedOriginalIdentity: true,
+    recoveryReleasedOne: true, savedQueueEmpty: true, onlyOriginalRecovery: true,
+    reopenedQueueEmpty: true, reopenedFullText: true, unlocks: 2,
+    sendInvocations: 0, contextInvocations: 0, newRetryTokens: 0,
   });
 
   // A fresh load again, so the accept test's patched IPC cannot decide what the console shows.

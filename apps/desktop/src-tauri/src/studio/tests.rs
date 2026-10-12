@@ -1,12 +1,87 @@
 use super::*;
+// The shared fixture below reaches its crate through `super::app`.
+use catcoms_app as app;
 use catcoms_rt::{Hub, ManualClock, PeerId};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::future::Future;
+/// The shared genuine-accepted-draft fixture, declared once for the whole Studio test tree.
+/// `#[path]`-including it from two test modules would compile two unrelated copies of it.
+#[path = "../../../../../crates/catcoms-app/tests/support/studio_inspection.rs"]
+pub(in crate::studio) mod fixture;
 mod preview;
 mod receiver;
 mod recovery;
 mod recovery_restore;
+
+fn save_response(outcome: app::studio::StudioUnconfirmedSaveOutcome) -> InvokeResponse {
+    InvokeResponse::Control(app::studio::StudioControlResponse::UnconfirmedOverlaySaved {
+        target: StudioTarget::Index {
+            channel: 7u128.to_be_bytes(),
+        },
+        outcome,
+    })
+}
+
+/// MAP K13: final native fences must not relabel a Save that may already be durable as a clean
+/// refusal. Conversely, outcomes which explicitly say this request wrote nothing stay plain.
+#[test]
+fn native_withheld_save_classification_follows_the_typed_outcome() {
+    use app::studio::StudioUnconfirmedSaveOutcome as O;
+    use app::studio::types::StudioOverlaySaveRefusal;
+
+    assert_eq!(
+        withheld_write(&save_response(O::Saved {
+            basis: [3; 32],
+            accepted: 1,
+        })),
+        Some(WithheldWrite::Save)
+    );
+    assert_eq!(
+        withheld_write(&save_response(O::Scheduled)),
+        Some(WithheldWrite::Save),
+        "the detached worker can commit after native stops waiting"
+    );
+    for outcome in [
+        O::Busy,
+        O::Paused,
+        O::Refused {
+            reason: StudioOverlaySaveRefusal::NonceConflict,
+            message: "diagnostic".into(),
+        },
+    ] {
+        assert_eq!(withheld_write(&save_response(outcome)), None);
+    }
+}
+
+#[test]
+fn every_destructive_or_copy_success_is_classified_before_a_final_fence() {
+    use app::studio::StudioControlResponse as R;
+
+    assert_eq!(
+        withheld_write(&InvokeResponse::Control(R::OverlayArchiveReleased)),
+        Some(WithheldWrite::Release)
+    );
+    assert_eq!(
+        withheld_write(&InvokeResponse::Control(R::OverlayCopyApplied {
+            destination: StudioTarget::Index {
+                channel: 7u128.to_be_bytes(),
+            },
+            already_saved: false,
+        })),
+        Some(WithheldWrite::Copy)
+    );
+    assert_eq!(
+        withheld_write(&InvokeResponse::Control(R::OverlayCopyRefused {
+            destination: StudioTarget::Index {
+                channel: 7u128.to_be_bytes(),
+            },
+            reason: app::studio::StudioOverlayCopyRefusal::StalePreview,
+        })),
+        None,
+        "a typed refusal is emitted before publication and must not be relabeled uncertain"
+    );
+}
 
 #[tokio::test]
 async fn native_studio_superseded_view_is_rejected_after_conversion() {

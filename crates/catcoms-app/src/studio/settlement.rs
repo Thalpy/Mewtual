@@ -17,6 +17,11 @@ pub enum StudioSettlementState {
     /// An attempted transition may have crossed an earlier durable barrier before failing.
     /// No phase or cause is inferred from an error string: reread before displaying a label.
     RefreshRequired,
+    /// A repair's application barrier returned and its replacement or a hold is still owed.
+    /// Produced only by the repair step; never inferred from a restore or an absent error.
+    Repairing,
+    /// A repair's whole-version recovery exceeds its bound. Everything is retained.
+    StorageRefused,
 }
 impl From<EpochPhase> for StudioSettlementState {
     fn from(value: EpochPhase) -> Self {

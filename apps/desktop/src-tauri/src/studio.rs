@@ -5,7 +5,12 @@ use catcoms_app::studio::{
     types::*, EpochPhase, StudioRead, StudioRequest, StudioVaultLease, StudioView,
 };
 use serde_json::{json, Value};
+// Overlay lifecycle and copy commands are registered atomically with their reviewed policy,
+// capability, frontend-contract and session-gate rows. Signed-repair controls remain absent.
+pub(crate) mod copy;
+pub(crate) mod fault;
 pub(crate) mod inspection;
+pub(crate) mod lifecycle;
 pub(crate) mod recovery;
 mod requests;
 pub(crate) mod settlement;
@@ -21,6 +26,34 @@ enum InvokeReady {
 enum InvokeResponse {
     Document(Option<StudioRead>),
     Control(catcoms_app::studio::StudioControlResponse),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WithheldWrite {
+    Archive,
+    Save,
+    Release,
+    Dispose,
+    Copy,
+}
+
+/// Classify the response before conversion or any final UI-session fence can withhold it. This is
+/// based on the typed outcome, never its eventual JSON or diagnostic text: a refused/busy Save is
+/// known not to have written, while a scheduled Save can still commit after native loses interest.
+fn withheld_write(response: &InvokeResponse) -> Option<WithheldWrite> {
+    use catcoms_app::studio::StudioControlResponse as R;
+    match response {
+        InvokeResponse::Control(R::OverlayArchived(_)) => Some(WithheldWrite::Archive),
+        InvokeResponse::Control(R::OverlayArchiveReleased) => Some(WithheldWrite::Release),
+        InvokeResponse::Control(R::OverlayDisposed(_)) => Some(WithheldWrite::Dispose),
+        InvokeResponse::Control(R::OverlayCopyApplied { .. }) => Some(WithheldWrite::Copy),
+        InvokeResponse::Control(R::UnconfirmedOverlaySaved { outcome, .. })
+            if outcome.may_have_durable_effect() =>
+        {
+            Some(WithheldWrite::Save)
+        }
+        _ => None,
+    }
 }
 
 fn id(s: &str) -> Result<[u8; 16], String> {
@@ -192,47 +225,99 @@ async fn invoke_with_context<V>(
         }
         _ => None,
     };
+    // Every control result that carries a job's slot - inspection, export, archive, copy preview -
+    // has a delivery the actor began. Asked of the response, which lists its delivered variants
+    // exhaustively, rather than re-matched here where a second list could drift from the first.
     let inspection_delivery = match &response {
-        InvokeResponse::Control(catcoms_app::studio::StudioControlResponse::OverlayInspection(
-            inspection,
-        )) => Some(inspection.delivery()),
+        InvokeResponse::Control(control) => control.delivery(),
         _ => None,
     };
-    if cancellation.is_cancelled() {
-        return Err("Studio request cancelled; its local save may have completed".into());
-    }
-    let _commit = require_ui_session_generation(state, generation).await?;
-    let servers = state.servers.lock().await;
-    if servers
-        .get(&server)
-        .is_none_or(|entry| entry.instance != instance)
-    {
-        return Err("server changed during Studio operation".into());
-    }
-    // Conversion can be substantial (base64 and full conflict-preserving JSON). Keep the
-    // completion fences until it is finished, and suppress even a lock request that arrived
-    // during conversion before the actual lock task can acquire this commit guard.
-    let value = convert(response)?;
-    if view_request
-        .as_ref()
-        .is_some_and(|request| !request.is_current())
-    {
-        return Err("Studio view request was superseded; refresh".into());
-    }
-    if preview_delivery
-        .as_ref()
-        .is_some_and(|delivery| !delivery.is_current())
-        || inspection_delivery
+    // An archive result is a DURABLE WRITE that already happened. Every refusal below withholds
+    // its result, but none of them undoes the write, so for an archive each one is `uncertain`,
+    // not `refused` (design section 11's write outcomes): the renderer must re-read rather than
+    // tell a user nothing was preserved. Reads lose nothing by being withheld and keep the plain
+    // refusals. Before results were delivered this could not arise for an archive.
+    let durable_write = withheld_write(&response);
+    let delivered = async {
+        if cancellation.is_cancelled() {
+            return Err("Studio request cancelled; its local save may have completed".into());
+        }
+        let _commit = require_ui_session_generation(state, generation).await?;
+        let servers = state.servers.lock().await;
+        if servers
+            .get(&server)
+            .is_none_or(|entry| entry.instance != instance)
+        {
+            return Err("server changed during Studio operation".into());
+        }
+        // Conversion can be substantial (base64 and full conflict-preserving JSON). Keep the
+        // completion fences until it is finished, and suppress even a lock request that arrived
+        // during conversion before the actual lock task can acquire this commit guard.
+        let value = convert(response)?;
+        if view_request
+            .as_ref()
+            .is_some_and(|request| !request.is_current())
+        {
+            return Err("Studio view request was superseded; refresh".into());
+        }
+        if preview_delivery
             .as_ref()
             .is_some_and(|delivery| !delivery.is_current())
-        || cancellation.is_cancelled()
-        || state.session_lock_requested.load(Ordering::Acquire)
-        || state.ui_session_generation.load(Ordering::Acquire) != generation
-    {
-        return Err("Studio response belongs to a locked or changed UI session".into());
+            || inspection_delivery
+                .as_ref()
+                .is_some_and(|delivery| !delivery.is_current())
+            || cancellation.is_cancelled()
+            || state.session_lock_requested.load(Ordering::Acquire)
+            || state.ui_session_generation.load(Ordering::Acquire) != generation
+        {
+            return Err("Studio response belongs to a locked or changed UI session".into());
+        }
+        Ok(value)
     }
-    Ok(value)
+    .await;
+    if let Some(write) = durable_write {
+        let message = match write {
+            WithheldWrite::Archive => UNDELIVERED_ARCHIVE,
+            WithheldWrite::Save => UNDELIVERED_SAVE,
+            WithheldWrite::Release => UNDELIVERED_RELEASE,
+            WithheldWrite::Dispose => UNDELIVERED_DISPOSE,
+            WithheldWrite::Copy => UNDELIVERED_COPY,
+        };
+        return delivered.map_err(|error| format!("{message} ({error})"));
+    }
+    delivered
 }
+
+/// What a caller is told when an archive was written but its result could not be shown. Prefixed
+/// like every other uncertain outcome, so a renderer that already handles `outcome=uncertain;`
+/// handles this, and the exact retry it suggests is safe: the archive writer treats an identical
+/// payload as a sync-only repair.
+pub(crate) const UNDELIVERED_ARCHIVE: &str = "outcome=uncertain; the archive was written, but its \
+     result could not be delivered; read the archive to confirm it, or retry exactly";
+
+/// A completed or still-running Save whose typed response was withheld by a final native fence.
+/// The caller must re-read before claiming either success or refusal; an identical retry remains
+/// safe because Save classification recognizes already accepted work.
+pub(crate) const UNDELIVERED_SAVE: &str = "outcome=uncertain; the Save may have completed, but its \
+     result could not be delivered; refresh the Studio document, or retry exactly";
+
+/// A release or disposal cannot safely be repeated after a withheld result: each exact retry may
+/// now find that the thing it destroyed is absent. The caller must reconcile the lifecycle view.
+pub(crate) const UNDELIVERED_RELEASE: &str = "outcome=uncertain; the archive release completed, but \
+     its result could not be delivered; refresh the local-draft lifecycle before acting again";
+pub(crate) const UNDELIVERED_DISPOSE: &str = "outcome=uncertain; the draft disposal completed, but \
+     its result could not be delivered; refresh the local-draft lifecycle before acting again";
+
+/// Copy Apply is nonce-idempotent. Its result may be withheld after the destination write, so the
+/// safe recovery is the same exact prepared request, never a newly previewed copy.
+pub(crate) const UNDELIVERED_COPY: &str = "outcome=uncertain; the draft copy may have completed, but \
+     its result could not be delivered; retry the exact prepared copy";
+
+/// The weaker form, for an archive finish that failed without producing a result: the store could
+/// not read back what it wrote, or the actor dropped the reply. The second can also happen BEFORE
+/// the write, so this says "may have been", not "was". Same prefix, same safe action.
+pub(crate) const ARCHIVE_MAYBE_WRITTEN: &str = "outcome=uncertain; the archive may have been \
+     written; read the archive to confirm it, or retry exactly";
 
 fn authorize(
     state: &AppState,

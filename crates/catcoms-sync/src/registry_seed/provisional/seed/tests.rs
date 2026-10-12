@@ -177,6 +177,28 @@ async fn provisional_seed_nonowner_index_and_flipnote_are_only_unconfirmed_typed
                 assert_eq!(value.projection.epoch(), 1);
                 assert_eq!(value.projection.document(), &receipt.document);
                 assert_eq!(value.projection.channel(), target.channel());
+                assert_eq!(
+                    value.seed_bytes,
+                    seed.bytes(),
+                    "the callback exposes exactly the seed the provider served (design 8.1)"
+                );
+                // The view is private Studio content and must not print as such: neither the
+                // typed content nor the seed bytes, which a derived Debug would list in full.
+                let shown = format!("{value:?}");
+                assert!(
+                    !shown.contains("unconfirmed title"),
+                    "the view's Debug printed preview content: {shown}"
+                );
+                let leading = seed.bytes()[..8]
+                    .iter()
+                    .map(u8::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                assert!(
+                    !shown.contains(&leading),
+                    "the view's Debug printed the seed bytes: {shown}"
+                );
+                assert!(shown.contains(&format!("seed_bytes: {}", seed.bytes().len())));
                 match value.projection {
                     StudioProjection::Flipnote(p) => assert_eq!(
                         p.title.as_ref().unwrap().selected.value,
@@ -186,6 +208,13 @@ async fn provisional_seed_nonowner_index_and_flipnote_are_only_unconfirmed_typed
                 }
             })
             .unwrap();
+        // Design 8.1: no authenticated tail has run yet, so the preview has not shown the whole
+        // current history, and no draft may be based on it.
+        assert!(!prepared.tail_complete());
+        assert!(matches!(
+            client.mint_unconfirmed_overlay_basis(&prepared),
+            Err(SyncError::Unauthorized)
+        ));
         assert_eq!(retained(&client), 1);
         drop(prepared);
         assert_eq!(retained(&client), 0);

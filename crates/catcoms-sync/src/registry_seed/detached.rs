@@ -73,6 +73,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peer: PeerId,
         target: CheckpointTarget,
     ) -> Result<PendingCheckpointDiscovery<T>, SyncError> {
+        self.prepare_checkpoint_discovery_with_fault_report(peer, target, None)
+    }
+
+    /// Discovery whose head request also reports this requester's frozen fault pair (W-1).
+    pub fn prepare_checkpoint_discovery_with_fault_report(
+        &mut self,
+        peer: PeerId,
+        target: CheckpointTarget,
+        fault_report: Option<&[Receipt; 2]>,
+    ) -> Result<PendingCheckpointDiscovery<T>, SyncError> {
         let capacity = self.registry_seeds.reserve_retained(false)?;
         let expires = self
             .clock
@@ -80,12 +90,40 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .checked_add(FETCH_MS)
             .ok_or(SyncError::Malformed)?;
         let head = self
-            .prepare_checkpoint_head(peer, target)?
+            .prepare_checkpoint_head_with_fault_report(peer, target, fault_report)?
             .retaining(capacity.clone());
         Ok(PendingCheckpointDiscovery {
             head,
             capacity,
             expires,
+        })
+    }
+    /// Seed fetch for a repair that still owes its replacement: the selected receipt comes from
+    /// a locally verified repair, not a fresh owner proof, because a held or moved-on owner may
+    /// never prove it again. It reuses the four retained slots, three paced attempts and the
+    /// sixty-second lifetime; installing the seed still goes through Repair-recovery adoption.
+    pub fn select_repaired_checkpoint(
+        &mut self,
+        target: CheckpointTarget,
+        fault_repair: &catcoms_replication::ReceiptRepair,
+        selected: &Receipt,
+    ) -> Result<RegistrySeedFetch, SyncError> {
+        let capacity = self.registry_seeds.reserve_retained(false)?;
+        let expires = self
+            .clock
+            .monotonic_ms()
+            .checked_add(FETCH_MS)
+            .ok_or(SyncError::Malformed)?;
+        let selection = self.repaired_head_selection(target, fault_repair, selected)?;
+        Ok(RegistrySeedFetch {
+            selection,
+            fault_repair: Some(Box::new(fault_repair.clone())),
+            _capacity: capacity,
+            expires,
+            attempts: 0,
+            next_at: 0,
+            seed: None,
+            attempt: None,
         })
     }
     pub fn complete_checkpoint_discovery(
@@ -103,6 +141,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             None => RegistrySeedDiscovery::Hint(answer),
             Some(selection) => RegistrySeedDiscovery::Selected(RegistrySeedFetch {
                 selection,
+                fault_repair: answer.repair.map(Box::new),
                 _capacity: completed.capacity,
                 expires: completed.expires,
                 attempts: 0,

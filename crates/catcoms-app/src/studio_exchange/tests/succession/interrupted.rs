@@ -119,7 +119,7 @@ impl Interruption {
             .clone();
         assert_eq!(
             receipt.tenure_start_group_epoch,
-            verifier.sync.observed_owner_tenure_start().unwrap()
+            verifier.sync.verification_owner_tenure_start().unwrap()
         );
         assert_eq!(receipt.closed_epoch, 1);
         let close = journal

@@ -98,6 +98,24 @@ pub enum TransportError {
     InvalidDialBatch,
 }
 
+/// Deadline one addressed request/response exchange gets, **in both directions**.
+///
+/// Part of the seam rather than of one implementation, because it is the deadline every layer
+/// above is really budgeting against and none of them could previously see it. Production maps
+/// it onto libp2p's `request_response` timeout, which a responder applies to inbound requests
+/// too: it abandons one it has not finished answering in time. So no higher layer's longer
+/// budget can outlive this, however generously that budget is written, and a per-kind response
+/// size only fits if it fits *here*.
+///
+/// Raising it is almost never the fix for a payload that does not arrive in time. That converts
+/// a fast failure into a long hang and moves the cliff instead of removing it; making the
+/// response smaller, so a legal answer always fits, is the fix. See `MAX_BLOB_PAGE` in
+/// `catcoms-sync` for the worked case.
+pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// [`REQUEST_TIMEOUT`] in milliseconds, for layers sizing their own budgets around it.
+pub const REQUEST_TIMEOUT_MS: u64 = 10_000;
+
 /// Local admission bounds for one-shot publications, not a promise that the gossip protocol's
 /// configured message limit accepts every payload this large. Check before queueing/copying.
 pub const MAX_PUBLISH_ONCE_BYTES: usize = 512 * 1024;

@@ -28,7 +28,9 @@ def main():
             "preview trust-state flag",
         ),
         (
-            "if preview_delivery\n        .as_ref()\n        .is_some_and(|delivery| !delivery.is_current())",
+            # Indented one level deeper since the post-response checks moved inside the `delivered`
+            # block of `invoke_with_context` (archive results report uncertain outcomes there).
+            "if preview_delivery\n            .as_ref()\n            .is_some_and(|delivery| !delivery.is_current())",
             "if false",
             "studio::tests::preview::native_studio_preview_expiring_after_conversion_is_rejected",
             "expired preview escaped final native delivery fence",

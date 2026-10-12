@@ -115,7 +115,8 @@ impl Fixture {
         }
     }
     fn candidate(&self) -> UnconfirmedStudioSeed {
-        UnconfirmedStudioSeed::parse(self.target, &self.receipt, self.seed.bytes()).unwrap()
+        UnconfirmedStudioSeed::parse_live_transfer(self.target, &self.receipt, self.seed.bytes())
+            .unwrap()
     }
     fn edit(&mut self, n: u8) -> SealedOp {
         let logical = self.target.document(&self.group.group_id()).unwrap();
@@ -183,6 +184,87 @@ fn provisional_tail_replays_real_index_and_flipnote_changes_and_deduplicates() {
         assert_eq!(preview.projection(), &f.source.projection().unwrap());
         assert_eq!(preview.doc_id(), f.source.doc_id());
         assert_eq!(preview.applied.len(), 4);
+    }
+}
+
+/// Design 8.1 part 1, and the review finding (A2) it answers: once a tail is applied, the preview's
+/// projection has moved past the seed, so the seed an unconfirmed draft is based on can only come
+/// from what `parse` kept. The tail here is real, and the move is observed rather than assumed.
+#[test]
+fn provisional_seed_bytes_are_the_parsed_seed_and_survive_a_tail_that_moves_the_projection() {
+    for art in [false, true] {
+        let mut f = Fixture::new(art);
+        let original = f.candidate();
+        let mut preview = f.candidate();
+        assert_eq!(
+            preview.seed_bytes(),
+            f.seed.bytes(),
+            "exactly the bytes parse accepted"
+        );
+        let edit = f.edit(1);
+        preview = preview
+            .prepare_tail(vec![edit], &f.group, &f.owner)
+            .unwrap()
+            .prepare()
+            .unwrap();
+        assert_ne!(
+            preview.projection(),
+            original.projection(),
+            "precondition: the tail moved the merged projection off the seed"
+        );
+        assert_eq!(
+            preview.seed_bytes(),
+            f.seed.bytes(),
+            "the tail must not touch the retained seed"
+        );
+        // And the retained bytes are still the seed in the only sense that matters later: they
+        // re-parse, against the same receipt, to the seed's own projection (part 3's re-check).
+        let reparsed =
+            UnconfirmedStudioSeed::parse_live_transfer(f.target, &f.receipt, preview.seed_bytes())
+                .expect("the retained seed re-parses against its receipt");
+        assert_eq!(reparsed.projection(), original.projection());
+    }
+}
+
+/// `parse_graph` skips only the retained copy, never a check: it accepts what `parse` accepts,
+/// with the same projection, and refuses what `parse` refuses. Structural today, because both run
+/// `parsed`; pinned so a future divergence between the two cannot pass unnoticed. Local drafts and
+/// archives rebuild their graph through `parse_graph`, so a weaker one would admit a base that the
+/// preview path would have refused. (The reordered-encoding class is pinned in `tests.rs`.)
+#[test]
+fn parse_graph_refuses_exactly_what_parse_refuses() {
+    for art in [false, true] {
+        let f = Fixture::new(art);
+        let (_, graph) =
+            UnconfirmedStudioSeed::parse_graph(f.target, &f.receipt, f.seed.bytes()).unwrap();
+        assert_eq!(&graph, f.candidate().projection());
+
+        let logical = f.target.document(&f.group.group_id()).unwrap();
+        let other_hash = Receipt::sign(
+            logical,
+            0,
+            [7; 32],
+            [0xEE; 32],
+            0,
+            InheritedCheckpoint::EpochZero,
+            &f.outsider,
+        )
+        .unwrap();
+        let bytes = f.seed.bytes();
+        let truncated = &bytes[..bytes.len() - 1];
+        for (case, receipt, bytes) in [
+            ("a receipt naming another seed", &other_hash, bytes),
+            ("truncated bytes", &f.receipt, truncated),
+        ] {
+            assert!(
+                UnconfirmedStudioSeed::parse_live_transfer(f.target, receipt, bytes).is_err(),
+                "precondition, {case}: parse refuses"
+            );
+            assert!(
+                UnconfirmedStudioSeed::parse_graph(f.target, receipt, bytes).is_err(),
+                "{case}: parse_graph must refuse what parse refuses"
+            );
+        }
     }
 }
 

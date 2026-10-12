@@ -77,7 +77,9 @@ export const TAURI_COMMAND_GROUPS = {
   authenticated_server_reads: {
     boundary: "Read projections from a registered per-server actor; never bypass MLS/CRDT validation.",
     commands: [
-      "get_channels", "get_members", "get_profiles", "get_livery", "get_badges", "get_devices",
+      "get_channels", "durable_send_context", "get_members", "get_profiles", "get_livery", "get_badges", "get_devices",
+      // Exact actor's authenticated mode; fenced against lock and replacement, no authority write.
+      "group_communication_mode",
       "get_files", "get_storage_health", "get_online_members", "get_delivery", "dm_stats",
       "get_dm_requests", "file_available", "get_kept_files", "get_file_usage", "get_wiki_pinned_cids", "get_statuses",
       "get_events", "get_wiki_pages", "get_wiki_map", "get_wiki_page", "get_wiki_meta",
@@ -122,7 +124,13 @@ export const TAURI_COMMAND_GROUPS = {
       // ceiling is a 32 MiB refusal on the encoded view, which fails rather than quietly dropping
       // the conflict evidence to fit.
       "studio_list", "studio_read",
-      "studio_overlay_read",
+      // Overlay reads are local-vault evidence, never settlement authority. Lifecycle is the
+      // structural row; read/export return retained draft/archive bytes; copy preview derives one
+      // proposed ordinary edit but writes nothing. The Unconfirmed ticket is only an identity the
+      // write must echo: the actor re-mints from the live preview at every later stage.
+      "studio_overlay_read", "studio_overlay_lifecycle",
+      "studio_overlay_archive_read", "studio_overlay_archive_export", "studio_overlay_export",
+      "studio_overlay_copy_preview", "studio_unconfirmed_overlay_save_begin",
       // Retained Studio history, all of it local vault content. `studio_recovery_list` is metadata
       // only: at most three snapshots with their epoch, size and why each was retained.
       // `studio_recovery_read` returns one snapshot's projection, and `studio_recovery_export`
@@ -187,6 +195,16 @@ export const TAURI_COMMAND_GROUPS = {
       // operation bound, ids must be exactly 32 lowercase hex characters, and the channel must be
       // canonical decimal, so an id or a channel is never a way to address something else.
       "studio_create", "studio_apply", "studio_apply_index",
+      // Manual local-draft lifecycle. Archive adds lossless local evidence; release and disposal
+      // can destroy it only with exact typed identities/confirmation; copy apply is re-planned
+      // against current source and destination bytes. None grants owner, receipt or handoff
+      // authority, and every response remains fenced by the unlocked session/actor generation.
+      "studio_overlay_archive", "studio_overlay_archive_release",
+      "studio_overlay_copy_apply", "studio_overlay_dispose",
+      // Preview-local Save persists only this device's Unconfirmed draft. It cannot create an
+      // installed source, receipt or handoff and it rechecks membership, preview, basis and full
+      // request identity at commit. Pending/busy retries resend the exact request.
+      "studio_unconfirmed_overlay_save",
       // The bytes half of a flipnote frame. It validates the PIX grammar, then seals one immutable
       // blob into this device's persistent blob store and returns its address. It publishes no
       // frame, index entry or expiry, so a failed call can leave an orphan blob but can never

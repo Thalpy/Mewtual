@@ -48,8 +48,9 @@ use std::fmt;
 use std::io::{self, Cursor, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use catcoms_rt::{Clock, SystemClock};
 use image::codecs::bmp::BmpDecoder;
 use image::codecs::gif::GifDecoder;
 use image::codecs::ico::IcoDecoder;
@@ -104,7 +105,8 @@ impl SourceFormat {
         }
     }
 
-    /// The MIME type this format is admitted under, for logs and tests.
+    /// The MIME type used by the decoder's format fixtures.
+    #[cfg(test)]
     #[must_use]
     pub fn as_mime(self) -> &'static str {
         match self {
@@ -202,7 +204,8 @@ pub struct DecodeBounds {
     /// Cumulative pixels across all retained frames. Frames must be collected before the APNG
     /// header can be written (`acTL` needs the count up front), so this is a live memory bound.
     pub max_animation_pixels: u64,
-    /// Wall-clock ceiling. See [`DecodeBounds::max_duration`] notes on the module docs: this stops
+    /// Monotonic elapsed-time ceiling. The clock seam has millisecond resolution; fractional
+    /// milliseconds round down so they cannot extend the budget. This stops
     /// an animation loop mid-flight, but a single still decode inside `image` is not interruptible,
     /// so for stills it is only checked at stage boundaries.
     pub max_duration: Duration,
@@ -309,6 +312,15 @@ pub fn transcode_inline_image_with(
     bytes: &[u8],
     bounds: DecodeBounds,
 ) -> Result<DecodedImage, DecodeRefusal> {
+    transcode_inline_image_with_clock(declared, bytes, bounds, &SystemClock)
+}
+
+fn transcode_inline_image_with_clock(
+    declared: &str,
+    bytes: &[u8],
+    bounds: DecodeBounds,
+    clock: &dyn Clock,
+) -> Result<DecodedImage, DecodeRefusal> {
     let Some(format) = SourceFormat::from_mime(declared) else {
         return Err(DecodeRefusal::UnsupportedType);
     };
@@ -319,9 +331,33 @@ pub fn transcode_inline_image_with(
     // range or a capacity overflow in `image`, `tiff` or `image-webp` is a bug reachable from a
     // peer's file. Containing the unwind turns that into the same click-to-load chip every other
     // refusal produces instead of killing the scheme handler's task.
-    match catch_unwind(AssertUnwindSafe(|| transcode_inner(format, bytes, &bounds))) {
+    match catch_unwind(AssertUnwindSafe(|| {
+        transcode_inner(format, bytes, &bounds, clock)
+    })) {
         Ok(result) => result,
         Err(_) => Err(DecodeRefusal::DecoderPanicked),
+    }
+}
+
+/// One budget across header parsing, still decoding and animation frames. A decoder call itself
+/// remains non-preemptible: only the existing stage boundaries can observe expiry.
+#[derive(Clone, Copy)]
+struct DecodeDeadline<'a> {
+    clock: &'a dyn Clock,
+    expires_ms: u64,
+}
+
+impl<'a> DecodeDeadline<'a> {
+    fn new(clock: &'a dyn Clock, duration: Duration) -> Self {
+        let budget_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+        Self {
+            clock,
+            expires_ms: clock.monotonic_ms().saturating_add(budget_ms),
+        }
+    }
+
+    fn expired(self) -> bool {
+        self.clock.monotonic_ms() >= self.expires_ms
     }
 }
 
@@ -329,8 +365,12 @@ fn transcode_inner(
     format: SourceFormat,
     bytes: &[u8],
     bounds: &DecodeBounds,
+    clock: &dyn Clock,
 ) -> Result<DecodedImage, DecodeRefusal> {
-    let deadline = Instant::now() + bounds.max_duration;
+    let deadline = DecodeDeadline::new(clock, bounds.max_duration);
+    if deadline.expired() {
+        return Err(DecodeRefusal::DeadlineExceeded);
+    }
     match format {
         SourceFormat::Gif => {
             let decoder = GifDecoder::new(Cursor::new(bytes)).map_err(refusal_from_image)?;
@@ -409,7 +449,7 @@ fn transcode_inner(
 fn decode_still<D: ImageDecoder>(
     mut decoder: D,
     bounds: &DecodeBounds,
-    deadline: Instant,
+    deadline: DecodeDeadline<'_>,
 ) -> Result<DynamicImage, DecodeRefusal> {
     let (width, height) = decoder.dimensions();
     check_frame_bounds(width, height, bounds)?;
@@ -423,7 +463,7 @@ fn decode_still<D: ImageDecoder>(
     let orientation = decoder
         .orientation()
         .unwrap_or(image::metadata::Orientation::NoTransforms);
-    if Instant::now() > deadline {
+    if deadline.expired() {
         return Err(DecodeRefusal::DeadlineExceeded);
     }
     let mut image = DynamicImage::from_decoder(decoder).map_err(refusal_from_image)?;
@@ -436,12 +476,12 @@ fn finish_still(
     format: SourceFormat,
     image: DynamicImage,
     bounds: &DecodeBounds,
-    deadline: Instant,
+    deadline: DecodeDeadline<'_>,
 ) -> Result<DecodedImage, DecodeRefusal> {
     // Checked after the fact on purpose, and it does not undo the cost already paid. What it does
     // buy is that a decode which took absurdly long does not then also get an encode spent on it,
     // and that the caller hears about it. The real backstop is the caller's own timeout.
-    if Instant::now() > deadline {
+    if deadline.expired() {
         return Err(DecodeRefusal::DeadlineExceeded);
     }
     // Orientation can transpose the image, so re-check rather than trusting the header numbers.
@@ -481,7 +521,7 @@ fn transcode_frames(
     format: SourceFormat,
     frames: Frames<'_>,
     bounds: &DecodeBounds,
-    deadline: Instant,
+    deadline: DecodeDeadline<'_>,
 ) -> Result<DecodedImage, DecodeRefusal> {
     debug_assert!(format.may_animate());
     let mut collected: Vec<RawFrame> = Vec::new();
@@ -501,7 +541,7 @@ fn transcode_frames(
             truncated = true;
             break;
         };
-        if Instant::now() > deadline {
+        if deadline.expired() {
             if collected.is_empty() {
                 return Err(DecodeRefusal::DeadlineExceeded);
             }
@@ -1212,6 +1252,131 @@ mod tests {
 
         // And the bounds that should not fire do not.
         assert!(transcode_inline_image_with("image/png", &png, DecodeBounds::DEFAULT).is_ok());
+    }
+
+    /// Advance only when the production pipeline checks elapsed time. Wall time and sleeping
+    /// would make these deadline regressions dependent on the machine running the decoder.
+    #[derive(Debug, Default)]
+    struct DecodeStepClock(std::sync::atomic::AtomicU64);
+
+    impl Clock for DecodeStepClock {
+        fn now_ms(&self) -> u64 {
+            panic!("decode deadlines must never read wall time")
+        }
+
+        fn monotonic_ms(&self) -> u64 {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn sleep(
+            &self,
+            _duration: Duration,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            panic!("synchronous decoding must not sleep")
+        }
+    }
+
+    #[test]
+    fn injected_deadline_refuses_still_before_decode_or_encode() {
+        let png = encode_fixture(SourceFormat::Png, &sample(16, 16, true));
+        for budget_ms in [2, 3] {
+            // The first budget expires before decoding; the second expires before encoding.
+            // A zero output cap also proves expiry refuses before an encoder/output-bound error.
+            let bounds = DecodeBounds {
+                max_duration: Duration::from_millis(budget_ms),
+                max_output_bytes: 0,
+                ..DecodeBounds::DEFAULT
+            };
+            assert_eq!(
+                transcode_inline_image_with_clock(
+                    "image/png",
+                    &png,
+                    bounds,
+                    &DecodeStepClock::default(),
+                ),
+                Err(DecodeRefusal::DeadlineExceeded),
+            );
+        }
+        let bounds = DecodeBounds {
+            max_duration: Duration::from_millis(4),
+            ..DecodeBounds::DEFAULT
+        };
+        assert!(transcode_inline_image_with_clock(
+            "image/png",
+            &png,
+            bounds,
+            &DecodeStepClock::default(),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn injected_deadline_keeps_only_animation_frames_decoded_before_expiry() {
+        let gif = animated_gif(5, 16, 16);
+        let bounds = DecodeBounds {
+            max_duration: Duration::from_millis(4),
+            ..DecodeBounds::DEFAULT
+        };
+        let decoded = transcode_inline_image_with_clock(
+            "image/gif",
+            &gif,
+            bounds,
+            &DecodeStepClock::default(),
+        )
+        .expect("the first two frames fit before the injected deadline");
+        assert_eq!(decoded.frames, 2);
+        assert!(decoded.truncated_animation);
+        let (_, info) = reread(&decoded.png);
+        assert_eq!(info.animation_control.unwrap().num_frames, 2);
+    }
+
+    #[test]
+    fn zero_and_fractional_millisecond_budgets_refuse_before_header_parsing() {
+        let clock = catcoms_rt::ManualClock::new(50);
+        for max_duration in [Duration::ZERO, Duration::from_nanos(999_999)] {
+            let bounds = DecodeBounds {
+                max_duration,
+                ..DecodeBounds::DEFAULT
+            };
+            assert_eq!(
+                transcode_inline_image_with_clock("image/png", b"invalid header", bounds, &clock),
+                Err(DecodeRefusal::DeadlineExceeded),
+            );
+        }
+    }
+
+    #[test]
+    fn decode_deadline_ignores_wall_time_and_expires_at_the_monotonic_boundary() {
+        let clock = catcoms_rt::ManualClock::new(100);
+        let deadline = DecodeDeadline::new(&clock, Duration::from_micros(10_999));
+        clock.set_wall_ms(u64::MAX);
+        assert!(
+            !deadline.expired(),
+            "forward wall adjustment spent no elapsed time"
+        );
+        clock.set_wall_ms(0);
+        assert!(
+            !deadline.expired(),
+            "backward wall adjustment extends no budget"
+        );
+        clock.advance_ms(9);
+        assert!(!deadline.expired());
+        clock.advance_ms(1);
+        assert!(
+            deadline.expired(),
+            "fractional milliseconds do not extend the bound"
+        );
+    }
+
+    #[test]
+    fn decode_deadline_saturates_without_wrapping_or_panicking() {
+        let clock = catcoms_rt::ManualClock::new(u64::MAX - 2);
+        let deadline = DecodeDeadline::new(&clock, Duration::MAX);
+        assert!(!deadline.expired());
+        clock.set_ms(u64::MAX - 1);
+        assert!(!deadline.expired());
+        clock.set_ms(u64::MAX);
+        assert!(deadline.expired());
     }
 
     #[test]

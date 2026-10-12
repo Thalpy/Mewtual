@@ -36,11 +36,34 @@ pub enum StudioRecoveryDisposition {
     MissingTarget,
 }
 
+/// Which documents this plan is allowed to span.
+///
+/// Recovery is always `SameDocument`: a historical version of a document can only be restored into
+/// that document. Copy adds `CrossDocument`, which drops **only** the logical-key equality and keeps
+/// every capacity, conflict, tombstone and over-cap check, because a Flipnote frame is the same kind
+/// of thing whichever Flipnote it came from while a frame's *capacity* is a property of where it is
+/// going.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlanScope {
+    SameDocument,
+    CrossDocument,
+}
+
 /// A proposal, not a save result. Body and provenance are private vault content.
 pub struct StudioRecoveryPlan {
     pub disposition: StudioRecoveryDisposition,
     pub body: Option<Vec<u8>>,
     pub original_author: Option<crate::DeviceId>,
+    /// The operation ids in `historical` that this proposal actually consumed, derived here rather
+    /// than supplied by a caller.
+    ///
+    /// It reports what was resolved and **nothing more**. It is not a preservation claim: copy is
+    /// projection-level, so a superseded entry, a conflict alternative, the original authorship of
+    /// an accepted envelope and the accepted ordering all have no representation in what this
+    /// produces. No count of these ever establishes that a branch was preserved; only an archive
+    /// does that. An earlier revision had the caller pass a `source_entry` in, which let a request
+    /// claim to have consumed work it never resolved.
+    pub source_ops: Vec<[u8; 32]>,
 }
 impl std::fmt::Debug for StudioRecoveryPlan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -55,16 +78,34 @@ impl StudioRecoveryPlan {
             disposition,
             body: None,
             original_author: None,
+            source_ops: Vec::new(),
         }
     }
+    /// `source_ops` is taken as a slice at every call site so the ids come from the values the arm
+    /// just resolved, in that arm, rather than being reconstructed afterwards from the item.
+    ///
+    /// **Deduplicated here, in order.** An `IndexRegister` with no explicit edit falls back to the
+    /// creating operation's own source, so a `PutObject` whose title and expiry were never
+    /// separately set resolves three registers that are all the birth op. Reporting that id three
+    /// times would say the proposal consumed three operations when it consumed one, and
+    /// `source_ops` claims to name exactly what was resolved. Order is preserved rather than
+    /// sorted, because the order is the order the arm read them in and that is information.
     fn ready(
         body: Result<Vec<u8>, catcoms_replication::ReplError>,
         author: crate::DeviceId,
+        source_ops: &[[u8; 32]],
     ) -> Result<Self, AppError> {
+        let mut seen = Vec::with_capacity(source_ops.len());
+        for id in source_ops {
+            if !seen.contains(id) {
+                seen.push(*id);
+            }
+        }
         Ok(Self {
             disposition: StudioRecoveryDisposition::Ready,
             body: Some(body.map_err(invalid)?),
             original_author: Some(author),
+            source_ops: seen,
         })
     }
 }
@@ -100,17 +141,45 @@ pub(crate) fn plan(
     item: StudioRecoveryItem,
     mode: StudioRecoveryMode,
     restorer: crate::DeviceId,
+    scope: PlanScope,
 ) -> Result<StudioRecoveryPlan, AppError> {
     use StudioRecoveryDisposition as D;
     use StudioRecoveryItem as I;
     let held = |d| Ok(StudioRecoveryPlan::held(d));
-    if current.document() != historical.document()
-        || current.channel() != historical.channel()
-        || history.iter().any(|r| {
-            r.projection().document() != current.document()
-                || r.projection().channel() != current.channel()
-        })
-    {
+    // The channel never relaxes, in either scope. A cross-document copy still crosses only within
+    // one channel's key material, and a different channel naming the same object id is a different
+    // destination (C-0), not a permissible source.
+    if current.channel() != historical.channel() {
+        return Err(invalid("recovery document scope differs"));
+    }
+    // `historical` is the one thing a cross-document copy is allowed to have come from elsewhere,
+    // and **only its logical key may differ**.
+    //
+    // Relaxing to "same channel" alone would be wrong and the existing scope test is what shows it:
+    // `channel()` is the 16-byte channel id and does not name a server, so two unrelated groups can
+    // both hold channel `[1; 16]`. Requiring `server_id` and `doc_type` to match as well keeps a
+    // foreign group's document from ever being a copy source, which is the whole point of C-0
+    // treating the complete `LogicalDocument` as the identity.
+    //
+    // Everything checked against `current` below - capacity, tombstones, over-cap, conflicts - is a
+    // property of the destination and is unaffected by this.
+    let compatible = match scope {
+        PlanScope::SameDocument => current.document() == historical.document(),
+        PlanScope::CrossDocument => {
+            current.document().server_id == historical.document().server_id
+                && current.document().doc_type == historical.document().doc_type
+        }
+    };
+    if !compatible {
+        return Err(invalid("recovery document scope differs"));
+    }
+    // `history` is always the DESTINATION's retained versions, in both scopes: it exists to prove a
+    // deletion elsewhere in the destination's own history blocks a resurrection here. A cross-
+    // document copy that relaxed this would consult the source's tombstones about the destination.
+    if history.iter().any(|r| {
+        r.projection().document() != current.document()
+            || r.projection().channel() != current.channel()
+    }) {
         return Err(invalid("recovery document scope differs"));
     }
     match (current, historical, item) {
@@ -155,6 +224,7 @@ pub(crate) fn plan(
                     }
                     .encode(),
                     pixels.source.author,
+                    &[pixels.source.op_id],
                 );
             }
             // Ordinary Restore takes the snapshot's actual selected pixels, not its birth blob.
@@ -188,6 +258,9 @@ pub(crate) fn plan(
                 }
                 .encode(),
                 pixels.source.author,
+                // The insertion that supplied `after` is positional and is not consumed: the
+                // proposal takes the resolved pixels, not that frame's place in the source.
+                &[pixels.source.op_id],
             )
         }
         (
@@ -209,6 +282,7 @@ pub(crate) fn plan(
             StudioRecoveryPlan::ready(
                 FlipnoteOp::RemoveFrame { frame: id }.encode(),
                 deletion.author,
+                &[deletion.op_id],
             )
         }
         (StudioProjection::Flipnote(now), StudioProjection::Flipnote(old), I::Title { value }) => {
@@ -231,6 +305,7 @@ pub(crate) fn plan(
             StudioRecoveryPlan::ready(
                 FlipnoteOp::SetHeader(FlipnoteHeader::Title(value.value.clone())).encode(),
                 value.source.author,
+                &[value.source.op_id],
             )
         }
         (StudioProjection::Flipnote(now), StudioProjection::Flipnote(old), I::Fps { value }) => {
@@ -253,6 +328,7 @@ pub(crate) fn plan(
             StudioRecoveryPlan::ready(
                 FlipnoteOp::SetHeader(FlipnoteHeader::Fps(value.value)).encode(),
                 value.source.author,
+                &[value.source.op_id],
             )
         }
         (StudioProjection::Index(now), StudioProjection::Index(old), I::Object { id }) => {
@@ -293,6 +369,14 @@ pub(crate) fn plan(
                 }
                 .encode(),
                 birth.source.author,
+                // Three values, so three ids. A PutObject resolves the creation, the selected title
+                // and the selected expiry, and reporting only the creation would understate what
+                // this proposal read out of the source.
+                &[
+                    birth.source.op_id,
+                    entry.title.selected.source.op_id,
+                    entry.expiry.selected.source.op_id,
+                ],
             )
         }
         (
@@ -325,6 +409,7 @@ pub(crate) fn plan(
                 }
                 .encode(),
                 value.source.author,
+                &[value.source.op_id],
             )
         }
         (
@@ -358,6 +443,7 @@ pub(crate) fn plan(
                 }
                 .encode(),
                 value.source.author,
+                &[value.source.op_id],
             )
         }
         (StudioProjection::Index(now), StudioProjection::Index(old), I::ObjectDeletion { id }) => {
@@ -375,6 +461,7 @@ pub(crate) fn plan(
             StudioRecoveryPlan::ready(
                 IndexOp::TombstoneObject { object: id }.encode(),
                 deletion.author,
+                &[deletion.op_id],
             )
         }
         _ => Err(invalid("recovery choice is for a different document type")),

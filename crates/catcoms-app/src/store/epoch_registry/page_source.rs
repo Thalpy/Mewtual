@@ -38,7 +38,7 @@ impl ServerStore {
     /// Reuse the verified prepared graph; unchanged history is never reconstructed here.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn registry_maintenance_hint(
-        &self,
+        &mut self,
         server: u64,
         group: &ServerGroup,
         bucket: u8,
@@ -65,10 +65,10 @@ impl ServerStore {
                     record,
                 )
                 .map_err(invalid)?;
-            sync_registry(
-                &self.registry_epoch_path(&scope_bytes(server, &logical)?),
-                record.footprint.total().map_err(invalid)?,
-            )?;
+            // I-4: an unchanged-file flush still invalidates a captured inventory.
+            let path = self.registry_epoch_path(&scope_bytes(server, &logical)?);
+            let bytes = record.footprint.total().map_err(invalid)?;
+            self.epoch_mutation_guard().sync_registry(&path, bytes)?;
             reservation.commit();
         }
         prepared
@@ -193,6 +193,24 @@ impl ServerStore {
         }))
     }
 
+    /// Recheck a preparation-time absence without opening or reconstructing a newly-created
+    /// Registry source. A present non-regular entry is an integrity error, never absence.
+    pub(crate) fn registry_page_source_is_absent(
+        &self,
+        server: u64,
+        group: &[u8],
+        bucket: u8,
+    ) -> Result<bool, AppError> {
+        let logical = registry_document(group, bucket).map_err(invalid)?;
+        let scope = scope_bytes(server, &logical)?;
+        match fs::symlink_metadata(self.registry_epoch_path(&scope)) {
+            Ok(meta) if !regular_file(&meta) => Err(invalid("file is not regular")),
+            Ok(_) => Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(error) => Err(AppError::Io(error.to_string())),
+        }
+    }
+
     /// No history replay here. Missing/replaced/corrupt records never authorize cached content.
     /// Hashing the FULL authenticated plaintext detects receipt faults even with unchanged ops.
     pub(crate) fn registry_page_source_is_current(
@@ -212,6 +230,7 @@ impl ServerStore {
 
     /// Reuse the read-only graph's already-verified facts, but reauthenticate its exact wrapper
     /// and physical inventory first. A missing preparation may report ONLY checked true absence.
+    /// Seed consumers that call this helper deliberately retain Fault as a refusal.
     pub(super) fn checked_registry_checkpoint_source(
         &self,
         server: u64,
@@ -233,7 +252,7 @@ impl ServerStore {
 
     /// Authenticate the physical source and its inventory independently of whether its
     /// receipt book currently permits serving a checkpoint (Fault deliberately does not).
-    fn checked_registry_prepared_record(
+    pub(super) fn checked_registry_prepared_record(
         &self,
         server: u64,
         group: &ServerGroup,

@@ -110,7 +110,7 @@ test("jukebox playback uses the call-server index and exposes an explicit consen
 test("server onboarding is gated until vault-sealed trust policy has loaded", () => {
   const source = readFileSync(fileURLToPath(new URL("./App.svelte", import.meta.url)), "utf8");
   const continuityGate = source.indexOf("{:else if !uiStateReady}");
-  const onboarding = source.indexOf("{:else if servers.length === 0 || showAdd}");
+  const onboarding = source.indexOf("{:else if (servers.length === 0 || showAdd) && !showSettings}");
   assert.ok(continuityGate >= 0 && continuityGate < onboarding);
   assert.match(source, /let uiStateReady = \$state\(false\)/);
   assert.match(source, /if \(!r\.is_dm\) \{[\s\S]*\[r\.server\]: \{ mode: onboardingFileTrust/);

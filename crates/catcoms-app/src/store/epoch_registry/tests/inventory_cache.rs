@@ -20,15 +20,18 @@ fn inventory_cache_reauthenticates_and_revalidates_gate_only_changes() {
     let mut budget = budget(&mut store, &f);
     let first = f.op(1);
     f.ingest(&mut store, &first, &mut budget).unwrap();
-    let (cold, p) = scan(&mut store);
-    assert_eq!(p.reused_records, 0);
-    let (warm, p) = scan(&mut store);
+    let (writer_warm, p) = scan(&mut store);
     assert_eq!(p.reused_records, 1);
     assert_eq!(p.uncached_bytes, 0);
+    store.inventory_cache.clear_for_test();
+    let (fresh, p) = scan(&mut store);
+    assert_eq!(p.reused_records, 0);
     assert_eq!(
-        cold.records_for_server(SERVER, &f.group.group_id())
+        writer_warm
+            .records_for_server(SERVER, &f.group.group_id())
             .unwrap(),
-        warm.records_for_server(SERVER, &f.group.group_id())
+        fresh
+            .records_for_server(SERVER, &f.group.group_id())
             .unwrap()
     );
 
@@ -46,9 +49,8 @@ fn inventory_cache_reauthenticates_and_revalidates_gate_only_changes() {
         )
         .unwrap();
     let (_, p) = scan(&mut store);
-    assert_eq!(p.reused_records, 0);
-    assert!(p.uncached_bytes > 0);
-    assert_eq!(scan(&mut store).1.reused_records, 1);
+    assert_eq!(p.reused_records, 1);
+    assert_eq!(p.uncached_bytes, 0);
 
     let path = f.path(&store);
     // A separately valid owner receipt changes fixed-width hashes/signatures only. Equal
@@ -66,7 +68,7 @@ fn inventory_cache_reauthenticates_and_revalidates_gate_only_changes() {
     assert_eq!(scan(&mut store).1.reused_records, 1);
 
     // A cached final record never bypasses enumeration/accounting of a new staging copy.
-    let staged = crate::store::staging_candidate(&path, 917);
+    let staged = crate::store::staging_candidate_for_test(&path, 917);
     fs::write(&staged, [0; 123]).unwrap();
     let (with_orphan, p) = scan(&mut store);
     assert_eq!(p.reused_records, 1);
@@ -105,20 +107,11 @@ fn inventory_cache_reauthenticates_and_revalidates_gate_only_changes() {
 }
 
 #[test]
-fn inventory_cache_large_source_needs_explicit_warmup_and_counts_actual_bytes() {
+fn inventory_cache_large_writer_warm_bypasses_only_the_cold_validation_rail() {
     let root = tempfile::tempdir().unwrap();
     let mut store = open(root.path());
     let path = performance::save_inventory_fixture(&mut store);
     let original = fs::read(&path).unwrap();
-    let mut cold = store.scan_studio_receive_inventory().unwrap();
-    assert!(cold
-        .step()
-        .unwrap_err()
-        .to_string()
-        .contains("cold byte limit"));
-    assert!(cold.finish().is_err());
-    let (_, p) = scan(&mut store);
-    assert_eq!(p.reused_records, 0);
     let mut warm = store.scan_studio_receive_inventory().unwrap();
     let p = loop {
         let p = warm.step().unwrap();
@@ -131,6 +124,27 @@ fn inventory_cache_large_source_needs_explicit_warmup_and_counts_actual_bytes() 
     assert_eq!(p.uncached_bytes, 0);
     warm.finish().unwrap();
     assert_eq!(fs::read(&path).unwrap(), original);
+
+    // A remount (represented here by clearing the process-local memo) starts cold. The same
+    // large bytes must still meet the cold-validation rail until an explicit full scan validates
+    // them; writer warmth is neither durable authority nor a way around the aggregate read rail.
+    store.inventory_cache.clear_for_test();
+    let mut cold = store.scan_studio_receive_inventory().unwrap();
+    assert!(cold
+        .step()
+        .unwrap_err()
+        .to_string()
+        .contains("cold byte limit"));
+    assert!(cold.finish().is_err());
+    let (_, p) = scan(&mut store);
+    assert_eq!(p.reused_records, 0);
+    let mut rewarmed = store.scan_studio_receive_inventory().unwrap();
+    loop {
+        if rewarmed.step().unwrap().complete {
+            break;
+        }
+    }
+    assert_eq!(rewarmed.finish().unwrap().records().count(), 1);
 
     // Authenticate a changed, equal-size wrapper whose inner history is deliberately damaged.
     // The second cold check must reject BEFORE attempting its expensive validator. Without
@@ -151,6 +165,47 @@ fn inventory_cache_large_source_needs_explicit_warmup_and_counts_actual_bytes() 
         .to_string()
         .contains("cold byte limit"));
     assert!(changed.finish().is_err());
+}
+
+/// PR #27 review MEDIUM-1, the bucket half (its re-review's LOW-1). A repair job's S3 memoizes its
+/// rebuilt bucket's footprint before building the budget, so the budget's scan reuses it instead
+/// of validating the bucket inline. That is sound only if the memoized footprint is exactly what
+/// the scan computes from the same bytes; a drift would silently change the bucket's accounting.
+#[test]
+fn a_repair_rebuilds_memoized_footprint_is_what_the_scan_computes() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let mut f = Fixture::new();
+    let mut budget = budget(&mut store, &f);
+    let first = f.op(1);
+    f.ingest(&mut store, &first, &mut budget).unwrap();
+    store.inventory_cache.clear_for_test();
+    let (cold, p) = scan(&mut store);
+    assert_eq!(p.reused_records, 0, "precondition: the scan validated cold");
+    store.inventory_cache.clear_for_test();
+    let bucket = f.key.bucket();
+    let prepared = store
+        .capture_registry_repair_source(SERVER, &f.group, bucket, &f.device)
+        .unwrap()
+        .expect("the bucket exists")
+        .rebuild()
+        .unwrap();
+    assert!(store
+        .warm_registry_repair_inventory(SERVER, &f.group, bucket, &f.device, &prepared)
+        .unwrap());
+    let (warm, p) = scan(&mut store);
+    assert_eq!(
+        (p.reused_records, p.uncached_bytes),
+        (1, 0),
+        "the scan reused the memoized footprint"
+    );
+    assert_eq!(
+        warm.records_for_server(SERVER, &f.group.group_id())
+            .unwrap(),
+        cold.records_for_server(SERVER, &f.group.group_id())
+            .unwrap(),
+        "the memoized footprint is exactly what the scan computes"
+    );
 }
 
 #[test]

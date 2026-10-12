@@ -1,5 +1,8 @@
 //! A native broker for the handful of actions that extend durable user authority.
 //!
+//! Integration status: this is a test-only broker model. No native command currently consumes
+//! it; the design below describes its intended integration, not a shipped approval guarantee.
+//!
 //! SEC-PAIR-001. Device pairing hands a new device the ability to act as this person, in every
 //! group, for as long as the grant lives. Until this module existed, the only thing standing
 //! between a pasted pairing request and a signed grant bundle was a Svelte modal: a confirmation
@@ -672,6 +675,8 @@ mod tests {
         let shown = store.pending(T0 + 20, GEN).expect("a pending approval");
         assert_eq!(shown.id, newer);
         assert_eq!(shown.new_device, scope(5).new_device);
+        assert_eq!(shown.disclosure, disclosure());
+        assert_eq!(shown.expires_at_ms, T0 + 10 + INTENT_TTL_MS);
         // Nothing in the rendered shape carries the ceremony nonce, only its hash lives in the
         // store at all, and the surface is never handed even that.
         assert_eq!(shown.action, SensitiveAction::PairDevice);

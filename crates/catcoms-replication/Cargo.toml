@@ -22,6 +22,13 @@ hmac = "0.12"
 zeroize = "1"
 serde_json = "1"
 
+[features]
+# Test instrumentation only: a per-thread count of branch reconstructions
+# (`studio::overlay_reconstructions_on_this_thread`), so a dependent crate's tests can pin a path as
+# reconstruction-free. Turned on only by catcoms-app's dev-dependency; with resolver 2 a
+# dev-dependency's features never reach a non-test build.
+test-counters = []
+
 [dev-dependencies]
 rand_chacha = "0.3"
 rand_core = "0.6"

@@ -3,12 +3,15 @@ use super::*;
 use catcoms_replication::{epoch::MAX_RECEIPT_BYTES, ReceiptRepair};
 
 pub(super) const MAX_QUERY: usize = 256;
+// W-1: a counted report of exactly zero or two receipts, after the unchanged v1 header fields.
+const MAX_REPORT: usize = 1 + 2 * (4 + MAX_RECEIPT_BYTES);
+pub(super) const MAX_QUERY_V2: usize = MAX_QUERY + MAX_REPORT;
 pub(super) const MAX_ANSWER: usize = 1 + 3 * (4 + MAX_RECEIPT_BYTES);
 const MAX_RESPONSE: usize = MAX_ANSWER + 108;
 
 /// Checked query-bound transport answer. Receipt/repair without `proof` are provisional hints;
-/// the public values remain uninstalled. This release sends no repair because its durable signed
-/// repair adapter is not yet implemented; bounded repairs can be carried by later providers.
+/// the public values remain uninstalled. A provider sends a repair only once it is durably
+/// applied locally; the receiver verifies it under its own observed tenure before any use.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ReceiptHeadAnswer {
     pub receipt: Option<Receipt>,
@@ -67,7 +70,40 @@ pub(super) fn decode_query(
 
 // Studio queries include the channel even for an object whose logical key is the object id.
 // Exact lengths/zero index object prevent alternate encodings and cross-channel confusion.
+// Without a report the bytes are exactly v1; with one they are v2, whose leading byte a v1
+// decoder already rejects, so an older provider simply never sees a report.
 pub(super) fn encode_scoped_query(
+    target: CheckpointTarget,
+    group: &[u8],
+    nonce: [u8; 16],
+    report: Option<&[Receipt; 2]>,
+) -> Result<Vec<u8>, SyncError> {
+    let Some(report) = report else {
+        return encode_scoped_query_v1(target, group, nonce);
+    };
+    let document = target.document(group)?;
+    if report.iter().any(|r| r.document != document) {
+        return Err(SyncError::Malformed);
+    }
+    let mut v1 = encode_scoped_query_v1(target, group, nonce)?;
+    v1[0] = 2;
+    let mut e = Encoder::new();
+    e.put_u8(2);
+    for receipt in report {
+        let bytes = receipt.encode();
+        if bytes.len() > MAX_RECEIPT_BYTES {
+            return Err(SyncError::Malformed);
+        }
+        wire(e.put_bytes(&bytes))?;
+    }
+    v1.extend_from_slice(&e.finish());
+    if v1.len() > MAX_QUERY_V2 {
+        return Err(SyncError::Malformed);
+    }
+    Ok(v1)
+}
+
+fn encode_scoped_query_v1(
     target: CheckpointTarget,
     group: &[u8],
     nonce: [u8; 16],
@@ -95,7 +131,74 @@ pub(super) fn encode_scoped_query(
         }
     }
 }
+/// A decoded scoped query header: target, nonce and the still-opaque v2 report section.
+pub(super) type ScopedQuery = (CheckpointTarget, [u8; 16], Option<Vec<u8>>);
+
+/// Header-only decode. A v2 report section is returned as bounded opaque bytes and is not
+/// parsed here: the caller decodes it only after the requester has paid its own rail.
 pub(super) fn decode_scoped_query(
+    kind: u8,
+    bytes: &[u8],
+    group: &[u8],
+) -> Result<ScopedQuery, SyncError> {
+    if bytes.first() != Some(&2) {
+        let (target, nonce) = decode_scoped_query_v1(kind, bytes, group)?;
+        return Ok((target, nonce, None));
+    }
+    if bytes.len() > MAX_QUERY_V2 {
+        return Err(SyncError::Malformed);
+    }
+    // Walk exactly the v1 field layout to find where the report begins, then validate those
+    // header bytes through the unchanged v1 decoder so v2 admits no alternate header encoding.
+    let mut d = Decoder::new(bytes);
+    wire(d.get_u8())?;
+    wire(d.get_u16())?;
+    wire(d.get_bytes())?;
+    if kind == KIND_STUDIO_HEAD {
+        wire(d.get_bytes())?;
+    }
+    wire(d.get_bytes())?;
+    let header_end = bytes.len() - d.remaining();
+    let report = &bytes[header_end..];
+    if report.is_empty() || report.len() > MAX_REPORT {
+        return Err(SyncError::Malformed);
+    }
+    let mut header = bytes[..header_end].to_vec();
+    header[0] = 1;
+    let (target, nonce) = decode_scoped_query_v1(kind, &header, group)?;
+    Ok((target, nonce, Some(report.to_vec())))
+}
+
+/// Admission-time decode of a v2 report: exactly zero or two canonical receipts for exactly this
+/// document. A count of one is malformed: the pair is always complete. Decoding grants nothing.
+pub(super) fn decode_fault_report(
+    bytes: &[u8],
+    document: &LogicalDocument,
+) -> Result<Option<[Receipt; 2]>, SyncError> {
+    let mut d = Decoder::new(bytes);
+    let report = match wire(d.get_u8())? {
+        0 => None,
+        2 => {
+            let mut receipt = || {
+                let bytes = wire(d.get_bytes())?;
+                if bytes.len() > MAX_RECEIPT_BYTES {
+                    return Err(SyncError::Malformed);
+                }
+                Ok::<_, SyncError>(Receipt::decode(bytes)?)
+            };
+            let pair = [receipt()?, receipt()?];
+            if pair.iter().any(|r| &r.document != document) {
+                return Err(SyncError::Malformed);
+            }
+            Some(pair)
+        }
+        _ => return Err(SyncError::Malformed),
+    };
+    wire(d.finish())?;
+    Ok(report)
+}
+
+fn decode_scoped_query_v1(
     kind: u8,
     bytes: &[u8],
     group: &[u8],

@@ -48,6 +48,7 @@ use multiaddr::{Multiaddr, Protocol};
 
 mod cache;
 mod eclipse;
+pub mod reconnect;
 
 pub use cache::{AddressCache, CacheConfig, CacheError, CachedPeer};
 pub use eclipse::{EclipseConfig, EclipseDetector, EclipseLevel, EclipseObservation};

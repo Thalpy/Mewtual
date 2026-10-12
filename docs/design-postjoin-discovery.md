@@ -116,9 +116,11 @@ detector needed from it is served by roster-backed confirmation instead (the P8 
 - `local_reconnect_routes: Vec<(PeerId,String)>`; transient in `ChannelSync`, restored from the
   desktop's version-3 `ServerNet`. Its adjacent durable `ReconnectPolicy` is `Disabled`,
   `AuthorizedPeer(peer)`, or `LegacyPending`; a stored row is valid only for the authorized peer.
-  Direct admission authorizes only the named inviter and makes one bounded best-effort PEX request
-  before the first post-join snapshot, so reload normally has the inviter's signed transport claim.
-  Helper/reply/switchboard admission is explicitly disabled. Every retry requires an exact, unique
+  Direct admission authorizes only the named inviter. Every completed admission makes one bounded
+  best-effort PEX request over its existing connection before the first post-join snapshot, so
+  signed member records can survive even a reply-assisted join. That request cannot redial a
+  disconnected temporary contact. Local route authority for helper/reply/switchboard admission
+  remains explicitly disabled. Every retry requires an exact, unique
   current roster claim for that peer, raw literal-IP TCP/QUIC shape, and the shared endpoint
   scheduler. The hint is never gossiped and never mixed into the public-only `AddressCache`/PEX
   candidate set.

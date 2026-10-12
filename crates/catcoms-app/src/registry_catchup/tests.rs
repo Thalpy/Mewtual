@@ -9,6 +9,7 @@ use catcoms_replication::{
     epoch_zero_id,
     registry::{registry_document, PointerKey, RegistryOp},
     registry_epoch::catchup::{RegistryOpPage, RegistryPageCursor},
+    InheritedCheckpoint, Receipt,
 };
 use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
 use catcoms_wire::DocType;
@@ -96,6 +97,73 @@ impl Fixture {
                 )
             })
             .unwrap();
+    }
+    fn make_repair_install_pending(&mut self) {
+        use crate::store::{StudioRepairOutcome, StudioRepairRequest};
+
+        let receipts = self.server.sync.with_registry_context(|g, d, _, _| {
+            let logical = registry_document(&g.group_id(), self.key.bucket()).unwrap();
+            let state = self
+                .store
+                .load_registry_epoch(SERVER, g, self.key.bucket(), d)
+                .unwrap()
+                .unwrap();
+            [71u8, 72].map(|salt| {
+                let mut projection = state.projection().unwrap();
+                projection.epoch = 10;
+                let seed = projection.checkpoint([salt; 32]).unwrap();
+                Receipt::sign(
+                    logical.clone(),
+                    10,
+                    [salt; 32],
+                    seed.change_hash(),
+                    0,
+                    InheritedCheckpoint::EpochZero,
+                    d,
+                )
+                .unwrap()
+            })
+        });
+        self.server.sync.with_registry_context(|g, d, _, r| {
+            for receipt in &receipts {
+                self.store
+                    .adopt_registry_checkpoint(
+                        SERVER,
+                        g,
+                        self.key.bucket(),
+                        d,
+                        receipt,
+                        None,
+                        0,
+                        &self.clock,
+                        r,
+                        &mut self.budget,
+                    )
+                    .unwrap();
+            }
+            let mut pair = receipts;
+            pair.sort_by_key(Receipt::hash);
+            let (_, outcome, _) = self
+                .store
+                .issue_registry_repair(
+                    SERVER,
+                    g,
+                    self.key.bucket(),
+                    d,
+                    0,
+                    StudioRepairRequest {
+                        receipt_a: pair[0].hash(),
+                        receipt_b: pair[1].hash(),
+                        selected: pair[0].hash(),
+                    },
+                    None,
+                    &self.clock,
+                    r,
+                    &mut self.budget,
+                )
+                .unwrap();
+            assert_eq!(outcome, StudioRepairOutcome::AwaitingSeed);
+        });
     }
     fn begin(&mut self) -> ServerRegistryPageProvider {
         let mut provider = self

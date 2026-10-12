@@ -6,6 +6,12 @@ use catcoms_replication::studio::{
 };
 use catcoms_replication::{CloseRecord, DomainOp};
 
+mod admission;
+pub(crate) use admission::{OverlayAdmission, OverlayOwnership};
+
+#[cfg(test)]
+mod tests;
+
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Explicit internal handoff. Caller owns exclusive store/runtime custody; no actor or
     /// native command schedules this batch. Live tenure comes only from this sync instance.
@@ -17,12 +23,33 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         basis: [u8; 32],
         budget: &mut EpochStudioBudget,
     ) -> Result<StudioHandoffOutcome, AppError> {
-        let tenure = self.sync.observed_owner_tenure_start();
+        let tenure = self.sync.authoring_owner_tenure_start();
         self.sync.with_registry_context(|group, device, _, rng| {
             store.handoff_studio_overlay(server, group, target, device, basis, tenure, rng, budget)
         })
     }
     /// Prepare against actual observed tenure. Request data cannot supply its own authority.
+    ///
+    /// **A V1 refusal site, and the one place it is right to require tenure before anything
+    /// else.** Preparation mints a fresh basis and has no terminal path: there is no retry to
+    /// recognise, no acknowledgement owed and no durable Prepared record to resolve, so nothing V8
+    /// protects runs here, and refusing first cannot strand one. That is what distinguishes it from
+    /// Save and handoff, which must classify and acknowledge before they require anything and so
+    /// still read the value instead (see `save_studio_closing_overlay` below and H1).
+    ///
+    /// Requiring through the typed seam rather than `authoring_owner_tenure_start()` changes no
+    /// acceptance - both admit `Known` alone - but it keeps `Imported` and `Unknown` apart in the
+    /// refusal, because they describe different things the device holds: nothing at all, or a
+    /// value from a snapshot it cannot verify. They do **not** differ in how they end. Neither is
+    /// cleared by elapsed time or by an ordinary commit; both end at the same event, the next
+    /// contiguous step that derives a fresh tenure here - an owner change, or the committer's
+    /// membership restarting on a new leaf (`OwnerTenure::applied`; pinned by
+    /// `owner_tenure_imported_and_unknown_both_end_at_the_next_observed_owner_change`). An earlier
+    /// version of this comment said waiting fixes one and not the other, which was false.
+    ///
+    /// Returns the branch the Save must name alongside the basis, both from the one fresh basis and
+    /// in the one custody visit, so a caller cannot hold one without the other or compute the
+    /// branch itself.
     pub fn prepare_studio_closing_overlay(
         &mut self,
         store: &mut ServerStore,
@@ -30,16 +57,30 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         target: StudioTarget,
         close: &CloseRecord,
         budget: &mut EpochStudioBudget,
-    ) -> Result<StudioClosingOverlayBasis, AppError> {
-        let tenure = self.sync.observed_owner_tenure_start();
+    ) -> Result<StudioOverlaySaveTicket, AppError> {
+        let tenure = self.require_observed_owner_tenure()?;
         self.sync.with_registry_context(|group, device, _, _| {
-            store.prepare_studio_closing_overlay(
-                server, group, target, device, close, tenure, budget,
-            )
+            let basis = store.prepare_studio_closing_overlay(
+                server,
+                group,
+                target,
+                device,
+                close,
+                Some(tenure),
+                budget,
+            )?;
+            let branch =
+                store.studio_overlay_request_branch(server, group, target, &basis, budget)?;
+            Ok(StudioOverlaySaveTicket { basis, branch })
         })
     }
     /// Save local draft data only. Exact acceptance retry survives source/tenure changes;
     /// new writes still require the actual independently observed current tenure and source.
+    ///
+    /// `branch` is the one the request was prepared with - from a [`StudioOverlaySaveTicket`] for
+    /// a new Save, or the original request's for a retry. The tenure is **read** here and passed
+    /// down rather than required, because a retry or an acknowledgement must still succeed under
+    /// `Imported` and `Unknown` (V8); S1b and S3 require it at their own points.
     #[allow(clippy::too_many_arguments)]
     pub fn save_studio_closing_overlay(
         &mut self,
@@ -48,10 +89,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         target: StudioTarget,
         close: &CloseRecord,
         basis: [u8; 32],
+        branch: [u8; 32],
         operation: DomainOp,
         budget: &mut EpochStudioBudget,
     ) -> Result<StudioOverlaySave, AppError> {
-        let tenure = self.sync.observed_owner_tenure_start();
+        let tenure = self.observed_owner_tenure();
         self.sync
             .with_registry_context(|group, device, clock, rng| {
                 store.save_studio_closing_overlay(
@@ -62,11 +104,29 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     close,
                     tenure,
                     basis,
+                    branch,
                     operation,
                     clock.now_ms(),
                     rng,
                     budget,
                 )
             })
+    }
+}
+
+/// What a Closing-overlay Save must carry back: the basis it was prepared against and the branch
+/// it names.
+///
+/// Both are derived from one fresh basis in one custody visit. The branch comes from
+/// `StudioOverlayState::request_branch_id`, never from the caller: it is the live branch when one
+/// exists, and otherwise the branch the next admission would open.
+pub struct StudioOverlaySaveTicket {
+    pub basis: StudioClosingOverlayBasis,
+    pub branch: [u8; 32],
+}
+
+impl std::fmt::Debug for StudioOverlaySaveTicket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StudioOverlaySaveTicket { .. }")
     }
 }

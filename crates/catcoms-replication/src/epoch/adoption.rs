@@ -37,7 +37,9 @@ impl ReceiptBook {
         let conflicting = opening
             .into_iter()
             .chain(self.previous_until_installed.iter())
-            .find(|prior| receipts_conflict(prior, &receipt));
+            // A verified repair repudiates the losing anchor as well as later arrivals on
+            // that baseline. Keeping it as recovery evidence must not recreate the same fault.
+            .find(|prior| receipts_conflict(prior, &receipt) && !self.is_repaired_loser(prior));
         let outcome = if let Some(prior) = conflicting {
             next.fault = Some(canonical_receipt_pair(prior.clone(), receipt));
             ReceiptIngest::Fault
@@ -101,6 +103,7 @@ impl ReceiptBook {
                     && inner.receipt_hash == Some(latest.hash())
                     && self.previous_until_installed.as_ref().is_none_or(|prior| {
                         prior.tenure_id != latest.tenure_id
+                            || self.is_repaired_loser(prior)
                             || (prior.closed_epoch < latest.closed_epoch
                                 && TenureSelection::from(prior) == TenureSelection::from(latest))
                     })
@@ -108,6 +111,7 @@ impl ReceiptBook {
                     // another high-water anchor, not just an inheritance-conflict check.
                     && opening.is_none_or(|prior| {
                         prior.tenure_id != latest.tenure_id
+                            || self.is_repaired_loser(prior)
                             || (prior.closed_epoch < latest.closed_epoch
                                 && TenureSelection::from(prior) == TenureSelection::from(latest))
                     })

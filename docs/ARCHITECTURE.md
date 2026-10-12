@@ -21,6 +21,15 @@ code was written), the honest residual risks, and the phased build plan.
 
 ## 2. Corrections from the adversarial review (must hold in the implementation)
 
+The Gate 4 completion candidate exposes retained Studio work without promoting it into shared
+history. Awaiting-tenure views remain non-authoritative bases: their edits use a ticketed
+Unconfirmed overlay, are shown as local-only and follow typed exact-retry instructions. The
+lifecycle surface can inspect/export/archive/copy/dispose retained work; copy is preview then one
+ordinary provisional Save, and destructive actions require literal confirmations. The registration,
+command policy, native conversion, frontend parser and consumer move together. Direct Closing Save
+and repair commands stay unavailable. This preserves the existing ownership model rather than
+creating a second source, receipt or repair authority in the renderer.
+
 Creative immutable blobs are independent of the P1 document lifecycle. The C0c native seam uses
 the existing blob staging/store and authenticated fetch protocol, with PIX1 validation and bounded
 reads/response decoding added at the relevant boundaries. Publication returns a real CID only after
@@ -35,6 +44,9 @@ An installed, flushed checkpoint with an exactly matching current-owner journal 
 that journal's pending publication slot locally: it is available through keyed head/seed service,
 not claimed delivered to another member. This lets a solo owner keep rotating. A Registry Fault
 remains a per-bucket hold; it does not invalidate otherwise authenticated storage accounting.
+Registry head adapters therefore authenticate/account the source, persist any independently
+authorized B0 report, and only then preserve Fault as a no-head result. The prepared adapter reuses
+the verified detached graph rather than reconstructing it for this ordering.
 Actual changed Registry wrappers refresh the existing inventory-validation cache before the next
 Studio turn. No second mutable document cache, budget owner or network protocol is introduced.
 
@@ -117,9 +129,10 @@ atomic across files; a different nonce cannot rename an existing object through 
 Native projections retain conflict/deletion evidence and three-state expiry. Local update events
 invalidate views, while responses explicitly label local publication and provisional edits.
 Create keeps the new object in epoch zero but obtains the Index's actual Open epoch under the
-same transaction, including after rotation. Automatic Index/art sync and watched-owner rotation
-are connected; the remaining recovery/succession integration is tracked in the backend roadmap.
-Dense-source latency remains unqualified. UI is unchanged.
+same transaction, including after rotation. Automatic Index/art sync, watched-owner rotation,
+repeated-tenure recovery and detached Studio/Registry repair are connected. Dense-source latency
+remains unqualified. The Studio UI consumes the reviewed local lifecycle and ticketed Unconfirmed
+Save boundary; it does not expose direct Closing Save or native repair controls.
 Persistent blob handles now share one mount-local deletion guard outside the kept-copy adapter.
 The derived reference union is keyed by full group bytes (including numeric-server aliases).
 Studio source/intent/recovery writes add holds before I/O; only a complete, generation-current,
@@ -164,9 +177,12 @@ and membership/MLS are rechecked before disk work; snapshot persistence precedes
 Only newly Accepted durable edits emit remote StudioUpdated; events recheck native incarnation.
 Automatic inventory uses the existing scanner with local limits (1024 directory entries,
 64 records, 8 MiB authenticated bytes and 256 KiB cold validation bytes). The mount-local
-64-entry LRU retains only pure Registry/Studio footprint validation, never a document, inventory
-or write permit. Every hit requires fresh authenticated file bytes, scope/filename binding and
+LRU retains every family's pure accounting validation (and an Intents record's inventory facts),
+never a document, inventory or write permit. Every hit requires fresh authenticated file bytes, scope/filename binding and
 the exact complete-wrapper digest/size. Ordinary complete scans warm it; remount starts cold.
+It is indexed and holds up to `MAX_ACCOUNTED_RECORDS` (65 536) entries, so a complete scan never
+thrashes it, and every inventory-issuing finish prunes the entries of records the scan did not
+find, within the scan's own coverage (`GATE4-AGENT-1-C3-RUNTIME.md` 16.1).
 The sole mounted store can also retain one owned verified Studio restart unit, moved rather than
 cloned. Explicit view access prepares it; warm receive and timeline reads reauthenticate its exact
 complete wrapper and bind current actor/group/MLS before reuse. Index refreshes keep only their

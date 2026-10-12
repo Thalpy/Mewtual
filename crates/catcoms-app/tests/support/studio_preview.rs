@@ -326,7 +326,7 @@ impl PreviewFixture {
                     .unwrap();
                 // Allow real detached I/O/parsers to finish; this is bounded polling, not a
                 // timing assertion. Manual time only drives normal scheduler retry deadlines.
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                catcoms_rt::Clock::sleep(&catcoms_rt::SystemClock, Duration::from_millis(10)).await;
                 self.clock.advance_ms(1000);
             }
         })

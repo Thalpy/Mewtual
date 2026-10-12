@@ -1,32 +1,44 @@
-//! A genuine post-succession join recycles the departed founder's low MLS leaf and changes
-//! ownership AGAIN. Held PIX bytes remain fetchable, but a former owner's checkpoint hint must
-//! not become current-owner installation authority. Preview reads retain that boundary.
+//! Historical legacy-group post-succession admission recycles the departed founder's low MLS
+//! leaf and changes ownership AGAIN. Held PIX bytes remain fetchable, but a former owner's
+//! checkpoint hint must not become current-owner installation authority. Authenticated P2P
+//! policy currently refuses that admission; the separate negative case below preserves it.
 use super::*;
+use catcoms_replication::RecoveryReason;
 
 #[tokio::test]
-async fn studio_actor_post_succession_joiner_fetches_open_source_pixels_without_owner_confirmation()
+async fn studio_actor_post_succession_joiner_legacy_fetches_open_pixels_without_owner_confirmation()
 {
-    newcomer(false, false).await;
+    newcomer(false, false, false).await;
 }
 
 #[tokio::test]
-async fn studio_actor_post_succession_joiner_fetches_closing_source_pixels_without_owner_confirmation(
+async fn studio_actor_post_succession_joiner_legacy_fetches_closing_pixels_without_owner_confirmation(
 ) {
-    newcomer(true, false).await;
+    newcomer(true, false, false).await;
 }
 
 #[tokio::test]
-async fn studio_actor_post_succession_joiner_reads_open_history_provisionally() {
-    newcomer(false, true).await;
+async fn studio_actor_post_succession_joiner_legacy_reads_open_history_provisionally() {
+    newcomer(false, true, false).await;
 }
 
 #[tokio::test]
-async fn studio_actor_post_succession_joiner_reads_closing_history_provisionally() {
-    newcomer(true, true).await;
+async fn studio_actor_post_succession_joiner_legacy_reads_closing_history_provisionally() {
+    newcomer(true, true, false).await;
 }
 
-async fn newcomer(closing: bool, require_preview: bool) {
-    let mut p = Pair::new().await;
+/// Design 9.6's explicit option (3): a join-born fresh-key owner starts the singleton document
+/// again, and a continuously present member preserves the superseded history through its actual
+/// receiver scheduler. This is the product shape; product joins always mint a fresh `MlsDevice`.
+#[tokio::test]
+async fn studio_actor_join_born_owner_starts_fresh_and_receiver_preserves_the_old_history() {
+    newcomer(true, true, true).await;
+}
+
+async fn newcomer(closing: bool, require_preview: bool, supersede: bool) {
+    let mut p = Pair::new_legacy().await;
+    assert_eq!(p.alice.group_mode(), crate::GroupMode::LegacyUnverified);
+    assert_eq!(p.bob.group_mode(), crate::GroupMode::LegacyUnverified);
     let logical = target().document(&p.bob.group_id()).unwrap();
     let group_key = hex::encode(p.bob.group_id());
     let old_owner = p
@@ -106,7 +118,7 @@ async fn newcomer(closing: bool, require_preview: bool) {
     );
     // Same observed-transition fixture as the reviewed matrix; strict policy is restored
     // before Studio runs. This is not a desktop founder-transfer feature.
-    assert_eq!(p.bob.sync.observed_owner_tenure_start(), None);
+    assert_eq!(p.bob.sync.authoring_owner_tenure_start(), None);
     p.bob.sync.set_config(catcoms_sync::SyncConfig {
         max_committer_rank: 1,
         stage_decision_window_ms: 0,
@@ -116,7 +128,8 @@ async fn newcomer(closing: bool, require_preview: bool) {
     p.bob.sync_once().await.unwrap();
     p.bob.sync.set_config(catcoms_sync::SyncConfig::default());
     assert!(p.bob.is_owner());
-    let tenure = p.bob.sync.observed_owner_tenure_start().unwrap();
+    assert_eq!(p.bob.group_mode(), crate::GroupMode::LegacyUnverified);
+    let tenure = p.bob.sync.authoring_owner_tenure_start().unwrap();
     assert!(tenure > 0);
     let snapshot = p.bob.snapshot().unwrap();
     p.bob.sync.with_registry_context(|_, _, _, rng| {
@@ -143,6 +156,7 @@ async fn newcomer(closing: bool, require_preview: bool) {
         "successor",
     )
     .unwrap();
+    assert_eq!(provider.group_mode(), crate::GroupMode::LegacyUnverified);
     provider.set_blob_store(restored_store.blob_store(&group_key).unwrap());
     let mut verifier = Node::restore(
         &snapshot,
@@ -294,9 +308,14 @@ async fn newcomer(closing: bool, require_preview: bool) {
         "restarted successor",
     )
     .unwrap();
-    assert_eq!(provider.sync.observed_owner_tenure_start(), Some(tenure));
+    assert_eq!(provider.sync.authoring_owner_tenure_start(), Some(tenure));
+    assert_eq!(provider.group_mode(), crate::GroupMode::LegacyUnverified);
     provider.set_blob_store(provider_store.blob_store(&group_key).unwrap());
     let invite = provider.mint_invite([44; 16], u64::MAX, vec![]).unwrap();
+    assert!(
+        invite.policy.is_none(),
+        "legacy admission establishes no P2P pin"
+    );
     let (joined, tick) = tokio::join!(
         Node::join(
             Net::new(hub.join(PeerId::from_u64(3))),
@@ -311,13 +330,30 @@ async fn newcomer(closing: bool, require_preview: bool) {
     );
     tick.unwrap();
     let mut newcomer = joined.unwrap();
+    assert_eq!(newcomer.group_mode(), crate::GroupMode::LegacyUnverified);
     let provider_peer = provider.local_peer();
-    // Adding into Alice's recycled leaf changes Bob -> newcomer. A Welcome is not an
-    // independently witnessed tenure transition, even when it makes its recipient owner.
+    // Adding into Alice's recycled leaf changes Bob -> newcomer.
+    //
+    // **The old expectation here was the bug, and the old comment stated it as a principle:** "a
+    // Welcome is not an independently witnessed tenure transition, even when it makes its recipient
+    // owner". Under that rule this newcomer is the designated committer holding `None`, so it can
+    // never issue a receipt while the provider - an actual witness - already knows the answer. And
+    // the disagreement does not self-correct, because a proof's claimed tenure is accepted when the
+    // local value is absent.
+    //
+    // A Welcome does establish one thing soundly: when this device's current continuous membership
+    // began. A tenure is an uninterrupted run as committer, so a committer's current tenure cannot
+    // predate its current membership. The property to assert is therefore agreement between the
+    // joiner and its witness, not the joiner's ignorance.
     assert!(newcomer.is_owner());
     assert!(!provider.is_owner());
-    assert_eq!(newcomer.sync.observed_owner_tenure_start(), None);
-    assert!(provider.sync.observed_owner_tenure_start().unwrap() > tenure);
+    let witnessed = provider.sync.authoring_owner_tenure_start().unwrap();
+    assert!(witnessed > tenure, "the provider observed the succession");
+    assert_eq!(
+        newcomer.sync.authoring_owner_tenure_start(),
+        Some(witnessed),
+        "the joining committer and the witness that admitted it must agree"
+    );
     let newcomer_id = newcomer
         .sync
         .with_registry_context(|_, d, _, _| d.device_id());
@@ -329,6 +365,32 @@ async fn newcomer(closing: bool, require_preview: bool) {
     );
     proof.unwrap();
     tick.unwrap();
+    // Discovery asks the authenticated current-owner endpoint. The newcomer proved the provider
+    // above to read the old hint; now the continuously present member proves the new owner's
+    // endpoint through the same directory catch-up the desktop uses after membership changes.
+    let (proof, tick) = tokio::join!(
+        provider.request_channel_index_catchup(newcomer.local_peer()),
+        newcomer.sync_once()
+    );
+    proof.unwrap();
+    tick.unwrap();
+    // The membership catch-up above changed the provider's MLS state. Persist that exact state
+    // before either actor starts so the final reopen validates the same current-owner evidence
+    // that authorized discovery, rather than the pre-admission snapshot saved earlier.
+    let provider_snapshot = provider.snapshot().unwrap();
+    provider.sync.with_registry_context(|_, _, _, rng| {
+        provider_store
+            .save_server(SERVER, &provider_snapshot, rng)
+            .unwrap()
+    });
+    let mut provider_verifier = Node::restore(
+        &provider_snapshot,
+        Net::new(Hub::new().join(PeerId::from_u64(96))),
+        rng(),
+        Box::new(clock.clone()),
+        "read-only continuously present verifier",
+    )
+    .unwrap();
     let newcomer_snapshot = newcomer.snapshot().unwrap();
     let root = tempfile::tempdir().unwrap();
     let newcomer_store = open(root.path());
@@ -357,6 +419,19 @@ async fn newcomer(closing: bool, require_preview: bool) {
     let b_store = Arc::new(Mutex::new(Some(newcomer_store)));
     let (a, ae, at) = crate::spawn(provider);
     let (b, be, bt) = crate::spawn(newcomer);
+    // Each actor models its own process, so each gets its own preparation pools rather than the
+    // process-wide ones every parallel test also draws on, as the scheduling tests do. Discovery
+    // and the preview retry a refused slot on the next step, but this test steps a fixed number
+    // of times, so under a parallel test load it ran out of steps before the preview was ready:
+    // one run measured 72 preview refusals from the shared pool.
+    for actor in [&a, &b] {
+        actor
+            .studio_preparation_pools_for_test(
+                Arc::new(tokio::sync::Semaphore::new(4)),
+                Arc::new(tokio::sync::Semaphore::new(3)),
+            )
+            .await;
+    }
     let ad = drain_events(ae);
     let bd = drain_events(be);
     assert!(save(&b, &b_store, StudioRequest::Read { target: target() })
@@ -480,20 +555,249 @@ async fn newcomer(closing: bool, require_preview: bool) {
         a.files().await.is_empty() && b.files().await.is_empty(),
         "PIX availability does not require a fileshare listing"
     );
+
+    let mut replacement = None;
+    if supersede {
+        // Option (3) is deliberately a fresh-key product path. The member first watches the
+        // document through the public actor boundary; no direct discovery/install helper is used.
+        let provider_read = save(&a, &a_store, StudioRequest::Read { target: target() })
+            .await
+            .unwrap()
+            .expect("the continuously present member retains its current history");
+        assert_eq!(provider_read.epoch_id, successor_id);
+        assert_eq!(provider_read.projection, saved.projection);
+        let retained_before = {
+            let guard = a_store.lock().await;
+            guard
+                .as_ref()
+                .unwrap()
+                .load_epoch_recovery(SERVER, &logical)
+                .unwrap()
+                .retained()
+                .count()
+        };
+
+        // A join-born owner has no local authoritative source. Its first ordinary edit therefore
+        // starts this singleton document again at epoch zero under the new device key.
+        let fresh = title(101, "fresh-key owner starts this document again");
+        let fresh_view = save(
+            &b,
+            &b_store,
+            StudioRequest::Apply {
+                target: target(),
+                epoch_id: catcoms_replication::epoch_zero_id(
+                    logical.doc_type,
+                    &logical.logical_key,
+                ),
+                nonce: fresh.nonce,
+                body: fresh.body.clone(),
+            },
+        )
+        .await
+        .unwrap()
+        .expect("the fresh-key owner creates its own epoch-zero source");
+        assert_eq!(fresh_view.epoch, 0);
+        assert_title(
+            &fresh_view.projection,
+            newcomer_id,
+            &fresh,
+            "fresh-key owner starts this document again",
+        );
+
+        // The first edit above is the user-visible path under test. This fixture adds only the
+        // remaining eligible operations needed to reach the production rotation threshold.
+        {
+            let mut guard = b_store.lock().await;
+            newcomer_verifier.sync.with_registry_context(|g, d, _, _| {
+                crate::store::fill_studio_epoch_fixture(
+                    guard.as_mut().unwrap(),
+                    SERVER,
+                    g,
+                    d,
+                    target(),
+                )
+            });
+        }
+
+        // Both sides advance only through their ordinary receiver schedulers. The owner creates
+        // and advertises its receipt; the member discovers, fetches and installs that head.
+        for _ in 0..180 {
+            clock.advance_ms(1000);
+            tokio::join!(step(&a, &a_store), step(&b, &b_store));
+            tokio::join!(a.wait_studio_preparation(), b.wait_studio_preparation());
+            let selected = {
+                let guard = b_store.lock().await;
+                guard
+                    .as_ref()
+                    .unwrap()
+                    .load_epoch_owner_receipts(SERVER, &logical)
+                    .unwrap()
+                    .published()
+                    .cloned()
+            };
+            let Some(receipt) = selected else {
+                continue;
+            };
+            let replacement_id = catcoms_replication::epoch::epoch_id(
+                logical.doc_type,
+                &logical.logical_key,
+                1,
+                &receipt.close_record_hash,
+            );
+            let member_installed = {
+                let guard = a_store.lock().await;
+                provider_verifier.sync.with_registry_context(|g, d, _, _| {
+                    guard
+                        .as_ref()
+                        .unwrap()
+                        .load_studio_epoch(SERVER, g, target(), d)
+                        .unwrap()
+                        .is_some_and(|source| {
+                            source.doc_id() == replacement_id
+                                && source.epoch() == 1
+                                && source.phase() == EpochPhase::Open
+                        })
+                })
+            };
+            if member_installed {
+                replacement = Some((receipt, replacement_id, retained_before));
+                break;
+            }
+        }
+
+        if replacement.is_none() {
+            let owner_state = {
+                let guard = b_store.lock().await;
+                let held = guard.as_ref().unwrap();
+                let receipt = held
+                    .load_epoch_owner_receipts(SERVER, &logical)
+                    .unwrap()
+                    .published()
+                    .map(|receipt| (receipt.closed_epoch, receipt.tenure_start_group_epoch));
+                let source = newcomer_verifier.sync.with_registry_context(|g, d, _, _| {
+                    held.load_studio_epoch(SERVER, g, target(), d)
+                        .unwrap()
+                        .map(|source| (source.epoch(), source.phase(), source.op_count()))
+                });
+                (receipt, source)
+            };
+            let member_state = {
+                let guard = a_store.lock().await;
+                provider_verifier.sync.with_registry_context(|g, d, _, _| {
+                    guard
+                        .as_ref()
+                        .unwrap()
+                        .load_studio_epoch(SERVER, g, target(), d)
+                        .unwrap()
+                        .map(|source| (source.epoch(), source.phase(), source.op_count()))
+                })
+            };
+            panic!(
+                "the receiver loop did not install the fresh owner's replacement: owner={owner_state:?}, member={member_state:?}"
+            );
+        }
+        let (receipt, replacement_id, retained_before) = replacement.as_ref().unwrap();
+        assert_eq!(receipt.closed_epoch, 0);
+        assert_eq!(receipt.tenure_start_group_epoch, witnessed);
+        assert_eq!(receipt.inherited, InheritedCheckpoint::EpochZero);
+        newcomer_verifier.sync.with_registry_context(|g, _, _, _| {
+            receipt.verify_current_owner(g, witnessed).unwrap()
+        });
+
+        let current = {
+            let guard = b_store.lock().await;
+            newcomer_verifier.sync.with_registry_context(|g, d, _, _| {
+                guard
+                    .as_ref()
+                    .unwrap()
+                    .load_studio_epoch(SERVER, g, target(), d)
+                    .unwrap()
+                    .unwrap()
+            })
+        };
+        assert_eq!(current.doc_id(), *replacement_id);
+        assert_eq!((current.epoch(), current.phase()), (1, EpochPhase::Open));
+
+        let guard = a_store.lock().await;
+        let held = guard.as_ref().unwrap();
+        let member_current = provider_verifier.sync.with_registry_context(|g, d, _, _| {
+            held.load_studio_epoch(SERVER, g, target(), d)
+                .unwrap()
+                .unwrap()
+        });
+        assert_eq!(member_current.doc_id(), *replacement_id);
+        assert_eq!(
+            member_current.projection().unwrap(),
+            current.projection().unwrap()
+        );
+        let recovery = held.load_epoch_recovery(SERVER, &logical).unwrap();
+        assert_eq!(
+            recovery.retained().count(),
+            retained_before + 1,
+            "adopting the new tenure retains exactly the displaced current version"
+        );
+        let rewound = recovery
+            .retained()
+            .find(|snapshot| {
+                snapshot.reason == RecoveryReason::Rewound
+                    && StudioRecovery::from_snapshot(snapshot, &logical, channel())
+                        .is_ok_and(|recovered| recovered.projection() == &saved.projection)
+            })
+            .expect("the previous tenure's visible history survives as a typed rewind");
+        assert_eq!(rewound.epoch, 1);
+    }
     a.shutdown().await;
     b.shutdown().await;
     at.await.unwrap();
     bt.await.unwrap();
     ad.await.unwrap();
     bd.await.unwrap();
+    if supersede {
+        drop(a_store.lock().await.take());
+    }
     drop(b_store.lock().await.take());
     let reopened = open(root.path());
-    assert_unconfirmed(
-        &mut newcomer_verifier,
-        &reopened,
-        &logical,
-        &registry_before,
-    );
+    if let Some((receipt, replacement_id, retained_before)) = replacement {
+        newcomer_verifier.sync.with_registry_context(|g, d, _, _| {
+            let source = reopened
+                .load_studio_epoch(SERVER, g, target(), d)
+                .unwrap()
+                .unwrap();
+            assert_eq!((source.doc_id(), source.epoch()), (replacement_id, 1));
+        });
+        assert_eq!(
+            reopened
+                .load_epoch_owner_receipts(SERVER, &logical)
+                .unwrap()
+                .published(),
+            Some(&receipt)
+        );
+
+        let member_reopened = open(b_root.path());
+        provider_verifier.sync.with_registry_context(|g, d, _, _| {
+            let source = member_reopened
+                .load_studio_epoch(SERVER, g, target(), d)
+                .unwrap()
+                .unwrap();
+            assert_eq!((source.doc_id(), source.epoch()), (replacement_id, 1));
+        });
+        let recovery = member_reopened
+            .load_epoch_recovery(SERVER, &logical)
+            .unwrap();
+        assert_eq!(recovery.retained().count(), retained_before + 1);
+        assert!(recovery.retained().any(|snapshot| {
+            snapshot.reason == RecoveryReason::Rewound
+                && StudioRecovery::from_snapshot(snapshot, &logical, channel())
+                    .is_ok_and(|recovered| recovered.projection() == &saved.projection)
+        }));
+    } else {
+        assert_unconfirmed(
+            &mut newcomer_verifier,
+            &reopened,
+            &logical,
+            &registry_before,
+        );
+    }
     // With no provider on this final network, a second fetch can only use persisted bytes.
     let mut offline = Node::restore(
         &newcomer_snapshot,
@@ -503,6 +807,7 @@ async fn newcomer(closing: bool, require_preview: bool) {
         "offline reopened newcomer",
     )
     .unwrap();
+    assert_eq!(offline.group_mode(), crate::GroupMode::LegacyUnverified);
     offline.set_blob_store(reopened.blob_store(&group_key).unwrap());
     assert_eq!(
         offline
@@ -521,6 +826,98 @@ async fn newcomer(closing: bool, require_preview: bool) {
         assert_title(&read.1, new_owner, &tail, "pixels after owner succession");
         assert_frame(&read.1, &frame, old_owner, &cid, fetched.len());
     }
+}
+
+#[tokio::test]
+async fn studio_actor_restored_p2p_successor_preserves_policy_and_refuses_unprovable_admission() {
+    let mut p = Pair::new().await;
+    let founder = p.alice.device_id();
+    let successor = p.bob.device_id();
+    let pin = p.bob.sync.group_policy().unwrap().clone();
+    assert_eq!(p.alice.group_mode(), crate::GroupMode::PeerToPeer);
+    assert_eq!(p.bob.group_mode(), crate::GroupMode::PeerToPeer);
+    assert_eq!(pin.issuer(), founder);
+    assert_eq!(p.bob.sync.authoring_owner_tenure_start(), None);
+    p.bob.open_channel(314).await.unwrap();
+    p.bob
+        .send_message(314, "history survives refused successor admission")
+        .await
+        .unwrap();
+    p.bob.sync.set_config(catcoms_sync::SyncConfig {
+        max_committer_rank: 1,
+        stage_decision_window_ms: 0,
+        ..Default::default()
+    });
+    p.bob.sync.remove(&founder).await.unwrap();
+    p.bob.sync_once().await.unwrap();
+    p.bob.sync.set_config(catcoms_sync::SyncConfig::default());
+    assert!(p.bob.is_owner());
+    let tenure = p.bob.sync.authoring_owner_tenure_start().unwrap();
+    assert!(tenure > 0);
+    let bytes = p.bob.snapshot().unwrap();
+    p.b_store.save_server(SERVER, &bytes, &mut rng()).unwrap();
+    let Pair {
+        b_root,
+        b_store,
+        clock,
+        alice,
+        bob,
+        ..
+    } = p;
+    drop(alice);
+    drop(bob);
+    drop(b_store);
+
+    let restored_store = open(b_root.path());
+    let mut restored = Node::restore(
+        &restored_store.load_server(SERVER).unwrap(),
+        Net::new(Hub::new().join(PeerId::from_u64(22))),
+        rng(),
+        Box::new(clock),
+        "restored authenticated successor",
+    )
+    .unwrap();
+    assert_eq!(restored.group_mode(), crate::GroupMode::PeerToPeer);
+    assert_eq!(restored.sync.group_policy(), Some(&pin));
+    assert_eq!(restored.sync.authoring_owner_tenure_start(), Some(tenure));
+    restored.sync.with_registry_context(|group, _, _, _| {
+        assert_eq!(group.designated_committer(), Some(successor));
+        assert_eq!(group.designated_committer_index(), Some(1));
+        assert!(!group.contains_device(&founder));
+        pin.verify_pin(group).unwrap();
+        assert!(
+            matches!(
+                pin.verify_current_owner(group),
+                Err(catcoms_mls::PolicyError::Unauthorized)
+            ),
+            "a saved founder pin is not current founder authority after removal"
+        );
+    });
+    let before = restored.snapshot().unwrap();
+    let epoch = restored.epoch();
+    let version = restored.doc_version(catcoms_wire::DocType::Channel, 314);
+    assert_eq!(restored.messages(314).len(), 1);
+    assert_eq!(
+        restored.messages(314)[0].text,
+        "history survives refused successor admission"
+    );
+    assert!(matches!(
+        restored.mint_invite([44; 16], u64::MAX, vec![]),
+        Err(AppError::Sync(catcoms_sync::SyncError::Policy(
+            catcoms_mls::PolicyError::AdmissionAuthorityUnavailable
+        )))
+    ));
+    assert_eq!(restored.epoch(), epoch);
+    assert_eq!(
+        restored.doc_version(catcoms_wire::DocType::Channel, 314),
+        version
+    );
+    assert_eq!(restored.sync.group_policy(), Some(&pin));
+    assert_eq!(
+        restored.snapshot().unwrap(),
+        before,
+        "refusal cannot mutate the MLS state, retained history or authenticated pin"
+    );
 }
 
 pub(super) async fn step(actor: &crate::ServerActor, store: &Arc<Mutex<Option<ServerStore>>>) {

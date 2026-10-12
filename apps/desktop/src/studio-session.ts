@@ -7,14 +7,15 @@
 // - A save is one complete request. A retry resends exactly it, nonce and epoch included; only an
 //   explicit "save again as a new edit" mints a new nonce against the current epoch. Recovery
 //   applies are saves too: their echoed preview payload is retained and retried the same way.
-// - Saves to one document run in order. An uncertain save blocks the later saves of its lane
+// - Saves to one document run in order. An uncertain or explicitly not-written save blocks the later saves of its lane
 //   until it is retried or discarded on purpose; other documents keep moving.
 // - Unsaved pixels survive every failure. They stay on the record until the save lands or the
 //   member discards them on purpose.
 // - Every asynchronous result is fenced by scope generation (server, channel, session) and by a
 //   per-target request generation; a late result is dropped even after IPC delivered it, and a
 //   landed write supersedes the reads that were issued before it.
-// - A preview (`awaitingTenureReceipt`) is read-only: its epoch never authorizes an edit.
+// - A preview (`awaitingTenureReceipt`) never authorizes an ordinary edit. The editor may save a
+//   ticketed local-only Unconfirmed overlay, which stays visibly separate from installed history.
 // - One fetch scheduler: thumbnails, the open frame, conflict actions and recovery all go through
 //   the same bounded, prioritized, deduplicated queue. A cid that was unavailable or failed
 //   transiently is asked again only after an invalidation or an explicit retry; content the
@@ -33,6 +34,16 @@ import {
   expiryForBody,
   flipnoteModel,
   indexModel,
+  overlayArchive,
+  overlayArchiveExport,
+  overlayArchiveRead,
+  overlayArchiveRelease,
+  overlayCopyApply,
+  overlayCopyPreview,
+  overlayDispose,
+  overlayExport,
+  overlayLifecycle,
+  overlayRead,
   parseReceivePaused,
   parseSettlementChanged,
   parseStudioUpdated,
@@ -50,6 +61,8 @@ import {
   studioCreate,
   studioList,
   studioRead,
+  unconfirmedOverlaySave,
+  unconfirmedOverlaySaveBegin,
   type ApplyIndexRequest,
   type ApplyRequest,
   type CreateRequest,
@@ -62,6 +75,14 @@ import {
   type IndexModel,
   type IndexView,
   type NativeExpiry,
+  type OverlayArchive,
+  type OverlayCopyApplied,
+  type OverlayCopyApplyEdit,
+  type OverlayCopyPreview,
+  type OverlayDisposalRequest,
+  type OverlayInspection,
+  type OverlayLifecycle,
+  type OverlaySaveRetry,
   type PixPublication,
   type PointerRestored,
   type RecoveryApplied,
@@ -73,20 +94,26 @@ import {
   type RecoveryMode,
   type RecoveryVersionRead,
   type StudioIpc,
+  type StudioContent,
   type StudioPhase,
   type StudioUnlisten,
+  type UnconfirmedOverlaySave,
+  type UnconfirmedOverlaySaveInput,
 } from "./studio-native.ts";
 
 export type StudioScope = { server: number; channel: Decimal };
 
-export type SaveStatus = "queued" | "inflight" | "uncertain";
-export type SaveOutcome = "landed" | "uncertain" | "discarded";
+export type SaveStatus = "queued" | "inflight" | "blocked" | "uncertain";
+export type SaveOutcome = "landed" | "notWritten" | "uncertain" | "discarded";
 type SaveBase = {
   id: number;
   label: string;
   status: SaveStatus;
   attempts: number;
   error: string;
+  /// A delivery failure on this exact request has not been reconciled. This remains true while a
+  /// later exact retry is queued or in flight, so its latest attempt cannot hide older uncertainty.
+  mayHaveCommitted: boolean;
   /// Set when a later read of the same document carries a different epoch than the frozen
   /// request: the backend decides on retry; the member may instead re-author explicitly.
   epochChanged: boolean;
@@ -95,13 +122,18 @@ type SaveBase = {
 export type SaveRecord = SaveBase &
   (
     | { kind: "create"; request: CreateRequest; object: Hex32 }
-    | { kind: "frame"; object: Hex32; frame: Hex32; op: "insert" | "replace"; after: Hex32 | null; pix: Uint8Array; published: PixPublication | null; apply: ApplyRequest | null; force?: boolean }
+    | { kind: "frame"; object: Hex32; frame: Hex32; op: "insert" | "replace"; after: Hex32 | null; pix: Uint8Array; published: PixPublication | null; route: "ordinary" | "unconfirmed"; apply: ApplyRequest | null; overlay: UnconfirmedOverlaySaveInput | null; overlayRetry: OverlaySaveRetry | null; force?: boolean }
     | { kind: "apply"; object: Hex32; request: ApplyRequest; op: FlipnoteOp }
     | { kind: "applyIndex"; request: ApplyIndexRequest; op: IndexOp; object: Hex32 }
+    | { kind: "overlayApply"; object: Hex32 | null; request: UnconfirmedOverlaySaveInput | null; overlayRetry: OverlaySaveRetry | null; op: FlipnoteOp | IndexOp }
     | { kind: "recoveryApply"; object: Hex32 | null; edit: RecoveryApplyEdit; applied: RecoveryApplied | null }
   );
 /// The queue's own mutable entry, with the callback of whoever awaits its first outcome.
 type SaveEntry = SaveRecord & { settle?: (outcome: SaveOutcome) => void };
+
+/// A typed Flow-S result that proves this attempt did not write. It is deliberately separate from
+/// native/transport errors, whose final-fence timing means the write outcome can be uncertain.
+class OverlayNoWrite extends Error {}
 
 /// held: decoded bytes are cached. fetching/queued: a job for this scope exists. unavailable:
 /// the backend answered null. failed: the request itself failed (busy, transport); retryable.
@@ -109,7 +141,7 @@ type SaveEntry = SaveRecord & { settle?: (outcome: SaveOutcome) => void };
 export type BlobState = "held" | "fetching" | "queued" | "unavailable" | "failed" | "invalid" | "idle";
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
-type NewSave = DistributiveOmit<SaveRecord, "id" | "status" | "attempts" | "error" | "epochChanged">;
+type NewSave = DistributiveOmit<SaveRecord, "id" | "status" | "attempts" | "error" | "mayHaveCommitted" | "epochChanged">;
 
 export type RecoveryItemState = "pending" | "previewing" | "fetching" | "applying" | "applied" | "alreadySaved" | "uncertain" | RecoveryDisposition | "error";
 export type RecoveryItem = {
@@ -128,6 +160,31 @@ export type RecoveryRun = {
   error: string;
 };
 export type PointerStep = { status: "idle" | "running" | "done" | "blocked"; error: string; result: PointerRestored | null };
+
+export type OverlayState = {
+  object: Hex32 | null;
+  inspection: OverlayInspection | null;
+  lifecycle: OverlayLifecycle | null;
+  archive: OverlayArchive | null;
+  exported: OverlayArchive | null;
+  copy: {
+    choice: RecoveryChoice;
+    label: string;
+    mode: RecoveryMode;
+    status: "previewing" | "applying" | "applied" | "refused" | "uncertain" | "error" | RecoveryDisposition;
+    error: string;
+    /// Once any Apply delivery is ambiguous, a later pre-write refusal cannot prove what the
+    /// earlier attempt did. Only an applied acknowledgement may clear this uncertainty.
+    mayHaveCommitted: boolean;
+    preview: OverlayCopyPreview | null;
+    edit: OverlayCopyApplyEdit | null;
+    applied: OverlayCopyApplied | null;
+  } | null;
+  loading: boolean;
+  error: string;
+};
+
+type OverlayCopyRun = NonNullable<OverlayState["copy"]>;
 
 export type DocState = {
   object: Hex32;
@@ -156,6 +213,7 @@ const REFRESH_COALESCE_MS = 120;
 const BLOB_CACHE_BYTES = 8 * 1024 * 1024;
 const BLOB_CACHE_ENTRIES = 512;
 const RECENT_VIEWS = 8;
+const RETAINED_OVERLAY_COPIES = 8;
 
 type BlobJob = {
   key: string;
@@ -183,12 +241,20 @@ export class StudioSession {
   indexLoading = false;
   indexError = "";
   doc: DocState | null = null;
+  indexOverlay: OverlayState | null = null;
+  /// The retained local branch is a separate truth from the ordinary/preview projection. It is
+  /// read-only evidence here; edits reach it only through the ticketed Unconfirmed Save below.
+  overlay: OverlayState | null = null;
   /// Trust state of documents this session has read, for sidebar chips; never a phase claim
   /// for a document that was not read.
   readonly known = new Map<Hex32, KnownView>();
   /// The last view of each recently read document, so a queued save still has its epoch after
   /// the member moves to another flipnote. Bounded; the open document is always current.
   private readonly views = new Map<Hex32, { view: FlipnoteView; model: FlipnoteModel }>();
+  /// Exact retained-draft Copy requests are session work, not panel state. Keeping them here means
+  /// navigation cannot lose an uncertain nonce/body or let a late response overwrite a newer run.
+  /// The map is bounded; unresolved entries are never evicted merely to make room.
+  private readonly overlayCopies = new Map<string, OverlayCopyRun>();
 
   /// Mutable queue entries (with their settle callbacks); never handed to a surface.
   private readonly records: SaveEntry[] = [];
@@ -228,7 +294,9 @@ export class StudioSession {
   private runSeq = 0;
 
   private indexReq = 0;
+  private indexOverlayReq = 0;
   private readonly docReq = new Map<Hex32, number>();
+  private readonly overlayReq = new Map<Hex32, number>();
   private recoveryReq = 0;
   private pendingIndex = false;
   private readonly pendingObjects = new Set<Hex32>();
@@ -289,8 +357,11 @@ export class StudioSession {
     this.indexLoading = false;
     this.indexError = "";
     this.doc = null;
+    this.indexOverlay = null;
+    this.overlay = null;
     this.known.clear();
     this.views.clear();
+    this.overlayCopies.clear();
     for (const s of this.records) s.settle?.("discarded");
     this.records.length = 0;
     this.saving = 0;
@@ -412,17 +483,56 @@ export class StudioSession {
     } finally {
       if (this.current(gen) && req === this.indexReq) { this.indexLoading = false; this.notify(); }
     }
+    if (this.current(gen) && req === this.indexReq) await this.refreshIndexOverlay();
+  }
+
+  private async refreshIndexOverlay(): Promise<void> {
+    const gen = this.generation;
+    const req = ++this.indexOverlayReq;
+    const target = { ...this.target(), object: null };
+    this.indexOverlay = this.indexOverlay
+      ? { ...this.indexOverlay, loading: true }
+      : { object: null, inspection: null, lifecycle: null, archive: null, exported: null, copy: this.overlayCopyFor(null), loading: true, error: "" };
+    this.notify();
+    try {
+      const lifecycle = await overlayLifecycle(this.ipc, target);
+      const inspection = await overlayRead(this.ipc, target);
+      const archive = lifecycle.archive ? await overlayArchiveRead(this.ipc, target) : null;
+      if (!this.current(gen) || req !== this.indexOverlayReq) return;
+      this.indexOverlay = {
+        object: null,
+        lifecycle,
+        inspection,
+        archive,
+        exported: this.indexOverlay?.exported ?? null,
+        copy: this.overlayCopyFor(null),
+        loading: false,
+        error: "",
+      };
+      if (inspection.kind === "local-draft" && inspection.content) {
+        if (inspection.content.kind !== "index") throw new StudioNativeError("local draft has Flipnote content for the Index target");
+        this.indexModel = indexModel(inspection.content);
+      } else if (this.index) {
+        this.indexModel = indexModel(this.index.content);
+      }
+      this.notify();
+    } catch (e) {
+      if (!this.current(gen) || req !== this.indexOverlayReq) return;
+      this.indexOverlay = { ...(this.indexOverlay ?? { object: null, inspection: null, lifecycle: null, archive: null, exported: null, copy: this.overlayCopyFor(null) }), object: null, copy: this.overlayCopyFor(null), loading: false, error: reason(e) };
+      this.notify();
+    }
   }
 
   /// Open (or re-read) a flipnote. Opening a different object drops the previous document but
   /// keeps its pending saves: they are addressed by object and finish or fail on their own.
   open(object: Hex32 | null, opts: { read?: boolean } = {}): void {
     if (object === null) {
-      if (this.doc) { this.doc = null; this.notify(); }
+      if (this.doc || this.overlay) { this.doc = null; this.overlay = null; this.notify(); }
       return;
     }
     if (this.doc?.object !== object) {
       this.doc = { object, view: null, model: null, loading: opts.read === false, absent: false, error: "" };
+      this.overlay = { object, inspection: null, lifecycle: null, archive: null, exported: null, copy: this.overlayCopyFor(object), loading: opts.read !== false, error: "" };
       this.notify();
     }
     // A just-created object is filled by its Create result; reading it first would only
@@ -451,6 +561,12 @@ export class StudioSession {
       if (!this.current(gen) || req !== this.docReq.get(object)) return;
       this.patchDoc(object, { error: reason(e), loading: false });
     }
+    // `studio_read` and `studio_overlay_read` share the native latest-view fence. Awaiting this
+    // second read, rather than starting both from the surface, ensures neither legitimate result
+    // suppresses the other merely because the renderer raced them.
+    if (this.current(gen) && req === this.docReq.get(object) && this.doc?.object === object) {
+      await this.refreshOverlay(object);
+    }
   }
 
   /// Replace the open document's state (never mutate it) when it is this object.
@@ -458,6 +574,299 @@ export class StudioSession {
     if (this.doc?.object !== object) return;
     this.doc = { ...this.doc, ...patch };
     this.notify();
+  }
+
+  // --- Retained local draft -----------------------------------------------------------------
+
+  /// Reconcile the live branch, lifecycle terminal and optional archive as one UI observation.
+  /// These are deliberately not inferred from the ordinary view: a branch may outlive a source,
+  /// and a terminal disposition must remain visible instead of collapsing to "absent".
+  async refreshOverlay(object: Hex32): Promise<void> {
+    const gen = this.generation;
+    const req = (this.overlayReq.get(object) ?? 0) + 1;
+    this.overlayReq.set(object, req);
+    const target = { ...this.target(), object };
+    if (this.overlay?.object !== object) {
+      this.overlay = { object, inspection: null, lifecycle: null, archive: null, exported: null, copy: this.overlayCopyFor(object), loading: true, error: "" };
+    } else {
+      this.overlay = { ...this.overlay, loading: true };
+    }
+    this.notify();
+    try {
+      // The lifecycle row tells us whether an archive exists. Read it before the branch view so
+      // the latter remains the final latest-view operation at native delivery.
+      const lifecycle = await overlayLifecycle(this.ipc, target);
+      const inspection = await overlayRead(this.ipc, target);
+      const archive = lifecycle.archive ? await overlayArchiveRead(this.ipc, target) : null;
+      if (!this.current(gen) || req !== this.overlayReq.get(object) || this.doc?.object !== object) return;
+      this.overlay = {
+        object,
+        lifecycle,
+        inspection,
+        archive,
+        exported: this.overlay?.object === object ? this.overlay.exported : null,
+        copy: this.overlayCopyFor(object),
+        loading: false,
+        error: "",
+      };
+      // A replayable local draft is what the member most recently saved. Display that projection
+      // while keeping the ordinary preview/source view untouched for trust and routing decisions.
+      if (inspection.kind === "local-draft" && inspection.content) {
+        if (inspection.content.kind !== "flipnote") throw new StudioNativeError("local draft has Index content for a flipnote target");
+        this.patchDoc(object, { model: flipnoteModel(inspection.content) });
+      } else if (this.doc?.object === object) {
+        this.patchDoc(object, { model: this.doc.view ? flipnoteModel(this.doc.view.content) : null });
+      }
+      this.notify();
+    } catch (e) {
+      if (!this.current(gen) || req !== this.overlayReq.get(object) || this.doc?.object !== object) return;
+      this.overlay = { ...(this.overlay ?? { object, inspection: null, lifecycle: null, archive: null, exported: null, copy: this.overlayCopyFor(object) }), object, copy: this.overlayCopyFor(object), loading: false, error: reason(e) };
+      this.notify();
+    }
+  }
+
+  private overlayFor(object: Hex32 | null): OverlayState | null {
+    return object === null ? this.indexOverlay : this.overlay?.object === object ? this.overlay : null;
+  }
+
+  private overlayIsCurrent(object: Hex32 | null): boolean {
+    return object === null
+      ? this.indexOverlay?.object === null
+      : this.doc?.object === object && this.overlay?.object === object;
+  }
+
+  private replaceOverlay(object: Hex32 | null, state: OverlayState): void {
+    if (object === null) this.indexOverlay = state;
+    else if (this.doc?.object === object) this.overlay = state;
+  }
+
+  private overlayCopyKey(object: Hex32 | null): string {
+    return object ?? "index";
+  }
+
+  private overlayCopyFor(object: Hex32 | null): OverlayCopyRun | null {
+    return this.overlayCopies.get(this.overlayCopyKey(object)) ?? null;
+  }
+
+  private retainOverlayCopy(object: Hex32 | null, run: OverlayCopyRun): void {
+    const key = this.overlayCopyKey(object);
+    const prior = this.overlayCopies.get(key);
+    if (prior && (prior.status === "previewing" || prior.status === "applying" || prior.status === "refused" || prior.status === "uncertain")) {
+      throw new StudioNativeError("the previous local draft copy is unresolved; retry it before starting another");
+    }
+    if (!prior && this.overlayCopies.size >= RETAINED_OVERLAY_COPIES) {
+      const disposable = [...this.overlayCopies].find(([, copy]) =>
+        copy.status !== "previewing" && copy.status !== "applying" && copy.status !== "refused" && copy.status !== "uncertain");
+      if (disposable) this.overlayCopies.delete(disposable[0]);
+    }
+    if (!prior && this.overlayCopies.size >= RETAINED_OVERLAY_COPIES) {
+      throw new StudioNativeError("too many unresolved local draft copies; resolve one before starting another");
+    }
+    this.overlayCopies.delete(key);
+    this.overlayCopies.set(key, run);
+  }
+
+  private publishOverlayCopy(object: Hex32 | null, run: OverlayCopyRun): void {
+    if (this.overlayCopyFor(object) !== run) return;
+    const overlay = this.overlayFor(object);
+    if (overlay) this.replaceOverlay(object, { ...overlay, copy: run });
+    this.notify();
+  }
+
+  private async refreshOverlayTarget(object: Hex32 | null): Promise<void> {
+    if (object === null) await this.refreshIndexOverlay();
+    else await this.refreshOverlay(object);
+  }
+
+  async exportOverlay(object: Hex32 | null): Promise<OverlayArchive | null> {
+    const gen = this.generation;
+    const exported = await overlayExport(this.ipc, { ...this.target(), object });
+    if (!this.current(gen) || !this.overlayIsCurrent(object)) return null;
+    const overlay = this.overlayFor(object);
+    if (overlay) this.replaceOverlay(object, { ...overlay, exported, error: "" });
+    this.notify();
+    return exported;
+  }
+
+  async archiveOverlay(object: Hex32 | null): Promise<void> {
+    const gen = this.generation;
+    try {
+      await overlayArchive(this.ipc, { ...this.target(), object });
+    } finally {
+      // Archive may have committed even when final delivery failed. Reconcile instead of
+      // resending a write whose outcome is explicitly uncertain.
+      if (this.current(gen) && this.overlayIsCurrent(object)) await this.refreshOverlayTarget(object);
+    }
+  }
+
+  async exportOverlayArchive(object: Hex32 | null): Promise<OverlayArchive | null> {
+    const gen = this.generation;
+    const exported = await overlayArchiveExport(this.ipc, { ...this.target(), object });
+    if (!this.current(gen) || !this.overlayIsCurrent(object)) return null;
+    const overlay = this.overlayFor(object);
+    if (overlay) this.replaceOverlay(object, { ...overlay, exported, error: "" });
+    this.notify();
+    return exported;
+  }
+
+  async releaseOverlayArchive(object: Hex32 | null): Promise<void> {
+    const archive = this.overlayFor(object)?.archive?.archive;
+    if (!archive) throw new StudioNativeError("no retained draft archive to release");
+    const gen = this.generation;
+    try {
+      await overlayArchiveRelease(this.ipc, { ...this.target(), object }, archive, "release-local-archive");
+    } finally {
+      if (this.current(gen) && this.overlayIsCurrent(object)) await this.refreshOverlayTarget(object);
+    }
+  }
+
+  async disposeOverlay(object: Hex32 | null, mode: "preserve" | "discard"): Promise<void> {
+    const branch = this.overlayFor(object)?.lifecycle?.branch;
+    if (!branch) throw new StudioNativeError("no live local draft to dispose");
+    const disposal: OverlayDisposalRequest = {
+      branch: branch.branch,
+      content: branch.content,
+      accepted: branch.accepted,
+      mode: mode === "preserve" ? { kind: "preserve" } : { kind: "discard", confirmation: "destroy-local-draft" },
+    };
+    const gen = this.generation;
+    try {
+      await overlayDispose(this.ipc, { ...this.target(), object }, disposal);
+    } finally {
+      if (this.current(gen) && this.overlayIsCurrent(object)) await this.refreshOverlayTarget(object);
+    }
+  }
+
+  overlayChoices(mode: RecoveryMode, object: Hex32 | null = this.overlay?.object ?? null): { choice: RecoveryChoice; label: string }[] {
+    const inspection = this.overlayFor(object)?.inspection;
+    return inspection?.kind === "local-draft" && inspection.content
+      ? choicesForContent(inspection.content, mode)
+      : [];
+  }
+
+  /// Preview and apply one retained value into the current ordinary document. The preview body,
+  /// projection fingerprint and nonce are frozen before Apply; if delivery fails, `retryOverlayCopy`
+  /// resends that exact edit and never asks for a different preview under the same UI action.
+  async copyOverlayChoice(object: Hex32 | null, choice: RecoveryChoice, label: string, mode: RecoveryMode): Promise<void> {
+    if (!this.overlayIsCurrent(object)) throw new StudioNativeError("local draft is not open");
+    const gen = this.generation;
+    const source = { ...this.target(), object };
+    const destination = object === null ? { channel: source.channel } : { channel: source.channel, object };
+    const run: OverlayCopyRun = {
+      choice, label, mode, status: "previewing", error: "", mayHaveCommitted: false, preview: null, edit: null, applied: null,
+    };
+    this.retainOverlayCopy(object, run);
+    this.publishOverlayCopy(object, run);
+    try {
+      const preview = await overlayCopyPreview(this.ipc, source, destination, choice, mode);
+      if (!this.current(gen) || this.overlayCopyFor(object) !== run) return;
+      run.preview = preview;
+      if (preview.disposition !== "ready" || preview.body === null) {
+        run.status = preview.disposition;
+        this.publishOverlayCopy(object, run);
+        return;
+      }
+      run.edit = {
+        destination,
+        choice,
+        mode,
+        epochId: preview.epochId,
+        expectedProjection: preview.expectedProjection,
+        nonce: this.newId(),
+        body: preview.body,
+      };
+      await this.applyOverlayCopy(object, run, gen);
+    } catch (e) {
+      if (!this.current(gen) || this.overlayCopyFor(object) !== run) return;
+      if (run.edit) run.mayHaveCommitted = true;
+      run.status = run.mayHaveCommitted ? "uncertain" : "error";
+      run.error = reason(e);
+      this.publishOverlayCopy(object, run);
+    }
+  }
+
+  /// Start a deliberately new Copy decision after C4 proved that the frozen proposal wrote
+  /// nothing. This is not an exact retry: it obtains a fresh preview and later mints a fresh nonce.
+  async repreviewOverlayCopy(object: Hex32 | null): Promise<void> {
+    const run = this.overlayCopyFor(object);
+    if (!run || run.status !== "refused" || run.mayHaveCommitted) return;
+    if (!this.overlayIsCurrent(object)) throw new StudioNativeError("local draft is not open");
+    this.overlayCopies.delete(this.overlayCopyKey(object));
+    await this.copyOverlayChoice(object, run.choice, run.label, run.mode);
+  }
+
+  async retryOverlayCopy(object: Hex32 | null): Promise<void> {
+    const run = this.overlayCopyFor(object);
+    if (!run?.edit || run.status !== "uncertain") return;
+    const gen = this.generation;
+    try {
+      await this.applyOverlayCopy(object, run, gen);
+    } catch (e) {
+      if (!this.current(gen) || this.overlayCopyFor(object) !== run) return;
+      run.mayHaveCommitted = true;
+      run.status = "uncertain";
+      run.error = reason(e);
+      this.publishOverlayCopy(object, run);
+    }
+  }
+
+  /// Cancel a Copy only after C4 conclusively refused its exact proposal without writing it.
+  /// This is intentionally separate from `forgetOverlayCopy`: an uncertain request may have
+  /// committed and needs explicit stop-tracking consent, while a refused request has no native
+  /// state to undo. The expected nonce fences a delayed click from cancelling a replacement run.
+  cancelRefusedOverlayCopy(object: Hex32 | null, expectedNonce: string): boolean {
+    const key = this.overlayCopyKey(object);
+    const run = this.overlayCopies.get(key);
+    if (!run || run.status !== "refused" || run.mayHaveCommitted || run.edit?.nonce !== expectedNonce) return false;
+    this.overlayCopies.delete(key);
+    const overlay = this.overlayFor(object);
+    if (overlay?.copy === run) this.replaceOverlay(object, { ...overlay, copy: null });
+    this.notify();
+    return true;
+  }
+
+  /// Forget only the frontend's retained identity for an ambiguous Copy. This deliberately sends
+  /// no native command: the operation may already have landed, and forgetting it neither undoes
+  /// nor disproves that write. The explicit UI confirmation is the user's decision to stop exact
+  /// retries and accept that uncertainty before this bounded slot can be reused.
+  forgetOverlayCopy(object: Hex32 | null, expectedNonce: string): boolean {
+    const key = this.overlayCopyKey(object);
+    const run = this.overlayCopies.get(key);
+    // Bind the confirmation to the exact operation the user saw. A late DOM event must not forget
+    // a different uncertain run that replaced it under the same document key.
+    if (!run || run.status !== "uncertain" || run.edit?.nonce !== expectedNonce) return false;
+    this.overlayCopies.delete(key);
+    const overlay = this.overlayFor(object);
+    if (overlay?.copy === run) this.replaceOverlay(object, { ...overlay, copy: null });
+    this.notify();
+    return true;
+  }
+
+  private async applyOverlayCopy(object: Hex32 | null, run: OverlayCopyRun, gen: number): Promise<void> {
+    if (!run.edit) throw new StudioNativeError("local draft copy has no prepared edit");
+    run.status = "applying";
+    run.error = "";
+    this.publishOverlayCopy(object, run);
+    const applied = await overlayCopyApply(this.ipc, { ...this.target(), object }, run.edit);
+    if (!this.current(gen) || this.overlayCopyFor(object) !== run) return;
+    if (applied.kind === "overlayCopyRefused") {
+      if (run.mayHaveCommitted) {
+        run.status = "uncertain";
+        run.error = "the current proposal was refused before writing, but an earlier delivery may already have committed; retry the exact request or discard it";
+      } else {
+        run.status = "refused";
+        run.error = "the destination changed after preview; preview again or cancel this copy";
+      }
+      this.publishOverlayCopy(object, run);
+      return;
+    }
+    run.status = "applied";
+    run.applied = applied;
+    this.publishOverlayCopy(object, run);
+    if (this.overlayIsCurrent(object)) {
+      if (object === null) await this.refreshIndex();
+      else await this.refreshDoc(object);
+    }
   }
 
   /// A read carrying a different epoch than an uncertain save used marks that save.
@@ -483,16 +892,43 @@ export class StudioSession {
   }
 
   canEdit(object: Hex32 | null): boolean {
-    return "epochId" in this.editableEpoch(object);
+    return !("refused" in this.editRoute(object));
+  }
+
+  /// Why the editor must be locked. Awaiting-tenure content is intentionally not a refusal now:
+  /// edits are saved into a bounded local-only branch through the ticketed route, while the
+  /// preview itself remains non-authoritative and cannot supply an ordinary epoch.
+  editRefusal(object: Hex32 | null): string {
+    const route = this.editRoute(object);
+    return "refused" in route ? route.refused : "";
+  }
+
+  private editRoute(object: Hex32 | null): { kind: "ordinary"; epochId: Hex32 } | { kind: "unconfirmed" } | { refused: string } {
+    const view = object === null ? this.index : this.doc?.object === object ? this.doc.view : this.views.get(object)?.view ?? null;
+    if (!view) return { refused: object === null ? "the channel index is not loaded" : "the flipnote is not loaded" };
+    if (view.awaitingTenureReceipt) return { kind: "unconfirmed" };
+    if (view.phase === "fault") return { refused: "history fault: conflicting owner receipts; this document is read-only" };
+    if (view.phase === "closing") return { refused: "rotating: durable edits resume when the owner settles this rotation" };
+    return { kind: "ordinary", epochId: view.epochId };
   }
 
   createFlipnote(title: string): Hex32 {
+    // Create is a coordinated Index + new-document transaction, not one domain operation. The
+    // Unconfirmed overlay route deliberately accepts only a single target operation, so a preview
+    // cannot make Create appear atomic by saving only half of it.
+    const epoch = this.editableEpoch(null);
+    if (!("epochId" in epoch)) throw new StudioNativeError(epoch.refused);
     const object = this.newId();
     this.enqueue({ kind: "create", object, label: `new flipnote "${title}"`, request: { object, nonce: this.newId(), title, createdAtMs: this.now() } });
     return object;
   }
 
   saveFrame(object: Hex32, frame: Hex32, pix: Uint8Array): void {
+    const route = this.editRoute(object);
+    const routeKind = "refused" in route && this.records.some((s) => s.kind === "create" && s.object === object)
+      ? "ordinary"
+      : "refused" in route ? null : route.kind;
+    if (!routeKind) throw new StudioNativeError((route as { refused: string }).refused);
     // A newer raster coalesces only into the lane's TAIL when that is a save of this frame with
     // no apply identity yet (nothing of it can have committed). Anything else queued after it
     // in this lane (another frame, a chosen conflict value, an insert) keeps its place: the new
@@ -500,7 +936,7 @@ export class StudioSession {
     let tail: SaveEntry | undefined;
     for (const s of this.records) if (laneOf(s) === object) tail = s;
     // A forced record is an explicit conflict choice: never fold new strokes into it.
-    const prior = tail && tail.kind === "frame" && tail.frame === frame && !tail.force && tail.status !== "inflight" && tail.apply === null ? tail : undefined;
+    const prior = tail && tail.kind === "frame" && tail.frame === frame && tail.route === routeKind && !tail.force && tail.status !== "inflight" && tail.apply === null && tail.overlay === null ? tail : undefined;
     if (prior && prior.kind === "frame") {
       prior.pix = pix;
       prior.published = null;
@@ -510,12 +946,17 @@ export class StudioSession {
       this.pump();
       return;
     }
-    this.enqueue({ kind: "frame", object, frame, op: "replace", after: null, pix, published: null, apply: null, label: "frame pixels" });
+    this.enqueue({ kind: "frame", object, frame, op: "replace", after: null, pix, published: null, route: routeKind, apply: null, overlay: null, overlayRetry: null, label: "frame pixels" });
   }
 
   insertFrame(object: Hex32, after: Hex32 | null, pix: Uint8Array): Hex32 {
+    const route = this.editRoute(object);
+    const routeKind = "refused" in route && this.records.some((s) => s.kind === "create" && s.object === object)
+      ? "ordinary"
+      : "refused" in route ? null : route.kind;
+    if (!routeKind) throw new StudioNativeError((route as { refused: string }).refused);
     const frame = this.newId();
-    this.enqueue({ kind: "frame", object, frame, op: "insert", after, pix, published: null, apply: null, label: "new frame" });
+    this.enqueue({ kind: "frame", object, frame, op: "insert", after, pix, published: null, route: routeKind, apply: null, overlay: null, overlayRetry: null, label: "new frame" });
     return frame;
   }
 
@@ -538,13 +979,15 @@ export class StudioSession {
   /// locally through publication, then replace. The blob is never named by a guessed cid.
   async useVersion(object: Hex32, frame: Hex32, alt: FrameConflictValue, how: "replace" | "insertAfter"): Promise<void> {
     const gen = this.generation;
+    const route = this.editRoute(object);
+    if ("refused" in route) throw new StudioNativeError(route.refused);
     const bytes = await this.fetchNow(alt.cid, alt.bytes);
     if (!this.current(gen)) return;
     if (!bytes) throw new StudioNativeError("that version's pixels are not available yet");
     // Re-putting a value the register already selects is still an operation here: it consumes
     // every live predecessor and so resolves the conflict on purpose.
-    if (how === "replace") this.enqueue({ kind: "frame", object, frame, op: "replace", after: null, pix: bytes, published: null, apply: null, force: true, label: `frame pixels by ${alt.author.slice(0, 8)}` });
-    else this.enqueue({ kind: "frame", object, frame: this.newId(), op: "insert", after: frame, pix: bytes, published: null, apply: null, label: "keep both versions" });
+    if (how === "replace") this.enqueue({ kind: "frame", object, frame, op: "replace", after: null, pix: bytes, published: null, route: route.kind, apply: null, overlay: null, overlayRetry: null, force: true, label: `frame pixels by ${alt.author.slice(0, 8)}` });
+    else this.enqueue({ kind: "frame", object, frame: this.newId(), op: "insert", after: frame, pix: bytes, published: null, route: route.kind, apply: null, overlay: null, overlayRetry: null, label: "keep both versions" });
   }
 
   renameEntry(object: Hex32, title: string): void {
@@ -558,18 +1001,26 @@ export class StudioSession {
   }
 
   private applyOp(object: Hex32, op: FlipnoteOp, label: string): void {
-    const ep = this.editableEpoch(object);
-    if (!("epochId" in ep)) throw new StudioNativeError(ep.refused);
-    this.enqueue({ kind: "apply", object, op, label, request: { object, epochId: ep.epochId, nonce: this.newId(), body: canonicalJson(op) } });
+    const route = this.editRoute(object);
+    if ("refused" in route) throw new StudioNativeError(route.refused);
+    if (route.kind === "ordinary") {
+      this.enqueue({ kind: "apply", object, op, label, request: { object, epochId: route.epochId, nonce: this.newId(), body: canonicalJson(op) } });
+    } else {
+      this.enqueue({ kind: "overlayApply", object, op, label, request: null, overlayRetry: null });
+    }
   }
   private applyIndexOp(op: IndexOp, object: Hex32, label: string): void {
-    const ep = this.editableEpoch(null);
-    if (!("epochId" in ep)) throw new StudioNativeError(ep.refused);
-    this.enqueue({ kind: "applyIndex", object, op, label, request: { epochId: ep.epochId, nonce: this.newId(), body: canonicalJson(op) } });
+    const route = this.editRoute(null);
+    if ("refused" in route) throw new StudioNativeError(route.refused);
+    if (route.kind === "ordinary") {
+      this.enqueue({ kind: "applyIndex", object, op, label, request: { epochId: route.epochId, nonce: this.newId(), body: canonicalJson(op) } });
+    } else {
+      this.enqueue({ kind: "overlayApply", object: null, op, label, request: null, overlayRetry: null });
+    }
   }
 
   private enqueue(rec: NewSave): SaveEntry {
-    const record = { ...rec, id: ++this.saveSeq, status: "queued", attempts: 0, error: "", epochChanged: false } as SaveEntry;
+    const record = { ...rec, id: ++this.saveSeq, status: "queued", attempts: 0, error: "", epochChanged: false, mayHaveCommitted: false } as SaveEntry;
     this.records.push(record);
     this.notify();
     this.pump();
@@ -579,31 +1030,59 @@ export class StudioSession {
   /// Resend the same complete request.
   retry(id: number): void {
     const s = this.records.find((r) => r.id === id);
-    if (!s || s.status !== "uncertain") return;
+    if (!s || (s.status !== "uncertain" && s.status !== "blocked")) return;
+    const retry = s.kind === "overlayApply" || s.kind === "frame" ? s.overlayRetry : null;
+    if (retry === "newTicket" || retry === "none") return;
     s.status = "queued";
     s.error = "";
     this.notify();
     this.pump();
   }
 
-  /// Explicit re-authoring: a NEW operation with a fresh nonce against the current epoch. Never
-  /// automatic; the local save under the old identity may already have committed.
-  reauthor(id: number): void {
+  /// Whether the retained operation is proven not to have written and can therefore be replaced
+  /// by a deliberately new authoring decision. Ambiguous operations keep their exact identity;
+  /// the member must reconcile/retry or explicitly discard them rather than having this method
+  /// silently erase their uncertainty.
+  canReauthor(id: number): boolean {
     const s = this.records.find((r) => r.id === id);
-    if (!s || s.status !== "uncertain") return;
-    if (s.kind === "frame") s.apply = null;
-    else if (s.kind === "apply") {
-      const ep = this.editableEpoch(s.object);
-      if (!("epochId" in ep)) throw new StudioNativeError(ep.refused);
-      s.request = { ...s.request, epochId: ep.epochId, nonce: this.newId() };
-    } else if (s.kind === "applyIndex") {
-      const ep = this.editableEpoch(null);
-      if (!("epochId" in ep)) throw new StudioNativeError(ep.refused);
-      s.request = { ...s.request, epochId: ep.epochId, nonce: this.newId() };
-    } else return; // create and recovery apply keep their identity; retry them as they are
-    s.status = "queued";
-    s.error = "";
-    s.epochChanged = false;
+    return !!s && s.status === "blocked" && !s.mayHaveCommitted
+      && (s.kind === "frame" || s.kind === "apply" || s.kind === "applyIndex" || s.kind === "overlayApply");
+  }
+
+  /// Explicit re-authoring: replace one proven-no-write entry with a NEW operation selected by
+  /// the document's route *now*. This is deliberately not available for an ambiguous request.
+  /// The replacement gets a fresh queue identity and, on the ordinary route, a fresh nonce.
+  reauthor(id: number): void {
+    const at = this.records.findIndex((r) => r.id === id);
+    const s = this.records[at];
+    if (!s || !this.canReauthor(id)) return;
+    if (s.kind !== "frame" && s.kind !== "apply" && s.kind !== "applyIndex" && s.kind !== "overlayApply") return;
+    const object = s.kind === "applyIndex" ? null : s.object;
+    const route = this.editRoute(object);
+    if ("refused" in route) throw new StudioNativeError(route.refused);
+    let next: NewSave;
+    if (s.kind === "frame") {
+      // A ticket refusal can mean the publication disappeared or failed validation. Re-publish
+      // retained pixels even when the new route is ordinary; identical valid bytes are
+      // content-addressed, and no stale receipt crosses the route transition.
+      next = { kind: "frame", object: s.object, frame: s.frame, op: s.op, after: s.after,
+        pix: s.pix, published: s.route === "unconfirmed" ? null : s.published,
+        route: route.kind, apply: null, overlay: null, overlayRetry: null,
+        ...(s.force === undefined ? {} : { force: s.force }), label: s.label };
+    } else if (route.kind === "unconfirmed") {
+      next = { kind: "overlayApply", object, op: s.op, label: s.label, request: null, overlayRetry: null };
+    } else if (object === null) {
+      const op = s.op as IndexOp;
+      next = { kind: "applyIndex", object: op.object, op, label: s.label,
+        request: { epochId: route.epochId, nonce: this.newId(), body: canonicalJson(op) } };
+    } else {
+      next = { kind: "apply", object, op: s.op as FlipnoteOp, label: s.label,
+        request: { object, epochId: route.epochId, nonce: this.newId(), body: canonicalJson(s.op) } };
+    }
+    const replacement = { ...next, id: ++this.saveSeq, status: "queued", attempts: 0,
+      error: "", epochChanged: false, mayHaveCommitted: false } as SaveEntry;
+    this.records[at] = replacement;
+    this.settleRecord(s, "discarded");
     this.notify();
     this.pump();
   }
@@ -633,16 +1112,16 @@ export class StudioSession {
     return this.saves.filter((s) => (s.kind === "applyIndex" ? object === null || s.object === object : s.object === object));
   }
 
-  /// Queued saves that cannot run until this uncertain save is retried or discarded.
+  /// Queued saves that cannot run until this uncertain or known-not-written save is handled.
   blockedBehind(id: number): number {
     const s = this.records.find((r) => r.id === id);
-    if (!s || s.status !== "uncertain") return 0;
+    if (!s || (s.status !== "uncertain" && s.status !== "blocked")) return 0;
     const lane = laneOf(s);
     return this.records.filter((r) => r.id !== id && r.status === "queued" && laneOf(r) === lane).length;
   }
 
   /// One save at a time, in queue order within each lane (a document, or the Index). An
-  /// uncertain or in-flight save blocks the later saves of its lane; other lanes proceed.
+  /// uncertain, known-not-written or in-flight save blocks later saves of its lane; other lanes proceed.
   private pump(): void {
     if (this.saving) return;
     const blocked = new Set<string>();
@@ -651,7 +1130,7 @@ export class StudioSession {
       const lane = laneOf(s);
       if (blocked.has(lane)) continue;
       if (s.status === "queued") { next = s; break; }
-      blocked.add(lane); // uncertain (or, defensively, inflight): nothing later in this lane runs
+      blocked.add(lane); // blocked/uncertain (or, defensively, inflight): nothing later runs
     }
     if (!next) return;
     const token = ++this.workerSeq;
@@ -687,17 +1166,24 @@ export class StudioSession {
           this.finish(s); // already the selected value: no operation for an unchanged value
           return;
         }
-        if (!s.apply) {
-          const ep = this.editableEpoch(s.object);
-          if (!("epochId" in ep)) throw new StudioNativeError(ep.refused);
-          const op: FlipnoteOp = s.op === "insert"
-            ? { op: "insert_frame", frame: s.frame, after: s.after, cid: s.published.cid, bytes: s.published.bytes }
-            : { op: "replace_frame", frame: s.frame, cid: s.published.cid, bytes: s.published.bytes };
-          s.apply = { object: s.object, epochId: ep.epochId, nonce: this.newId(), body: canonicalJson(op) };
+        const op: FlipnoteOp = s.op === "insert"
+          ? { op: "insert_frame", frame: s.frame, after: s.after, cid: s.published.cid, bytes: s.published.bytes }
+          : { op: "replace_frame", frame: s.frame, cid: s.published.cid, bytes: s.published.bytes };
+        if (s.route === "unconfirmed") {
+          await this.runUnconfirmed(s, s.object, canonicalJson(op), gen);
+          if (!this.current(gen)) return;
+          await this.refreshDoc(s.object);
+          if (!this.current(gen)) return;
+        } else {
+          if (!s.apply) {
+            const ep = this.editableEpoch(s.object);
+            if (!("epochId" in ep)) throw new StudioNativeError(ep.refused);
+            s.apply = { object: s.object, epochId: ep.epochId, nonce: this.newId(), body: canonicalJson(op) };
+          }
+          const view = await studioApply(this.ipc, target, s.apply);
+          if (!this.current(gen)) return;
+          this.landed(s.object, view);
         }
-        const view = await studioApply(this.ipc, target, s.apply);
-        if (!this.current(gen)) return;
-        this.landed(s.object, view);
       } else if (s.kind === "apply") {
         const view = await studioApply(this.ipc, target, s.request);
         if (!this.current(gen)) return;
@@ -706,6 +1192,12 @@ export class StudioSession {
         const view = await studioApplyIndex(this.ipc, target, s.request);
         if (!this.current(gen)) return;
         this.landedIndex(view);
+      } else if (s.kind === "overlayApply") {
+        await this.runUnconfirmed(s, s.object, canonicalJson(s.op), gen);
+        if (!this.current(gen)) return;
+        if (s.object) await this.refreshDoc(s.object);
+        else await this.refreshIndex();
+        if (!this.current(gen)) return;
       } else {
         const applied = await recoveryApply(this.ipc, { ...target, object: s.object }, s.edit);
         if (!this.current(gen)) return;
@@ -717,13 +1209,75 @@ export class StudioSession {
       this.finish(s);
     } catch (e) {
       if (!this.current(gen)) return;
-      // Timeout, cancellation, busy, capacity refusal, epoch mismatch: all leave the local save
-      // uncertain. Keep the request and the pixels; the member retries or discards.
-      s.status = "uncertain";
-      s.error = reason(e);
-      this.settleRecord(s, "uncertain");
+      // Typed Flow-S refusals and scheduling replies prove that this attempt did not write. Native
+      // errors remain uncertain because they may have crossed a final delivery fence after commit.
+      const noWrite = e instanceof OverlayNoWrite;
+      const earlierAttemptWasUncertain = s.mayHaveCommitted;
+      if (!noWrite) s.mayHaveCommitted = true;
+      s.status = s.mayHaveCommitted ? "uncertain" : "blocked";
+      s.error = noWrite && earlierAttemptWasUncertain
+        ? `${reason(e)}; an earlier attempt may already have committed, so the exact request remains uncertain`
+        : reason(e);
+      this.settleRecord(s, s.mayHaveCommitted ? "uncertain" : "notWritten");
       this.notify();
     }
+  }
+
+  /// Execute one visit of a preview-local Save while retaining the exact request on the queue.
+  /// A successful `pending`/`busy` response is not spun here: the member chooses when to repeat
+  /// the same bytes. `busy` proves no write began, while `pending` means a detached job may still
+  /// land and is therefore uncertain. A paused actor is first resumed by an explicit ordinary
+  /// document access, exactly as the native contract requires, then receives the same request.
+  private async runUnconfirmed(
+    s: Extract<SaveEntry, { kind: "frame" }> | Extract<SaveEntry, { kind: "overlayApply" }>,
+    object: Hex32 | null,
+    body: string,
+    gen: number,
+  ): Promise<UnconfirmedOverlaySave> {
+    const target = { ...this.target(), object };
+    if (!this.current(gen)) throw new StudioNativeError("Studio session changed before the local draft Save");
+    let request = s.kind === "frame" ? s.overlay : s.request;
+    if (s.overlayRetry === "afterExplicitAccess") {
+      if (object) await this.refreshDoc(object);
+      else await this.refreshIndex();
+      if (!this.current(gen)) throw new StudioNativeError("Studio session changed before the local draft retry");
+      const accessError = object
+        ? this.doc?.object === object ? this.doc.error : "the flipnote is no longer open"
+        : this.indexError;
+      if (accessError) {
+        throw new OverlayNoWrite(`explicit document access failed; the paused Save was not retried (${accessError})`);
+      }
+    }
+    if (!request) {
+      const begun = await unconfirmedOverlaySaveBegin(this.ipc, target);
+      if (!this.current(gen)) throw new StudioNativeError("Studio session changed while obtaining a local draft ticket");
+      if (begun.kind === "unconfirmedOverlaySave") {
+        s.overlayRetry = begun.retry;
+        throw new OverlayNoWrite(`local draft refused (${begun.reason}); retry=${begun.retry}`);
+      }
+      request = { basis: begun.basis, branch: begun.branch, nonce: this.newId(), body };
+      if (s.kind === "frame") s.overlay = request;
+      else s.request = request;
+      // Retain the request before invoking Save: a native delivery failure may follow its write.
+      this.notify();
+    }
+    if (!this.current(gen)) throw new StudioNativeError("Studio session changed before the local draft Save");
+    const result = await unconfirmedOverlaySave(this.ipc, target, request);
+    if (result.state === "saved" || result.state === "disposed" || result.state === "handedOff") {
+      s.overlayRetry = null;
+      return result;
+    }
+    s.overlayRetry = result.retry;
+    if (result.state === "refused") {
+      throw new OverlayNoWrite(`local draft refused (${result.reason}); retry=${result.retry}`);
+    }
+    if (result.state === "paused") {
+      throw new OverlayNoWrite("local draft Save paused; explicit document access is required before retrying the same request");
+    }
+    if (result.state === "busy") {
+      throw new OverlayNoWrite("local draft Save busy; retry the same request");
+    }
+    throw new StudioNativeError("local draft Save pending and may still complete; retry the same request exactly");
   }
 
   private landed(object: Hex32, view: FlipnoteView): void {
@@ -994,30 +1548,7 @@ export class StudioSession {
   /// The choices a historical version offers, in the order Restore walks them. Headers never
   /// restore automatically: they are listed for Copy only; deletions are Copy only.
   choicesFor(v: RecoveryVersionRead, mode: RecoveryMode): { choice: RecoveryChoice; label: string }[] {
-    const out: { choice: RecoveryChoice; label: string }[] = [];
-    if (v.content.kind === "flipnote") {
-      const c = v.content;
-      c.timeline.forEach((id, i) => {
-        const e = c.frames[id];
-        if (e) out.push({ choice: { kind: "frame", id, value: e.pixels.selected.source.opId }, label: `frame ${i + 1}` });
-      });
-      if (mode === "copy") {
-        if (c.title) out.push({ choice: { kind: "title", value: c.title.selected.source.opId }, label: `title "${c.title.selected.value}"` });
-        if (c.fps) out.push({ choice: { kind: "fps", value: c.fps.selected.source.opId }, label: `${c.fps.selected.value} fps` });
-        for (const id of Object.keys(c.tombstones)) out.push({ choice: { kind: "frameDeletion", id }, label: `deletion of frame ${id.slice(0, 8)}` });
-      }
-    } else {
-      const c = v.content;
-      for (const [id, e] of [...Object.entries(c.objects), ...Object.entries(c.overflow)]) {
-        out.push({ choice: { kind: "object", id }, label: `entry "${e.title.selected.value}"` });
-        if (mode === "copy") {
-          out.push({ choice: { kind: "objectTitle", id, value: e.title.selected.source.opId }, label: `title "${e.title.selected.value}"` });
-          out.push({ choice: { kind: "objectExpiry", id, value: e.expiry.selected.source.opId }, label: `expiry of "${e.title.selected.value}"` });
-        }
-      }
-      if (mode === "copy") for (const id of Object.keys(c.tombstones)) out.push({ choice: { kind: "objectDeletion", id }, label: `deletion of entry ${id.slice(0, 8)}` });
-    }
-    return out;
+    return choicesForContent(v.content, mode);
   }
 
   /// Walk a version's choices: preview, apply what is Ready through the save queue, re-read,
@@ -1120,6 +1651,34 @@ export class StudioSession {
     }
     this.notify();
   }
+}
+
+/// Domain choices shared by historical recovery and retained-draft copy. Keeping one enumerator is
+/// important: a newly supported operation must not silently appear in one recovery surface while
+/// remaining impossible to preserve from the other.
+function choicesForContent(content: StudioContent, mode: RecoveryMode): { choice: RecoveryChoice; label: string }[] {
+  const out: { choice: RecoveryChoice; label: string }[] = [];
+  if (content.kind === "flipnote") {
+    content.timeline.forEach((id, i) => {
+      const entry = content.frames[id];
+      if (entry) out.push({ choice: { kind: "frame", id, value: entry.pixels.selected.source.opId }, label: `frame ${i + 1}` });
+    });
+    if (mode === "copy") {
+      if (content.title) out.push({ choice: { kind: "title", value: content.title.selected.source.opId }, label: `title "${content.title.selected.value}"` });
+      if (content.fps) out.push({ choice: { kind: "fps", value: content.fps.selected.source.opId }, label: `${content.fps.selected.value} fps` });
+      for (const id of Object.keys(content.tombstones)) out.push({ choice: { kind: "frameDeletion", id }, label: `deletion of frame ${id.slice(0, 8)}` });
+    }
+  } else {
+    for (const [id, entry] of [...Object.entries(content.objects), ...Object.entries(content.overflow)]) {
+      out.push({ choice: { kind: "object", id }, label: `entry "${entry.title.selected.value}"` });
+      if (mode === "copy") {
+        out.push({ choice: { kind: "objectTitle", id, value: entry.title.selected.source.opId }, label: `title "${entry.title.selected.value}"` });
+        out.push({ choice: { kind: "objectExpiry", id, value: entry.expiry.selected.source.opId }, label: `expiry of "${entry.title.selected.value}"` });
+      }
+    }
+    if (mode === "copy") for (const id of Object.keys(content.tombstones)) out.push({ choice: { kind: "objectDeletion", id }, label: `deletion of entry ${id.slice(0, 8)}` });
+  }
+  return out;
 }
 
 function laneOf(s: SaveRecord): string {

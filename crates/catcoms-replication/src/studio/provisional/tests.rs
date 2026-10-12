@@ -1,3 +1,6 @@
+// These tests exercise the seed parser itself, which the repository gate otherwise reserves for
+// `catcoms-sync`'s live transfer (design 8.1 (ii)). Inherited by the `tail` submodule.
+#![allow(clippy::disallowed_methods)]
 use super::*;
 use crate::{CheckpointSeed, InheritedCheckpoint};
 use automerge::transaction::Transactable;
@@ -53,6 +56,11 @@ fn provisional_seed_rejects_noncanonical_order_after_raw_and_typed_checks_pass()
             target.read(&logical, 1, &raw_valid).unwrap(),
             target.read(&logical, 1, &source).unwrap()
         );
-        assert!(UnconfirmedStudioSeed::parse(target, &receipt, reordered.bytes()).is_err());
+        assert!(
+            UnconfirmedStudioSeed::parse_live_transfer(target, &receipt, reordered.bytes())
+                .is_err()
+        );
+        // The non-retaining path runs the same canonical re-emission check.
+        assert!(UnconfirmedStudioSeed::parse_graph(target, &receipt, reordered.bytes()).is_err());
     }
 }

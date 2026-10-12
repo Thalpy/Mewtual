@@ -14,8 +14,22 @@ import {
   expiryForBody,
   flipnoteModel,
   indexModel,
+  overlayArchive,
+  overlayArchiveExport,
+  overlayArchiveRead,
+  overlayArchiveRelease,
+  overlayCopyApply,
+  overlayCopyPreview,
+  overlayDispose,
+  overlayExport,
+  overlayLifecycle,
+  overlayRead,
   parseFlipnoteView,
   parseIndexView,
+  parseOverlayArchive,
+  parseOverlayCopyApplyResult,
+  parseOverlayInspection,
+  parseOverlayLifecycle,
   parseRecoveryApplied,
   parseRecoveryExport,
   parseRecoveryListing,
@@ -23,6 +37,9 @@ import {
   parseSettlementChanged,
   parseStudioUpdated,
   parseStudioView,
+  parseUnconfirmedOverlaySave,
+  parseUnconfirmedOverlaySaveBegin,
+  parseUnconfirmedOverlaySaveTicket,
   publishPix,
   recoveryAcknowledge,
   recoveryApply,
@@ -32,9 +49,25 @@ import {
   studioCreate,
   studioList,
   studioRead,
+  unconfirmedOverlaySave,
+  unconfirmedOverlaySaveBegin,
 } from "./studio-native.ts";
 
 const F1 = id32(0x11), F2 = id32(0x12), F3 = id32(0x13);
+
+test("a Copy refusal crosses as a typed proven-no-write re-preview result", () => {
+  assert.deepEqual(parseOverlayCopyApplyResult({
+    v: 1, kind: "overlayCopyRefused", channel: CHANNEL, object: id32(7),
+    reason: "stalePreview", retry: "repreview", written: false,
+  }), {
+    v: 1, kind: "overlayCopyRefused", channel: CHANNEL, object: id32(7),
+    reason: "stalePreview", retry: "repreview", written: false,
+  });
+  assert.throws(() => parseOverlayCopyApplyResult({
+    v: 1, kind: "overlayCopyRefused", channel: CHANNEL, object: id32(7),
+    reason: "stalePreview", retry: "repreview", written: true,
+  }), /not an overlay copy refusal/);
+});
 
 test("an ordinary flipnote view keeps conflicts, insertions, tombstones and over-cap evidence", () => {
   const raw = ordinaryView(flipnoteContent({
@@ -222,6 +255,104 @@ test("recovery commands omit `object` for the Index and echo an apply edit verba
   assert.deepEqual(ipc.calls[1].args, { server: SERVER, channel: CHANNEL, object: id32(7), edit });
   await recoveryAcknowledge(ipc, { server: SERVER, channel: CHANNEL, object: null }, { oldestSnapshot: id64(1), stagedSnapshot: id64(2) });
   assert.deepEqual(ipc.calls[2].args, { server: SERVER, channel: CHANNEL, oldestSnapshot: id64(1), stagedSnapshot: id64(2) });
+});
+
+test("overlay views keep lifecycle, provenance and retry truth distinct", () => {
+  const draft = parseOverlayInspection({
+    v: 1, kind: "local-draft", channel: CHANNEL, object: id32(7),
+    eligibility: "manual", manualReason: "tenureUnknown",
+    handoffAttempt: { state: "backingOff", reason: "transient", retryAt: "18446744073709551615" },
+    unconfirmedState: "awaitingSource", basis: id64(1), branch: id64(2), contentId: id64(3),
+    generation: "4", accepted: 2, transferState: "active", provenance: "unconfirmed",
+    replayable: true, readOnly: true, content: flipnoteContent({ frames: [] }),
+  });
+  assert.equal(draft.kind, "local-draft");
+  assert.equal(draft.manualReason, "tenureUnknown");
+  assert.equal(draft.handoffAttempt?.reason, "transient");
+  assert.equal(draft.content?.kind, "flipnote");
+  assert.throws(() => parseOverlayInspection({ ...draft, eligibility: "transferable" }), /exactly when manual/);
+  assert.throws(() => parseOverlayInspection({ ...draft, replayable: false }), /replayability/);
+
+  const lifecycle = parseOverlayLifecycle({
+    v: 1, kind: "overlayLifecycle", channel: CHANNEL, object: id32(7),
+    branch: { branch: id64(2), content: id64(3), generation: "4", accepted: 2 },
+    prepared: false, eligibility: "manual", manualReason: "tenureUnknown", handoffAttempt: null,
+    unconfirmedState: "awaitingSource",
+    archive: { archive: id64(5), branch: id64(2), generation: "4", replayable: true },
+    disposed: null, transferred: false,
+  });
+  assert.equal(lifecycle.archive?.branch, lifecycle.branch?.branch);
+
+  const bytes = new Uint8Array([1, 2, 3]);
+  const exported = parseOverlayArchive({
+    v: 1, kind: "overlayExport", archive: id64(5), basis: id64(1), content: id64(3),
+    branch: id64(2), generation: "4", author: ME, accepted: 2,
+    provenance: { kind: "unconfirmed", provider: ROOK, observedMlsEpoch: "8", observedAtMs: "9" },
+    replayable: true, readOnly: true, authority: false, terminal: true, preserved: false,
+    notReplayable: null, format: "catcoms-studio-draft-v1", bytes: bytes.length, bytesB64: b64(bytes),
+  });
+  assert.equal(exported.provenance.kind, "unconfirmed");
+  assert.equal(exported.bytes, 3);
+
+  const ticket = parseUnconfirmedOverlaySaveTicket({ v: 1, kind: "unconfirmedOverlaySaveTicket", channel: CHANNEL, object: id32(7), basis: id64(1), branch: id64(2), provenance: "unconfirmed" });
+  assert.equal(ticket.branch, id64(2));
+  assert.equal(parseUnconfirmedOverlaySaveBegin(ticket).kind, "unconfirmedOverlaySaveTicket");
+  assert.deepEqual(parseUnconfirmedOverlaySave({ v: 1, kind: "unconfirmedOverlaySave", channel: CHANNEL, object: id32(7), state: "pending", retry: "sameRequest" }).state, "pending");
+  const refused = parseUnconfirmedOverlaySave({ v: 1, kind: "unconfirmedOverlaySave", channel: CHANNEL, object: id32(7), state: "refused", reason: "basisChangedDuringDetach", retry: "newTicket" });
+  assert.equal(refused.state, "refused");
+  if (refused.state === "refused") assert.equal(refused.reason, "basisChangedDuringDetach");
+  assert.deepEqual(parseUnconfirmedOverlaySaveBegin({ v: 1, kind: "unconfirmedOverlaySave", channel: CHANNEL, object: id32(7), state: "refused", reason: "notMember", retry: "none" }), {
+    v: 1, kind: "unconfirmedOverlaySave", channel: CHANNEL, object: id32(7), state: "refused", reason: "notMember", retry: "none",
+  });
+  assert.throws(() => parseUnconfirmedOverlaySaveBegin({ v: 1, kind: "unconfirmedOverlaySave", channel: CHANNEL, object: id32(7), state: "pending", retry: "sameRequest" }), /must be a ticket or refusal/);
+  assert.throws(() => parseUnconfirmedOverlaySave({ v: 1, kind: "unconfirmedOverlaySave", channel: CHANNEL, object: null, state: "refused", reason: "internalError", retry: "none" }), /reason is unknown/);
+});
+
+test("overlay commands use the registered names and preserve exact destructive and Save payloads", async () => {
+  const ipc = fakeIpc();
+  const target = { server: SERVER, channel: CHANNEL, object: id32(7) };
+  const targetResult = { channel: CHANNEL, object: id32(7) };
+  const archiveResult = { v: 1, kind: "overlayArchive", archive: id64(5), basis: id64(1), content: id64(3), branch: id64(2), generation: "4", author: ME, accepted: 2, provenance: { kind: "closing" }, replayable: true, physicalBytes: "100", readOnly: true, authority: false, terminal: true };
+  ipc.on("studio_overlay_read", () => ({ v: 1, kind: "absent", ...targetResult }));
+  ipc.on("studio_overlay_lifecycle", () => ({ v: 1, kind: "overlayLifecycle", ...targetResult, branch: null, prepared: false, eligibility: null, manualReason: null, handoffAttempt: null, unconfirmedState: null, archive: null, disposed: null, transferred: false }));
+  ipc.on("studio_overlay_export", () => ({ ...archiveResult, kind: "overlayExport", preserved: false, notReplayable: null, physicalBytes: undefined, format: "catcoms-studio-draft-v1", bytes: 3, bytesB64: b64(new Uint8Array([1, 2, 3])) }));
+  ipc.on("studio_overlay_archive", () => ({ ...archiveResult, kind: "overlayArchived", preserved: true, notReplayable: null }));
+  ipc.on("studio_overlay_archive_read", () => archiveResult);
+  ipc.on("studio_overlay_archive_export", () => ({ ...archiveResult, kind: "overlayArchiveExport", format: "catcoms-studio-draft-v1", bytes: 3, bytesB64: b64(new Uint8Array([1, 2, 3])) }));
+  ipc.on("studio_overlay_archive_release", () => ({ v: 1, kind: "overlayArchiveReleased", reconcileRequired: true }));
+  ipc.on("studio_overlay_copy_preview", () => ({ v: 1, kind: "overlayCopyPreview", source: targetResult, destination: targetResult, epochId: id32(8), expectedProjection: id64(9), disposition: "ready", body: "{}", originalAuthor: ME, sourceOps: [id64(10)], preservesBranch: false, provisional: true }));
+  ipc.on("studio_overlay_copy_apply", () => ({ v: 1, kind: "overlayCopyApplied", ...targetResult, contentSaved: true, alreadySaved: false, provisional: true, branchPreserved: false }));
+  ipc.on("studio_overlay_dispose", () => ({ v: 1, kind: "overlayDisposed", ...targetResult, author: ME, provenance: { kind: "closing" }, basis: id64(1), branch: id64(2), content: id64(3), generation: "4", disposal: { mode: "discarded" }, accepted: 2, sequence: "1", atMs: "2", terminal: true }));
+  ipc.on("studio_unconfirmed_overlay_save_begin", () => ({ v: 1, kind: "unconfirmedOverlaySaveTicket", ...targetResult, basis: id64(1), branch: id64(2), provenance: "unconfirmed" }));
+  ipc.on("studio_unconfirmed_overlay_save", () => ({ v: 1, kind: "unconfirmedOverlaySave", ...targetResult, state: "saved", basis: id64(1), accepted: 3, localOnly: true, provisional: true, provenance: "unconfirmed" }));
+
+  await overlayRead(ipc, target);
+  await overlayLifecycle(ipc, target);
+  await overlayExport(ipc, target);
+  await overlayArchive(ipc, target);
+  await overlayArchiveRead(ipc, target);
+  await overlayArchiveExport(ipc, target);
+  await overlayArchiveRelease(ipc, target, id64(5), "release-local-archive");
+  const choice = { kind: "title" as const, value: id64(10) };
+  const destination = { channel: CHANNEL, object: id32(7) };
+  await overlayCopyPreview(ipc, target, destination, choice, "copy");
+  const edit = { destination, choice, mode: "copy" as const, epochId: id32(8), expectedProjection: id64(9), nonce: id32(11), body: "{}" };
+  await overlayCopyApply(ipc, target, edit);
+  const disposal = { branch: id64(2), content: id64(3), accepted: 2, mode: { kind: "discard" as const, confirmation: "destroy-local-draft" as const } };
+  await overlayDispose(ipc, target, disposal);
+  await unconfirmedOverlaySaveBegin(ipc, target);
+  const save = { basis: id64(1), branch: id64(2), nonce: id32(12), body: "{}" };
+  await unconfirmedOverlaySave(ipc, target, save);
+
+  assert.deepEqual(ipc.calls.map((c) => c.cmd), [
+    "studio_overlay_read", "studio_overlay_lifecycle", "studio_overlay_export",
+    "studio_overlay_archive", "studio_overlay_archive_read", "studio_overlay_archive_export",
+    "studio_overlay_archive_release", "studio_overlay_copy_preview", "studio_overlay_copy_apply",
+    "studio_overlay_dispose", "studio_unconfirmed_overlay_save_begin", "studio_unconfirmed_overlay_save",
+  ]);
+  assert.deepEqual(ipc.calls[6].args, { server: SERVER, channel: CHANNEL, object: id32(7), archive: id64(5), confirmation: "release-local-archive" });
+  assert.deepEqual(ipc.calls[9].args.disposal, disposal);
+  assert.deepEqual(ipc.calls[11].args.save, save);
 });
 
 test("event payloads parse with their documented scope fields and refuse unknown states", () => {

@@ -13,7 +13,8 @@ pub(crate) fn payload(server: u64, target: StudioTarget, state: S) -> Value {
     "state":match state {
         S::Open=>"open", S::Closing=>"closing", S::Settled=>"settled", S::Fault=>"fault",
         S::RecoveryAvailable=>"recoveryAvailable", S::RecoveryEvictionPending=>"recoveryEvictionPending",
-        S::RefreshRequired=>"refreshRequired",
+        S::RefreshRequired=>"refreshRequired", S::Repairing=>"repairing",
+        S::StorageRefused=>"storageRefused",
     }})
 }
 
@@ -30,6 +31,8 @@ mod tests {
             (S::RecoveryAvailable, "recoveryAvailable"),
             (S::RecoveryEvictionPending, "recoveryEvictionPending"),
             (S::RefreshRequired, "refreshRequired"),
+            (S::Repairing, "repairing"),
+            (S::StorageRefused, "storageRefused"),
         ];
         for (state, name) in states {
             let index = payload(7, StudioTarget::Index { channel: [255; 16] }, state);
