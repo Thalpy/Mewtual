@@ -29,16 +29,19 @@ and ranks the live hazards in that path.
 
   | Check | Result |
   |---|---|
-  | `npm --prefix apps/desktop test` | 1382/1382 |
+  | `npm --prefix apps/desktop test` | 1389/1389 |
   | `npm run check` | 0 errors |
   | `npm run build` | pass |
-  | `node scripts/claims-webrtc-check.mjs` (Chromium 141; three members as separate processes) | 36/36 in each of three runs |
+  | `node scripts/claims-webrtc-check.mjs` (Chromium 141; three members as separate processes) | 34/34 checks, plus 2 notes, in each of three runs |
   | `test:flows` (Chromium via `EDGE_PATH`, `--no-sandbox` wrapper for root) | 9/9 |
 
   - The WebRTC check includes a genuine SIGSTOP disconnect and recovery: both the held and the
     direct Pass orderings occurred across the runs. It also includes the old-build stream-8 case:
     23 frames sent on stream 8; `inst`, voice and the connection unaffected.
   - Each new behaviour is mutation-checked (GATE5-DESIGN 9.1).
+  - An independent review of this round found nothing blocking: one MEDIUM, a held replay
+    refusing an Ask, and four LOWs. All are fixed, with regressions; see GATE5-DESIGN section 14.
+    The figures above are from after those fixes.
   - No Rust changed this round; the Rust record below stands.
   - `test:startup` now resolves the binary name per platform. Against a fresh desktop debug build
     under Xvfb (Linux, WebKitGTK), it passes: "application startup completed".

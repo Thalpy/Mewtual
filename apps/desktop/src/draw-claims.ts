@@ -28,12 +28,14 @@
 // (`send` returned true without throwing). A refused or throwing send leaves that record alone, so
 // the next flush (every action, every 1 s tick, every recovery) retries on that edge only, and an
 // edge that took a frame is never sent it again. What the record says the receiver holds and this
-// device no longer asserts gets a Release; anything older than 90 s the receiver has expired.
+// device no longer asserts gets a Release, however long ago it was taken: a frame the transport
+// took may still be in flight after a long outage, and the Release must follow it.
 //
 // Reachability: while a peer's connection is not "connected", its entries are hidden from every
 // view and its deliveries are held (bounded); recovery shows what is still live and applies the
-// held frames in order, so a Pass sent during the gap still lands. Failure closes the channel,
-// which drops both.
+// held frames in order, so a Pass sent during the gap still lands. A link that never recovers
+// stays that way (the app restarts ICE on the same connection) until the peer is removed or the
+// call ends, which drops both.
 //
 // Time and randomness are injected (`now`, `randomHex`) so tests are deterministic.
 
@@ -198,16 +200,21 @@ type ChannelSession = { sn: string | null; highQ: number; retired: string[]; ses
 type PeerBudget = { admission: RtPeerAdmission; claims: RtTokenBucket; muted: boolean };
 /** What one receiver last accepted from me for one frame. */
 type Told = { obj: string; fr: string; kind: "claim" | "ask"; atMs: number };
+/** A delivery held from an unreachable edge: its arrival time and its frame key. */
+type Held = { raw: string; atMs: number; key: string };
 type Edge = {
   send: (raw: string) => boolean;
   open: boolean;
   /** Frame key -> what this edge's transport took for it; changed only by a send that succeeded. */
   told: Map<string, Told>;
-  /** Mirrors that receiver's claim bucket for me, charged only for frames the transport took. */
+  /**
+   * Mirrors that receiver's claim bucket for me (per peer identity for the call, as the receiver
+   * keeps it), charged only for frames the transport took.
+   */
   bucket: RtTokenBucket;
   /** The connection left "connected": entries hidden, deliveries held, nothing sent. */
   suspended: boolean;
-  held: { raw: string; atMs: number }[];
+  held: Held[];
 };
 type Wanted = { key: string; obj: string; fr: string; kind: "claim" | "ask" };
 
@@ -255,6 +262,10 @@ export class DrawClaimsSession {
   private readonly edges = new Map<DrawChannel, Edge>();
   private readonly sessions = new WeakMap<DrawChannel, ChannelSession>();
   private readonly budgets = new Map<string, PeerBudget>();
+  // My side of each receiver's claim bucket. Per identity for the whole call, never per channel:
+  // the receiver's bucket survives a channel replacement, so a fresh one here would let a new edge
+  // send a burst that receiver must refuse.
+  private readonly sendBuckets = new Map<string, RtTokenBucket>();
   private readonly entries = new Map<string, Entry>();
   private disposed = false;
 
@@ -292,8 +303,7 @@ export class DrawClaimsSession {
       send,
       open: false,
       told: new Map(),
-      // Each receiver charges my claims and asks against its own bucket, so pacing is per edge.
-      bucket: new RtTokenBucket(CLAIM_FRAME_BUCKET_BURST, CLAIM_FRAME_BUCKET_RATE),
+      bucket: this.sendBucketFor(peer),
       suspended: false,
       held: [],
     });
@@ -325,7 +335,8 @@ export class DrawClaimsSession {
    * The peer connection left "connected" (disconnected, failed). Until `edgeReady` says it is back,
    * that peer is absent: its entries leave every view at once (they keep expiring underneath), a
    * delivery that still arrives is held rather than applied, and nothing is sent to it. A link that
-   * never recovers closes its channel, which drops the entries and the held frames.
+   * never recovers stays suspended (its hidden entries keep expiring, at most DRAW_HOLD_MAX frames
+   * wait) until the peer is removed, its channel closes, or the call ends.
    */
   peerUnreachable(peer: string): void {
     if (this.disposed) return;
@@ -350,6 +361,7 @@ export class DrawClaimsSession {
     this.edges.clear();
     this.entries.clear();
     this.budgets.clear();
+    this.sendBuckets.clear();
     this.localClaim = null;
     this.localAsk = null;
     this.passed = null;
@@ -389,8 +401,18 @@ export class DrawClaimsSession {
       // is applied (session and sequence checked then), in order, only if the connection recovers.
       const decoded = decodeDrawFrame(admitted.raw);
       if (!decoded.ok) return decoded;
-      edge.held.push({ raw: admitted.raw, atMs: now });
-      if (edge.held.length > DRAW_HOLD_MAX) edge.held.shift();
+      edge.held.push({ raw: admitted.raw, atMs: now, key: frameKey(decoded.frame.obj, decoded.frame.fr) });
+      if (edge.held.length > DRAW_HOLD_MAX) {
+        // Shed the oldest frame a later held frame for the same (obj, fr) supersedes; only when
+        // none is superseded, the oldest of all. A Release is never shed while it is the latest
+        // word on its frame.
+        let drop = 0;
+        for (let i = 0; i < edge.held.length; i += 1) {
+          const key = edge.held[i]!.key;
+          if (edge.held.some((h, j) => j > i && h.key === key)) { drop = i; break; }
+        }
+        edge.held.splice(drop, 1);
+      }
       return { ok: false, reason: "held" };
     }
     return this.apply(channel, admitted.raw, now, now);
@@ -428,7 +450,9 @@ export class DrawClaimsSession {
     if (action !== "release") {
       const held = [...this.entries.values()].filter((e) => e.peer === peer && !(sessionChange && e.channel === channel)).length;
       if (!retained && held >= CLAIM_MAX_LIVE_PER_SENDER) return { ok: false, reason: "claim-cap" };
-      if (!budget.claims.charge(now)) return { ok: false, reason: "claim-rate" };
+      // Charged at the frame's arrival: held frames replayed together on recovery must not
+      // exhaust a bucket they arrived within (nothing else charges a peer while it is suspended).
+      if (!budget.claims.charge(seenMs)) return { ok: false, reason: "claim-rate" };
     }
 
     // Commit: session, sequence, then the entry.
@@ -650,8 +674,6 @@ export class DrawClaimsSession {
   private reconcileEdge(edge: Edge): void {
     const now = this.now();
     const want = this.wanted(now);
-    // Whatever that receiver last heard about 90 s ago it has expired: nothing to withdraw there.
-    for (const [key, told] of edge.told) if (!(now - told.atMs < CLAIM_TTL_MS)) edge.told.delete(key);
     // Withdraw first, so the receiver's per-sender cap never sees more of mine than I assert.
     for (const [key, told] of edge.told) {
       if (want.has(key)) continue;
@@ -771,6 +793,15 @@ export class DrawClaimsSession {
 
   private prune(now: number): boolean {
     return this.dropEntries((e) => !(now - e.seenMs < CLAIM_TTL_MS), false);
+  }
+
+  private sendBucketFor(peer: string): RtTokenBucket {
+    let bucket = this.sendBuckets.get(peer);
+    if (!bucket) {
+      bucket = new RtTokenBucket(CLAIM_FRAME_BUCKET_BURST, CLAIM_FRAME_BUCKET_RATE);
+      this.sendBuckets.set(peer, bucket);
+    }
+    return bucket;
   }
 
   private budgetFor(peer: string): PeerBudget {

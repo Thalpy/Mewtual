@@ -699,7 +699,10 @@ test("an Ask still undelivered when it lapses is never sent; a delivered one is 
   clock.advance(1_000);
   a.session.tick();
   assert.deepEqual(ab.xy.took, [], "the lapsed Ask is not delivered late");
-  assert.deepEqual(kinds(ac.xy.took), ["ask:11"], "C's receiver expired it on its own clock: no Release needed");
+  // C's receiver expired it on its own clock, but the Release still follows (a frame the transport
+  // took may arrive late after an outage); at C it removes nothing.
+  assert.deepEqual(kinds(ac.xy.took), ["ask:11", "release:11"]);
+  assert.deepEqual(c.session.peerEntries(), []);
 });
 
 test("moving on while a claim is undelivered: the new frame is claimed, the old one never named", () => {
@@ -841,24 +844,127 @@ test("while I see a peer as unreachable I send it nothing; recovery sends only w
   assert.deepEqual(b.session.peerEntries(OBJ).map((e) => [e.fr, e.kind]), [[FR2, "claim"], [FR3, "ask"]]);
 });
 
-test("held deliveries are bounded and dropped when the peer's channel auto-mutes", () => {
+function suspendedEdge() {
   const clock = new FakeClock();
   const a = member(A, clock, 1);
   const chan = a.session.openEdge(B, () => true)!;
   a.session.edgeReady(chan);
   a.session.peerUnreachable(B);
-  // A claim, then more than the bound of later frames (no-op Releases of another frame).
+  return { clock, a, chan };
+}
+
+test("held deliveries are bounded: superseded frames are shed first", () => {
+  const { a, chan } = suspendedEdge();
+  // A claim, then more than the bound of later frames for one other frame.
   assert.deepEqual(a.session.receive(chan, frame(SN1, 0, FR1, 1, 0)), { ok: false, reason: "held" });
   for (let q = 1; q <= DRAW_HOLD_MAX; q += 1) {
     assert.deepEqual(a.session.receive(chan, frame(SN1, q, FR2, 0, 0)), { ok: false, reason: "held" });
   }
   a.session.edgeReady(chan);
-  assert.deepEqual(a.session.peerEntries(), [], "only the newest DRAW_HOLD_MAX were kept: the oldest (the claim) went first");
-  a.session.peerUnreachable(B);
+  assert.deepEqual(a.session.peerEntries().map((e) => e.fr), [FR1], "the claim, still the latest word on FR1, survived");
+});
+
+test("held deliveries are bounded: with nothing superseded, the oldest goes", () => {
+  const { a, chan } = suspendedEdge();
+  a.session.receive(chan, frame(SN1, 0, FR3, 1, 0));
+  for (let q = 1; q <= DRAW_HOLD_MAX; q += 1) a.session.receive(chan, frame(SN1, q, q.toString(16).padStart(32, "0"), 0, 0));
+  a.session.edgeReady(chan);
+  assert.deepEqual(a.session.peerEntries(), [], "33 distinct frames: the oldest, the claim, was shed");
+});
+
+test("malformed deliveries are refused while unreachable, and an auto-mute discards what was held", () => {
+  const { clock, a, chan } = suspendedEdge();
   assert.deepEqual(a.session.receive(chan, "{"), { ok: false, reason: "json" }, "malformed is refused now, never held");
-  assert.deepEqual(a.session.receive(chan, frame(SN1, 100, FR2, 1, 0)), { ok: false, reason: "held" });
+  assert.deepEqual(a.session.receive(chan, frame(SN1, 0, FR2, 1, 0)), { ok: false, reason: "held" });
   for (let ms = 0; ms < 30_000; ms += 1) { clock.advance(1); a.session.receive(chan, "{"); }
   a.session.edgeReady(chan);
   assert.deepEqual(a.session.peerEntries(), [], "an auto-mute discards what was held");
+});
+
+// --- Second review round (32e37c3..32e089b) ------------------------------------------------------
+
+test("held frames are charged at arrival, so a recovery replay cannot refuse the newest Ask", () => {
+  // MEDIUM-1: replaying ten held claims and an Ask at one instant spent the receiver's burst and
+  // refused the Ask, which the sender had recorded as taken and never re-sent.
+  const clock = new FakeClock();
+  const a = member(A, clock, 1);
+  const b = member(B, clock, 2);
+  const ab = link(a, A, b, B);
+  clock.advance(10_000);
+  b.session.peerUnreachable(A); // B sees A unreachable; A still sees B connected
+  const ids = Array.from({ length: 10 }, (_, i) => (i + 1).toString(16).padStart(32, "0"));
+  for (const fr of ids) a.session.claim(OBJ, fr);
+  clock.advance(1_000);
+  a.session.ask(OBJ, FR5);
+  assert.ok(kinds(ab.xy.took).includes("ask:55"), "A's transport took the Ask");
+  clock.advance(5_000);
+  b.session.edgeReady(ab.y);
+  assert.deepEqual(b.session.peerEntries().filter((e) => e.kind === "ask").map((e) => e.fr), [FR5], "the replayed Ask was admitted");
+});
+
+test("a Release follows a frame taken long ago, so a claim delivered after a long outage is withdrawn", () => {
+  // LOW-1: a record aged out 90 s after it was TAKEN dropped the owed Release, but SCTP could still
+  // deliver the claim itself after the outage; the receiver then showed it for another 90 s.
+  const clock = new FakeClock();
+  const a = member(A, clock, 1);
+  const b = member(B, clock, 2);
+  const ab = link(a, A, b, B);
+  ab.xy.mode = "queue"; // the path is silently dead; the association buffers
+  a.session.claim(OBJ, FR1);
+  clock.advance(5_000);
+  a.session.peerUnreachable(B);
+  b.session.peerUnreachable(A);
+  a.session.selectionChanged(OBJ, FR2);
+  a.session.autoClaim(OBJ, FR2);
+  for (let i = 0; i < 95; i += 1) { clock.advance(1_000); a.session.tick(); b.session.tick(); }
+  a.session.edgeReady(ab.x);
+  b.session.edgeReady(ab.y);
+  ab.xy.flush();
+  assert.deepEqual(kinds(ab.xy.took), ["claim:11", "release:11", "claim:22"]);
+  assert.deepEqual(b.session.peerEntries().map((e) => e.fr), [FR2], "no ghost of the old frame");
+});
+
+test("pacing is per peer for the call: a replaced channel does not start with a fresh burst", () => {
+  // LOW-2: the receiver's bucket survives a channel replacement; a fresh sender bucket per edge let
+  // the new edge's claim and Ask be refused (and the Ask recorded as taken).
+  const clock = new FakeClock();
+  const a = member(A, clock, 1);
+  const b = member(B, clock, 2);
+  const refusals: string[] = [];
+  const pair = () => {
+    let atB: DrawChannel | null = null;
+    const atA = a.session.openEdge(B, (raw) => {
+      const r = b.session.receive(atB!, raw);
+      if (!r.ok) refusals.push(r.reason);
+      return true;
+    })!;
+    atB = b.session.openEdge(A, () => true);
+    a.session.edgeReady(atA);
+    b.session.edgeReady(atB!);
+  };
+  pair();
+  b.session.claim(OBJ, FR5);
+  const ids = Array.from({ length: CLAIM_FRAME_BUCKET_BURST }, (_, i) => (i + 1).toString(16).padStart(32, "0"));
+  for (const fr of ids) a.session.claim(OBJ, fr);
+  pair(); // the peer connection is replaced straight after the burst
+  a.session.ask(OBJ, FR5);
+  for (let i = 0; i < 10; i += 1) { clock.advance(1_000); a.session.tick(); }
+  assert.deepEqual(refusals, [], "nothing was sent that the receiver had to refuse");
+  assert.deepEqual(b.session.asksOnMine().map((e) => e.peer), [A], "the Ask arrived once pacing allowed");
+});
+
+test("a Release held behind a flood of other frames is not shed", () => {
+  // LOW-3: shedding the oldest held frame could drop a Release and let a stale claim reappear.
+  const clock = new FakeClock();
+  const a = member(A, clock, 1);
+  const chan = a.session.openEdge(B, () => true)!;
+  a.session.edgeReady(chan);
+  a.session.receive(chan, frame(SN1, 0, FR1, 1, 0));
+  assert.equal(a.session.peerEntries().length, 1);
+  a.session.peerUnreachable(B);
+  a.session.receive(chan, frame(SN1, 1, FR1, 0, 0)); // B released FR1
+  for (let q = 2; q <= DRAW_HOLD_MAX + 1; q += 1) a.session.receive(chan, frame(SN1, q, FR2, 0, 0));
+  a.session.edgeReady(chan);
+  assert.deepEqual(a.session.peerEntries(), [], "the Release survived, so the hidden claim did not come back");
 });
 

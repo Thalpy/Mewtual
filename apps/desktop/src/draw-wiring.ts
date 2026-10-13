@@ -84,7 +84,8 @@ export function openDrawEdge(
  * leaves "connected" stops showing as drawing at once, and what it still sends is held, not shown,
  * until this side sees the link "connected" again. Recovery shows its claims that are still live,
  * applies what was held (so a Pass sent during the gap lands), and tells it whatever it missed
- * from me. A link that never recovers closes the channel, which drops all of it.
+ * from me. A link that never recovers stays that way (the app restarts ICE on the same connection)
+ * until the peer is removed or the call ends.
  */
 export function drawConnectionState(
   claims: DrawClaimsSession,

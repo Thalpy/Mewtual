@@ -121,3 +121,17 @@ test("no data channels, or an ended call, leaves the edge without claims and clo
   assert.equal(openDrawEdge({ createDataChannel: () => dc }, claims, B, { live: () => true, changed: () => {} }), null);
   assert.equal(dc.closed, true);
 });
+
+test("a channel that is no longer open refuses the send, and the frame is retried when it is", () => {
+  const { claims, made, clock } = setup();
+  const dc = made[0]!.dc;
+  dc.open();
+  dc.readyState = "closing"; // the edge was readied, but the channel is going away
+  claims.claim(OBJ, FR1);
+  assert.deepEqual(dc.sent, [], "refused by the readyState check, not queued");
+  dc.readyState = "open";
+  clock.advance(1_000);
+  claims.tick();
+  assert.equal(dc.sent.length, 1);
+});
+

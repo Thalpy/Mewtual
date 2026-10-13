@@ -3819,12 +3819,15 @@ The four `on`/`ask` combinations:
   device, is "contested". Nothing resolves them.
 - **Unreachable.** While a peer's connection is not "connected" (disconnected or failed):
   - its entries are hidden from every view and from the Pass check, but keep expiring;
-  - its well-formed deliveries are held, at most `DRAW_HOLD_MAX` (32), oldest first, after being
-    charged, and malformed ones are refused (refusal `held` for a held frame);
+  - its well-formed deliveries are held after being charged (refusal `held`), and malformed ones
+    are refused. At most `DRAW_HOLD_MAX` (32) are held: on overflow, a frame superseded by a later
+    held frame for the same (obj, fr) goes first, otherwise the oldest;
   - nothing is sent to it.
 
   When this side sees "connected" again, its live entries reappear and the held frames are applied
-  in arrival order, aged from arrival.
+  in arrival order. They are aged from arrival and charged against the claim bucket at arrival.
+  A link that never recovers stays suspended (the app restarts ICE on the same connection) until
+  the peer is removed or the call ends.
 - **Clearing.** A peer's entries (and anything held) are dropped at once when:
   - its channel closes or is replaced;
   - it is removed (bye, roster revocation, closed);
@@ -3841,14 +3844,16 @@ The four `on`/`ask` combinations:
   `OperationError`.
   - Every action, 1 s tick and recovery reconciles that record with what this device asserts.
   - What the edge lacks is sent. What it took and I no longer assert gets a Release.
-  - Anything it took 90 s ago or more is forgotten (its receiver expired it).
+  - A record of something I no longer assert is kept until the edge takes its Release, however old
+    (the frame may still be in flight after an outage). A late Release is a no-op.
   - A refused or throwing send changes nothing and is retried next time, on that edge only.
   - Records are bounded (`DRAW_TOLD_MAX`, 8).
 - The claim is refreshed on each edge `CLAIM_RESEND_MS` (30 000 ms) after that edge took it. An
   edge that opens is told my claim and ask. An edge that recovers is told what changed meanwhile.
 - An Ask is sent once to each edge, when it takes it, and never refreshed.
-- Claims and Asks are paced per edge by a mirror of that receiver's claim bucket. A burst
-  coalesces to the latest claim, and a refused send is refunded.
+- Claims and Asks are paced by a mirror of each receiver's claim bucket, kept per peer identity
+  for the call, as the receiver keeps it. A burst coalesces to the latest claim, and a refused
+  send is refunded.
 - **Pass.** A holder's Pass is a Release, plus local suppression of auto-claim on that frame until
   the selection moves to another frame. An asker takes a frame only when an explicit Release of a
   live claim arrives from its holder while the asker's own Ask is live and nobody else claims it.

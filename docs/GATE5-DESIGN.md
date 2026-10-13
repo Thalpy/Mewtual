@@ -261,11 +261,15 @@ completes the hand-over by claiming (6.4).
   - A refused or throwing send changes nothing, so it is retried on that edge only.
   - An edge that took a frame is never sent it again, so receivers' countdowns do not restart.
   - A Release goes only to edges that took the claim or ask.
-  - Anything that edge's receiver has expired (90 s since it took it) is forgotten.
+  - A record of something I no longer assert is kept until that edge takes its Release, however
+    old. A frame the transport took may still be in flight after a long outage, and the Release
+    must follow it; at a receiver that already expired the entry, the Release is a no-op. Records
+    are bounded (`DRAW_TOLD_MAX`).
   - So an Ask or a Pass whose send failed still arrives once the transport recovers, before
     expiry.
-- **Pacing.** Each edge mirrors its receiver's claim bucket and coalesces a burst to the latest
-  claim. A send the transport refused is refunded. Ordered SCTP can still deliver a stalled backlog
+- **Pacing.** I mirror each receiver's claim bucket per peer identity for the whole call, as the
+  receiver keeps it, so a replaced channel does not start a fresh burst. A burst coalesces to the
+  latest claim, and a send the transport refused is refunded. Ordered SCTP can still deliver a stalled backlog
   in one burst, so this lowers rather than eliminates refusals, and the 30 s refresh repairs a
   dropped claim (review L1).
 
@@ -292,14 +296,20 @@ completes the hand-over by claiming (6.4).
   leaves "connected" (disconnected or failed):
   - Its entries leave every view at once. They keep expiring underneath.
   - A delivery that still arrives (a delayed `onmessage`, or traffic after the peer recovered but
-    before this side sees it) is held, not applied. Holding is bounded (`DRAW_HOLD_MAX`, oldest
-    first), malformed frames are refused at once, and an auto-mute discards everything held.
+    before this side sees it) is held, not applied, and charged against the claim bucket at its
+    arrival time when replayed. Holding is bounded (`DRAW_HOLD_MAX`): on overflow, a frame that a
+    later held frame for the same (obj, fr) supersedes goes first, so a Release that is still the
+    latest word on its frame is never shed; with nothing superseded, the oldest goes. Malformed
+    frames are refused at once, and an auto-mute discards everything held.
   - Nothing is sent to that peer.
   - When this side sees "connected" again, the entries still within 90 s reappear and the held
     frames are applied in arrival order. A Pass sent during the gap therefore lands.
   - An unreachable claimant does not block a Pass to someone else.
-- **What drops a peer's entries:** its `draw` channel closing (including a link that never
-  recovers), `removePeer` (bye, revocation, `closed`) or the end of the call.
+- **What drops a peer's entries:** its `draw` channel closing, `removePeer` (bye, revocation,
+  `closed`) or the end of the call.
+- A link that never recovers stays suspended: the app answers "failed" with an ICE restart on the
+  same connection. Its hidden entries keep expiring, and at most `DRAW_HOLD_MAX` frames wait,
+  until the peer is removed or the call ends.
 
 ## 7. Studio surface
 
@@ -350,7 +360,7 @@ All of these run on deterministic seams.
 
 - **`rt-admission.test.ts`:** bucket monotonicity, charge-before-parse, UTF-8 cap, auto-mute and
   unmute, per-kind capabilities, and the pinned jam limits. The jam suite is unchanged.
-- **`draw-claims.test.ts` (39 tests):**
+- **`draw-claims.test.ts` (45 tests):**
   - Codec exactness, two-member observation with the 30 s refresh, and the 89 999 / 90 000 ms
     boundary.
   - Ask countdown, Pass hand-over and suppression.
@@ -378,10 +388,16 @@ All of these run on deterministic seams.
     - close drops everything;
     - nothing is sent while unreachable;
     - holding is bounded, malformed frames are refused, and an auto-mute discards what is held.
+  - Second review round: held frames charged at arrival (a recovery replay cannot refuse the
+    newest Ask); a Release follows a frame taken before a long outage; pacing per peer survives a
+    channel replacement; a held Release is not shed; overflow sheds superseded frames first, else
+    the oldest; a closing channel's refusal is retried (`draw-wiring.test.ts`).
   - Mutation checks: the expiry boundary, the replay comparison and the Pass-trigger condition;
     then, for the PR #43 fixes, ignoring the send result, treating a throw as success, no refund,
     no hiding, no holding, sending while suspended, refreshing an Ask, no record bound, an
-    unbounded hold, holding garbage, and a hidden claim blocking a Pass. Each fails a test.
+    unbounded hold, holding garbage, and a hidden claim blocking a Pass; then, for the second
+    round, charging held frames at replay time, forgetting records after 90 s, a fresh bucket per
+    edge, always shedding the oldest held frame, and no `readyState` check. Each fails a test.
     Removing *both* mute defences fails one; each alone is redundant by design.
 - **`draw-wiring.test.ts`:** the channel parameters; retry after a refused or throwing send; `onopen`
   readies only a live edge; messages and close reach the session, and views rebuild only on change;
@@ -418,7 +434,8 @@ the engine WebView2 ships. Each holds real `RTCPeerConnection`s with a fake micr
 and drives the pages over plain CDP. Time-dependent steps skew each member's injected clock while
 the transport stays real.
 
-Result: 36/36 checks in each of three consecutive runs on 2026-10-13.
+Result: 34/34 checks, plus two notes (timing observations that cannot fail), in each of three
+consecutive runs on 2026-10-13 after the second review round.
 
 - **Claim, Ask and Pass** across data channels, with a notice. A contested frame is shown on both
   sides.
@@ -430,10 +447,11 @@ Result: 36/36 checks in each of three consecutive runs on 2026-10-13.
   the other sees `connected → disconnected → connected` after about 6 s:
   - the claim is hidden at once;
   - the Pass the frozen member sends on waking lands;
-  - both orderings occurred across the runs: the Pass was held then applied (run 2), and arrived
-    after recovery (runs 1 and 3).
-- **Leave and rejoin.** Leaving drops that member's claims at the other. A rejoined member's
-  claims flow both ways.
+  - which ordering occurs is timing, so it is a note, not a check. Both occurred across the runs:
+    the Pass was held then applied (runs 2 and 3), and it arrived after recovery (run 1). The
+    held path is asserted deterministically in `draw-claims.test.ts`.
+- **Leave and rejoin.** Leaving drops (not merely hides) that member's claims at the other: its
+  channel closes and the book is empty. A rejoined member's claims flow both ways.
 - **Mixed versions.** An old build with no channel 8 connects to a current one, which sends claim
   frames on stream 8 toward it (engine stats: 23 messages, the channel stays `open`).
   - `inst` traffic still flows both ways (+20 each).
@@ -557,9 +575,22 @@ D1.
 | Finding | Resolution |
 |---|---|
 | 1 (MEDIUM): a failed send silently discarded an Ask or Pass (`send` false or `OperationError`; `flushAsk` marked it sent; a failed Pass Release had nothing to retry) | Fixed in `f178666`: per-edge delivery records (6.4). The regressions requested: false, `OperationError`, recovery before expiry, cancel while pending, partial success across two edges, plus Pass retry, lapse while pending, replacement and bounds. All mutation-checked (9.1). |
-| 2 (acceptance blocker): no real desktop claim path, no mixed-version check | Partly closed. The wiring moved to `draw-wiring.ts` (shared by the App and the check, behaviour-tested). Real-WebRTC evidence: 36/36 three times, including a genuine disconnect and recovery and the mixed-version check (9.3). On WebKitGTK the check is moot, because there is no WebRTC; WKWebView is unverified (10). **The two-desktop run with sign-off remains the owner's.** |
-| 3 (lifecycle gap): disconnect cleared entries but a later delivery could repopulate them | Fixed in `f178666`: suspension hides and holds, and recovery restores and applies (6.6). It is tested with a delayed delivery during the interval, and over real WebRTC, where the held path occurred. |
+| 2 (acceptance blocker): no real desktop claim path, no mixed-version check | Partly closed. The wiring moved to `draw-wiring.ts` (shared by the App and the check, behaviour-tested). Real-WebRTC evidence: 34/34 three times, including a genuine disconnect and recovery and the mixed-version check (9.3). On WebKitGTK the check is moot, because there is no WebRTC; WKWebView is unverified (10). **The two-desktop run with sign-off remains the owner's.** |
+| 3 (lifecycle gap): disconnect cleared entries but a later delivery could repopulate them | Fixed in `f178666`: suspension hides and holds, and recovery restores and applies (6.6). It is tested deterministically with a delayed delivery during the interval, and exercised over real WebRTC, where the held ordering was observed in two of three runs (9.3). |
 | Records: the Gate 4 ledger was stale | Fixed: GATE4-ACCEPTANCE records the merge of PR #27 (`e8aad1a` → `ff8e276`, 28/28 hosted checks) and supersedes "not merge-ready" and "Gate 5 remains closed". |
 | Records: D1 still "please confirm" | Left with the owner, with the specific behaviours spelled out (10). |
 | The inherited inviter HIGH | Unchanged and out of scope (D5, THREAT-MODEL item 7). Gate 5 acceptance is not whole-application security acceptance. |
+
+## 14. Second review round (2026-10-13)
+
+An independent adversarial review of `32e37c3..32e089b` found nothing blocking, one MEDIUM and four
+LOWs. All are fixed, with regressions that fail without the fix.
+
+| Finding | Resolution |
+|---|---|
+| MEDIUM-1: replaying held frames at recovery charged them all at one instant, so the newest Ask was refused (`claim-rate`) and, recorded as taken, never re-sent. This regression came from holding. | Held frames are charged at their arrival time. Nothing else charges a peer while its only channel is suspended, and the bucket ignores a backward step. |
+| LOW-1: a record aged out 90 s after it was *taken* dropped the owed Release, but SCTP could deliver the claim after a long outage, leaving a 90 s ghost | Records of what I no longer assert are kept until the edge takes the Release (bounded). A late Release is a no-op at a receiver that already expired the entry. |
+| LOW-2: a fresh sender bucket per edge, while the receiver's bucket lasts the call per identity | The sender bucket is per peer identity for the call. |
+| LOW-3: shedding the oldest held frame could drop a Release | Overflow sheds superseded frames first. |
+| LOW-4: harness and documentation accuracy | Two logged rows are now notes, not checks (34 checks). The leave check asserts drop, not hide. "Failure closes the channel" is corrected (6.6). The record-ageing and pacing wording is corrected. The `readyState` refusal branch now has a test. |
 

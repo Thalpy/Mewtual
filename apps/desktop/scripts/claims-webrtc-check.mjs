@@ -146,6 +146,7 @@ const H = (window.harness = {
       notices: this.notices.map((n) => [n.kind, n.from.slice(0, 2), n.fr.slice(0, 2)]),
       conn: Object.fromEntries(Object.entries(this.peers).map(([k, p]) => [k.slice(0, 2), p.pc.connectionState])),
       drawDc: Object.fromEntries(Object.entries(this.peers).map(([k, p]) => [k.slice(0, 2), p.edge ? p.edge.dc.readyState : "none"])),
+      quiet: this.claims.isQuiet(),
     };
   },
   contested(obj, fr) { return Claims.frameClaimState(Claims.snapshotClaims(this.claims), obj, fr).contested; },
@@ -239,9 +240,15 @@ async function link(x, xId, y, yId, { xDraw = true, yDraw = true } = {}) {
 // --- checks ------------------------------------------------------------------------------------
 
 const results = [];
+const notes = [];
 function record(name, ok, detail) {
   results.push({ name, ok, detail });
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail === undefined ? "" : `  ${JSON.stringify(detail)}`}`);
+}
+/** An observation for the record, not a check: it can neither pass nor fail. */
+function note(name, detail) {
+  notes.push({ name, detail });
+  console.log(`NOTE  ${name}  ${JSON.stringify(detail)}`);
 }
 async function until(name, m, predicate, timeoutMs = 15_000) {
   const t0 = Date.now();
@@ -323,15 +330,17 @@ async function main() {
     record("B's notice names A", after.notices.some((n) => n[1] === a && n[2] === "33"), after.notices);
     const recv = (await B.eval("harness.recv")).slice(recvMark);
     // Either order is legitimate: "held" when the Pass arrived before B saw the link recover
-    // (applied on recovery), "release" when it arrived after. Both must end with B holding it.
-    record("B's deliveries from A around the gap (held = arrived while B still saw A unreachable)", true, recv.map((r) => r.why));
-    const statesB = await B.eval(`harness.states[${JSON.stringify(ID.A)}]`);
-    record("B's connection states for A", true, statesB);
+    // (applied on recovery), "release" when it arrived after. Both must end with B holding it,
+    // which the check above asserts; which order occurred is timing, so it is only noted.
+    note("B's deliveries from A around the gap (held = arrived while B still saw A unreachable)", recv.map((r) => r.why));
+    note("B's connection states for A", await B.eval(`harness.states[${JSON.stringify(ID.A)}]`));
 
     // 6. Leave and rejoin: B leaves the call; A drops B's claims; B rejoins and claims again.
     await until("A sees B's claim on 33 before B leaves", A, (v) => has(v, b, "33", "claim"));
     await B.eval("harness.leaveCall()");
-    await until("B leaving drops its claims at A", A, (v) => !v.entries.some((e) => e[0] === b), 20_000);
+    // Dropped, not merely hidden: A's book is empty (a hidden entry would keep it non-quiet) and
+    // its draw channel to B closed.
+    await until("B leaving drops its claims at A (channel closed, book empty)", A, (v) => !v.entries.some((e) => e[0] === b) && v.drawDc[b] === "closed" && v.quiet, 20_000);
     await B.eval(`harness.start(${JSON.stringify(ID.B)})`);
     await A.eval(`delete harness.peers[${JSON.stringify(ID.B)}]`);
     await link(A, ID.A, B, ID.B);
@@ -383,9 +392,9 @@ async function main() {
   }
   const failed = results.filter((r) => !r.ok);
   if (process.env.CLAIMS_WEBRTC_REPORT) {
-    writeFileSync(process.env.CLAIMS_WEBRTC_REPORT, JSON.stringify({ browser, at: new Date().toISOString(), results }, null, 2));
+    writeFileSync(process.env.CLAIMS_WEBRTC_REPORT, JSON.stringify({ browser, at: new Date().toISOString(), results, notes }, null, 2));
   }
-  console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
+  console.log(`\n${results.length - failed.length}/${results.length} checks passed (${notes.length} notes)`);
   process.exit(failed.length ? 1 : 0);
 }
 
