@@ -1170,10 +1170,14 @@
                 <p class="micro"><b style="color: {tint(a.peer)}">{who(a.peer)}</b> asked for this frame · {a.secondsLeft} s</p>
               {/each}
               {#if !frameClaims.mine}
+                <!-- My pending Ask stands on its own: it outlives a holder who went unreachable or
+                     whose claim expired, and a later Release can still hand the frame over, so its
+                     countdown and Cancel stay visible whether or not a claimant is shown. -->
+                {#if frameClaims.myAsk !== null}
+                  <p class="micro">you asked for it · {frameClaims.myAsk} s <button type="button" class="st-link" onclick={() => claimActions?.cancelAsk()}>cancel</button></p>
+                {/if}
                 {#if frameClaims.claimants.length}
-                  {#if frameClaims.myAsk !== null}
-                    <p class="micro">you asked for it · {frameClaims.myAsk} s <button type="button" class="st-link" onclick={() => claimActions?.cancelAsk()}>cancel</button></p>
-                  {:else}
+                  {#if frameClaims.myAsk === null}
                     <button type="button" class="st-btn ghost" title="ask them to pass this frame to you; you can still draw on it either way" onclick={() => claimActions?.ask(objectId, frameId)}>ask to draw it</button>
                   {/if}
                 {:else}

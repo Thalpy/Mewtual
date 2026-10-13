@@ -66,6 +66,30 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-10-13)
 
+- **Gate 5 follow-up on merged PR #43 (2026-10-13).** Branch `claude/cool-newton-yglssi`, from
+  `7cbe8cb`. The post-merge review found nothing HIGH and three code findings; all are fixed,
+  each with a regression that fails without the fix:
+  - **MEDIUM:** `Server::roles()` now materializes the owner and verified admin set once per call.
+    Before, a non-owner re-verified the published roster once per member.
+  - **LOW:** a delayed first `open` on the draw channel no longer undoes a recorded disconnect.
+    `openDrawEdge` readies the edge only while the connection is "connected".
+  - **LOW:** a live Ask keeps its countdown and Cancel in the Studio when no claimant is visible.
+    Cancelling it while the holder is hidden also stops a later Release from handing over.
+
+  Verification:
+
+  | Check | Result |
+  |---|---|
+  | `npm --prefix apps/desktop test` | 1397/1397 |
+  | `npm run check` | 0 errors |
+  | `npm run build` | pass |
+  | `scripts/claims-webrtc-check.mjs` | 34/34 |
+  | `catcoms-app` role and admin tests | pass |
+  | Strict Clippy (`catcoms-app`) | clean |
+  | `cargo fmt --check` | clean |
+
+  The two-desktop acceptance run is deferred by the owner.
+
 - **Gate 5: PR #43 review round (2026-10-13; still not accepted).** The review of
   `ff8e276..32e37c3` returned request changes. The response is GATE5-DESIGN section 13.
 

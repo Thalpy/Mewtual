@@ -988,3 +988,22 @@ test("asking again for a frame whose earlier Ask an unreachable edge took still 
   assert.equal(a.session.local().ask?.secondsLeft, 80);
 });
 
+test("an Ask cancelled while its holder is hidden is not completed by that holder's later Release", () => {
+  // Review LOW-3 (session half): the UI now keeps Cancel available while the holder is hidden;
+  // cancelling must really end the handover, even though the Release was already on its way.
+  const clock = new FakeClock();
+  const a = member(A, clock, 1);
+  const b = member(B, clock, 2);
+  const ab = link(a, A, b, B);
+  a.session.claim(OBJ, FR1);
+  b.session.ask(OBJ, FR1);
+  b.session.peerUnreachable(A);
+  assert.deepEqual(b.session.peerEntries(OBJ), [], "the holder is hidden");
+  assert.equal(b.session.local().ask?.fr, FR1, "the Ask is still live");
+  b.session.cancelAsk();
+  a.session.pass(OBJ, FR1); // held at B
+  b.session.edgeReady(ab.y);
+  assert.equal(b.session.local().claim, null, "the cancelled Ask took nothing");
+  assert.deepEqual(b.notices, []);
+});
+

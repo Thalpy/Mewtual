@@ -3901,7 +3901,8 @@ The four `on`/`ask` combinations:
 - No Studio edit, save or native path consults claims.
 - **Wiring.** `draw-wiring.ts` binds an edge:
   - `openDrawEdge` creates the channel, mints the capability, and routes `onopen` (live
-    generation only), `onmessage` and `onclose`;
+    generation, and only while the connection is "connected", so a delayed first `open` cannot
+    undo a recorded disconnect), `onmessage` and `onclose`;
   - `drawConnectionState` maps "connected" on an open channel to `edgeReady`, and any state other
     than new, connecting or connected to `peerUnreachable`.
 

@@ -26,7 +26,7 @@ class FakeChannel implements DrawDataChannel {
   deliver(data: string) { this.onmessage?.(new MessageEvent("message", { data })); }
 }
 
-function setup(opts: { live?: () => boolean; refuse?: boolean } = {}) {
+function setup(opts: { live?: () => boolean; connected?: () => boolean; refuse?: boolean } = {}) {
   let t = 1_000;
   const clock = { now: () => t, advance: (ms: number) => { t += ms; } };
   let n = 0;
@@ -41,7 +41,11 @@ function setup(opts: { live?: () => boolean; refuse?: boolean } = {}) {
     },
   };
   let changes = 0;
-  const edge = openDrawEdge(pc, claims, B, { live: opts.live ?? (() => true), changed: () => { changes += 1; } });
+  const edge = openDrawEdge(pc, claims, B, {
+    live: opts.live ?? (() => true),
+    connected: opts.connected ?? (() => true),
+    changed: () => { changes += 1; },
+  });
   return { claims, clock, made, edge, changes: () => changes };
 }
 
@@ -118,7 +122,7 @@ test("no data channels, or an ended call, leaves the edge without claims and clo
   const claims = new DrawClaimsSession({ self: A, now: () => t++, randomHex: (b) => "1".repeat(b * 2) });
   claims.dispose();
   const dc = new FakeChannel();
-  assert.equal(openDrawEdge({ createDataChannel: () => dc }, claims, B, { live: () => true, changed: () => {} }), null);
+  assert.equal(openDrawEdge({ createDataChannel: () => dc }, claims, B, { live: () => true, connected: () => true, changed: () => {} }), null);
   assert.equal(dc.closed, true);
 });
 
@@ -132,6 +136,41 @@ test("a channel that is no longer open refuses the send, and the frame is retrie
   dc.readyState = "open";
   clock.advance(1_000);
   claims.tick();
+  assert.equal(dc.sent.length, 1);
+});
+
+for (const lost of ["disconnected", "failed"] as const) {
+  test(`a first open that lands after "${lost}" does not undo the suspension`, () => {
+    // Review LOW-2: the channel's first open is a queued task that does not re-check the
+    // connection, so it can arrive after this side recorded the link as down.
+    let state: RTCPeerConnectionState = "connecting";
+    const { claims, made, edge } = setup({ connected: () => state === "connected" });
+    const dc = made[0]!.dc;
+    state = lost;
+    drawConnectionState(claims, B, state, edge, () => {});
+    dc.open(); // the delayed initial open
+    dc.deliver(encodeClaimFrame({ sn: SN, q: 0, obj: OBJ, fr: FR1, on: 1, ask: 0 }));
+    assert.deepEqual(claims.peerEntries(), [], "incoming claims stay held");
+    claims.claim(OBJ, FR1);
+    claims.tick();
+    assert.deepEqual(dc.sent, [], "outgoing claims stay unsent");
+    // Recovery on the same peer connection readies the already-open channel.
+    state = "connected";
+    drawConnectionState(claims, B, state, edge, () => {});
+    assert.equal(claims.peerEntries().length, 1, "what was held is applied");
+    assert.equal(dc.sent.length, 1, "and my claim goes out");
+  });
+}
+
+test("an open that lands before the connection reports connected is readied by that transition", () => {
+  let state: RTCPeerConnectionState = "connecting";
+  const { claims, made, edge } = setup({ connected: () => state === "connected" });
+  const dc = made[0]!.dc;
+  claims.claim(OBJ, FR1);
+  dc.open();
+  assert.deepEqual(dc.sent, [], "not yet connected: nothing readied");
+  state = "connected";
+  drawConnectionState(claims, B, state, edge, () => {});
   assert.equal(dc.sent.length, 1);
 });
 

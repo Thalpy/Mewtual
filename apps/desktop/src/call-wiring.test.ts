@@ -53,7 +53,7 @@ test("every edge gets a negotiated draw channel bound to a claim capability, tor
   // The wiring itself lives in draw-wiring.ts (behaviour-tested there, and run over real WebRTC by
   // scripts/claims-webrtc-check.mjs); the App must use it, for this exact peer and session.
   const create = body(app, "function createPeer(");
-  assert.match(create, /peer\.draw = openDrawEdge\(pc, claims, fp, \{\s*live: \(\) => callPeers\[fp\] === peer,/);
+  assert.match(create, /peer\.draw = openDrawEdge\(pc, claims, fp, \{\s*live: \(\) => callPeers\[fp\] === peer,\s*connected: \(\) => pc\.connectionState === "connected",/);
   assert.match(create, /drawConnectionState\(claims, fp, pc\.connectionState, peer\.draw, syncDrawClaims\)/);
   assert.doesNotMatch(app, /createDataChannel\(DRAW_CHANNEL_LABEL/, "no second, hand-rolled draw wiring");
   assert.match(body(app, "function removePeer("), /withDrawClaims\(\(s\) => s\.removePeer\(fp\)\)/);

@@ -795,6 +795,33 @@ test("CLAIM-UI-002: an ask on my frame is a sticky notice with a countdown and P
   }
 });
 
+test("CLAIM-UI-004: my live Ask keeps its countdown and Cancel when no claimant is visible", async () => {
+  // Review LOW-3: an unreachable holder is hidden (or its claim expired) while my Ask stays live,
+  // and a later Release can still hand the frame over, so the pending request must stay visible.
+  const { calls, actions } = recordingActions();
+  const claims = {
+    self: ME,
+    entries: [],
+    local: { claim: null, ask: { obj: OBJ, fr: F1, secondsLeft: 41 } },
+    asksOnMine: [],
+  };
+  const m = mountStudioWithClaims(openFlipnoteIpc(), claims, actions);
+  try {
+    await settled();
+    state.studio.selected = OBJ;
+    flushSync();
+    await settled(400);
+    assert.match(m.text(), /you asked for it · 41 s/);
+    assert.ok(m.button("claim this frame"), "nobody visibly holds it, so a direct claim is offered too");
+    assert.equal(m.button("ask to draw it"), undefined, "no second Ask while one is pending");
+    m.button("cancel")!.click();
+    flushSync();
+    assert.ok(calls.includes("cancelAsk"), calls.join("; "));
+  } finally {
+    m.done();
+  }
+});
+
 test("CLAIM-UI-003: outside a call the surface explains claims and offers no claim controls", async () => {
   const m = mountStudioWithClaims(openFlipnoteIpc(), null, null);
   try {

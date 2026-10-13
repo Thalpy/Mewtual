@@ -7615,7 +7615,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Exact per-device grants, filtered to current membership. Companions do not inherit.
+    /// On a non-owner this parses and signature-verifies the owner's published roster, so a
+    /// caller classifying many devices materializes it once (see `roles`).
     fn admin_set(&self) -> HashSet<DeviceId> {
+        #[cfg(test)]
+        ADMIN_SET_MATERIALIZATIONS.with(|n| n.set(n.get() + 1));
         let Some(owner) = self.sync.designated_committer_id() else {
             return HashSet::new();
         };
@@ -7652,11 +7656,25 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
     }
 
-    /// Roles keyed by canonical full identity for exact UI selection.
+    /// Roles keyed by canonical full identity for exact UI selection. One coherent snapshot per
+    /// call: the owner and the verified admin set are materialized once (a non-owner verifies the
+    /// published roster once, not once per member), then every current member is classified by
+    /// its full identity, exactly as `role_of` would.
     pub fn roles(&self) -> HashMap<String, String> {
+        let owner = self.sync.designated_committer_id();
+        let admins = self.admin_set();
         self.members()
             .into_iter()
-            .map(|id| (id.to_string(), self.role_of(&id).as_str().to_string()))
+            .map(|id| {
+                let role = if owner == Some(id) {
+                    Role::Owner
+                } else if admins.contains(&id) {
+                    Role::Admin
+                } else {
+                    Role::Member
+                };
+                (id.to_string(), role.as_str().to_string())
+            })
             .collect()
     }
 
@@ -8450,6 +8468,13 @@ impl<T: MeshTransport, R: CryptoRngCore> std::fmt::Debug for Server<T, R> {
             .field("members", &self.sync.member_count())
             .finish_non_exhaustive()
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times `Server::admin_set` was materialized on this thread. Thread-local because
+    /// unrelated fixtures run in parallel; a role-map regression counts its own calls.
+    static ADMIN_SET_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -11709,6 +11734,108 @@ mod tests {
         let outsider = DeviceId::from_bytes([99; 32]);
         assert!(alice.set_admin(&outsider, true).await.is_err());
         assert_eq!(alice.role_of(&outsider), Role::Member);
+    }
+
+    /// A non-owner's role map verifies the owner's published roster ONCE per build, not once per
+    /// member (review MEDIUM-1): the roster is untrusted input, and re-verifying the same value
+    /// for every member of a large group repeated signature work inside the actor turn. Holds for
+    /// a valid roster and for a forged one, which must still classify nobody as admin.
+    #[tokio::test]
+    async fn a_members_role_map_verifies_the_published_roster_once() {
+        use automerge::transaction::Transactable;
+        use catcoms_sync::{encode_roster, roster_payload, ROSTER_KEY};
+        let clock = ManualClock::new(T0);
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = Server::found(
+            hub.join(alice_peer),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(clock.clone()),
+            "alice",
+        )
+        .unwrap();
+        alice.subscribe_control().await.unwrap();
+        alice.open_roles().await.unwrap();
+        let mut joined = Vec::new();
+        for (n, name) in [(2u64, "bob"), (3, "carol"), (4, "dave")] {
+            let invite = alice.mint_invite([n as u8; 16], u64::MAX, vec![]).unwrap();
+            let (member, _) = tokio::join!(
+                Server::join(
+                    hub.join(PeerId::from_u64(n)),
+                    MlsDevice::generate().unwrap(),
+                    ChaCha20Rng::seed_from_u64(n),
+                    Box::new(clock.clone()),
+                    name,
+                    alice_peer,
+                    &invite,
+                ),
+                alice.sync_once(),
+            );
+            joined.push(member.unwrap());
+        }
+        let mut dave = joined.pop().unwrap();
+        let carol = joined.pop().unwrap();
+        let bob = joined.pop().unwrap();
+        let (alice_id, bob_id) = (alice.sync.device_id(), bob.sync.device_id());
+        let (carol_id, dave_id) = (carol.sync.device_id(), dave.sync.device_id());
+        assert_eq!(
+            dave.members().len(),
+            4,
+            "the last to join sees every member"
+        );
+
+        alice.set_admin(&bob_id, true).await.unwrap();
+        dave.open_roles().await.unwrap();
+        let (caught, _) = tokio::join!(dave.request_roles_catchup(alice_peer), alice.sync_once());
+        caught.unwrap();
+
+        let label = |roles: &HashMap<String, String>, id: &DeviceId| roles[&id.to_string()].clone();
+        ADMIN_SET_MATERIALIZATIONS.with(|n| n.set(0));
+        let roles = dave.roles();
+        assert_eq!(
+            ADMIN_SET_MATERIALIZATIONS.with(|n| n.get()),
+            1,
+            "one roster verification per map"
+        );
+        assert_eq!(label(&roles, &alice_id), "owner");
+        assert_eq!(label(&roles, &bob_id), "admin");
+        assert_eq!(label(&roles, &carol_id), "member");
+        assert_eq!(label(&roles, &dave_id), "member");
+        for id in [alice_id, bob_id, carol_id, dave_id] {
+            assert_eq!(
+                roles[&id.to_string()],
+                dave.role_of(&id).as_str(),
+                "the map agrees with role_of"
+            );
+        }
+
+        // A forged roster (signed by a non-owner key) arriving in the shared document: rejected
+        // once, not once per member, and nobody becomes admin.
+        let mallory = MlsDevice::generate().unwrap();
+        let group = dave.group_id();
+        let forged = {
+            let admins = vec![bob_id, carol_id, dave_id];
+            let sig = mallory.sign(&roster_payload(&group, 99, &admins)).unwrap();
+            encode_roster(99, &mallory.public_key_bytes(), &admins, &sig)
+        };
+        dave.sync
+            .post(DocType::MemberRoles, ROLES_DOC, |doc| {
+                doc.put(ROOT, ROSTER_KEY, ScalarValue::Bytes(forged))
+            })
+            .await
+            .unwrap();
+        ADMIN_SET_MATERIALIZATIONS.with(|n| n.set(0));
+        let roles = dave.roles();
+        assert_eq!(ADMIN_SET_MATERIALIZATIONS.with(|n| n.get()), 1);
+        assert_eq!(label(&roles, &alice_id), "owner");
+        for id in [bob_id, carol_id, dave_id] {
+            assert_eq!(
+                label(&roles, &id),
+                "member",
+                "a forged roster grants nothing"
+            );
+        }
     }
 
     #[tokio::test]

@@ -29,6 +29,12 @@ export type DrawEdge = Readonly<{ dc: DrawDataChannel; channel: DrawChannel }>;
 export type DrawEdgeHooks = Readonly<{
   /** False once this peer generation was replaced or the call ended. */
   live: () => boolean;
+  /**
+   * Whether the peer connection is "connected" right now. The channel's first `open` is a queued
+   * task that does not re-check the connection, so it can land after a disconnect was already
+   * recorded; it must not undo that.
+   */
+  connected: () => boolean;
   /** The session changed something a view shows: rebuild the Studio snapshot. */
   changed: () => void;
 }>;
@@ -71,8 +77,11 @@ export function openDrawEdge(
     op();
     if (claims.rev !== before) hooks.changed();
   };
+  // Ready the edge only while the connection is "connected". An `open` that lands after this side
+  // saw the link drop leaves the peer suspended (hidden, held, sent nothing); the later "connected"
+  // transition readies the already-open channel (drawConnectionState). Either order converges.
   dc.onopen = () => {
-    if (hooks.live()) run(() => claims.edgeReady(channel));
+    if (hooks.live() && hooks.connected()) run(() => claims.edgeReady(channel));
   };
   dc.onmessage = (e) => run(() => claims.receive(channel, e.data));
   dc.onclose = () => run(() => claims.closeEdge(channel));

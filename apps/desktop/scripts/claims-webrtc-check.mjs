@@ -99,7 +99,7 @@ const H = (window.harness = {
     inst.onmessage = () => { this.inst[peer].got += 1; };
     const p = { pc, inst, edge: null, draw };
     this.states[peer] = [];
-    if (draw) p.edge = Claims.openDrawEdge(pc, this.claims, peer, { live: () => H.peers[peer] === p, changed: () => {} });
+    if (draw) p.edge = Claims.openDrawEdge(pc, this.claims, peer, { live: () => H.peers[peer] === p, connected: () => pc.connectionState === "connected", changed: () => {} });
     pc.ondatachannel = (e) => this.states[peer].push("ondatachannel:" + e.channel.label);
     pc.onconnectionstatechange = () => {
       this.states[peer].push(pc.connectionState);

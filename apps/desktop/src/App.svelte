@@ -17930,6 +17930,7 @@
     if (claims) {
       peer.draw = openDrawEdge(pc, claims, fp, {
         live: () => callPeers[fp] === peer,
+        connected: () => pc.connectionState === "connected",
         changed: () => {
           if (drawClaims === claims) syncDrawClaims();
         },
