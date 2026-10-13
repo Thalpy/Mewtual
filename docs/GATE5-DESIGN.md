@@ -431,8 +431,9 @@ The commands run and their results are recorded in HANDOVER's Gate 5 entry.
 
 ### 9.3 Real WebRTC (PR #43 review #2)
 
-`scripts/claims-webrtc-check.mjs` runs three members, each its own headless Chromium 141 process,
-the engine WebView2 ships. Each holds real `RTCPeerConnection`s with a fake microphone, `inst`
+`scripts/claims-webrtc-check.mjs` runs three members, each its own headless Chromium 141 process.
+Chromium is the engine family WebView2 is built on, but these are Chromium runs, not runs inside
+a WebView2 or WKWebView host. Each holds real `RTCPeerConnection`s with a fake microphone, `inst`
 (id 7) and `draw` (id 8), and the shipped `draw-claims.ts` and `draw-wiring.ts`. Node relays SDP
 and drives the pages over plain CDP. Time-dependent steps skew each member's injected clock while
 the transport stays real.
@@ -455,8 +456,12 @@ consecutive runs on 2026-10-13 after the second review round.
     held path is asserted deterministically in `draw-claims.test.ts`.
 - **Leave and rejoin.** Leaving drops (not merely hides) that member's claims at the other: its
   channel closes and the book is empty. A rejoined member's claims flow both ways.
-- **Mixed versions.** An old build with no channel 8 connects to a current one, which sends claim
-  frames on stream 8 toward it (engine stats: 23 messages, the channel stays `open`).
+- **Unsolicited stream 8.** A peer configured like an older build connects to a current one.
+  - It has no channel 8. It is a harness peer, not an executed historical desktop binary.
+  - The current one sends claim frames on stream 8 toward it (engine stats: 23 messages, and the
+    channel stays `open`).
+  - This answers the specific stream-8 question. It does not establish whole-application
+    compatibility between released versions.
   - `inst` traffic still flows both ways (+20 each).
   - Voice packets keep arriving both ways.
   - The connection stays `connected`.
@@ -472,12 +477,13 @@ on that Chromium (`EDGE_PATH` pointed at it, `--no-sandbox` for root).
 
 ## 10. Decisions taken and still open
 
-- **D1 (taken, awaiting the owner's confirmation).** The seven-key frame with Pass carrying no
-  recipient. What the owner is confirming:
+- **D1 (confirmed by the owner, 2026-10-13).** The seven-key frame with Pass carrying no
+  recipient. The owner accepted these consequences, on the basis that a peer-to-peer call is
+  chaotic by nature and claims only coordinate:
   - Any explicit Release of a live claim hands the frame to an asker, so a holder moving to another
     frame or leaving the Studio satisfies an Ask as Pass does.
   - Two askers can both take a released frame, which then shows as contested.
-  - A targeted Pass would need a wire change.
+  - A targeted Pass would need a wire change, and none is planned.
 - **D2 (taken).** The draw gate uses the jam `inst` limits so C4a stays compatible (review M2).
 - **D3 (taken).** Jam seeds and take `parts` keep fingerprint labels (review M1). Takes and noise
   are unchanged.
@@ -487,18 +493,25 @@ on that Chromium (`EDGE_PATH` pointed at it, `--no-sandbox` for root).
 - **D5 (open, HIGH, outside Gate 5).** The fingerprint-keyed admin roster in the owner's admission
   check (review H3).
 - **Stream-8 compatibility per WebView** (review L9; PR #43 review #2):
-  - **Chromium (WebView2's engine): verified** in section 9.3.
-  - **WebKitGTK: the question does not arise on the stack tested.** Ubuntu 24.04's WebKitGTK
-    2.52.6 does not expose `RTCPeerConnection` at all, whether by default, with `enable-webrtc`, or
-    with the GStreamer WebRTC plugins installed. Neither the app nor wry 0.55 enables WebRTC in the
-    Linux WebView, so the Linux desktop build has no calls of any kind there. That predates Gate 5.
-    A Linux build that does get WebRTC needs this check run on it.
-  - **WKWebView: unverified.** It needs a macOS run.
+  - **Chromium 141: verified** for the unsolicited-stream-8 question, with a harness peer that
+    lacks channel 8 (9.3). This is not a run inside a WebView2 host.
+  - **WebKitGTK: WebRTC unavailable in the tested configuration.** On Ubuntu 24.04's WebKitGTK
+    2.52.6, `RTCPeerConnection` is not exposed, whether by default, with `enable-webrtc`, or with
+    the GStreamer WebRTC plugins installed.
+    - This is an unavailable-feature result, not a passed compatibility test, and not a
+      conclusion about every WebKitGTK build.
+    - Neither the app nor wry 0.55 enables WebRTC in the Linux WebView, so calls are unavailable in
+      that configuration. That predates Gate 5.
+    - A Linux build that does get WebRTC needs this check run on it.
+  - **WKWebView (macOS): unverified, by the owner's decision (2026-10-13).** Gate 5 states macOS
+    as unverified for stream-8 compatibility between old and new builds, rather than blocking on
+    a macOS run. Claims between current builds on macOS are covered by the same code and tests as
+    elsewhere; only the old-build interaction there is unchecked.
 - **Two-desktop acceptance (PR #43 review #2): outstanding.** Two real desktop instances must run
   Claim, Ask, Pass, refresh and expiry, contested claims, continued editing of a claimed frame,
   disconnect and recovery, leave and rejoin, and switching away from the call's server through the
   Studio, with the owner's sign-off. Section 9.3 is engine-level evidence for the same paths, not a
-  substitute.
+  substitute. The script is section 16.
 
 ## 11. Early design review response (2026-10-12)
 
@@ -564,7 +577,8 @@ Residuals carried forward (as amended by section 13):
 - ~~A transient "disconnected" can hide a peer's claims for up to 30 s if only the receiver saw
   the blip.~~ Resolved in `f178666`: hidden entries reappear on recovery, and held frames are
   applied.
-- The L9 WebView check: Chromium verified, WKWebView open, WebKitGTK has no WebRTC (section 10).
+- The L9 WebView check: Chromium verified; WKWebView (macOS) unverified by the owner's decision;
+  WebKitGTK has no WebRTC in the tested configuration (section 10).
 - A routing test against a *member* prefix twin is impractical: it needs a ground key.
 - ~~There is no live two-client WebRTC run.~~ The engine-level run is in 9.3. The two-desktop
   acceptance run remains outstanding.
@@ -597,4 +611,68 @@ LOWs. All are fixed, with regressions that fail without the fix.
 | LOW-3: shedding the oldest held frame could drop a Release | Overflow sheds superseded frames first. |
 | Re-review LOW (new): with records kept, an earlier Ask's record on the same frame made a new Ask look delivered after an outage | An Ask is due unless the edge took it after that Ask was made (`Wanted.sinceMs`). Regression test, mutation-checked. The two wording nits (unconditional "never shed"; a Pass shed with its re-claim) are corrected in 6.6. The re-review found nothing blocking. |
 | LOW-4: harness and documentation accuracy | Two logged rows are now notes, not checks (34 checks). The leave check asserts drop, not hide. "Failure closes the channel" is corrected (6.6). The record-ageing and pacing wording is corrected. The `readyState` refusal branch now has a test. |
+
+## 15. PR #43 re-review disposition (`cdf1a5f`, 2026-10-13)
+
+The external reviewer re-reviewed the corrective code at `cdf1a5f` against `32e37c3`. They found
+no new blocking defect.
+
+| Original finding | Disposition |
+|---|---|
+| 1. A failed send silently discarded an Ask or Pass | **Closed** by the implementation and its regressions. Delivery is an enqueue guarantee, not an application-level acknowledgement, and the code keeps the two separate. |
+| 2. No real desktop or WebRTC acceptance evidence | **Partially closed.** Real Chromium transport evidence exists (9.3). The two-desktop run and the WKWebView check, or a stated platform limitation, remain acceptance requirements. |
+| 3. Disconnect cleared entries without suspending reception | **Closed** by suspension, bounded holding and recovery. Holding is bounded, so it can shed frames on overflow (6.6). It is not lossless delivery. |
+
+The reviewer's labels are adopted in 9.3 and 10:
+
+- the "old build" is a harness peer without channel 8;
+- the runs are Chromium, not WebView2 or WKWebView hosts;
+- the WebKitGTK result is "unavailable in that configuration".
+
+The reviewer did not re-execute the suites. The figures in HANDOVER are this branch's own runs.
+
+**Acceptance is pending on:**
+
+- the two-desktop run (section 16);
+- a complete green check set on the exact head.
+
+Resolved since the re-review, both by the owner on 2026-10-13:
+
+- D1 is confirmed (section 10).
+- macOS (WKWebView) is stated as unverified for stream-8 compatibility (section 10).
+
+A CI note: every `build & test` failure on PR #43 heads is one test,
+`studio_actors_new_member_after_index_checkpoint_installs_registry_and_index_tail`. It belongs to
+Gate 4's Studio exchange, which Gate 5 does not touch.
+
+- **Failures on this PR:** `32e089b` and `67e9855` (Linux) and `cdf1a5f` (Windows).
+- **Passes on this PR:** the identical Rust passed on `086f854`, `32e37c3`, `f178666` and `06fad7b`.
+- **Before Gate 5:** the same test failed on `c13239d` (Windows, same assertion and values) and on
+  `f3e9291` (Linux).
+- **Locally:** it passes in isolation on both the base and this branch, including under
+  single-core starvation.
+
+It is a pre-existing flake, and it is a Gate 4 follow-up, not a Gate 5 change.
+
+The inherited inviter HIGH (THREAT-MODEL item 7) is separate and is not absorbed by this verdict.
+
+## 16. Two-desktop acceptance script
+
+Use two desktop instances, A and B, with different identities, on one server, both in the same
+voice room, with the Studio open on that server and on the same Flipnote. Record the build and the
+OS of each, and tick each row with what was actually seen.
+
+| # | Do | Expect |
+|---|---|---|
+| 1 | A paints frame 1. | B's timeline marks frame 1 as A's, with a countdown near 90 s that keeps refreshing while A works. |
+| 2 | B selects frame 1. | B sees "A is drawing this frame" and can still paint it: nothing is locked. B's painting claims it too, and both sides then show frame 1 as contested. B saves, and the save succeeds. |
+| 3 | B moves to frame 2, then asks for frame 1 ("ask to draw it"). | A's transport bar shows a sticky "B asks for frame 1 · N s · pass" notice that counts down. B shows its own Ask countdown. |
+| 4 | A presses Pass. | B gets "A let go of the frame you asked for; it's yours now" and holds frame 1. A painting frame 1 straight away does not take it back. |
+| 5 | A paints frame 3, then closes the Flipnote. | B sees A's claim on frame 3 leave at once (an explicit release), not after 90 s. |
+| 6 | Disconnect A's network for about 10 s, then reconnect. | B hides A's claims while A is unreachable. They reappear after reconnection, if still within 90 s. A Pass made by A during or just after the outage still reaches B. |
+| 7 | A leaves the voice room, then rejoins. | B drops A's claims when A leaves. After rejoining, A's new claims show at B again. |
+| 8 | A switches the view to another server, keeping the call. | B sees A's claim released. A's Studio on the other server shows no call claims and sends none. |
+| 9 | Optional: an older desktop build (pre-Gate 5) joins the call. | Voice and instruments work both ways. The older build shows no errors, and the claims simply do not appear there. |
+
+Owner sign-off: date, builds, OS for A and B, and any deviation.
 

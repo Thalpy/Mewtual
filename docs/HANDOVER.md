@@ -107,10 +107,25 @@ and ranks the live hazards in that path.
   whether by default, with `enable-webrtc`, or with the GStreamer WebRTC plugins installed. The
   app and wry do not enable it, so the Linux desktop build has no calls on that stack.
 
+  **External re-review of `cdf1a5f`:** findings 1 and 3 are closed, and 2 is partially closed. No
+  new blocking defect (GATE5-DESIGN section 15). The evidence labels now follow the reviewer:
+  - the stream-8 check uses a harness peer configured without channel 8, not a released binary;
+  - the runs are Chromium, not WebView2 or WKWebView hosts;
+  - the WebKitGTK result is "unavailable in that configuration".
+
+  **Owner decisions (2026-10-13)**
+  - D1 is confirmed: Pass names no recipient, and peer-to-peer calls are accepted as chaotic.
+  - macOS (WKWebView) is stated as unverified for stream-8 compatibility.
+
+  **CI.** The only `build & test` failures on PR #43 are one pre-existing Gate 4 flake,
+  `studio_actors_new_member_after_index_checkpoint_installs_registry_and_index_tail`.
+  - It also failed before Gate 5, on `c13239d` and `f3e9291`.
+  - The identical Rust passed on four other PR heads.
+  - It is a Gate 4 follow-up; details are in GATE5-DESIGN section 15.
+
   **Outstanding for acceptance**
-  - The owner's two-desktop run and sign-off.
-  - D1 confirmation.
-  - The WKWebView stream-8 check.
+  - The owner's two-desktop run and sign-off, scripted in GATE5-DESIGN section 16.
+  - A green check set on the exact head.
   - The inherited inviter HIGH stays out of scope (THREAT-MODEL item 7).
 
 - **Gate 5 collaborative frame claims (2026-10-13; implementation candidate, not accepted).**
