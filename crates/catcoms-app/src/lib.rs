@@ -2675,11 +2675,11 @@ fn read_events(doc: &AutoCommit) -> Vec<ServerEvent> {
 //   (`inviter_is_authorized`) reads that local set, which a malicious member cannot write; so a
 //   demoted admin re-adding/replaying its old grant into the shared CRDT can no longer
 //   re-authorize itself (closes the old revocation-by-deletion residual). The owner publishes a
-//   single owner-signed `roster` value into `DocType::MemberRoles` for **display only**; readers
-//   verify the owner's signature, so a tampered copy is at worst cosmetic (never an admission).
+//   single owner-signed v2 `roster` of full device ids for display and reject-only relay preflight;
+//   readers verify the owner's signature. This copy never positively authorizes an owner Add.
 //
-// Residual: a tampered/stale published roster can transiently mislead *other members'* role
-// badges (cosmetic, R4-class). The guarantee rests on single-committer admission; do NOT enable
+// Residual: a stale valid published roster can mislead badges or deny a newly promoted
+// admin's relay until republished; unreadable data remains unknown for relay preflight. The guarantee rests on single-committer admission; do NOT enable
 // `max_committer_rank ≥ 1` (a second committer would re-introduce the replay surface).
 
 // `ROLES_DOC`, `roster_payload`, `encode_roster`, `read_published_roster`, and `fingerprint` live
@@ -7342,13 +7342,21 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         };
         let mut state = moderation::read_state(doc.doc(), &self.group_id());
         for event in &mut state.events {
+            // Origin labels preserve legacy attribution only. Role authority binds the
+            // full key authenticated by this event's signature, without companion inheritance.
             event.signature_valid &= self.origin_of(&event.signer) == event.actor;
             event.authorized = event.signature_valid
                 && match event.kind.as_str() {
                     "warning" | "kick_case" => {
-                        matches!(self.role_of(&event.actor), Role::Owner | Role::Admin)
+                        matches!(
+                            self.role_of(&DeviceId::from_public_key_bytes(&event.public_key)),
+                            Role::Owner | Role::Admin
+                        )
                     }
-                    "case_resolution" => self.role_of(&event.actor) == Role::Owner,
+                    "case_resolution" => {
+                        self.role_of(&DeviceId::from_public_key_bytes(&event.public_key))
+                            == Role::Owner
+                    }
                     _ => false,
                 };
         }
@@ -7606,79 +7614,90 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .map(fingerprint)
     }
 
-    /// The set of admin fingerprints, **filtered to current members** so a departed member does
-    /// not resolve to a live admin. The **owner** displays its LOCAL authoritative roster (item 3
-    ///; the same source the admission gate uses, so a tampered/replayed CRDT copy can't mislead
-    /// the owner's own UI); other members read the owner-signed published copy.
-    fn admin_set(&self) -> std::collections::HashSet<String> {
-        let Some(owner_id) = self.sync.designated_committer_id() else {
-            return std::collections::HashSet::new();
+    /// Exact per-device grants, filtered to current membership. Companions do not inherit.
+    fn admin_set(&self) -> HashSet<DeviceId> {
+        let Some(owner) = self.sync.designated_committer_id() else {
+            return HashSet::new();
         };
-        let members: std::collections::HashSet<String> = self
-            .members_view()
-            .into_iter()
-            .map(|m| m.fingerprint)
-            .collect();
         let admins = if self.is_owner() {
             self.sync.admin_roster()
         } else {
-            let group_id = self.sync.group_id();
             self.sync
                 .doc(DocType::MemberRoles, ROLES_DOC)
-                .and_then(|d| read_published_roster(d.doc(), &group_id, &owner_id))
+                .and_then(|d| read_published_roster(d.doc(), &self.group_id(), &owner))
                 .unwrap_or_default()
         };
         admins
             .into_iter()
-            .filter(|fp| members.contains(fp))
+            .filter(|id| self.sync.contains_member(id))
             .collect()
     }
 
-    /// This member's effective [`Role`].
+    /// This exact device's role.
     pub fn my_role(&self) -> Role {
-        self.role_of(&self.my_fingerprint())
+        self.role_of(&self.sync.device_id())
     }
 
-    /// The effective [`Role`] of a member by fingerprint.
-    pub fn role_of(&self, fp: &str) -> Role {
-        if self.owner_fingerprint().as_deref() == Some(fp) {
+    /// Classify an exact current device; display labels confer no authority.
+    pub fn role_of(&self, device: &DeviceId) -> Role {
+        if !self.sync.contains_member(device) {
+            return Role::Member;
+        }
+        if self.sync.designated_committer_id() == Some(*device) {
             Role::Owner
-        } else if self.admin_set().contains(fp) {
+        } else if self.admin_set().contains(device) {
             Role::Admin
         } else {
             Role::Member
         }
     }
 
-    /// Every known member's role, keyed by fingerprint (for the UI roster/settings).
+    /// Roles keyed by canonical full identity for exact UI selection.
     pub fn roles(&self) -> HashMap<String, String> {
-        let owner = self.owner_fingerprint();
-        let admins = self.admin_set();
-        self.members_view()
+        self.members()
             .into_iter()
-            .map(|m| {
-                let role = if owner.as_deref() == Some(m.fingerprint.as_str()) {
-                    Role::Owner
-                } else if admins.contains(&m.fingerprint) {
-                    Role::Admin
-                } else {
-                    Role::Member
-                };
-                (m.fingerprint, role.as_str().to_string())
-            })
+            .map(|id| (id.to_string(), self.role_of(&id).as_str().to_string()))
             .collect()
     }
 
-    /// Grant or revoke admin for a member fingerprint. **Owner only**; errors otherwise. Updates
-    /// the owner's LOCAL authoritative roster (the admission source of truth, item 3) and publishes
-    /// a fresh owner-signed copy into the roles doc for display; a demoted admin re-publishing its
-    /// old roster into the CRDT cannot re-authorize itself because the gate reads the local set.
-    pub async fn set_admin(&mut self, fp: &str, admin: bool) -> Result<(), AppError> {
+    /// Owner-only grant/revoke for an exact device; grants require current membership.
+    pub async fn set_admin(&mut self, device: &DeviceId, admin: bool) -> Result<(), AppError> {
         if !self.is_owner() {
             return Err(AppError::Invalid("only the owner can change roles".into()));
         }
-        self.sync.set_admin(fp, admin).await?;
+        self.sync.set_admin(device, admin).await?;
         Ok(())
+    }
+
+    /// Native role transaction: validate before blocking delegated admissions. A publish
+    /// failure after mutation keeps the barrier closed until the owner retries saving.
+    pub async fn set_admin_pending_save(
+        &mut self,
+        device: &DeviceId,
+        admin: bool,
+    ) -> Result<u64, AppError> {
+        if !self.is_owner() {
+            return Err(AppError::Invalid("only the owner can change roles".into()));
+        }
+        if admin && !self.members().contains(device) {
+            return Err(AppError::Invalid(
+                "admin target must be a current member".into(),
+            ));
+        }
+        self.require_admin_persistence();
+        self.set_admin(device, admin).await?;
+        Ok(self.admin_generation())
+    }
+
+    /// Native persistence barrier for delegated admission; direct in-memory users own durability.
+    pub fn require_admin_persistence(&mut self) {
+        self.sync.require_admin_persistence();
+    }
+    pub fn admin_generation(&self) -> u64 {
+        self.sync.admin_generation()
+    }
+    pub fn confirm_admin_persistence(&mut self, generation: u64) {
+        self.sync.confirm_admin_persistence(generation);
     }
 
     /// Remove a member from the server by fingerprint. **Owner only**, enforced at *both* this
@@ -8693,6 +8712,89 @@ mod tests {
         // identity, and anything not in the registry is its own identity.
         assert_eq!(alice.origin_of(&phone_fp), alice.my_fingerprint());
         assert_eq!(alice.origin_of("deadbeef"), "deadbeef");
+        assert_eq!(
+            phone.my_role(),
+            Role::Member,
+            "companions inherit no admin role"
+        );
+        alice.open_roles().await.unwrap();
+        alice.open_moderation().await.unwrap();
+        // Bypass the honest-client posting gate, as a modified companion can. Its
+        // origin attribution remains valid, but authority belongs to the signing device.
+        let event = ModerationEvent {
+            id: "a1".into(),
+            kind: "warning".into(),
+            actor: alice.my_fingerprint(),
+            signer: phone_fp.clone(),
+            target: phone_fp.clone(),
+            channel: GENERAL.to_string(),
+            message_id: "c1".into(),
+            message_text: "evidence".into(),
+            reason: "test".into(),
+            ts: T0,
+            public_key: phone.sync.my_public_key(),
+            ..ModerationEvent::default()
+        };
+        let event = moderation::sign_event(&alice.group_id(), event, |payload| {
+            phone.sync.sign_blob(payload).map_err(AppError::from)
+        })
+        .unwrap();
+        alice
+            .sync
+            .post(
+                DocType::Moderation,
+                moderation::MODERATION_DOC,
+                move |doc| moderation::write_event(doc, &event),
+            )
+            .await
+            .unwrap();
+        let warning = alice.moderation_state().events.remove(0);
+        assert!(warning.signature_valid);
+        assert!(
+            !warning.authorized,
+            "owner-origin attribution is not owner authority"
+        );
+        alice.set_admin(&phone_id, true).await.unwrap();
+        assert!(
+            alice.moderation_state().events[0].authorized,
+            "an exact device grant authorizes its warning"
+        );
+        let resolution = ModerationEvent {
+            id: "a2".into(),
+            kind: "case_resolution".into(),
+            actor: alice.my_fingerprint(),
+            signer: phone_fp.clone(),
+            target: phone_fp.clone(),
+            case_id: "c1".into(),
+            outcome: "dismissed".into(),
+            ts: T0 + 1,
+            public_key: phone.sync.my_public_key(),
+            ..ModerationEvent::default()
+        };
+        let resolution = moderation::sign_event(&alice.group_id(), resolution, |payload| {
+            phone.sync.sign_blob(payload).map_err(AppError::from)
+        })
+        .unwrap();
+        alice
+            .sync
+            .post(
+                DocType::Moderation,
+                moderation::MODERATION_DOC,
+                move |doc| moderation::write_event(doc, &resolution),
+            )
+            .await
+            .unwrap();
+        let resolution = alice
+            .moderation_state()
+            .events
+            .into_iter()
+            .find(|e| e.id == "a2")
+            .unwrap();
+        assert!(resolution.signature_valid);
+        assert!(
+            !resolution.authorized,
+            "an admin companion cannot inherit owner-only resolution"
+        );
 
         // A message from the companion is authored by the *device* and attributable to the member.
         phone.open_channel(GENERAL).await.unwrap();
@@ -11598,14 +11700,57 @@ mod tests {
         assert!(
             alice
                 .roles()
-                .get(&alice.my_fingerprint())
+                .get(&alice.sync.device_id().to_string())
                 .map(String::as_str)
                 == Some("owner")
         );
         // The owner may write a grant, but a grant for a non-member never resolves to admin;
         // admin_set is filtered to current members, so a stale/bogus fp can't become admin.
-        alice.set_admin("deadbeef", true).await.unwrap();
-        assert_eq!(alice.role_of("deadbeef"), Role::Member);
+        let outsider = DeviceId::from_bytes([99; 32]);
+        assert!(alice.set_admin(&outsider, true).await.is_err());
+        assert_eq!(alice.role_of(&outsider), Role::Member);
+    }
+
+    #[tokio::test]
+    async fn rejected_native_grant_does_not_block_existing_admin() {
+        let hub = Hub::new();
+        let peer = PeerId::from_u64(1);
+        let mut alice = Server::found(
+            hub.join(peer),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(ManualClock::new(1000)),
+            "alice",
+        )
+        .unwrap();
+        alice.subscribe_control().await.unwrap();
+        alice.open_roles().await.unwrap();
+        let invite = alice.mint_invite([73; 16], u64::MAX, vec![]).unwrap();
+        let (bob, _) = tokio::join!(
+            Server::join(
+                hub.join(PeerId::from_u64(2)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(2),
+                Box::new(ManualClock::new(1000)),
+                "bob",
+                peer,
+                &invite
+            ),
+            alice.sync_once()
+        );
+        let bob = bob.unwrap();
+        let id = bob.sync.device_id();
+        alice.set_admin(&id, true).await.unwrap();
+        assert!(alice.sync.inviter_is_authorized(&id));
+        assert!(alice
+            .set_admin_pending_save(&DeviceId::from_bytes([99; 32]), true)
+            .await
+            .is_err());
+        assert!(alice.sync.inviter_is_authorized(&id));
+        let generation = alice.set_admin_pending_save(&id, true).await.unwrap();
+        assert!(!alice.sync.inviter_is_authorized(&id));
+        alice.confirm_admin_persistence(generation);
+        assert!(alice.sync.inviter_is_authorized(&id));
     }
 
     #[test]
@@ -11616,9 +11761,9 @@ mod tests {
         let other = MlsDevice::generate().unwrap();
         let gid = b"group-xyz".to_vec();
         let owner_id = owner.device_id();
-        let fps = vec!["aaaa1111".to_string(), "bbbb2222".to_string()];
+        let fps = vec![DeviceId::from_bytes([1; 32]), DeviceId::from_bytes([2; 32])];
 
-        let mk_roster = |dev: &MlsDevice, group: &[u8], gen: u64, fps: &[String]| {
+        let mk_roster = |dev: &MlsDevice, group: &[u8], gen: u64, fps: &[DeviceId]| {
             let sig = dev.sign(&roster_payload(group, gen, fps)).unwrap();
             encode_roster(gen, &dev.public_key_bytes(), fps, &sig)
         };
@@ -11633,7 +11778,7 @@ mod tests {
         .unwrap();
         let admins = read_published_roster(&doc, &gid, &owner_id).expect("owner roster read");
         assert!(
-            admins.contains("aaaa1111") && admins.contains("bbbb2222"),
+            admins.contains(&fps[0]) && admins.contains(&fps[1]),
             "the owner-signed roster's admins are read"
         );
 

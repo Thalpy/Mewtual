@@ -11135,12 +11135,19 @@ async fn resolve_kick_case(
 async fn set_admin(
     state: State<'_, AppState>,
     server: u64,
-    fp: String,
+    identity: String,
     admin: bool,
 ) -> Result<(), String> {
-    let actor = actor_of(&state, server).await?;
-    actor.set_admin(fp, admin).await?;
-    persist_server(&state, server).await;
+    let device = DeviceId::from_canonical_hex(&identity)
+        .ok_or("expected a canonical full device identity")?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    let generation = actor.set_admin(device, admin).await?;
+    if persist_server_instance(&state, server, instance, actor.clone()).await
+        != PersistOutcome::Durable
+    {
+        return Err("Role change applied but not saved; retry saving before relying on it".into());
+    }
+    actor.confirm_admin_persistence(generation).await;
     Ok(())
 }
 

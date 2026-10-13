@@ -1,5 +1,28 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Admin collision hardening (2026-10-13)
+
+Current moderation-record roles also use the verified full signing-device identity.
+Legacy origin labels supply attribution only, without inheriting an origin's admin
+or owner authority. Historical-role proof and append-only audit completeness remain open.
+
+The four-byte admin admission bypass in hardening item 7 is repaired on the separate
+security branch: authoritative grants bind full current `DeviceId`s, with no companion
+inheritance. Fresh Add rechecks permission after queueing. Legacy grants are discarded
+without matching fingerprints; v2 rosters and versioned snapshot records use full IDs.
+Native role-write failures leave delegated admissions blocked and report unsaved state.
+Removal revokes exact grants and owner changes require fresh delegation.
+
+The earlier R3 claim was overbroad on unpatched builds: a full-member collision twin
+could invite an independent member. Updated owners reject that twin even if the genuine
+admin has departed. An existing member can still disclose plaintext or certify ordinary
+companions under the existing policy. Admission gives ordinary new-epoch capabilities,
+not every historical MLS secret or other devices' private keys. A fixed-target search
+has expected cost around 2^32 candidates under uniform hashing; no wall-clock benchmark
+is claimed. Old builds/backups remain vulnerable; stale valid v2 roster replay remains
+a badge/relay liveness issue, never an owner-local authority source.
+
+
 This document tracks **what a modified ("hacked") client can and cannot do**. Mewtual is
 peer-to-peer and open-source: anyone can run a build that ignores the UI's rules. The question
 this document answers, action by action, is *which rules are enforced by cryptography / the
@@ -1436,7 +1459,7 @@ table with the commit that closed it.
 |---|---|---|---|---|---|
 | ~~R1~~ | **Member-removal requests** |; | ~~The committer honored a removal request from any member without a role check.~~ **CLOSED:** removal is now owner-only at the protocol layer; `request_remove` rejects a non-owner, and the committer ignores any inbound remove request whose requester isn't the owner (verified by signature, so a forged owner-claim fails too). |; | **Closed**; `crates/catcoms-sync` (on_remove_request owner gate + request_remove Unauthorized) |
 | R2 | **File deletion** | `Server::delete_file` gates on owner/admin role | A modified member could post a raw `FileIndex` delete op directly, unlisting any file. Low stakes; the content-addressed blob survives on every peer that holds it; nothing is destroyed. | **Low** | **Open**; close with the same committer-side role re-check, or accept (lowest stakes) |
-| R3 | **Invite-minting permission** | `require_invite_permission` → `can_invite()` (Owner/Admin) gates `mint_invite` | A modified member can *mint* an invite token, **but it is useless**: admission is both rank-gated and role-gated (see the protocol table), so a non-committer cannot admit the joiner itself, and the owner rejects its relayed Add-request because the named inviter is not on the owner's local roster. | **None today** (single-committer) / **Medium** if multi-committer were enabled, where a second committer reads the shared published roster rather than the owner's local one (see item 3's residual) | **Closed at the protocol layer** for the shipped single-committer config; the committer-side inviter role re-check (`inviter_is_authorized`) is shipped and tested, so minting permission is no longer the load-bearing gate. Do not enable `max_committer_rank ≥ 1` |
+| R3 | **Invite-minting permission** | `require_invite_permission` → `can_invite()` (Owner/Admin) gates `mint_invite` | A modified member can *mint* an invite token, **but it is useless against an updated owner**: admission is both rank-gated and role-gated (see the protocol table), so a non-committer cannot admit the joiner itself, and the owner rejects its relayed Add-request because the named inviter is not on the owner's local roster. | **None today** (single-committer) / **Medium** if multi-committer were enabled, where a second committer reads the shared published roster rather than the owner's local one (see item 3's residual) | **Closed at the protocol layer** for the shipped single-committer config; the committer-side inviter role re-check (`inviter_is_authorized`) is shipped and tested, so minting permission is no longer the load-bearing gate. Do not enable `max_committer_rank ≥ 1` |
 | R4 | **Local role display** | `my_role()` drives which controls the UI shows | A modified client can paint itself as "admin/owner" **in its own UI**, but this grants **no real capability**; grants are owner-signed (unforgeable) and admission is rank-gated. Cosmetic only. | **Cosmetic** | Accepted; documented in-app |
 | R5 | **Invite rate-limit / server policy** (planned) | An owner-set server-settings doc, respected by honest clients | A modified admin can ignore a mint rate-limit / expiry policy. It is a guardrail against *accidental* over-sharing by honest admins, **not** a control against a malicious admin. | **Soft guardrail** | Document the limitation in the UI when shipped |
 | R6 | **Message edit / delete / react / pin** | `edit_message`/`delete_message` gate on `author == self` (own messages; delete also allows owner/admin moderation); `set_pin` gates on the owner/admin role; `toggle_reaction` keys the reaction by the caller's own fingerprint | A modified member could post a raw channel op editing/deleting/pinning **any** member's message, or forging a reaction under another member's fingerprint; the per-op inner signature signs the *delta*, not the semantic `author`/reactor/role (the same property that already lets a member forge a message's author on send). Low stakes; message content is not authenticated, by design. | **Low** | **Open**; accept (same posture as R2), or a later per-message author-binding hardening |
@@ -1552,16 +1575,12 @@ design that shipped:
    owner-signed role evidence and a protocol-side append/delete policy before calling the timeline
    a tamper-proof audit trail. Preserve the existing invariant that a tally is never executable
    authority and only the owner removal path can mutate MLS membership.
-7. **Fingerprint-keyed inviter authorization (OPEN, HIGH; found by the Gate 5 design review).**
-   `ChannelSync::inviter_is_authorized` checks the owner's local `admin_roster`, which stores 4-byte
-   fingerprints, against `roles::fingerprint(device)`. Any member can certify a companion device
-   (`design-multi-device.md`), so a member who grinds a companion key whose `DeviceId` shares an
-   admin's first four bytes (about 2^32 key generations) can relay an Add-request as an authorized
-   inviter and get a joiner admitted without being an admin. The published roster has the same
-   fingerprint shape. Gate 5 does not change admission; closing this needs the roster (and its
-   owner-signed published form) to carry full device ids, a persistence/wire compatibility decision
-   for the user. Until then R3's "useless self-minted invite" statement holds only against members
-   who cannot afford that grind.
+7. **Fingerprint-keyed inviter authorization (FIXED on the separate security branch).**
+   Unpatched Gate 5 owners authorize four-byte collision twins that are actual members.
+   Updated owners use full per-device grants and final fresh-Add checks, with v2 signed
+   rosters and explicit versioned authority persistence. Legacy grants are discarded,
+   never matched to current members. Owner re-approval is required. See the security
+   amendment above for impact, compatibility and the remaining relay liveness limitation.
 
 ## How to use this document
 

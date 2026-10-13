@@ -1,5 +1,61 @@
 # Mewtual; Handover
 
+## Admin admission security fix (2026-10-13)
+
+Separate branch `fix/gate5-full-device-admin` from Gate 5. The reported four-byte
+admin collision admission flaw was confirmed by tracing the owner check and companion
+admission path. The repair uses per-device full identities through native/app/sync/UI,
+v2 owner-signed rosters, a versioned snapshot authority tail, legacy grant reset,
+removal pruning, and a final fresh-Add permission check after queueing.
+Owners must re-grant permissions after loading legacy snapshots. Existing membership
+and content survive. Owners/admin clients must upgrade together; do not downgrade to
+unpatched owners or old backups. No fixed-target key-search timing or full exploit
+benchmark is claimed. Stale published-roster relay liveness remains a separate residual.
+
+
+After a failed role save, the owner must retry a valid role change to complete
+the save and unblock delegation; a background snapshot alone does not acknowledge it.
+Completed admission recovery remains nonce/KeyPackage-bound, not original-inviter-bound.
+
+### Verification and remaining validation issue
+
+- `cargo test --all --all-features -- --test-threads=16`: application library
+  **1,074 passed, 1 failed, 21 existing opt-in benchmarks ignored**. The unmodified
+  `studio_actors_new_member_after_index_checkpoint_installs_registry_and_index_tail`
+  failed its epoch-id assertion at `studio_exchange/tests/unopened.rs:743`; isolated
+  rerun passed. Cargo stopped there, so remaining targets were run separately below.
+- The eight-test `studio_exchange::tests::unopened` recheck passed that case but failed
+  `studio_actors_closing_reopen_after_expired_selection_resumes_without_another_action`
+  at `unopened.rs:783` (registry op count); that case also passed isolated.
+- **MEDIUM follow-up; baseline status unknown.** The unchanged fixture advances its
+  ManualClock through 100 turns while network work runs independently; the CPU-preparation
+  barrier explicitly excludes network jobs. Parallel scheduling sensitivity is plausible,
+  but an isolated pass does not prove an inherited defect. Reproduce on the unchanged base
+  with comparable load, instrument epoch/phase/job completion, and await bounded domain
+  completion. Preserve the final assertions; do not merely raise iteration counts. Review
+  found no concrete authorization-regression path into these failures.
+- Remaining workspace targets completed with
+  `cargo test --all --all-features --exclude catcoms-app -- --test-threads=16`: passed.
+  The excluded application library had already run in full above; its integrations and
+  doc test were then run explicitly. No failed test or assertion was removed or weakened.
+- All app integration targets (`cargo test -p catcoms-app --test '*' --all-features`)
+  passed: 20 tests, one existing ignored fixture. App doc test passed.
+- Separate Tauri workspace: 337 library and 5 binary tests passed; `cargo check` passed.
+- Frontend: 1,392 tests passed; `check`, production `build`, and all 9 `test:flows`
+  checks passed. Members UI inspected in the ready-marked fixture at 900 by 640.
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
+  `bash scripts/check-no-ambient.sh`, and `cargo deny check` passed (deny retains duplicate
+  dependency warnings). Startup gate not run: setup/runtime placement/process spawning
+  are unchanged.
+- Optional separate-workspace formatting check (`cargo fmt --manifest-path
+  apps/desktop/src-tauri/Cargo.toml -- --check`) also found formatting differences in
+  unchanged Studio files. The edited role-command region was formatted; unrelated
+  Studio formatting is left as a separate follow-up.
+- Read-only adversarial design review, implementation review and re-reviews found no
+  remaining blocker/high. The Studio validation failures above remain an explicit follow-up.
+  Collision decisions use crafted full ids; no fixed-target key grind or full collision
+  exploit benchmark was performed.
+
 Authoritative current-state document. Read this first, then
 [`INTERFACES.md`](INTERFACES.md) (the API/seam schema) and
 [`ARCHITECTURE.md`](ARCHITECTURE.md) (decisions + the adversarial-review fixes).

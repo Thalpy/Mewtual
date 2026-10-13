@@ -86,3 +86,11 @@ test("file fixture separates cached bytes from explicitly kept copies", () => {
     wiki_pages: [], status_count: 0, chat_count: 0, event_count: 0, pinned: false,
   });
 });
+
+test("visual fixture role maps name exact roster identities", () => {
+  const members = visualFixtureResponse("get_members", { server: 1 }) as Array<{ identity: string; you: boolean; fingerprint: string }>;
+  const roles = visualFixtureResponse("get_roles", { server: 1 }) as Record<string, string>;
+  const me = members.find((m) => m.you)!;
+  assert.equal(roles[me.identity], "owner");
+  assert.equal(roles[me.fingerprint], undefined);
+});

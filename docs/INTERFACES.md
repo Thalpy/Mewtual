@@ -1,5 +1,28 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Exact device admin authority (security update, 2026-10-13)
+
+Current moderation-record roles also use the verified full signing-device identity.
+Legacy origin labels supply attribution only, without inheriting an origin's admin
+or owner authority. Historical-role proof and append-only audit completeness remain open.
+
+After a failed role save, the owner must retry a valid role change to complete
+the save and unblock delegation; a background snapshot alone does not acknowledge it.
+Completed admission recovery remains nonce/KeyPackage-bound, not original-inviter-bound.
+
+`set_admin` takes a canonical 64-lowercase-hex `identity` at the desktop boundary,
+then `DeviceId` through actor/app/sync. Grants require current membership; revokes are
+idempotent. `get_roles` maps full identity strings to roles. Admin grants are per device,
+without companion inheritance. Native changes block delegated admission until an exact
+generation has a covering successful save; save failures report an unsaved change.
+
+Published rosters use `catcoms/role-roster/v2`, retain group/generation/owner binding,
+and encode sorted distinct 32-byte identities. V1 never grants roles. Snapshots write
+an empty legacy roster and a strict `catcoms/admin-authority/v2` tail. Legacy grants
+are discarded even for unique current matches. Older strict readers reject the new tail;
+upgrade owners and admin clients together. Downgrading old backups remains unsafe.
+
+
 A reference for the **seams** (dependency-injection hooks) and the key public APIs.
 Signatures are abbreviated; see the source for exact generics/lifetimes. This is the
 contract a new contributor (or agent) builds against.

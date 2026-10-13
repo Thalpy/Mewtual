@@ -870,15 +870,19 @@ pub enum AppCommand {
     CatchUpWiki {
         peer: PeerId,
     },
-    /// Query every member's role, keyed by fingerprint (owner/admin/member).
+    /// Query every member's role, keyed by full identity (owner/admin/member).
     Roles {
         reply: oneshot::Sender<HashMap<String, String>>,
     },
-    /// Grant or revoke admin for a member fingerprint (owner only).
+    /// Grant or revoke admin for an exact device (owner only).
     SetAdmin {
-        fp: String,
+        device: DeviceId,
         admin: bool,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
+    ConfirmAdminPersistence {
+        generation: u64,
+        reply: oneshot::Sender<()>,
     },
     /// Pull the roles document from `peer` (e.g. right after joining).
     CatchUpRoles {
@@ -3057,18 +3061,35 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
-    /// Grant or revoke admin for a member fingerprint (owner only).
-    pub async fn set_admin(&self, fp: String, admin: bool) -> Result<(), String> {
+    /// Grant or revoke admin for an exact device (owner only).
+    pub async fn set_admin(&self, device: DeviceId, admin: bool) -> Result<u64, String> {
         let (reply, rx) = oneshot::channel();
         if self
             .cmd_tx
-            .send(AppCommand::SetAdmin { fp, admin, reply })
+            .send(AppCommand::SetAdmin {
+                device,
+                admin,
+                reply,
+            })
             .await
             .is_err()
         {
             return Err("server stopped".into());
         }
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Acknowledge only a covering save of this exact authority generation.
+    pub async fn confirm_admin_persistence(&self, generation: u64) {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::ConfirmAdminPersistence { generation, reply })
+            .await
+            .is_ok()
+        {
+            let _ = rx.await;
+        }
     }
 
     /// Pull the roles document from `peer`.
@@ -4828,8 +4849,8 @@ where
                     Some(AppCommand::Roles { reply }) => {
                         let _ = reply.send(server.roles());
                     }
-                    Some(AppCommand::SetAdmin { fp, admin, reply }) => {
-                        let res = server.set_admin(&fp, admin).await.map_err(|e| e.to_string());
+                    Some(AppCommand::SetAdmin { device, admin, reply }) => {
+                        let res = server.set_admin_pending_save(&device, admin).await.map_err(|e| e.to_string());
                         let _ = reply.send(res);
                         if roles_changed(&server, &mut last_roles) {
                             let _ = event_tx.send(AppEvent::RolesUpdated).await;
@@ -4837,6 +4858,10 @@ where
                         if moderation_changed(&server, &mut last_moderation) {
                             let _ = event_tx.send(AppEvent::ModerationUpdated).await;
                         }
+                    }
+                    Some(AppCommand::ConfirmAdminPersistence { generation, reply }) => {
+                        server.confirm_admin_persistence(generation);
+                        let _ = reply.send(());
                     }
                     Some(AppCommand::CatchUpRoles { peer }) => {
                         if let Err(e) = server.request_roles_catchup(peer).await {
@@ -6332,6 +6357,9 @@ mod tests {
         // Exact pre-policy snapshot fixture: retain the preceding observed-tenure extension.
         let policy_tail = fresh.sync().group_policy().unwrap().encode().len() + 9;
         let snapshot = fresh.snapshot().unwrap();
+        // No grants in this fixture: strip the newer versioned authority tail first.
+        let authority_tail = 8 + b"catcoms/admin-authority/v2".len();
+        let snapshot = &snapshot[..snapshot.len() - authority_tail];
         // Both unused trailing extensions are framed v1, zero-record payloads. Strip
         // pending finalization first, then durable chat, before reaching the policy frame.
         let empty_pending_tail = [0, 0, 0, 5, 1, 0, 0, 0, 0];

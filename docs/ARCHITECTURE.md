@@ -1,5 +1,29 @@
 # Mewtual; Architecture
 
+## Exact device admin authority (2026-10-13)
+
+Current moderation-record roles also use the verified full signing-device identity.
+Legacy origin labels supply attribution only, without inheriting an origin's admin
+or owner authority. Historical-role proof and append-only audit completeness remain open.
+
+After a failed role save, the owner must retry a valid role change to complete
+the save and unblock delegation; a background snapshot alone does not acknowledge it.
+Completed admission recovery remains nonce/KeyPackage-bound, not original-inviter-bound.
+
+The designated owner admits independent invitees using exact current-device grants.
+Four-byte fingerprints remain display labels. Companion certification adds membership,
+not admin authority. Owner-local grants are rechecked synchronously immediately before
+fresh MLS Add, including queued requests. Observed removals prune exact grants and
+owner changes clear them; published predecessor rosters never become local authority.
+
+The signed v2 roster carries sorted full identities. The snapshot authority tail is
+explicitly versioned, with the old roster section empty. Old fingerprint grants cannot
+identify their original grantees and are reset, requiring owner re-approval. No members
+or content are removed by this migration. Native role transactions block delegated
+admission until their generation is saved. Published stale roster replay can still
+affect badges/relay liveness, but cannot authorize owner admission.
+
+
 This document is the in-repo source of truth for the design. It records the locked
 decisions, the corrections that came out of an adversarial design review (run before any
 code was written), the honest residual risks, and the phased build plan.

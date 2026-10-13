@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { memberRole, identityForRoleLabel } from "./member-role.ts";
   import { invoke } from "@tauri-apps/api/core";
   import { fileAvailability, keptCopyLabel, fileInventoryRequests, mutateFileInventory, type KeptFiles } from "./file-availability";
   import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -5271,7 +5272,7 @@
   let myEmbedFolder = $derived(myFp ? `embed/${myFp}` : "embed");
   // Member roles (10h): fingerprint -> "owner"|"admin"|"member".
   let roles = $state<Record<string, string>>({});
-  let myRole = $derived(roles[myFp] ?? "member");
+  let myRole = $derived(memberRole(roles, myIdentity));
   // Owners + admins may invite. Admin invites are owner-serialized end-to-end (the joiner is
   // admitted when the owner is next online), and revocation is replay-proof (THREAT-MODEL item 3),
   // so this is safe to surface to admins.
@@ -8208,10 +8209,14 @@
       if (viewCurrent(gen, server)) error = String(e);
     }
   }
-  async function setAdmin(fp: string, admin: boolean) {
+  async function setAdmin(identity: string, admin: boolean) {
     if (activeServerId === null) return;
+    const target = roster.find((m) => m.identity === identity);
+    if (!target) return;
+    if (roster.filter((m) => m.fingerprint === target.fingerprint).length > 1
+      && !window.confirm(`Shared display fingerprint. ${admin ? "Grant" : "Revoke"} admin for this exact device?\n${identity}`)) return;
     try {
-      await invoke("set_admin", { server: activeServerId, fp, admin });
+      await invoke("set_admin", { server: activeServerId, identity, admin });
       await refreshRoles();
     } catch (e) {
       error = String(e);
@@ -9233,7 +9238,7 @@
       });
     }
     items.push({ label: "Copy fingerprint", icon: "fp", onSelect: () => copyText(m.fingerprint) });
-    const r = roles[m.fingerprint] ?? "member";
+    const r = memberRole(roles, m.identity);
     if (myRole === "owner" && !m.you && r !== "owner") {
       items.push({ divider: true }, { section: "server · owner" });
       items.push({
@@ -9241,8 +9246,8 @@
         icon: "crown",
         sub: [
           r === "admin"
-            ? { label: "Demote from admin", icon: "crown", onSelect: () => setAdmin(m.fingerprint, false) }
-            : { label: "Make admin", icon: "crown", onSelect: () => setAdmin(m.fingerprint, true) },
+            ? { label: "Demote from admin", icon: "crown", onSelect: () => setAdmin(m.identity, false) }
+            : { label: "Make admin", icon: "crown", onSelect: () => setAdmin(m.identity, true) },
         ],
       });
       items.push({
@@ -22066,7 +22071,7 @@
   and the custom badge still reads in full on the profile card and in chat.
 -->
 {#snippet memberRow(m: Member, online: boolean)}
-  {@const role = roles[m.fingerprint] ?? "member"}
+  {@const role = memberRole(roles, m.identity)}
   <li
     title={`${nameOf(m.fingerprint)}\n${m.fingerprint}`}
     class:is-you={m.you}
@@ -27890,7 +27895,7 @@
               <div class="pc-id">
                 <div class="pc-name">{@render nameTag(fp)}</div>
                 <div class="pc-meta">
-                  {#if roles[fp] && roles[fp] !== "member"}<span class="role-badge {roles[fp]}">{roles[fp]}</span>{/if}
+                  {#if roles[identityForRoleLabel(roster, fp)] && roles[identityForRoleLabel(roster, fp)] !== "member"}<span class="role-badge {roles[identityForRoleLabel(roster, fp)]}">{roles[identityForRoleLabel(roster, fp)]}</span>{/if}
                   {#if fp === myFp}<span class="you-badge">you</span>{/if}
                   {#if fp !== myFp && verifiedFps.has(fp)}<span class="vf-check" title="You verified this member out of band">✓ verified</span>{/if}
                   {#if badges[fp]}
@@ -29787,23 +29792,27 @@
             {:else if serverSettingsPage === "members"}
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // MEMBERS</div>
               <h1>Members</h1>
+              <p class="muted small">Admin grants apply to one exact device. Permissions from before the security update need owner re-approval; membership and content are unchanged.</p>
               <section class="set-section">
               <ul class="role-list">
                 {#each roster as m}
-                  {@const r = roles[m.fingerprint] ?? "member"}
+                  {@const r = memberRole(roles, m.identity)}
                   <li>
                     {@render avatarTag(m.fingerprint)}
                     {@render nameTag(m.fingerprint)}
                     <span class="role-badge {r}">{r}</span>
+                    {#if roster.filter((other) => other.fingerprint === m.fingerprint).length > 1}
+                      <span class="muted small" style="min-width: 0; overflow-wrap: anywhere" title={m.identity}>Shared fingerprint: {m.identity}</span>
+                    {/if}
                     {#if badges[m.fingerprint]}
                       {@const b = badges[m.fingerprint]}
                       <span class="cust-badge" style={b.color ? `--badge-c:${b.color}` : ""}>{b.label}</span>
                     {/if}
                     {#if myRole === "owner" && !m.you && r !== "owner"}
                       {#if r === "admin"}
-                        <button class="ghost small" onclick={() => setAdmin(m.fingerprint, false)}>Remove admin</button>
+                        <button class="ghost small" onclick={() => setAdmin(m.identity, false)}>Remove admin</button>
                       {:else}
-                        <button class="ghost small" onclick={() => setAdmin(m.fingerprint, true)}>Make admin</button>
+                        <button class="ghost small" onclick={() => setAdmin(m.identity, true)}>Make admin</button>
                       {/if}
                       {#if confirmRemoveFp === m.fingerprint}
                         <button class="ghost small danger-btn" onclick={() => removeMember(m.fingerprint)}>Confirm</button>
