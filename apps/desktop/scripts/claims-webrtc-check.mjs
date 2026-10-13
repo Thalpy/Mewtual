@@ -1,5 +1,6 @@
-// Gate 5 frame claims over REAL WebRTC. Each member is its own headless Chromium process (the
-// engine WebView2 ships) holding real RTCPeerConnections with a fake microphone, the negotiated
+// Gate 5 frame claims over REAL WebRTC. Each member is its own headless Chromium process
+// (Chromium is the engine family WebView2 is built on; this is not a run inside a WebView2 host)
+// holding real RTCPeerConnections with a fake microphone, the negotiated
 // `inst` (id 7) and `draw` (id 8) data channels, and the shipped claim session and channel wiring
 // (src/draw-claims.ts and src/draw-wiring.ts, bundled as they are). Node relays the SDP and drives
 // each page over plain CDP, the same stance as flow-check.mjs: no automation framework.
@@ -8,8 +9,9 @@
 // claims across genuine data channels and event ordering; a genuine ICE disconnect and recovery
 // (the other member's whole browser is frozen with SIGSTOP, so its traffic and consent checks stop
 // for real) through `onconnectionstatechange` into the session; leave and rejoin; and the
-// mixed-version case, a build with no channel 8, which must keep its voice and jam traffic while
-// we send on stream 8. What it does not prove: the Studio UI and the native backend (covered by
+// unsolicited-stream-8 question: a peer configured like an older build (no channel 8; a harness
+// peer, not an executed historical binary) must keep its voice and jam traffic while we send on
+// stream 8. It does not establish whole-application compatibility between released versions. What it does not prove: the Studio UI and the native backend (covered by
 // the compiled Studio tests and the Rust suites), or any engine other than the one it launches;
 // WKWebView and WebKitGTK need the same run on macOS and Linux desktops.
 //
@@ -353,7 +355,7 @@ async function main() {
     // 7. Mixed versions: C is an older build with no channel 8. A sends claims on stream 8 to it;
     //    C's voice and jam traffic, and the connection, must carry on unaffected.
     await link(A, ID.A, C, ID.C, { yDraw: false });
-    await until("A and the old build C connect", A, (v) => v.conn[c] === "connected");
+    await until("A and the old-build peer C (no channel 8) connect", A, (v) => v.conn[c] === "connected");
     await sleep(1_500);
     await A.eval(`harness.ping(${JSON.stringify(ID.C)}, 20)`);
     await C.eval(`harness.ping(${JSON.stringify(ID.A)}, 20)`);
@@ -361,7 +363,7 @@ async function main() {
     const instBefore = [await C.eval(`harness.inst[${JSON.stringify(ID.A)}].got`), await A.eval(`harness.inst[${JSON.stringify(ID.C)}].got`)];
     const audioBefore = [await C.eval(`harness.audioIn(${JSON.stringify(ID.A)})`), await A.eval(`harness.audioIn(${JSON.stringify(ID.C)})`)];
     const aDrawToC = (await A.eval("harness.view()")).drawDc[c];
-    record("A's draw channel toward the old build opens on A's side (negotiated)", aDrawToC === "open", aDrawToC);
+    record("A's draw channel toward the old-build peer opens on A's side (negotiated)", aDrawToC === "open", aDrawToC);
     for (let i = 0; i < 60; i++) {
       await A.eval(`harness.claims.claim(${JSON.stringify(OBJ)}, ${JSON.stringify(((i % 9) + 1).toString(16).repeat(32))}); harness.claims.ask(${JSON.stringify(OBJ)}, ${JSON.stringify(F(9))})`);
     }
@@ -377,14 +379,14 @@ async function main() {
     const drawStatsA = (await A.eval(`harness.dcStats(${JSON.stringify(ID.C)})`)).find((d) => d.id === 8);
     const statsC = await C.eval(`harness.dcStats(${JSON.stringify(ID.A)})`);
     // 120 claim/ask changes; the per-edge pacing (burst 10, then 2/s) coalesces them, so the engine
-    // sends a few dozen frames, every one of which lands on a stream the old build never opened.
-    record("A really sent claim frames on stream 8 toward the old build (engine stats)", (drawStatsA?.sent ?? 0) >= CLAIM_BURST, drawStatsA);
-    record("the old build has no channel 8 at all", !statsC.some((d) => d.id === 8), statsC);
+    // sends a few dozen frames, every one of which lands on a stream the old-build peer never opened.
+    record("A really sent claim frames on stream 8 toward the old-build peer (engine stats)", (drawStatsA?.sent ?? 0) >= CLAIM_BURST, drawStatsA);
+    record("the old-build peer has no channel 8 at all", !statsC.some((d) => d.id === 8), statsC);
     record("jam (inst, id 7) still flows both ways after stream-8 traffic", instAfter[0] === instBefore[0] + 20 && instAfter[1] === instBefore[1] + 20, { instBefore, instAfter });
     record("voice still flows both ways", audioAfter[0] > audioBefore[0] && audioAfter[1] > audioBefore[1], { audioBefore, audioAfter });
     record("the A-C connection stayed connected", vA.conn[c] === "connected" && vC.conn[a] === "connected", { A: vA.conn[c], C: vC.conn[a] });
-    record("the old build saw no new channel and no state churn", !statesC.some((s) => s.startsWith("ondatachannel")) && statesC.filter((s) => s !== "connecting" && s !== "connected").length === 0, statesC);
-    record("A's draw channel toward the old build is still open (no stream reset)", vA.drawDc[c] === "open", vA.drawDc[c]);
+    record("the old-build peer saw no new channel and no state churn", !statesC.some((s) => s.startsWith("ondatachannel")) && statesC.filter((s) => s !== "connecting" && s !== "connected").length === 0, statesC);
+    record("A's draw channel toward the old-build peer is still open (no stream reset)", vA.drawDc[c] === "open", vA.drawDc[c]);
     record("A's other edge (to B) was unaffected", vA.conn[b] === "connected" && vA.drawDc[b] === "open", { conn: vA.conn[b], draw: vA.drawDc[b] });
   } finally {
     for (const mem of Object.values(m)) mem.stop();

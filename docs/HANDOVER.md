@@ -51,8 +51,14 @@ and ranks the live hazards in that path.
   whether by default, with `enable-webrtc`, or with the GStreamer WebRTC plugins installed. The
   app and wry do not enable it, so the Linux desktop build has no calls on that stack.
 
+  **External re-review of `cdf1a5f`:** findings 1 and 3 are closed, and 2 is partially closed. No
+  new blocking defect (GATE5-DESIGN section 15). The evidence labels now follow the reviewer:
+  - the stream-8 check uses a harness peer configured without channel 8, not a released binary;
+  - the runs are Chromium, not WebView2 or WKWebView hosts;
+  - the WebKitGTK result is "unavailable in that configuration".
+
   **Outstanding for acceptance**
-  - The owner's two-desktop run and sign-off.
+  - The owner's two-desktop run and sign-off, scripted in GATE5-DESIGN section 16.
   - D1 confirmation.
   - The WKWebView stream-8 check.
   - The inherited inviter HIGH stays out of scope (THREAT-MODEL item 7).
