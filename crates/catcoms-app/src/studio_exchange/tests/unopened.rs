@@ -396,9 +396,8 @@ async fn studio_actors_new_member_after_index_checkpoint_installs_registry_and_i
 
 /// Deliberately drains production's global pools, so execute this diagnostic alone. It must not
 /// run beside other tests that intentionally exercise those pools. Before `actor_newcomer` gave
-/// each actor its own pools, this failed exactly as the parallel suite sometimes did: the
-/// newcomer never got a preparation slot inside the fixed step window and was still on its
-/// initial epoch at the `epoch_id` assertion.
+/// each actor its own pools, every variant failed here exactly as the parallel suite sometimes
+/// did: the newcomer never got a preparation slot inside the fixed step window.
 #[tokio::test]
 #[ignore = "run alone: intentionally occupies all process-global preparation permits"]
 async fn studio_actors_newcomer_survives_unrelated_process_pool_contention() {
@@ -408,6 +407,8 @@ async fn studio_actors_newcomer_survives_unrelated_process_pool_contention() {
     assert_eq!(shared.available_permits(), 0);
     assert_eq!(preview.available_permits(), 0);
     actor_newcomer(StudioTarget::Index { channel: channel() }, false).await;
+    actor_newcomer(target(), false).await;
+    actor_newcomer(target(), true).await;
 }
 
 #[tokio::test]
