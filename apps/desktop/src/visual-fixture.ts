@@ -306,7 +306,7 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
     case "get_invite":
       return server === 1 ? "fixture-invite-not-for-pairing" : null;
     case "get_roles":
-      return server === 1 ? { [ME]: "owner", [JUNIPER]: "admin", [MOSS]: "member" } : {};
+      return server === 1 ? { [`${ME}-full-device-id`]: "owner", [`${JUNIPER}-full-device-id`]: "admin", [`${MOSS}-full-device-id`]: "member" } : {};
     case "get_livery":
       return { preset: "", accent: "", tokens: {}, icon: "", cursor: "", name: "", banner: "" };
     case "get_channel_topic":

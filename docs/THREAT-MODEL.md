@@ -1,5 +1,28 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Admin collision hardening (2026-10-13)
+
+Current moderation-record roles also use the verified full signing-device identity.
+Legacy origin labels supply attribution only, without inheriting an origin's admin
+or owner authority. Historical-role proof and append-only audit completeness remain open.
+
+The four-byte admin admission bypass in hardening item 7 is repaired on the separate
+security branch: authoritative grants bind full current `DeviceId`s, with no companion
+inheritance. Fresh Add rechecks permission after queueing. Legacy grants are discarded
+without matching fingerprints; v2 rosters and versioned snapshot records use full IDs.
+Native role-write failures leave delegated admissions blocked and report unsaved state.
+Removal revokes exact grants and owner changes require fresh delegation.
+
+The earlier R3 claim was overbroad on unpatched builds: a full-member collision twin
+could invite an independent member. Updated owners reject that twin even if the genuine
+admin has departed. An existing member can still disclose plaintext or certify ordinary
+companions under the existing policy. Admission gives ordinary new-epoch capabilities,
+not every historical MLS secret or other devices' private keys. A fixed-target search
+has expected cost around 2^32 candidates under uniform hashing; no wall-clock benchmark
+is claimed. Old builds/backups remain vulnerable; stale valid v2 roster replay remains
+a badge/relay liveness issue, never an owner-local authority source.
+
+
 This document tracks **what a modified ("hacked") client can and cannot do**. Mewtual is
 peer-to-peer and open-source: anyone can run a build that ignores the UI's rules. The question
 this document answers, action by action, is *which rules are enforced by cryptography / the
@@ -1244,6 +1267,51 @@ table with the commit that closed it.
   repainting the replacement deck.
   The current take `group` value is device-local
   scope metadata, not the stable group binding needed by phase 6.
+- **Call identity is the full verified device id (Gate 5, C0d).** The sync layer queues the
+  32-byte `DeviceId` it derived from the signature key that authenticated a `KIND_CALL_SIGNAL`
+  request; the actor, the bridge and the frontend carry it as 64 lowercase hex (`from`), with the
+  8-hex fingerprint (`from_fp`) only as a display label of the same id. Outbound signals are
+  addressed by full identity and route only through that exact current member's own signed record
+  (`peer_for_device`); a malformed or 8-hex target is refused at the actor boundary. Queue fairness,
+  frontend call maps, roster revocation, jam capabilities/budgets/voice ownership and draw claims
+  all key on the full identity, so a member who grinds a device key sharing a victim's first four
+  bytes (about 2^32 work) can no longer receive the victim's signals, take over its call edge,
+  share its fairness bucket, alias its jam lane or claims, or shield a revoked device by sharing
+  its fingerprint. The legacy fingerprint resolver (DM invites only) refuses an ambiguous
+  fingerprint. **Residuals:** profiles, names and presence remain fingerprint-keyed app-wide, so a
+  twin renders under the victim's name (call and Studio labels add a longer id slice and "shares a
+  fingerprint" when two roster members collide) and an online twin makes the victim look online
+  (addressing widens; routing does not); DM invites are still addressed and deduplicated by
+  fingerprint, so a twin can replace a victim's pending friend request; jam drum seeds and
+  `jam-take:v1` `parts` deliberately keep the published fingerprint label (reproducibility, not
+  authority), and the recorder refuses a take whose participants share a label; the call-signal
+  transcript binds neither recipient nor a nonce cache, so a member can re-deliver another member's
+  signed signal (SDP, ICE, presence or `bye`) to a third member within the 60 s freshness window,
+  which can briefly drop a rejoined peer's call edge and claims (DTLS still binds every media and
+  data-channel endpoint); and `peer_for_device` inherits the documented peer-id squatting caveat of
+  member records.
+- **Flipnote frame claims are advisory coordination on the call `draw` channel (Gate 5).** A claim
+  frame's authority is only the opaque per-generation capability minted for the authenticated peer
+  identity; no frame field names a sender. Every delivery is charged before parsing against that
+  identity's call-epoch gate (the jam `inst` limits: 1024-byte cap, 80/s burst 160, auto-mute after
+  10 s exhausted in 60 s, which also retracts the peer's claims) and must fit 200 bytes before
+  `JSON.parse`; the exact seven-key schema rejects everything else. Sequence numbers are bound to
+  (capability, sender session): duplicates, reorders, retired sessions and a fifth session per
+  capability are refused, and every check runs before any state changes. Claims and asks are
+  bounded (4 live per sender, 2/s burst 10 per identity per call; releases uncharged) and expire
+  90 s after their last receipt on the receiver's own monotonic clock. While a peer's connection
+  is not "connected", its entries are hidden. Its deliveries are charged as usual and then held: at
+  most 32, malformed ones refused, and all discarded on auto-mute. They are applied only when this
+  side sees the link recover, so an unreachable peer cannot assert presence. Its entries are
+  dropped when its channel closes or is replaced, when it is removed, or when the call ends. One
+  claim session exists per call join. Only an explicit release of a live claim hands a
+  frame to a live asker. The Studio asserts claims only while open on the call's own server, so a
+  Studio browsed elsewhere cannot leak another server's object/frame ids or edit timing into the
+  call (which would link per-server identities). Claims never gate an edit or a save, and no
+  Studio edit, save or native path consults them. A modified client can claim every frame, never
+  refresh or release, or ignore Pass; the cost to receivers is bounded as above and the honest UI
+  shows such frames as claimed or contested, never locked. Older builds have no channel 8 and
+  neither send nor see claims.
 - **A shared file is authenticated bytes, not trusted content.** Explicit save streams into a
   non-overwriting `.part`, checks the declared size and whole-file content address, sanitizes the
   peer-provided name to one leaf, atomically publishes only after verification, and reveals it in
@@ -1391,11 +1459,12 @@ table with the commit that closed it.
 |---|---|---|---|---|---|
 | ~~R1~~ | **Member-removal requests** |; | ~~The committer honored a removal request from any member without a role check.~~ **CLOSED:** removal is now owner-only at the protocol layer; `request_remove` rejects a non-owner, and the committer ignores any inbound remove request whose requester isn't the owner (verified by signature, so a forged owner-claim fails too). |; | **Closed**; `crates/catcoms-sync` (on_remove_request owner gate + request_remove Unauthorized) |
 | R2 | **File deletion** | `Server::delete_file` gates on owner/admin role | A modified member could post a raw `FileIndex` delete op directly, unlisting any file. Low stakes; the content-addressed blob survives on every peer that holds it; nothing is destroyed. | **Low** | **Open**; close with the same committer-side role re-check, or accept (lowest stakes) |
-| R3 | **Invite-minting permission** | `require_invite_permission` → `can_invite()` (Owner/Admin) gates `mint_invite` | A modified member can *mint* an invite token, **but it is useless**: admission is both rank-gated and role-gated (see the protocol table), so a non-committer cannot admit the joiner itself, and the owner rejects its relayed Add-request because the named inviter is not on the owner's local roster. | **None today** (single-committer) / **Medium** if multi-committer were enabled, where a second committer reads the shared published roster rather than the owner's local one (see item 3's residual) | **Closed at the protocol layer** for the shipped single-committer config; the committer-side inviter role re-check (`inviter_is_authorized`) is shipped and tested, so minting permission is no longer the load-bearing gate. Do not enable `max_committer_rank ≥ 1` |
+| R3 | **Invite-minting permission** | `require_invite_permission` → `can_invite()` (Owner/Admin) gates `mint_invite` | A modified member can *mint* an invite token, **but it is useless against an updated owner**: admission is both rank-gated and role-gated (see the protocol table), so a non-committer cannot admit the joiner itself, and the owner rejects its relayed Add-request because the named inviter is not on the owner's local roster. | **None today** (single-committer) / **Medium** if multi-committer were enabled, where a second committer reads the shared published roster rather than the owner's local one (see item 3's residual) | **Closed at the protocol layer** for the shipped single-committer config; the committer-side inviter role re-check (`inviter_is_authorized`) is shipped and tested, so minting permission is no longer the load-bearing gate. Do not enable `max_committer_rank ≥ 1` |
 | R4 | **Local role display** | `my_role()` drives which controls the UI shows | A modified client can paint itself as "admin/owner" **in its own UI**, but this grants **no real capability**; grants are owner-signed (unforgeable) and admission is rank-gated. Cosmetic only. | **Cosmetic** | Accepted; documented in-app |
 | R5 | **Invite rate-limit / server policy** (planned) | An owner-set server-settings doc, respected by honest clients | A modified admin can ignore a mint rate-limit / expiry policy. It is a guardrail against *accidental* over-sharing by honest admins, **not** a control against a malicious admin. | **Soft guardrail** | Document the limitation in the UI when shipped |
 | R6 | **Message edit / delete / react / pin** | `edit_message`/`delete_message` gate on `author == self` (own messages; delete also allows owner/admin moderation); `set_pin` gates on the owner/admin role; `toggle_reaction` keys the reaction by the caller's own fingerprint | A modified member could post a raw channel op editing/deleting/pinning **any** member's message, or forging a reaction under another member's fingerprint; the per-op inner signature signs the *delta*, not the semantic `author`/reactor/role (the same property that already lets a member forge a message's author on send). Low stakes; message content is not authenticated, by design. | **Low** | **Open**; accept (same posture as R2), or a later per-message author-binding hardening |
 | R7 | **Moderation-log semantic authorization and completeness** | Product APIs gate warning/case creation to current owner/admin, resolution to owner, bind evidence to a currently visible message and same-target warning, and readers ignore invalid/unattributed/currently unauthorized records | A modified member can still submit raw Automerge changes that delete/overwrite moderation keys. A modified current admin can sign an invented evidence snapshot because the original message is not author-signed. Signatures make alteration and attribution failures detectable, but do **not** make the CRDT an append-only audit log or prove the signer's role at the historical instant. Votes never authorize removal; owner-only MLS removal remains enforced. | **Medium** (accountability), **None** for removal authority | **Open and disclosed**; historical role certificates plus a countersigned/hash-chained append-only log are the hardening path |
+| R8 | **Flipnote frame claims, Ask and Pass** (Gate 5) | The honest Studio claims on paint, releases on navigation, re-checks the call-server scope and completes a Pass only after an explicit release | A modified call member can claim any frame, never refresh or release a claim, spam Asks, or ignore Pass. Claims are advisory by design: they never lock a frame or gate a save, expire 90 s after their last receipt on the receiver's clock, and are bounded per sender (4 live, 2/s) and per identity per call. | **Low** (coordination only) | **Accepted by design**; the UI says claims never lock a frame |
 
 ### Notes on the roles/committer entanglement and how "admin invites" were resolved
 
@@ -1506,6 +1575,12 @@ design that shipped:
    owner-signed role evidence and a protocol-side append/delete policy before calling the timeline
    a tamper-proof audit trail. Preserve the existing invariant that a tally is never executable
    authority and only the owner removal path can mutate MLS membership.
+7. **Fingerprint-keyed inviter authorization (FIXED on the separate security branch).**
+   Unpatched Gate 5 owners authorize four-byte collision twins that are actual members.
+   Updated owners use full per-device grants and final fresh-Add checks, with v2 signed
+   rosters and explicit versioned authority persistence. Legacy grants are discarded,
+   never matched to current members. Owner re-approval is required. See the security
+   amendment above for impact, compatibility and the remaining relay liveness limitation.
 
 ## How to use this document
 

@@ -10,7 +10,9 @@ fn restore_pending_snapshot(bytes: &[u8]) -> Result<Node, SyncError> {
 fn snapshot_without_pending_tail(node: &mut Node) -> Vec<u8> {
     let tail = node.pending_finalization_snapshot().unwrap();
     let mut snapshot = node.snapshot().unwrap().to_vec();
-    snapshot.truncate(snapshot.len() - 4 - tail.len());
+    // Strip the later authority extension too to recreate the actual pre-pending format.
+    let authority_tail = 8 + b"catcoms/admin-authority/v2".len() + node.admin_roster.len() * 36;
+    snapshot.truncate(snapshot.len() - authority_tail - 4 - tail.len());
     snapshot
 }
 

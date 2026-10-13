@@ -678,6 +678,33 @@ test("live and take playback use identical stable drum seed provenance", async (
   assert.deepEqual(seeds, [seeds[0], seeds[0]], "synthetic allocator ids never enter seed material");
 });
 
+test("a live peer keyed by full identity seeds exactly as its fingerprint did (Gate 5)", async () => {
+  // INTERFACES 12 fixes drum seed material as the sender FINGERPRINT. Authority moved to the full
+  // identity; the seed did not, so a mixed-build room still renders identical noise per hit.
+  const fake = new FakeContext();
+  const seeds: JamDrumSeedInput[] = [];
+  const engine = new JamEngine(
+    fake as unknown as AudioContext,
+    () => 0,
+    fake.destination as unknown as AudioNode,
+    undefined,
+    async (input) => { seeds.push(input); return 123; },
+  );
+  const victim = "1a2b3c4d" + "0".repeat(56);
+  const twin = "1a2b3c4d" + "f".repeat(56);
+  const live = engine.openSource(victim, "1a2b3c4d");
+  const other = engine.openSource(twin, "1a2b3c4d");
+  assert.notEqual(live, other, "prefix-colliding identities get separate capabilities");
+  assert.equal(engine.sourceChannels.isCurrent(live), true, "the twin did not replace the victim's channel");
+  assert.equal((await engine.drum({ callId: "stable-channel", channel: live, sessionNonce: sn, sequence: 7, pad: 4 })).ok, true);
+  assert.equal(seeds[0]?.source, "1a2b3c4d");
+  const legacy = { callId: "stable-channel", source: "1a2b3c4d", sessionNonce: sn, sequence: 7, pad: 4 };
+  assert.deepEqual(seeds[0], legacy, "the seed input equals what a fingerprint-keyed build used");
+  assert.throws(() => engine.openSource(victim, ""), TypeError);
+  // Voices are owned by the full identity, so a twin's held notes never count against the victim.
+  assert.equal(engine.snapshot().voices.every((voice) => voice.source === victim), true);
+});
+
 test("take reconnect lanes share performer fairness and source-scoped hat choke", async () => {
   const { fake, engine } = contextAndEngine();
   const patches = await engine.preparePlaybackPatches([], () => true, {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { memberRole, identityForRoleLabel } from "./member-role.ts";
   import { invoke } from "@tauri-apps/api/core";
   import { fileAvailability, keptCopyLabel, fileInventoryRequests, mutateFileInventory, type KeptFiles } from "./file-availability";
   import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -256,6 +257,14 @@
     uniqueSavedName, type JamEditorStep, type JamStage, type JamStageStash,
   } from "./jam-editor";
   import type { JamSourceChannel } from "./jam-channel";
+  import {
+    callFingerprint, callJamLabel, displayKey, identityLabel, isPoliteTowards, onlineCallTargets,
+    parseCallSignalSender, revokedCallPeers, rosterIdentities, rosterSelfIdentity, sharedFingerprints,
+  } from "./call-identity";
+  import {
+    DrawClaimsSession, snapshotClaims, type StudioClaimActions, type StudioClaimSnapshot,
+  } from "./draw-claims";
+  import { drawConnectionState, openDrawEdge, type DrawEdge } from "./draw-wiring";
   import { JAM_INBOUND_PENDING_MAX, JAM_KIT, JAM_LEGACY_SESSION_NONCE, JAM_LOCAL_PUBLICATION_PENDING_MAX, JAM_MET_BPM_MAX, JAM_MET_BPM_MIN, JAM_MET_REV_MIN_INTERVAL_MS, JAM_PATCH_ANNOUNCE_MIN_INTERVAL_MS, JAM_PATCH_EXT, JAM_PATCH_MIME, JAM_PATCH_NAME_MAX_CHARS, JAM_REMOTE_HOLD_MAX_MS, JAM_SAVED_PATCHES_MAX, PATCH_CUTOFF_MAX_HZ, PATCH_OSC_WAVES, PATCH_PARAM, TAKE_MAX_DURATION_MS, type JamMetronome, type JamOsc, type JamPatch, type JamTake, type LegacyWave } from "./jam-contract";
   import { JamClockProbeTracker, JamClockSync, JamMetronomeClock } from "./jam-clock";
   import { JamCallCuePlayer, JamClickPlayer } from "./jam-clicks";
@@ -5243,9 +5252,12 @@
   // The full device identity, as the studio's native views name authors. A fingerprint is
   // display only and never compared against an author field.
   let myIdentity = $derived(roster.find((r) => r.you)?.identity ?? "");
+  // Viewed-server members whose fingerprint another member shares: their labels say so, because
+  // names are fingerprint-keyed and would otherwise let one device pass as the other.
+  let rosterSharedIds = $derived(sharedFingerprints(roster));
   function nameOfIdentity(identity: string): string {
     const m = roster.find((r) => r.identity === identity);
-    return m ? nameOf(m.fingerprint) : identity.slice(0, 8);
+    return identityLabel(m ? nameOf(m.fingerprint) : identity.slice(0, 8), identity, rosterSharedIds);
   }
   function colorOfIdentity(identity: string): string {
     const m = roster.find((r) => r.identity === identity);
@@ -5260,7 +5272,7 @@
   let myEmbedFolder = $derived(myFp ? `embed/${myFp}` : "embed");
   // Member roles (10h): fingerprint -> "owner"|"admin"|"member".
   let roles = $state<Record<string, string>>({});
-  let myRole = $derived(roles[myFp] ?? "member");
+  let myRole = $derived(memberRole(roles, myIdentity));
   // Owners + admins may invite. Admin invites are owner-serialized end-to-end (the joiner is
   // admitted when the owner is next online), and revocation is replay-proof (THREAT-MODEL item 3),
   // so this is safe to surface to admins.
@@ -5271,7 +5283,11 @@
   function activeName(): string {
     return cur?.channels.find((c) => c.id === cur?.active)?.name ?? "";
   }
-  function nameOf(fp: string): string {
+  function nameOf(key: string): string {
+    // Profiles are keyed by the 8-hex fingerprint. Call state is keyed by the full 64-hex identity
+    // (Gate 5, design 2.18); `displayKey` maps that to its fingerprint and leaves anything else
+    // alone, so every display site resolves either kind of key to the same name.
+    const fp = displayKey(key);
     // A companion device with no profile of its own renders under its origin's name
     // (attribution is per member; the device tag is added where devices are shown).
     const p = profiles[fp] ?? (deviceMap[fp] ? profiles[deviceMap[fp].origin] : undefined);
@@ -5280,15 +5296,19 @@
   // The call surfaces' counterpart to nameOf/profileFor. Resolves against the room's server
   // first and only falls back to the viewed server's map, so a peer keeps one name for the
   // whole call no matter where the user wanders in the rail.
-  function callProfileFor(fp: string): Prof | undefined {
+  function callProfileFor(key: string): Prof | undefined {
+    const fp = displayKey(key); // a call peer key is a full identity; profiles are per fingerprint
     return (
       callProfiles[fp] ??
       (deviceMap[fp] ? callProfiles[deviceMap[fp].origin] : undefined) ??
       profiles[fp]
     );
   }
-  function callNameOf(fp: string): string {
-    return resolveCallName(fp, callProfiles, profiles, (id) => deviceMap[id]?.origin);
+  function callNameOf(key: string): string {
+    const name = resolveCallName(displayKey(key), callProfiles, profiles, (id) => deviceMap[id]?.origin);
+    // Two call-server members sharing a fingerprint render under one profile name; say so rather
+    // than let one pass as the other (the full identity is what call state actually keys on).
+    return identityLabel(name, key, callSharedIds);
   }
   // Two-letter mono monogram for a rail circle (one letter for a one-character name).
   function monogram(name: string): string {
@@ -5296,7 +5316,8 @@
   }
   // A profile's custom frame is untrusted; the helper validates it before it reaches CSS. A
   // companion device inherits its origin's frame just as it already inherits the origin's name.
-  function profileFor(fp: string): Prof | undefined {
+  function profileFor(key: string): Prof | undefined {
+    const fp = displayKey(key);
     return profiles[fp] ?? (deviceMap[fp] ? profiles[deviceMap[fp].origin] : undefined);
   }
   function bubbleStyle(fp: string): string {
@@ -8122,7 +8143,7 @@
    */
   function debugVoicePeers(): DebugVoicePeer[] {
     return Object.entries(callPeers).map(([fp, p]) => ({
-      fingerprint: fp,
+      fingerprint: displayKey(fp), // call keys are full identities; this view reports the label
       connection: p.pc.connectionState,
       ice: p.pc.iceConnectionState,
       signaling: p.pc.signalingState,
@@ -8188,10 +8209,14 @@
       if (viewCurrent(gen, server)) error = String(e);
     }
   }
-  async function setAdmin(fp: string, admin: boolean) {
+  async function setAdmin(identity: string, admin: boolean) {
     if (activeServerId === null) return;
+    const target = roster.find((m) => m.identity === identity);
+    if (!target) return;
+    if (roster.filter((m) => m.fingerprint === target.fingerprint).length > 1
+      && !window.confirm(`Shared display fingerprint. ${admin ? "Grant" : "Revoke"} admin for this exact device?\n${identity}`)) return;
     try {
-      await invoke("set_admin", { server: activeServerId, fp, admin });
+      await invoke("set_admin", { server: activeServerId, identity, admin });
       await refreshRoles();
     } catch (e) {
       error = String(e);
@@ -9213,7 +9238,7 @@
       });
     }
     items.push({ label: "Copy fingerprint", icon: "fp", onSelect: () => copyText(m.fingerprint) });
-    const r = roles[m.fingerprint] ?? "member";
+    const r = memberRole(roles, m.identity);
     if (myRole === "owner" && !m.you && r !== "owner") {
       items.push({ divider: true }, { section: "server · owner" });
       items.push({
@@ -9221,8 +9246,8 @@
         icon: "crown",
         sub: [
           r === "admin"
-            ? { label: "Demote from admin", icon: "crown", onSelect: () => setAdmin(m.fingerprint, false) }
-            : { label: "Make admin", icon: "crown", onSelect: () => setAdmin(m.fingerprint, true) },
+            ? { label: "Demote from admin", icon: "crown", onSelect: () => setAdmin(m.identity, false) }
+            : { label: "Make admin", icon: "crown", onSelect: () => setAdmin(m.identity, true) },
         ],
       });
       items.push({
@@ -9351,10 +9376,14 @@
 
   // A peer row on the voice stage: their two levels (for you only), the two mutes, and who they
   // are. Toggles keep the menu open and rebuild it so the row says what it now does.
+  // `fp` is the CALL key: the peer's full identity (Gate 5). Every per-peer control below must get
+  // exactly the key callPeers, the audio chains and the jam engine use; only the profile card, the
+  // copied fingerprint and the menu head's avatar want the fingerprint those surfaces are keyed by.
   function peerMenu(fp: string): MenuItem[] {
     const again = () => refreshMenu(() => peerMenu(fp));
+    const label = displayKey(fp);
     return [
-      { head: true, kind: "in call", title: `${nameOf(fp)}${speaking[fp] ? " · speaking" : ""}`, fp },
+      { head: true, kind: "in call", title: `${nameOf(fp)}${speaking[fp] ? " · speaking" : ""}`, fp: label },
       {
         slider: true, icon: "vol", label: `Voice volume for ${nameOf(fp)}`,
         value: peerLevelFor(fp, "voice"), max: MAX_PEER_LEVEL,
@@ -9377,8 +9406,8 @@
         onSelect: () => { toggleInstPeer(fp); return again(); },
       },
       { divider: true },
-      { label: "Profile card", icon: "user", onSelect: () => showProfile(fp) },
-      { label: "Copy fingerprint", icon: "fp", onSelect: () => copyText(fp) },
+      { label: "Profile card", icon: "user", onSelect: () => showProfile(label) },
+      { label: "Copy fingerprint", icon: "fp", onSelect: () => copyText(label) },
     ];
   }
 
@@ -12137,13 +12166,16 @@
     // Screen audio is one mixed track regardless of how many applications the user adds. Keeping
     // its sender parked lets a source be added/removed without multiplying SDP sections forever.
     screenAudioSender: RTCRtpSender | null;
+    // Gate 5 frame claims: this edge's negotiated `draw` channel (id 8) and the opaque capability
+    // the claim session minted for it. Null when the WebView refused the channel.
+    draw: DrawEdge | null;
   };
   let inCall = $state(false);
   let callMuted = $state(false);
   // Whether this device has a microphone in the room at all, as distinct from having muted one.
   // Being in a room without one is a supported state, not a failed join.
   let micOn = $state(false);
-  let callParticipants = $state<string[]>([]); // peer fingerprints, for the call UI
+  let callParticipants = $state<string[]>([]); // peer full identities (call keys), for the call UI
   let callPeerStates = $state<Record<string, string>>({}); // fp -> RTCPeerConnectionState
   // A voice room is per-CHANNEL: the channel id doubles as the call id (for signalling + the media
   // key). You join a channel's room; others see it via presence (below) and join the same room.
@@ -12153,7 +12185,11 @@
   // room's server stops being the viewed one, which is the whole point of the fields below.
   let callServer = $state<number | null>(null); // the server the room is on
   let callServerName = $state(""); // the room's server, for chrome that must not say "here"
-  let callSelfFp = $state(""); // identity on callServer; the viewed server may change mid-call
+  // This device's FULL identity (64 lowercase hex) on callServer; the viewed server may change
+  // mid-call. Every call key is a full identity (design 2.18); display derives the fingerprint.
+  let callSelfId = $state("");
+  // Call-server members whose fingerprint another member shares, so call labels can say so.
+  let callSharedIds = $state<ReadonlySet<string>>(new Set());
   let activeCallLease = 0; // binds async call-only caches to this exact room lifecycle
   // Names and avatars on the call surfaces MUST resolve against the room's server, never the
   // viewed one. `profiles` is replaced wholesale on every server switch (see refreshProfiles),
@@ -12208,7 +12244,92 @@
   // remote description instead of throwing it away and making the call depend on event timing.
   const waitingIce: Record<string, RTCIceCandidateInit[]> = {};
 
-  // Voice-room presence: `${server}:${channel}` -> { fp: lastSeenMs }, from periodic pings members in
+  // --- Gate 5: collaborative frame claims (draw-claims.ts; docs/GATE5-DESIGN.md) ------------------
+  // One session per call join: the receiver book for every peer's `draw` channel plus this
+  // device's own claim and ask. Created on join, disposed on leave, so nothing survives the call.
+  // Claims are advisory; nothing here gates an edit.
+  let drawClaims = $state.raw<DrawClaimsSession | null>(null);
+  // The plain, frozen view the Studio renders; rebuilt after every change and once a second so
+  // countdowns move.
+  let drawClaimSnapshot = $state.raw<StudioClaimSnapshot | null>(null);
+  let drawClaimTimer: ReturnType<typeof setInterval> | undefined;
+  // The Studio may assert claims only while it is open on the CALL's server. A Studio browsed on
+  // another server must not leak that server's object/frame ids (or edit timing) into this call,
+  // which would link the user's identities across servers.
+  let studioClaimScope = $derived(inCall && callServer !== null && activeServerId === callServer && view === "studio");
+  function randomHex(bytes: number): string {
+    const buf = new Uint8Array(bytes);
+    crypto.getRandomValues(buf);
+    return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  function syncDrawClaims() {
+    drawClaimSnapshot = drawClaims ? snapshotClaims(drawClaims) : null;
+  }
+  // Run one session operation and rebuild the Studio snapshot only if it changed something
+  // visible. Every draw delivery and every paint sample goes through here, so an unconditional
+  // rebuild would let a peer's flood (or ordinary painting) re-render the whole timeline.
+  function withDrawClaims(op: (session: DrawClaimsSession) => void) {
+    const session = drawClaims;
+    if (!session) return;
+    const before = session.rev;
+    op(session);
+    if (session.rev !== before) syncDrawClaims();
+  }
+  function startDrawClaims(selfId: string) {
+    stopDrawClaims();
+    const session = new DrawClaimsSession({ self: selfId, now: () => performance.now(), randomHex });
+    session.onnotice = (notice) => {
+      // Any explicit release of a frame I asked for hands it over: a Pass, or the holder moving on.
+      toast(`${callNameOf(notice.from)} let go of the frame you asked for; it's yours now`, "ok", 5000);
+    };
+    session.onmuted = () => {
+      // No identity or content: the receiver-side flood mute is policy, and its cost is that peer's
+      // claims disappearing for the rest of the call.
+      diagRecord({ section: "voice", code: "VOICE.DRAW.ABUSE_MUTED", level: "warn", fields: {} });
+    };
+    drawClaims = session;
+    drawClaimTimer = setInterval(() => {
+      if (drawClaims !== session) return;
+      const before = session.rev;
+      session.tick();
+      // Countdowns move every second while anything is live; otherwise only a change rebuilds. A
+      // snapshot still showing something is rebuilt too, so nothing it shows can outlive the book.
+      const shown = drawClaimSnapshot;
+      const showing = !!shown && (shown.entries.length > 0 || shown.local.ask !== null);
+      if (session.rev !== before || !session.isQuiet() || showing) syncDrawClaims();
+    }, 1000);
+    syncDrawClaims();
+  }
+  function stopDrawClaims() {
+    clearInterval(drawClaimTimer);
+    drawClaimTimer = undefined;
+    drawClaims?.dispose();
+    drawClaims = null;
+    drawClaimSnapshot = null;
+  }
+  // Every action goes through the live session and is re-checked against the scope, so a Studio
+  // that outlived its call or wandered to another server cannot send anything.
+  const studioClaimActions: StudioClaimActions = Object.freeze({
+    select: (obj: string, fr: string) => withDrawClaims((s) => s.selectionChanged(obj, fr)),
+    claim: (obj: string, fr: string) => withDrawClaims((s) => { if (studioClaimScope) s.claim(obj, fr); }),
+    autoClaim: (obj: string, fr: string) => withDrawClaims((s) => { if (studioClaimScope) s.autoClaim(obj, fr); }),
+    release: () => withDrawClaims((s) => s.release()),
+    ask: (obj: string, fr: string) => withDrawClaims((s) => { if (studioClaimScope) s.ask(obj, fr); }),
+    cancelAsk: () => withDrawClaims((s) => s.cancelAsk()),
+    pass: (obj: string, fr: string) => withDrawClaims((s) => s.pass(obj, fr)),
+  });
+  // Leaving the Studio, or viewing another server, withdraws my claim and ask at once.
+  $effect(() => {
+    if (studioClaimScope) return;
+    untrack(() => {
+      withDrawClaims((s) => {
+        s.release();
+        s.cancelAsk();
+      });
+    });
+  });
+
+  // Voice-room presence: `${server}:${channel}` -> { identity: lastSeenMs }, from periodic pings members in
   // a room broadcast. Drives the per-channel "in voice" indicators + the room-active notification.
   let voiceRooms = $state<Record<string, Record<string, number>>>({});
   let voiceAlert = $state<{ server: number; channel: string; name: string } | null>(null);
@@ -12218,7 +12339,7 @@
   function roomKey(server: number, channel: string) {
     return `${server}:${channel}`;
   }
-  // Fingerprints currently in a room (presence fresher than VOICE_STALE_MS).
+  // Full identities currently in a room (presence fresher than VOICE_STALE_MS).
   function roomMembers(server: number, channel: string): string[] {
     const r = voiceRooms[roomKey(server, channel)];
     if (!r) return [];
@@ -12332,7 +12453,9 @@
   function b64dec(b: string): string {
     return new TextDecoder().decode(Uint8Array.from(atob(b), (c) => c.charCodeAt(0)));
   }
-  async function sendSignal(server: number, targetFp: string, msg: Record<string, unknown>): Promise<boolean> {
+  // `target` is the member's full identity (64 lowercase hex). The backend routes only through that
+  // exact device's own signed record; an 8-hex fingerprint is refused there (design 2.18).
+  async function sendSignal(server: number, target: string, msg: Record<string, unknown>): Promise<boolean> {
     // The message kind is a protocol enum (offer, answer, ice, bye), never anything a person
     // wrote, so it is safe to record and it is what turns a wall of identical warnings into
     // "every ice candidate failed while the offer got through".
@@ -12340,7 +12463,7 @@
     try {
       const { value: delivered } = await invokeDebugged<boolean>("send_call_signal", {
         server,
-        targetFp,
+        target,
         payload: b64enc(JSON.stringify(msg)),
       });
       // The incident this whole section exists for: the roster shows a claimed path and the
@@ -12367,17 +12490,14 @@
   }
   // Send against the CALL server's live roster, never the server currently being viewed. Fetching
   // this small in-memory view also lets a background call pick up newly-reconnected members.
-  async function broadcastOn(server: number, selfFp: string, msg: Record<string, unknown>) {
+  async function broadcastOn(server: number, selfId: string, msg: Record<string, unknown>) {
     try {
       const [membersHere, onlineHere] = await Promise.all([
         invoke<Member[]>("get_members", { server }),
         invoke<string[]>("get_online_members", { server }),
       ]);
-      const online = new Set(onlineHere);
-      for (const m of membersHere) {
-        if (m.fingerprint !== selfFp && online.has(m.fingerprint)) {
-          void sendSignal(server, m.fingerprint, msg);
-        }
+      for (const target of onlineCallTargets(membersHere, new Set(onlineHere), selfId)) {
+        void sendSignal(server, target, msg);
       }
     } catch (e) {
       console.warn("voice broadcast could not read its server roster", { server, error: String(e) });
@@ -12386,8 +12506,8 @@
   // Capture the room synchronously: leaveVoice clears global state immediately after sending bye.
   function broadcast(msg: Record<string, unknown>) {
     const server = callServer;
-    const selfFp = callSelfFp;
-    if (server !== null && selfFp) void broadcastOn(server, selfFp, msg);
+    const selfId = callSelfId;
+    if (server !== null && selfId) void broadcastOn(server, selfId, msg);
   }
   /**
    * Say goodbye, on every route at once, before the room is torn down.
@@ -12408,11 +12528,11 @@
    *   room but have no edge with me yet (a joiner still negotiating, someone the mesh routed
    *   around). It needs the roster read, so it finishes after this function returns.
    */
-  function announceHangup(server: number, selfFp: string, channel: string) {
+  function announceHangup(server: number, selfId: string, channel: string) {
     const farewell = { callId: channel, type: "bye" };
     const edges: string[] = [];
-    for (const [fp, peer] of Object.entries(callPeers)) {
-      edges.push(fp);
+    for (const [id, peer] of Object.entries(callPeers)) {
+      edges.push(id);
       if (peer.dc?.readyState === "open") {
         try { peer.dc.send(JSON.stringify({ t: "bye" })); } catch { /* edge already gone */ }
       }
@@ -12427,13 +12547,14 @@
           invoke<Member[]>("get_members", { server }),
           invoke<string[]>("get_online_members", { server }),
         ]);
-        members = membersHere.map((m) => m.fingerprint);
-        online = new Set(onlineHere);
+        // Everything here is a full identity: edges, members and the online set alike.
+        members = rosterIdentities(membersHere);
+        online = new Set(onlineCallTargets(membersHere, new Set(onlineHere), selfId));
       } catch (e) {
         console.warn("hangup could not read its server roster", { server, error: String(e) });
       }
-      for (const fp of hangupTargets(edges, members, online, selfFp)) {
-        void sendSignal(server, fp, farewell);
+      for (const target of hangupTargets(edges, members, online, selfId)) {
+        void sendSignal(server, target, farewell);
       }
     })();
   }
@@ -12927,7 +13048,7 @@
       jamMySn = jamNonce();
       jamMyQ = 0;
       // Keep the reserved UI lane while binding seeds/fairness to the authenticated call identity.
-      jamSelfChan = jamEngine.openLocalSource(callSelfFp);
+      jamSelfChan = jamEngine.openLocalSource(callJamLabel(callSelfId));
       jamEngine.beginSourceSession(jamSelfChan, jamMySn);
       jamEngine.setDeafened(callDeafened);
     }
@@ -13445,11 +13566,14 @@
   function myRecWire(): number {
     return jamRecUi === "recording" ? 2 : jamRecUi === "off" ? 0 : 1;
   }
+  // Take `parts` are the published jam-take:v1 performer labels: fingerprints, the same strings
+  // the drum seed uses (INTERFACES.md 12). Two participants sharing a fingerprint yield a
+  // duplicate label, which the recorder refuses (it pauses), rather than merging their lanes.
   function jamRecParticipants(): string[] {
-    return [callSelfFp, ...callParticipants.filter((fp) => fp !== callSelfFp)];
+    return [callJamLabel(callSelfId), ...callParticipants.filter((id) => id !== callSelfId).map(callJamLabel)];
   }
   function jamRecArm() {
-    if (!inCall || jamRec || !callSelfFp) return;
+    if (!inCall || jamRec || !callSelfId) return;
     try {
       jamRec = new JamTakeRecorder({
         groupId: `${callServer ?? "?"}`,
@@ -13766,7 +13890,7 @@
   // Sheet music: the honest transcript (jam-sheet.ts states its own limits) rendered here and
   // saved by a command that only accepts this exporter's own output shape.
   async function jamExportSheet(entry: { id: number; take: JamTake; name: string }) {
-    const names = entry.take.parts.map((fp) => (fp === callSelfFp ? "you" : nameOf(fp)));
+    const names = entry.take.parts.map((fp) => (fp === callJamLabel(callSelfId) ? "you" : nameOf(fp)));
     const now = new Date();
     const title = entry.name.trim() || `take ${pad2(entry.id)}`;
     const name = `${jamTakeSlug(title)}-${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}.svg`;
@@ -13806,7 +13930,7 @@
   }
   function takePlayers(take: JamTake): string {
     const sources = [...new Set(take.lanes.map((lane) => take.parts[lane.src]))];
-    return sources.map((fp) => (fp === callSelfFp ? "you" : nameOf(fp))).join(" · ") || "nobody";
+    return sources.map((fp) => (fp === callJamLabel(callSelfId) ? "you" : nameOf(fp))).join(" · ") || "nobody";
   }
   function takeDuration(take: JamTake): number {
     return Math.ceil((take.events[take.events.length - 1]?.ms ?? 0) / 1000);
@@ -14096,8 +14220,10 @@
   // separately for a peer's voice and for the audio of whatever they are sharing.
   let peerVolumes = $state<Record<string, number>>({});
   let peerShareVolumes = $state<Record<string, number>>({});
-  const peerLevelKey = (fp: string, kind: PeerAudioKind) =>
-    kind === "voice" ? `catcoms.call.level.${fp}` : `catcoms.call.sharelevel.${fp}`;
+  // Stored per fingerprint even though call state is keyed by full identity: these trims are a
+  // local cosmetic preference, and keeping the key preserves every trim saved before Gate 5.
+  const peerLevelKey = (key: string, kind: PeerAudioKind) =>
+    kind === "voice" ? `catcoms.call.level.${displayKey(key)}` : `catcoms.call.sharelevel.${displayKey(key)}`;
   function loadPeerLevel(fp: string, kind: PeerAudioKind): number {
     try {
       const raw = localStorage.getItem(peerLevelKey(fp, kind));
@@ -14105,7 +14231,7 @@
       if (kind === "share") return DEFAULT_PEER_LEVEL;
       // One-time carry-over of the trims set before levels were percentages. The old key held a
       // 0..1 element volume, so a stored 0.4 is 40%, not 0.4%. Read only; nothing writes it again.
-      const legacy = localStorage.getItem(`catcoms.call.vol.${fp}`);
+      const legacy = localStorage.getItem(`catcoms.call.vol.${displayKey(fp)}`);
       if (legacy === null) return DEFAULT_PEER_LEVEL;
       const fraction = Number(legacy);
       return Number.isFinite(fraction) ? normalizePeerLevel(fraction * 100) : DEFAULT_PEER_LEVEL;
@@ -14128,7 +14254,9 @@
   // notes are synthesized here, on the engine's per-source gain (0..1), so there is nothing sent
   // to amplify past 100%. Remembered per fingerprint like the other trims.
   let peerInstLevels = $state<Record<string, number>>({});
-  const peerInstKey = (fp: string) => `catcoms.call.instlevel.${fp}`;
+  // Like the voice/share trims: a local cosmetic preference, kept per fingerprint so saved trims
+  // survive the move of call keys to full identities.
+  const peerInstKey = (key: string) => `catcoms.call.instlevel.${displayKey(key)}`;
   const clampInstLevel = (n: number) => (Number.isFinite(n) ? Math.min(100, Math.max(0, Math.round(n))) : 100);
   function peerInstLevelFor(fp: string): number {
     const held = peerInstLevels[fp];
@@ -14305,7 +14433,7 @@
         if (!jamSequenceAccepted(played)) return;
         uiNoteOn(fp, m.n);
         const recorded = recordLeasedJamNoteOn(jamRec, admission.recorderLease, {
-          source: fp, sessionNonce: JAM_LEGACY_SESSION_NONCE, sequence: m.q, note: m.n, wave: m.w,
+          source: callJamLabel(fp), sessionNonce: JAM_LEGACY_SESSION_NONCE, sequence: m.q, note: m.n, wave: m.w,
         });
         if (recorded) jamRecGap(recorded);
       } else {
@@ -14313,7 +14441,7 @@
         if (!jamSequenceAccepted(played)) return;
         uiNoteOff(fp, m.n);
         const recorded = recordLeasedJamNoteOff(jamRec, admission.recorderLease, {
-          source: fp, sessionNonce: JAM_LEGACY_SESSION_NONCE, sequence: m.q, note: m.n,
+          source: callJamLabel(fp), sessionNonce: JAM_LEGACY_SESSION_NONCE, sequence: m.q, note: m.n,
         });
         if (recorded) jamRecGap(recorded);
       }
@@ -14329,7 +14457,7 @@
         uiNoteOn(fp, m.n);
         if (jamPeerSn[fp]) {
           const recorded = recordLeasedJamNoteOn(jamRec, admission.recorderLease, {
-            source: fp,
+            source: callJamLabel(fp),
             sessionNonce: jamPeerSn[fp],
             sequence: m.q,
             note: m.n,
@@ -14346,7 +14474,7 @@
         uiNoteOff(fp, m.n);
         if (jamPeerSn[fp]) {
           const recorded = recordLeasedJamNoteOff(jamRec, admission.recorderLease, {
-            source: fp, sessionNonce: jamPeerSn[fp], sequence: m.q, note: m.n,
+            source: callJamLabel(fp), sessionNonce: jamPeerSn[fp], sequence: m.q, note: m.n,
           });
           if (recorded) jamRecGap(recorded);
         }
@@ -14361,7 +14489,7 @@
       if (!jamSequenceAccepted(played)) return;
       flashPad(m.n, fp);
       const recorded = recordLeasedJamDrum(jamRec, admission.recorderLease, {
-        source: fp, sessionNonce: sn, sequence: m.q, pad: m.n,
+        source: callJamLabel(fp), sessionNonce: sn, sequence: m.q, pad: m.n,
       });
       if (recorded) jamRecGap(recorded);
     } else if (m.t === "p") {
@@ -14595,9 +14723,9 @@
       const channel = jamSelfChan;
       if (!inCall || !engine || !channel || publication.sessionNonce !== jamMySn) return;
       const q = instSend(publication, note, true, outbound);
-      if (callSelfFp) {
+      if (callSelfId) {
         const recorded = recordLeasedJamNoteOn(jamRec, recorderLease, {
-          source: callSelfFp,
+          source: callJamLabel(callSelfId),
           sessionNonce: publication.sessionNonce,
           sequence: q,
           note,
@@ -14627,9 +14755,9 @@
       const channel = jamSelfChan;
       if (!inCall || !engine || !channel || publication.sessionNonce !== jamMySn) return;
       const q = instSend(publication, note, false, outbound);
-      if (callSelfFp) {
+      if (callSelfId) {
         const recorded = recordLeasedJamNoteOff(jamRec, recorderLease, {
-          source: callSelfFp, sessionNonce: publication.sessionNonce, sequence: q, note,
+          source: callJamLabel(callSelfId), sessionNonce: publication.sessionNonce, sequence: q, note,
         });
         if (recorded) jamRecGap(recorded);
       }
@@ -14652,9 +14780,9 @@
       jamMyQ += 1;
       const callId = jamCallId();
       if (outbound) jamBroadcastEvent(publication, JSON.stringify({ t: "d", n: pad, q }));
-      if (callSelfFp) {
+      if (callSelfId) {
         const recorded = recordLeasedJamDrum(jamRec, recorderLease, {
-          source: callSelfFp, sessionNonce: publication.sessionNonce, sequence: q, pad,
+          source: callJamLabel(callSelfId), sessionNonce: publication.sessionNonce, sequence: q, pad,
         });
         if (recorded) jamRecGap(recorded);
       }
@@ -14736,8 +14864,8 @@
     return m;
   });
   // A peer's chosen name colour, or the accent when their profile never set one.
-  function instColor(fp: string): string {
-    return profiles[fp]?.color?.trim() || "var(--accent-hi)";
+  function instColor(key: string): string {
+    return profiles[displayKey(key)]?.color?.trim() || "var(--accent-hi)";
   }
   // Remote notes outside the visible register: you must be able to see someone is playing
   // without hunting for the octave they played it in. Nearest the visible edge sorts first.
@@ -15818,7 +15946,7 @@
   }
   // I am the DJ while the transport we follow is my own press.
   function jukeIsDj(): boolean {
-    return !!jukeAdopted && !!callSelfFp && jukeAdopted.fromFp === callSelfFp;
+    return !!jukeAdopted && !!callSelfId && jukeAdopted.fromFp === callSelfId;
   }
   // The deck element, but only while it actually holds this track. The comparison is against the
   // attribute we set rather than `el.src`, which is the resolved URL and need not come back the
@@ -16005,7 +16133,7 @@
   function jukeSend(entry: string, cid: string, src: string, link: string, name: string, off: number, paused: boolean) {
     if (!inCall || !callChannel) return;
     jukeSeq = nextJukeSeq(jukeSeq, jukeAdopted?.seq ?? null);
-    jukeAdopt(jukeSeq, callSelfFp, entry, cid, src, link, name, off, paused);
+    jukeAdopt(jukeSeq, callSelfId, entry, cid, src, link, name, off, paused);
     broadcast({ callId: callChannel, type: "juke", seq: jukeSeq, entry, cid, src, link, name, off, paused });
   }
   /**
@@ -16048,7 +16176,7 @@
       jukeTrustBlocked = "";
     }
     jukeNow = entry || cid || link
-      ? { entry, cid, src, link, name, paused, dj: fromFp === callSelfFp ? "" : fromFp }
+      ? { entry, cid, src, link, name, paused, dj: fromFp === callSelfId ? "" : fromFp }
       : null;
     if (!jukeNow) {
       jukeDur = 0;
@@ -16981,7 +17109,7 @@
       peer.screenAudioSender = peer.pc.addTrack(track, camStream ?? screenAudioDestination.stream);
       void capScreenAudio(peer.screenAudioSender);
     } catch (e) {
-      console.warn("voice: could not add mixed screen audio", { peer: peer.fp, error: String(e) });
+      console.warn("voice: could not add mixed screen audio", { peer: displayKey(peer.fp), error: String(e) });
     }
   }
 
@@ -17435,7 +17563,7 @@
         // Same m-line: a cam/screen swap never renegotiates. replaceTrack rejects rather than
         // throwing when the edge has gone under us, so the failure is caught on the promise.
         p.vidSender.replaceTrack(track).catch((e: unknown) =>
-          console.warn("voice: video swap was refused", { peer: p.fp, error: String(e) }));
+          console.warn("voice: video swap was refused", { peer: displayKey(p.fp), error: String(e) }));
         if (plan.direction && slot.tr) slot.tr.direction = plan.direction;
         preferVideoCodecs(slot.tr);
         capVideo(p.vidSender, kind, p.fp);
@@ -17455,7 +17583,7 @@
       preferVideoCodecs(p.pc.getTransceivers().find((transceiver) => transceiver.sender === sn) ?? null);
       capVideo(sn, kind, p.fp);
     } catch (e) {
-      console.warn("voice: could not put video on this edge", { peer: p.fp, error: String(e) });
+      console.warn("voice: could not put video on this edge", { peer: displayKey(p.fp), error: String(e) });
     }
   }
   function stopVideo() {
@@ -17538,7 +17666,7 @@
   let focusSolo = $state("");
   // A soloed peer who has left, or stopped being interesting, releases the view on their own.
   let focusSoloActive = $derived(
-    focusSolo !== "" && (focusSolo === callSelfFp || callParticipants.includes(focusSolo)),
+    focusSolo !== "" && (focusSolo === callSelfId || callParticipants.includes(focusSolo)),
   );
   function toggleFocusSolo(fp: string) {
     focusSolo = focusSolo === fp ? "" : fp;
@@ -17546,11 +17674,11 @@
   /** Whoever is sharing a screen right now, self last: the natural thing to solo from a keystroke. */
   let focusShareCandidates = $derived([
     ...callParticipants.filter((fp) => (peerMeta[fp]?.vid ?? 0) === 2 && !!remoteStreams[fp]),
-    ...(myVideo === "screen" ? [callSelfFp] : []),
+    ...(myVideo === "screen" ? [callSelfId] : []),
   ]);
   // Self first, then peers: one tile per person, and nothing else on the grid.
   let focusTiles = $derived(
-    focusSoloActive ? [focusSolo] : [callSelfFp, ...callParticipants],
+    focusSoloActive ? [focusSolo] : [callSelfId, ...callParticipants],
   );
   let focusCols = $derived(focusTiles.length <= 1 ? 1 : focusTiles.length <= 4 ? 2 : 3);
 
@@ -17567,7 +17695,7 @@
         });
       }
     } catch (e) {
-      console.warn("voice negotiation failed", { peer: peer.fp, error: String(e) });
+      console.warn("voice negotiation failed", { peer: displayKey(peer.fp), error: String(e) });
     } finally {
       peer.makingOffer = false;
     }
@@ -17580,7 +17708,7 @@
       try {
         await peer.pc.addIceCandidate(new RTCIceCandidate(candidate));
       } catch (e) {
-        if (!peer.ignoreOffer) console.warn("buffered ICE candidate was rejected", { peer: peer.fp, error: String(e) });
+        if (!peer.ignoreOffer) console.warn("buffered ICE candidate was rejected", { peer: displayKey(peer.fp), error: String(e) });
       }
     }
   }
@@ -17604,7 +17732,7 @@
     try {
       peer.pc.restartIce(); // raises negotiationneeded and sends a fresh ICE offer
     } catch (e) {
-      console.warn("voice ICE restart failed", { peer: peer.fp, error: String(e) });
+      console.warn("voice ICE restart failed", { peer: displayKey(peer.fp), error: String(e) });
     }
   }
 
@@ -17737,7 +17865,7 @@
     if (callPeers[fp]) return callPeers[fp];
     const server = callServer;
     const channel = callChannel;
-    if (server === null || !channel || !callSelfFp) return null;
+    if (server === null || !channel || !callSelfId) return null;
     const pc = new RTCPeerConnection({ iceServers: iceServers() });
     const peer: CallPeer = {
       fp,
@@ -17745,13 +17873,14 @@
       channel,
       pc,
       dc: null,
-      polite: callSelfFp < fp,
+      polite: isPoliteTowards(callSelfId, fp),
       makingOffer: false,
       ignoreOffer: false,
       lastRetry: 0,
       vidSender: null,
       micSender: null,
       screenAudioSender: null,
+      draw: null,
     };
     if (localStream) {
       for (const t of localStream.getAudioTracks()) peer.micSender = pc.addTrack(t, localStream);
@@ -17772,7 +17901,8 @@
       // jam:v2 provenance: the handler closes over THIS generation's capability and budget. A
       // recovered connection re-runs this block and mints a new pair, so a queued callback from
       // the replaced channel fails the engine's isCurrent check instead of speaking for it.
-      const jamChan = ensureJamEngine().openSource(fp);
+      // `fp` is the peer's full identity: the authority key. Drum seeds keep the jam:v2 label.
+      const jamChan = ensureJamEngine().openSource(fp, callJamLabel(fp));
       const jamBudget = jamPeerBudgets[fp] ??= new JamPeerBudget();
       const jamDec = new JamFrameDecoder(jamBudget);
       jamPeerChans[fp] = jamChan;
@@ -17794,6 +17924,17 @@
     } catch {
       /* data channels unavailable: voice still works */
     }
+    // Gate 5 frame claims ride their own negotiated, ordered channel (id 8), created here for the
+    // same reason as `inst`: before the first offer, so nothing renegotiates (draw-wiring.ts).
+    const claims = drawClaims;
+    if (claims) {
+      peer.draw = openDrawEdge(pc, claims, fp, {
+        live: () => callPeers[fp] === peer,
+        changed: () => {
+          if (drawClaims === claims) syncDrawClaims();
+        },
+      });
+    }
     // Perfect negotiation, offer side: fires for the initial tracks AND whenever video is added
     // later. The no-argument setLocalDescription picks offer/answer from the signaling state.
     pc.onnegotiationneeded = () => void negotiatePeer(peer);
@@ -17810,7 +17951,7 @@
       }
     };
     pc.onicecandidateerror = (e) => console.warn("voice ICE server/candidate error", {
-      peer: fp,
+      peer: displayKey(fp),
       code: e.errorCode,
       text: e.errorText,
       url: e.url,
@@ -17836,6 +17977,11 @@
     };
     pc.onconnectionstatechange = () => {
       callPeerStates = { ...callPeerStates, [fp]: pc.connectionState };
+      // Claims never outlive a dead link, and an unreachable peer is absent until this side sees
+      // it "connected" again (draw-wiring.ts).
+      if (claims && callPeers[fp] === peer && drawClaims === claims) {
+        drawConnectionState(claims, fp, pc.connectionState, peer.draw, syncDrawClaims);
+      }
       if (pc.connectionState === "connected") void sniffTransport(fp, pc);
       if (pc.connectionState === "failed") recoverPeer(peer);
       else if (pc.connectionState === "closed") removePeer(fp);
@@ -17862,6 +18008,8 @@
     peerVideoCodec = codecs;
     const { [fp]: _budget, ...budgets } = peerVideoBudget;
     peerVideoBudget = budgets;
+    // Their frame claims and asks go with them, immediately (Gate 5).
+    withDrawClaims((s) => s.removePeer(fp));
     // Silence and forget anything they were sounding; a dead edge must not drone on.
     jamEngine?.removeSource(fp);
     clearPeerJamUi(fp);
@@ -17904,13 +18052,13 @@
   // a name and fill four bars, and it costs nothing next to the codecs already running. Analysers
   // are never wired to the destination: tapping a remote stream must not double it into the ears.
   let stageOpen = $state(false); // the expanded stage (vs. the collapsed call bar)
-  let speaking = $state<Record<string, boolean>>({}); // "me" or a peer fp -> above the talk floor
+  let speaking = $state<Record<string, boolean>>({}); // "me" or a peer identity -> above the talk floor
   let micLevel = $state(0); // 0..1, drives the meter
   // How far each voice's ears are up: the same RMS the ring uses, quantised to four steps. It is
   // quantised for the same reason the mic meter is drawn as four bars rather than a continuous
   // fill: a value that changes every tick would re-render the stage eight times a second for a
   // difference no eye can see. Four steps is enough for ears to read as twitching.
-  let earPerk = $state<Record<string, number>>({}); // "me" or a peer fp -> 0..3
+  let earPerk = $state<Record<string, number>>({}); // "me" or a peer identity -> 0..3
   const perkOf = (rms: number): number =>
     rms <= SPEAK_FLOOR ? 0 : Math.min(3, 1 + Math.floor((rms / METER_FULL) * 2.4));
   let linksUp = $derived(callParticipants.filter((fp) => callPeerStates[fp] === "connected").length);
@@ -18047,16 +18195,18 @@
     micCaptureSession.invalidate();
     callFiles = [];
     jukeExplicitApprovals.clear();
-    let selfFp = "";
+    let selfId = "";
+    let sharedIds: ReadonlySet<string> = new Set();
     try {
       const membersHere = await invoke<Member[]>("get_members", { server });
       if (!callLifecycleSession.isCurrent(joinLease)) return;
-      selfFp = membersHere.find((m) => m.you)?.fingerprint ?? "";
+      selfId = rosterSelfIdentity(membersHere);
+      sharedIds = sharedFingerprints(membersHere);
     } catch (e) {
       error = `Couldn't read the voice room's member list: ${String(e)}`;
       return;
     }
-    if (!selfFp) {
+    if (!selfId) {
       error = "Couldn't identify this device on the voice room's server.";
       return;
     }
@@ -18075,7 +18225,9 @@
     localStream = null;
     micOn = false;
     callServer = server;
-    callSelfFp = selfFp;
+    callSelfId = selfId;
+    callSharedIds = sharedIds;
+    startDrawClaims(selfId); // before any peer edge exists, so every edge gets a draw channel
     callChannel = channel;
     callChannelName = name;
     // Snapshot the room's server identity now, while we are certainly on it. Everything the
@@ -18101,7 +18253,7 @@
     startMeters();
     navigator.mediaDevices?.addEventListener?.("devicechange", onDeviceChange);
     alertedRooms.delete(roomKey(server, channel));
-    recordPresence(server, channel, callSelfFp);
+    recordPresence(server, channel, callSelfId);
     void refreshJukebox(); // the room's queue, whatever the DJ is currently on
     broadcast({ callId: channel, type: "hello", mic: 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight, rec: myRecWire(), rc: 1 }); // announce + trigger existing members to offer
     clearInterval(pingTimer);
@@ -18110,7 +18262,7 @@
         // vid rides the heartbeat for the same reason mic does: it is the only thing that repairs
         // a data-channel state message that never arrived, and the video tile is gated on it.
         broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid(), rx: receiveHeight, rec: myRecWire(), rc: 1 });
-        recordPresence(callServer, callChannel, callSelfFp); // keep my own presence fresh
+        recordPresence(callServer, callChannel, callSelfId); // keep my own presence fresh
         jukeTick(); // the DJ's re-announce (and the listener's DJ-left check) ride this tick
         sweepJamUi(); // engine hold watchdogs + the drawer's own 30s held-note honesty sweep
         // Re-read the winning candidate pair: an ICE restart can migrate a live call from
@@ -18124,16 +18276,17 @@
   // The roster read is server-scoped (not tied to the viewed server), so an eviction lands even
   // while the user browses elsewhere. Errors keep the call: the next members-changed retries, and
   // failing open here only preserves the status quo ante rather than granting anything new.
+  //
+  // Compared by FULL identity (`revokedCallPeers`): compared by fingerprint, a removed device whose
+  // prefix twin is still a member kept its call edge, its jam lane and its claims.
   async function reconcileCallRoster(server: number) {
-    let allowed: Set<string>;
+    let members: Member[];
     try {
-      const r = await invoke<Member[]>("get_members", { server });
-      allowed = new Set(r.map((m) => m.fingerprint));
+      members = await invoke<Member[]>("get_members", { server });
     } catch { return; }
     if (!inCall || callServer !== server) return;
-    for (const fp of Object.keys(callPeers)) {
-      if (!allowed.has(fp)) removePeer(fp);
-    }
+    callSharedIds = sharedFingerprints(members);
+    for (const id of revokedCallPeers(Object.keys(callPeers), members)) removePeer(id);
   }
   function leaveVoice() {
     // Permission prompts are not cancellable. Invalidate before any teardown so a chooser that
@@ -18144,8 +18297,8 @@
     callLifecycleSession.invalidate();
     // First, and on every route: the room has to learn that this was a hangup, not a link that
     // died. Sent before any teardown below, while the data channels are still open.
-    if (callChannel && callServer !== null && callSelfFp) {
-      announceHangup(callServer, callSelfFp, callChannel);
+    if (callChannel && callServer !== null && callSelfId) {
+      announceHangup(callServer, callSelfId, callChannel);
     }
     releaseMappedCallPorts(); // give the router its ports back; the lease is bounded regardless
     instReleaseAll(); // lift my own notes (and tell peers) before the edges go down
@@ -18160,6 +18313,7 @@
     remoteStreams = {};
     focusSolo = ""; // whoever was being watched is not in a call any more
     for (const fp of Object.keys(callPeers)) removePeer(fp);
+    stopDrawClaims(); // claims exist only during a call
     // Every chain went with its peer; the context they shared goes with the call.
     remoteAudioRouter.clear();
     peerChainKinds.clear();
@@ -18239,7 +18393,7 @@
     }
     clearInterval(pingTimer);
     pingTimer = undefined;
-    if (callServer !== null && callChannel && callSelfFp) dropPresence(callServer, callChannel, callSelfFp);
+    if (callServer !== null && callChannel && callSelfId) dropPresence(callServer, callChannel, callSelfId);
     inCall = false;
     callMuted = false;
     micOn = false;
@@ -18247,7 +18401,8 @@
     callChannelName = "";
     callServer = null;
     callServerName = "";
-    callSelfFp = "";
+    callSelfId = "";
+    callSharedIds = new Set();
     activeCallLease = 0;
     callProfiles = {};
     peerTransport = {};
@@ -18395,7 +18550,11 @@
     }
     return null;
   });
+  // `fromFp` is the sender's FULL verified identity (64 lowercase hex), despite the historic name:
+  // every map below is keyed by it (design 2.18).
   async function handleCallSignal(fromFp: string, payloadB64: string, server: number) {
+    // This device never signals itself; a self-addressed signal is not a peer.
+    if (callSelfId && fromFp === callSelfId) return;
     let msg: Record<string, unknown>;
     try {
       msg = JSON.parse(b64dec(payloadB64));
@@ -18479,7 +18638,7 @@
         await pc.setLocalDescription(); // no-arg picks "answer" from the have-remote-offer state
         void sendSignal(server, fromFp, { callId: cid, type: "answer", sdp: pc.localDescription });
       } catch (e) {
-        console.warn("voice offer handling failed", { peer: fromFp, error: String(e) });
+        console.warn("voice offer handling failed", { peer: displayKey(fromFp), error: String(e) });
       }
     } else if (type === "answer") {
       const peer = callPeers[fromFp];
@@ -18490,7 +18649,7 @@
           await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
           await flushWaitingIce(peer);
         } catch (e) {
-          console.warn("voice answer handling failed", { peer: fromFp, error: String(e) });
+          console.warn("voice answer handling failed", { peer: displayKey(fromFp), error: String(e) });
         }
       }
     } else if (type === "ice") {
@@ -18503,7 +18662,7 @@
         try {
           await peer.pc.addIceCandidate(new RTCIceCandidate(candidate));
         } catch (e) {
-          if (!peer.ignoreOffer) console.warn("voice ICE candidate was rejected", { peer: fromFp, error: String(e) });
+          if (!peer.ignoreOffer) console.warn("voice ICE candidate was rejected", { peer: displayKey(fromFp), error: String(e) });
         }
       }
     }
@@ -20408,8 +20567,14 @@
         // A friend request may have arrived over ANY server (active or not): refresh that server's.
         refreshDmRequests(e.payload.server);
       }),
-      listen<{ server: number; from_fp: string; payload: string }>("call-signal", (e) => {
-        void handleCallSignal(e.payload.from_fp, e.payload.payload, e.payload.server);
+      listen<{ server: number; from?: unknown; from_fp?: unknown; payload: string }>("call-signal", (e) => {
+        // Call authority is the full verified identity; the fingerprint is a label of the same id.
+        const sender = parseCallSignalSender(e.payload);
+        if (!sender) {
+          diagRecord({ section: "voice", code: "VOICE.SIGNAL.BAD_SENDER", level: "warn", fields: {} });
+          return;
+        }
+        void handleCallSignal(sender.identity, e.payload.payload, e.payload.server);
       }),
       listen<{ server: number; online: string[] }>("connectivity-changed", (e) => {
         spaceOnlineCounts[e.payload.server] = e.payload.online.length + 1;
@@ -21906,7 +22071,7 @@
   and the custom badge still reads in full on the profile card and in chat.
 -->
 {#snippet memberRow(m: Member, online: boolean)}
-  {@const role = roles[m.fingerprint] ?? "member"}
+  {@const role = memberRole(roles, m.identity)}
   <li
     title={`${nameOf(m.fingerprint)}\n${m.fingerprint}`}
     class:is-you={m.you}
@@ -26776,7 +26941,7 @@
           </div>
         {:else if view === "studio"}
           {#if StudioSurface}
-            <StudioSurface me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} nameOf={nameOfIdentity} colorOf={colorOfIdentity} onnotice={studioNotice} />
+            <StudioSurface me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} nameOf={nameOfIdentity} colorOf={colorOfIdentity} onnotice={studioNotice} claims={studioClaimScope ? drawClaimSnapshot : null} claimActions={studioClaimActions} />
           {:else}
             <h2>Studio</h2>
             <p class="muted">Loading the studio…</p>
@@ -27041,7 +27206,7 @@
           onclick={openCallDiagnostics}
         >CONN</button>
         <div class="call-avatars">
-          {@render callAvatarTag(callSelfFp)}
+          {@render callAvatarTag(callSelfId)}
           {#each callParticipants as fp}{@render callAvatarTag(fp)}{/each}
         </div>
         {@render micMeter()}
@@ -27230,9 +27395,9 @@
 
         <div class="stage-self">
           <div class="stage-row">
-            <span class="stage-av" class:talking={speaking.me}>{@render callAvatarTag(callSelfFp)}</span>
-            <span class="stage-nm">{@render callNameTag(callSelfFp)}</span>
-            <span class="stage-fp">{callSelfFp.slice(0, 4)}·{callSelfFp.slice(4, 8)}</span>
+            <span class="stage-av" class:talking={speaking.me}>{@render callAvatarTag(callSelfId)}</span>
+            <span class="stage-nm">{@render callNameTag(callSelfId)}</span>
+            <span class="stage-fp">{callSelfId.slice(0, 4)}·{callSelfId.slice(4, 8)}</span>
             <span class="stage-spacer"></span>
             {@render micMeter()}
           </div>
@@ -27402,7 +27567,7 @@
 
         <div class="focus-grid" class:strip={jukeScreen === "focus"} style={`--focus-cols:${focusCols}`}>
           {#each focusTiles as fp (fp)}
-            {@const me = fp === callSelfFp}
+            {@const me = fp === callSelfId}
             {@const vid = me ? (myVideo === "screen" ? 2 : myVideo === "cam" ? 1 : 0) : peerMeta[fp]?.vid ?? 0}
             {@const stream = me ? localVideoStream : remoteStreams[fp] ?? null}
             {@const held = me ? callHeld : remoteHeld[fp] ?? []}
@@ -27730,7 +27895,7 @@
               <div class="pc-id">
                 <div class="pc-name">{@render nameTag(fp)}</div>
                 <div class="pc-meta">
-                  {#if roles[fp] && roles[fp] !== "member"}<span class="role-badge {roles[fp]}">{roles[fp]}</span>{/if}
+                  {#if roles[identityForRoleLabel(roster, fp)] && roles[identityForRoleLabel(roster, fp)] !== "member"}<span class="role-badge {roles[identityForRoleLabel(roster, fp)]}">{roles[identityForRoleLabel(roster, fp)]}</span>{/if}
                   {#if fp === myFp}<span class="you-badge">you</span>{/if}
                   {#if fp !== myFp && verifiedFps.has(fp)}<span class="vf-check" title="You verified this member out of band">✓ verified</span>{/if}
                   {#if badges[fp]}
@@ -29627,23 +29792,27 @@
             {:else if serverSettingsPage === "members"}
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // MEMBERS</div>
               <h1>Members</h1>
+              <p class="muted small">Admin grants apply to one exact device. Permissions from before the security update need owner re-approval; membership and content are unchanged.</p>
               <section class="set-section">
               <ul class="role-list">
                 {#each roster as m}
-                  {@const r = roles[m.fingerprint] ?? "member"}
+                  {@const r = memberRole(roles, m.identity)}
                   <li>
                     {@render avatarTag(m.fingerprint)}
                     {@render nameTag(m.fingerprint)}
                     <span class="role-badge {r}">{r}</span>
+                    {#if roster.filter((other) => other.fingerprint === m.fingerprint).length > 1}
+                      <span class="muted small" style="min-width: 0; overflow-wrap: anywhere" title={m.identity}>Shared fingerprint: {m.identity}</span>
+                    {/if}
                     {#if badges[m.fingerprint]}
                       {@const b = badges[m.fingerprint]}
                       <span class="cust-badge" style={b.color ? `--badge-c:${b.color}` : ""}>{b.label}</span>
                     {/if}
                     {#if myRole === "owner" && !m.you && r !== "owner"}
                       {#if r === "admin"}
-                        <button class="ghost small" onclick={() => setAdmin(m.fingerprint, false)}>Remove admin</button>
+                        <button class="ghost small" onclick={() => setAdmin(m.identity, false)}>Remove admin</button>
                       {:else}
-                        <button class="ghost small" onclick={() => setAdmin(m.fingerprint, true)}>Make admin</button>
+                        <button class="ghost small" onclick={() => setAdmin(m.identity, true)}>Make admin</button>
                       {/if}
                       {#if confirmRemoveFp === m.fingerprint}
                         <button class="ghost small danger-btn" onclick={() => removeMember(m.fingerprint)}>Confirm</button>

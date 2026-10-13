@@ -629,9 +629,11 @@ pub enum AppCommand {
         invite: Vec<u8>,
         reply: oneshot::Sender<Result<bool, String>>,
     },
-    /// Push a call-signalling message (opaque payload) to a member; `true` if reached.
+    /// Push a call-signalling message (opaque payload) to the member with exactly this device id;
+    /// `true` if addressed. Built only by [`ServerActor::send_call_signal`], which parses the
+    /// canonical identity text at the string boundary.
     SendCallSignal {
-        target_fp: String,
+        target: DeviceId,
         payload: Vec<u8>,
         reply: oneshot::Sender<Result<bool, String>>,
     },
@@ -868,15 +870,19 @@ pub enum AppCommand {
     CatchUpWiki {
         peer: PeerId,
     },
-    /// Query every member's role, keyed by fingerprint (owner/admin/member).
+    /// Query every member's role, keyed by full identity (owner/admin/member).
     Roles {
         reply: oneshot::Sender<HashMap<String, String>>,
     },
-    /// Grant or revoke admin for a member fingerprint (owner only).
+    /// Grant or revoke admin for an exact device (owner only).
     SetAdmin {
-        fp: String,
+        device: DeviceId,
         admin: bool,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
+    ConfirmAdminPersistence {
+        generation: u64,
+        reply: oneshot::Sender<()>,
     },
     /// Pull the roles document from `peer` (e.g. right after joining).
     CatchUpRoles {
@@ -1168,9 +1174,18 @@ pub enum AppEvent {
     },
     /// The set of pending incoming DM (friend) requests changed; the UI should re-fetch them.
     DmRequestsChanged,
-    /// An inbound call-signalling message arrived: `(sender fingerprint, opaque payload)`. One event
-    /// per signal; the UI decodes the payload (`{callId, type, data}`) and drives WebRTC.
-    CallSignal { from_fp: String, payload: Vec<u8> },
+    /// An inbound call-signalling message arrived. One event per signal; the UI decodes the
+    /// payload (`{callId, type, data}`) and drives WebRTC.
+    ///
+    /// `from` is the verified sender's **full** device id as 64 lowercase hex characters (the
+    /// `DeviceId` `Display` form, the same encoding as `MemberView::identity`); every call
+    /// authority, session, budget and claim key must use it. `from_fp` is the 8-hex display
+    /// fingerprint of that same id, for labels only (design-creative-suite.md 2.18).
+    CallSignal {
+        from: String,
+        from_fp: String,
+        payload: Vec<u8>,
+    },
     /// The actor has stopped (transport closed or shutdown requested).
     Closed,
 }
@@ -2568,17 +2583,21 @@ impl ServerActor {
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
-    /// Push a call-signalling message (opaque payload) to a member; `Ok(true)` if reached.
-    pub async fn send_call_signal(
-        &self,
-        target_fp: String,
-        payload: Vec<u8>,
-    ) -> Result<bool, String> {
+    /// Push a call-signalling message (opaque payload) to the member whose full device id is
+    /// `target` (64 lowercase hex); `Ok(true)` if addressed.
+    ///
+    /// A malformed or short identity is refused here, before anything is queued: the old
+    /// 8-hex fingerprint is not accepted, so a caller can never fall back to the ambiguous
+    /// route. Whether the id is a current member is decided by the sync layer.
+    pub async fn send_call_signal(&self, target: String, payload: Vec<u8>) -> Result<bool, String> {
+        let Some(target) = DeviceId::from_canonical_hex(&target) else {
+            return Err("call-signal target is not a full device identity".into());
+        };
         let (reply, rx) = oneshot::channel();
         if self
             .cmd_tx
             .send(AppCommand::SendCallSignal {
-                target_fp,
+                target,
                 payload,
                 reply,
             })
@@ -3042,18 +3061,35 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
-    /// Grant or revoke admin for a member fingerprint (owner only).
-    pub async fn set_admin(&self, fp: String, admin: bool) -> Result<(), String> {
+    /// Grant or revoke admin for an exact device (owner only).
+    pub async fn set_admin(&self, device: DeviceId, admin: bool) -> Result<u64, String> {
         let (reply, rx) = oneshot::channel();
         if self
             .cmd_tx
-            .send(AppCommand::SetAdmin { fp, admin, reply })
+            .send(AppCommand::SetAdmin {
+                device,
+                admin,
+                reply,
+            })
             .await
             .is_err()
         {
             return Err("server stopped".into());
         }
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Acknowledge only a covering save of this exact authority generation.
+    pub async fn confirm_admin_persistence(&self, generation: u64) {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::ConfirmAdminPersistence { generation, reply })
+            .await
+            .is_ok()
+        {
+            let _ = rx.await;
+        }
     }
 
     /// Pull the roles document from `peer`.
@@ -4600,12 +4636,12 @@ where
                         let _ = reply.send(res);
                     }
                     Some(AppCommand::SendCallSignal {
-                        target_fp,
+                        target,
                         payload,
                         reply,
                     }) => {
                         let res = server
-                            .send_call_signal(&target_fp, &payload)
+                            .send_call_signal(&target, &payload)
                             .await
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
@@ -4813,8 +4849,8 @@ where
                     Some(AppCommand::Roles { reply }) => {
                         let _ = reply.send(server.roles());
                     }
-                    Some(AppCommand::SetAdmin { fp, admin, reply }) => {
-                        let res = server.set_admin(&fp, admin).await.map_err(|e| e.to_string());
+                    Some(AppCommand::SetAdmin { device, admin, reply }) => {
+                        let res = server.set_admin_pending_save(&device, admin).await.map_err(|e| e.to_string());
                         let _ = reply.send(res);
                         if roles_changed(&server, &mut last_roles) {
                             let _ = event_tx.send(AppEvent::RolesUpdated).await;
@@ -4822,6 +4858,10 @@ where
                         if moderation_changed(&server, &mut last_moderation) {
                             let _ = event_tx.send(AppEvent::ModerationUpdated).await;
                         }
+                    }
+                    Some(AppCommand::ConfirmAdminPersistence { generation, reply }) => {
+                        server.confirm_admin_persistence(generation);
+                        let _ = reply.send(());
                     }
                     Some(AppCommand::CatchUpRoles { peer }) => {
                         if let Err(e) = server.request_roles_catchup(peer).await {
@@ -5489,9 +5529,16 @@ where
                         }
                         // Drain any inbound call-signalling messages, one event each, so the UI's
                         // WebRTC layer can process offers/answers/ICE promptly.
-                        for (from_fp, payload) in server.take_call_signals() {
+                        for (from, payload) in server.take_call_signals() {
+                            // Both strings derive from the one verified id, so they can never
+                            // disagree; the fingerprint exists only for display.
+                            let from_fp = catcoms_sync::fingerprint(&from);
                             let _ = event_tx
-                                .send(AppEvent::CallSignal { from_fp, payload })
+                                .send(AppEvent::CallSignal {
+                                    from: from.to_string(),
+                                    from_fp,
+                                    payload,
+                                })
                                 .await;
                         }
                     }
@@ -6310,6 +6357,9 @@ mod tests {
         // Exact pre-policy snapshot fixture: retain the preceding observed-tenure extension.
         let policy_tail = fresh.sync().group_policy().unwrap().encode().len() + 9;
         let snapshot = fresh.snapshot().unwrap();
+        // No grants in this fixture: strip the newer versioned authority tail first.
+        let authority_tail = 8 + b"catcoms/admin-authority/v2".len();
+        let snapshot = &snapshot[..snapshot.len() - authority_tail];
         // Both unused trailing extensions are framed v1, zero-record payloads. Strip
         // pending finalization first, then durable chat, before reaching the policy frame.
         let empty_pending_tail = [0, 0, 0, 5, 1, 0, 0, 0, 0];
@@ -7713,7 +7763,7 @@ mod tests {
             .publish_self_record(vec!["/ip4/203.0.113.1/tcp/1".into()], 1)
             .unwrap();
         let alice_record = alice_srv.sync.self_record().unwrap().clone();
-        let alice_fp = alice_srv.my_fingerprint();
+        let alice_id = alice_srv.device_id().to_string();
         let invite = alice_srv.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
         let (alice, mut alice_events, alice_handle) = spawn(alice_srv);
 
@@ -7730,11 +7780,27 @@ mod tests {
         .unwrap();
         assert!(bob_srv.sync.ingest_peer_record(alice_record));
         let bob_fp = bob_srv.my_fingerprint();
+        let bob_id = bob_srv.device_id().to_string();
         let (bob, _bob_events, bob_handle) = spawn(bob_srv);
+
+        // The command boundary takes only the canonical full identity: the legacy fingerprint,
+        // an uppercase spelling and garbage are refused before anything is queued.
+        for bad in [
+            alice_id[..8].to_string(),
+            alice_id.to_uppercase(),
+            "zz".repeat(32),
+        ] {
+            assert!(
+                bob.send_call_signal(bad.clone(), b"x".to_vec())
+                    .await
+                    .is_err(),
+                "{bad} must not be accepted as a call-signal target"
+            );
+        }
 
         let payload = br#"{"type":"offer","sdp":"opaque-to-actor"}"#.to_vec();
         assert!(bob
-            .send_call_signal(alice_fp, payload.clone())
+            .send_call_signal(alice_id, payload.clone())
             .await
             .unwrap());
 
@@ -7742,9 +7808,14 @@ mod tests {
             loop {
                 match alice_events.recv().await {
                     Some(TracedEvent {
-                        event: AppEvent::CallSignal { from_fp, payload },
+                        event:
+                            AppEvent::CallSignal {
+                                from,
+                                from_fp,
+                                payload,
+                            },
                         ..
-                    }) => break (from_fp, payload),
+                    }) => break (from, from_fp, payload),
                     Some(_) => continue,
                     None => panic!("alice actor closed"),
                 }
@@ -7752,7 +7823,12 @@ mod tests {
         })
         .await
         .expect("Alice did not surface the call signal");
-        assert_eq!(received, (bob_fp, payload));
+        assert_eq!(bob_id.len(), 64);
+        assert!(
+            bob_id.starts_with(&bob_fp),
+            "the label is a prefix of the identity"
+        );
+        assert_eq!(received, (bob_id, bob_fp, payload));
 
         alice.shutdown().await;
         bob.shutdown().await;

@@ -90,6 +90,9 @@ fn group_policy_legacy_snapshot_and_invite_are_explicitly_unresolved() {
         .policy
         .is_none());
     let snapshot = bob.snapshot().unwrap();
+    // Strip the later versioned authority record before creating a pre-policy fixture.
+    let authority_tail = 8 + b"catcoms/admin-authority/v2".len() + bob.admin_roster.len() * 36;
+    let snapshot = &snapshot[..snapshot.len() - authority_tail];
     let snapshot =
         &snapshot[..snapshot.len() - bob.pending_finalization_snapshot().unwrap().len() - 4];
     let snapshot = &snapshot[..snapshot.len() - bob.durable_chat.encode().unwrap().len() - 4];

@@ -1,5 +1,61 @@
 # Mewtual; Handover
 
+## Admin admission security fix (2026-10-13)
+
+Separate branch `fix/gate5-full-device-admin` from Gate 5. The reported four-byte
+admin collision admission flaw was confirmed by tracing the owner check and companion
+admission path. The repair uses per-device full identities through native/app/sync/UI,
+v2 owner-signed rosters, a versioned snapshot authority tail, legacy grant reset,
+removal pruning, and a final fresh-Add permission check after queueing.
+Owners must re-grant permissions after loading legacy snapshots. Existing membership
+and content survive. Owners/admin clients must upgrade together; do not downgrade to
+unpatched owners or old backups. No fixed-target key-search timing or full exploit
+benchmark is claimed. Stale published-roster relay liveness remains a separate residual.
+
+
+After a failed role save, the owner must retry a valid role change to complete
+the save and unblock delegation; a background snapshot alone does not acknowledge it.
+Completed admission recovery remains nonce/KeyPackage-bound, not original-inviter-bound.
+
+### Verification and remaining validation issue
+
+- `cargo test --all --all-features -- --test-threads=16`: application library
+  **1,074 passed, 1 failed, 21 existing opt-in benchmarks ignored**. The unmodified
+  `studio_actors_new_member_after_index_checkpoint_installs_registry_and_index_tail`
+  failed its epoch-id assertion at `studio_exchange/tests/unopened.rs:743`; isolated
+  rerun passed. Cargo stopped there, so remaining targets were run separately below.
+- The eight-test `studio_exchange::tests::unopened` recheck passed that case but failed
+  `studio_actors_closing_reopen_after_expired_selection_resumes_without_another_action`
+  at `unopened.rs:783` (registry op count); that case also passed isolated.
+- **MEDIUM follow-up; baseline status unknown.** The unchanged fixture advances its
+  ManualClock through 100 turns while network work runs independently; the CPU-preparation
+  barrier explicitly excludes network jobs. Parallel scheduling sensitivity is plausible,
+  but an isolated pass does not prove an inherited defect. Reproduce on the unchanged base
+  with comparable load, instrument epoch/phase/job completion, and await bounded domain
+  completion. Preserve the final assertions; do not merely raise iteration counts. Review
+  found no concrete authorization-regression path into these failures.
+- Remaining workspace targets completed with
+  `cargo test --all --all-features --exclude catcoms-app -- --test-threads=16`: passed.
+  The excluded application library had already run in full above; its integrations and
+  doc test were then run explicitly. No failed test or assertion was removed or weakened.
+- All app integration targets (`cargo test -p catcoms-app --test '*' --all-features`)
+  passed: 20 tests, one existing ignored fixture. App doc test passed.
+- Separate Tauri workspace: 337 library and 5 binary tests passed; `cargo check` passed.
+- Frontend: 1,392 tests passed; `check`, production `build`, and all 9 `test:flows`
+  checks passed. Members UI inspected in the ready-marked fixture at 900 by 640.
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
+  `bash scripts/check-no-ambient.sh`, and `cargo deny check` passed (deny retains duplicate
+  dependency warnings). Startup gate not run: setup/runtime placement/process spawning
+  are unchanged.
+- Optional separate-workspace formatting check (`cargo fmt --manifest-path
+  apps/desktop/src-tauri/Cargo.toml -- --check`) also found formatting differences in
+  unchanged Studio files. The edited role-command region was formatted; unrelated
+  Studio formatting is left as a separate follow-up.
+- Read-only adversarial design review, implementation review and re-reviews found no
+  remaining blocker/high. The Studio validation failures above remain an explicit follow-up.
+  Collision decisions use crafted full ids; no fixed-target key grind or full collision
+  exploit benchmark was performed.
+
 Authoritative current-state document. Read this first, then
 [`INTERFACES.md`](INTERFACES.md) (the API/seam schema) and
 [`ARCHITECTURE.md`](ARCHITECTURE.md) (decisions + the adversarial-review fixes).
@@ -8,7 +64,136 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-10-12)
+## Status (latest entry: 2026-10-13)
+
+- **Gate 5: PR #43 review round (2026-10-13; still not accepted).** The review of
+  `ff8e276..32e37c3` returned request changes. The response is GATE5-DESIGN section 13.
+
+  **Fixes**
+  - **Delivery (#1).** Per-edge delivery records mean a refused or `OperationError` send of an Ask
+    or a Pass Release is retried on that edge only, before expiry. An edge that took a frame is
+    never re-sent it.
+  - **Reachability (#3).** An unreachable peer's entries are hidden and its deliveries held until
+    this side sees the link recover. They are then applied in order, so a Pass sent during the gap
+    lands.
+  - **Wiring (#2).** The wiring moved to `draw-wiring.ts`, which `App.svelte` and the new
+    `scripts/claims-webrtc-check.mjs` share.
+  - **Records.** GATE4-ACCEPTANCE now records the merge of PR #27 (`e8aad1a` → `ff8e276`, 28/28
+    hosted checks).
+
+  **Verification in this container**
+
+  | Check | Result |
+  |---|---|
+  | `npm --prefix apps/desktop test` | 1390/1390 |
+  | `npm run check` | 0 errors |
+  | `npm run build` | pass |
+  | `node scripts/claims-webrtc-check.mjs` (Chromium 141; three members as separate processes) | 34/34 checks, plus 2 notes, in each of three runs |
+  | `test:flows` (Chromium via `EDGE_PATH`, `--no-sandbox` wrapper for root) | 9/9 |
+
+  - The WebRTC check includes a genuine SIGSTOP disconnect and recovery: both the held and the
+    direct Pass orderings occurred across the runs. It also includes the old-build stream-8 case:
+    23 frames sent on stream 8; `inst`, voice and the connection unaffected.
+  - Each new behaviour is mutation-checked (GATE5-DESIGN 9.1).
+  - An independent review of this round found nothing blocking: one MEDIUM, a held replay
+    refusing an Ask, and four LOWs. All are fixed, with regressions; see GATE5-DESIGN section 14.
+    Its short re-review found nothing blocking. It found one new LOW, an old Ask record masking a
+    new Ask, which is fixed with a regression. The figures above are from after all of these.
+  - No Rust changed this round; the Rust record below stands.
+  - `test:startup` now resolves the binary name per platform. Against a fresh desktop debug build
+    under Xvfb (Linux, WebKitGTK), it passes: "application startup completed".
+
+  **Found (predates Gate 5).** Ubuntu 24.04's WebKitGTK 2.52.6 exposes no `RTCPeerConnection`,
+  whether by default, with `enable-webrtc`, or with the GStreamer WebRTC plugins installed. The
+  app and wry do not enable it, so the Linux desktop build has no calls on that stack.
+
+  **External re-review of `cdf1a5f`:** findings 1 and 3 are closed, and 2 is partially closed. No
+  new blocking defect (GATE5-DESIGN section 15). The evidence labels now follow the reviewer:
+  - the stream-8 check uses a harness peer configured without channel 8, not a released binary;
+  - the runs are Chromium, not WebView2 or WKWebView hosts;
+  - the WebKitGTK result is "unavailable in that configuration".
+
+  **Owner decisions (2026-10-13)**
+  - D1 is confirmed: Pass names no recipient, and peer-to-peer calls are accepted as chaotic.
+  - macOS (WKWebView) is stated as unverified for stream-8 compatibility.
+
+  **CI.** The only `build & test` failures on PR #43 were one pre-existing Gate 4 test,
+  `studio_actors_new_member_after_index_checkpoint_installs_registry_and_index_tail`. It also
+  failed before Gate 5, on `c13239d` and `f3e9291`.
+  - **Cause:** the fixture used the process-wide preparation pools, so parallel tests could hold
+    every slot through its fixed step window.
+  - **Fix:** the fixture now gives each actor private pools. This is test-only.
+  - **Regression:** an opt-in diagnostic drains the global pools and runs all three fixture
+    variants. Each fails without the fix and passes with it.
+  - **Both failures recorded above have this one cause:** the `epoch_id` failure in the index-tail
+    test, and `studio_actors_closing_reopen_after_expired_selection_resumes_without_another_action`
+    at its Registry-bootstrap assertion. They are the same `actor_newcomer` fixture. No
+    assertion was weakened and no iteration count was raised.
+  - Details are in GATE5-DESIGN section 15.
+
+  **Outstanding for acceptance**
+  - The owner's two-desktop run and sign-off, scripted in GATE5-DESIGN section 16.
+  - A green check set on the exact head.
+  - The inherited inviter HIGH stays out of scope (THREAT-MODEL item 7).
+
+- **Gate 5 collaborative frame claims (2026-10-13; implementation candidate, not accepted).**
+  Branch `gate5-frame-claims` from `e8aad1a` (`origin/gate4-agent1-runtime`). The gate record,
+  slice and commit map, and both review responses are in [GATE5-DESIGN](GATE5-DESIGN.md). The
+  contract is INTERFACES section 13; the threat entries are the Gate 5 bullets, R8 and hardening
+  item 7.
+
+  **What the candidate does**
+  - C0d: the full 64-hex device identity flows through `CallSignal`, the bridge and every
+    frontend call key.
+  - C0b: shared `rt-admission.ts`, with no jam behaviour change.
+  - The negotiated ordered `draw` channel (id 8) carries the exact `t:"c"` Claim/Ask/Pass frame.
+    Expiry is receiver-observed at 90 s, claims refresh every 30 s, and the Studio shows a
+    countdown with Ask and Pass. Claims are advisory and scoped to the call's own server.
+
+  **Reviews**
+  - The early design review and the final diff review found no blocker. Every HIGH/MEDIUM inside
+    Gate 5 is fixed: cross-server leak, revocation by fingerprint, drum-seed contract, the C4a
+    rate, disconnect clearing, the Pass trigger, twin labels, context-menu keying and snapshot
+    amplification.
+  - A short re-review found one new MEDIUM (an expired-claim ghost). It is fixed and
+    mutation-checked.
+  - Out of scope and handed to the user: THREAT-MODEL item 7. The owner's inviter check compares
+    4-byte fingerprints, so a ground companion key could pass server admission.
+
+  **Verification in this container (Linux, running as root)**
+
+  | Check | Result |
+  |---|---|
+  | `npm --prefix apps/desktop test` | 1362/1362 pass |
+  | `npm run check` | 0 errors |
+  | `npm run build` | pass |
+  | `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` | 337 + 5 pass |
+  | Desktop strict Clippy and desktop `cargo check` | pass |
+  | Root `cargo clippy --all-targets --all-features -D warnings` | pass |
+  | `cargo fmt --all --check` | clean |
+  | `scripts/check-no-ambient.sh` and `scripts/check-store-raw-fs.sh` | pass |
+  | `cargo deny check` | advisories, bans, licences and sources ok; no dependency changes |
+  | Root `cargo test --all-features --no-fail-fast`, every package, binary and doc-test | 2368 pass, 24 ignored, 3 environmental failures (below) |
+
+  - The root suite ran with `CARGO_PROFILE_{DEV,TEST}_DEBUG=0` to fit the disk allowance. The
+    one-command run hit the 2-hour background limit, so it was completed per package (`-p ...`) for
+    the packages it had not reached; nothing was counted twice.
+  - The three root failures are environmental, and both tests are in code this branch does not
+    touch:
+    - `catcoms-app` `store::epoch_recovery::inventory::tests::a_failed_sync_is_not_remembered`:
+      its precondition ("a read-only file cannot be opened to flush") does not hold for root. The
+      same test binary passes that test when run as `nobody` and fails it as root.
+    - `catcoms-net` `ipv6_pcp_adapter_sends_exact_map_and_best_effort_delete` and
+      `ipv6_pcp_worker_retains_failed_renewal_replaces_and_expires_monotonically`: both fail with
+      "Address family not supported by protocol" because the container has no IPv6 sockets.
+  - Focused evidence:
+    - claim-session tests with mutation checks: the expiry boundary, replay comparison, Pass
+      trigger, `rev` gating, receive-side expiry and rotation;
+    - Rust prefix-twin routing, fairness and ambiguity regressions;
+    - compiled Studio claim-UI tests.
+  - **Not run here:** `test:startup` and `test:flows` (they need a display/Edge), a live two-client
+    WebRTC call, and the per-WebView check that data on stream 8 toward an older build is dropped
+    without resetting the association (GATE5-DESIGN section 10).
 
 - **PR #27 recovery-workflow corrections (2026-10-12; local verification complete).** Review of exact
   head `b8cda2a047b01f75664603c9e0fd96ed5341b6c6` found three reachable Studio progress failures.

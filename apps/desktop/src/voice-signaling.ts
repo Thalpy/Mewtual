@@ -47,17 +47,18 @@ export function heartbeatRecovery(input: {
  *
  * So it is the union: every peer with an edge, plus every member the roster says is online. Self
  * is never a target, and a roster read that failed contributes nothing rather than emptying the
- * set, because the edges alone are still worth telling.
+ * set, because the edges alone are still worth telling. Every argument is a call key, the full
+ * device identity (Gate 5), so an edge with a prefix twin never stands in for another member.
  */
 export function hangupTargets(
   edges: readonly string[],
   members: readonly string[],
   online: ReadonlySet<string>,
-  selfFp: string,
+  self: string,
 ): string[] {
   const targets = new Set(edges);
   for (const fp of members) if (online.has(fp)) targets.add(fp);
-  targets.delete(selfFp);
+  targets.delete(self);
   targets.delete("");
   return [...targets];
 }

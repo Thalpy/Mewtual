@@ -1,5 +1,25 @@
 # Design; replay-proof admin-grant revocation (THREAT-MODEL item 3)
 
+## Security amendment (2026-10-13; supersedes fingerprint formats below)
+
+After a failed role save, the owner must retry a valid role change to complete
+the save and unblock delegation; a background snapshot alone does not acknowledge it.
+Completed admission recovery remains nonce/KeyPackage-bound, not original-inviter-bound.
+
+Authority is now `BTreeSet<DeviceId>`, per exact device. The owner checks current
+membership and exact grants at fresh MLS Add, including after queueing. Companions
+inherit no admin grant. Completed removals prune grants; ownership changes clear them.
+The signed roster domain is `catcoms/role-roster/v2` with sorted distinct raw 32-byte
+identities. UI maps and commands carry full canonical identities.
+
+Snapshots leave the old roster section empty and append the strict versioned
+`catcoms/admin-authority/v2` record. All legacy fingerprint-only grants are discarded,
+including unique matches, because the sole match could be a collision twin after
+the original grantee left. Owner re-approval is required. Native role changes block
+delegated admissions until the matching generation is durably saved; stale saves
+cannot unblock a newer transaction. Published stale replay remains a liveness issue.
+
+
 Status: **implemented.** The owner-local `admin_roster` + `roster_gen`, the `inviter_is_authorized`
 admission gate and `set_admin` are in `crates/catcoms-sync/src/lib.rs`; the signed published-roster
 format and its fail-closed reader are in `crates/catcoms-sync/src/roles.rs`; the replay attack is

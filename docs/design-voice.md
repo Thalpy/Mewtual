@@ -70,6 +70,10 @@ is no longer what a deliberate departure looks like.
 
 ## Notes
 
+- **Sender identity (Gate 5, design-creative-suite.md 2.18).** `from` is the verified signer's
+  full `DeviceId` (64 lowercase hex), and every call key in the UI uses it. The 4-byte fingerprint
+  (`from_fp`) is a display label only. Outbound signals are addressed by full identity and routed
+  only through that exact member's own signed record. The signal wire itself is unchanged.
 - The signal payload is **opaque** to the core (the frontend JSON-encodes `{callId, type, data}`); the
   core only relays it authenticated + members-only. No dedup (unlike DM invites; every ICE candidate
   must arrive); FIFO-bounded queue.

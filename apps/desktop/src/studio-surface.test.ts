@@ -694,3 +694,119 @@ test("FETCH-004: a loaded raster follows the frame's reference; a changed declar
     m.done();
   }
 });
+
+// --- Gate 5: frame claims on the real surface ---------------------------------------------------
+
+function mountStudioWithClaims(ipc: FakeIpc, claims: unknown, claimActions: unknown) {
+  state.useStudioIpc(ipc);
+  const target = document.createElement("div");
+  document.body.appendChild(target);
+  const app = mount(Studio, {
+    target,
+    props: {
+      me: ME, server: SERVER, channel: CHANNEL, nameOf: (id: string) => `n-${id.slice(0, 4)}`, colorOf: () => "#000000",
+      onnotice: () => {}, claims, claimActions,
+    } as never,
+  });
+  flushSync();
+  const text = () => target.textContent ?? "";
+  const button = (label: string) => [...target.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === label);
+  return { target, text, button, done: () => { unmount(app); target.remove(); state.disposeStudio(); } };
+}
+
+function recordingActions() {
+  const calls: string[] = [];
+  const log = (name: string) => (...args: unknown[]) => { calls.push([name, ...args].join(" ")); };
+  return {
+    calls,
+    actions: Object.freeze({
+      select: log("select"), claim: log("claim"), autoClaim: log("autoClaim"), release: log("release"),
+      ask: log("ask"), cancelAsk: log("cancelAsk"), pass: log("pass"),
+    }),
+  };
+}
+
+function openFlipnoteIpc(): FakeIpc {
+  const ipc = fakeIpc();
+  ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ title: "moon cat" }) } })));
+  ipc.on("studio_read", () => frameView());
+  ipc.on("request_blob_bounded", () => ({ bytes_b64: b64(pix), bytes: pix.length }));
+  ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ }));
+  return ipc;
+}
+
+const PEER = "b2".repeat(32);
+
+test("CLAIM-UI-001: a peer's claim shows on the timeline and frame card with its countdown, and Ask goes to the session", async () => {
+  const { calls, actions } = recordingActions();
+  const claims = {
+    self: ME,
+    entries: [{ peer: PEER, obj: OBJ, fr: F1, kind: "claim", secondsLeft: 74 }],
+    local: { claim: null, ask: null },
+    asksOnMine: [],
+  };
+  const m = mountStudioWithClaims(openFlipnoteIpc(), claims, actions);
+  try {
+    await settled();
+    state.studio.selected = OBJ;
+    flushSync();
+    await settled(400);
+    assert.match(m.text(), /n-b2b2 is drawing this frame · 74 s/);
+    const marker = m.target.querySelector(".st-thumb .claim");
+    assert.ok(marker, "the timeline marks the claimed frame");
+    assert.match(marker!.getAttribute("title") ?? "", /74 s unless refreshed/);
+    assert.equal(marker!.classList.contains("contested"), false);
+    const ask = m.button("ask to draw it");
+    assert.ok(ask, "a frame someone else claims offers Ask, not a lock");
+    ask!.click();
+    flushSync();
+    assert.ok(calls.includes(`select ${OBJ} ${F1}`), "opening the frame reported the selection to the session");
+    assert.deepEqual(calls.filter((c) => !c.startsWith("select")), [`ask ${OBJ} ${F1}`]);
+    // The canvas is still editable: a claim never locks a frame.
+    assert.equal(m.target.querySelector(".st-canvas-wrap")?.classList.contains("locked"), false);
+  } finally {
+    m.done();
+  }
+});
+
+test("CLAIM-UI-002: an ask on my frame is a sticky notice with a countdown and Pass", async () => {
+  const { calls, actions } = recordingActions();
+  const claims = {
+    self: ME,
+    entries: [{ peer: PEER, obj: OBJ, fr: F1, kind: "ask", secondsLeft: 52 }],
+    local: { claim: { obj: OBJ, fr: F1 }, ask: null },
+    asksOnMine: [{ peer: PEER, obj: OBJ, fr: F1, kind: "ask", secondsLeft: 52 }],
+  };
+  const m = mountStudioWithClaims(openFlipnoteIpc(), claims, actions);
+  try {
+    await settled();
+    state.studio.selected = OBJ;
+    flushSync();
+    await settled(400);
+    const notice = m.target.querySelector(".st-ask");
+    assert.ok(notice, "the ask notice is in the always-visible transport bar");
+    assert.match(notice!.textContent ?? "", /n-b2b2 asks for frame 1 · 52 s/);
+    assert.match(m.text(), /you are drawing this frame/);
+    m.button("pass")!.click();
+    flushSync();
+    assert.ok(calls.includes(`pass ${OBJ} ${F1}`), calls.join("; "));
+  } finally {
+    m.done();
+  }
+});
+
+test("CLAIM-UI-003: outside a call the surface explains claims and offers no claim controls", async () => {
+  const m = mountStudioWithClaims(openFlipnoteIpc(), null, null);
+  try {
+    await settled();
+    state.studio.selected = OBJ;
+    flushSync();
+    await settled(400);
+    assert.match(m.text(), /appear while you are in a call on this server · they never lock a frame/);
+    assert.equal(m.button("claim this frame"), undefined);
+    assert.equal(m.button("ask to draw it"), undefined);
+    assert.equal(m.target.querySelector(".st-thumb .claim"), null);
+  } finally {
+    m.done();
+  }
+});

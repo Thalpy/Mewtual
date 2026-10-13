@@ -299,6 +299,11 @@ export class StudioStore {
   }
 
   // --- Claims: ephemeral, advisory, 90 s from last receipt -----------------------------------
+  // FIXTURE ONLY. This local table predates Gate 5 and backs the cat-scene fixture and its store
+  // tests; it is not the wire protocol and nothing on the real Studio surface reads it. The Gate 5
+  // call protocol (the draw-channel claim module) differs on purpose: an entry expires AT 90 s (this table keeps
+  // it through the 90th second), and Pass is a release that the asker completes by claiming,
+  // because no device can claim on another's behalf (this table's passClaim(frame, to) does).
 
   claim(frame: string, by: string, ask = false): void {
     this.claims.set(frame, { frame, by, ask, seenTs: this.now() });

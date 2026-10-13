@@ -580,9 +580,9 @@ const MAX_PEX_ENTRIES: usize = 64;
 /// Cap on peer records **retained locally**, which is a different question from what fits in one
 /// response and needs a lot more headroom.
 ///
-/// Dropping a record is not merely a dark presence dot: `peer_for_fingerprint` reads this map, so
-/// an evicted member silently cannot be sent a call signal or a DM invite (both just return
-/// `Ok(false)`). At 64 that was reachable by an ordinary group once multi-device grants multiply
+/// Dropping a record is not merely a dark presence dot: `peer_for_device` (call signals) and
+/// `peer_for_fingerprint` (DM invites) read this map, so an evicted member silently cannot be sent
+/// a call signal or a DM invite (both just return `Ok(false)`). At 64 that was reachable by an ordinary group once multi-device grants multiply
 /// each person by their devices, and the eviction that got there was `HashMap` iteration order,
 /// which Rust randomises per process: which member's calls broke would differ every launch.
 const MAX_PEER_RECORDS: usize = 512;
@@ -2431,6 +2431,32 @@ pub enum ManualRedialOutcome {
     NoRoutes,
     /// Routes existed, but shared endpoint/process safety limits deferred every one.
     DeferredBySafetyLimit,
+}
+
+/// The single current member whose display fingerprint is `fp`, or `None` when no member or more
+/// than one member carries it.
+///
+/// A fingerprint is only four bytes of a `DeviceId`, and any member can grind a device key whose
+/// id shares a victim's first four bytes. A caller that still addresses members by fingerprint
+/// (the legacy DM-invite route) must therefore refuse an ambiguous name rather than guess. Pure
+/// over the member list so the ambiguity rule is testable with crafted ids.
+fn unique_member_for_fingerprint(
+    members: impl IntoIterator<Item = DeviceId>,
+    fp: &str,
+) -> Option<DeviceId> {
+    let mut found: Option<DeviceId> = None;
+    for device in members {
+        if roles::fingerprint(&device) != fp {
+            continue;
+        }
+        match found {
+            // The same device listed twice is still one member.
+            Some(existing) if existing == device => {}
+            Some(_) => return None,
+            None => found = Some(device),
+        }
+    }
+    found
 }
 
 fn peer_descriptor_hash(descriptor: &PeerDescriptor) -> [u8; 32] {
@@ -4421,12 +4447,14 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// Companion certificates this node admitted and has not yet handed to the product layer,
     /// which writes them into the shared `Devices` document. Drained by `take_admitted_devices`.
     admitted_devices: Vec<DeviceCertificate>,
-    /// **Owner-local authoritative** admin set (fingerprints), persisted in the snapshot. This is
+    /// **Owner-local authoritative** admin set (full device identities), persisted in the snapshot. This is
     /// the security source of truth for the admission gate (`inviter_is_authorized`): a malicious
     /// member cannot write it, so the demoted-admin grant-replay residual is closed (THREAT-MODEL
-    /// item 3). The owner publishes a signed *copy* into the `MemberRoles` doc for display only.
+    /// item 3). The owner publishes a signed *copy* into the `MemberRoles` doc for display and reject-only relay preflight.
     /// Empty on non-owner nodes (they don't admit; they read the published copy for display).
-    admin_roster: BTreeSet<String>,
+    admin_roster: BTreeSet<DeviceId>,
+    /// Native authority writes block delegated admissions until a covering save completes.
+    admin_authority_durable: bool,
     /// Generation counter for the owner's *published* roster copy (monotonic; persisted), so
     /// honest members converge deterministically. Not load-bearing for the local gate.
     roster_gen: u64,
@@ -4466,10 +4494,15 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// fingerprint, opaque DM-group invite bytes)`, deduped on the sender. Surfaced to the recipient
     /// as pending friend requests; transient + bounded (`MAX_PENDING_DM_INVITES`).
     pending_dm_invites: Vec<(String, Vec<u8>)>,
-    /// Inbound call-signalling messages received via `KIND_CALL_SIGNAL`: `(sender fingerprint,
-    /// opaque payload)`. Drained by the actor (which emits a `CallSignal` event per item); FIFO,
-    /// bounded (`MAX_PENDING_CALL_SIGNALS`). NOT deduped.
-    pending_call_signals: Vec<(String, Vec<u8>)>,
+    /// Inbound call-signalling messages received via `KIND_CALL_SIGNAL`: `(verified sender
+    /// device, opaque payload)`. Drained by the actor (which emits a `CallSignal` event per item);
+    /// FIFO, bounded (`MAX_PENDING_CALL_SIGNALS`). NOT deduped.
+    ///
+    /// The sender is the **full** `DeviceId` derived from the signature key that authenticated the
+    /// request (Gate 5, design-creative-suite.md 2.18). It used to be cut down to the 4-byte
+    /// display fingerprint right here, which let any member who generated a device key sharing a
+    /// victim's first four bytes be indistinguishable from the victim to every call surface above.
+    pending_call_signals: Vec<(DeviceId, Vec<u8>)>,
     /// Known **member** peer records (this node's own + those learned via PEX), each
     /// self-signed by a current member. The discovery layer turns these into
     /// PEX-sourced dial candidates. Bounded by `MAX_PEER_RECORDS`.
@@ -4706,6 +4739,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             revoked_devices: HashSet::new(),
             admitted_devices: Vec::new(),
             admin_roster: BTreeSet::new(),
+            admin_authority_durable: true,
             roster_gen: 0,
             rendezvous_nodes: Vec::new(),
             rendezvous_renewals: BTreeMap::new(),
@@ -4787,10 +4821,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // (also after the peer records, so `peer_addrs_from_snapshot` is still unaffected). This
         // is the security source of truth for the admission gate, so it MUST persist.
         e.put_u64(self.roster_gen);
-        e.put_u32(self.admin_roster.len() as u32);
-        for fp in &self.admin_roster {
-            e.put_str(fp).map_err(|_| oversize())?;
-        }
+        // Empty legacy grants: an old reader must never regain fingerprint authority.
+        e.put_u32(0);
         // Post-join discovery: the rendezvous config, so a reloaded member re-registers/discovers
         // to re-find the group (also appended after the peer records).
         e.put_u32(self.rendezvous_nodes.len() as u32);
@@ -4826,6 +4858,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // Retry correlation only: no connected/bound proof or private listener is restored.
         e.put_bytes(&self.pending_finalization_snapshot()?)
             .map_err(|_| oversize())?;
+        // Versioned authority tail. Older strict readers reject this snapshot rather than
+        // silently reviving a legacy fingerprint grant. Exact device grants never inherit.
+        e.put_str("catcoms/admin-authority/v2")
+            .map_err(|_| oversize())?;
+        e.put_u32(self.admin_roster.len() as u32);
+        for id in &self.admin_roster {
+            e.put_bytes(id.as_bytes()).map_err(|_| oversize())?;
+        }
         Ok(Zeroizing::new(e.finish()))
     }
 
@@ -4869,64 +4909,65 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // Item 3: the owner-local authoritative admin roster + generation. Read gracefully so a
         // pre-item-3 snapshot (no trailing bytes) loads with an empty roster (the owner re-grants;
         // old per-fp grant docs are no longer honored). A new snapshot is decoded strictly.
-        let (roster_gen, admin_roster, rendezvous_nodes, direct_admit_results) = if d.is_empty() {
-            (0u64, BTreeSet::new(), Vec::new(), HashMap::new())
-        } else {
-            let gen = d.get_u64().map_err(|_| bad())?;
-            let count = d.get_u32().map_err(|_| bad())?;
-            let mut set = BTreeSet::new();
-            for _ in 0..count {
-                set.insert(d.get_str().map_err(|_| bad())?.to_string());
-            }
-            // Post-join discovery rendezvous config; also a graceful tail (absent in a snapshot
-            // written before this feature). `get_*` is bounded by the remaining input, so push
-            // (no pre-alloc) can't over-run; the snapshot is sealed, so the count isn't adversarial.
-            let mut nodes = Vec::new();
-            if !d.is_empty() {
-                let n = d.get_u32().map_err(|_| bad())?;
-                for _ in 0..n {
-                    let addr = d.get_str().map_err(|_| bad())?.to_string();
-                    let rz = d.get_bytes().map_err(|_| bad())?.to_vec();
-                    nodes.push((addr, rz));
-                }
-            }
-            let mut direct = HashMap::new();
-            if !d.is_empty() {
-                let count = d.get_u32().map_err(|_| bad())? as usize;
-                if count > MAX_DIRECT_ADMIT_RESULTS {
-                    return Err(bad());
-                }
+        let (roster_gen, _legacy_admin_roster, rendezvous_nodes, direct_admit_results) =
+            if d.is_empty() {
+                (0u64, BTreeSet::new(), Vec::new(), HashMap::new())
+            } else {
+                let gen = d.get_u64().map_err(|_| bad())?;
+                let count = d.get_u32().map_err(|_| bad())?;
+                let mut set = BTreeSet::new();
                 for _ in 0..count {
-                    let nonce = d
-                        .get_bytes()
-                        .map_err(|_| bad())?
-                        .try_into()
-                        .map_err(|_| bad())?;
-                    let kp_hash = d
-                        .get_bytes()
-                        .map_err(|_| bad())?
-                        .try_into()
-                        .map_err(|_| bad())?;
-                    let welcome = d.get_bytes().map_err(|_| bad())?.to_vec();
-                    let sealed_routing = d.get_bytes().map_err(|_| bad())?.to_vec();
-                    let owner_sig = d
-                        .get_bytes()
-                        .map_err(|_| bad())?
-                        .try_into()
-                        .map_err(|_| bad())?;
-                    direct.insert(
-                        nonce,
-                        CachedAdmit {
-                            kp_hash: Some(kp_hash),
-                            welcome,
-                            sealed_routing,
-                            owner_sig,
-                        },
-                    );
+                    set.insert(d.get_str().map_err(|_| bad())?.to_string());
                 }
-            }
-            (gen, set, nodes, direct)
-        };
+                // Post-join discovery rendezvous config; also a graceful tail (absent in a snapshot
+                // written before this feature). `get_*` is bounded by the remaining input, so push
+                // (no pre-alloc) can't over-run; the snapshot is sealed, so the count isn't adversarial.
+                let mut nodes = Vec::new();
+                if !d.is_empty() {
+                    let n = d.get_u32().map_err(|_| bad())?;
+                    for _ in 0..n {
+                        let addr = d.get_str().map_err(|_| bad())?.to_string();
+                        let rz = d.get_bytes().map_err(|_| bad())?.to_vec();
+                        nodes.push((addr, rz));
+                    }
+                }
+                let mut direct = HashMap::new();
+                if !d.is_empty() {
+                    let count = d.get_u32().map_err(|_| bad())? as usize;
+                    if count > MAX_DIRECT_ADMIT_RESULTS {
+                        return Err(bad());
+                    }
+                    for _ in 0..count {
+                        let nonce = d
+                            .get_bytes()
+                            .map_err(|_| bad())?
+                            .try_into()
+                            .map_err(|_| bad())?;
+                        let kp_hash = d
+                            .get_bytes()
+                            .map_err(|_| bad())?
+                            .try_into()
+                            .map_err(|_| bad())?;
+                        let welcome = d.get_bytes().map_err(|_| bad())?.to_vec();
+                        let sealed_routing = d.get_bytes().map_err(|_| bad())?.to_vec();
+                        let owner_sig = d
+                            .get_bytes()
+                            .map_err(|_| bad())?
+                            .try_into()
+                            .map_err(|_| bad())?;
+                        direct.insert(
+                            nonce,
+                            CachedAdmit {
+                                kp_hash: Some(kp_hash),
+                                welcome,
+                                sealed_routing,
+                                owner_sig,
+                            },
+                        );
+                    }
+                }
+                (gen, set, nodes, direct)
+            };
         let tenure_bytes = if d.is_empty() {
             None
         } else {
@@ -4947,6 +4988,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         } else {
             member_finalization::decode_pending_snapshot(d.get_bytes().map_err(|_| bad())?)?
         };
+        // Legacy fingerprints contain no trustworthy original-grantee binding, even when
+        // one current member matches. Discard every such grant; require owner re-approval.
+        let mut admin_roster = BTreeSet::new();
+        if !d.is_empty() {
+            if d.get_str().map_err(|_| bad())? != "catcoms/admin-authority/v2" {
+                return Err(bad());
+            }
+            let count = d.get_u32().map_err(|_| bad())?;
+            for _ in 0..count {
+                let id = DeviceId::from_bytes(
+                    d.get_bytes()
+                        .map_err(|_| bad())?
+                        .try_into()
+                        .map_err(|_| bad())?,
+                );
+                if !admin_roster.insert(id) {
+                    return Err(bad());
+                }
+            }
+        }
         d.finish().map_err(|_| bad())?;
 
         // Reconstruct the MLS device + group, then build a base synchronizer and override its
@@ -5000,7 +5061,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         this.peer_records = peer_records;
         this.restore_pending_finalization(pending_finalization);
         this.roster_gen = roster_gen;
-        this.admin_roster = admin_roster;
+        this.admin_roster = admin_roster
+            .into_iter()
+            .filter(|id| this.group.contains_device(id))
+            .collect();
         this.rendezvous_nodes = rendezvous_nodes;
         this.direct_admit_results = direct_admit_results;
         Ok(this)
@@ -5029,15 +5093,23 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let Some(owner) = self.group.designated_committer() else {
             return false;
         };
+        if !self.group.contains_device(device_id) {
+            return false;
+        }
         if owner == *device_id {
             return true;
         }
-        let fp = roles::fingerprint(device_id);
         if self.is_designated_committer() {
             // We are the owner; the only node that runs admission (Option C). Consult our LOCAL
             // authoritative roster: replay/deletion/forgery against the shared CRDT cannot touch
             // it, so a demoted admin cannot re-authorize itself (THREAT-MODEL item 3).
-            return self.admin_roster.contains(&fp);
+            return roles::authorizes_device(
+                owner,
+                &self.admin_roster,
+                *device_id,
+                self.group.contains_device(device_id),
+                self.admin_authority_durable,
+            );
         }
         // Non-owner: this never gates admission (only the owner commits, against its local
         // roster). It IS consulted for the relay self-gate via `published_roster_omits`, which
@@ -5046,7 +5118,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // admission effect. Trust a cleanly-read owner-signed roster.
         match self.doc(DocType::MemberRoles, roles::ROLES_DOC) {
             Some(doc) => roles::read_published_roster(doc.doc(), &self.group.group_id(), &owner)
-                .is_some_and(|s| s.contains(&fp)),
+                .is_some_and(|s| s.contains(device_id)),
             None => false,
         }
     }
@@ -5060,11 +5132,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let Some(owner) = self.group.designated_committer() else {
             return false;
         };
-        let fp = roles::fingerprint(device);
         match self.doc(DocType::MemberRoles, roles::ROLES_DOC) {
             Some(doc) => {
                 match roles::read_published_roster(doc.doc(), &self.group.group_id(), &owner) {
-                    Some(set) => !set.contains(&fp), // read cleanly → trust the positive omission
+                    Some(set) => !set.contains(device), // read cleanly → trust the positive omission
                     None => false, // unreadable/absent → unknown, not unauthorized
                 }
             }
@@ -5072,28 +5143,47 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
-    /// The owner's local authoritative admin set (fingerprints). Owner-only meaningful; empty on
+    /// The owner's local authoritative admin set (full device identities). Owner-only meaningful; empty on
     /// non-owner nodes. The product layer uses this for the owner's own role display so it always
     /// matches the admission gate (other members read the published copy).
-    pub fn admin_roster(&self) -> HashSet<String> {
+    pub fn admin_roster(&self) -> HashSet<DeviceId> {
         self.admin_roster.iter().cloned().collect()
     }
 
-    /// Owner-only: grant/revoke admin for `fp`, updating the **local authoritative** roster (the
+    /// Owner-only: grant/revoke admin for an exact device, updating the **local authoritative** roster (the
     /// admission source of truth) and publishing a fresh owner-signed copy into the `MemberRoles`
     /// doc for display. The local set is updated first, so a later delete/replay of the published
     /// copy by a malicious member cannot affect the gate. Errors `Unauthorized` if not the owner;
     /// `NoSuchDoc` if the roles doc isn't open.
-    pub async fn set_admin(&mut self, fp: &str, admin: bool) -> Result<(), SyncError> {
+    pub async fn set_admin(&mut self, device: &DeviceId, admin: bool) -> Result<(), SyncError> {
         if !self.is_designated_committer() {
             return Err(SyncError::Unauthorized);
         }
         if admin {
-            self.admin_roster.insert(fp.to_string());
+            if !self.group.contains_device(device) {
+                return Err(SyncError::Unauthorized);
+            }
+            self.admin_roster.insert(*device);
         } else {
-            self.admin_roster.remove(fp);
+            self.admin_roster.remove(device);
         }
         self.publish_roster().await
+    }
+
+    /// Begin a native role transaction. The actor serializes this with all admissions.
+    pub fn require_admin_persistence(&mut self) {
+        self.admin_authority_durable = false;
+    }
+
+    /// Correlate a covering authority save with the exact roster generation. A stale
+    /// concurrent completion must not unblock a newer grant or revocation.
+    pub fn admin_generation(&self) -> u64 {
+        self.roster_gen
+    }
+    pub fn confirm_admin_persistence(&mut self, generation: u64) {
+        if generation == self.roster_gen {
+            self.admin_authority_durable = true;
+        }
     }
 
     /// Sign + publish the current `admin_roster` as the owner-signed `roster` value (display copy).
@@ -5104,7 +5194,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.roster_gen = self.roster_gen.saturating_add(1);
         let gen = self.roster_gen;
         let group_id = self.group.group_id();
-        let fps: Vec<String> = self.admin_roster.iter().cloned().collect(); // BTreeSet ⇒ sorted
+        let fps: Vec<DeviceId> = self.admin_roster.iter().copied().collect(); // BTreeSet ⇒ sorted
         let payload = roles::roster_payload(&group_id, gen, &fps);
         let sig = self.device.sign(&payload)?;
         let owner_pk = self.device.public_key_bytes();
@@ -8778,12 +8868,32 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// The transport peer id for a current member by fingerprint, taken from its signed peer record
-    /// (the dial target). `None` if we hold no record for that member yet (no PEX).
+    /// (the dial target). `None` if we hold no record for that member yet (no PEX), **or if the
+    /// fingerprint is ambiguous**.
+    ///
+    /// Legacy route: only the DM-invite path still addresses members by their 4-byte fingerprint.
+    /// A member can generate a device key sharing another member's first four bytes, and this used
+    /// to return whichever colliding record `HashMap` iteration yielded first, which Rust
+    /// randomises per process. It now refuses whenever more than one current member carries the
+    /// fingerprint (design-creative-suite.md 2.18), whether or not each holds a record, so the
+    /// answer can never depend on which of them happened to publish one. Call signalling uses the
+    /// exact [`Self::peer_for_device`] instead.
     fn peer_for_fingerprint(&self, fp: &str) -> Option<PeerId> {
-        self.peer_records.iter().find_map(|(device, desc)| {
-            (self.group.contains_device(device) && roles::fingerprint(device) == fp)
-                .then(|| PeerId::new(desc.peer_id))
-        })
+        let device = unique_member_for_fingerprint(self.group.member_device_ids(), fp)?;
+        self.peer_for_device(&device)
+    }
+
+    /// The transport peer id for exactly this current member, taken from the signed peer record
+    /// stored under its full `DeviceId`. `None` when `device` is not a current member or we hold
+    /// no record for it. A different device that merely shares a display fingerprint can never
+    /// match, because the lookup is keyed by all 32 bytes.
+    fn peer_for_device(&self, device: &DeviceId) -> Option<PeerId> {
+        if !self.group.contains_device(device) {
+            return None;
+        }
+        self.peer_records
+            .get(device)
+            .map(|desc| PeerId::new(desc.peer_id))
     }
 
     /// Deliver a DM (friend) invite to current member `target_fp` over this group, so they receive
@@ -8832,10 +8942,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         true
     }
 
-    /// Push a call-signalling message (opaque payload) to current member `target_fp` over this group.
-    /// `Ok(true)` if it was addressed and queued, `Ok(false)` if we hold no peer record for the
-    /// target. Authenticated as coming from a current member (the recipient learns the verified
-    /// sender fingerprint).
+    /// Push a call-signalling message (opaque payload) to current member `target` over this group.
+    /// `Ok(true)` if it was addressed and queued, `Ok(false)` if `target` is not a current member or
+    /// we hold no peer record for it. Authenticated as coming from a current member (the recipient
+    /// learns the verified sender's full `DeviceId`).
+    ///
+    /// The target is the member's **full** device id, never a fingerprint: routing goes through
+    /// [`Self::peer_for_device`], so a forged identity sharing a victim's first four bytes cannot
+    /// pull the victim's call traffic toward itself, nor push its own to the victim.
     ///
     /// Sent through [`MeshTransport::notify`], never `request`: `serve_call_signal` deliberately
     /// answers with no data, so there is nothing in the reply worth blocking for, and blocking is
@@ -8849,10 +8963,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// of it.
     pub async fn send_call_signal(
         &mut self,
-        target_fp: &str,
+        target: &DeviceId,
         payload: &[u8],
     ) -> Result<bool, SyncError> {
-        let Some(peer) = self.peer_for_fingerprint(target_fp) else {
+        let Some(peer) = self.peer_for_device(target) else {
             return Ok(false);
         };
         let (req, _auth) = self.build_authed_request(KIND_CALL_SIGNAL, payload)?;
@@ -8882,8 +8996,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             tracing::trace!("call signal rate-limited; dropped");
             return;
         }
-        let from = roles::fingerprint(&device);
-        self.pending_call_signals.push((from, payload));
+        // Queue the full verified device id. The 4-byte fingerprint is a display label and is
+        // derived later, by the actor, only for display (design-creative-suite.md 2.18).
+        self.pending_call_signals.push((device, payload));
         self.bound_call_signals();
     }
 
@@ -8949,17 +9064,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// oldest one, so a flooder can only starve itself: with `k` senders active nobody is ever
     /// squeezed below `MAX_PENDING_CALL_SIGNALS / k` slots.
     ///
-    /// Ties go to the lowest fingerprint, so the behaviour is deterministic and testable.
+    /// Senders are counted by their **full** `DeviceId`. Keyed by fingerprint, two devices sharing
+    /// four bytes used to share one fair share, so a colliding member could make a victim pay for
+    /// its own flood. Ties go to the lowest `DeviceId` in byte order, so the behaviour is
+    /// deterministic and testable; where fingerprints differ that is also the lowest fingerprint,
+    /// the order this rule always had.
     fn bound_call_signals(&mut self) {
         while self.pending_call_signals.len() > MAX_PENDING_CALL_SIGNALS {
-            let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+            let mut counts: BTreeMap<DeviceId, usize> = BTreeMap::new();
             for (from, _) in &self.pending_call_signals {
-                *counts.entry(from.as_str()).or_default() += 1;
+                *counts.entry(*from).or_default() += 1;
             }
             let Some(worst) = counts
                 .into_iter()
-                .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0)))
-                .map(|(fp, _)| fp.to_string())
+                .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+                .map(|(device, _)| device)
             else {
                 break;
             };
@@ -8976,9 +9095,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
-    /// Drain (return + clear) the buffered inbound call signals; the actor calls this each loop and
-    /// emits a `CallSignal` event per item.
-    pub fn take_call_signals(&mut self) -> Vec<(String, Vec<u8>)> {
+    /// Drain (return + clear) the buffered inbound call signals as `(verified sender device,
+    /// payload)`; the actor calls this each loop and emits a `CallSignal` event per item.
+    pub fn take_call_signals(&mut self) -> Vec<(DeviceId, Vec<u8>)> {
         std::mem::take(&mut self.pending_call_signals)
     }
 
@@ -13454,6 +13573,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         kp_bytes: &[u8],
         now: u64,
     ) -> Option<(Vec<u8>, Vec<u8>, [u8; 64])> {
+        // Recheck at the protected mutation, after queueing. This synchronous operation
+        // cannot interleave a demotion or removal between authorization and MLS Add.
+        if !self.is_designated_committer() || !self.inviter_is_authorized(&invite.inviter_device_id)
+        {
+            return None;
+        }
         self.policy_admission_ready().ok()?;
         if !self.invite_policy_matches(invite) {
             return None;
@@ -13628,10 +13753,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return;
         }
         // THE ROLE RE-CHECK: the requester must BE the invite's named inviter, and that inviter
-        // must be authorized (owner/admin) RIGHT NOW per the live roles doc. The invite must also
+        // must be authorized (owner/admin) RIGHT NOW per the owner-local authority. The invite must also
         // self-authenticate + target this group.
         if requester != invite.inviter_device_id
-            || !self.inviter_is_authorized(&invite.inviter_device_id)
             || invite.group_id != self.group.group_id()
             || !invite.verify_self()
             || !self.invite_policy_matches(&invite)
@@ -13653,6 +13777,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 &cached.owner_sig,
             );
             self.admit_result_outbox.push((from_admin, payload));
+            return;
+        }
+
+        // Exact authenticated retries above recover a completed Add even after demotion.
+        // Only fresh admissions require present-time authority; no new mutation happens above.
+        if !self.inviter_is_authorized(&requester) {
+            self.stats.requests_rejected += 1;
             return;
         }
 
@@ -21992,6 +22123,144 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn removing_admin_revokes_the_exact_grant_durably() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        grant_admin(&mut members[0], &ids[1]).await;
+        let invite = members[0].mint_invite([74; 16], u64::MAX, vec![]).unwrap();
+        let kp = members[1]
+            .device
+            .key_package_for_invite(&invite.group_id, invite.invite_nonce)
+            .unwrap();
+        let kp = serialize_key_package(&kp).unwrap();
+        let owner = &mut members[0];
+        owner.request_remove(&ids[1]).await.unwrap();
+        assert!(!owner.admin_roster().contains(&ids[1]));
+        assert!(!owner.inviter_is_authorized(&ids[1]));
+        let snap = owner.snapshot().unwrap();
+        let restored = Member::restore(
+            &snap,
+            Hub::new().join(PeerId::from_u64(99)),
+            ChaCha20Rng::seed_from_u64(7),
+            Box::new(ManualClock::new(1000)),
+        )
+        .unwrap();
+        assert!(!restored.admin_roster().contains(&ids[1]));
+        owner.admit_now(&invite, &kp, 1000).unwrap();
+        assert!(owner.contains_member(&ids[1]));
+        assert!(
+            !owner.inviter_is_authorized(&ids[1]),
+            "rejoining does not restore a grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_admission_rechecks_demotion_and_preserves_nonce() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        grant_admin(&mut members[0], &ids[1]).await;
+        let invite = members[1].mint_invite([72; 16], u64::MAX, vec![]).unwrap();
+        let joiner = MlsDevice::generate().unwrap();
+        let kp = joiner
+            .key_package_for_invite(&invite.group_id, invite.invite_nonce)
+            .unwrap();
+        let kp = serialize_key_package(&kp).unwrap();
+        let body = admin_add_request_body(&members[1], &invite, &kp);
+        let owner = &mut members[0];
+        owner.on_add_request(PeerId::from_u64(2), &body);
+        assert_eq!(owner.add_request_queue.len(), 1);
+        owner.set_admin(&ids[1], false).await.unwrap();
+        let epoch = owner.epoch();
+        owner.drain_add_request_queue();
+        assert_eq!(owner.epoch(), epoch);
+        assert!(!owner.contains_member(&joiner.device_id()));
+        assert!(owner.ledger.check(&invite, owner.clock.now_ms()).is_ok());
+        assert!(!owner.admit_results.contains_key(&invite.invite_nonce));
+        // Re-grant permits the fresh request. Later demotion cannot strand its
+        // already-committed, KeyPackage-bound Welcome recovery or trigger another Add.
+        owner.set_admin(&ids[1], true).await.unwrap();
+        owner.on_add_request(PeerId::from_u64(2), &body);
+        owner.drain_add_request_queue();
+        assert!(owner.contains_member(&joiner.device_id()));
+        owner.set_admin(&ids[1], false).await.unwrap();
+        let epoch = owner.epoch();
+        let results = owner.admit_result_outbox.len();
+        owner.on_add_request(PeerId::from_u64(2), &body);
+        assert_eq!(owner.epoch(), epoch);
+        assert_eq!(owner.admit_result_outbox.len(), results + 1);
+    }
+
+    #[tokio::test]
+    async fn authority_save_barrier_rejects_stale_completion() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        grant_admin(&mut members[0], &ids[1]).await;
+        let owner = &mut members[0];
+        let old = owner.admin_generation();
+        owner.require_admin_persistence();
+        assert!(!owner.inviter_is_authorized(&ids[1]));
+        assert!(owner.inviter_is_authorized(&ids[0]));
+        owner.set_admin(&ids[1], true).await.unwrap();
+        owner.confirm_admin_persistence(old);
+        assert!(!owner.inviter_is_authorized(&ids[1]));
+        owner.confirm_admin_persistence(owner.admin_generation());
+        assert!(owner.inviter_is_authorized(&ids[1]));
+    }
+
+    #[tokio::test]
+    async fn legacy_authority_is_discarded_and_v2_tail_is_strict() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        grant_admin(&mut members[0], &ids[1]).await;
+        let snap = members[0].snapshot().unwrap();
+        let marker = b"catcoms/admin-authority/v2";
+        let offset = snap
+            .windows(marker.len())
+            .rposition(|w| w == marker)
+            .unwrap()
+            - 4;
+        let legacy = &snap[..offset];
+        let restore = |bytes: &[u8]| {
+            Member::restore(
+                bytes,
+                Hub::new().join(PeerId::from_u64(99)),
+                ChaCha20Rng::seed_from_u64(7),
+                Box::new(ManualClock::new(1000)),
+            )
+        };
+        // Construct the genuine old count/string region, including a grant that matches
+        // exactly one current member. Uniqueness is not evidence of original ownership.
+        let mut d = Decoder::new(legacy);
+        for _ in 0..3 {
+            d.get_bytes().unwrap();
+        }
+        for _ in 0..3 {
+            let n = d.get_u32().unwrap();
+            for _ in 0..n {
+                d.get_bytes().unwrap();
+            }
+        }
+        d.get_bytes().unwrap(); // file key
+        d.get_u64().unwrap(); // generation
+        let count_offset = legacy.len() - d.remaining();
+        assert_eq!(d.get_u32().unwrap(), 0);
+        for label in [fingerprint(&ids[1]), "deadbeef".to_string()] {
+            let mut grant = Encoder::new();
+            grant.put_u32(1);
+            grant.put_str(&label).unwrap();
+            let mut old = legacy[..count_offset].to_vec();
+            old.extend_from_slice(&grant.finish());
+            old.extend_from_slice(&legacy[count_offset + 4..]);
+            let restored = restore(&old).unwrap();
+            assert!(restored.admin_roster().is_empty());
+            assert!(!restored.inviter_is_authorized(&ids[1]));
+        }
+        let restored = restore(legacy).unwrap();
+        assert!(!restored.inviter_is_authorized(&ids[1]));
+        assert!(restored.inviter_is_authorized(&ids[0]));
+        assert!(restore(&snap[..snap.len() - 1]).is_err());
+        let mut unsupported = snap.to_vec();
+        unsupported[offset + 4 + marker.len() - 1] = b'3';
+        assert!(restore(&unsupported).is_err());
+    }
+
+    #[tokio::test]
     async fn inviter_is_authorized_tracks_the_owners_local_roster() {
         let (_hub, mut members, ids) = build_members(3).await;
         let owner = ids[0];
@@ -22020,10 +22289,7 @@ mod tests {
         );
 
         // Revoking the admin removes it from the owner's gate.
-        members[0]
-            .set_admin(&fingerprint(&admin), false)
-            .await
-            .unwrap();
+        members[0].set_admin(&admin, false).await.unwrap();
         assert!(
             !members[0].inviter_is_authorized(&admin),
             "a revoked admin is no longer authorized"
@@ -22038,7 +22304,6 @@ mod tests {
         // re-authorize the demoted admin, and a CTRL_ADD_REQUEST from it is rejected.
         let (_hub, mut members, ids) = build_members(2).await;
         let mallory = ids[1];
-        let mallory_fp = fingerprint(&mallory);
 
         // Owner grants Mallory (gen 1); capture the gen-1 published roster value.
         grant_admin(&mut members[0], &mallory).await;
@@ -22047,7 +22312,7 @@ mod tests {
         assert!(!stale_roster.is_empty(), "a roster was published");
 
         // Owner demotes Mallory (gen 2).
-        members[0].set_admin(&mallory_fp, false).await.unwrap();
+        members[0].set_admin(&mallory, false).await.unwrap();
         assert!(!members[0].inviter_is_authorized(&mallory), "revoked");
 
         // Mallory replays the gen-1 roster value back into the CRDT (the owner's doc here, to
@@ -22070,7 +22335,7 @@ mod tests {
             .and_then(|d| read_published_roster(d.doc(), &members[0].group_id(), &ids[0]))
             .unwrap_or_default();
         assert!(
-            published.contains(&mallory_fp),
+            published.contains(&mallory),
             "the replayed CRDT copy does name Mallory (so the replay is real)"
         );
         assert!(
@@ -22141,7 +22406,7 @@ mod tests {
             .open_channel(DocType::MemberRoles, ROLES_DOC)
             .await
             .unwrap();
-        owner.set_admin(&fingerprint(target), true).await.unwrap();
+        owner.set_admin(target, true).await.unwrap();
     }
 
     /// Read the raw `roster` value bytes from a member's roles doc (for replay tests).
@@ -24157,21 +24422,118 @@ mod tests {
             .unwrap();
         assert!(bob.ingest_peer_record(alice.self_record().unwrap().clone()));
 
-        let alice_fp = roles::fingerprint(&ids[0]);
-        let bob_fp = roles::fingerprint(&ids[1]);
         let payload = br#"{"type":"offer","sdp":"opaque-to-sync"}"#;
-        let (sent, _) = tokio::join!(bob.send_call_signal(&alice_fp, payload), alice.run_once());
+        let (sent, _) = tokio::join!(bob.send_call_signal(&ids[0], payload), alice.run_once());
 
         assert!(sent.unwrap(), "the sender had a verified route to Alice");
         assert_eq!(
             alice.take_call_signals(),
-            vec![(bob_fp, payload.to_vec())],
-            "the recipient keeps the authenticated sender and opaque payload intact"
+            vec![(ids[1], payload.to_vec())],
+            "the recipient keeps the full authenticated sender id and opaque payload intact"
         );
         assert!(
             alice.take_call_signals().is_empty(),
             "draining a call signal emits it only once"
         );
+    }
+
+    /// A device id sharing `real`'s first four bytes (its display fingerprint) and nothing else.
+    /// Grinding an actual key for this takes about 2^32 attempts; the routing and fairness code
+    /// only ever sees the id, so a crafted id exercises exactly the collision a member could buy.
+    fn prefix_twin(real: &DeviceId) -> DeviceId {
+        let mut bytes = *real.as_bytes();
+        for b in &mut bytes[4..] {
+            *b ^= 0x5a;
+        }
+        let twin = DeviceId::from_bytes(bytes);
+        assert_eq!(roles::fingerprint(&twin), roles::fingerprint(real));
+        assert_ne!(twin, *real);
+        twin
+    }
+
+    #[tokio::test]
+    async fn a_call_signal_for_a_prefix_twin_never_routes_to_the_real_member() {
+        // Design 2.18 / Gate 5: the target is the full device id. A member who presents an id
+        // sharing Alice's fingerprint must not be able to address (or receive) Alice's calls.
+        let (_hub, members, ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        alice
+            .publish_self_record(vec![member_route(&alice, "/ip4/203.0.113.1/tcp/1")], 1)
+            .unwrap();
+        assert!(bob.ingest_peer_record(alice.self_record().unwrap().clone()));
+
+        let twin = prefix_twin(&ids[0]);
+        // Nothing is sent, so Alice is not driven here: there is no request for her to serve.
+        assert!(
+            !bob.send_call_signal(&twin, b"misrouted").await.unwrap(),
+            "a non-member id is never routed, even though its fingerprint matches Alice's"
+        );
+        assert!(alice.take_call_signals().is_empty());
+
+        // The exact id still routes, so the refusal above is about identity, not reachability.
+        let (sent, _) = tokio::join!(bob.send_call_signal(&ids[0], b"routed"), alice.run_once());
+        assert!(sent.unwrap());
+        assert_eq!(
+            alice.take_call_signals(),
+            vec![(ids[1], b"routed".to_vec())]
+        );
+    }
+
+    #[tokio::test]
+    async fn colliding_senders_keep_separate_fair_shares_of_the_signal_queue() {
+        // Keyed by fingerprint, a flooder and the quiet member it collides with shared one share,
+        // so the flood's eviction rule removed the quiet member's older offer. Keyed by the full
+        // id, only the flooder pays.
+        let (_hub, members, ids) = build_members(1).await;
+        let mut alice = members.into_iter().next().unwrap();
+        let quiet = DeviceId::from_public_key_bytes(&[7u8; 32]);
+        let flooder = prefix_twin(&quiet);
+        let _ = ids;
+
+        alice
+            .pending_call_signals
+            .push((quiet, b"quiet-offer".to_vec()));
+        for i in 0..MAX_PENDING_CALL_SIGNALS {
+            alice
+                .pending_call_signals
+                .push((flooder, format!("flood-{i}").into_bytes()));
+        }
+        alice.bound_call_signals();
+
+        let queued = alice.take_call_signals();
+        assert_eq!(queued.len(), MAX_PENDING_CALL_SIGNALS);
+        assert_eq!(
+            queued.first(),
+            Some(&(quiet, b"quiet-offer".to_vec())),
+            "the colliding quiet member's offer survives; the flooder lost its own oldest entry"
+        );
+        assert_eq!(
+            queued.iter().filter(|(from, _)| *from == flooder).count(),
+            MAX_PENDING_CALL_SIGNALS - 1
+        );
+    }
+
+    #[test]
+    fn the_legacy_fingerprint_route_refuses_an_ambiguous_fingerprint() {
+        let a = DeviceId::from_public_key_bytes(&[1u8; 32]);
+        let twin = prefix_twin(&a);
+        let c = DeviceId::from_public_key_bytes(&[2u8; 32]);
+        let fp_a = roles::fingerprint(&a);
+        let fp_c = roles::fingerprint(&c);
+        assert_ne!(fp_a, fp_c);
+
+        assert_eq!(unique_member_for_fingerprint([a, c], &fp_a), Some(a));
+        assert_eq!(
+            unique_member_for_fingerprint([a, twin, c], &fp_a),
+            None,
+            "two current members share the fingerprint, so neither may be guessed"
+        );
+        assert_eq!(unique_member_for_fingerprint([a, twin, c], &fp_c), Some(c));
+        assert_eq!(unique_member_for_fingerprint([a, a], &fp_a), Some(a));
+        assert_eq!(unique_member_for_fingerprint([c], &fp_a), None);
+        assert_eq!(unique_member_for_fingerprint(Vec::new(), &fp_a), None);
     }
 
     /// A transport whose `request` never answers: the peer that has gone away, without the test
@@ -24260,7 +24622,7 @@ mod tests {
 
         let sent = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            node.send_call_signal(&roles::fingerprint(&own), b"sdp-offer"),
+            node.send_call_signal(&own, b"sdp-offer"),
         )
         .await
         .expect("a call signal must return without waiting for the peer to answer")
@@ -24281,10 +24643,8 @@ mod tests {
         let mut it = members.into_iter();
         let mut alice = it.next().unwrap();
         let mut bob = it.next().unwrap();
-        let alice_fp = roles::fingerprint(&ids[0]);
-
         assert!(!bob
-            .send_call_signal(&alice_fp, b"unroutable-offer")
+            .send_call_signal(&ids[0], b"unroutable-offer")
             .await
             .unwrap());
         assert!(alice.take_call_signals().is_empty());
@@ -24299,8 +24659,8 @@ mod tests {
         let mut alice = it.next().unwrap();
         let mut bob = it.next().unwrap();
         let mut carol = it.next().unwrap();
-        let bob_fp = roles::fingerprint(&ids[1]);
-        let carol_fp = roles::fingerprint(&ids[2]);
+        let bob_id = ids[1];
+        let carol_id = ids[2];
 
         // Everyone can address Alice.
         alice
@@ -24309,18 +24669,18 @@ mod tests {
         for n in [&mut bob, &mut carol] {
             assert!(n.ingest_peer_record(alice.self_record().unwrap().clone()));
         }
-        let alice_fp = roles::fingerprint(&ids[0]);
+        let alice_id = ids[0];
 
         // Carol's offer lands first, then Bob floods far past the queue bound.
         let (sent, _) = tokio::join!(
-            carol.send_call_signal(&alice_fp, b"carol-sdp-offer"),
+            carol.send_call_signal(&alice_id, b"carol-sdp-offer"),
             alice.run_once()
         );
         assert!(sent.unwrap());
         for i in 0..(MAX_PENDING_CALL_SIGNALS + 64) {
             let payload = format!("bob-flood-{i}");
             let (_, _) = tokio::join!(
-                bob.send_call_signal(&alice_fp, payload.as_bytes()),
+                bob.send_call_signal(&alice_id, payload.as_bytes()),
                 alice.run_once()
             );
         }
@@ -24333,12 +24693,12 @@ mod tests {
         assert!(
             queued
                 .iter()
-                .any(|(from, p)| *from == carol_fp && p == b"carol-sdp-offer"),
+                .any(|(from, p)| *from == carol_id && p == b"carol-sdp-offer"),
             "the quiet member's offer survived a flood that used to evict it"
         );
         // The flooder is squeezed by its own token bucket: it cannot have banked more than one
         // burst plus whatever the (unmoving) test clock refilled, which is nothing.
-        let from_bob = queued.iter().filter(|(from, _)| *from == bob_fp).count();
+        let from_bob = queued.iter().filter(|(from, _)| *from == bob_id).count();
         assert!(
             from_bob <= CALL_SIGNAL_BURST as usize,
             "the flooder was capped at its burst, got {from_bob}"

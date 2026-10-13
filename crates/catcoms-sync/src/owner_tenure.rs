@@ -474,6 +474,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let before = Position::of(&self.group);
         let outcome = work(self);
         self.owner_tenure.applied(before, &self.group);
+        // A completed removal permanently revokes the exact grant, including cascades.
+        // A successor owner must explicitly re-grant; published predecessor state is not authority.
+        if before.owner != Position::of(&self.group).owner {
+            self.admin_roster.clear();
+        }
+        self.admin_roster
+            .retain(|id| self.group.contains_device(id));
         outcome
     }
 

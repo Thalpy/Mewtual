@@ -1,6 +1,33 @@
 # Gate 4 acceptance matrix
 
-Current checkpoint: 2026-10-12. A later review of PR #27 exact head
+**Merged, 2026-10-12.** The owner merged PR #27 into `Create-suite-2`:
+
+| Item | Value |
+|---|---|
+| Merged head | `e8aad1acb7ccc43f5e8757bcffbcd83997f7c231` (branch `gate4-agent1-runtime`) |
+| Base | `5a899c22e7e26a7853c34f8adac4c11246846204` |
+| Merge commit | `ff8e2760756213f3238409e1c889fadd7a8d8797` |
+| Merged at | 2026-10-12 22:30:49 UTC |
+
+- All 28 hosted check runs on the merged head concluded **success**, including:
+  - `build & test` (Linux and Windows);
+  - `Linux frontend & Tauri`;
+  - `cargo-deny`;
+  - two-process and Linux NAT acceptance;
+  - every repair, lifecycle, handoff and Studio-native job.
+- That satisfies the "published-head checks remain open" condition in the 2026-10-12 checkpoint
+  below. The merge is the owner's acceptance decision for Gate 4, and this ledger records it rather
+  than re-deriving it.
+- The residuals stated in the matrix stay as written; they are disclosed scope, not open
+  blockers.
+- Gate 5 then opened for implementation. Its candidate is PR #43 (`gate5-frame-claims` against
+  this merge commit), and its own record is [GATE5-DESIGN](GATE5-DESIGN.md). Gate 5 acceptance is
+  separate and still pending.
+
+The paragraphs that follow are the pre-merge checkpoint, kept as history. Their "not yet
+merge-ready" and "Gate 5 remains closed" statements are superseded by the merge above.
+
+Pre-merge checkpoint: 2026-10-12. A later review of PR #27 exact head
 `b8cda2a047b01f75664603c9e0fd96ed5341b6c6` found three MEDIUM Studio recovery progress defects.
 Their isolated correction is implemented on `fix/pr27-studio-recovery`. Complete local exact-head
 verification and the final bounded re-reviews pass. The first rereview closed the original three

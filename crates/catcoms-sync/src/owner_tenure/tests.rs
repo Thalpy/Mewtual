@@ -52,7 +52,9 @@ async fn owner_tenure_founder_joiner_and_legacy_snapshot_have_distinct_evidence(
         let tail = node.owner_tenure.encode(&node.group).unwrap().len() + 4;
         let chat_tail = node.durable_chat.encode().unwrap().len() + 4;
         let pending_tail = node.pending_finalization_snapshot().unwrap().len() + 4;
-        let legacy = &snap[..snap.len() - pending_tail - chat_tail - policy_tail - tail];
+        let authority_tail = 8 + b"catcoms/admin-authority/v2".len() + node.admin_roster.len() * 36;
+        let legacy =
+            &snap[..snap.len() - authority_tail - pending_tail - chat_tail - policy_tail - tail];
         let mut upgraded = restore(legacy).unwrap();
         assert_eq!(observed_start(&upgraded), None);
         let saved = upgraded.snapshot().unwrap();
@@ -77,7 +79,8 @@ async fn owner_tenure_unknown_owner_stays_unknown_after_valid_same_owner_adds() 
         + 4
         + nodes[0].pending_finalization_snapshot().unwrap().len()
         + 4;
-    let mut owner = restore(&snap[..snap.len() - tail]).unwrap();
+    let authority_tail = 8 + b"catcoms/admin-authority/v2".len() + nodes[0].admin_roster.len() * 36;
+    let mut owner = restore(&snap[..snap.len() - authority_tail - tail]).unwrap();
     assert!(owner.is_designated_committer());
     assert_eq!(observed_start(&owner), None);
     let joining = MlsDevice::generate().unwrap();
