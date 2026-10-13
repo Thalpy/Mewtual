@@ -652,7 +652,22 @@ Gate 4's Studio exchange, which Gate 5 does not touch.
 - **Locally:** it passes in isolation on both the base and this branch, including under
   single-core starvation.
 
-It is a pre-existing flake, and it is a Gate 4 follow-up, not a Gate 5 change.
+**Root cause (fixed in this PR, test-only).**
+
+- The fixture `actor_newcomer` spawned both actors on production's process-wide preparation
+  pools: 4 shared slots and 3 preview slots. Every other test in the `catcoms-app` binary also
+  draws on those pools.
+- Its loop steps a fixed window of 100 synthetic seconds. While other parallel tests held the
+  slots, the newcomer's preparation was refused on every step. It never installed the
+  checkpoint, so it was still on its initial epoch at the `epoch_id` assertion.
+- Holding the shared pool full reproduces the CI failure exactly: the same line and the same two
+  values.
+- The fix is the one `succession/joining.rs` already applies: each actor gets its own pools
+  (`studio_pools_for_next_spawn`, before each spawn).
+- An opt-in `#[ignore]` diagnostic,
+  `studio_actors_newcomer_survives_unrelated_process_pool_contention`, drains the global pools
+  and passes. Without the fix, or with only the provider isolated, it fails with the CI
+  signature.
 
 The inherited inviter HIGH (THREAT-MODEL item 7) is separate and is not absorbed by this verdict.
 

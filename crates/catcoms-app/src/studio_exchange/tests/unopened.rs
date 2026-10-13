@@ -394,6 +394,22 @@ async fn studio_actors_new_member_after_index_checkpoint_installs_registry_and_i
     actor_newcomer(StudioTarget::Index { channel: channel() }, false).await;
 }
 
+/// Deliberately drains production's global pools, so execute this diagnostic alone. It must not
+/// run beside other tests that intentionally exercise those pools. Before `actor_newcomer` gave
+/// each actor its own pools, this failed exactly as the parallel suite sometimes did: the
+/// newcomer never got a preparation slot inside the fixed step window and was still on its
+/// initial epoch at the `epoch_id` assertion.
+#[tokio::test]
+#[ignore = "run alone: intentionally occupies all process-global preparation permits"]
+async fn studio_actors_newcomer_survives_unrelated_process_pool_contention() {
+    let (shared, preview) = crate::studio::StudioReceiver::default_preparation_pools_for_test();
+    let _shared = shared.clone().try_acquire_many_owned(4).unwrap();
+    let _preview = preview.clone().try_acquire_many_owned(3).unwrap();
+    assert_eq!(shared.available_permits(), 0);
+    assert_eq!(preview.available_permits(), 0);
+    actor_newcomer(StudioTarget::Index { channel: channel() }, false).await;
+}
+
 #[tokio::test]
 async fn studio_actors_closing_reopen_after_expired_selection_resumes_without_another_action() {
     actor_newcomer(target(), true).await;
@@ -669,7 +685,20 @@ async fn actor_newcomer(selected_target: StudioTarget, restart_closing: bool) {
     let verify_snapshot = p.bob.snapshot().unwrap();
     let a_store = Arc::new(Mutex::new(Some(p.a_store)));
     let b_store = Arc::new(Mutex::new(Some(p.b_store)));
+    // Each actor models its own process, so each gets its own preparation pools rather than the
+    // process-wide ones every parallel test in this binary also draws on (as `succession/joining.rs`
+    // does), installed before the actor can do any Studio work. The loop below steps a fixed
+    // window; while other tests held the four shared slots, the newcomer never got one, so it was
+    // still on its initial epoch at the assertion. Holding the shared pool full replays that.
+    let own_pools = || {
+        crate::actor::studio_pools_for_next_spawn(
+            Arc::new(tokio::sync::Semaphore::new(4)),
+            Arc::new(tokio::sync::Semaphore::new(3)),
+        )
+    };
+    own_pools(); // consumed by the next spawn on this thread
     let (a, mut ae, at) = spawn(p.alice);
+    own_pools();
     let (b, mut be, bt) = spawn(p.bob);
     let ad = tokio::spawn(async move {
         while let Some(e) = ae.recv().await {

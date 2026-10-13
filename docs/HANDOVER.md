@@ -117,11 +117,15 @@ and ranks the live hazards in that path.
   - D1 is confirmed: Pass names no recipient, and peer-to-peer calls are accepted as chaotic.
   - macOS (WKWebView) is stated as unverified for stream-8 compatibility.
 
-  **CI.** The only `build & test` failures on PR #43 are one pre-existing Gate 4 flake,
-  `studio_actors_new_member_after_index_checkpoint_installs_registry_and_index_tail`.
-  - It also failed before Gate 5, on `c13239d` and `f3e9291`.
-  - The identical Rust passed on four other PR heads.
-  - It is a Gate 4 follow-up; details are in GATE5-DESIGN section 15.
+  **CI.** The only `build & test` failures on PR #43 were one pre-existing Gate 4 test,
+  `studio_actors_new_member_after_index_checkpoint_installs_registry_and_index_tail`. It also
+  failed before Gate 5, on `c13239d` and `f3e9291`.
+  - **Cause:** the fixture used the process-wide preparation pools, so parallel tests could hold
+    every slot through its fixed step window.
+  - **Fix:** the fixture now gives each actor private pools. This is test-only.
+  - **Regression:** an opt-in diagnostic drains the global pools; it fails without the fix and
+    passes with it.
+  - Details are in GATE5-DESIGN section 15.
 
   **Outstanding for acceptance**
   - The owner's two-desktop run and sign-off, scripted in GATE5-DESIGN section 16.
