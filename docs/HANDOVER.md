@@ -123,8 +123,12 @@ and ranks the live hazards in that path.
   - **Cause:** the fixture used the process-wide preparation pools, so parallel tests could hold
     every slot through its fixed step window.
   - **Fix:** the fixture now gives each actor private pools. This is test-only.
-  - **Regression:** an opt-in diagnostic drains the global pools; it fails without the fix and
-    passes with it.
+  - **Regression:** an opt-in diagnostic drains the global pools and runs all three fixture
+    variants. Each fails without the fix and passes with it.
+  - **Both failures recorded above have this one cause:** the `epoch_id` failure in the index-tail
+    test, and `studio_actors_closing_reopen_after_expired_selection_resumes_without_another_action`
+    at its Registry-bootstrap assertion. They are the same `actor_newcomer` fixture. No
+    assertion was weakened and no iteration count was raised.
   - Details are in GATE5-DESIGN section 15.
 
   **Outstanding for acceptance**

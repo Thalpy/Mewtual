@@ -666,8 +666,13 @@ Gate 4's Studio exchange, which Gate 5 does not touch.
   (`studio_pools_for_next_spawn`, before each spawn).
 - An opt-in `#[ignore]` diagnostic,
   `studio_actors_newcomer_survives_unrelated_process_pool_contention`, drains the global pools
-  and passes. Without the fix, or with only the provider isolated, it fails with the CI
-  signature.
+  and runs all three fixture variants. It passes. Without the fix, every variant fails, each at
+  its own fixture assertion, and with only the provider isolated the Index variant fails with
+  the CI signature.
+- The same fixture also backs
+  `studio_actors_closing_reopen_after_expired_selection_resumes_without_another_action`, which
+  the owner's `fix/gate5-full-device-admin` verification saw fail at its Registry-bootstrap
+  assertion. The same fix covers it.
 
 The inherited inviter HIGH (THREAT-MODEL item 7) is separate and is not absorbed by this verdict.
 
