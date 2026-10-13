@@ -40,7 +40,8 @@ and ranks the live hazards in that path.
     23 frames sent on stream 8; `inst`, voice and the connection unaffected.
   - Each new behaviour is mutation-checked (GATE5-DESIGN 9.1).
   - No Rust changed this round; the Rust record below stands.
-  - `test:startup` now resolves the binary name per platform. Its result is recorded only once run.
+  - `test:startup` now resolves the binary name per platform. Against a fresh desktop debug build
+    under Xvfb (Linux, WebKitGTK), it passes: "application startup completed".
 
   **Found (predates Gate 5).** Ubuntu 24.04's WebKitGTK 2.52.6 exposes no `RTCPeerConnection`,
   whether by default, with `enable-webrtc`, or with the GStreamer WebRTC plugins installed. The
