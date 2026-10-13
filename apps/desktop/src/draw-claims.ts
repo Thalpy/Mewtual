@@ -24,6 +24,17 @@
 // than 90 s have passed on THIS device's monotonic clock since its last accepted receipt; no
 // timestamps travel. Everything is per call join: the session object is disposed on leave.
 //
+// Delivery: each edge records what its receiver was told by frames the transport actually TOOK
+// (`send` returned true without throwing). A refused or throwing send leaves that record alone, so
+// the next flush (every action, every 1 s tick, every recovery) retries on that edge only, and an
+// edge that took a frame is never sent it again. What the record says the receiver holds and this
+// device no longer asserts gets a Release; anything older than 90 s the receiver has expired.
+//
+// Reachability: while a peer's connection is not "connected", its entries are hidden from every
+// view and its deliveries are held (bounded); recovery shows what is still live and applies the
+// held frames in order, so a Pass sent during the gap still lands. Failure closes the channel,
+// which drops both.
+//
 // Time and randomness are injected (`now`, `randomHex`) so tests are deterministic.
 
 import { CLAIM_RESEND_MS, CLAIM_TTL_MS } from "./studio-contract.ts";
@@ -69,6 +80,13 @@ export const CLAIM_FRAME_BUCKET_RATE = 2;
 export const CLAIM_MAX_LIVE_PER_SENDER = 4;
 /** Distinct sender sessions one channel capability may present before it must reconnect. */
 export const DRAW_MAX_SESSIONS_PER_CHANNEL = 4;
+/** Deliveries held from one unreachable edge until it recovers; the oldest go first beyond this. */
+export const DRAW_HOLD_MAX = 32;
+/**
+ * Frames one edge's record may hold. A receiver keeps at most CLAIM_MAX_LIVE_PER_SENDER of mine,
+ * so beyond this the oldest record is forgotten; its entry simply expires there.
+ */
+export const DRAW_TOLD_MAX = 2 * CLAIM_MAX_LIVE_PER_SENDER;
 
 export type ClaimAction = "claim" | "ask" | "release";
 export type ClaimFrame = Readonly<{
@@ -141,7 +159,9 @@ export type DrawChannel = RtSourceChannel<"draw">;
 
 export type ClaimRefusal =
   | "disposed" | "stale-channel" | RtAdmissionDenial | DrawDecodeFailure
-  | "replay" | "stale-session" | "session-limit" | "claim-rate" | "claim-cap";
+  | "replay" | "stale-session" | "session-limit" | "claim-rate" | "claim-cap"
+  /** Not applied yet: the edge is unreachable, and the frame is held until it recovers. */
+  | "held";
 export type ClaimReceive =
   | Readonly<{ ok: true; action: ClaimAction; changed: boolean }>
   | Readonly<{ ok: false; reason: ClaimRefusal }>;
@@ -176,10 +196,27 @@ type Entry = {
 
 type ChannelSession = { sn: string | null; highQ: number; retired: string[]; sessions: number };
 type PeerBudget = { admission: RtPeerAdmission; claims: RtTokenBucket; muted: boolean };
-type Edge = { send: (raw: string) => boolean; open: boolean };
+/** What one receiver last accepted from me for one frame. */
+type Told = { obj: string; fr: string; kind: "claim" | "ask"; atMs: number };
+type Edge = {
+  send: (raw: string) => boolean;
+  open: boolean;
+  /** Frame key -> what this edge's transport took for it; changed only by a send that succeeded. */
+  told: Map<string, Told>;
+  /** Mirrors that receiver's claim bucket for me, charged only for frames the transport took. */
+  bucket: RtTokenBucket;
+  /** The connection left "connected": entries hidden, deliveries held, nothing sent. */
+  suspended: boolean;
+  held: { raw: string; atMs: number }[];
+};
+type Wanted = { key: string; obj: string; fr: string; kind: "claim" | "ask" };
 
 function entryKey(peer: string, obj: string, fr: string): string {
   return `${peer}\u0000${obj}\u0000${fr}`;
+}
+
+function frameKey(obj: string, fr: string): string {
+  return `${obj}\u0000${fr}`;
 }
 
 export type DrawClaimsOptions = Readonly<{
@@ -223,14 +260,14 @@ export class DrawClaimsSession {
 
   private sn: string;
   private q = 0;
-  private localClaim: { obj: string; fr: string; sentMs: number | null } | null = null;
-  private localAsk: { obj: string; fr: string; askedMs: number; sent: boolean } | null = null;
+  private rotations = 0;
+  private localClaim: { obj: string; fr: string } | null = null;
+  private localAsk: { obj: string; fr: string; askedMs: number } | null = null;
   private passed: { obj: string; fr: string } | null = null;
-  // Mirrors a receiver's claim bucket for this sender, so an honest burst of user actions is
-  // coalesced here rather than dropped there. Ordered SCTP can still deliver a stalled backlog in
-  // one burst, so this lowers, not eliminates, the chance of a refused frame; the 30 s refresh
-  // repairs a dropped claim.
-  private readonly sendBucket = new RtTokenBucket(CLAIM_FRAME_BUCKET_BURST, CLAIM_FRAME_BUCKET_RATE);
+  // A flush can re-enter itself only through a synchronous transport (tests); the outer one then
+  // runs again instead, so a record is never written from a decision a nested flush overtook.
+  private flushing = false;
+  private reflush = false;
 
   constructor(options: DrawClaimsOptions) {
     this.self = options.self;
@@ -251,20 +288,31 @@ export class DrawClaimsSession {
     const previous = this.registry.current(peer);
     if (previous) this.forgetChannel(previous);
     const channel = this.registry.open(peer);
-    this.edges.set(channel, { send, open: false });
+    this.edges.set(channel, {
+      send,
+      open: false,
+      told: new Map(),
+      // Each receiver charges my claims and asks against its own bucket, so pacing is per edge.
+      bucket: new RtTokenBucket(CLAIM_FRAME_BUCKET_BURST, CLAIM_FRAME_BUCKET_RATE),
+      suspended: false,
+      held: [],
+    });
     this.sessions.set(channel, { sn: null, highQ: -1, retired: [], sessions: 0 });
     return channel;
   }
 
-  /** The channel opened (or its connection recovered): tell that edge what I am drawing. */
+  /**
+   * The channel opened, or its connection is "connected" again. A recovering edge shows the
+   * entries it hid that are still live and applies what it held, in order. Then this edge is told
+   * whatever its record says it is missing (on a new edge: my claim and my ask; after a gap: only
+   * what changed, since the receiver kept or restored the rest).
+   */
   edgeReady(channel: DrawChannel): void {
     const edge = this.edges.get(channel);
     if (this.disposed || !edge || !this.registry.isCurrent(channel)) return;
     edge.open = true;
-    // Only the claim is re-sent. An Ask is one-shot: re-sending it to a new edge would restart
-    // that receiver's whole 90 s countdown.
-    const claim = this.localClaim;
-    if (claim && claim.sentMs !== null) this.emit(claim.obj, claim.fr, 1, 0, [channel]);
+    if (edge.suspended) this.resume(channel, edge);
+    this.flush();
   }
 
   /** The channel closed or was replaced: its capability is retired and its entries dropped. */
@@ -274,13 +322,18 @@ export class DrawClaimsSession {
   }
 
   /**
-   * The peer connection left "connected" (failed, disconnected, closed). Its entries are dropped
-   * at once rather than lingering for 90 s on a dead link; if ICE recovers on the same channel,
-   * the sender's `edgeReady` resend and 30 s refresh restore them.
+   * The peer connection left "connected" (disconnected, failed). Until `edgeReady` says it is back,
+   * that peer is absent: its entries leave every view at once (they keep expiring underneath), a
+   * delivery that still arrives is held rather than applied, and nothing is sent to it. A link that
+   * never recovers closes its channel, which drops the entries and the held frames.
    */
   peerUnreachable(peer: string): void {
     if (this.disposed) return;
-    this.dropEntries((e) => e.peer === peer);
+    const channel = this.registry.current(peer);
+    const edge = channel ? this.edges.get(channel) : undefined;
+    if (!channel || !edge || edge.suspended) return;
+    edge.suspended = true;
+    if ([...this.entries.values()].some((e) => e.channel === channel)) this.rev += 1;
   }
 
   /** The peer left the call, said bye, or was removed from the server. */
@@ -320,16 +373,35 @@ export class DrawClaimsSession {
     const now = this.now();
     const budget = this.budgetFor(peer);
     const admitted = budget.admission.admitFrame(raw, now);
+    const edge = this.edges.get(channel)!;
     if (!admitted.ok) {
       if (admitted.reason === "abuse-muted" && !budget.muted) {
         // A flood that auto-mutes the channel also retracts what that peer was asserting.
         budget.muted = true;
+        edge.held = [];
         this.dropEntries((e) => e.peer === peer);
         this.onmuted?.(peer);
       }
       return { ok: false, reason: admitted.reason };
     }
-    const decoded = decodeDrawFrame(admitted.raw);
+    if (edge.suspended) {
+      // Already charged. A malformed frame is refused now, as it would be later; a well-formed one
+      // is applied (session and sequence checked then), in order, only if the connection recovers.
+      const decoded = decodeDrawFrame(admitted.raw);
+      if (!decoded.ok) return decoded;
+      edge.held.push({ raw: admitted.raw, atMs: now });
+      if (edge.held.length > DRAW_HOLD_MAX) edge.held.shift();
+      return { ok: false, reason: "held" };
+    }
+    return this.apply(channel, admitted.raw, now, now);
+  }
+
+  /** Decode, validate and commit one admitted frame received at `seenMs`. */
+  private apply(channel: DrawChannel, raw: string, now: number, seenMs: number): ClaimReceive {
+    const peer = channel.source;
+    const budget = this.budgetFor(peer);
+    if (budget.muted) return { ok: false, reason: "abuse-muted" };
+    const decoded = decodeDrawFrame(raw);
     if (!decoded.ok) return decoded;
     const { frame, action } = decoded;
 
@@ -382,7 +454,7 @@ export class DrawClaimsSession {
     } else {
       const current = this.entries.get(key);
       changed = changed || !current || current.kind !== action;
-      this.entries.set(key, { peer, obj: frame.obj, fr: frame.fr, kind: action, seenMs: now, channel });
+      this.entries.set(key, { peer, obj: frame.obj, fr: frame.fr, kind: action, seenMs, channel });
     }
     // A claim or ask refresh moves its countdown, so it is visible even when nothing else changed;
     // a release that removed nothing is not.
@@ -410,35 +482,38 @@ export class DrawClaimsSession {
     return this.setClaim(obj, fr);
   }
 
-  /** Stop claiming (selection moved, object closed, Studio left, server changed). */
+  /**
+   * Stop claiming (selection moved, object closed, Studio left, server changed). Every edge that
+   * took the claim is sent a Release, retried until its transport takes it or its receiver has
+   * expired the claim anyway; an edge that never took the claim is sent nothing.
+   */
   release(): void {
     if (this.disposed) return;
     this.passed = null;
-    const claim = this.localClaim;
-    if (!claim) return;
+    if (!this.localClaim) return;
     this.localClaim = null;
-    // A claim that never went out needs no release either.
-    if (claim.sentMs !== null) this.emit(claim.obj, claim.fr, 0, 0);
+    this.flush();
     this.rev += 1;
   }
 
-  /** Ask whoever is drawing this frame to Pass it. Replaces any earlier ask. */
+  /**
+   * Ask whoever is drawing this frame to Pass it. Replaces any earlier ask. Each edge is sent the
+   * Ask once its transport takes it; an Ask is never refreshed.
+   */
   ask(obj: string, fr: string): boolean {
     if (this.disposed || !isClaimElementId(obj) || !isClaimElementId(fr)) return false;
     if (this.localClaim?.obj === obj && this.localClaim.fr === fr) return false;
-    this.cancelAsk();
-    this.localAsk = { obj, fr, askedMs: this.now(), sent: false };
-    this.flushAsk();
+    this.localAsk = { obj, fr, askedMs: this.now() };
+    this.flush();
     this.rev += 1;
     return true;
   }
 
+  /** Withdraw my Ask: a Release to every edge that took it, nothing to an edge that never did. */
   cancelAsk(): void {
-    if (this.disposed) return;
-    const ask = this.localAsk;
-    if (!ask) return;
+    if (this.disposed || !this.localAsk) return;
     this.localAsk = null;
-    if (ask.sent) this.emit(ask.obj, ask.fr, 0, 0);
+    this.flush();
     this.rev += 1;
   }
 
@@ -472,24 +547,19 @@ export class DrawClaimsSession {
   }
 
   /**
-   * Once a second: expire entries, refresh my claim every 30 s, send anything the local pacing
-   * deferred, and lapse my own Ask after 90 s.
+   * Once a second: expire entries, lapse my own Ask after 90 s, then flush: refresh my claim on
+   * each edge 30 s after that edge last took it, and retry whatever an edge's transport refused or
+   * the local pacing deferred.
    */
   tick(): void {
     if (this.disposed) return;
     const now = this.now();
     if (this.prune(now)) this.rev += 1;
-    const claim = this.localClaim;
-    if (claim && (claim.sentMs === null || now - claim.sentMs >= CLAIM_RESEND_MS)) {
-      if (this.sendBucket.charge(now)) {
-        this.emit(claim.obj, claim.fr, 1, 0);
-        claim.sentMs = now;
-      }
-    }
-    if (this.localAsk && now - this.localAsk.askedMs >= CLAIM_TTL_MS) {
+    if (this.localAsk && !(now - this.localAsk.askedMs < CLAIM_TTL_MS)) {
       this.localAsk = null;
       this.rev += 1;
-    } else this.flushAsk();
+    }
+    this.flush();
   }
 
   // --- Views -----------------------------------------------------------------------------------
@@ -501,7 +571,7 @@ export class DrawClaimsSession {
     for (const e of this.entries.values()) {
       if (obj !== undefined && e.obj !== obj) continue;
       const age = now - e.seenMs;
-      if (!(age < CLAIM_TTL_MS)) continue;
+      if (!(age < CLAIM_TTL_MS) || this.hidden(e)) continue;
       out.push({ peer: e.peer, obj: e.obj, fr: e.fr, kind: e.kind, secondsLeft: Math.max(1, Math.ceil((CLAIM_TTL_MS - age) / 1_000)) });
     }
     return out.sort((a, b) => (a.obj < b.obj ? -1 : a.obj > b.obj ? 1 : a.fr < b.fr ? -1 : a.fr > b.fr ? 1 : a.peer < b.peer ? -1 : a.peer > b.peer ? 1 : 0));
@@ -530,67 +600,131 @@ export class DrawClaimsSession {
   // --- Internals -------------------------------------------------------------------------------
 
   private setClaim(obj: string, fr: string): boolean {
-    const previous = this.localClaim;
-    if (previous && (previous.obj !== obj || previous.fr !== fr) && previous.sentMs !== null) {
-      this.emit(previous.obj, previous.fr, 0, 0);
-    }
     // A claim on the frame I was asking for replaces that ask at every receiver.
     if (this.localAsk?.obj === obj && this.localAsk.fr === fr) this.localAsk = null;
-    this.localClaim = { obj, fr, sentMs: null };
-    const now = this.now();
-    if (this.sendBucket.charge(now)) {
-      this.emit(obj, fr, 1, 0);
-      this.localClaim.sentMs = now;
-    }
+    this.localClaim = { obj, fr };
+    this.flush();
     this.rev += 1;
     return true;
   }
 
-  private flushAsk(): void {
+  /** What this device asserts now: at most one claim and one ask, on different frames. */
+  private wanted(now: number): Map<string, Wanted> {
+    const out = new Map<string, Wanted>();
+    const claim = this.localClaim;
+    if (claim) out.set(frameKey(claim.obj, claim.fr), { key: frameKey(claim.obj, claim.fr), obj: claim.obj, fr: claim.fr, kind: "claim" });
     const ask = this.localAsk;
-    if (!ask || ask.sent) return;
-    if (!this.sendBucket.charge(this.now())) return;
-    this.emit(ask.obj, ask.fr, 0, 1);
-    ask.sent = true;
+    if (ask && now - ask.askedMs < CLAIM_TTL_MS) {
+      out.set(frameKey(ask.obj, ask.fr), { key: frameKey(ask.obj, ask.fr), obj: ask.obj, fr: ask.fr, kind: "ask" });
+    }
+    return out;
   }
 
   /**
-   * Number and send one frame to every open edge (or `only`). One `q` per frame however many
-   * edges carry it, so each edge sees a strictly increasing subsequence.
+   * Bring every open, reachable edge's receiver in line with what I assert. Idempotent: an edge
+   * whose record already matches is sent nothing. A sequence rotation part-way through invalidates
+   * the records it has already written, so the pass runs again (bounded; the next tick finishes).
    */
-  private emit(obj: string, fr: string, on: 0 | 1, ask: 0 | 1, only?: readonly DrawChannel[]): void {
-    if (this.q >= this.sequenceMax) this.rotateSession();
-    const raw = encodeClaimFrame({ sn: this.sn, q: this.q, obj, fr, on, ask });
-    this.q += 1;
-    const targets = only ?? [...this.edges.keys()];
-    for (const channel of targets) {
-      const edge = this.edges.get(channel);
-      if (!edge?.open || !this.registry.isCurrent(channel)) continue;
-      try { edge.send(raw); } catch { /* a closing channel; its close callback cleans up */ }
+  private flush(): void {
+    if (this.disposed) return;
+    if (this.flushing) {
+      this.reflush = true;
+      return;
+    }
+    this.flushing = true;
+    try {
+      for (let pass = 0; pass < 4; pass += 1) {
+        this.reflush = false;
+        const rotations = this.rotations;
+        for (const [channel, edge] of this.edges) {
+          if (!edge.open || edge.suspended || !this.registry.isCurrent(channel)) continue;
+          this.reconcileEdge(edge);
+        }
+        if (!this.reflush && this.rotations === rotations) break;
+      }
+    } finally {
+      this.flushing = false;
+    }
+  }
+
+  private reconcileEdge(edge: Edge): void {
+    const now = this.now();
+    const want = this.wanted(now);
+    // Whatever that receiver last heard about 90 s ago it has expired: nothing to withdraw there.
+    for (const [key, told] of edge.told) if (!(now - told.atMs < CLAIM_TTL_MS)) edge.told.delete(key);
+    // Withdraw first, so the receiver's per-sender cap never sees more of mine than I assert.
+    for (const [key, told] of edge.told) {
+      if (want.has(key)) continue;
+      if (this.sendTo(edge, told.obj, told.fr, 0, 0)) edge.told.delete(key);
+    }
+    for (const w of want.values()) {
+      const told = edge.told.get(w.key);
+      // A claim is refreshed 30 s after this edge last took it; an Ask is sent once per edge.
+      const due = !told || told.kind !== w.kind || (w.kind === "claim" && now - told.atMs >= CLAIM_RESEND_MS);
+      if (!due || !edge.bucket.charge(now)) continue;
+      if (this.sendTo(edge, w.obj, w.fr, w.kind === "claim" ? 1 : 0, w.kind === "ask" ? 1 : 0)) {
+        edge.told.set(w.key, { obj: w.obj, fr: w.fr, kind: w.kind, atMs: now });
+      } else {
+        edge.bucket.refund();
+      }
+    }
+    // Bounded: a record beyond this is a frame the receiver could not be holding anyway.
+    while (edge.told.size > DRAW_TOLD_MAX) {
+      let oldest: string | null = null;
+      let at = Infinity;
+      for (const [key, told] of edge.told) if (!want.has(key) && told.atMs < at) { oldest = key; at = told.atMs; }
+      if (oldest === null) break;
+      edge.told.delete(oldest);
     }
   }
 
   /**
-   * Exhausting the uint32 sequence space starts a new sender session. Receivers treat the new
-   * `sn` as a session change and drop this device's old entries, so the current claim is re-sent
-   * under the new session and an outstanding ask is marked unsent, so the caller that triggered the
-   * rotation (or the next tick) sends it again under the new session. Keeping the ask object, rather
-   * than dropping it, means a rotation in the middle of `flushAsk` cannot leave receivers showing an
-   * Ask this device no longer tracks.
+   * Number one frame and offer it to one edge's transport. True only if the transport took it:
+   * `send` returned true and did not throw (a full buffer throws OperationError; a closing channel
+   * refuses). A frame the transport did not take changes no record, so it is retried.
+   */
+  private sendTo(edge: Edge, obj: string, fr: string, on: 0 | 1, ask: 0 | 1): boolean {
+    if (this.q >= this.sequenceMax) this.rotateSession();
+    const raw = encodeClaimFrame({ sn: this.sn, q: this.q, obj, fr, on, ask });
+    this.q += 1;
+    try {
+      return edge.send(raw) === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Exhausting the uint32 sequence space starts a new sender session. A receiver treats the new
+   * `sn` as a session change and drops everything of mine, so each edge's record of what I still
+   * assert is cleared (the flush re-sends it under the new session); records of what I no longer
+   * assert stay, and their Releases go out under the new session too.
    */
   private rotateSession(): void {
     this.sn = this.freshSession();
     this.q = 0;
-    const claim = this.localClaim;
-    if (claim && claim.sentMs !== null) {
-      const raw = encodeClaimFrame({ sn: this.sn, q: this.q, obj: claim.obj, fr: claim.fr, on: 1, ask: 0 });
-      this.q += 1;
-      for (const [channel, edge] of this.edges) {
-        if (!edge.open || !this.registry.isCurrent(channel)) continue;
-        try { edge.send(raw); } catch { /* closing */ }
-      }
+    this.rotations += 1;
+    const want = this.wanted(this.now());
+    for (const edge of this.edges.values()) for (const key of want.keys()) edge.told.delete(key);
+  }
+
+  /** The edge is reachable again: show its live entries and apply what it held, in order. */
+  private resume(channel: DrawChannel, edge: Edge): void {
+    edge.suspended = false;
+    const held = edge.held;
+    edge.held = [];
+    if ([...this.entries.values()].some((e) => e.channel === channel)) this.rev += 1;
+    const now = this.now();
+    for (const h of held) {
+      if (!this.registry.isCurrent(channel) || this.disposed) return;
+      this.apply(channel, h.raw, now, h.atMs);
     }
-    if (this.localAsk) this.localAsk.sent = false;
+    if (this.prune(now)) this.rev += 1;
+  }
+
+  /** An entry from an edge that is currently unreachable: kept, but in no view. */
+  private hidden(entry: Entry): boolean {
+    return this.edges.get(entry.channel)?.suspended === true;
   }
 
   private freshSession(): string {
@@ -609,7 +743,8 @@ export class DrawClaimsSession {
     const ask = this.localAsk;
     if (!ask || ask.obj !== obj || ask.fr !== fr) return;
     if (!(this.now() - ask.askedMs < CLAIM_TTL_MS)) return;
-    const othersClaiming = [...this.entries.values()].some((e) => e.kind === "claim" && e.obj === obj && e.fr === fr);
+    // Only claims the user can see count: an unreachable peer is absent until it recovers.
+    const othersClaiming = [...this.entries.values()].some((e) => e.kind === "claim" && e.obj === obj && e.fr === fr && !this.hidden(e));
     if (othersClaiming) return;
     this.localAsk = null;
     this.setClaim(obj, fr);

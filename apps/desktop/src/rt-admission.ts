@@ -102,6 +102,14 @@ export class RtTokenBucket {
     return true;
   }
 
+  /**
+   * Give back a charge whose work never happened (a sender mirroring a receiver's bucket charges
+   * before sending, and refunds when the transport did not take the frame).
+   */
+  refund(cost = 1): void {
+    if (Number.isFinite(cost) && cost > 0) this.tokens = Math.min(this.burst, this.tokens + cost);
+  }
+
   reset(): void {
     this.tokens = this.burst;
     this.lastMs = null;

@@ -17930,6 +17930,9 @@
     if (claims) {
       try {
         const drawDc = pc.createDataChannel(DRAW_CHANNEL_LABEL, { negotiated: true, id: DRAW_CHANNEL_ID, ordered: true });
+        // `true` only when the frame was queued: a closing channel refuses, and a full send
+        // buffer throws OperationError. Either way the session keeps the frame owed to this edge
+        // and retries it on the next tick, so an Ask or a Pass is never silently lost.
         const drawChan = claims.openEdge(fp, (raw) => {
           if (drawDc.readyState !== "open") return false;
           drawDc.send(raw);
@@ -18009,7 +18012,10 @@
     pc.onconnectionstatechange = () => {
       callPeerStates = { ...callPeerStates, [fp]: pc.connectionState };
       // Claims never outlive a dead link: a peer whose connection drops stops showing as drawing
-      // at once rather than for up to 90 s. A recovered link re-sends my current claim to it.
+      // at once, and what it still sends is held, not shown, until this side sees the link
+      // "connected" again. Recovery shows its claims that are still live, applies what was held
+      // (so a Pass sent during the gap lands), and tells it whatever it missed from me. A link
+      // that never recovers closes the channel, which drops all of it.
       if (claims && callPeers[fp] === peer && drawClaims === claims) {
         withDrawClaims((s) => {
           if (pc.connectionState === "connected") {
