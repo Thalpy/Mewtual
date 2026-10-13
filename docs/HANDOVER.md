@@ -8,7 +8,60 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
 [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
 and ranks the live hazards in that path.
 
-## Status (latest entry: 2026-10-12)
+## Status (latest entry: 2026-10-13)
+
+- **Gate 5 collaborative frame claims (2026-10-13; implementation candidate, not accepted).**
+  Branch `gate5-frame-claims` from `e8aad1a` (`origin/gate4-agent1-runtime`). The gate record,
+  slice and commit map, and both review responses are in [GATE5-DESIGN](GATE5-DESIGN.md). The
+  contract is INTERFACES section 13; the threat entries are the Gate 5 bullets, R8 and hardening
+  item 7.
+
+  **What the candidate does**
+  - C0d: the full 64-hex device identity flows through `CallSignal`, the bridge and every
+    frontend call key.
+  - C0b: shared `rt-admission.ts`, with no jam behaviour change.
+  - The negotiated ordered `draw` channel (id 8) carries the exact `t:"c"` Claim/Ask/Pass frame.
+    Expiry is receiver-observed at 90 s, claims refresh every 30 s, and the Studio shows a
+    countdown with Ask and Pass. Claims are advisory and scoped to the call's own server.
+
+  **Reviews**
+  - The early design review and the final diff review found no blocker. Every HIGH/MEDIUM inside
+    Gate 5 is fixed: cross-server leak, revocation by fingerprint, drum-seed contract, the C4a
+    rate, disconnect clearing, the Pass trigger, twin labels, context-menu keying and snapshot
+    amplification.
+  - A short re-review found one new MEDIUM (an expired-claim ghost). It is fixed and
+    mutation-checked.
+  - Out of scope and handed to the user: THREAT-MODEL item 7. The owner's inviter check compares
+    4-byte fingerprints, so a ground companion key could pass server admission.
+
+  **Verification in this container (Linux, running as root)**
+
+  | Check | Result |
+  |---|---|
+  | `npm --prefix apps/desktop test` | 1362/1362 pass |
+  | `npm run check` | 0 errors |
+  | `npm run build` | pass |
+  | `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` | 337 + 5 pass |
+  | Desktop strict Clippy and desktop `cargo check` | pass |
+  | Root `cargo clippy --all-targets --all-features -D warnings` | pass |
+  | `cargo fmt --all --check` | clean |
+  | `scripts/check-no-ambient.sh` and `scripts/check-store-raw-fs.sh` | pass |
+  | `cargo deny check` | advisories, bans, licences and sources ok; no dependency changes |
+  | Root `cargo test --all --all-features` | `catcoms-app` lib: 1077 pass, 22 ignored, 1 environmental failure (below). The complete `--no-fail-fast` run over every crate was still in progress when this entry was written. |
+
+  - The root suite ran with `CARGO_PROFILE_{DEV,TEST}_DEBUG=0` to fit the disk allowance.
+  - The one root failure, `catcoms-app` `store::epoch_recovery::inventory::tests::a_failed_sync_is_not_remembered`,
+    is environmental. Its precondition ("a read-only file cannot be opened to flush") does not hold
+    for root. The same test binary passes that test when run as `nobody` and fails it as root. The
+    test is untouched by this branch.
+  - Focused evidence:
+    - claim-session tests with mutation checks: the expiry boundary, replay comparison, Pass
+      trigger, `rev` gating, receive-side expiry and rotation;
+    - Rust prefix-twin routing, fairness and ambiguity regressions;
+    - compiled Studio claim-UI tests.
+  - **Not run here:** `test:startup` and `test:flows` (they need a display/Edge), a live two-client
+    WebRTC call, and the per-WebView check that data on stream 8 toward an older build is dropped
+    without resetting the association (GATE5-DESIGN section 10).
 
 - **PR #27 recovery-workflow corrections (2026-10-12; local verification complete).** Review of exact
   head `b8cda2a047b01f75664603c9e0fd96ed5341b6c6` found three reachable Studio progress failures.
