@@ -234,8 +234,9 @@ completes the hand-over by claiming (6.4).
     told my claim and my ask. An edge that recovers is told only what changed while it was
     unreachable, because its receiver kept what it had.
 - **Ask.**
-  - Available on a frame someone else claims. Each edge is sent it once, when that edge's transport
-    takes it, and it is never refreshed (review L7).
+  - Available on a frame someone else claims. Each edge is sent each Ask once, when that edge's
+    transport takes it, and it is never refreshed (review L7). A record the edge took before this
+    Ask was made belongs to an earlier Ask on the same frame and does not count.
   - Moving off the frame cancels it. Cancelling, a lapse at 90 s or claiming the frame sends a
     Release to every edge that took the Ask, and nothing to one that never did.
   - An edge that first takes the Ask after it was made (one that opened late, or whose transport
@@ -299,7 +300,9 @@ completes the hand-over by claiming (6.4).
     before this side sees it) is held, not applied, and charged against the claim bucket at its
     arrival time when replayed. Holding is bounded (`DRAW_HOLD_MAX`): on overflow, a frame that a
     later held frame for the same (obj, fr) supersedes goes first, so a Release that is still the
-    latest word on its frame is never shed; with nothing superseded, the oldest goes. Malformed
+    latest word on its frame is never shed while anything held is superseded; with nothing
+    superseded, the oldest goes. A Pass followed by a re-claim of the same frame inside one
+    overflowing hold reads as the holder still claiming it. Malformed
     frames are refused at once, and an auto-mute discards everything held.
   - Nothing is sent to that peer.
   - When this side sees "connected" again, the entries still within 90 s reappear and the held
@@ -360,7 +363,7 @@ All of these run on deterministic seams.
 
 - **`rt-admission.test.ts`:** bucket monotonicity, charge-before-parse, UTF-8 cap, auto-mute and
   unmute, per-kind capabilities, and the pinned jam limits. The jam suite is unchanged.
-- **`draw-claims.test.ts` (45 tests):**
+- **`draw-claims.test.ts` (46 tests):**
   - Codec exactness, two-member observation with the 30 s refresh, and the 89 999 / 90 000 ms
     boundary.
   - Ask countdown, Pass hand-over and suppression.
@@ -592,5 +595,6 @@ LOWs. All are fixed, with regressions that fail without the fix.
 | LOW-1: a record aged out 90 s after it was *taken* dropped the owed Release, but SCTP could deliver the claim after a long outage, leaving a 90 s ghost | Records of what I no longer assert are kept until the edge takes the Release (bounded). A late Release is a no-op at a receiver that already expired the entry. |
 | LOW-2: a fresh sender bucket per edge, while the receiver's bucket lasts the call per identity | The sender bucket is per peer identity for the call. |
 | LOW-3: shedding the oldest held frame could drop a Release | Overflow sheds superseded frames first. |
+| Re-review LOW (new): with records kept, an earlier Ask's record on the same frame made a new Ask look delivered after an outage | An Ask is due unless the edge took it after that Ask was made (`Wanted.sinceMs`). Regression test, mutation-checked. The two wording nits (unconditional "never shed"; a Pass shed with its re-claim) are corrected in 6.6. The re-review found nothing blocking. |
 | LOW-4: harness and documentation accuracy | Two logged rows are now notes, not checks (34 checks). The leave check asserts drop, not hide. "Failure closes the channel" is corrected (6.6). The record-ageing and pacing wording is corrected. The `readyState` refusal branch now has a test. |
 

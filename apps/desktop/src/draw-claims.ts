@@ -216,7 +216,8 @@ type Edge = {
   suspended: boolean;
   held: Held[];
 };
-type Wanted = { key: string; obj: string; fr: string; kind: "claim" | "ask" };
+/** One thing I assert. `sinceMs` is when an Ask was made: a record taken before it is an older Ask. */
+type Wanted = { key: string; obj: string; fr: string; kind: "claim" | "ask"; sinceMs: number };
 
 function entryKey(peer: string, obj: string, fr: string): string {
   return `${peer}\u0000${obj}\u0000${fr}`;
@@ -404,8 +405,10 @@ export class DrawClaimsSession {
       edge.held.push({ raw: admitted.raw, atMs: now, key: frameKey(decoded.frame.obj, decoded.frame.fr) });
       if (edge.held.length > DRAW_HOLD_MAX) {
         // Shed the oldest frame a later held frame for the same (obj, fr) supersedes; only when
-        // none is superseded, the oldest of all. A Release is never shed while it is the latest
-        // word on its frame.
+        // none is superseded, the oldest of all. So while anything held is superseded, a frame
+        // that is still the latest word on its (obj, fr), a Release included, is kept. (Shedding
+        // a superseded Release can lose a Pass: one that is passed and re-claimed inside a single
+        // overflowing hold reads as the holder still claiming it.)
         let drop = 0;
         for (let i = 0; i < edge.held.length; i += 1) {
           const key = edge.held[i]!.key;
@@ -636,10 +639,10 @@ export class DrawClaimsSession {
   private wanted(now: number): Map<string, Wanted> {
     const out = new Map<string, Wanted>();
     const claim = this.localClaim;
-    if (claim) out.set(frameKey(claim.obj, claim.fr), { key: frameKey(claim.obj, claim.fr), obj: claim.obj, fr: claim.fr, kind: "claim" });
+    if (claim) out.set(frameKey(claim.obj, claim.fr), { key: frameKey(claim.obj, claim.fr), obj: claim.obj, fr: claim.fr, kind: "claim", sinceMs: 0 });
     const ask = this.localAsk;
     if (ask && now - ask.askedMs < CLAIM_TTL_MS) {
-      out.set(frameKey(ask.obj, ask.fr), { key: frameKey(ask.obj, ask.fr), obj: ask.obj, fr: ask.fr, kind: "ask" });
+      out.set(frameKey(ask.obj, ask.fr), { key: frameKey(ask.obj, ask.fr), obj: ask.obj, fr: ask.fr, kind: "ask", sinceMs: ask.askedMs });
     }
     return out;
   }
@@ -681,8 +684,11 @@ export class DrawClaimsSession {
     }
     for (const w of want.values()) {
       const told = edge.told.get(w.key);
-      // A claim is refreshed 30 s after this edge last took it; an Ask is sent once per edge.
-      const due = !told || told.kind !== w.kind || (w.kind === "claim" && now - told.atMs >= CLAIM_RESEND_MS);
+      // A claim is refreshed 30 s after this edge last took it. An Ask is sent once per edge per
+      // Ask: a record the edge took before this Ask was made is an earlier Ask on the same frame
+      // (kept because its Release never went out), and says nothing about this one.
+      const due = !told || told.kind !== w.kind ||
+        (w.kind === "claim" ? now - told.atMs >= CLAIM_RESEND_MS : told.atMs < w.sinceMs);
       if (!due || !edge.bucket.charge(now)) continue;
       if (this.sendTo(edge, w.obj, w.fr, w.kind === "claim" ? 1 : 0, w.kind === "ask" ? 1 : 0)) {
         edge.told.set(w.key, { obj: w.obj, fr: w.fr, kind: w.kind, atMs: now });

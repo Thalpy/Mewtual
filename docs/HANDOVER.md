@@ -29,7 +29,7 @@ and ranks the live hazards in that path.
 
   | Check | Result |
   |---|---|
-  | `npm --prefix apps/desktop test` | 1389/1389 |
+  | `npm --prefix apps/desktop test` | 1390/1390 |
   | `npm run check` | 0 errors |
   | `npm run build` | pass |
   | `node scripts/claims-webrtc-check.mjs` (Chromium 141; three members as separate processes) | 34/34 checks, plus 2 notes, in each of three runs |
@@ -41,7 +41,8 @@ and ranks the live hazards in that path.
   - Each new behaviour is mutation-checked (GATE5-DESIGN 9.1).
   - An independent review of this round found nothing blocking: one MEDIUM, a held replay
     refusing an Ask, and four LOWs. All are fixed, with regressions; see GATE5-DESIGN section 14.
-    The figures above are from after those fixes.
+    Its short re-review found nothing blocking. It found one new LOW, an old Ask record masking a
+    new Ask, which is fixed with a regression. The figures above are from after all of these.
   - No Rust changed this round; the Rust record below stands.
   - `test:startup` now resolves the binary name per platform. Against a fresh desktop debug build
     under Xvfb (Linux, WebKitGTK), it passes: "application startup completed".

@@ -968,3 +968,23 @@ test("a Release held behind a flood of other frames is not shed", () => {
   assert.deepEqual(a.session.peerEntries(), [], "the Release survived, so the hidden claim did not come back");
 });
 
+test("asking again for a frame whose earlier Ask an unreachable edge took still reaches it", () => {
+  // Re-review: records are kept until their Release is taken, so an Ask that lapsed while the edge
+  // was unreachable left a record that made a NEW Ask on the same frame look delivered.
+  const clock = new FakeClock();
+  const a = member(A, clock, 1);
+  const b = member(B, clock, 2);
+  const ab = link(a, A, b, B);
+  b.session.claim(OBJ, FR1);
+  a.session.ask(OBJ, FR1); // B took it
+  clock.advance(10_000);
+  a.session.peerUnreachable(B);
+  for (let i = 0; i < 85; i += 1) { clock.advance(1_000); a.session.tick(); b.session.tick(); }
+  assert.equal(a.session.local().ask, null, "the first Ask lapsed during the outage, its Release unsent");
+  a.session.ask(OBJ, FR1);
+  clock.advance(10_000);
+  a.session.edgeReady(ab.x);
+  assert.deepEqual(b.session.asksOnMine().map((e) => e.peer), [A], "the new Ask was sent, not mistaken for the old one");
+  assert.equal(a.session.local().ask?.secondsLeft, 80);
+});
+

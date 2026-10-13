@@ -3850,7 +3850,8 @@ The four `on`/`ask` combinations:
   - Records are bounded (`DRAW_TOLD_MAX`, 8).
 - The claim is refreshed on each edge `CLAIM_RESEND_MS` (30 000 ms) after that edge took it. An
   edge that opens is told my claim and ask. An edge that recovers is told what changed meanwhile.
-- An Ask is sent once to each edge, when it takes it, and never refreshed.
+- Each Ask is sent once to each edge, when it takes it, and never refreshed. A record the edge
+  took before that Ask was made (an earlier Ask on the same frame) does not count.
 - Claims and Asks are paced by a mirror of each receiver's claim bucket, kept per peer identity
   for the call, as the receiver keeps it. A burst coalesces to the latest claim, and a refused
   send is refunded.
