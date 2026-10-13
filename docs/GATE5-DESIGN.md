@@ -477,12 +477,13 @@ on that Chromium (`EDGE_PATH` pointed at it, `--no-sandbox` for root).
 
 ## 10. Decisions taken and still open
 
-- **D1 (taken, awaiting the owner's confirmation).** The seven-key frame with Pass carrying no
-  recipient. What the owner is confirming:
+- **D1 (confirmed by the owner, 2026-10-13).** The seven-key frame with Pass carrying no
+  recipient. The owner accepted these consequences, on the basis that a peer-to-peer call is
+  chaotic by nature and claims only coordinate:
   - Any explicit Release of a live claim hands the frame to an asker, so a holder moving to another
     frame or leaving the Studio satisfies an Ask as Pass does.
   - Two askers can both take a released frame, which then shows as contested.
-  - A targeted Pass would need a wire change.
+  - A targeted Pass would need a wire change, and none is planned.
 - **D2 (taken).** The draw gate uses the jam `inst` limits so C4a stays compatible (review M2).
 - **D3 (taken).** Jam seeds and take `parts` keep fingerprint labels (review M1). Takes and noise
   are unchanged.
@@ -502,7 +503,10 @@ on that Chromium (`EDGE_PATH` pointed at it, `--no-sandbox` for root).
     - Neither the app nor wry 0.55 enables WebRTC in the Linux WebView, so calls are unavailable in
       that configuration. That predates Gate 5.
     - A Linux build that does get WebRTC needs this check run on it.
-  - **WKWebView: unverified.** It needs a macOS run, or an explicit supported-platform limitation.
+  - **WKWebView (macOS): unverified, by the owner's decision (2026-10-13).** Gate 5 states macOS
+    as unverified for stream-8 compatibility between old and new builds, rather than blocking on
+    a macOS run. Claims between current builds on macOS are covered by the same code and tests as
+    elsewhere; only the old-build interaction there is unchecked.
 - **Two-desktop acceptance (PR #43 review #2): outstanding.** Two real desktop instances must run
   Claim, Ask, Pass, refresh and expiry, contested claims, continued editing of a claimed frame,
   disconnect and recovery, leave and rejoin, and switching away from the call's server through the
@@ -573,7 +577,8 @@ Residuals carried forward (as amended by section 13):
 - ~~A transient "disconnected" can hide a peer's claims for up to 30 s if only the receiver saw
   the blip.~~ Resolved in `f178666`: hidden entries reappear on recovery, and held frames are
   applied.
-- The L9 WebView check: Chromium verified, WKWebView open, WebKitGTK has no WebRTC (section 10).
+- The L9 WebView check: Chromium verified; WKWebView (macOS) unverified by the owner's decision;
+  WebKitGTK has no WebRTC in the tested configuration (section 10).
 - A routing test against a *member* prefix twin is impractical: it needs a ground key.
 - ~~There is no live two-client WebRTC run.~~ The engine-level run is in 9.3. The two-desktop
   acceptance run remains outstanding.
@@ -629,9 +634,25 @@ The reviewer did not re-execute the suites. The figures in HANDOVER are this bra
 **Acceptance is pending on:**
 
 - the two-desktop run (section 16);
-- WKWebView, or a stated limitation;
-- D1;
 - a complete green check set on the exact head.
+
+Resolved since the re-review, both by the owner on 2026-10-13:
+
+- D1 is confirmed (section 10).
+- macOS (WKWebView) is stated as unverified for stream-8 compatibility (section 10).
+
+A CI note: every `build & test` failure on PR #43 heads is one test,
+`studio_actors_new_member_after_index_checkpoint_installs_registry_and_index_tail`. It belongs to
+Gate 4's Studio exchange, which Gate 5 does not touch.
+
+- **Failures on this PR:** `32e089b` and `67e9855` (Linux) and `cdf1a5f` (Windows).
+- **Passes on this PR:** the identical Rust passed on `086f854`, `32e37c3`, `f178666` and `06fad7b`.
+- **Before Gate 5:** the same test failed on `c13239d` (Windows, same assertion and values) and on
+  `f3e9291` (Linux).
+- **Locally:** it passes in isolation on both the base and this branch, including under
+  single-core starvation.
+
+It is a pre-existing flake, and it is a Gate 4 follow-up, not a Gate 5 change.
 
 The inherited inviter HIGH (THREAT-MODEL item 7) is separate and is not absorbed by this verdict.
 
