@@ -3907,3 +3907,56 @@ The four `on`/`ask` combinations:
 
   `App.svelte` and `scripts/claims-webrtc-check.mjs` both use it.
 
+## 14. Gate 6 export foundations (no native exposure yet)
+
+`apps/desktop/src/studio-export.ts` provides `exportScoreTake`, `exportFlipnoteTake` and
+`studioPatchUnion`. Inputs are resolved export views, not native admission capabilities.
+Score input is `{id,bpm,bpb,steps,patches,cells}`: object id is 32 lowercase hex, headers use
+the creative design ranges, cell keys are canonical `step:row`, and values are exactly
+`{k:"n",p:<patch id>,len?:<sixteenth steps>}` or `{k:"d",pad:0..9}`. Note length is 1 through
+the remaining score steps; absent `len` preserves the original one-step draft. Same-row note
+overlap refuses rather than silently shortening authored holds. Patch keys must equal the existing
+jam recipe hashes. Up to 4096 cells and 64 recipes are accepted. Cells beyond the requested score length
+refuse; a future projection consumer must resolve overflow/conflicts before exporting.
+
+Context carries `{group,exporter}`. `group` must come from the stable backend group identifier,
+not a local numeric server alias; the helper can enforce only scalar-text/UTF-8 size bounds.
+`exporter` is the full 64-hex device identity and is a content label, not live authority.
+Flipnote epoch is a u64-bounded `bigint`; numeric or noncanonical string alternatives are not
+accepted by the leaf API. Framed SHA-256 and raw object-id/u64 bytes follow creative design 2.0.
+The no-score and score call/lane derivations are pinned by `studio-export-v1.json`.
+
+Score patch ids sort ascending; distinct SFX patches sort ascending after them. Shared ids
+deduplicate only identical verified recipes. More than 64 union entries refuses. Note-on `p`
+indices retain their score meaning after the append; its required legacy `w` follows the first
+oscillator. Notes use integer sixteenth-step timing, note-offs precede note-ons at equal times,
+and the final sorted events receive `q` from zero. Every take passes the unchanged jukebox
+`validateJamTake` validator. All mutable inputs are copied before hashing can yield.
+
+`pixa.ts::encodePixa/decodePixa` implement design 2.16's `PIXA` layout. Low-level SFX entries
+are `{frame,patch,note,durationMs}`, with zero-based frame/patch indices and authored hold
+duration in 1..600000 ms. An emoji sound source supplies its existing validated `len`.
+`exportFlipnotePixa` accepts resolved stable-id frames/SFX, checks their links, sorts SFX by
+ascending source id and builds
+the patch-indexed take before encoding. It does not fetch blobs or prove their CIDs.
+
+Caps are 999 frames, 64 KiB per PIX frame, 8 MiB summed frames, a 512-KiB canonical take,
+4096/eight-byte SFX entries (32 KiB) and 9 MiB whole package. The unreleased SFX layout adds
+u32 LE duration to the earlier four-byte draft; strict framing refuses that old layout when
+SFX is present, while empty-SFX packages are unchanged. All frames are validated 192x144
+PIX1. Decode bounds and copies one owned input snapshot, then checks complete framing before any
+raster is decoded; Buffer/subclass/shared-memory input cannot change validated bytes afterward.
+It expands one PIX at a time for validation and returns owned encoded frames. Strict UTF-8 and
+equality to the take validator's
+normalized, canonical Studio JSON reject duplicate fields and alternate byte spellings. Trailing
+bytes, invalid SFX indices/notes, missing recipes and malformed PIX/takes refuse.
+
+No native command, publication, sound rendering or persistence is introduced here. Later Gate 6
+work must connect these helpers to current scope/readiness checks and existing media, storage,
+reference and audio lifecycle owners. A `.pixa` is playable-content packaging, distinct from the
+already available recovery/draft backup formats. See `GATE6-DESIGN.md` for remaining work.
+
+These helpers preserve authored duration in content. Playback is not yet connected; the current
+engine's archival-note watchdog also stops holds after 30 seconds. Later integration must provide
+bounded archival timing without weakening the live lost-note-off watchdog.
+

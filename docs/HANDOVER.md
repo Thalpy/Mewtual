@@ -1,5 +1,43 @@
 # Mewtual; Handover
 
+## Gate 6 export foundations (2026-10-14; first bounded checkpoint)
+
+The owner accepted Gate 5 and PR #43 merged into `Create-suite-2` as
+`7cbe8cbe131e1be8e672d04341c31a1d2b52a98d`. New isolated branch `gate6-sound-export`
+starts there. Its first slice implements pure deterministic score/take export, exact no-score
+derivations, score-first/SFX-second recipe union and bounded `.pixa` encoding/decoding.
+It reuses the jukebox's take parser/validator, jam patch identity and PIX decoder. No synth,
+transport, native registration or production UI control is added.
+
+Verification on this branch:
+
+- All 26 focused export regressions pass, including exact byte/hash vectors, authored durations,
+  patch union, maximal inputs, malformed/truncated input and caller-mutation ownership.
+- `cargo test --all --all-features` passes in full; existing opt-in ignored fixtures remain ignored.
+- `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` passes: 337 library tests and
+  5 command-ACL tests, plus binary/doc targets.
+- `npm --prefix apps/desktop test` passes 1418/1418; frontend `check` reports zero errors/warnings
+  and production `build` passes, with Vite's large-chunk advisory.
+- `git diff --check` passes. Independent read-only design/implementation reviews and re-reviews
+  leave no BLOCKER/HIGH/MEDIUM/LOW finding in this bounded checkpoint. The fallback-wave,
+  Buffer alias, scalar reread and growable-buffer allocation findings are fixed and regression-pinned.
+- Startup/flow gates were not run: this leaf slice changes no setup/runtime/process spawning,
+  rendered UI, chat-send or friend-request paths. Rust lint/ambient/dependency gates were not rerun:
+  no Rust source, dependency, build or runtime registration changes.
+
+Exact byte/hash vectors live in `studio-export-v1.json`; epochs above JS's safe range stay bounded
+`bigint` values. See `GATE6-DESIGN.md` for the review boundary and reuse map.
+
+`GATE6-DESIGN.md` records the remaining score/SFX/export causal validation, seed/recovery,
+durability/reference protection, native/UI connection, playback and GIF work. Frame-SFX
+duration follows the creator's authored length (owner clarification, 2026-10-14), including
+existing jam note-on/off timing and emoji-sound `len`. This first codec preserves score `len`
+and required SFX `durationMs`, amending the unreleased `.pixa` draft to eight-byte SFX entries.
+Persistent operations/projections still need duration support and overlap-conflict presentation.
+The current audio engine also applies its 30-second watchdog to archival notes; later playback
+integration must preserve bounded archival holds without weakening the live watchdog.
+This slice does not close Gate 6. Historical candidate/check statements below retain their scope.
+
 ## Admin admission security fix (2026-10-13)
 
 Separate branch `fix/gate5-full-device-admin` from Gate 5. The reported four-byte

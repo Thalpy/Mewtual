@@ -34,6 +34,21 @@ table with the commit that closed it.
 
 ## Trust assumptions
 
+- **Gate 6 export bytes are content, not authority.** The initial `studio-export.ts` and `pixa.ts`
+  helpers validate resolved inputs, recipe hashes and exact framed derivations, then reuse the
+  existing jam-take and PIX validators. They make no native calls and start no audio. `.pixa`
+  checks the whole bound before copying one input snapshot, then component/count bounds and
+  complete framing before raster decoding or individual frame copies. It rejects noncanonical/
+  duplicate JSON and invalid UTF-8 and returns owned encoded frames, including for Buffer,
+  typed-array subclass or shared-memory callers.
+  Authored score holds and SFX durations are bounded and preserved, not derived from animation
+  FPS. Overlapping same-row score holds refuse export; persistent conflict display and archival
+  playback beyond the existing engine's 30-second watchdog remain explicit later Gate 6 work.
+  Export inputs are snapshotted before asynchronous hashing. Exporter/group labels do not prove
+  membership, authorship of source edits, a receipt, publication or persistence. A later consumer
+  must enforce current scope/readiness, actual CID/length binding, native validation and durability
+  before publishing a reference. Sound/score/export commands remain unavailable in this slice.
+
 - **Renderer access to retained Studio work is local authority, not protocol authority.** The Gate 4
   completion candidate registers the reviewed overlay lifecycle family and a ticketed Unconfirmed
   Save for awaiting-tenure previews. The session gate, command allow-list and actor/store custody

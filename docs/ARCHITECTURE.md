@@ -61,6 +61,11 @@ promotion and flush; saving a Studio reference is a separate subsequent operatio
 Automerge or sync: it adds permission to retire their retained history into owner-receipted,
 verifiable checkpoints with bounded recovery. Existing snapshots alone do not provide that.
 
+Gate 6's first export slice is a pure frontend conversion/codec boundary (`studio-export.ts`,
+`pixa.ts`). Scores produce the existing validated jam-take type consumed by the jukebox; PIX
+frames use the existing PIX decoder. No second synth, media transport or document owner is added.
+These helpers are not yet connected to native publication, score persistence or production controls.
+
 Gate 4's current worktree connects Studio's typed owner decision to the same durable P1 journal,
 recovery store and exact-envelope intent retirement used by Registry. Recently watched targets
 share the existing native idle worker for owner rotation and Registry pointer/tail maintenance.

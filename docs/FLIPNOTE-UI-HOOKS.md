@@ -1,8 +1,13 @@
 # Flipnote UI hook guide
 
-Last checked: 2026-10-12 against PR #41's isolated Gate 4 completion candidate, whose reviewed
-runtime/UI code checkpoint is `610c45e323bf018c2a3ffa91bbf359faaf707be3`. **Gate 4 is pending
-the final integration checkpoint; Gate 5 remains closed.** The exact current ledger is
+Current status (2026-10-14): the owner accepted the Gate 4 and Gate 5 merges. PR #43 merged
+into `Create-suite-2` at `7cbe8cbe131e1be8e672d04341c31a1d2b52a98d`; Gate 6 starts from that
+checkpoint on `gate6-sound-export`. Claims/Ask/Pass are implemented, advisory call features.
+Sound/linked Music/`.pixa` production controls still await Gate 6 integration.
+
+Historical Gate 4 checkpoint (2026-10-12): PR #41's reviewed runtime/UI code was
+`610c45e323bf018c2a3ffa91bbf359faaf707be3`. The dated candidate/check statements below describe
+that earlier checkpoint, not the present merge status. The Gate 4 ledger is
 [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md); historical
 implementation and verification detail is in [HANDOVER](HANDOVER.md).
 
@@ -53,8 +58,9 @@ lossless, fence obsolete async results, and preserve conflicts/overflow/deletion
 also appears on ordinary editable local views; it is not the read-only discriminator. Do not
 invent a phase, settlement receipt, author confirmation or publication claim for a preview.
 
-Keep direct Closing Save, native repair controls, claims/Ask/Pass (Gate 5), and
-sound/linked Music/`.pixa` export (Gate 6) unavailable. The reviewed lifecycle family and ticketed
+Keep direct Closing Save, native repair controls and sound/linked Music/`.pixa` export
+(Gate 6) unavailable. Gate 5 claims/Ask/Pass are advisory and do not grant edit authority.
+The reviewed lifecycle family and ticketed
 Unconfirmed Save are now connected to the real Studio surface; they grant only bounded local-draft
 authority. Recovery backup export is also available and uses a different format. These controls do
 not imply later-gate or release acceptance.
@@ -377,8 +383,8 @@ installation; the UI should not implement a second catch-up scheduler or derive 
 | Manual lifecycle and preview-local Save | Registered on the isolated candidate. `eligibility`, `manualReason` and `unconfirmedState` drive truthful actions; awaiting-tenure edits use the ticketed Unconfirmed Save pair. `pending`/`busy` retry the same bytes, `paused` requires explicit access before the same request, `newTicket` requires explicit re-authoring, and `none` cannot be retried as success. Final review is complete; preserve this boundary through the final head's normal checks and merge. |
 | Recovery rail: Restore / Copy / Export | List/inspect/backup export, per-item Restore/Copy and conservative own-intent replay are connected. Unsafe replay is manual recovery, never settlement. Final Gate 4 acceptance remains pending; backup export is not `.pixa`. |
 | Eviction warning / countdown | Use the listing's actual warning pair/deadline and `studio_recovery_acknowledge`. Refresh after the action and matching `settlement-changed` events. |
-| Claims, Ask, Pass, countdown | **Gate 5 candidate on `gate5-frame-claims`, not yet accepted.** These are frontend-only call data, not a native command. `Studio.svelte` receives `claims: StudioClaimSnapshot \| null` and `claimActions` (`select`, `claim`, `autoClaim`, `release`, `ask`, `cancelAsk`, `pass`) from the app; INTERFACES section 13 is the contract. The snapshot is non-null only while the user is in a call on the Studio's own server and the Studio is the open view. Claims are advisory and never lock a frame or gate a save. Countdowns are receiver-observed (90 s; claims refresh every 30 s; Asks are sent once per peer). A frame a transport refused is retried, so an Ask or a Pass is not lost. A peer whose connection drops is hidden until it recovers. The local fixture claim table in `studio-store.ts` is not the protocol. |
-| Sound, linked Music, `.pixa` export | Pending Gate 6. Do not infer availability from the contract's type definitions. |
+| Claims, Ask, Pass, countdown | **Gate 5 merged and owner-accepted in PR #43.** These are frontend-only call data, not a native command. `Studio.svelte` receives `claims: StudioClaimSnapshot \| null` and `claimActions` (`select`, `claim`, `autoClaim`, `release`, `ask`, `cancelAsk`, `pass`) from the app; INTERFACES section 13 is the contract. The snapshot is non-null only while the user is in a call on the Studio's own server and the Studio is the open view. Claims are advisory and never lock a frame or gate a save. Countdowns are receiver-observed (90 s; claims refresh every 30 s; Asks are sent once per peer). A frame a transport refused is retried, so an Ask or a Pass is not lost. A peer whose connection drops is hidden until it recovers. The local fixture claim table in `studio-store.ts` is not the protocol. |
+| Sound, linked Music, `.pixa` export | Gate 6 has started on `gate6-sound-export` from the merged Gate 5 base. Pure score/take export and `.pixa` helpers reuse the existing validators; typed persistent audio/export state and native/UI integration remain pending. These helpers add no callable command and do not enable the production controls. See `GATE6-DESIGN.md`. |
 
 Implementation progress and reuse evidence live in [BACKEND-IMPLEMENTATION](BACKEND-IMPLEMENTATION.md).
 UI hooks will be marked callable here only once their actor/native path and tests exist.

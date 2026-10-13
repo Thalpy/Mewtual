@@ -9,7 +9,14 @@ Frontend integration is tracked separately in [FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HO
 native commands/events, retry rules and explicitly unavailable controls. Update it alongside
 every bridge-facing slice; UI layout and rendering remain user-owned.
 
-Current follow-up (2026-09-15): the user passes `aa0a81f...0b28f06` profiling and detached
+Current Gate 6 work (2026-10-13): the owner accepted the Gate 5 merge, PR #43 at
+`7cbe8cbe131e1be8e672d04341c31a1d2b52a98d` in `Create-suite-2`. The isolated
+`gate6-sound-export` branch begins with pure deterministic score/take export, patch union and
+bounded `.pixa` codecs, reusing the existing jukebox/PIX validators. This does not complete Gate 6
+or enable sound/export commands. [GATE6-DESIGN](GATE6-DESIGN.md) records its delivery order and
+the remaining typed state, persistence, playback, native/UI integration and GIF work.
+
+Historical follow-up (2026-09-15; superseded by the merges above): the user passes `aa0a81f...0b28f06` profiling and detached
 inspection design without findings. Code/test checkpoint `d5ca2ff` adds read-only
 `studio_overlay_read`, implementing capture,
 detached reconstruction, full intent-wrapper currency and native delivery under one original
@@ -53,7 +60,7 @@ These are ordered integration milestones, not equal-sized percentages. Index/art
 through Gate 3 are implemented; wider sound/export coverage still belongs to Gate 6.
 The first user-observable target is gate 2: **create, save, restart, reopen** through real backend
 commands. Its Index/art native-path and reference-protection tests now pass; that art milestone
-is implemented and the next active work is gate 4. Wider sound/export families remain gate 6
+is implemented; Gates 4 and 5 have since merged, and the active work is Gate 6. Wider sound/export families remain Gate 6
 work, so this does not close every family in the seven full gates. Gate 1 begins with typed Studio
 operations; it does not wait for P1 support
 for unrelated document types. Tests and review accompany each slice, not only gate 7.
