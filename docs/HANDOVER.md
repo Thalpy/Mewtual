@@ -10,6 +10,48 @@ and ranks the live hazards in that path.
 
 ## Status (latest entry: 2026-10-13)
 
+- **Gate 5: PR #43 review round (2026-10-13; still not accepted).** The review of
+  `ff8e276..32e37c3` returned request changes. The response is GATE5-DESIGN section 13.
+
+  **Fixes**
+  - **Delivery (#1).** Per-edge delivery records mean a refused or `OperationError` send of an Ask
+    or a Pass Release is retried on that edge only, before expiry. An edge that took a frame is
+    never re-sent it.
+  - **Reachability (#3).** An unreachable peer's entries are hidden and its deliveries held until
+    this side sees the link recover. They are then applied in order, so a Pass sent during the gap
+    lands.
+  - **Wiring (#2).** The wiring moved to `draw-wiring.ts`, which `App.svelte` and the new
+    `scripts/claims-webrtc-check.mjs` share.
+  - **Records.** GATE4-ACCEPTANCE now records the merge of PR #27 (`e8aad1a` → `ff8e276`, 28/28
+    hosted checks).
+
+  **Verification in this container**
+
+  | Check | Result |
+  |---|---|
+  | `npm --prefix apps/desktop test` | 1382/1382 |
+  | `npm run check` | 0 errors |
+  | `npm run build` | pass |
+  | `node scripts/claims-webrtc-check.mjs` (Chromium 141; three members as separate processes) | 36/36 in each of three runs |
+  | `test:flows` (Chromium via `EDGE_PATH`, `--no-sandbox` wrapper for root) | 9/9 |
+
+  - The WebRTC check includes a genuine SIGSTOP disconnect and recovery: both the held and the
+    direct Pass orderings occurred across the runs. It also includes the old-build stream-8 case:
+    23 frames sent on stream 8; `inst`, voice and the connection unaffected.
+  - Each new behaviour is mutation-checked (GATE5-DESIGN 9.1).
+  - No Rust changed this round; the Rust record below stands.
+  - `test:startup` now resolves the binary name per platform. Its result is recorded only once run.
+
+  **Found (predates Gate 5).** Ubuntu 24.04's WebKitGTK 2.52.6 exposes no `RTCPeerConnection`,
+  whether by default, with `enable-webrtc`, or with the GStreamer WebRTC plugins installed. The
+  app and wry do not enable it, so the Linux desktop build has no calls on that stack.
+
+  **Outstanding for acceptance**
+  - The owner's two-desktop run and sign-off.
+  - D1 confirmation.
+  - The WKWebView stream-8 check.
+  - The inherited inviter HIGH stays out of scope (THREAT-MODEL item 7).
+
 - **Gate 5 collaborative frame claims (2026-10-13; implementation candidate, not accepted).**
   Branch `gate5-frame-claims` from `e8aad1a` (`origin/gate4-agent1-runtime`). The gate record,
   slice and commit map, and both review responses are in [GATE5-DESIGN](GATE5-DESIGN.md). The

@@ -26,7 +26,8 @@ In scope, from the user's Gate 5 brief:
 - Claim, Ask and Pass; receiver-observed 90-second expiry; 30-second refresh; a visible countdown.
 - Sequence numbers bound to the authenticated channel capability and the sender session.
 - Claims are advisory: never authorization, never an edit lock.
-- Claims exist only during a call and disappear on disconnect and session change.
+- Claims exist only during a call. They are hidden while a peer is unreachable, and dropped when
+  its channel closes or its session changes.
 - Tests on deterministic clock seams: two-member observation, collision, replay, malformed input,
   identity prefix collision, disconnect, expiry, stale-session delivery and Pass.
 
@@ -67,7 +68,9 @@ What was missing for C0d:
 | `017f54d` | documents | Interfaces, threat model, gate board, UI hooks, design notes |
 | `0f41172` | review fixes | Context menu keying, snapshot gating, selection/Pass, auto-mute diagnostic, rotation |
 | `7ad6f34` | re-review fix | An expired claim never outlives the view |
-| (this commit) | handover | Verification record in HANDOVER |
+| `9c5510c`, `086f854`, `32e37c3` | records | Commit map, HANDOVER verification record |
+| `f178666` | PR #43 review #1, #3 | Per-edge delivery records; an unreachable peer is hidden, its deliveries held and applied on recovery |
+| (this round) | PR #43 review #2 | `draw-wiring.ts` shared by the App and `scripts/claims-webrtc-check.mjs`; real-WebRTC evidence; acceptance records |
 
 ## 4. Identity contract (C0d)
 
@@ -148,7 +151,10 @@ The `KIND_CALL_SIGNAL` network wire is unchanged.
 
 - `pc.createDataChannel("draw", { negotiated: true, id: 8, ordered: true })` is created in
   `createPeer` before the first offer. An older build has no channel 8; frames sent to it are
-  discarded and it sends none.
+  discarded and it sends none. Section 9.3 records that in Chromium.
+- **Wiring.** `draw-wiring.ts` (`openDrawEdge`, `drawConnectionState`) binds the channel and the
+  peer connection's state to the session. `App.svelte` and the real-WebRTC check both run exactly
+  this code.
 - **Capability.** The claim session mints it synchronously in `createPeer` (review L2).
   - Callbacks close over the capability and the call's session.
   - `onopen` checks that the peer generation is still current.
@@ -224,11 +230,17 @@ completes the hand-over by claiming (6.4).
     call releases the claim. The Studio reports every selection change to the session (`select`),
     which withdraws a claim or ask for any other frame and lapses a Pass suppression for another
     frame.
-  - The claim is refreshed every 30 s and re-sent to an edge that opens or whose connection
-    recovers.
+  - Each edge is refreshed 30 s after its transport last took my claim. An edge that opens is
+    told my claim and my ask. An edge that recovers is told only what changed while it was
+    unreachable, because its receiver kept what it had.
 - **Ask.**
-  - Available on a frame someone else claims. It is sent once and not refreshed (review L7).
-  - Moving off the frame cancels it.
+  - Available on a frame someone else claims. Each edge is sent it once, when that edge's transport
+    takes it, and it is never refreshed (review L7).
+  - Moving off the frame cancels it. Cancelling, a lapse at 90 s or claiming the frame sends a
+    Release to every edge that took the Ask, and nothing to one that never did.
+  - An edge that first takes the Ask after it was made (one that opened late, or whose transport
+    refused it at first) counts down from its own receipt. The asker's lapse Release ends it there
+    on time.
 - **Pass.**
   - The holder sees a sticky "X asks for frame N · 52 s · pass" notice in the always-visible
     transport bar.
@@ -241,10 +253,21 @@ completes the hand-over by claiming (6.4).
     asked for; it's yours now". Two askers can both take it, which then shows as contested.
   - Expiry, a dropped channel, a reconnect, a session change, an auto-mute, or a peer withdrawing its
     own Ask is never a Pass.
-- **Pacing.** The sender mirrors the receiver's claim bucket and coalesces a burst to its latest
-  claim, sent on the next tick. Ordered SCTP can still deliver a stalled backlog in one burst, so
-  this lowers rather than eliminates refusals, and the 30 s refresh repairs a dropped claim (review
-  L1).
+- **Delivery (PR #43 review #1).** Each edge keeps a bounded record of what its transport *took*
+  for each frame: `send` returned true and did not throw. A full WebRTC send buffer throws
+  `OperationError`, and a closing channel refuses.
+  - Every action, every 1 s tick and every recovery reconciles that record with what this device
+    asserts.
+  - A refused or throwing send changes nothing, so it is retried on that edge only.
+  - An edge that took a frame is never sent it again, so receivers' countdowns do not restart.
+  - A Release goes only to edges that took the claim or ask.
+  - Anything that edge's receiver has expired (90 s since it took it) is forgotten.
+  - So an Ask or a Pass whose send failed still arrives once the transport recovers, before
+    expiry.
+- **Pacing.** Each edge mirrors its receiver's claim bucket and coalesces a burst to the latest
+  claim. A send the transport refused is refunded. Ordered SCTP can still deliver a stalled backlog
+  in one burst, so this lowers rather than eliminates refusals, and the 30 s refresh repairs a
+  dropped claim (review L1).
 
 ### 6.5 Advisory only
 
@@ -265,10 +288,18 @@ completes the hand-over by claiming (6.4).
 - Losing the scope releases my claim and cancels my ask.
 - A Studio browsed on another server therefore sends nothing into the call, so object ids and edit
   timing cannot link the user's per-server identities.
-- **What clears a peer's entries at once** (review M3): the peer's connection leaving "connected"
-  (failed, disconnected or closed), its `draw` channel closing, `removePeer` (bye, revocation,
-  `closed`), or the end of the call. A link that recovers through ICE restart is restored by the
-  sender's re-send.
+- **An unreachable peer is absent** (review M3; PR #43 review #3). When the peer's connection
+  leaves "connected" (disconnected or failed):
+  - Its entries leave every view at once. They keep expiring underneath.
+  - A delivery that still arrives (a delayed `onmessage`, or traffic after the peer recovered but
+    before this side sees it) is held, not applied. Holding is bounded (`DRAW_HOLD_MAX`, oldest
+    first), malformed frames are refused at once, and an auto-mute discards everything held.
+  - Nothing is sent to that peer.
+  - When this side sees "connected" again, the entries still within 90 s reappear and the held
+    frames are applied in arrival order. A Pass sent during the gap therefore lands.
+  - An unreachable claimant does not block a Pass to someone else.
+- **What drops a peer's entries:** its `draw` channel closing (including a link that never
+  recovers), `removePeer` (bye, revocation, `closed`) or the end of the call.
 
 ## 7. Studio surface
 
@@ -319,7 +350,7 @@ All of these run on deterministic seams.
 
 - **`rt-admission.test.ts`:** bucket monotonicity, charge-before-parse, UTF-8 cap, auto-mute and
   unmute, per-kind capabilities, and the pinned jam limits. The jam suite is unchanged.
-- **`draw-claims.test.ts` (21 tests):**
+- **`draw-claims.test.ts` (39 tests):**
   - Codec exactness, two-member observation with the 30 s refresh, and the 89 999 / 90 000 ms
     boundary.
   - Ask countdown, Pass hand-over and suppression.
@@ -331,14 +362,38 @@ All of these run on deterministic seams.
   - Malformed input charged before parse, auto-mute retraction, caps with uncharged releases, sender
     pacing, sequence rotation.
   - The Studio snapshot, and the advisory-only source/API checks.
-  - Mutation checks during development: the expiry boundary, the replay comparison and the
-    Pass-trigger condition each fail a test when inverted.
+  - Delivery (PR #43 review #1), each on a two-way link whose transport can refuse, throw
+    `OperationError` or queue:
+    - a refused Ask is retried on that edge only, and an edge that took it is not re-sent it;
+    - a throwing send is retried, and a refused Pass Release is retried until the asker takes the
+      frame;
+    - cancelling or lapsing an Ask no transport took sends nothing;
+    - moving on while undelivered names only the new frame;
+    - a replaced channel starts empty;
+    - a refused send is refunded, and records are bounded.
+  - Reachability (PR #43 review #3):
+    - a delayed delivery while unreachable is held, then applied on recovery;
+    - a Pass during the gap lands;
+    - an unreachable claimant does not block a Pass;
+    - close drops everything;
+    - nothing is sent while unreachable;
+    - holding is bounded, malformed frames are refused, and an auto-mute discards what is held.
+  - Mutation checks: the expiry boundary, the replay comparison and the Pass-trigger condition;
+    then, for the PR #43 fixes, ignoring the send result, treating a throw as success, no refund,
+    no hiding, no holding, sending while suspended, refreshing an Ask, no record bound, an
+    unbounded hold, holding garbage, and a hidden claim blocking a Pass. Each fails a test.
+    Removing *both* mute defences fails one; each alone is redundant by design.
+- **`draw-wiring.test.ts`:** the channel parameters; retry after a refused or throwing send; `onopen`
+  readies only a live edge; messages and close reach the session, and views rebuild only on change;
+  connection states hide, hold and recover; and creation failure and an ended call.
 - **`call-identity.test.ts`:** sender parsing, prefix-twin revocation, targets, politeness, labels
   and `displayKey`.
 - **`jam-engine.test.ts`:** an identity-keyed live peer seeds exactly as its fingerprint did, and
   twins get separate capabilities.
 - **`call-wiring.test.ts`:** source pins for the App wiring (listener, sends, broadcasts, hangups,
-  revocation, politeness, jam labels, draw channel lifecycle, scope, trim keys).
+  revocation, politeness, jam labels, scope, trim keys). It also pins that `createPeer` uses
+  `openDrawEdge` and `drawConnectionState` for this exact peer and session, with no second draw
+  wiring.
 - **`studio-surface.test.ts`:** compiled Studio claim-UI regressions (CLAIM-UI-001..003).
 
 ### 9.2 Rust
@@ -355,9 +410,53 @@ All of these run on deterministic seams.
 
 The commands run and their results are recorded in HANDOVER's Gate 5 entry.
 
+### 9.3 Real WebRTC (PR #43 review #2)
+
+`scripts/claims-webrtc-check.mjs` runs three members, each its own headless Chromium 141 process,
+the engine WebView2 ships. Each holds real `RTCPeerConnection`s with a fake microphone, `inst`
+(id 7) and `draw` (id 8), and the shipped `draw-claims.ts` and `draw-wiring.ts`. Node relays SDP
+and drives the pages over plain CDP. Time-dependent steps skew each member's injected clock while
+the transport stays real.
+
+Result: 36/36 checks in each of three consecutive runs on 2026-10-13.
+
+- **Claim, Ask and Pass** across data channels, with a notice. A contested frame is shown on both
+  sides.
+- **Refresh and expiry.**
+  - Each receiver counts down on its own clock.
+  - The 30 s refresh restarts the countdown.
+  - A sender that stops refreshing expires at 90 s.
+- **A genuine ICE disconnect and recovery.** One member's whole browser is frozen with SIGSTOP, and
+  the other sees `connected → disconnected → connected` after about 6 s:
+  - the claim is hidden at once;
+  - the Pass the frozen member sends on waking lands;
+  - both orderings occurred across the runs: the Pass was held then applied (run 2), and arrived
+    after recovery (runs 1 and 3).
+- **Leave and rejoin.** Leaving drops that member's claims at the other. A rejoined member's
+  claims flow both ways.
+- **Mixed versions.** An old build with no channel 8 connects to a current one, which sends claim
+  frames on stream 8 toward it (engine stats: 23 messages, the channel stays `open`).
+  - `inst` traffic still flows both ways (+20 each).
+  - Voice packets keep arriving both ways.
+  - The connection stays `connected`.
+  - The old build sees no `ondatachannel` and no state change.
+  - The current build's other edge is unaffected.
+
+Not covered here: the Studio UI and the native backend (compiled Studio tests and the Rust
+suites), and the App-level scope rules such as switching away from the call's server (`call-wiring`
+pins and the scope `$effect`).
+
+The repository's own `test:flows` gate, which drives the real Svelte app over CDP, also passes 9/9
+on that Chromium (`EDGE_PATH` pointed at it, `--no-sandbox` for root).
+
 ## 10. Decisions taken and still open
 
-- **D1 (taken, please confirm).** The seven-key frame with Pass carrying no recipient.
+- **D1 (taken, awaiting the owner's confirmation).** The seven-key frame with Pass carrying no
+  recipient. What the owner is confirming:
+  - Any explicit Release of a live claim hands the frame to an asker, so a holder moving to another
+    frame or leaving the Studio satisfies an Ask as Pass does.
+  - Two askers can both take a released frame, which then shows as contested.
+  - A targeted Pass would need a wire change.
 - **D2 (taken).** The draw gate uses the jam `inst` limits so C4a stays compatible (review M2).
 - **D3 (taken).** Jam seeds and take `parts` keep fingerprint labels (review M1). Takes and noise
   are unchanged.
@@ -366,9 +465,19 @@ The commands run and their results are recorded in HANDOVER's Gate 5 entry.
   later slice.
 - **D5 (open, HIGH, outside Gate 5).** The fingerprint-keyed admin roster in the owner's admission
   check (review H3).
-- **Open check.** Confirm on each shipping WebView (WebView2, WKWebView, WebKitGTK) that unsolicited
-  data on SCTP stream 8 toward an old build is dropped without resetting the association (review
-  L9). This cannot be verified in this container.
+- **Stream-8 compatibility per WebView** (review L9; PR #43 review #2):
+  - **Chromium (WebView2's engine): verified** in section 9.3.
+  - **WebKitGTK: the question does not arise on the stack tested.** Ubuntu 24.04's WebKitGTK
+    2.52.6 does not expose `RTCPeerConnection` at all, whether by default, with `enable-webrtc`, or
+    with the GStreamer WebRTC plugins installed. Neither the app nor wry 0.55 enables WebRTC in the
+    Linux WebView, so the Linux desktop build has no calls of any kind there. That predates Gate 5.
+    A Linux build that does get WebRTC needs this check run on it.
+  - **WKWebView: unverified.** It needs a macOS run.
+- **Two-desktop acceptance (PR #43 review #2): outstanding.** Two real desktop instances must run
+  Claim, Ask, Pass, refresh and expiry, contested claims, continued editing of a claimed frame,
+  disconnect and recovery, leave and rejoin, and switching away from the call's server through the
+  Studio, with the owner's sign-off. Section 9.3 is engine-level evidence for the same paths, not a
+  substitute.
 
 ## 11. Early design review response (2026-10-12)
 
@@ -429,11 +538,28 @@ found two more issues:
 Leaving the claim scope also clears a Pass suppression, because `release()` runs on every scope
 loss. That is intended: the user left.
 
-Residuals carried forward:
+Residuals carried forward (as amended by section 13):
 
-- A transient "disconnected" can hide a peer's claims for up to 30 s if only the receiver saw the
-  blip.
-- The L9 WebView check is still open.
+- ~~A transient "disconnected" can hide a peer's claims for up to 30 s if only the receiver saw
+  the blip.~~ Resolved in `f178666`: hidden entries reappear on recovery, and held frames are
+  applied.
+- The L9 WebView check: Chromium verified, WKWebView open, WebKitGTK has no WebRTC (section 10).
 - A routing test against a *member* prefix twin is impractical: it needs a ground key.
-- There is no live two-client WebRTC run.
+- ~~There is no live two-client WebRTC run.~~ The engine-level run is in 9.3. The two-desktop
+  acceptance run remains outstanding.
+
+## 13. PR #43 review response (2026-10-13)
+
+The review covered `ff8e276..32e37c3` and returned **request changes: Gate 5 is not complete**.
+All three findings are addressed. Acceptance stays pending on the owner's two-desktop run and on
+D1.
+
+| Finding | Resolution |
+|---|---|
+| 1 (MEDIUM): a failed send silently discarded an Ask or Pass (`send` false or `OperationError`; `flushAsk` marked it sent; a failed Pass Release had nothing to retry) | Fixed in `f178666`: per-edge delivery records (6.4). The regressions requested: false, `OperationError`, recovery before expiry, cancel while pending, partial success across two edges, plus Pass retry, lapse while pending, replacement and bounds. All mutation-checked (9.1). |
+| 2 (acceptance blocker): no real desktop claim path, no mixed-version check | Partly closed. The wiring moved to `draw-wiring.ts` (shared by the App and the check, behaviour-tested). Real-WebRTC evidence: 36/36 three times, including a genuine disconnect and recovery and the mixed-version check (9.3). On WebKitGTK the check is moot, because there is no WebRTC; WKWebView is unverified (10). **The two-desktop run with sign-off remains the owner's.** |
+| 3 (lifecycle gap): disconnect cleared entries but a later delivery could repopulate them | Fixed in `f178666`: suspension hides and holds, and recovery restores and applies (6.6). It is tested with a delayed delivery during the interval, and over real WebRTC, where the held path occurred. |
+| Records: the Gate 4 ledger was stale | Fixed: GATE4-ACCEPTANCE records the merge of PR #27 (`e8aad1a` → `ff8e276`, 28/28 hosted checks) and supersedes "not merge-ready" and "Gate 5 remains closed". |
+| Records: D1 still "please confirm" | Left with the owner, with the specific behaviours spelled out (10). |
+| The inherited inviter HIGH | Unchanged and out of scope (D5, THREAT-MODEL item 7). Gate 5 acceptance is not whole-application security acceptance. |
 

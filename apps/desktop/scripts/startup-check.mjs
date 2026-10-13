@@ -28,7 +28,7 @@ import { startupChildEnv } from "./startup-env.mjs";
 // `fileURLToPath`, not the URL's `pathname`: this repository lives under a directory with a space
 // in its name, and a raw pathname keeps it percent-encoded.
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
-const EXE = join(ROOT, "src-tauri", "target", "debug", "mewtual-desktop.exe");
+const EXE = join(ROOT, "src-tauri", "target", "debug", process.platform === "win32" ? "mewtual-desktop.exe" : "mewtual-desktop");
 /** How long startup gets to finish. Generous: a cold debug build is slow to open its first window. */
 const STARTUP_MS = Number(process.env.STARTUP_WAIT_MS ?? 20000);
 

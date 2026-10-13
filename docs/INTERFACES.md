@@ -3817,8 +3817,15 @@ The four `on`/`ask` combinations:
   per-identity bucket refilling 2/s with burst 10; Releases are never charged.
 - **Collisions.** Every live claimant is shown, sorted by identity. Two or more, counting this
   device, is "contested". Nothing resolves them.
-- **Clearing.** A peer's entries are dropped at once when:
-  - its connection leaves "connected";
+- **Unreachable.** While a peer's connection is not "connected" (disconnected or failed):
+  - its entries are hidden from every view and from the Pass check, but keep expiring;
+  - its well-formed deliveries are held, at most `DRAW_HOLD_MAX` (32), oldest first, after being
+    charged, and malformed ones are refused (refusal `held` for a held frame);
+  - nothing is sent to it.
+
+  When this side sees "connected" again, its live entries reappear and the held frames are applied
+  in arrival order, aged from arrival.
+- **Clearing.** A peer's entries (and anything held) are dropped at once when:
   - its channel closes or is replaced;
   - it is removed (bye, roster revocation, closed);
   - it is auto-muted;
@@ -3826,13 +3833,22 @@ The four `on`/`ask` combinations:
 
 **Sender rules:**
 
-- `sn` is minted once per call join from the injected RNG. One `q` per frame, however many edges
-  carry it. Exhausting `q` rotates `sn` and re-sends the current claim.
-- The claim is re-sent every `CLAIM_RESEND_MS` (30 000 ms), and to a channel that opens or whose
-  connection recovers.
-- An Ask is sent once and never re-sent.
-- Claims and Asks are paced by a local mirror of the receiver's claim bucket. A burst coalesces to
-  the latest claim.
+- `sn` is minted once per call join from the injected RNG. Every frame offered to an edge takes the
+  next `q`, so each edge sees a strictly increasing subsequence. Exhausting `q` rotates `sn`. The
+  claim and ask then count as untold on every edge, and are re-sent under the new session.
+- **Delivery.** Each edge records, per frame, what its transport *took*: `send` returned true and
+  did not throw. The app's `send` refuses on a channel that is not open, and a full buffer throws
+  `OperationError`.
+  - Every action, 1 s tick and recovery reconciles that record with what this device asserts.
+  - What the edge lacks is sent. What it took and I no longer assert gets a Release.
+  - Anything it took 90 s ago or more is forgotten (its receiver expired it).
+  - A refused or throwing send changes nothing and is retried next time, on that edge only.
+  - Records are bounded (`DRAW_TOLD_MAX`, 8).
+- The claim is refreshed on each edge `CLAIM_RESEND_MS` (30 000 ms) after that edge took it. An
+  edge that opens is told my claim and ask. An edge that recovers is told what changed meanwhile.
+- An Ask is sent once to each edge, when it takes it, and never refreshed.
+- Claims and Asks are paced per edge by a mirror of that receiver's claim bucket. A burst
+  coalesces to the latest claim, and a refused send is refunded.
 - **Pass.** A holder's Pass is a Release, plus local suppression of auto-claim on that frame until
   the selection moves to another frame. An asker takes a frame only when an explicit Release of a
   live claim arrives from its holder while the asker's own Ask is live and nobody else claims it.
@@ -3854,4 +3870,11 @@ The four `on`/`ask` combinations:
   countdown is live. A refused or no-op frame does no view work.
 - A draw auto-mute records `VOICE.DRAW.ABUSE_MUTED`, with no identity or content.
 - No Studio edit, save or native path consults claims.
+- **Wiring.** `draw-wiring.ts` binds an edge:
+  - `openDrawEdge` creates the channel, mints the capability, and routes `onopen` (live
+    generation only), `onmessage` and `onclose`;
+  - `drawConnectionState` maps "connected" on an open channel to `edgeReady`, and any state other
+    than new, connecting or connected to `peerUnreachable`.
+
+  `App.svelte` and `scripts/claims-webrtc-check.mjs` both use it.
 

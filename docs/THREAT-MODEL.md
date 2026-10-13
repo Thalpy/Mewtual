@@ -1276,9 +1276,12 @@ table with the commit that closed it.
   (capability, sender session): duplicates, reorders, retired sessions and a fifth session per
   capability are refused, and every check runs before any state changes. Claims and asks are
   bounded (4 live per sender, 2/s burst 10 per identity per call; releases uncharged) and expire
-  90 s after their last receipt on the receiver's own monotonic clock. A peer's entries vanish when
-  its connection leaves "connected", its channel closes or is replaced, it is removed, or the call
-  ends; one claim session exists per call join. Only an explicit release of a live claim hands a
+  90 s after their last receipt on the receiver's own monotonic clock. While a peer's connection
+  is not "connected", its entries are hidden. Its deliveries are charged as usual and then held: at
+  most 32, malformed ones refused, and all discarded on auto-mute. They are applied only when this
+  side sees the link recover, so an unreachable peer cannot assert presence. Its entries are
+  dropped when its channel closes or is replaced, when it is removed, or when the call ends. One
+  claim session exists per call join. Only an explicit release of a live claim hands a
   frame to a live asker. The Studio asserts claims only while open on the call's own server, so a
   Studio browsed elsewhere cannot leak another server's object/frame ids or edit timing into the
   call (which would link per-server identities). Claims never gate an edit or a save, and no

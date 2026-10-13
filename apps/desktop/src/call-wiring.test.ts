@@ -50,12 +50,12 @@ test("jam keeps the published fingerprint seed label while authority is the full
 });
 
 test("every edge gets a negotiated draw channel bound to a claim capability, torn down with it", () => {
+  // The wiring itself lives in draw-wiring.ts (behaviour-tested there, and run over real WebRTC by
+  // scripts/claims-webrtc-check.mjs); the App must use it, for this exact peer and session.
   const create = body(app, "function createPeer(");
-  assert.match(create, /createDataChannel\(DRAW_CHANNEL_LABEL, \{ negotiated: true, id: DRAW_CHANNEL_ID, ordered: true \}\)/);
-  assert.match(create, /claims\.openEdge\(fp,/);
-  assert.match(create, /claims\.receive\(drawChan, e\.data\)/);
-  assert.match(create, /drawDc\.onclose = \(\) => \{[^}]*claims\.closeEdge\(drawChan\)/);
-  assert.match(create, /s\.peerUnreachable\(fp\)/, "a dead link drops that peer's claims at once");
+  assert.match(create, /peer\.draw = openDrawEdge\(pc, claims, fp, \{\s*live: \(\) => callPeers\[fp\] === peer,/);
+  assert.match(create, /drawConnectionState\(claims, fp, pc\.connectionState, peer\.draw, syncDrawClaims\)/);
+  assert.doesNotMatch(app, /createDataChannel\(DRAW_CHANNEL_LABEL/, "no second, hand-rolled draw wiring");
   assert.match(body(app, "function removePeer("), /withDrawClaims\(\(s\) => s\.removePeer\(fp\)\)/);
   const leave = body(app, "function leaveVoice(");
   assert.match(leave, /stopDrawClaims\(\)/);
@@ -101,7 +101,7 @@ test("claim snapshots are rebuilt only when the session changed something visibl
   // claimed must not re-render the timeline.
   assert.match(body(app, "function withDrawClaims("), /if \(session\.rev !== before\) syncDrawClaims\(\)/);
   const create = body(app, "function createPeer(");
-  assert.match(create, /const before = claims\.rev;\s*claims\.receive\(drawChan, e\.data\);\s*syncIfChanged\(before\)/);
+  assert.match(create, /changed: \(\) => \{\s*if \(drawClaims === claims\) syncDrawClaims\(\);/);
   assert.match(body(app, "function startDrawClaims("), /session\.rev !== before \|\| !session\.isQuiet\(\)/);
   assert.match(body(studio, "function edited("), /claims\.local\.claim\?\.obj !== objectId \|\| claims\.local\.claim\?\.fr !== frameId/);
 });

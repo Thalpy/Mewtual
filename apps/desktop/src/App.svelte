@@ -261,9 +261,9 @@
     parseCallSignalSender, revokedCallPeers, rosterIdentities, rosterSelfIdentity, sharedFingerprints,
   } from "./call-identity";
   import {
-    DRAW_CHANNEL_ID, DRAW_CHANNEL_LABEL, DrawClaimsSession, snapshotClaims,
-    type DrawChannel, type StudioClaimActions, type StudioClaimSnapshot,
+    DrawClaimsSession, snapshotClaims, type StudioClaimActions, type StudioClaimSnapshot,
   } from "./draw-claims";
+  import { drawConnectionState, openDrawEdge, type DrawEdge } from "./draw-wiring";
   import { JAM_INBOUND_PENDING_MAX, JAM_KIT, JAM_LEGACY_SESSION_NONCE, JAM_LOCAL_PUBLICATION_PENDING_MAX, JAM_MET_BPM_MAX, JAM_MET_BPM_MIN, JAM_MET_REV_MIN_INTERVAL_MS, JAM_PATCH_ANNOUNCE_MIN_INTERVAL_MS, JAM_PATCH_EXT, JAM_PATCH_MIME, JAM_PATCH_NAME_MAX_CHARS, JAM_REMOTE_HOLD_MAX_MS, JAM_SAVED_PATCHES_MAX, PATCH_CUTOFF_MAX_HZ, PATCH_OSC_WAVES, PATCH_PARAM, TAKE_MAX_DURATION_MS, type JamMetronome, type JamOsc, type JamPatch, type JamTake, type LegacyWave } from "./jam-contract";
   import { JamClockProbeTracker, JamClockSync, JamMetronomeClock } from "./jam-clock";
   import { JamCallCuePlayer, JamClickPlayer } from "./jam-clicks";
@@ -12163,8 +12163,7 @@
     screenAudioSender: RTCRtpSender | null;
     // Gate 5 frame claims: this edge's negotiated `draw` channel (id 8) and the opaque capability
     // the claim session minted for it. Null when the WebView refused the channel.
-    drawDc: RTCDataChannel | null;
-    drawChan: DrawChannel | null;
+    draw: DrawEdge | null;
   };
   let inCall = $state(false);
   let callMuted = $state(false);
@@ -17876,8 +17875,7 @@
       vidSender: null,
       micSender: null,
       screenAudioSender: null,
-      drawDc: null,
-      drawChan: null,
+      draw: null,
     };
     if (localStream) {
       for (const t of localStream.getAudioTracks()) peer.micSender = pc.addTrack(t, localStream);
@@ -17922,52 +17920,15 @@
       /* data channels unavailable: voice still works */
     }
     // Gate 5 frame claims ride their own negotiated, ordered channel (id 8), created here for the
-    // same reason as `inst`: before the first offer, so nothing renegotiates. The capability is
-    // minted synchronously for this exact peer generation; every callback closes over it and the
-    // call's claim session, so a callback from a replaced edge or an ended call changes nothing.
-    // An older build has no channel 8: our frames are discarded there and it sends none.
+    // same reason as `inst`: before the first offer, so nothing renegotiates (draw-wiring.ts).
     const claims = drawClaims;
     if (claims) {
-      try {
-        const drawDc = pc.createDataChannel(DRAW_CHANNEL_LABEL, { negotiated: true, id: DRAW_CHANNEL_ID, ordered: true });
-        // `true` only when the frame was queued: a closing channel refuses, and a full send
-        // buffer throws OperationError. Either way the session keeps the frame owed to this edge
-        // and retries it on the next tick, so an Ask or a Pass is never silently lost.
-        const drawChan = claims.openEdge(fp, (raw) => {
-          if (drawDc.readyState !== "open") return false;
-          drawDc.send(raw);
-          return true;
-        });
-        if (drawChan) {
-          peer.drawDc = drawDc;
-          peer.drawChan = drawChan;
-          // Each callback rebuilds the snapshot only when the session changed something visible:
-          // a refused or no-op frame (a flood, an auto-muted peer) costs no view work.
-          const syncIfChanged = (before: number) => {
-            if (drawClaims === claims && claims.rev !== before) syncDrawClaims();
-          };
-          drawDc.onopen = () => {
-            if (callPeers[fp] !== peer) return;
-            const before = claims.rev;
-            claims.edgeReady(drawChan);
-            syncIfChanged(before);
-          };
-          drawDc.onmessage = (e) => {
-            const before = claims.rev;
-            claims.receive(drawChan, e.data);
-            syncIfChanged(before);
-          };
-          drawDc.onclose = () => {
-            const before = claims.rev;
-            claims.closeEdge(drawChan);
-            syncIfChanged(before);
-          };
-        } else {
-          drawDc.close();
-        }
-      } catch {
-        /* no draw channel on this edge: claims simply do not flow to or from it */
-      }
+      peer.draw = openDrawEdge(pc, claims, fp, {
+        live: () => callPeers[fp] === peer,
+        changed: () => {
+          if (drawClaims === claims) syncDrawClaims();
+        },
+      });
     }
     // Perfect negotiation, offer side: fires for the initial tracks AND whenever video is added
     // later. The no-argument setLocalDescription picks offer/answer from the signaling state.
@@ -18011,19 +17972,10 @@
     };
     pc.onconnectionstatechange = () => {
       callPeerStates = { ...callPeerStates, [fp]: pc.connectionState };
-      // Claims never outlive a dead link: a peer whose connection drops stops showing as drawing
-      // at once, and what it still sends is held, not shown, until this side sees the link
-      // "connected" again. Recovery shows its claims that are still live, applies what was held
-      // (so a Pass sent during the gap lands), and tells it whatever it missed from me. A link
-      // that never recovers closes the channel, which drops all of it.
+      // Claims never outlive a dead link, and an unreachable peer is absent until this side sees
+      // it "connected" again (draw-wiring.ts).
       if (claims && callPeers[fp] === peer && drawClaims === claims) {
-        withDrawClaims((s) => {
-          if (pc.connectionState === "connected") {
-            if (peer.drawChan && peer.drawDc?.readyState === "open") s.edgeReady(peer.drawChan);
-          } else if (pc.connectionState !== "new" && pc.connectionState !== "connecting") {
-            s.peerUnreachable(fp);
-          }
-        });
+        drawConnectionState(claims, fp, pc.connectionState, peer.draw, syncDrawClaims);
       }
       if (pc.connectionState === "connected") void sniffTransport(fp, pc);
       if (pc.connectionState === "failed") recoverPeer(peer);
