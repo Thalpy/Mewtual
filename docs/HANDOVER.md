@@ -47,13 +47,19 @@ and ranks the live hazards in that path.
   | `cargo fmt --all --check` | clean |
   | `scripts/check-no-ambient.sh` and `scripts/check-store-raw-fs.sh` | pass |
   | `cargo deny check` | advisories, bans, licences and sources ok; no dependency changes |
-  | Root `cargo test --all --all-features` | `catcoms-app` lib: 1077 pass, 22 ignored, 1 environmental failure (below). The complete `--no-fail-fast` run over every crate was still in progress when this entry was written. |
+  | Root `cargo test --all-features --no-fail-fast`, every package, binary and doc-test | 2368 pass, 24 ignored, 3 environmental failures (below) |
 
-  - The root suite ran with `CARGO_PROFILE_{DEV,TEST}_DEBUG=0` to fit the disk allowance.
-  - The one root failure, `catcoms-app` `store::epoch_recovery::inventory::tests::a_failed_sync_is_not_remembered`,
-    is environmental. Its precondition ("a read-only file cannot be opened to flush") does not hold
-    for root. The same test binary passes that test when run as `nobody` and fails it as root. The
-    test is untouched by this branch.
+  - The root suite ran with `CARGO_PROFILE_{DEV,TEST}_DEBUG=0` to fit the disk allowance. The
+    one-command run hit the 2-hour background limit, so it was completed per package (`-p ...`) for
+    the packages it had not reached; nothing was counted twice.
+  - The three root failures are environmental, and both tests are in code this branch does not
+    touch:
+    - `catcoms-app` `store::epoch_recovery::inventory::tests::a_failed_sync_is_not_remembered`:
+      its precondition ("a read-only file cannot be opened to flush") does not hold for root. The
+      same test binary passes that test when run as `nobody` and fails it as root.
+    - `catcoms-net` `ipv6_pcp_adapter_sends_exact_map_and_best_effort_delete` and
+      `ipv6_pcp_worker_retains_failed_renewal_replaces_and_expires_monotonically`: both fail with
+      "Address family not supported by protocol" because the container has no IPv6 sockets.
   - Focused evidence:
     - claim-session tests with mutation checks: the expiry boundary, replay comparison, Pass
       trigger, `rev` gating, receive-side expiry and rotation;
