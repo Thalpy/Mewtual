@@ -43,10 +43,10 @@ boundary changes.
 
 | Prerequisite | State at base | Gate 5 work |
 |---|---|---|
-| C0d full identity | Missing. Details below. | Commits `56f276a`, `4f68892` |
-| C0b shared admission | Missing. The admission mechanism lived inside `jam-budget.ts` and `jam-channel.ts`. | Commit `5c0d5e4` |
-| C4a draw channel | Missing. | Claim frames only, `7815d2a` and `4f68892` |
-| Studio claim UI | Only a local fixture table (`studio-store.ts`) and a placeholder sentence. | `4f68892` |
+| C0d full identity | Missing. Details below. | Commits `cdba0b3`, `1ebabdc` |
+| C0b shared admission | Missing. The admission mechanism lived inside `jam-budget.ts` and `jam-channel.ts`. | Commit `136dcdc` |
+| C4a draw channel | Missing. | Claim frames only, `a324474` and `1ebabdc` |
+| Studio claim UI | Only a local fixture table (`studio-store.ts`) and a placeholder sentence. | `1ebabdc` |
 
 What was missing for C0d:
 
@@ -59,12 +59,15 @@ What was missing for C0d:
 
 | Commit | Slice | Content |
 |---|---|---|
-| `8ce97b3` | design | This document's first revision |
-| `5c0d5e4` | C0b | `rt-admission.ts`: capability registry, token bucket, pre-parse gate with exhaustion auto-mute. Jam re-exports them; jam limits are pinned by a test. |
-| `56f276a` | C0d backend | crypto/sync/app/actor/bridge full identity |
-| `7815d2a` | claim protocol | `draw-claims.ts` codec, book, sender and Studio snapshot helpers |
-| `4f68892` | C0d frontend + wiring | `call-identity.ts`, App call-state re-key, jam seed label, `draw` channel lifecycle, Studio claim UI |
-| (this commit) | documents | Interfaces, threat model, handover, gate board, UI hooks, design notes |
+| `966b4db` | design | This document's first revision |
+| `136dcdc` | C0b | `rt-admission.ts`: capability registry, token bucket, pre-parse gate with exhaustion auto-mute. Jam re-exports them; jam limits are pinned by a test. |
+| `cdba0b3` | C0d backend | crypto/sync/app/actor/bridge full identity |
+| `a324474` | claim protocol | `draw-claims.ts` codec, book, sender and Studio snapshot helpers |
+| `1ebabdc` | C0d frontend + wiring | `call-identity.ts`, App call-state re-key, jam seed label, `draw` channel lifecycle, Studio claim UI |
+| `017f54d` | documents | Interfaces, threat model, gate board, UI hooks, design notes |
+| `0f41172` | review fixes | Context menu keying, snapshot gating, selection/Pass, auto-mute diagnostic, rotation |
+| `7ad6f34` | re-review fix | An expired claim never outlives the view |
+| (this commit) | handover | Verification record in HANDOVER |
 
 ## 4. Identity contract (C0d)
 
@@ -401,7 +404,7 @@ Residuals the review listed as pre-existing are recorded in THREAT-MODEL:
 
 ## 12. Final diff review response (2026-10-12)
 
-A read-only adversarial reviewer inspected `e8aad1a..57683b1` and reran the focused frontend
+A read-only adversarial reviewer inspected `e8aad1a..017f54d` and reran the focused frontend
 suites. It reported no blocker.
 
 | Finding | Resolution |
@@ -415,7 +418,7 @@ suites. It reported no blocker.
 | L5: silent draw auto-mute | Diagnostic `VOICE.DRAW.ABUSE_MUTED` added (no identity or content); session test. |
 | L6: a rotation inside `flushAsk` desynchronised the Ask | Fixed: rotation marks the Ask unsent instead of dropping it. A test fails under the old behaviour. |
 
-A short re-review of `57683b1..4bd03d6` confirmed those fixes and reported nothing blocking. It
+A short re-review of `017f54d..0f41172` confirmed those fixes and reported nothing blocking. It
 found two more issues:
 
 | Finding | Resolution |
