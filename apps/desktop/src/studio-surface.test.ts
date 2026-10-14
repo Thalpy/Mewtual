@@ -848,3 +848,22 @@ test("G6-UI-002: Play calls preparation in the gesture adapter and source invali
     assert.ok(stops > before, "stop reacts to the immediate source generation, not only a later refreshed projection");
   } finally { m.done(); }
 });
+
+test("G6-UI-003: Score loop has an explicit labelled checkbox and forwards only the local choice", async () => {
+  const ipc = fakeIpc();
+  const score = { kind: "score", title: null, bpm: null, bpb: null, steps: null, cells: {}, patches: {}, readiness: { cells: {}, patches: {}, headerConflicts: false } };
+  ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ kind: "score", title: "music" }) } })));
+  ipc.on("studio_read", () => ({ ...ordinaryView(score), group: "deadbeef" }));
+  ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ }));
+  const loops: boolean[] = [];
+  const m = mountStudio(ipc, { audioActions: { stop: () => {}, start: async (_kind, _prepare, loop) => { loops.push(loop); return true; } } });
+  try {
+    await settled(); state.studio.selected = OBJ; flushSync(); await settled(400);
+    const checkbox = m.target.querySelector<HTMLInputElement>('input[aria-label="Loop whole authored score"]');
+    assert.ok(checkbox); assert.equal(checkbox.type, "checkbox"); assert.equal(checkbox.checked, false);
+    assert.match(checkbox.closest("label.st-score-loop")?.textContent ?? "", /loop whole authored score/);
+    m.click("button", "play locally"); await settled(50); assert.deepEqual(loops, [false]);
+    checkbox.checked = true; checkbox.dispatchEvent(new Event("change", { bubbles: true })); flushSync();
+    m.click("button", "play locally"); await settled(50); assert.deepEqual(loops, [false, true]);
+  } finally { m.done(); }
+});

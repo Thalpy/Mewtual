@@ -1187,7 +1187,7 @@
     <div class="st-score">
       {@render pendingSaves()}
       <p class="micro wrap">{settlementChip().text} · native Score · {audioState.state} · {Math.floor(audioState.elapsedMs)}ms</p>
-      <label class="micro"><input type="checkbox" bind:checked={loop} disabled={playing} /> loop whole authored score</label>
+      <label class="micro st-score-loop"><input type="checkbox" aria-label="Loop whole authored score" bind:checked={loop} disabled={playing} /><span>loop whole authored score</span></label>
       <span class="st-card-acts"><button class="st-btn" disabled={mediaBusy || playing} onclick={() => downloadMedia()}>download .jamtake</button><button class="st-btn" disabled={mediaBusy || playing || !onshareScore} onclick={() => downloadMedia(true)}>share .jamtake</button></span>
       {#if mediaReceipt}<div class="st-banner info wrap">{mediaReceipt}</div>{/if}
       {#key objectId}
@@ -1571,6 +1571,11 @@
 
 <style>
   .st-score { flex: 1; overflow: auto; min-height: 0; padding: 10px; }
+  /* The application-wide input width is for text fields. A full-width checkbox pushed its
+     visible consent label outside the 900px desktop viewport, leaving an unexplained square. */
+  .st-score-loop { display: flex; align-items: center; gap: 6px; margin: 6px 0; white-space: normal; }
+  .st-score-loop input { width: auto; flex: none; margin: 0; }
+  .st-score-loop span { min-width: 0; }
   .st-score-history { margin-top: 12px; display: block; }
   .studio { display: flex; flex-direction: column; flex: 1; min-height: 0; outline: none; gap: 0; }
   .studio-empty { padding: 2rem; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
