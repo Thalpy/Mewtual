@@ -1,5 +1,26 @@
 # Mewtual; Architecture
 
+## Current Gate 6 composition (2026-10-14; candidate, not final acceptance)
+
+The existing Studio/P1/vault/native/renderer stack now composes typed Score and complete Flipnote
+sound state with production Score/Sound/Music controls, actual-byte PIXA publication/readback,
+durable export references and local visual-only GIF export. The existing JamEngine/allocator also
+serves Studio and local/shared `.jamtake` playback through opaque archival capabilities; no second
+synth, media transport or document owner was added. Live raw notes retain the 30s watchdog, while
+archival indices carry bounded authored remaining holds and drum deadlines.
+
+Explicit Flipnote SoundRecord recovery is implemented and bounded-reviewed at `1d888287`, with
+frontend selectors/custody/retry plumbing reviewed at `cefe0825`. Whole-version recovery walks
+select one effective value/removal per slot, not every raw alternative or a preserved branch.
+Score historical OBJECT edits stay manual, Unconfirmed drafts stay local/non-transferable,
+header-only Index Copy stays projection-level, and direct Closing Save/unfinished native repair
+commands remain unavailable. Gate 4's bounded lifecycle P5 promotion is unchanged.
+
+[GATE6-ACCEPTANCE](GATE6-ACCEPTANCE.md) pins the stack, bounded review verdicts and pending final
+root/native/startup/CI evidence. Older first-slice sections describe their named checkpoints,
+not current missing UI/native activation. Gate 7 release/two-real-client acceptance, broader
+emoji catalog/chat clicks and shared-deck PIXA consensus/global viewer remain later work.
+
 ## Gate 6 native exports (2026-10-14)
 
 Native `publish_pixa` now validates complete actual bytes and reuses the existing persistent
@@ -7,7 +28,8 @@ blob stage/promotion/flush path, without writing Studio metadata. Local `export_
 reuses the pure-Rust image encoder, bounded detached work, inline leases and guarded safe
 Downloads publication. It is visual-only, fixed-name, infinite-loop output, not replicated
 audio or synchronization. Command registration, policy/capabilities and review ledger move
-together. See `GATE6-NATIVE-EXPORT.md`; SetExport and full UI integration remain main-owned.
+together. SetExport validation/custody and production UI integration are now connected in the
+candidate; final combined evidence remains pending. See `GATE6-NATIVE-EXPORT.md` and the ledger.
 
 ## Gate 6 Flipnote sound core checkpoint (2026-10-14)
 
@@ -17,7 +39,8 @@ an optional canonical sound trailer retains complete source/body records. Effect
 and visible prefixes are separate from retained evidence and conservative blob holds. Native
 DTO/UI activation was not implied by that core checkpoint. The native sound omission has since
 been closed by the shared fallible conflict-preserving converter and ordinary/provisional tests;
-final UI composition and combined verification remain open. See `GATE6-FRAME-SOUND.md` for the exact contract and review scope. Older
+Production UI composition and explicit SoundRecord recovery are separately bounded-reviewed;
+final combined verification remains open. See `GATE6-FRAME-SOUND.md` for the exact contract and review scope. Older
 art-only/refusal statements below describe their earlier checkpoints.
 
 ## Exact device admin authority (2026-10-13)
@@ -81,12 +104,13 @@ promotion and flush; saving a Studio reference is a separate subsequent operatio
 Automerge or sync: it adds permission to retire their retained history into owner-receipted,
 verifiable checkpoints with bounded recovery. Existing snapshots alone do not provide that.
 
-Gate 6's first export slice is a pure frontend conversion/codec boundary (`studio-export.ts`,
+Gate 6's leaf export layer is a pure frontend conversion/codec boundary (`studio-export.ts`,
 `pixa.ts`). Scores produce the existing validated jam-take type consumed by the jukebox; PIX
 frames use the existing PIX decoder. No second synth, media transport or document owner is added.
-These helpers are not yet connected to native publication, score persistence or production controls.
+The candidate composes these helpers with typed persistence, native custody and production
+controls; the leaf functions themselves still grant no publication, edit or membership authority.
 
-Gate 4's current worktree connects Studio's typed owner decision to the same durable P1 journal,
+The merged Gate 4 baseline connects Studio's typed owner decision to the same durable P1 journal,
 recovery store and exact-envelope intent retirement used by Registry. Recently watched targets
 share the existing native idle worker for owner rotation and Registry pointer/tail maintenance.
 An installed, flushed checkpoint with an exactly matching current-owner journal can complete
@@ -119,7 +143,8 @@ queued under custody but emitted after its release; reads do not emit refresh-tr
 
 Studio's Rust schema layer (`catcoms_replication::studio`) decodes the closed IndexOp, FlipnoteOp
 and ScoreOp bodies, preserving stable element ids and the frontend's canonical JSON bytes.
-ScoreOp adds only static musical grammar and complete-envelope checks, not a score target/writer.
+ScoreOp itself supplies only static musical grammar and complete-envelope checks; the separate
+typed ScoreTarget now supplies its causal/P1 writer and exact checkpoint/recovery preflight.
 Its codec must be selected from trusted root kind; shared title/patch shapes do not identify it.
 Contextual decoding checks the whole P1 envelope and expected type/key; Index creation additionally
 binds `created_by` to a caller-supplied, independently verified full author. This decoder grants
@@ -129,12 +154,13 @@ title/expiry registers use Automerge's actual winner with all concurrent alterna
 The smallest insertion op id wins a same-object collision; the first 64 live object ids are
 visible, with explicit overflow and deleted content kept for later typed recovery. Every live
 root value is checked, including losing headers; primitive and value-byte limits bound the reader.
-The art-only Flipnote frame projection now likewise retains insertion/replacement/deletion
+The Flipnote frame projection likewise retains insertion/replacement/deletion
 evidence. Stable insertion-node origins and a right-origin forest preserve sequential placement
 and same-gap concurrent ordering without rewiring losing/deleted anchors. All live alternatives
 remain available even when a frame is deleted or beyond the 999-frame / 8 MiB playable prefix.
-Sound/score/export state rejects until its projection support lands. Neither reader authenticates
-its records. A separate Index delta validator checks canonical record/actor
+Typed Score and sound/export projection support is present in the candidate; unsupported future
+families still refuse rather than disappearing. Projection readers alone do not authenticate
+their records. A separate Index delta validator checks canonical record/actor
 binding, the sender's dependency-frontier target existence, immutable headers/evidence and exact
 same-property predecessors for mutable registers. It is a pure semantic callback: P1 must still
 authenticate membership/server/physical scope and preflight the exact checkpoint. The art/frame
@@ -199,8 +225,9 @@ There is no durable pin ledger or expiry engine. Full scans have existing work r
 65,536-reference cache rail; overflow holds bytes rather than truncate. Existing file unlisting
 and upload cleanup use the guarded delete, but still do not promise freed disk space. Explicit
 kept-copy release and unreferenced staging cleanup retain their separate ownership semantics.
-Future sound/export/doodle record support must extend enumeration before enabling reclamation
-for those formats; current unsupported records cannot be interpreted as an empty hold set.
+The Gate 6 candidate extends this enumeration to retained sound/export CIDs, including losing,
+deleted and overflow evidence. Future doodle/unknown families must extend typed enumeration before
+enabling reclamation; unsupported records cannot be interpreted as an empty hold set.
 Explicit Studio exchange now reuses current sealed operations, blinded topics, the cancel-safe
 subscription reconciler and one-shot publication. A bounded opt-in sync inbox authenticates,
 but the existing accounted Studio store remains the only durable admission path. Logical
@@ -900,7 +927,8 @@ fakes own no detached lower work.
 Studio's Gate 6 core continuation extends the existing P1 `StudioTarget` with a score family,
 not a new store or transport. Reusable remove-wins musical slots, sender-frontier checks and
 explicit-family snapshots/restart units are specified in `GATE6-STATE-DESIGN.md`. Existing art
-and Index bytes remain unchanged; app/native/wire score activation is still a separate boundary.
+and Index bytes remain unchanged; explicit app/native/wire family activation is now implemented
+and reviewed separately. Final combined acceptance remains governed by the Gate 6 ledger.
 
 [File reliability](design-file-reliability.md) separates actor-owned authorization/storage from bounded
 network tasks, projects conflicting first file-index lists consistently, and adds explicit local kept

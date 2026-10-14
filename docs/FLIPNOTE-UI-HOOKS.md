@@ -1,9 +1,13 @@
 # Flipnote UI hook guide
 
 Current status (2026-10-14): the owner accepted the Gate 4 and Gate 5 merges. PR #43 merged
-into `Create-suite-2` at `7cbe8cbe131e1be8e672d04341c31a1d2b52a98d`; Gate 6 starts from that
-checkpoint on `gate6-sound-export`. Claims/Ask/Pass are implemented, advisory call features.
-Sound/linked Music/`.pixa` production controls still await Gate 6 integration.
+into `Create-suite-2` at `7cbe8cbe131e1be8e672d04341c31a1d2b52a98d`. Gate 6's stacked PR #44/#45
+candidate is at `cefe08256acb6ba1e4e70ebc0f159eaf7cfce50d`: Score/Sound/linked Music/PIXA/GIF
+production controls and archival take playback are connected. Backend SoundRecord recovery is
+implemented/bounded-reviewed through `9fed4588`; final combined verification remains pending.
+This is not Gate 6 acceptance.
+Claims/Ask/Pass remain advisory call features. [GATE6-ACCEPTANCE](GATE6-ACCEPTANCE.md) is the
+current stack/evidence ledger; dated older checkpoint statements retain their original scope.
 
 Historical Gate 4 checkpoint (2026-10-12): PR #41's reviewed runtime/UI code was
 `610c45e323bf018c2a3ffa91bbf359faaf707be3`. The dated candidate/check statements below describe
@@ -11,12 +15,11 @@ that earlier checkpoint, not the present merge status. The Gate 4 ledger is
 [GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md); historical
 implementation and verification detail is in [HANDOVER](HANDOVER.md).
 
-The completion candidate promotes P5 for the reviewed local-draft lifecycle and ticketed
+The merged Gate 4 baseline promotes P5 for the reviewed local-draft lifecycle and ticketed
 awaiting-tenure Save boundary. Its lifecycle/read/export/archive/copy/dispose commands and the
 Unconfirmed Save begin/visit pair are registered, permissioned, parsed exhaustively and consumed
-by the real Studio surface. This promotion remains isolated from the shared
-`gate4-agent1-runtime` branch; final review is complete and merge waits for normal checks on the
-final harness/docs head. Native repair commands remain unregistered.
+by the real Studio surface. This is a bounded promotion, not general permission for direct
+Closing Save or arbitrary repair commands. Native unfinished repair commands remain unregistered.
 
 The [handoff signing checkpoint](GATE4-HANDOFF-SIGNING-REVIEW.md) has its bounded production PASS,
 and the 2026-10-10 short re-review closes its last test-coverage finding. Later integrated work now
@@ -34,7 +37,26 @@ logs: 19 native tests passed, both mutations failed at their intended assertions
 regressions passed. Execution used the PR merge checkout for `c60de4e`; `134394e` adds only docs.
 The reviewer did not independently rerun Cargo. TAIL-TEST-001 also remains closed.
 
-## Handoff to the UI agent
+## Current Gate 6 hook inventory
+
+| Surface / operation | Current hook and boundary |
+|---|---|
+| Score create/read/apply | Existing `studio_create/read/apply` plus optional `objectKind:"score"`; omitted kind remains Flipnote. `studio-native.ts` checks the selected family and raw slots/readiness; `studio-session.ts` preserves kind with exact nonce/epoch/body retry identity. No parser fallback to the fixture store. |
+| Score composer | `ScoreEditor.svelte`, keyed by object, uses the session's Score operations and App's existing validated jam recipe library. Authored sixteenth-step holds, recipe readiness, overflow/conflicts/removals and cleanup remain visible. Title also updates the existing Index title path. |
+| Sound markers / Music link | `StudioSound.svelte` uses native complete sound records; `set_sfx` requires authored `duration_ms`1..600000, alongside recipe/removal and linked Score header operations. All-active paged cleanup includes orphan/overflow markers whose frames cannot be selected. Local emoji JSON import is4KiB and copies validated `len`20..1000; no shared catalog/image-author binding or chat-click feature is claimed. |
+| Resolve/play/export | `studio-resolved-export.ts` plus session preparation require exact complete native snapshots, stable native `group`, current readiness and all exact held frame bytes. Draft media requires its own rebuilt `contentEpoch/group`; an unreadable draft never substitutes the ordinary base. Linked Score must be in the same group/channel. |
+| Publish/read back PIXA | `publish_pixa({server,bytesB64})->{cid,bytes}` acknowledges durable blob custody only. A separately queued SetExport Save adds the reference. `request_blob_bounded` reads its exact CID/length and the full package is revalidated before preview/play/download/share. A Studio blob CID is not a fileshare CID. |
+| Local GIF / browser downloads / share | `export_studio_gif` returns actual `path/displayed/warning/contentValidation`; reveal failure is still a saved file. GIF is visual-only/infinite-loop with fixed safe filename. Browser download requests make no native save-path claim. Explicit Score/PIXA sharing reuses the existing File upload path; shared-deck PIXA support is not implied. |
+| Playback lifecycle | App supplies the existing patch library and scoped audio actions; Studio and existing local/shared `.jamtake` playback reuse one JamEngine/allocator and engine-minted archival capabilities. Raw live notes keep their30s watchdog. Explicit gesture/seek, bounded tick work, complete hold/tail EOF, scope/lock/membership/Deafen and pending-download cancellation are enforced. Remote heartbeats never resume a suspended synth or resurrect suppressed ownership. |
+| Score / sound recovery | Existing preview/apply/draft-Copy commands carry the pinned object family. Score choices are `scorePatch/scoreHeader/scoreCell`; frontend sound choice is `{kind:"soundRecord",value:hex64}` naming an authenticated historical operation, with exact PIXA custody before an export reference. SoundRecord backend is separately implemented/bounded-reviewed; `GATE6-SOUND-RECOVERY.md` specifies additive Restore, explicit Copy, exact linked-Score scope and held-media custody. Whole-version walks choose one effective value/removal per slot; they do not replay every losing alternative or preserve a branch. |
+| Visual fixture | `?fixture=chat&studio=1` uses decimal channel`1`, real PIX bytes and native-shaped Score/sound/conflict reads. `html[data-visual-ready="chat"]` remains the readiness marker. Writes/publication/GIF deliberately refuse: a screenshot cannot pretend that native Save succeeded. |
+
+Gate 4's lifecycle and projection-level/header-only Index Copy preservation limitation is
+unchanged. Only an archive-preservation acknowledgement proves retained branch preservation.
+Shared-deck PIXA media-kind/consensus/global viewer and native audible/two-real-client release
+acceptance remain Gate 7/UI follow-ups, not missing native permission to expose unfinished writes.
+
+## Existing UI integration guidance
 
 The existing mockup now has a native integration implementation (`0b6e870`).
 The typed adapter is [studio-native.ts](../apps/desktop/src/studio-native.ts);
@@ -58,8 +80,9 @@ lossless, fence obsolete async results, and preserve conflicts/overflow/deletion
 also appears on ordinary editable local views; it is not the read-only discriminator. Do not
 invent a phase, settlement receipt, author confirmation or publication claim for a preview.
 
-Keep direct Closing Save, native repair controls and sound/linked Music/`.pixa` export
-(Gate 6) unavailable. Gate 5 claims/Ask/Pass are advisory and do not grant edit authority.
+Keep direct Closing Save and unfinished native repair controls unavailable. The Gate 6 candidate
+now connects Sound/linked Music/PIXA/GIF through the hooks above; final acceptance is still pending.
+Gate 5 claims/Ask/Pass are advisory and do not grant edit authority.
 The reviewed lifecycle family and ticketed
 Unconfirmed Save are now connected to the real Studio surface; they grant only bounded local-draft
 authority. Recovery backup export is also available and uses a different format. These controls do
@@ -75,7 +98,7 @@ native Studio tests on `febbd70`; two-client acceptance also passes. Broader str
 blocked by existing unused security-intent APIs, so these results do not mean the whole PR is green.
 See [HANDOVER](HANDOVER.md) for exact commands and current validation status.
 
-Gate 4 remains open. The combined actor regression now exercises competing authoritative
+Historical scheduling checkpoint: Gate 4 was still open at this point. The combined actor regression exercises competing authoritative
 Studio/Registry installations under retained-preview, cancelled-parser and cancelled-transport
 pressure, with owner reachability returning without MLS churn. The final checkpoint `6b71d96`
 passes its 11 focused actor/preview/newcomer tests, shared native fixture, Clippy and all 19 native
@@ -372,7 +395,7 @@ results, but frontend navigation can still supersede a legitimate returned view.
 The backend handles recent-target watches, missed-edit catch-up, checkpoint discovery and
 installation; the UI should not implement a second catch-up scheduler or derive receipt proofs.
 
-## Waiting on Gate 4 and later
+## Current availability and remaining acceptance
 
 | Canonical UI surface | Backend availability / next hook |
 |---|---|
@@ -380,11 +403,11 @@ installation; the UI should not implement a second catch-up scheduler or derive 
 | Current owner has not confirmed history | Native Read/List return the distinct `awaitingTenureReceipt: true` preview documented above. Its base is never ordinary authoring authority. The candidate UI can retain edits in the separately labelled local-only Unconfirmed overlay, with exact retry or explicit re-authoring as the typed result directs. |
 | History fault / repair progress | Actual `phase:"fault"` and `fault` invalidations are available. The detached bounded repair runtime is merged and reviewed at its stated boundary, but it has no native command or `repairing` event. Restore/Copy saves ordinary content in an Open target and cannot clear Fault. Historical Read/Export remain available. |
 | Local overlay while rotating | Closing Flow S/handoff remains automatic and Shared Apply still refuses Closing/Fault. The registered lifecycle UI can inspect, export, preserve, copy or explicitly dispose retained work; it does not expose a direct Closing Save command. |
-| Manual lifecycle and preview-local Save | Registered on the isolated candidate. `eligibility`, `manualReason` and `unconfirmedState` drive truthful actions; awaiting-tenure edits use the ticketed Unconfirmed Save pair. `pending`/`busy` retry the same bytes, `paused` requires explicit access before the same request, `newTicket` requires explicit re-authoring, and `none` cannot be retried as success. Final review is complete; preserve this boundary through the final head's normal checks and merge. |
-| Recovery rail: Restore / Copy / Export | List/inspect/backup export, per-item Restore/Copy and conservative own-intent replay are connected. Unsafe replay is manual recovery, never settlement. Final Gate 4 acceptance remains pending; backup export is not `.pixa`. |
+| Manual lifecycle and preview-local Save | Registered in the accepted Gate 4 baseline. `eligibility`, `manualReason` and `unconfirmedState` drive truthful actions; awaiting-tenure edits use the ticketed Unconfirmed Save pair. `pending`/`busy` retry the same bytes, `paused` requires explicit access before the same request, `newTicket` requires explicit re-authoring, and `none` cannot be retried as success. This does not enable direct Closing Save or transferable Unconfirmed authority. |
+| Recovery rail: Restore / Copy / Export | List/inspect/backup export, per-item Restore/Copy and conservative own-intent replay are connected. Score historical OBJECT replay stays manual; SoundRecord backend recovery is implemented and separately reviewed; final combined verification is pending. Whole-version walks choose one effective value/removal per slot, not all alternatives or branch preservation. Backup export is not PIXA; final Gate 6 evidence is in `GATE6-ACCEPTANCE.md`. |
 | Eviction warning / countdown | Use the listing's actual warning pair/deadline and `studio_recovery_acknowledge`. Refresh after the action and matching `settlement-changed` events. |
 | Claims, Ask, Pass, countdown | **Gate 5 merged and owner-accepted in PR #43.** These are frontend-only call data, not a native command. `Studio.svelte` receives `claims: StudioClaimSnapshot \| null` and `claimActions` (`select`, `claim`, `autoClaim`, `release`, `ask`, `cancelAsk`, `pass`) from the app; INTERFACES section 13 is the contract. The snapshot is non-null only while the user is in a call on the Studio's own server and the Studio is the open view. Claims are advisory and never lock a frame or gate a save. Countdowns are receiver-observed (90 s; claims refresh every 30 s; Asks are sent once per peer). A frame a transport refused is retried, so an Ask or a Pass is not lost. A peer whose connection drops is hidden until it recovers. The local fixture claim table in `studio-store.ts` is not the protocol. |
-| Sound, linked Music, `.pixa` export | Gate 6 has started on `gate6-sound-export` from the merged Gate 5 base. Pure score/take export and `.pixa` helpers reuse the existing validators; typed persistent audio/export state and native/UI integration remain pending. These helpers add no callable command and do not enable the production controls. See `GATE6-DESIGN.md`. |
+| Sound, linked Music, `.pixa` export | Connected in the Gate 6 integration candidate: typed causal/persistent sound/Score, production controls, actual-byte publication/record/readback, same-engine authored playback and local GIF. The inventory above states the callable hooks and honest export outcomes. Cumulative code review is clear; fresh root/native/startup and hosted verification remain pending; see `GATE6-ACCEPTANCE.md`. |
 
 Implementation progress and reuse evidence live in [BACKEND-IMPLEMENTATION](BACKEND-IMPLEMENTATION.md).
 UI hooks will be marked callable here only once their actor/native path and tests exist.

@@ -1,5 +1,54 @@
 # Mewtual; Handover
 
+## Current Gate 6 integration candidate (2026-10-14; final verification pending)
+
+Gate 5 is owner-accepted at `7cbe8cbe131e1be8e672d04341c31a1d2b52a98d` (PR #43).
+PR #44 supplies export foundations/nonce correction at `0fe17691fa353cee9b37dc85d4ea4149a5aa8ec5`;
+stacked PR #45 is at checkpoint `cefe08256acb6ba1e4e70ebc0f159eaf7cfce50d`. These are exact
+checkpoint heads, not final Gate 6 acceptance. [GATE6-ACCEPTANCE](GATE6-ACCEPTANCE.md) is the
+current evidence ledger; earlier dated sections below remain historical evidence for their pins.
+The implementation-complete candidate is `9fed4588d5f29862f18b38f7f44a14e506fefe4b`, including
+reviewed backend SoundRecord recovery `1d8882875e7178f80140e70c102b8ab6e74ae973`; final combined
+runs are in progress, not yet acceptance. Cumulative implementation/integration review is clear
+through mechanical native-formatting successor `8632b7bc69ebc096e5e8a2f8eb19465d902a282c`, with
+47 selected tests independently passing and no remaining B/H/M/L. Root-Rust/TypeScript bytes are unchanged.
+
+Typed Score and complete Flipnote sound state now use the existing causal/P1/vault/native paths.
+Score composer, Sound markers with authored holds, linked Music, actual-byte PIXA publication/
+readback/preview/download/share and local visual-only GIF export are connected. The existing local/
+shared `.jamtake` consumer reuses the same archival engine capability; long holds no longer enter
+the live 30-second watchdog. Scope, membership, lock, Deafen and pending-download cancellation
+remain fenced. Bounded actual-diff reviews are clear through UI `9330fc08`, take consumer
+`b8969aa3`, combined native/vault/drum corrections `bc86a44c` and frontend sound recovery `cefe0825`.
+
+Explicit backend SoundRecord recovery is implemented and bounded-reviewed; its ten focused,
+eighteen broader Restore and one native-choice tests pass. [GATE6-SOUND-RECOVERY](GATE6-SOUND-RECOVERY.md)
+records the exact derived-body/custody/removal rules. The contract permits an explicit retained
+alternative by op id, but whole-version walks intentionally choose one effective value/removal
+per slot, not every raw alternative in sequence. Only archive preservation proves branch preservation.
+Header-only Index Copy's accepted projection-level limitation remains unchanged.
+
+Current verification: frontend 1555/1555 passes at `9fed4588`; check 0/0 and production build pass
+at `e83f12e4` (29.07s, large-chunk advisory). The host flow rerun passes all nine scenarios at `cefe0825` after a sandbox
+CDP timeout (subsequent App change is CSS only, not a newly claimed flow run).
+Real 900×640 browser inspection covers Score/Sound/link states without App console errors;
+screenshots are under root `target`, not the repository. The reviewed Score loop-checkbox layout
+fix at `e83f12e4` is validated inside that viewport. The native 345+5 and full root aggregate
+2443 passed / 24 existing ignored at `f1151601` precede SoundRecord changes. Fresh final
+root/native runs, startup and hosted checks are PENDING. Local Git-Bash ambient pass is not Linux
+CI evidence. The integration owner must attach final exact heads/runs to the ledger.
+
+Gate 4's bounded lifecycle P5 promotion remains accepted; this is not a global P5=false claim.
+Direct Closing Save/native unfinished repair commands stay unavailable, Unconfirmed local drafts
+remain non-transferable and Score historical OBJECT replay remains manual. Local emoji JSON
+import does not implement the shared emoji catalog/chat clicks. Shared-deck PIXA consensus/global
+viewer and native audible/two-real-client release acceptance remain later Gate 7/UI work.
+
+## Historical implementation checkpoints
+
+The entries below record what existed and what was pending at their named commits. They do not
+override the current candidate/verification status above or expand a bounded review verdict.
+
 ## Gate 6 combined-review corrections (2026-10-14; acceptance still open)
 
 Fresh cross-layer review found and closed three MEDIUM defects: ticketed local-only SetExport
