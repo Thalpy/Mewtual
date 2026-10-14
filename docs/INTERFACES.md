@@ -3618,7 +3618,10 @@ the authenticated source and its sequence/seed nonce together across reconnects,
 index and legacy wave make the take independently playable. Events are stamped on the receiver's
 local monotonic take timeline when the authenticated event is admitted. Caps: 10 minutes,
 20 000 events, 512 KiB serialized, 16 participants, 64 lanes and 64 patches; group/call/performer
-identity strings are each capped at 256 UTF-8 bytes. Playback validates
+identity strings are each capped at 256 UTF-8 bytes.
+Session nonce `sn` must be a primitive string of exactly 16 lowercase hex characters; numbers,
+arrays and boxed strings are not coerced. This rule is shared by recorder admission and take imports.
+Playback validates
 and hashes the bounded patch table once per take into an engine-owned archival table; it does not
 multiply work by lanes or force archival recipes through the live peer's four-entry LRU. Across
 rapid replacements, one preparation runs and only the latest waits; superseded work checks

@@ -152,3 +152,19 @@ boundaries. The authored-duration amendment received both design and actual-diff
 re-review; six focused duration/snapshot checks also passed independently. No remaining
 BLOCKER/HIGH/MEDIUM/LOW finding was reported for this checkpoint. The primary ran the full suites;
 the reviewer did not duplicate them. This is not acceptance of the unimplemented Gate 6 slices.
+
+## External review correction: nonce types (2026-10-14)
+
+The external review of `575f01de` found that the inherited shared `validNonce` guard used
+`RegExp.test` without a runtime string check. A JSON number or single-element array could pass
+through take parsing and canonical `.pixa` admission as a non-string lane nonce. The exporter
+itself generated strings; this was an imported-input schema defect, not established live authority
+escalation. The shared guard now accepts `unknown`, requires a primitive string and then applies
+the same lowercase-hex rule. Legal takes retain their exact schema and bytes.
+
+Three new regressions failed before the correction and pass afterward. They cover shared JSON
+and direct take validation, recorder rejection before coercion/lane allocation, and independent
+`.pixa` framing through decoder/encoder rejection. All 44 recorder/export focused tests pass.
+Independent read-only correction review closes the MEDIUM finding with no remaining finding;
+the prior export ownership/bounds review remains intact. Complete suites are being rerun for this
+correction; the earlier checkpoint results above must not be mistaken for new-head evidence.

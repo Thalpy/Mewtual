@@ -309,6 +309,41 @@ test("take validation rejects parser tricks, unknown fields and dishonest lane o
   assert.equal(parseJamTakeJson(JSON.stringify(take)).ok, true);
 });
 
+test("take validation requires string session nonces without coercing numbers or arrays", () => {
+  const rec = recorder();
+  start(rec);
+  rec.recordDrum({ source: alice, sessionNonce: aliceSn, ms: 0, sequence: 1, pad: 0 });
+  const take = rec.stop();
+  for (const sn of [1111111111111111, ["1111111111111111"], [1111111111111111], null, {}, "", "1".repeat(15), "1".repeat(17), "A".repeat(16)]) {
+    const invalid = { ...take, lanes: [{ src: 0, sn }] };
+    assert.equal(validateJamTake(invalid).ok, false);
+    assert.equal(parseJamTakeJson(JSON.stringify(invalid)).ok, false);
+  }
+  assert.equal(validateJamTake({ ...take, lanes: [{ src: 0, sn: new String(aliceSn) }] }).ok, false);
+  const valid = validateJamTake({ ...take, lanes: [{ src: 0, sn: "1111111111111111" }] });
+  assert.ok(valid.ok);
+  assert.equal(typeof valid.take.lanes[0].sn, "string");
+  assert.equal(valid.take.lanes[0].sn, "1111111111111111");
+});
+
+test("recording rejects non-string session nonces before coercion or lane allocation", () => {
+  const rec = recorder();
+  start(rec);
+  let conversions = 0;
+  for (const sessionNonce of [1111111111111111, ["1111111111111111"], {
+    toString() { conversions++; return aliceSn; },
+  }]) {
+    assert.deepEqual(rec.recordDrum({ source: alice, sessionNonce: sessionNonce as string, ms: 0, sequence: 1, pad: 0 }), {
+      ok: false, reason: "invalid",
+    });
+  }
+  assert.equal(conversions, 0, "untrusted nonce conversion must never run");
+  assert.ok(rec.recordDrum({ source: alice, sessionNonce: aliceSn, ms: 0, sequence: 1, pad: 0 }).ok);
+  const take = rec.stop();
+  assert.deepEqual(take.lanes, [{ src: 0, sn: aliceSn }]);
+  assert.equal(take.events.length, 1);
+});
+
 test("participant commitments bind group, take, call, device and every reconnect lane", async () => {
   const rec = recorder();
   start(rec);

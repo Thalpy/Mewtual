@@ -171,6 +171,18 @@ test("take decoding rejects noncanonical JSON, duplicate fields, invalid UTF-8 a
   assert.throws(() => decodePixa(rawPackage(text)), /UTF-8/);
 });
 
+test("pixa import and export reject non-string take session nonces", () => {
+  for (const sn of [1111111111111111, ["1111111111111111"], [1111111111111111]]) {
+    const take = JSON.parse(vector.noScoreTake);
+    take.lanes[0].sn = sn;
+    const text = canonicalJson(take);
+    assert.equal(parseJamTakeJson(text).ok, false);
+    // Construct framing independently: encoder rejection alone cannot pin decoder admission.
+    assert.throws(() => decodePixa(rawPackage(text)), /take lane/);
+    assert.throws(() => encodePixa({ fps: 12, frames: [goldenFrame()], take, sfx: [] }), /take lane/);
+  }
+});
+
 test("PIX validation, exact Flipnote dimensions and SFX indices remain mandatory", () => {
   const bytes = rawPackage(vector.noScoreTake);
   for (const [offset, value] of [[11, 0], [15, 190], [35, 99], [34, 0]] as const) {

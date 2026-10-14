@@ -1,5 +1,15 @@
 # Mewtual; Handover
 
+## Gate 6 nonce validation correction (2026-10-14)
+
+External review of PR #44's `575f01de` checkpoint found an inherited `RegExp.test` coercion:
+numeric/array session nonces could survive shared take validation and `.pixa` import. The shared
+guard now requires a primitive string; legal nonce representation is unchanged. Three new
+regressions were demonstrated red before the fix, and all 44 recorder/export focused tests now
+pass. Independent read-only re-review closes the MEDIUM finding with no remaining finding.
+The mandatory root/native/frontend suites and frontend check/build are being rerun. Earlier
+checkpoint counts below describe that earlier head, not completed verification of this correction.
+
 ## Gate 6 export foundations (2026-10-14; first bounded checkpoint)
 
 The owner accepted Gate 5 and PR #43 merged into `Create-suite-2` as
