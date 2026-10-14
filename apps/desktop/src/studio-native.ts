@@ -10,9 +10,11 @@
 // on both and is never the read-only discriminator.
 
 import type { NativeInvoker } from "./native-download.ts";
-import { PIX_MAX_BYTES, SCORE_MAX_STEPS, SCORE_ROWS, type ScoreCell } from "./studio-contract.ts";
+import { PIX_MAX_BYTES, SCORE_MAX_STEPS, SCORE_ROWS, type ScoreCell, type FlipnoteOp } from "./studio-contract.ts";
+import { PIXA_MAX_BYTES } from "./pixa.ts";
 import type { JamPatch } from "./jam-contract.ts";
 import { validateJamPatch } from "./jam-patch.ts";
+import { studioSoundModel, type StudioSoundModel } from "./studio-sound.ts";
 
 export type Hex32 = string;
 export type Hex64 = string;
@@ -65,6 +67,13 @@ export type FrameBlob = { cid: Hex64; bytes: number };
 export type FrameInsertion = { checkpoint: boolean; after: Hex32 | null; anchor: Hex64 | null; before: Hex64 | null; blob: FrameBlob };
 export type FrameEntry = { pixels: Register<FrameBlob, FrameSource>; insertions: Valued<FrameInsertion, FrameSource>[] };
 export type FrameLimits = { count: boolean; bytes: boolean };
+export type FrameSoundOp = Exclude<FlipnoteOp, { op: "insert_frame" | "remove_frame" | "replace_frame" | "set_header" }>
+  | { op: "set_header"; field: "score"; value: Hex32 | null };
+export type FrameSoundReadiness = {
+  sfxOverflow: Hex32[]; patchOverflow: Hex64[]; exportOverflow: Hex32[];
+  missingFrames: Hex32[]; missingPatches: Hex32[]; conflicts: boolean;
+};
+export type FrameSoundContent = { records: Record<string, Register<FrameSoundOp, FrameSource>>; readiness: FrameSoundReadiness };
 export type FlipnoteContent = {
   kind: "flipnote";
   title: Register<string, FrameSource> | null;
@@ -74,6 +83,8 @@ export type FlipnoteContent = {
   declaredFrameBytes: number;
   overCap: Record<Hex32, FrameLimits>;
   tombstones: Record<Hex32, FrameSource[]>;
+  /** Omitted on older art-only replies; present sound evidence is never cast away. */
+  sound?: FrameSoundContent;
 };
 /** Raw Automerge winner and effective remove-wins state are deliberately separate evidence. */
 export type ScoreSlot<T> = { removed: boolean; register: Register<T | null, IndexSource> };
@@ -102,6 +113,8 @@ export type StudioView<C extends StudioContent = StudioContent> = {
   epochId: Hex32;
   epoch: Decimal;
   channel: Decimal;
+  /** Stable native projection group id, never a process-local server handle. Older replies omit it. */
+  group?: string;
   provisional: true;
   content: C;
 } & StudioTrust;
@@ -191,7 +204,7 @@ export type OverlayHandoffAttempt = {
 export type OverlayProvenance =
   | { kind: "closing" }
   | { kind: "unconfirmed"; provider: Hex64; observedMlsEpoch: Decimal; observedAtMs: Decimal };
-export type OverlayTarget = { channel: Decimal; object: Hex32 | null };
+export type OverlayTarget = { channel: Decimal; object: Hex32 | null; objectKind?: StudioObjectKind };
 export type OverlayInspection =
   | ({ v: 1; kind: "absent" } & OverlayTarget)
   | ({ v: 1; kind: "local-draft"; eligibility: "transferable" | "manual" | null;
@@ -208,6 +221,7 @@ export type OverlayLifecycle = {
   kind: "overlayLifecycle";
   channel: Decimal;
   object: Hex32 | null;
+  objectKind?: StudioObjectKind;
   branch: { branch: Hex64; content: Hex64; generation: Decimal; accepted: number } | null;
   prepared: boolean;
   eligibility: "transferable" | "manual" | null;
@@ -242,7 +256,7 @@ export type OverlayArchive = {
 };
 export type OverlayArchiveReleased = { v: 1; kind: "overlayArchiveReleased"; reconcileRequired: true };
 export type OverlayDisposed = {
-  v: 1; kind: "overlayDisposed"; channel: Decimal; object: Hex32 | null; author: Hex64;
+  v: 1; kind: "overlayDisposed"; channel: Decimal; object: Hex32 | null; objectKind?: StudioObjectKind; author: Hex64;
   provenance: OverlayProvenance; basis: Hex64; branch: Hex64; content: Hex64;
   generation: Decimal; disposal: { mode: "preserved"; archive: Hex64 } | { mode: "discarded" };
   accepted: number; sequence: Decimal; atMs: Decimal; terminal: true;
@@ -254,20 +268,20 @@ export type OverlayCopyPreview = {
   preservesBranch: false; provisional: true;
 };
 export type OverlayCopyApplied = {
-  v: 1; kind: "overlayCopyApplied"; channel: Decimal; object: Hex32 | null;
+  v: 1; kind: "overlayCopyApplied"; channel: Decimal; object: Hex32 | null; objectKind?: StudioObjectKind;
   contentSaved: true; alreadySaved: boolean; provisional: true; branchPreserved: false;
 };
 export type OverlayCopyRefused = {
-  v: 1; kind: "overlayCopyRefused"; channel: Decimal; object: Hex32 | null;
+  v: 1; kind: "overlayCopyRefused"; channel: Decimal; object: Hex32 | null; objectKind?: StudioObjectKind;
   reason: "stalePreview"; retry: "repreview"; written: false;
 };
 export type OverlayCopyApplyResult = OverlayCopyApplied | OverlayCopyRefused;
 export type UnconfirmedOverlaySaveTicket = {
-  v: 1; kind: "unconfirmedOverlaySaveTicket"; channel: Decimal; object: Hex32 | null;
+  v: 1; kind: "unconfirmedOverlaySaveTicket"; channel: Decimal; object: Hex32 | null; objectKind?: StudioObjectKind;
   basis: Hex64; branch: Hex64; provenance: "unconfirmed";
 };
 export type UnconfirmedOverlaySave = ({
-  v: 1; kind: "unconfirmedOverlaySave"; channel: Decimal; object: Hex32 | null;
+  v: 1; kind: "unconfirmedOverlaySave"; channel: Decimal; object: Hex32 | null; objectKind?: StudioObjectKind;
 } & (
   | { state: "saved"; basis: Hex64; accepted: number; localOnly: true; provisional: true; provenance: "unconfirmed" }
   | { state: "pending" | "busy"; retry: "sameRequest" }
@@ -296,10 +310,10 @@ export type UnconfirmedOverlaySaveInput = { basis: Hex64; branch: Hex64; nonce: 
 
 // --- Events --------------------------------------------------------------------------------------
 
-export type StudioUpdatedEvent = { server: number; channel: Decimal; object: Hex32 | null };
+export type StudioUpdatedEvent = { server: number; channel: Decimal; object: Hex32 | null; objectKind?: StudioObjectKind };
 export type StudioReceivePausedEvent = { server: number };
 export type SettlementState = "open" | "closing" | "settled" | "fault" | "recoveryAvailable" | "recoveryEvictionPending" | "refreshRequired";
-export type SettlementChangedEvent = { server: number; docType: 15 | 16; logicalKey: Hex32; channel: Decimal; object: Hex32 | null; state: SettlementState };
+export type SettlementChangedEvent = { server: number; docType: 15 | 16; logicalKey: Hex32; channel: Decimal; object: Hex32 | null; objectKind?: StudioObjectKind; state: SettlementState };
 
 // --- Checks --------------------------------------------------------------------------------------
 
@@ -466,7 +480,94 @@ export function parseFlipnoteContent(v: unknown, what = "content"): FlipnoteCont
       return { count: flag(e.count, `${w}.count`), bytes: flag(e.bytes, `${w}.bytes`) };
     }),
     tombstones: mapOf(r.tombstones, `${what}.tombstones`, asHex32Key, (t, w) => list(t, w).map((s, i) => frameSource(s, `${w}[${i}]`))),
+    ...(r.sound === undefined ? {} : { sound: parseFrameSoundContent(r.sound, `${what}.sound`) }),
   };
+}
+
+/** Validate the full sound operation and its physical-key/source binding, including losing values. */
+function soundOperation(value: unknown, what: string): FrameSoundOp {
+  const r = closedDataRecord(value, what);
+  const exact = (keys: string[]) => { if (Object.keys(r).sort().join(",") !== keys.sort().join(",")) fail(`${what} has unknown/missing operation fields`); };
+  switch (r.op) {
+    case "set_sfx": {
+      exact(["op", "sfx", "frame", "patch", "note", "duration_ms"]);
+      const note = count(r.note, `${what}.note`), duration_ms = count(r.duration_ms, `${what}.duration_ms`);
+      if (note > 127 || duration_ms < 1 || duration_ms > 600_000) fail(`${what} sound note/duration is outside its bound`);
+      return { op: "set_sfx", sfx: hex32(r.sfx, `${what}.sfx`), frame: hex32(r.frame, `${what}.frame`), patch: hex64(r.patch, `${what}.patch`), note, duration_ms };
+    }
+    case "remove_sfx": exact(["op", "sfx"]); return { op: "remove_sfx", sfx: hex32(r.sfx, `${what}.sfx`) };
+    case "set_patch": {
+      exact(["op", "patch", "descriptor"]);
+      const descriptor = validateJamPatch(r.descriptor);
+      if (!descriptor.ok) fail(`${what}.descriptor: ${descriptor.error}`);
+      return { op: "set_patch", patch: hex64(r.patch, `${what}.patch`), descriptor: descriptor.patch };
+    }
+    case "remove_patch": exact(["op", "patch"]); return { op: "remove_patch", patch: hex64(r.patch, `${what}.patch`) };
+    case "set_export": {
+      exact(["op", "export", "cid", "bytes", ...("expiry" in r ? ["expiry"] : [])]);
+      const bytes = count(r.bytes, `${what}.bytes`);
+      if (bytes < 1 || bytes > PIXA_MAX_BYTES) fail(`${what}.bytes is outside the pixa bound`);
+      return { op: "set_export", export: hex32(r.export, `${what}.export`), cid: hex64(r.cid, `${what}.cid`), bytes,
+        ...("expiry" in r ? { expiry: r.expiry === null ? null : count(r.expiry, `${what}.expiry`) } : {}) };
+    }
+    case "remove_export": exact(["op", "export"]); return { op: "remove_export", export: hex32(r.export, `${what}.export`) };
+    case "set_header":
+      exact(["op", "field", "value"]);
+      if (r.field !== "score") fail(`${what} is not a sound header`);
+      return { op: "set_header", field: "score", value: r.value === null ? null : hex32(r.value, `${what}.value`) };
+    default: return fail(`${what} is not a known sound operation`);
+  }
+}
+
+function soundOperationKey(op: FrameSoundOp, source: FrameSource): string {
+  switch (op.op) {
+    case "set_sfx": return `s/${op.sfx}`;
+    case "remove_sfx": return `q/${op.sfx}/${source.opId}`;
+    case "set_patch": case "remove_patch": return `p/${op.patch}`;
+    case "set_export": return `x/${op.export}/${source.opId}`;
+    case "remove_export": return `z/${op.export}/${source.opId}`;
+    case "set_header": return "h/score";
+  }
+}
+
+export function parseFrameSoundContent(value: unknown, what = "sound"): FrameSoundContent {
+  const r = closedDataRecord(value, what, ["records", "readiness"]), rawRecords = closedDataRecord(r.records, `${what}.records`);
+  let remaining = 3 * 20_000 + 8192;
+  if (Object.keys(rawRecords).length > remaining) fail(`${what} sound records exceed their bound`);
+  const records = mapOf(rawRecords, `${what}.records`, (key) => {
+    if (key !== "h/score" && !/^(?:s\/[0-9a-f]{32}|p\/[0-9a-f]{64}|[qxz]\/[0-9a-f]{32}\/[0-9a-f]{64})$/.test(key)) fail("sound physical key is malformed");
+    return key;
+  }, (raw, w) => {
+    const recordValue = closedDataRecord(raw, w, ["selected", "conflicts"]), conflicts = closedDataList(recordValue.conflicts, `${w}.conflicts`);
+    if (conflicts.length + 1 > remaining) fail(`${what} sound values exceed their bound`);
+    remaining -= conflicts.length + 1;
+    closedDataRecord(recordValue.selected, `${w}.selected`, ["value", "source"]);
+    for (const [index, conflict] of conflicts.entries()) closedDataRecord(conflict, `${w}.conflicts[${index}]`, ["value", "source"]);
+    const result = register(recordValue, w, soundOperation, (source, name) => frameSource(closedDataRecord(source, name, ["opId", "author", "nonce", "ts"]), name));
+    const key = w.slice(`${what}.records.`.length), seen = new Set<string>();
+    for (const alternative of [result.selected, ...result.conflicts]) {
+      if (soundOperationKey(alternative.value, alternative.source) !== key) fail(`${w} operation/key/source disagree`);
+      if (seen.has(alternative.source.opId)) fail(`${w} repeats a sound source operation`);
+      seen.add(alternative.source.opId);
+    }
+    return result;
+  });
+  const readiness = closedDataRecord(r.readiness, `${what}.readiness`, ["sfxOverflow", "patchOverflow", "exportOverflow", "missingFrames", "missingPatches", "conflicts"]);
+  const sortedIds = (input: unknown, w: string, parse: (v: unknown, w: string) => string) => {
+    const values = closedDataList(input, w);
+    if (values.length > 68_192) fail(`${w} exceeds its bound`);
+    const result = values.map((v, i) => parse(v, `${w}[${i}]`));
+    if (result.some((v, i) => i > 0 && v <= result[i - 1])) fail(`${w} is not a sorted unique list`);
+    return result;
+  };
+  return { records, readiness: {
+    sfxOverflow: sortedIds(readiness.sfxOverflow, `${what}.readiness.sfxOverflow`, hex32),
+    patchOverflow: sortedIds(readiness.patchOverflow, `${what}.readiness.patchOverflow`, hex64),
+    exportOverflow: sortedIds(readiness.exportOverflow, `${what}.readiness.exportOverflow`, hex32),
+    missingFrames: sortedIds(readiness.missingFrames, `${what}.readiness.missingFrames`, hex32),
+    missingPatches: sortedIds(readiness.missingPatches, `${what}.readiness.missingPatches`, hex32),
+    conflicts: flag(readiness.conflicts, `${what}.readiness.conflicts`),
+  } };
 }
 
 /** Canonical global address, independent of the current (possibly concurrently shrunk) extent. */
@@ -478,8 +579,29 @@ function scoreAddress(value: string): { step: number; row: number } {
   return { step, row };
 }
 
+/** New Score DTOs are closed data records; future automation/authority fields must not vanish. */
+function closedDataRecord(value: unknown, what: string, keys?: readonly string[]): Record<string, unknown> {
+  const r = record(value, what), prototype = Object.getPrototypeOf(r), own = Reflect.ownKeys(r);
+  if (prototype !== Object.prototype && prototype !== null) fail(`${what} is not plain data`);
+  if (own.some((key) => typeof key !== "string" || !Object.getOwnPropertyDescriptor(r, key)?.enumerable ||
+    !("value" in Object.getOwnPropertyDescriptor(r, key)!))) fail(`${what} has hidden/accessor fields`);
+  if (keys && (own.length !== keys.length || own.some((key) => !keys.includes(key as string)))) fail(`${what} has unknown/missing fields`);
+  return r;
+}
+
+function closedDataList(value: unknown, what: string): unknown[] {
+  const values = list(value, what);
+  if (values.length > 68_192 || Object.getPrototypeOf(values) !== Array.prototype) fail(`${what} is not a bounded plain list`);
+  if (Reflect.ownKeys(values).length !== values.length + 1) fail(`${what} is not a dense data list`);
+  for (let index = 0; index < values.length; index++) {
+    const descriptor = Object.getOwnPropertyDescriptor(values, String(index));
+    if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) fail(`${what} is not a dense data list`);
+  }
+  return values;
+}
+
 function scoreCell(v: unknown, what: string, step: number): ScoreCell {
-  const r = record(v, what), keys = Object.keys(r).sort().join(",");
+  const r = closedDataRecord(v, what), keys = Object.keys(r).sort().join(",");
   if (r.k === "n") {
     if (keys !== "k,p" && keys !== "k,len,p") fail(`${what} has unknown note fields`);
     const p = hex64(r.p, `${what}.p`);
@@ -498,16 +620,22 @@ function scoreCell(v: unknown, what: string, step: number): ScoreCell {
 
 /** Preserve all values, while checking the native effective flag against the removal evidence. */
 export function parseScoreContent(v: unknown, what = "content"): ScoreContent {
-  const r = record(v, what);
+  const r = closedDataRecord(v, what, ["kind", "title", "bpm", "bpb", "steps", "cells", "patches", "readiness"]);
   if (r.kind !== "score") fail(`${what}.kind is not score`);
   // Matches the typed snapshot's value rail; malformed native replies cannot allocate arbitrary
   // conflict vectors or let a tiny displayed winner hide an unbounded evidence collection.
   let remaining = 3 * 20_000 + 8192;
   const checkedRegister = <T>(value: unknown, w: string, parse: (v: unknown, w: string) => T): Register<T, IndexSource> => {
-    const raw = record(value, w), conflicts = list(raw.conflicts, `${w}.conflicts`);
+    const raw = closedDataRecord(value, w, ["selected", "conflicts"]), conflicts = closedDataList(raw.conflicts, `${w}.conflicts`);
     if (conflicts.length + 1 > remaining) fail("score register evidence exceeds its bound");
     remaining -= conflicts.length + 1;
-    const result = register(raw, w, parse, indexSource);
+    closedDataRecord(raw.selected, `${w}.selected`, ["value", "source"]);
+    for (let i = 0; i < conflicts.length; i++) {
+      const descriptor = Object.getOwnPropertyDescriptor(conflicts, String(i));
+      if (!descriptor || !("value" in descriptor)) fail(`${w}.conflicts is not a dense data list`);
+      closedDataRecord(descriptor.value, `${w}.conflicts[${i}]`, ["value", "source"]);
+    }
+    const result = register(raw, w, parse, (source, name) => indexSource(closedDataRecord(source, name, ["opId", "author", "nonce"]), name));
     const seen = new Set<string>();
     for (const alternative of [result.selected, ...result.conflicts]) {
       if (seen.has(alternative.source.opId)) fail(`${w} repeats a source operation`);
@@ -526,13 +654,13 @@ export function parseScoreContent(v: unknown, what = "content"): ScoreContent {
     return result;
   };
   const slot = <T>(value: unknown, w: string, parse: (v: unknown, w: string) => T): ScoreSlot<T> => {
-    const raw = record(value, w), removed = flag(raw.removed, `${w}.removed`);
+    const raw = closedDataRecord(value, w, ["removed", "register"]), removed = flag(raw.removed, `${w}.removed`);
     const result = checkedRegister<T | null>(raw.register, `${w}.register`, (x, name) => x === null ? null : parse(x, name));
     const effectiveRemoved = [result.selected, ...result.conflicts].some((alternative) => alternative.value === null);
     if (removed !== effectiveRemoved) fail(`${w}.removed disagrees with retained removal evidence`);
     return { removed, register: result };
   };
-  const rawCells = record(r.cells, `${what}.cells`), rawPatches = record(r.patches, `${what}.patches`);
+  const rawCells = closedDataRecord(r.cells, `${what}.cells`), rawPatches = closedDataRecord(r.patches, `${what}.patches`);
   if (Object.keys(rawCells).length > SCORE_MAX_STEPS * SCORE_ROWS || Object.keys(rawPatches).length > 20_064) fail("score slot collection exceeds its bound");
   const cells = mapOf(rawCells, `${what}.cells`, (key) => { scoreAddress(key); return key; },
     (value, w) => slot(value, w, (cell, name) => scoreCell(cell, name, scoreAddress(w.slice(w.lastIndexOf(".") + 1)).step)));
@@ -541,12 +669,12 @@ export function parseScoreContent(v: unknown, what = "content"): ScoreContent {
     if (!result.ok) fail(`${name}: ${result.error}`);
     return result.patch;
   }));
-  const ready = record(r.readiness, `${what}.readiness`);
+  const ready = closedDataRecord(r.readiness, `${what}.readiness`, ["cells", "patches", "headerConflicts"]);
   const issueMap = <T>(input: unknown, w: string, keys: readonly string[], present: Record<string, unknown>, key: (v: string) => string): Record<string, T> =>
-    mapOf(input, w, key, (value, name) => {
+    mapOf(closedDataRecord(input, w), w, key, (value, name) => {
       const address = name.slice(name.lastIndexOf(".") + 1);
       if (!(address in present)) fail(`${name} names an absent slot`);
-      const raw = record(value, name), result: Record<string, boolean> = {};
+      const raw = closedDataRecord(value, name, keys), result: Record<string, boolean> = {};
       if (Object.keys(raw).sort().join(",") !== [...keys].sort().join(",")) fail(`${name} has unknown readiness flags`);
       for (const field of keys) result[field] = flag(raw[field], `${name}.${field}`);
       return result as T;
@@ -590,6 +718,7 @@ export function parseStudioView(v: unknown): StudioView {
     channel: decimal(r.channel, "view.channel"),
     provisional: true as const,
     content: parseContent(r.content, "view.content"),
+    ...(r.group === undefined ? {} : { group: typeof r.group === "string" && /^(?:[0-9a-f]{2}){1,256}$/.test(r.group) ? r.group : fail("view.group is not a bounded stable group id") }),
   };
   if (r.awaitingTenureReceipt === true) {
     if (r.phase !== undefined && r.phase !== null) fail("a preview must not claim a phase");
@@ -747,7 +876,10 @@ function overlaySaveRefusal(v: unknown, what: string): OverlaySaveRefusal {
 }
 function overlayTarget(v: unknown, what: string): OverlayTarget {
   const r = record(v, what);
-  return { channel: decimal(r.channel, `${what}.channel`), object: nullable(r.object, (x) => hex32(x, `${what}.object`)) };
+  const object = nullable(r.object, (x) => hex32(x, `${what}.object`));
+  if (r.objectKind !== undefined && (object === null || (r.objectKind !== "score" && r.objectKind !== "flipnote"))) fail(`${what}.objectKind is invalid for this target`);
+  return { channel: decimal(r.channel, `${what}.channel`), object,
+    ...(r.objectKind === undefined ? {} : { objectKind: r.objectKind as StudioObjectKind }) };
 }
 function overlayUnconfirmedState(v: unknown, what: string): OverlayUnconfirmedState {
   if (v !== "awaitingSource" && v !== "baseConfirmed" && v !== "baseSuperseded" && v !== "sourceUnreadable") fail(`${what} is unknown`);
@@ -948,7 +1080,7 @@ export function parseUnconfirmedOverlaySaveBegin(v: unknown): UnconfirmedOverlay
 
 export function parseStudioUpdated(v: unknown): StudioUpdatedEvent {
   const r = record(v, "studio-updated");
-  return { server: count(r.server, "event.server"), channel: decimal(r.channel, "event.channel"), object: nullable(r.object, (o) => hex32(o, "event.object")) };
+  return { server: count(r.server, "event.server"), ...overlayTarget(r, "event") };
 }
 export function parseReceivePaused(v: unknown): StudioReceivePausedEvent {
   return { server: count(record(v, "studio-receive-paused").server, "event.server") };
@@ -962,8 +1094,7 @@ export function parseSettlementChanged(v: unknown): SettlementChangedEvent {
     server: count(r.server, "event.server"),
     docType: r.docType,
     logicalKey: hex32(r.logicalKey, "event.logicalKey"),
-    channel: decimal(r.channel, "event.channel"),
-    object: nullable(r.object, (o) => hex32(o, "event.object")),
+    ...overlayTarget(r, "event"),
     state: s,
   };
 }
@@ -1154,6 +1285,7 @@ export type FlipnoteModel = {
   declaredFrameBytes: number;
   overCapCount: number;
   deletedFrames: Hex32[];
+  sound: StudioSoundModel;
 };
 
 export const DEFAULT_TITLE = "";
@@ -1214,6 +1346,7 @@ export function flipnoteModel(c: FlipnoteContent): FlipnoteModel {
     declaredFrameBytes: c.declaredFrameBytes,
     overCapCount: Object.keys(c.overCap).length,
     deletedFrames: Object.keys(c.tombstones),
+    sound: studioSoundModel(c.sound),
   };
 }
 

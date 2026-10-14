@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { CHANNEL, SERVER, fakeIpc, flipnoteContent, id32, id64, isource, ordinaryView, previewView, reg } from "./studio-testkit.ts";
-import { overlayLifecycle, parseScoreView, parseStudioView, recoveryRead, scoreModel, studioApply, studioCreate, studioRead } from "./studio-native.ts";
+import { overlayLifecycle, parseScoreView, parseStudioView, parseSettlementChanged, parseUnconfirmedOverlaySaveTicket, recoveryRead, scoreModel, studioApply, studioCreate, studioRead } from "./studio-native.ts";
 import { legacyJamPatch } from "./jam-patch.ts";
 
 function content() {
@@ -75,6 +75,32 @@ test("score register duplicate provenance and excessive evidence are rejected", 
   assert.throws(() => parseScoreView(ordinaryView(raw)), /evidence exceeds/);
 });
 
+test("new Score DTO records reject unknown/missing fields instead of silently stripping future content", () => {
+  assert.throws(() => parseScoreView(ordinaryView({ ...content(), automation: {} })), /fields/);
+  const missing = content() as unknown as Record<string, unknown>; delete missing.bpm;
+  assert.throws(() => parseScoreView(ordinaryView(missing)), /fields/);
+  const readiness = content(); (readiness.readiness as unknown as Record<string, unknown>).future = false;
+  assert.throws(() => parseScoreView(ordinaryView(readiness)), /fields/);
+  for (const mutate of [
+    (slot: Record<string, unknown>) => { slot.future = {}; },
+    (slot: Record<string, unknown>) => { (slot.register as Record<string, unknown>).future = {}; },
+    (slot: Record<string, unknown>) => { ((slot.register as Record<string, unknown>).selected as Record<string, unknown>).future = {}; },
+    (slot: Record<string, unknown>) => { (((slot.register as Record<string, unknown>).selected as Record<string, unknown>).source as Record<string, unknown>).future = {}; },
+  ]) {
+    const raw = content(), slot: Record<string, unknown> = { removed: false, register: reg({ k: "d", pad: 0 }, isource(1)) };
+    mutate(slot); raw.cells["0:0"] = slot;
+    assert.throws(() => parseScoreView(ordinaryView(raw)), /fields/);
+  }
+  const access = content(); let calls = 0;
+  Object.defineProperty(access, "bpm", { enumerable: true, get: () => { calls++; return null; } });
+  assert.throws(() => parseScoreView(ordinaryView(access)), /accessor/);
+  assert.equal(calls, 0);
+  const dynamic = content(); let issueReads = 0;
+  Object.defineProperty(dynamic.readiness.cells, "0:0", { enumerable: true, get: () => { issueReads++; return cellIssues; } });
+  assert.throws(() => parseScoreView(ordinaryView(dynamic)), /accessor/);
+  assert.equal(issueReads, 0);
+});
+
 test("score commands pin explicit objectKind while legacy omission still requests Flipnote only", async () => {
   const ipc = fakeIpc(), target = { server: SERVER, channel: CHANNEL }, object = id32(9);
   for (const command of ["studio_read", "studio_create", "studio_apply"]) ipc.on(command, () => ordinaryView(content()));
@@ -94,4 +120,14 @@ test("score commands pin explicit objectKind while legacy omission still request
     version: { snapshot: id64(1), epoch: "1", staged: false, bytes: 1, reason: "rewound" }, channel: CHANNEL,
     content: flipnoteContent({ frames: [] }) }));
   await assert.rejects(recoveryRead(ipc, { ...target, object, objectKind: "score" }, id64(1)), /kind disagrees/);
+});
+
+test("stable group and optional Score target/event metadata survive bridge parsing", () => {
+  assert.equal(parseScoreView({ ...ordinaryView(content()), group: "aabb00" }).group, "aabb00");
+  for (const group of [7, "AA", "a", "aa".repeat(257), ""]) assert.throws(() => parseScoreView({ ...ordinaryView(content()), group }), /group/);
+  const event = { server: SERVER, docType: 16, logicalKey: id32(1), channel: CHANNEL, object: id32(1), objectKind: "score", state: "open" };
+  assert.equal(parseSettlementChanged(event).objectKind, "score");
+  assert.throws(() => parseSettlementChanged({ ...event, object: null }), /objectKind/);
+  const ticket = { v: 1, kind: "unconfirmedOverlaySaveTicket", channel: CHANNEL, object: id32(1), objectKind: "score", basis: id64(1), branch: id64(2), provenance: "unconfirmed" };
+  assert.equal(parseUnconfirmedOverlaySaveTicket(ticket).objectKind, "score");
 });

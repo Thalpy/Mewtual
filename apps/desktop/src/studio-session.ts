@@ -290,6 +290,7 @@ export class StudioSession {
 
   // Recovery
   recoveryTarget: Hex32 | null = null;
+  private recoveryFamily: StudioObjectKind | "index" = "index";
   recoveryListing: RecoveryListing | null = null;
   recoveryLoading = false;
   recoveryError = "";
@@ -384,6 +385,7 @@ export class StudioSession {
     this.failed.clear();
     this.invalid.clear();
     this.recoveryTarget = null;
+    this.recoveryFamily = "index";
     this.recoveryListing = null;
     this.recoveryLoading = false;
     this.recoveryError = "";
@@ -409,9 +411,18 @@ export class StudioSession {
   /** Kind comes from the selected/pinned Index target or retained request, never operation-body guessing. */
   objectKind(object: Hex32): StudioObjectKind {
     if (this.doc?.object === object) return this.doc.objectKind;
-    const create = this.records.find((save) => save.kind === "create" && save.object === object);
-    if (create?.kind === "create") return create.request.objectKind ?? "flipnote";
-    return this.views.get(object)?.view.content.kind ?? [...(this.indexModel?.entries ?? []), ...(this.indexModel?.overflow ?? [])].find((entry) => entry.id === object)?.kind ?? "flipnote";
+    const copy = this.overlayCopyFor(object);
+    if (copy) return copy.objectKind ?? "flipnote";
+    return this.retainedObjectKind(object) ?? this.views.get(object)?.view.content.kind
+      ?? (this.recoveryTarget === object && this.recoveryFamily !== "index" ? this.recoveryFamily : undefined)
+      ?? [...(this.indexModel?.entries ?? []), ...(this.indexModel?.overflow ?? [])].find((entry) => entry.id === object)?.kind ?? "flipnote";
+  }
+
+  private retainedObjectKind(object: Hex32): StudioObjectKind | undefined {
+    const retained = this.records.find((save) => save.kind !== "applyIndex" && save.object === object);
+    if (retained?.kind === "apply" || retained?.kind === "create") return retained.request.objectKind ?? "flipnote";
+    if (retained?.kind === "overlayApply" || retained?.kind === "recoveryApply") return retained.objectKind ?? "flipnote";
+    return retained?.kind === "frame" ? "flipnote" : undefined;
   }
 
   private objectTarget(object: Hex32 | null): RecoveryTargetArgs {
@@ -552,8 +563,25 @@ export class StudioSession {
       return;
     }
     const objectKind = opts.objectKind ?? this.objectKind(object);
+    const retainedKind = this.retainedObjectKind(object);
+    const retainedCopy = this.overlayCopyFor(object);
+    const knownKind = this.views.get(object)?.view.content.kind
+      ?? retainedKind
+      ?? (retainedCopy ? retainedCopy.objectKind ?? "flipnote" : undefined)
+      ?? (this.overlay?.object === object && this.overlay.inspection?.kind === "local-draft" && this.overlay.inspection.content?.kind !== "index" ? this.overlay.inspection.content?.kind : undefined)
+      ?? (this.overlay?.object === object && this.overlay.copy ? this.overlay.copy.objectKind ?? "flipnote" : undefined)
+      ?? [...(this.indexModel?.entries ?? []), ...(this.indexModel?.overflow ?? [])].find((entry) => entry.id === object)?.kind;
+    if (knownKind !== undefined && knownKind !== objectKind) throw new StudioNativeError("an object's known immutable family cannot be changed");
     if (this.doc?.object !== object || this.doc.objectKind !== objectKind) {
       this.docReq.set(object, (this.docReq.get(object) ?? 0) + 1);
+      this.overlayReq.set(object, (this.overlayReq.get(object) ?? 0) + 1);
+      if (this.recoveryTarget === object && this.recoveryFamily !== objectKind) {
+        this.recoveryFamily = objectKind;
+        this.recoveryReq++; this.activeRun = null; this.recoveryRun = null; this.recoveryListing = null;
+        this.recoveryError = ""; this.recoveryLoading = false;
+        this.versions.clear(); this.exports.clear();
+        this.pointer = { status: "idle", error: "", result: null };
+      }
       this.doc = { object, objectKind, view: null, model: null, score: null, loading: opts.read === false, absent: false, error: "" };
       this.overlay = { object, inspection: null, lifecycle: null, archive: null, exported: null, copy: this.overlayCopyFor(object), loading: opts.read !== false, error: "" };
       this.notify();
@@ -597,6 +625,7 @@ export class StudioSession {
   /// Replace the open document's state (never mutate it) when it is this object.
   private patchDoc(object: Hex32, patch: Partial<DocState>): void {
     if (this.doc?.object !== object) return;
+    if (patch.view && patch.view.content.kind !== this.doc.objectKind) return;
     this.doc = { ...this.doc, ...patch };
     this.notify();
   }
@@ -611,6 +640,8 @@ export class StudioSession {
     const req = (this.overlayReq.get(object) ?? 0) + 1;
     this.overlayReq.set(object, req);
     const target = this.objectTarget(object);
+    const objectKind = target.objectKind ?? "flipnote";
+    const live = () => this.current(gen) && req === this.overlayReq.get(object) && this.doc?.object === object && this.doc.objectKind === objectKind;
     if (this.overlay?.object !== object) {
       this.overlay = { object, inspection: null, lifecycle: null, archive: null, exported: null, copy: this.overlayCopyFor(object), loading: true, error: "" };
     } else {
@@ -621,9 +652,11 @@ export class StudioSession {
       // The lifecycle row tells us whether an archive exists. Read it before the branch view so
       // the latter remains the final latest-view operation at native delivery.
       const lifecycle = await overlayLifecycle(this.ipc, target);
+      if (!live()) return;
       const inspection = await overlayRead(this.ipc, target);
+      if (!live()) return;
       const archive = lifecycle.archive ? await overlayArchiveRead(this.ipc, target) : null;
-      if (!this.current(gen) || req !== this.overlayReq.get(object) || this.doc?.object !== object) return;
+      if (!live()) return;
       this.overlay = {
         object,
         lifecycle,
@@ -647,7 +680,7 @@ export class StudioSession {
       }
       this.notify();
     } catch (e) {
-      if (!this.current(gen) || req !== this.overlayReq.get(object) || this.doc?.object !== object) return;
+      if (!this.current(gen) || req !== this.overlayReq.get(object) || this.doc?.object !== object || this.doc.objectKind !== objectKind) return;
       this.overlay = { ...(this.overlay ?? { object, inspection: null, lifecycle: null, archive: null, exported: null, copy: this.overlayCopyFor(object) }), object, copy: this.overlayCopyFor(object), loading: false, error: reason(e) };
       this.notify();
     }
@@ -966,7 +999,7 @@ export class StudioSession {
   saveFrame(object: Hex32, frame: Hex32, pix: Uint8Array): void {
     if (this.objectKind(object) !== "flipnote") throw new StudioNativeError("pixels require a Flipnote target");
     const route = this.editRoute(object);
-    const routeKind = "refused" in route && this.records.some((s) => s.kind === "create" && s.object === object)
+    const routeKind = "refused" in route && this.records.some((s) => s.kind === "create" && s.object === object && (s.request.objectKind ?? "flipnote") === "flipnote")
       ? "ordinary"
       : "refused" in route ? null : route.kind;
     if (!routeKind) throw new StudioNativeError((route as { refused: string }).refused);
@@ -993,7 +1026,7 @@ export class StudioSession {
   insertFrame(object: Hex32, after: Hex32 | null, pix: Uint8Array): Hex32 {
     if (this.objectKind(object) !== "flipnote") throw new StudioNativeError("frames require a Flipnote target");
     const route = this.editRoute(object);
-    const routeKind = "refused" in route && this.records.some((s) => s.kind === "create" && s.object === object)
+    const routeKind = "refused" in route && this.records.some((s) => s.kind === "create" && s.object === object && (s.request.objectKind ?? "flipnote") === "flipnote")
       ? "ordinary"
       : "refused" in route ? null : route.kind;
     if (!routeKind) throw new StudioNativeError((route as { refused: string }).refused);
@@ -1357,13 +1390,18 @@ export class StudioSession {
   }
 
   private landed(object: Hex32, view: StudioObjectView): void {
+    // Offscreen exact requests can complete, but a same-id different-family surface owns its
+    // newer read fence. Never let an older ACK supersede that read or patch mismatched content.
+    const familyMismatch = this.doc?.object === object && this.doc.objectKind !== view.content.kind;
     // A read issued before this save answered is older than this view: supersede it.
-    this.docReq.set(object, (this.docReq.get(object) ?? 0) + 1);
-    this.known.set(object, { awaiting: view.awaitingTenureReceipt, phase: view.phase, epoch: view.epoch });
+    if (!familyMismatch) {
+      this.docReq.set(object, (this.docReq.get(object) ?? 0) + 1);
+      this.known.set(object, { awaiting: view.awaitingTenureReceipt, phase: view.phase, epoch: view.epoch });
+    }
     const model = view.content.kind === "flipnote" ? flipnoteModel(view.content) : null;
     const score = view.content.kind === "score" ? scoreModel(view.content) : null;
     this.rememberView(object, view, model, score);
-    this.patchDoc(object, { view, model, score, absent: false, error: "", loading: false });
+    if (!familyMismatch) this.patchDoc(object, { view, model, score, absent: false, error: "", loading: false });
   }
   /// The Index equivalent: a landed write is newer than any list still in flight.
   private landedIndex(view: IndexView): void {
@@ -1556,8 +1594,10 @@ export class StudioSession {
   /// Point the rail at a document (null = the Index). The same target is a no-op; the listing
   /// is read on a change of target, on an invalidation, or through an explicit refresh.
   watchRecovery(object: Hex32 | null): void {
-    if (this.recoveryTarget === object && (this.recoveryListing || this.recoveryLoading || this.recoveryError)) return;
+    const family = object === null ? "index" : this.objectKind(object);
+    if (this.recoveryTarget === object && this.recoveryFamily === family && (this.recoveryListing || this.recoveryLoading || this.recoveryError)) return;
     this.recoveryTarget = object;
+    this.recoveryFamily = family;
     this.recoveryListing = null;
     this.recoveryError = "";
     this.recoveryRun = null;
@@ -1571,29 +1611,33 @@ export class StudioSession {
     const gen = this.generation;
     const req = ++this.recoveryReq;
     const object = this.recoveryTarget;
-    const target = this.target();
+    const family = this.recoveryFamily;
+    const target = this.objectTarget(object);
+    const live = () => this.current(gen) && req === this.recoveryReq && object === this.recoveryTarget && this.recoveryFamily === family &&
+      (object === null ? "index" : this.objectKind(object)) === family;
     this.recoveryLoading = true;
     this.notify();
     try {
-      const listing = await recoveryList(this.ipc, this.objectTarget(object));
-      if (!this.current(gen) || req !== this.recoveryReq || object !== this.recoveryTarget) return;
+      const listing = await recoveryList(this.ipc, target);
+      if (!live()) return;
       this.recoveryListing = listing;
       this.recoveryError = "";
     } catch (e) {
-      if (!this.current(gen) || req !== this.recoveryReq || object !== this.recoveryTarget) return;
+      if (!live()) return;
       this.recoveryError = reason(e);
     } finally {
-      if (this.current(gen) && req === this.recoveryReq) { this.recoveryLoading = false; this.notify(); }
+      if (live()) { this.recoveryLoading = false; this.notify(); }
     }
   }
 
   async readVersion(snapshot: Hex64): Promise<RecoveryVersionRead | null> {
-    const cached = this.versions.get(snapshot);
-    if (cached) return cached;
-    const gen = this.generation;
     const object = this.recoveryTarget;
+    const objectKind = object === null ? "index" : this.objectKind(object);
+    const cached = this.versions.get(snapshot);
+    if (cached?.content.kind === objectKind) return cached;
+    const gen = this.generation;
     const v = await recoveryRead(this.ipc, this.objectTarget(object), snapshot);
-    if (!this.current(gen) || object !== this.recoveryTarget) return null;
+    if (!this.current(gen) || object !== this.recoveryTarget || (object === null ? "index" : this.objectKind(object)) !== objectKind) return null;
     this.versions.set(snapshot, v);
     this.notify();
     return v;
@@ -1602,8 +1646,9 @@ export class StudioSession {
   async exportVersion(snapshot: Hex64): Promise<RecoveryExport | null> {
     const gen = this.generation;
     const object = this.recoveryTarget;
+    const objectKind = object === null ? "index" : this.objectKind(object);
     const x = await recoveryExport(this.ipc, this.objectTarget(object), snapshot);
-    if (!this.current(gen) || object !== this.recoveryTarget) return null;
+    if (!this.current(gen) || object !== this.recoveryTarget || (object === null ? "index" : this.objectKind(object)) !== objectKind) return null;
     this.exports.set(snapshot, x);
     this.notify();
     return x;
@@ -1614,8 +1659,9 @@ export class StudioSession {
     if (!w) throw new StudioNativeError("no eviction warning to acknowledge");
     const gen = this.generation;
     const object = this.recoveryTarget;
+    const objectKind = object === null ? "index" : this.objectKind(object);
     const listing = await recoveryAcknowledge(this.ipc, this.objectTarget(object), { oldestSnapshot: w.oldestSnapshot, stagedSnapshot: w.stagedSnapshot });
-    if (!this.current(gen) || object !== this.recoveryTarget) return;
+    if (!this.current(gen) || object !== this.recoveryTarget || (object === null ? "index" : this.objectKind(object)) !== objectKind) return;
     this.recoveryReq++; // a list still in flight is older than this answer
     this.recoveryListing = listing;
     this.recoveryLoading = false;
@@ -1635,8 +1681,10 @@ export class StudioSession {
   async runRecovery(snapshot: Hex64, mode: RecoveryMode): Promise<void> {
     const gen = this.generation;
     const object = this.recoveryTarget;
+    const family = this.recoveryFamily;
     const version = await this.readVersion(snapshot);
-    if (!version || !this.current(gen)) return;
+    if (!version || !this.current(gen) || this.recoveryTarget !== object || this.recoveryFamily !== family ||
+      (object === null ? "index" : this.objectKind(object)) !== family) return;
     const token = ++this.runSeq;
     const control = { token, stop: false };
     this.activeRun = control;
@@ -1644,7 +1692,8 @@ export class StudioSession {
       snapshot, mode, object, status: "running", error: "",
       items: this.choicesFor(version, mode).map(({ choice, label }) => ({ choice, label, state: "pending", error: "", originalAuthor: null })),
     };
-    const live = () => this.current(gen) && this.activeRun === control;
+    const live = () => this.current(gen) && this.activeRun === control && this.recoveryTarget === object && this.recoveryFamily === family &&
+      (object === null ? "index" : this.objectKind(object)) === family;
     const publish = () => {
       if (!live()) return;
       this.recoveryRun = { ...run, items: run.items.map((i) => ({ ...i })) };
@@ -1717,14 +1766,16 @@ export class StudioSession {
   /// The separate, separately retryable Registry pointer step for a document that was saved.
   async restorePointer(object: Hex32 | null = this.recoveryTarget): Promise<void> {
     const gen = this.generation;
+    const objectKind = object === null ? "index" : this.objectKind(object);
+    const live = () => this.current(gen) && (object === null ? "index" : this.objectKind(object)) === objectKind;
     this.pointer = { status: "running", error: "", result: null };
     this.notify();
     try {
       const r = await recoveryRestorePointer(this.ipc, this.objectTarget(object));
-      if (!this.current(gen)) return;
+      if (!live()) return;
       this.pointer = { status: "done", error: "", result: r };
     } catch (e) {
-      if (!this.current(gen)) return;
+      if (!live()) return;
       this.pointer = { status: "blocked", error: reason(e), result: null };
     }
     this.notify();

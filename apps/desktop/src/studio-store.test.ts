@@ -54,7 +54,7 @@ test("a tombstone wins over any later insertion of the same id, and drops its sf
   const { store } = fresh();
   const id = store.createFlipnote("t");
   const a = store.insertFrame(id, null, sceneFrame("A"));
-  store.apply(id, { op: "set_sfx", sfx: "s".repeat(32), frame: a, patch: "meow", note: 60 });
+  store.apply(id, { op: "set_sfx", sfx: "s".repeat(32), frame: a, patch: "meow", note: 60, duration_ms: 300 });
   store.claim(a, ME);
   store.apply(id, { op: "remove_frame", frame: a });
   assert.deepEqual(store.root(id).frames, []);
