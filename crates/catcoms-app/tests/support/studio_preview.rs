@@ -145,6 +145,38 @@ impl PreviewFixture {
                         123,
                     )
                     .unwrap();
+                if art {
+                    // The real provisional seed must retain sound evidence, not just pixels.
+                    // An explicit unlink and export declaration catch native converters which
+                    // used to silently present a sound-bearing document as an art-only one.
+                    for (nonce, operation) in [
+                        (4, FlipnoteOp::SetHeader(FlipnoteHeader::Score(None))),
+                        (
+                            5,
+                            FlipnoteOp::SetExport {
+                                export: [8; 16],
+                                cid: [43; 32],
+                                bytes: 100,
+                                expiry: StudioExpiry::Never,
+                            },
+                        ),
+                    ] {
+                        source
+                            .edit_or_reseal(
+                                d,
+                                g,
+                                r,
+                                &DomainOp {
+                                    doc_type: logical.doc_type,
+                                    logical_key: logical.logical_key.clone(),
+                                    body: operation.encode().unwrap(),
+                                    nonce: [nonce; 16],
+                                },
+                                123,
+                            )
+                            .unwrap();
+                    }
+                }
                 let seed = source.projection().unwrap().checkpoint([7; 32]).unwrap();
                 let receipt = Receipt::sign(
                     logical.clone(),

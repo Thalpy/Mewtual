@@ -76,6 +76,11 @@ export targets and forged same-property predecessors still reject. Art golden ve
 Read-only design and actual-diff review reported no remaining core blocker/high; one MEDIUM
 integration condition remains below. Main owns full
 root/native/frontend suites after integration, plus native DTO/consumer coverage. In particular,
-unchanged native `projection_content` currently omits sound on remotely accepted Flipnote
-changes: this is an OPEN integration defect, not excused by local sound Save refusing. Resolve
-it before combined acceptance. No unfinished command is registered by this checkpoint.
+The subsequent integration correction closes the native omission: one fallible shared
+`projection_content` now retains all sound bodies, provenance, alternatives and effective
+readiness across ordinary, awaiting-receipt, draft and historical reads. It omits `sound` only
+when no evidence exists. An actual actor provisional seed with explicit unlink/export and a
+unit projection with unready/conflicted SFX pin those cases. Native focused Studio tests pass
+21/21; independent actual-diff re-review reports no remaining findings in this correction.
+This does not accept the remaining activation/native-export integration or replace the final
+combined suites. No unfinished command is registered by this checkpoint.

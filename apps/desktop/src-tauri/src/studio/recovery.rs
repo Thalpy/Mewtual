@@ -348,7 +348,7 @@ pub(super) fn response_value(response: Response) -> Result<Value, String> {
         }
         Response::Version(value) => json!({"v":1,"kind":"recoveryVersion","historical":true,
             "version":summary(&value.summary),"channel":u128::from_be_bytes(value.projection.channel()).to_string(),
-            "content":projection_content(&value.projection)}),
+            "group":hex::encode(&value.projection.document().server_id),"content":projection_content(&value.projection)?}),
         Response::Export { snapshot, bytes } => {
             use base64::Engine;
             json!({"v":1,"kind":"recoveryExport","snapshot":hex::encode(snapshot),

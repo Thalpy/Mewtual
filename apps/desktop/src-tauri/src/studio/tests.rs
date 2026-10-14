@@ -16,41 +16,156 @@ mod recovery_restore;
 
 #[test]
 fn score_diagnostics_distinguish_effective_removal_from_raw_winner() {
-    use app::studio::types::{ScoreCell, ScoreOp, ScoreProjection, ScoreRegister, ScoreSlot, ScoreSource, ScoreValue};
-    let document = app::studio::types::score_document(b"native-score-view",[9;16]).unwrap();
-    let mut score = ScoreProjection::read(&document,[7;16],0,&automerge::AutoCommit::new()).unwrap();
-    let author = DeviceId::from_bytes([3;32]);
-    let source = |nonce: u8, body: ScoreOp| {
-        let op = catcoms_replication::DomainOp { nonce:[nonce;16],doc_type:document.doc_type,logical_key:document.logical_key.clone(),body:body.encode().unwrap() };
-        ScoreSource {op_id:op.id(&author),author,nonce:op.nonce}
+    use app::studio::types::{
+        ScoreCell, ScoreOp, ScoreProjection, ScoreRegister, ScoreSlot, ScoreSource, ScoreValue,
     };
-    let cell = ScoreCell::Drum {pad:0};
-    score.cells.insert((0,0),ScoreSlot {register:ScoreRegister {
-        selected:ScoreValue {source:source(1,ScoreOp::SetCell{step:0,row:0,value:cell.clone()}),value:Some(cell)},
-        conflicts:vec![ScoreValue {source:source(2,ScoreOp::ClearCell{step:0,row:0}),value:None}],
-    }});
-    let view = projection_content(&StudioProjection::Score(Box::new(score)));
-    assert_eq!(view["kind"],"score"); assert_eq!(view["cells"]["0:0"]["removed"],true);
-    assert_eq!(view["cells"]["0:0"]["register"]["selected"]["value"],json!({"k":"d","pad":0}));
+    let document = app::studio::types::score_document(b"native-score-view", [9; 16]).unwrap();
+    let mut score =
+        ScoreProjection::read(&document, [7; 16], 0, &automerge::AutoCommit::new()).unwrap();
+    let author = DeviceId::from_bytes([3; 32]);
+    let source = |nonce: u8, body: ScoreOp| {
+        let op = catcoms_replication::DomainOp {
+            nonce: [nonce; 16],
+            doc_type: document.doc_type,
+            logical_key: document.logical_key.clone(),
+            body: body.encode().unwrap(),
+        };
+        ScoreSource {
+            op_id: op.id(&author),
+            author,
+            nonce: op.nonce,
+        }
+    };
+    let cell = ScoreCell::Drum { pad: 0 };
+    score.cells.insert(
+        (0, 0),
+        ScoreSlot {
+            register: ScoreRegister {
+                selected: ScoreValue {
+                    source: source(
+                        1,
+                        ScoreOp::SetCell {
+                            step: 0,
+                            row: 0,
+                            value: cell.clone(),
+                        },
+                    ),
+                    value: Some(cell),
+                },
+                conflicts: vec![ScoreValue {
+                    source: source(2, ScoreOp::ClearCell { step: 0, row: 0 }),
+                    value: None,
+                }],
+            },
+        },
+    );
+    let view = projection_content(&StudioProjection::Score(Box::new(score))).unwrap();
+    assert_eq!(view["kind"], "score");
+    assert_eq!(view["cells"]["0:0"]["removed"], true);
+    assert_eq!(
+        view["cells"]["0:0"]["register"]["selected"]["value"],
+        json!({"k":"d","pad":0})
+    );
     assert!(view["cells"]["0:0"]["register"]["conflicts"][0]["value"].is_null());
-    assert_eq!(view["cells"]["0:0"]["register"]["selected"]["source"]["author"],author.to_string());
+    assert_eq!(
+        view["cells"]["0:0"]["register"]["selected"]["source"]["author"],
+        author.to_string()
+    );
+}
+
+#[test]
+fn frame_sound_diagnostics_keep_unready_references_duration_and_conflicts() {
+    let document = flipnote_document(b"native-sound-view", [9; 16]).unwrap();
+    let mut art =
+        FlipnoteFrameProjection::read(&document, [7; 16], 0, &automerge::AutoCommit::new())
+            .unwrap();
+    assert!(
+        projection_content(&StudioProjection::Flipnote(Box::new(art.clone())))
+            .unwrap()
+            .get("sound")
+            .is_none()
+    );
+    let operation = |duration_ms| FlipnoteOp::SetSfx {
+        sfx: [1; 16],
+        frame: [2; 16],
+        patch: [3; 32],
+        note: 60,
+        duration_ms,
+    };
+    let value = |nonce, duration_ms| {
+        let value = operation(duration_ms);
+        let author = DeviceId::from_bytes([4; 32]);
+        let op = catcoms_replication::DomainOp {
+            doc_type: document.doc_type,
+            logical_key: document.logical_key.clone(),
+            nonce: [nonce; 16],
+            body: value.encode().unwrap(),
+        };
+        FrameValue {
+            source: FrameSource {
+                op_id: op.id(&author),
+                author,
+                nonce: op.nonce,
+                ts: 123,
+            },
+            value,
+        }
+    };
+    let key = format!("s/{}", hex::encode([1; 16]));
+    art.sound.records.insert(
+        key.clone(),
+        FrameRegister {
+            selected: value(1, 600000),
+            conflicts: vec![value(2, 250)],
+        },
+    );
+    let projection = StudioProjection::Flipnote(Box::new(art));
+    let content = projection_content(&projection).unwrap();
+    assert_eq!(
+        content["sound"]["records"][&key]["selected"]["value"]["duration_ms"],
+        600000
+    );
+    assert_eq!(
+        content["sound"]["records"][&key]["conflicts"][0]["value"]["duration_ms"],
+        250
+    );
+    assert_eq!(
+        content["sound"]["readiness"]["missingFrames"],
+        json!([hex::encode([1; 16])])
+    );
+    assert_eq!(
+        content["sound"]["readiness"]["missingPatches"],
+        json!([hex::encode([1; 16])])
+    );
+    assert_eq!(content["sound"]["readiness"]["conflicts"], true);
+    let ordinary = view(StudioView {
+        epoch_id: 7,
+        epoch: 0,
+        phase: EpochPhase::Open,
+        projection,
+    })
+    .unwrap();
+    assert_eq!(ordinary["content"], content);
+    assert_eq!(ordinary["group"], hex::encode(b"native-sound-view"));
 }
 
 fn save_response(outcome: app::studio::StudioUnconfirmedSaveOutcome) -> InvokeResponse {
-    InvokeResponse::Control(app::studio::StudioControlResponse::UnconfirmedOverlaySaved {
-        target: StudioTarget::Index {
-            channel: 7u128.to_be_bytes(),
+    InvokeResponse::Control(
+        app::studio::StudioControlResponse::UnconfirmedOverlaySaved {
+            target: StudioTarget::Index {
+                channel: 7u128.to_be_bytes(),
+            },
+            outcome,
         },
-        outcome,
-    })
+    )
 }
 
 /// MAP K13: final native fences must not relabel a Save that may already be durable as a clean
 /// refusal. Conversely, outcomes which explicitly say this request wrote nothing stay plain.
 #[test]
 fn native_withheld_save_classification_follows_the_typed_outcome() {
-    use app::studio::StudioUnconfirmedSaveOutcome as O;
     use app::studio::types::StudioOverlaySaveRefusal;
+    use app::studio::StudioUnconfirmedSaveOutcome as O;
 
     assert_eq!(
         withheld_write(&save_response(O::Saved {

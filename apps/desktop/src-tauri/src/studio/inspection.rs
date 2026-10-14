@@ -93,7 +93,9 @@ fn view(read: StudioOverlayInspection) -> Result<Value, String> {
         let channel = u128::from_be_bytes(v.target.channel()).to_string();
         let object = match v.target {
             StudioTarget::Index { .. } => None,
-            StudioTarget::Flipnote { object, .. } | StudioTarget::Score { object, .. } => Some(hex::encode(object)),
+            StudioTarget::Flipnote { object, .. } | StudioTarget::Score { object, .. } => {
+                Some(hex::encode(object))
+            }
         };
         let provenance = match v.provenance {
             Some(StudioOverlayProvenance::Closing) => Some("closing"),
@@ -122,7 +124,7 @@ fn view(read: StudioOverlayInspection) -> Result<Value, String> {
                 "provenance":provenance,
                 "replayable":v.replayable,
                 "readOnly":true,
-                "content":v.draft.map(|d| projection_content(d.projection()))}),
+                "content":v.draft.map(|d| projection_content(d.projection())).transpose()?}),
             (None, Some(d)) => json!({"v":1,"kind":"disposed","channel":channel,"object":object,
                 "basis":hex::encode(d.basis),"branch":hex::encode(d.branch),
                 "generation":d.generation.to_string(),"accepted":d.accepted,
