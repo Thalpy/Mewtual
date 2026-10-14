@@ -297,13 +297,9 @@ fn validate_operation(
             IndexOp::decode_domain(document, &intent.operation, &intent.author)?;
         }
         StudioProjection::Flipnote(_) => {
-            match FlipnoteOp::decode_domain(document, &intent.operation)? {
-                FlipnoteOp::InsertFrame { .. }
-                | FlipnoteOp::RemoveFrame { .. }
-                | FlipnoteOp::ReplaceFrame { .. }
-                | FlipnoteOp::SetHeader(FlipnoteHeader::Title(_) | FlipnoteHeader::Fps(_)) => {}
-                _ => return Err(ReplError::Malformed),
-            }
+            // The held typed projection selects the family, including its new sound grammar.
+            // StudioObject's shared namespace must never redirect a Score operation into art.
+            FlipnoteOp::decode_domain(document, &intent.operation)?;
         }
         StudioProjection::Score(_) => {
             ScoreOp::decode_domain(document, &intent.operation)?;

@@ -220,6 +220,26 @@ impl StudioTarget {
             }
             StudioProjection::Flipnote(p) => {
                 let op = FlipnoteOp::decode_domain(p.document(), domain)?;
+                match &op {
+                    FlipnoteOp::SetSfx { sfx, .. }
+                        if !p.sound.sfx().contains_key(sfx)
+                            && p.sound.sfx().len() >= FLIPNOTE_MAX_SFX =>
+                    {
+                        return Err(ReplError::EpochBound)
+                    }
+                    FlipnoteOp::SetPatch { patch, .. }
+                        if !p.sound.patches().contains_key(patch)
+                            && p.sound.patches().len() >= FLIPNOTE_MAX_PATCHES =>
+                    {
+                        return Err(ReplError::EpochBound)
+                    }
+                    FlipnoteOp::SetExport { .. }
+                        if p.sound.exports().len() >= FLIPNOTE_MAX_EXPORTS =>
+                    {
+                        return Err(ReplError::EpochBound)
+                    }
+                    _ => {}
+                }
                 let total = match op {
                     FlipnoteOp::InsertFrame { bytes, .. } => {
                         if p.timeline.len() >= FLIPNOTE_MAX_FRAMES {

@@ -14,7 +14,7 @@ the final combined backend/native/frontend suites and hosted evidence remain req
 
 ## Gate 6 stateful score continuation (2026-10-14; not gate acceptance)
 
-The isolated `gate6-typed-score` candidate now adds a bounded Score projection, causal validator,
+At core checkpoint `78c79faa`, isolated `gate6-typed-score` added a bounded Score projection, causal validator,
 reusable remove-wins cell/recipe registers, explicit-family checkpoints/recovery, exact P1
 preflight and scoped core restart/settlement. Native diagnostics retain raw winners and removal
 evidence separately. No score native command or legacy wire activation is enabled yet; app/store
@@ -31,12 +31,20 @@ ambient evidence remain required. Prior focused frontend/score and accepted revi
 their narrower scope. Independent current-diff review finds no remaining finding in this bounded
 core slice; it does not accept later native/wire, frame sound, playback or UI integration.
 The freshly rebuilt native diagnostic regression also passes (1/1). The wider replication run
-passes all 384 unit tests from before the last two cap/forgery additions (those additions pass
-in the 24-test focused set); its integration tests are still running, not yet a complete result.
+passed all384unit+49integration tests from before the last two cap/forgery additions (those
+additions pass in the 24-test focused set). This is not a final combined Gate6 suite result.
 
 Parallel isolated branches own frame sound state (`gate6-frame-sound`) and authored archival
 playback (`gate6-playback`). Application/native durability, actual-byte export validation,
 publication/readback, GIF and real Sound/Music/export UI wiring remain open. Gate 6 is not closed.
+
+## Gate 6 Flipnote sound core (2026-10-14; isolated checkpoint)
+
+`gate6-frame-sound` implements typed SFX/recipes/linked-score/export state, causal checks,
+bounded checkpoint/recovery and complete export holds. Required authored duration is1..600000ms.
+Art-only checkpoint bytes stay unchanged. See `GATE6-FRAME-SOUND.md` for full record/accessor
+semantics, test evidence and native DTO integration obligation. This is not Gate6 completion;
+native sound omission on remote ingress remains a confirmed MEDIUM pending main integration.
 
 ## Gate 6 typed score contract (2026-10-14; isolated continuation)
 

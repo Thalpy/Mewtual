@@ -1,5 +1,15 @@
 # Mewtual; Architecture
 
+## Gate 6 Flipnote sound core checkpoint (2026-10-14)
+
+The typed Flipnote projection now retains SFX, reusable recipes, linked-score provenance and
+exports through the existing P1 causal/checkpoint/recovery path. Art-only bytes stay unchanged;
+an optional canonical sound trailer retains complete source/body records. Effective removal
+and visible prefixes are separate from retained evidence and conservative blob holds. Native
+DTO/UI activation is not implied; the native sound omission remains an explicit integration
+defect until connected. See `GATE6-FRAME-SOUND.md` for the exact contract and review scope. Older
+art-only/refusal statements below describe their earlier checkpoints.
+
 ## Exact device admin authority (2026-10-13)
 
 Current moderation-record roles also use the verified full signing-device identity.

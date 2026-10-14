@@ -1,5 +1,15 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Gate 6 Flipnote sound core (2026-10-14)
+
+`FlipnoteOp::SetSfx` now requires creator-authored `duration_ms:u32` in1..600000. Typed frame
+projection exposes `sound:FrameSoundState`, complete raw `records` with source/value conflicts,
+effective `sfx()/patches()/exports()` and `score()` accessors, plus `sound_readiness()`. Retained
+records are distinct from active prefixes4096/64/8. Sound uses existing signed P1 mutation and
+exact checkpoint/recovery preflight, an optional canonical trailer preserving art-only bytes,
+and complete retained export CID enumeration. See `GATE6-FRAME-SOUND.md` for property grammar,
+seed omission and DTO obligations. Native sound DTO/consumer integration remains pending.
+
 ## Exact device admin authority (security update, 2026-10-13)
 
 Current moderation-record roles also use the verified full signing-device identity.

@@ -254,7 +254,7 @@ impl FlipnoteFrameProjection {
             crate::epoch::MAX_RECOVERY_SNAPSHOT_BYTES,
         ))?;
         let (nodes, pixels) = self.parts()?;
-        let checked = Self::from_parts(
+        let mut checked = Self::from_parts(
             &self.document,
             self.channel,
             self.epoch,
@@ -264,6 +264,11 @@ impl FlipnoteFrameProjection {
             pixels,
             self.tombstones.clone(),
         )?;
+        let art_ids = checked.source_ids();
+        if self.sound.source_ids().any(|id| art_ids.contains(&id)) {
+            return Err(ReplError::Malformed);
+        }
+        checked.sound = self.sound.clone();
         if checked != *self {
             return Err(ReplError::Malformed);
         }
@@ -322,7 +327,7 @@ impl FlipnoteFrameProjection {
             previous = Some(*id);
             anchor = Some(winner);
         }
-        Self::from_parts(
+        let mut compact = Self::from_parts(
             &self.document,
             self.channel,
             self.epoch,
@@ -331,7 +336,9 @@ impl FlipnoteFrameProjection {
             nodes,
             pixels,
             BTreeMap::new(),
-        )
+        )?;
+        compact.sound = self.sound.compact(&mut budget);
+        Ok(compact)
     }
 
     pub(in crate::studio) fn encode_snapshot(&self, limit: usize) -> Result<Vec<u8>, ReplError> {
@@ -370,7 +377,7 @@ impl FlipnoteFrameProjection {
                 put_source(e, &self.document, s)?;
             }
         }
-        Ok(())
+        self.sound.write(&self.document, e)
     }
     pub(in crate::studio) fn decode_snapshot(
         document: &LogicalDocument,
@@ -441,10 +448,14 @@ impl FlipnoteFrameProjection {
             }
             tombstones.insert(id, values);
         }
+        let sound = FrameSoundState::read(document, &mut d)?;
         d.finish().map_err(malformed)?;
-        Self::from_parts(
+        let mut projection = Self::from_parts(
             document, channel, epoch, title, fps, nodes, pixels, tombstones,
-        )
+        )?;
+        projection.sound = sound;
+        projection.checked_parts()?;
+        Ok(projection)
     }
     pub(super) fn decode_baseline(
         document: &LogicalDocument,
@@ -476,6 +487,7 @@ impl FlipnoteFrameProjection {
             ids.insert(r.selected.source.op_id);
             ids.extend(r.conflicts.iter().map(|v| v.source.op_id));
         }
+        ids.extend(self.sound.source_ids());
         ids
     }
 }
