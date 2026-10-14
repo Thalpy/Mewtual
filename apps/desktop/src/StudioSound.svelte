@@ -11,29 +11,30 @@
     onnotice: (text: string, kind: "info" | "warn" | "error") => void;
   }>();
   let patch = $state(""), note = $state(60), duration = $state<number | "">(""), editing = $state("");
-  let busy = $state(false), emoji = $state<EmojiSound | null>(null), page = $state(0), evidencePage = $state(0), altPage = $state(0);
+  let busy = $state(false), emoji = $state<EmojiSound | null>(null), page = $state(0), cleanupPage = $state(0), evidencePage = $state(0), altPage = $state(0);
   let disposed = false;
+  let formGeneration = 0;
   onDestroy(() => { disposed = true; });
-  $effect(() => { void frame; untrack(() => { editing = ""; emoji = null; duration = ""; page = 0; }); });
+  $effect(() => { void frame; untrack(() => { formGeneration++; editing = ""; emoji = null; duration = ""; page = 0; }); });
   const here = $derived<SfxView[]>(model.sfx.filter((sfx: SfxView) => sfx.frame === frame));
   const shown = $derived(here.slice(page * 8, page * 8 + 8));
   const records = $derived(Object.entries<StudioSoundModel["records"][string]>(model.records).sort(([a], [b]) => a.localeCompare(b)));
   function edit(sfx: (typeof here)[number]) { editing = sfx.id; patch = sfx.patch; note = sfx.note; duration = sfx.durationMs; }
   async function addPatch(descriptor: JamPatch) {
     if (busy || readonlyReason) return;
-    const source = model, sourceFrame = frame; busy = true;
-    try { const id = await onpatch(descriptor); if (!disposed && source === model && sourceFrame === frame) patch = id; }
+    const source = model, sourceFrame = frame, generation = formGeneration; busy = true;
+    try { const id = await onpatch(descriptor); if (!disposed && source === model && sourceFrame === frame && generation === formGeneration) patch = id; }
     catch (e) { onnotice(String(e), "error"); } finally { busy = false; }
   }
   async function importEmoji(file: File | undefined) {
     if (!file || busy) return;
     if (file.size > EMOJI_SOUND_MAX_BYTES) { onnotice("emoji sound exceeds 4KiB", "error"); return; }
-    const source = model, sourceFrame = frame; busy = true;
+    const source = model, sourceFrame = frame, generation = formGeneration; busy = true;
     try {
       const parsed = parseEmojiSoundJson(await file.text());
-      if (disposed || source !== model || sourceFrame !== frame || readonlyReason) return;
+      if (disposed || source !== model || sourceFrame !== frame || generation !== formGeneration || readonlyReason) return;
       emoji = parsed; note = parsed.lo; duration = parsed.len;
-      const id = await onpatch(parsed.patch); if (!disposed && source === model && sourceFrame === frame) patch = id;
+      const id = await onpatch(parsed.patch); if (!disposed && source === model && sourceFrame === frame && generation === formGeneration) patch = id;
     } catch (e) { onnotice(String(e), "error"); } finally { busy = false; }
   }
   function save() {
@@ -65,6 +66,11 @@
   {#if editing}<button onclick={() => { editing = ""; }}>cancel marker edit</button>{/if}
   {#if patch && !model.patches[patch]}<p class="warn">Recipe Save must land before a marker can use it. Check the pending Save card.</p>{/if}
   {#if patch && model.patches[patch]}<button disabled={!!readonlyReason} onclick={() => onremovepatch(patch)}>remove active recipe</button>{/if}
+  <details><summary>All active sound markers · cleanup ({model.sfx.length})</summary>
+    <p>Includes orphaned and overflow markers. Removing a marker never requires its old frame to remain selectable.</p>
+    <div><button disabled={cleanupPage === 0} onclick={() => cleanupPage--}>previous markers</button> {cleanupPage + 1}/{Math.max(1, Math.ceil(model.sfx.length / 8))} <button disabled={(cleanupPage + 1) * 8 >= model.sfx.length} onclick={() => cleanupPage++}>next markers</button></div>
+    {#each model.sfx.slice(cleanupPage * 8, cleanupPage * 8 + 8) as marker (marker.id)}<div class="marker"><span>{marker.id} · frame {marker.frame}{#if model.readiness.missingFrames.includes(marker.id)} · missing frame{/if}{#if model.readiness.missingPatches.includes(marker.id)} · missing recipe{/if}{#if model.readiness.sfxOverflow.includes(marker.id)} · overflow{/if}</span><button disabled={!!readonlyReason} data-remove-sfx={marker.id} onclick={() => onremove(marker.id)}>remove marker</button></div>{/each}
+  </details>
   <details><summary>All retained sound evidence ({records.length})</summary>
     <p>{model.deletedSfx.length} deleted marker IDs · {model.deletedExports.length} deleted export IDs. Readiness: {JSON.stringify(model.readiness)}</p>
     <div><button disabled={evidencePage === 0} onclick={() => evidencePage--}>previous records</button> {evidencePage + 1}/{Math.max(1, Math.ceil(records.length / 8))} <button disabled={(evidencePage + 1) * 8 >= records.length} onclick={() => evidencePage++}>next records</button></div>

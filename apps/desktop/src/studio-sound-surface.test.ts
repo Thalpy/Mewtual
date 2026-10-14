@@ -7,6 +7,7 @@ const w = (globalThis as unknown as { window: Window & typeof globalThis }).wind
 Object.assign(globalThis, { MutationObserver: w.MutationObserver, HTMLInputElement: w.HTMLInputElement, HTMLMediaElement: w.HTMLMediaElement, Event: w.Event });
 const { mount, unmount, flushSync } = await import("svelte");
 const { default: StudioSound } = await import("./StudioSound.svelte");
+const { default: StudioSoundHarness } = await import("../scripts/fixtures/StudioSoundHarness.svelte");
 const patchId = id64(1), frame = id32(2), patch = legacyJamPatch("sine");
 function model() { return studioSoundModel({ records: { [`p/${patchId}`]: reg({ op: "set_patch", patch: patchId, descriptor: patch }, fsource(1)) },
   readiness: { sfxOverflow: [], patchOverflow: [], exportOverflow: [], missingFrames: [], missingPatches: [], conflicts: false } }); }
@@ -43,4 +44,41 @@ test("a file chooser/read completing after Sound unmount cannot queue a recipe i
   await unmount(app); target.remove();
   read.resolve(JSON.stringify({ v: 1, img: id64(3), patch, lo: 70, hi: 75, len: 333 }));
   for (let i = 0; i < 5; i++) await Promise.resolve(); assert.equal(patches, 0);
+});
+
+test("orphaned/overflow sound cleanup remains reachable without selecting its deleted frame", async () => {
+  const target = document.createElement("div"); document.body.append(target); const removed: string[] = [], marker = id32(9), m = model();
+  m.sfx = [{ id: marker, frame, patch: patchId, note: 60, durationMs: 333, source: fsource(9) as import("./studio-native.ts").FrameSource, conflicts: [] }];
+  m.ready = false; m.readiness.missingFrames = [marker]; m.readiness.sfxOverflow = [marker];
+  const app = mount(StudioSound, { target, props: { model: m, frame: "", onpatch: async () => patchId, onsfx: () => {}, onremove: id => removed.push(id), onremovepatch: () => {}, onnotice: () => {} } }); flushSync();
+  try { assert.match(target.textContent!, /missing frame.*overflow/); target.querySelector<HTMLButtonElement>(`[data-remove-sfx="${marker}"]`)!.click(); assert.deepEqual(removed, [marker]); }
+  finally { await unmount(app); target.remove(); }
+});
+
+test("changing frame clears the edited marker identity instead of silently moving it to the new frame", async () => {
+  const target = document.createElement("div"); document.body.append(target); const ops: { id?: string }[] = [], marker = id32(9), m = model();
+  m.sfx = [{ id: marker, frame, patch: patchId, note: 60, durationMs: 333, source: fsource(9) as import("./studio-native.ts").FrameSource, conflicts: [] }];
+  const app = mount(StudioSoundHarness, { target, props: { model: m, frame, onpatch: async () => patchId, onsfx: value => ops.push(value), onremove: () => {}, onremovepatch: () => {}, onnotice: () => {} } }); flushSync();
+  try {
+    [...target.querySelectorAll("button")].find(b => b.textContent === "edit")!.click(); flushSync();
+    assert.ok([...target.querySelectorAll("button")].find(b => b.textContent === "save marker edit"));
+    app.setFrame(id32(10)); flushSync();
+    assert.equal([...target.querySelectorAll("button")].find(b => b.textContent === "save marker edit"), undefined);
+    const duration = target.querySelector<HTMLInputElement>('input[placeholder="from the sound creator"]')!;
+    duration.value = "500"; duration.dispatchEvent(new w.Event("input", { bubbles: true })); flushSync();
+    [...target.querySelectorAll("button")].find(b => b.textContent === "add sound marker")!.click(); flushSync();
+    assert.equal(ops.length, 1); assert.equal(ops[0].id, undefined, "new frame receives a fresh marker, not the old frame's identity");
+  } finally { await unmount(app); target.remove(); }
+});
+
+test("frame A→B→A cancels an outstanding emoji file read even when the final frame id matches", async () => {
+  const target = document.createElement("div"); document.body.append(target); const read = deferred<string>(); let patches = 0;
+  const app = mount(StudioSoundHarness, { target, props: { model: model(), frame, onpatch: async () => { patches++; return patchId; }, onsfx: () => {}, onremove: () => {}, onremovepatch: () => {}, onnotice: () => {} } }); flushSync();
+  try {
+    const file = target.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(file, "files", { value: [{ size: 500, text: () => read.promise }] }); file.dispatchEvent(new w.Event("change", { bubbles: true }));
+    app.setFrame(id32(10)); flushSync(); app.setFrame(frame); flushSync();
+    read.resolve(JSON.stringify({ v: 1, img: id64(3), patch, lo: 70, hi: 75, len: 333 }));
+    for (let i = 0; i < 5; i++) await Promise.resolve(); flushSync(); assert.equal(patches, 0); assert.doesNotMatch(target.textContent!, /Imported source/);
+  } finally { await unmount(app); target.remove(); }
 });

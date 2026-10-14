@@ -817,12 +817,16 @@ test("G6-UI-001: native Score composer routes real drum edits and retains exact 
   const score = { kind: "score", title: null, bpm: null, bpb: null, steps: null, cells: {}, patches: {}, readiness: { cells: {}, patches: {}, headerConflicts: false } };
   ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ kind: "score", title: "native music" }) } })));
   ipc.on("studio_read", () => ({ ...ordinaryView(score), group: "deadbeef" }));
-  ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ }));
+  ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ, versions: [version(1)] }));
   ipc.on("studio_apply", () => { throw new Error("ACK lost"); });
   const m = mountStudio(ipc);
   try {
     await settled(); state.studio.selected = OBJ; flushSync(); await settled(400);
     assert.ok(m.target.querySelector('[aria-label="Score composer"]'));
+    m.click("button", "copy");
+    assert.match(m.text(), /Score copy may replace same-coordinate cells and recipes, title, BPM, beats per bar and Steps/);
+    assert.match(m.text(), /not an atomic restore/);
+    assert.doesNotMatch(m.text(), /copy replaces the current title and fps/);
     assert.equal(ipc.calls.find(c => c.cmd === "studio_read")?.args.objectKind, "score");
     m.click("button", "drum"); m.target.querySelector<HTMLButtonElement>('[data-score-cell="0:0"]')!.click(); flushSync(); await settled(300);
     const first = ipc.calls.find(c => c.cmd === "studio_apply")!.args;

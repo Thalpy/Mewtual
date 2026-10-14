@@ -1125,10 +1125,10 @@
                   <span class="st-card-acts">
                     <button type="button" class="st-btn ghost" onclick={() => inspect(v)}>{inspected === v.snapshot ? "hide" : "inspect"}</button>
                     <button type="button" class="st-btn" disabled={!!readOnlyWhy || run?.status === "running"} title="add what is missing; never overwrites" onclick={() => startRecovery(v, "restore")}>restore</button>
-                    <button type="button" class="st-btn" disabled={!!readOnlyWhy || run?.status === "running"} title="replace current title/fps and apply the fork's deletions; asks first" onclick={() => startRecovery(v, "copy")}>{copyConfirm === v.snapshot ? "confirm copy" : "copy"}</button>
+                    <button type="button" class="st-btn" disabled={!!readOnlyWhy || run?.status === "running"} title={isScore ? "may replace same-coordinate cells and recipes, title/BPM/beats/steps and apply retained removals; asks first, each item is previewed separately" : "replace current title/fps and apply the fork's deletions; asks first"} onclick={() => startRecovery(v, "copy")}>{copyConfirm === v.snapshot ? "confirm copy" : "copy"}</button>
                     <button type="button" class="st-btn ghost" onclick={() => exportVersion(v)}>export</button>
                   </span>
-                  {#if copyConfirm === v.snapshot}<p class="micro wrap">copy replaces the current title and fps with this version's and applies deletions recorded on that fork · nothing deleted here is resurrected · press confirm copy</p>{/if}
+                  {#if copyConfirm === v.snapshot}<p class="micro wrap">{#if isScore}Score copy may replace same-coordinate cells and recipes, title, BPM, beats per bar and Steps, and apply retained clear/remove choices. Each item is previewed and saved separately, not an atomic restore; conflicts, missing recipes or out-of-length cells may still need attention. Press confirm copy.{:else}copy replaces the current title and fps with this version's and applies deletions recorded on that fork · nothing deleted here is resurrected · press confirm copy{/if}</p>{/if}
                   {#if inspected === v.snapshot}
                     {#if inspectedVersion}
                       {@const c = inspectedVersion.content}
