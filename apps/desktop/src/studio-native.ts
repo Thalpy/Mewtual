@@ -10,7 +10,9 @@
 // on both and is never the read-only discriminator.
 
 import type { NativeInvoker } from "./native-download.ts";
-import { PIX_MAX_BYTES } from "./studio-contract.ts";
+import { PIX_MAX_BYTES, SCORE_MAX_STEPS, SCORE_ROWS, type ScoreCell } from "./studio-contract.ts";
+import type { JamPatch } from "./jam-contract.ts";
+import { validateJamPatch } from "./jam-patch.ts";
 
 export type Hex32 = string;
 export type Hex64 = string;
@@ -73,7 +75,23 @@ export type FlipnoteContent = {
   overCap: Record<Hex32, FrameLimits>;
   tombstones: Record<Hex32, FrameSource[]>;
 };
-export type StudioContent = IndexContent | FlipnoteContent;
+/** Raw Automerge winner and effective remove-wins state are deliberately separate evidence. */
+export type ScoreSlot<T> = { removed: boolean; register: Register<T | null, IndexSource> };
+export type ScoreCellIssues = { count: boolean; extent: boolean; recipe: boolean; overlap: boolean; conflict: boolean };
+export type ScorePatchIssues = { count: boolean; conflict: boolean };
+export type ScoreReadiness = { cells: Record<string, ScoreCellIssues>; patches: Record<Hex64, ScorePatchIssues>; headerConflicts: boolean };
+export type ScoreContent = {
+  kind: "score";
+  title: Register<string, IndexSource> | null;
+  bpm: Register<number, IndexSource> | null;
+  bpb: Register<number, IndexSource> | null;
+  steps: Register<number, IndexSource> | null;
+  cells: Record<string, ScoreSlot<ScoreCell>>;
+  patches: Record<Hex64, ScoreSlot<JamPatch>>;
+  readiness: ScoreReadiness;
+};
+export type StudioObjectKind = "flipnote" | "score";
+export type StudioContent = IndexContent | FlipnoteContent | ScoreContent;
 
 export type StudioPhase = "open" | "closing" | "settled" | "fault";
 export type StudioTrust =
@@ -89,6 +107,8 @@ export type StudioView<C extends StudioContent = StudioContent> = {
 } & StudioTrust;
 export type IndexView = StudioView<IndexContent>;
 export type FlipnoteView = StudioView<FlipnoteContent>;
+export type ScoreView = StudioView<ScoreContent>;
+export type StudioObjectView = FlipnoteView | ScoreView;
 
 export type PixPublication = { cid: Hex64; bytes: number };
 
@@ -111,6 +131,9 @@ export type RecoveryVersionRead = { v: 1; kind: "recoveryVersion"; historical: t
 export type RecoveryExport = { v: 1; kind: "recoveryExport"; snapshot: Hex64; format: "p1-recovery-v1"; bytes: number; bytesB64: string };
 export type RecoveryMode = "restore" | "copy";
 export type RecoveryChoice =
+  | { kind: "scoreCell"; step: number; row: number; value: Hex64 }
+  | { kind: "scorePatch"; patch: Hex64; value: Hex64 }
+  | { kind: "scoreHeader"; field: "title" | "bpm" | "bpb" | "steps"; value: Hex64 }
   | { kind: "frame"; id: Hex32; value: Hex64 }
   | { kind: "frameDeletion"; id: Hex32 }
   | { kind: "title"; value: Hex64 }
@@ -260,7 +283,7 @@ export type UnconfirmedOverlaySaveBegin =
   | UnconfirmedOverlaySaveTicket
   | Extract<UnconfirmedOverlaySave, { state: "refused" }>;
 
-export type OverlayDestination = { channel: Decimal; object?: Hex32 };
+export type OverlayDestination = { channel: Decimal; object?: Hex32; objectKind?: StudioObjectKind };
 export type OverlayCopyApplyEdit = {
   destination: OverlayDestination; choice: RecoveryChoice; mode: RecoveryMode; epochId: Hex32;
   expectedProjection: Hex64; nonce: Hex32; body: string;
@@ -446,10 +469,106 @@ export function parseFlipnoteContent(v: unknown, what = "content"): FlipnoteCont
   };
 }
 
+/** Canonical global address, independent of the current (possibly concurrently shrunk) extent. */
+function scoreAddress(value: string): { step: number; row: number } {
+  const match = /^(0|[1-9][0-9]*):(0|[1-9][0-9]*)$/.exec(value);
+  if (!match) fail("score cell address is not canonical");
+  const step = Number(match[1]), row = Number(match[2]);
+  if (step >= SCORE_MAX_STEPS || row >= SCORE_ROWS) fail("score cell address is outside its global bound");
+  return { step, row };
+}
+
+function scoreCell(v: unknown, what: string, step: number): ScoreCell {
+  const r = record(v, what), keys = Object.keys(r).sort().join(",");
+  if (r.k === "n") {
+    if (keys !== "k,p" && keys !== "k,len,p") fail(`${what} has unknown note fields`);
+    const p = hex64(r.p, `${what}.p`);
+    if (!("len" in r)) return { k: "n", p };
+    const len = count(r.len, `${what}.len`);
+    if (len < 1 || len > SCORE_MAX_STEPS - step) fail(`${what}.len is outside its global extent`);
+    return { k: "n", p, len };
+  }
+  if (r.k === "d" && keys === "k,pad") {
+    const pad = count(r.pad, `${what}.pad`);
+    if (pad > 9) fail(`${what}.pad is outside 0..9`);
+    return { k: "d", pad };
+  }
+  return fail(`${what} is not a known score cell`);
+}
+
+/** Preserve all values, while checking the native effective flag against the removal evidence. */
+export function parseScoreContent(v: unknown, what = "content"): ScoreContent {
+  const r = record(v, what);
+  if (r.kind !== "score") fail(`${what}.kind is not score`);
+  // Matches the typed snapshot's value rail; malformed native replies cannot allocate arbitrary
+  // conflict vectors or let a tiny displayed winner hide an unbounded evidence collection.
+  let remaining = 3 * 20_000 + 8192;
+  const checkedRegister = <T>(value: unknown, w: string, parse: (v: unknown, w: string) => T): Register<T, IndexSource> => {
+    const raw = record(value, w), conflicts = list(raw.conflicts, `${w}.conflicts`);
+    if (conflicts.length + 1 > remaining) fail("score register evidence exceeds its bound");
+    remaining -= conflicts.length + 1;
+    const result = register(raw, w, parse, indexSource);
+    const seen = new Set<string>();
+    for (const alternative of [result.selected, ...result.conflicts]) {
+      if (seen.has(alternative.source.opId)) fail(`${w} repeats a source operation`);
+      seen.add(alternative.source.opId);
+    }
+    return result;
+  };
+  const boundedNumber = (min: number, max: number) => (value: unknown, w: string) => {
+    const n = count(value, w);
+    if (n < min || n > max) fail(`${w} is outside ${min}..${max}`);
+    return n;
+  };
+  const titleValue = (value: unknown, w: string) => {
+    const result = text(value, w);
+    if (result.length > 65536 || new TextEncoder().encode(result).length > 65536 || /[\uD800-\uDFFF]/u.test(result)) fail(`${w} is not bounded Unicode scalar text`);
+    return result;
+  };
+  const slot = <T>(value: unknown, w: string, parse: (v: unknown, w: string) => T): ScoreSlot<T> => {
+    const raw = record(value, w), removed = flag(raw.removed, `${w}.removed`);
+    const result = checkedRegister<T | null>(raw.register, `${w}.register`, (x, name) => x === null ? null : parse(x, name));
+    const effectiveRemoved = [result.selected, ...result.conflicts].some((alternative) => alternative.value === null);
+    if (removed !== effectiveRemoved) fail(`${w}.removed disagrees with retained removal evidence`);
+    return { removed, register: result };
+  };
+  const rawCells = record(r.cells, `${what}.cells`), rawPatches = record(r.patches, `${what}.patches`);
+  if (Object.keys(rawCells).length > SCORE_MAX_STEPS * SCORE_ROWS || Object.keys(rawPatches).length > 20_064) fail("score slot collection exceeds its bound");
+  const cells = mapOf(rawCells, `${what}.cells`, (key) => { scoreAddress(key); return key; },
+    (value, w) => slot(value, w, (cell, name) => scoreCell(cell, name, scoreAddress(w.slice(w.lastIndexOf(".") + 1)).step)));
+  const patches = mapOf(rawPatches, `${what}.patches`, (key) => hex64(key, "score patch id"), (value, w) => slot(value, w, (patch, name) => {
+    const result = validateJamPatch(patch);
+    if (!result.ok) fail(`${name}: ${result.error}`);
+    return result.patch;
+  }));
+  const ready = record(r.readiness, `${what}.readiness`);
+  const issueMap = <T>(input: unknown, w: string, keys: readonly string[], present: Record<string, unknown>, key: (v: string) => string): Record<string, T> =>
+    mapOf(input, w, key, (value, name) => {
+      const address = name.slice(name.lastIndexOf(".") + 1);
+      if (!(address in present)) fail(`${name} names an absent slot`);
+      const raw = record(value, name), result: Record<string, boolean> = {};
+      if (Object.keys(raw).sort().join(",") !== [...keys].sort().join(",")) fail(`${name} has unknown readiness flags`);
+      for (const field of keys) result[field] = flag(raw[field], `${name}.${field}`);
+      return result as T;
+    });
+  const title = nullable(r.title, (x) => checkedRegister(x, `${what}.title`, titleValue));
+  const bpm = nullable(r.bpm, (x) => checkedRegister(x, `${what}.bpm`, boundedNumber(40, 240)));
+  const bpb = nullable(r.bpb, (x) => checkedRegister(x, `${what}.bpb`, boundedNumber(1, 8)));
+  const steps = nullable(r.steps, (x) => checkedRegister(x, `${what}.steps`, boundedNumber(1, SCORE_MAX_STEPS)));
+  const headerConflicts = flag(ready.headerConflicts, `${what}.readiness.headerConflicts`);
+  if (headerConflicts !== [title, bpm, bpb, steps].some((header) => (header?.conflicts.length ?? 0) > 0)) fail("score header readiness disagrees with retained conflicts");
+  return { kind: "score", title, bpm, bpb, steps, cells, patches, readiness: {
+    cells: issueMap<ScoreCellIssues>(ready.cells, `${what}.readiness.cells`, ["count", "extent", "recipe", "overlap", "conflict"], cells, (key) => { scoreAddress(key); return key; }),
+    patches: issueMap<ScorePatchIssues>(ready.patches, `${what}.readiness.patches`, ["count", "conflict"], patches, (key) => hex64(key, "score patch issue id")),
+    headerConflicts,
+  } };
+}
+
 function parseContent(v: unknown, what: string): StudioContent {
   const r = record(v, what);
   if (r.kind === "index") return parseIndexContent(r, what);
   if (r.kind === "flipnote") return parseFlipnoteContent(r, what);
+  if (r.kind === "score") return parseScoreContent(r, what);
   return fail(`${what}.kind is unknown`);
 }
 
@@ -493,6 +612,11 @@ export function parseFlipnoteView(v: unknown): FlipnoteView {
   const view = parseStudioView(v);
   if (view.content.kind !== "flipnote") fail("expected a Flipnote view");
   return view as FlipnoteView;
+}
+export function parseScoreView(v: unknown): ScoreView {
+  const view = parseStudioView(v);
+  if (view.content.kind !== "score") fail("expected a Score view");
+  return view as ScoreView;
 }
 
 export function parsePixPublication(v: unknown): PixPublication {
@@ -873,24 +997,33 @@ export async function studioList(ipc: StudioIpc, target: StudioTargetArgs): Prom
   return parseIndexView(raw);
 }
 
-export async function studioRead(ipc: StudioIpc, target: StudioTargetArgs, object: Hex32): Promise<FlipnoteView | null> {
-  const raw = await ipc.invoke<unknown>("studio_read", { server: target.server, channel: target.channel, object });
-  return raw === null || raw === undefined ? null : parseFlipnoteView(raw);
+type ObjectViewFor<K extends StudioObjectKind> = K extends "score" ? ScoreView : FlipnoteView;
+function objectKindArgs(kind: StudioObjectKind | undefined): Record<string, unknown> {
+  if (kind !== undefined && kind !== "score" && kind !== "flipnote") fail("objectKind is unknown");
+  return kind === undefined ? {} : { objectKind: kind };
+}
+function parseObjectView<K extends StudioObjectKind>(raw: unknown, kind: K | undefined): ObjectViewFor<K> {
+  // The trusted target kind selects the decoder. Never try whichever body parser succeeds.
+  return (kind === "score" ? parseScoreView(raw) : parseFlipnoteView(raw)) as ObjectViewFor<K>;
+}
+export async function studioRead<K extends StudioObjectKind = "flipnote">(ipc: StudioIpc, target: StudioTargetArgs, object: Hex32, objectKind?: K): Promise<ObjectViewFor<K> | null> {
+  const raw = await ipc.invoke<unknown>("studio_read", { server: target.server, channel: target.channel, object, ...objectKindArgs(objectKind) });
+  return raw === null || raw === undefined ? null : parseObjectView(raw, objectKind);
 }
 
-export type CreateRequest = { object: Hex32; nonce: Hex32; title: string; createdAtMs: number };
-export async function studioCreate(ipc: StudioIpc, target: StudioTargetArgs, req: CreateRequest): Promise<FlipnoteView> {
+export type CreateRequest<K extends StudioObjectKind = "flipnote"> = { object: Hex32; nonce: Hex32; title: string; createdAtMs: number; objectKind?: K };
+export async function studioCreate<K extends StudioObjectKind = "flipnote">(ipc: StudioIpc, target: StudioTargetArgs, req: CreateRequest<K>): Promise<ObjectViewFor<K>> {
   if (!Number.isSafeInteger(req.createdAtMs) || req.createdAtMs < 0) fail("createdAtMs must be a non-negative safe integer");
-  const raw = await ipc.invoke<unknown>("studio_create", { server: target.server, channel: target.channel, object: req.object, nonce: req.nonce, title: req.title, createdAtMs: req.createdAtMs });
+  const raw = await ipc.invoke<unknown>("studio_create", { server: target.server, channel: target.channel, object: req.object, nonce: req.nonce, title: req.title, createdAtMs: req.createdAtMs, ...objectKindArgs(req.objectKind) });
   if (raw === null || raw === undefined) fail("studio_create returned nothing");
-  return parseFlipnoteView(raw);
+  return parseObjectView(raw, req.objectKind);
 }
 
-export type ApplyRequest = { object: Hex32; epochId: Hex32; nonce: Hex32; body: string };
-export async function studioApply(ipc: StudioIpc, target: StudioTargetArgs, req: ApplyRequest): Promise<FlipnoteView> {
-  const raw = await ipc.invoke<unknown>("studio_apply", { server: target.server, channel: target.channel, object: req.object, epochId: req.epochId, nonce: req.nonce, body: req.body });
+export type ApplyRequest<K extends StudioObjectKind = "flipnote"> = { object: Hex32; epochId: Hex32; nonce: Hex32; body: string; objectKind?: K };
+export async function studioApply<K extends StudioObjectKind = "flipnote">(ipc: StudioIpc, target: StudioTargetArgs, req: ApplyRequest<K>): Promise<ObjectViewFor<K>> {
+  const raw = await ipc.invoke<unknown>("studio_apply", { server: target.server, channel: target.channel, object: req.object, epochId: req.epochId, nonce: req.nonce, body: req.body, ...objectKindArgs(req.objectKind) });
   if (raw === null || raw === undefined) fail("studio_apply returned nothing");
-  return parseFlipnoteView(raw);
+  return parseObjectView(raw, req.objectKind);
 }
 
 export type ApplyIndexRequest = { epochId: Hex32; nonce: Hex32; body: string };
@@ -923,13 +1056,20 @@ export async function requestBlobBounded(ipc: StudioIpc, server: number, cid: He
   return bytes;
 }
 
-export type RecoveryTargetArgs = StudioTargetArgs & { object: Hex32 | null };
+export type RecoveryTargetArgs = StudioTargetArgs & { object: Hex32 | null; objectKind?: StudioObjectKind };
 function recoveryArgs(t: RecoveryTargetArgs): Record<string, unknown> {
-  return t.object === null ? { server: t.server, channel: t.channel } : { server: t.server, channel: t.channel, object: t.object };
+  if (t.object === null && t.objectKind !== undefined) fail("objectKind requires an object target");
+  return t.object === null ? { server: t.server, channel: t.channel } : { server: t.server, channel: t.channel, object: t.object, ...objectKindArgs(t.objectKind) };
+}
+
+function checkTargetContent(content: StudioContent | null, target: RecoveryTargetArgs): void {
+  if (content && content.kind !== (target.object === null ? "index" : target.objectKind ?? "flipnote")) fail("native content kind disagrees with the requested target");
 }
 
 export async function overlayRead(ipc: StudioIpc, t: RecoveryTargetArgs): Promise<OverlayInspection> {
-  return parseOverlayInspection(await ipc.invoke<unknown>("studio_overlay_read", recoveryArgs(t)));
+  const result = parseOverlayInspection(await ipc.invoke<unknown>("studio_overlay_read", recoveryArgs(t)));
+  if (result.kind === "local-draft") checkTargetContent(result.content, t);
+  return result;
 }
 export async function overlayLifecycle(ipc: StudioIpc, t: RecoveryTargetArgs): Promise<OverlayLifecycle> {
   return parseOverlayLifecycle(await ipc.invoke<unknown>("studio_overlay_lifecycle", recoveryArgs(t)));
@@ -969,7 +1109,9 @@ export async function recoveryList(ipc: StudioIpc, t: RecoveryTargetArgs): Promi
   return parseRecoveryListing(await ipc.invoke<unknown>("studio_recovery_list", recoveryArgs(t)));
 }
 export async function recoveryRead(ipc: StudioIpc, t: RecoveryTargetArgs, snapshot: Hex64): Promise<RecoveryVersionRead> {
-  return parseRecoveryVersionRead(await ipc.invoke<unknown>("studio_recovery_read", { ...recoveryArgs(t), snapshot }));
+  const result = parseRecoveryVersionRead(await ipc.invoke<unknown>("studio_recovery_read", { ...recoveryArgs(t), snapshot }));
+  checkTargetContent(result.content, t);
+  return result;
 }
 export async function recoveryExport(ipc: StudioIpc, t: RecoveryTargetArgs, snapshot: Hex64): Promise<RecoveryExport> {
   return parseRecoveryExport(await ipc.invoke<unknown>("studio_recovery_export", { ...recoveryArgs(t), snapshot }));
@@ -1016,6 +1158,32 @@ export type FlipnoteModel = {
 
 export const DEFAULT_TITLE = "";
 export const DEFAULT_FPS = 12;
+
+export type ScoreModel = {
+  title: string; bpm: number; bpb: number; steps: number;
+  /** Every raw slot, including clear/remove winners and losing alternatives. */
+  cellSlots: ScoreContent["cells"]; patchSlots: ScoreContent["patches"];
+  /** Effective values only; a selected setter does not defeat a concurrent removal. */
+  cells: Record<string, ScoreCell>; patches: Record<Hex64, JamPatch>;
+  readiness: ScoreReadiness; ready: boolean;
+  headers: Pick<ScoreContent, "title" | "bpm" | "bpb" | "steps">;
+};
+
+/** Defaults are display fallback, never a fabricated operation/source or authority to save. */
+export function scoreModel(content: ScoreContent): ScoreModel {
+  const cells: Record<string, ScoreCell> = {}, patches: Record<Hex64, JamPatch> = {};
+  for (const [key, slot] of Object.entries(content.cells)) if (!slot.removed && slot.register.selected.value !== null) cells[key] = slot.register.selected.value;
+  for (const [key, slot] of Object.entries(content.patches)) if (!slot.removed && slot.register.selected.value !== null) patches[key] = slot.register.selected.value;
+  return {
+    title: content.title?.selected.value ?? "", bpm: content.bpm?.selected.value ?? 120,
+    bpb: content.bpb?.selected.value ?? 4, steps: content.steps?.selected.value ?? 16,
+    cellSlots: content.cells, patchSlots: content.patches, cells, patches,
+    readiness: content.readiness,
+    ready: !content.readiness.headerConflicts && !Object.values(content.readiness.cells).some((issues) => Object.values(issues).some(Boolean)) &&
+      !Object.values(content.readiness.patches).some((issues) => Object.values(issues).some(Boolean)),
+    headers: { title: content.title, bpm: content.bpm, bpb: content.bpb, steps: content.steps },
+  };
+}
 
 /// The timeline in the backend's order (never map enumeration), each frame with its selected
 /// pixels and everything the register kept beside them.
