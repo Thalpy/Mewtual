@@ -1,5 +1,60 @@
 # Gate 6 frontend integration checkpoints
 
+## Connected editor/media candidate (review pending)
+
+The production Studio now composes the reviewed Score editor, Sound marker controls and linked
+Score selection against the native session. Score creation reuses coordinated Create with an
+explicit family; no blank PIX frame is invented for a Score. Save uncertainty, exact retry,
+retained draft/Copy and historical recovery controls remain reachable for both families through
+the same shared snippets. Conflict/removal/overflow evidence stays inspectable, with bounded
+pages for raw sound records and alternatives. Sound markers require an explicitly authored hold;
+there is no fixed playback duration substituted by the editor.
+
+The recipe picker reuses App's jam presets, saved library and current creator recipe. A local
+`emoji-sound:v1` JSON import is capped at 4KiB and validates the closed envelope, existing patch
+schema, MIDI range and authored `len` 20–1000ms. This is only an explicit local source: it does
+not implement or claim the shared emoji catalog's verified image/author binding or chat-click
+authority. No arbitrary URL is fetched.
+
+Media preparation captures the exact displayed native projection and refuses an unrebuildable
+local draft. Draft export requires its actual native `contentEpoch` and stable `group`, never an
+ordinary base epoch or numeric server handle. A synchronous timeline preflight checks every
+active (non-tombstoned) frame exactly once, the count, per-frame length, computed 8MiB total and
+matching aggregate before any fetch. Linked Score reads require the explicit same-group/channel
+target. One preparation slot and one media-write slot bound concurrent full packages; existing
+frame fetches reuse the bounded thumbnail/action scheduler. Source/navigation/invalidation edges
+abort stale asynchronous success.
+
+`publish_pixa` custody is reported separately from the queued SetExport Save. Every failure
+after a durable blob acknowledgement returns that acknowledgement plus an honest missing-reference
+warning, including Closing/fault routes or nonce allocation failure. Ticketed Flow-S export
+refusals use distinct `exportUnpublished`/`exportInvalid`/`exportMissing` PIXA diagnostics and
+respect native `newTicket` policy; they are proven no-write, not ambiguous transport success.
+GIF saves report the actual acknowledged native path and preserve reveal warnings as saved-file
+success. Browser download requests do not claim native path/custody proof.
+
+Active export references can read back the exact declared package through `request_blob_bounded`,
+validate full PIXA and its stable group, then explicitly preview/play/download/share the actual
+immutable package. PIXA never enters the PIX1-only thumbnail cache. The saved preview uses its
+own package frames, not the subsequently edited native timeline. The sealed blob CID is not
+treated as a fileshare CID; sharing reuses the existing explicit File upload path. Score exports
+are ordinary `.jamtake` files and use that same path.
+
+App owns one Studio playback coordinator around its existing JamEngine/context/allocator. Outside
+a call it creates no live-call source or sender nonce. Play resumes in the original local gesture
+before asynchronous media preparation. Stop, source invalidation, navigation, lock, membership,
+call leave and both Deafen edges revoke ownership; reopening audio never resumes automatically.
+Loop is explicit opt-in and waits for the complete authored hold/release horizon. Loop inputs are
+owned snapshots, and a suspended context terminates rather than auto-resuming. Frame stepping
+stops playback; the next Play seeks with a fresh capability from the selected frame.
+
+Focused evidence: the previous 37-case session/compiled-surface/audio run passed; four additional
+Score/Sound compiled cases passed; the latest media/audio/Sound group passed 16/16. The primary
+integration owns complete root/native/frontend suites, visual fixture inspection and final Gate 6
+acceptance. Actual audible native playback has not been manually claimed. Global shared-deck
+PIXA media-kind/consensus and a standalone package viewer are follow-ups, not this candidate's
+claim. The existing take consumer's archival-capability migration is the next bounded checkpoint.
+
 ## Typed Score bridge and session
 
 The first frontend checkpoint extends the existing Studio native adapter and session with a

@@ -180,6 +180,11 @@
     const d = Math.ceil((e.ms - Date.now()) / 86_400_000);
     return d <= 0 ? "expired" : `expires ${d}d`;
   }
+  function newScore() {
+    if (!session.scope) return;
+    try { const id = session.createScore(`score ${(model?.entries.filter((e) => e.kind === "score").length ?? 0) + 1}`); session.open(id, { read: false }); studio.selected = id; onopen(); }
+    catch (e) { onnotice?.(reason(e), "warn"); }
+  }
 </script>
 
 <h3><span>Studio</span></h3>
@@ -348,6 +353,7 @@
   <p class="muted small studio-deleted">{model.deleted.length} deleted {model.deleted.length === 1 ? "entry is" : "entries are"} kept in history</p>
 {/if}
 <button type="button" class="ghost small ctx-action studio-new" disabled={!indexView || !hasScope} onclick={newFlipnote}>+ new flipnote</button>
+<button type="button" class="ghost small ctx-action studio-new" disabled={!indexView || !hasScope} onclick={newScore}>+ new score</button>
 <p class="muted small">Any member can edit. The owner settles history.</p>
 
 <style>

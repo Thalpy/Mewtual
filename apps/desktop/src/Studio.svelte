@@ -2,9 +2,8 @@
   // The flipnote editor surface (design-creative-suite.md 2.2, 2.10; mockups "Flipnote Editor",
   // "Timeline States", "Art / Sound / Music"), connected to the native Studio through the shared
   // session: reads are typed views, edits are publish-then-apply saves that keep their identity
-  // across retries, and what the backend does not offer yet (claims, sound, linked Music, .pixa
-  // export, durable edits while rotating, signed repair) is shown as unavailable rather than
-  // pretended.
+  // across retries. Score/Sound and immutable media reuse the native Studio, patch validator,
+  // bounded blob fetch and App's existing JamEngine; neither a second store nor a synth lives here.
   import { onDestroy, onMount, untrack } from "svelte";
   import { decodePix, pixToRgba } from "./pix.ts";
   import {
@@ -49,8 +48,16 @@
   import { reason, type RecoveryItem, type SaveRecord } from "./studio-session.ts";
   import { ensureStudio, setStudioScope, studio } from "./studio-state.svelte.ts";
   import { frameClaimState, type ClaimView, type StudioClaimActions, type StudioClaimSnapshot } from "./draw-claims.ts";
+  import ScoreEditor from "./ScoreEditor.svelte";
+  import StudioSound from "./StudioSound.svelte";
+  import type { JamPatch, JamTake } from "./jam-contract.ts";
+  import { jamPatchId, validateJamPatch } from "./jam-patch.ts";
+  import type { StudioAudioActions, StudioAudioState } from "./studio-audio.ts";
+  import { decodePixa, type Pixa } from "./pixa.ts";
+  import { JAM_TAKE_MIME } from "./jukebox.ts";
 
-  let { me, server, channel, nameOf, colorOf, adapt = true, onnotice, claims = null, claimActions = null } = $props<{
+  let { me, server, channel, nameOf, colorOf, adapt = true, onnotice, claims = null, claimActions = null,
+    patchLibrary = [], audioActions = null, audioState = { state: "stopped", elapsedMs: 0 }, onshareScore, onsharePixa } = $props<{
     me: string;
     server: number | null;
     channel: string;
@@ -62,6 +69,11 @@
     /// Advisory only: nothing in this component lets a claim decide whether an edit may happen.
     claims?: StudioClaimSnapshot | null;
     claimActions?: StudioClaimActions | null;
+    patchLibrary?: readonly { name: string; patch: JamPatch }[];
+    audioActions?: StudioAudioActions | null;
+    audioState?: StudioAudioState;
+    onshareScore?: (take: JamTake, server: number) => Promise<void>;
+    onsharePixa?: (bytes: Uint8Array, server: number) => Promise<void>;
   }>();
 
   // Built once per mount (state may be written during init, never inside a derived); the
@@ -94,7 +106,14 @@
     const m = session.indexModel;
     return m ? [...m.entries, ...m.overflow].find((e) => e.id === objectId) ?? null : null;
   });
-  const isScore = $derived(entry?.kind === "score");
+  const isScore = $derived(doc?.objectKind === "score" || (!doc && entry?.kind === "score"));
+  const score = $derived.by(() => { void studio.rev; return session.doc?.object === objectId ? session.doc.score : null; });
+  const sourceGeneration = $derived.by(() => { void studio.rev; return session.mediaGeneration; });
+  $effect(() => {
+    void objectId; void view; void model; void score; void sourceGeneration;
+    untrack(() => { audioActions?.stop(); });
+  });
+  $effect(() => { void objectId; untrack(() => { mediaReceipt = ""; savedPreview = null; }); });
   const readOnlyWhy = $derived.by(() => { void studio.rev; return objectId ? session.editRefusal(objectId) : ""; });
   const pending = $derived.by(() => { void studio.rev; return objectId ? session.pendingFor(objectId) : []; });
   const attention = $derived(pending.filter((s) => s.mayHaveCommitted || s.status === "uncertain" || s.status === "blocked"));
@@ -135,8 +154,10 @@
   let inspectorTab = $state<"art" | "sound" | "music">("art");
   let stampIdx = $state(0);
   let textDraft = $state("nya~");
-  let playing = $state(false);
-  let loop = $state(true);
+  const playing = $derived(audioState.state !== "stopped");
+  let loop = $state(false);
+  let mediaBusy = $state(false), mediaReceipt = $state("");
+  let savedPreview = $state.raw<Pixa | null>(null);
   const ZOOM_MIN = 1, ZOOM_MAX = 6;
   let zoom = $state(3);
   function setZoom(z: number) { zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.round(z))); }
@@ -152,7 +173,7 @@
   const frameKnown = $derived(frameIndex >= 0 || pendingHere !== null);
   const totalBytes = $derived(model?.declaredFrameBytes ?? 0);
   const overCapCount = $derived(model?.overCapCount ?? 0);
-  const canEdit = $derived(!!raster && !!model && !isScore && !readOnlyWhy && overCapCount === 0);
+  const canEdit = $derived(!!raster && !!model && !isScore && !readOnlyWhy && overCapCount === 0 && !playing);
   const hasScope = $derived.by(() => { void studio.rev; return session.scope !== null; });
   // Blob state is session data, not part of the model: read it through the revision so the
   // strip and the veil follow a fetch as it lands.
@@ -213,8 +234,9 @@
   }
 
   // --- Frame open / commit --------------------------------------------------------------------
-  function openFrame(id: string) {
+  function openFrame(id: string, fromPlayback = false) {
     if (!model) return;
+    if (!fromPlayback && playing) audioActions?.stop();
     commit();
     frameId = id;
     loadRaster();
@@ -553,8 +575,8 @@
   $effect(() => {
     // The recovery rail follows the open document. Watching is idempotent for the same target,
     // and it runs untracked so the listing it starts cannot re-trigger this effect.
-    const id = objectId, score = isScore;
-    untrack(() => { if (id && !score) session.watchRecovery(id); });
+    const id = objectId;
+    untrack(() => { if (id) session.watchRecovery(id); });
   });
 
   /// Thumbnail action: decode the frame's held bytes into a small canvas, or ask for them.
@@ -631,22 +653,96 @@
     if (!frameIds.length) return;
     const n = frameIds.length;
     let i = (Math.max(0, frameIndex) + delta + n) % n;
-    // Playback skips frames that are over the cap or not held; stepping does not.
-    if (playing) {
-      let guardN = n;
-      while (guardN-- && (frames[i].overCap || !session.blob(frames[i].cid, frames[i].bytes))) i = (i + delta + n) % n;
-    }
-    if (!loop && playing && i === 0 && delta > 0) { playing = false; return; }
     openFrame(frameIds[i]);
   }
 
-  let playTimer: ReturnType<typeof setInterval> | null = null;
   $effect(() => {
-    if (playTimer) { clearInterval(playTimer); playTimer = null; }
-    const fps = model?.fps ?? 12;
-    if (playing && model) playTimer = setInterval(() => step(1), 1000 / Math.max(FLIPNOTE_FPS_MIN, Math.min(FLIPNOTE_FPS_MAX, fps)));
-    return () => { if (playTimer) clearInterval(playTimer); };
+    const elapsed = audioState.elapsedMs, status = audioState.state, fps = model?.fps ?? 12;
+    if (status === "playing" && frameIds.length && !isScore && !savedPreview) {
+      const id = frameIds[Math.min(frameIds.length - 1, Math.floor(elapsed * fps / 1000))];
+      if (id !== frameId) untrack(() => openFrame(id, true));
+    }
   });
+
+  function toggleStudioPlay() {
+    if (playing) { audioActions?.stop(); return; }
+    if (!audioActions || !objectId) { onnotice("audio playback is unavailable on this surface", "warn"); return; }
+    commit();
+    savedPreview = null;
+    const object = objectId, kind = isScore ? "score" : "flipnote";
+    const prepare = () => kind === "score" ? session.prepareScoreTake(object) : session.prepareFlipnotePixa(object);
+    // The App adapter resumes its existing context immediately, before prepare fetches/hashes.
+    void audioActions.start(kind, prepare, loop, kind === "flipnote" ? Math.max(0, frameIndex) * 1000 / (model?.fps ?? 12) : 0)
+      .then((started: boolean) => { if (!started) onnotice("playback was cancelled or audio is unavailable; press Play to try again", "warn"); })
+      .catch((e: unknown) => onnotice(reason(e), "warn"));
+  }
+  async function addStudioPatch(patch: JamPatch): Promise<string> {
+    const object = objectId, gen = session.generation, kind = isScore ? "score" : "flipnote";
+    const sourceView = session.doc?.view, sourceEpoch = session.mediaGeneration;
+    const checked = validateJamPatch(patch); if (!checked.ok) throw new Error(checked.error);
+    const id = await jamPatchId(checked.patch);
+    if (!object || gen !== session.generation || session.doc?.object !== object || session.doc.objectKind !== kind || session.doc.view !== sourceView || session.mediaGeneration !== sourceEpoch) throw new Error("the recipe target changed; choose it again");
+    if (kind === "score") session.setScorePatch(object, id, checked.patch); else session.setSoundPatch(object, id, checked.patch);
+    return id;
+  }
+  async function exportMedia(kind: "pixa" | "gif") {
+    if (mediaBusy || !objectId) return;
+    commit(); const object = objectId, gen = session.generation; mediaBusy = true; mediaReceipt = "";
+    try {
+      if (kind === "pixa") {
+        const result = await session.publishFlipnotePixa(object);
+        if (gen === session.generation && objectId === object) mediaReceipt = result.warning ?? `blob published ${result.publication.cid} · ${result.publication.bytes} bytes · Studio reference submitted as Save #${result.referenceSaveId}; an owner receipt settles it later`;
+      } else {
+        const result = await session.exportFlipnoteGif(object);
+        if (gen === session.generation && objectId === object) mediaReceipt = `GIF saved locally: ${result.path}${result.warning ? ` · ${result.warning}` : ""} · visual only, no audio`;
+      }
+    } catch (e) { onnotice(reason(e), "warn"); } finally { mediaBusy = false; }
+  }
+  function browserDownload(bytes: Uint8Array, filename: string, type: string) {
+    const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type }));
+    const a = document.createElement("a"); a.href = url; a.download = filename; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    // A browser download request has no native custody acknowledgement. Do not claim a path or
+    // successful OS save; the native GIF route above deliberately has a different result.
+    mediaReceipt = `${filename} handed to the browser download flow; this does not publish a Studio reference`;
+  }
+  async function downloadMedia(share = false) {
+    if (mediaBusy || !objectId) return;
+    commit(); const object = objectId, gen = session.generation, target = session.scope; mediaBusy = true;
+    try {
+      if (isScore) {
+        const take = await session.prepareScoreTake(object);
+        if (gen !== session.generation || objectId !== object || !target) throw new Error("the export target changed");
+        if (share) { if (!onshareScore) throw new Error("sharing is unavailable on this surface"); await onshareScore(take, target.server); }
+        else browserDownload(new TextEncoder().encode(JSON.stringify(take)), "Mewtual-score.jamtake", JAM_TAKE_MIME);
+      } else {
+        const bytes = await session.prepareFlipnotePixa(object);
+        if (gen !== session.generation || objectId !== object) throw new Error("the export target changed");
+        browserDownload(bytes, "Mewtual-flipnote.pixa", "application/octet-stream");
+      }
+    } catch (e) { onnotice(reason(e), "warn"); } finally { mediaBusy = false; }
+  }
+  async function publishedMedia(id: string, action: "play" | "download" | "share") {
+    if (mediaBusy || !objectId) return;
+    const object = objectId, gen = session.generation, target = session.scope;
+    const prepare = async () => {
+      const bytes = await session.preparePublishedPixa(object, id);
+      if (gen !== session.generation || objectId !== object) throw new Error("the published export target changed");
+      if (action === "play") savedPreview = decodePixa(bytes);
+      return bytes;
+    };
+    if (action === "play") {
+      if (!audioActions) return;
+      void audioActions.start("flipnote", prepare, loop).catch((e: unknown) => onnotice(reason(e), "warn"));
+      return;
+    }
+    mediaBusy = true;
+    try {
+      const bytes = await prepare();
+      if (action === "share") { if (!onsharePixa || !target) throw new Error("package sharing is unavailable"); await onsharePixa(bytes, target.server); }
+      else browserDownload(bytes, "Mewtual-published-flipnote.pixa", "application/octet-stream");
+    } catch (e) { onnotice(reason(e), "warn"); } finally { mediaBusy = false; }
+  }
 
   function setFps(v: number) {
     if (!objectId || !Number.isInteger(v) || v < FLIPNOTE_FPS_MIN || v > FLIPNOTE_FPS_MAX) { onnotice("fps is 1 to 24", "warn"); return; }
@@ -851,7 +947,7 @@
     const t = setInterval(() => { tick++; }, 1000);
     return () => clearInterval(t);
   });
-  onDestroy(() => { commit(); claimActions?.release(); claimActions?.cancelAsk(); });
+  onDestroy(() => { audioActions?.stop(); commit(); claimActions?.release(); claimActions?.cancelAsk(); });
 
   // --- Keys --------------------------------------------------------------------------------------
   function onKey(e: KeyboardEvent) {
@@ -867,7 +963,7 @@
       o: () => (onion = !onion), "#": () => (grid = !grid),
       "[": () => (brush = clampBrush(brush - 1)), "]": () => (brush = clampBrush(brush + 1)),
       "+": () => setZoom(zoom + 1), "=": () => setZoom(zoom + 1), "-": () => setZoom(zoom - 1),
-      ",": () => step(-1), ".": () => step(1), " ": () => (playing = !playing),
+      ",": () => step(-1), ".": () => step(1), " ": toggleStudioPlay,
     };
     if (map[k]) { e.preventDefault(); map[k](); return; }
     if (/^[0-9]$/.test(k) && raster) { e.preventDefault(); color = Math.min(raster.palette.length - 1, k === "0" ? 9 : Number(k) - 1); }
@@ -899,9 +995,186 @@
 
 <!-- Hotkeys apply while focus is inside the editor (the tool rail, the canvas, the timeline);
      typing in one of its inputs is exempt inside onKey. -->
+{#snippet pendingSaves()}
+    {#if attention.length}
+      <div class="st-banner warn st-save">
+        <span><b>{attention[0].mayHaveCommitted || attention[0].status !== "blocked" ? "save uncertain" : "local save not written"}</b> · {attention[0].label}{#if attention.length > 1} · and {attention.length - 1} more{/if}</span>
+        <span class="micro wrap">{attention[0].error}{#if attention[0].status === "blocked" && !attention[0].mayHaveCommitted} · the backend confirmed that this attempt wrote nothing{:else if attention[0].epochChanged} · the document moved to a newer epoch since; a retry resends the original request and the backend decides{/if} · attempt {attention[0].attempts} · your work is kept{#if blockedCount} · {blockedCount} later {blockedCount === 1 ? "save waits" : "saves wait"} behind it{/if}</span>
+        {#if attention[0].status === "uncertain" || attention[0].status === "blocked"}<span class="st-card-acts">
+          {#if overlayRetryOf(attention[0]) !== "newTicket" && overlayRetryOf(attention[0]) !== "none"}
+            <button type="button" class="st-btn primary" onclick={() => retrySave(attention[0])}>{overlayRetryOf(attention[0]) === "afterExplicitAccess" ? "access, then retry same request" : "retry same request"}</button>
+          {/if}
+          {#if attention[0].kind === "frame" || attention[0].kind === "apply" || attention[0].kind === "applyIndex" || attention[0].kind === "overlayApply"}
+            <button type="button" class="st-btn" title="available only after the backend proved the old attempt wrote nothing" disabled={!!readOnlyWhy || overlayRetryOf(attention[0]) === "none" || !session.canReauthor(attention[0].id)} onclick={() => reauthorSave(attention[0])}>save again as a new edit</button>
+          {/if}
+          <button type="button" class="st-btn ghost" onclick={() => discardSave(attention[0])}>{discardArmed === attention[0].id ? "discard for real" : "discard"}</button>
+        </span>{/if}
+      </div>
+    {/if}
+{/snippet}
+{#snippet historyRail()}
+            <div class="st-sec nxt">history</div>
+            {#if view}
+              <p class="st-hist"><i class={view.awaitingTenureReceipt ? "warn" : view.phase === "settled" ? "ok" : view.phase === "fault" ? "danger" : view.phase === "closing" ? "warn" : "info"}></i>
+                {#if view.awaitingTenureReceipt}awaiting the owner's tenure receipt · epoch {view.epoch}{:else}{view.phase} · epoch {view.epoch} · saved locally, provisional{/if}
+              </p>
+              <p class="micro wrap">{view.awaitingTenureReceipt ? "the base is unconfirmed; edits stay in a bounded local-only draft until the history is installed or you dispose of it" : view.phase === "closing" ? "rotating: durable edits resume when the owner settles this rotation" : view.phase === "fault" ? "history fault: conflicting owner receipts" : view.phase === "settled" ? "the owner settled this epoch; later edits are provisional until the next receipt" : "an owner receipt settles these edits later"}</p>
+            {/if}
+            {#if overlay?.loading}
+              <p class="micro wrap">checking this device for a retained local draft…</p>
+            {:else if overlay?.error}
+              <div class="st-card warn">
+                <span>local draft status could not be read</span>
+                <span class="micro wrap">{overlay.error}</span>
+                <span class="st-card-acts"><button type="button" class="st-btn" onclick={() => objectId && session.refreshOverlay(objectId)}>retry status</button></span>
+              </div>
+            {:else if overlay?.inspection?.kind === "local-draft"}
+              {@const draft = overlay.inspection}
+              <div class="st-card warn">
+                <span>local-only draft · {draft.accepted} saved {draft.accepted === 1 ? "edit" : "edits"} · {draft.transferState}</span>
+                <span class="micro wrap">{draft.provenance === "unconfirmed" ? "created while the owner's tenure was unconfirmed" : "retained from a closing rotation"} · read-only evidence, not a receipt or shared publication{#if draft.eligibility === "manual" && draft.manualReason} · manual: {words(draft.manualReason)}{/if}{#if draft.handoffAttempt} · handoff {words(draft.handoffAttempt.state)} ({words(draft.handoffAttempt.reason)}){/if}</span>
+                <span class="st-card-acts">
+                  <button type="button" class="st-btn" onclick={() => objectId && draftAction(() => session.exportOverlay(objectId), "local draft export ready below")}>export</button>
+                  <button type="button" class="st-btn" onclick={() => objectId && draftAction(() => session.archiveOverlay(objectId), "local draft preserved in an archive")}>preserve archive</button>
+                  {#if overlay.archive}
+                    <button type="button" class="st-btn ghost" onclick={() => objectId && draftAction(() => session.disposeOverlay(objectId, "preserve"), "live draft removed; archive preserved")}>remove live copy</button>
+                  {/if}
+                  {#if draftDestructiveKey && draftDiscardArmed === draftDestructiveKey}
+                    <button type="button" class="st-btn danger" onclick={() => objectId && draftDiscardArmed === draftDestructiveKey && draftAction(() => session.disposeOverlay(objectId, "discard"), "local draft discarded")}>discard local draft for real</button>
+                    <button type="button" class="st-btn ghost" onclick={() => (draftDiscardArmed = "")}>cancel</button>
+                  {:else}
+                    <button type="button" class="st-btn ghost" onclick={() => (draftDiscardArmed = draftDestructiveKey)}>discard…</button>
+                  {/if}
+                </span>
+                {#if view && !view.awaitingTenureReceipt && view.phase !== "closing" && view.phase !== "fault" && draftChoices.length}
+                  <span class="micro wrap">copy one retained value into the current document · this does not preserve or dispose the branch</span>
+                  <span class="st-card-acts">
+                    {#each draftChoices as choice (JSON.stringify(choice.choice))}
+                      <button type="button" class="st-btn ghost" disabled={overlay.copy?.status === "previewing" || overlay.copy?.status === "applying" || overlay.copy?.status === "refused" || overlay.copy?.status === "uncertain"} onclick={() => copyDraftItem(choice)}>{choice.label}</button>
+                    {/each}
+                  </span>
+                {/if}
+              </div>
+            {:else if overlay?.inspection?.kind === "disposed"}
+              <p class="micro wrap">local draft disposed · {overlay.inspection.mode}{#if overlay.inspection.archive} · archive {overlay.inspection.archive.slice(0, 8)}{/if} · terminal local history, not absence</p>
+            {:else if overlay?.lifecycle?.transferred}
+              <p class="micro wrap">the retained draft was transferred into the successor history; refresh the document to see the installed result</p>
+            {/if}
+            {#if overlay?.copy}
+              <div class="st-card warn">
+                <span>retained copy {overlay.copy.label} · {words(overlay.copy.status)}</span>
+                <span class="micro wrap">this operation remains independent of the source draft{#if overlay.copy.error} · {overlay.copy.error}{/if}</span>
+                {#if overlay.copy.status === "uncertain"}
+                  <span class="micro wrap">Stopping tracking does not undo the copy or prove that it never landed.</span>
+                  <span class="st-card-acts">
+                    <button type="button" class="st-btn primary" onclick={retryDraftCopy}>retry exact copy</button>
+                    {#if copyForgetKey && copyForgetArmed === copyForgetKey}
+                      <button type="button" class="st-btn danger" onclick={forgetDraftCopy}>stop tracking for real</button>
+                      <button type="button" class="st-btn ghost" onclick={() => (copyForgetArmed = "")}>cancel</button>
+                    {:else}
+                      <button type="button" class="st-btn ghost" onclick={() => (copyForgetArmed = copyForgetKey)}>stop tracking…</button>
+                    {/if}
+                  </span>
+                {:else if overlay.copy.status === "refused"}
+                  <span class="st-card-acts">
+                    <button type="button" class="st-btn primary" onclick={repreviewDraftCopy}>preview again as a new copy</button>
+                    {#if overlay.copy.edit}
+                      {#key overlay.copy.edit.nonce}
+                        {@const refusedNonce = overlay.copy.edit.nonce}
+                        <button type="button" class="st-btn ghost" onclick={() => cancelRefusedDraftCopy(refusedNonce)}>cancel this copy</button>
+                      {/key}
+                    {/if}
+                  </span>
+                {/if}
+              </div>
+            {/if}
+            {#if overlay?.archive}
+              <div class="st-card">
+                <span>retained draft archive · {overlay.archive.accepted} edits · {fmtKib(Number(overlay.archive.physicalBytes ?? "0"))}</span>
+                <span class="micro wrap">terminal read-only recovery evidence · no authoring authority · branch {overlay.archive.branch.slice(0, 8)}</span>
+                <span class="st-card-acts">
+                  <button type="button" class="st-btn" onclick={() => objectId && draftAction(() => session.exportOverlayArchive(objectId), "retained draft archive export ready below")}>export archive</button>
+                  {#if archiveDestructiveKey && archiveReleaseArmed === archiveDestructiveKey}
+                    <button type="button" class="st-btn danger" onclick={() => objectId && archiveReleaseArmed === archiveDestructiveKey && draftAction(() => session.releaseOverlayArchive(objectId), "archive released and status reconciled")}>release archive for real</button>
+                    <button type="button" class="st-btn ghost" onclick={() => (archiveReleaseArmed = "")}>cancel</button>
+                  {:else}
+                    <button type="button" class="st-btn ghost" onclick={() => (archiveReleaseArmed = archiveDestructiveKey)}>release…</button>
+                  {/if}
+                </span>
+              </div>
+            {/if}
+            {#if overlay?.exported?.bytesB64}
+              <div class="st-card">
+                <span>local draft backup ready · {fmtKib(overlay.exported.bytes ?? 0)}</span>
+                <span class="micro wrap">{overlay.exported.format} · private operation history, not playable media or a .pixa</span>
+                <span class="st-card-acts"><button type="button" class="st-btn" onclick={downloadDraftExport}>save file</button><button type="button" class="st-btn ghost" onclick={copyDraftExport}>copy base64</button></span>
+              </div>
+            {/if}
+            {#if listing}
+              {#if listing.pendingIntents}<p class="micro wrap">{listing.pendingIntents} of your saves await an owner receipt · not lost, not excluded</p>{/if}
+              {#if listing.evictionPending}
+                <div class="st-card warn">
+                  <span>a previous version will be removed {deadlineText(listing.evictionPending.deadlineMs)} unless exported</span>
+                  <span class="micro wrap">oldest {listing.evictionPending.oldestSnapshot.slice(0, 8)} makes room for staged {listing.evictionPending.stagedSnapshot.slice(0, 8)} · acknowledging removes it now instead of at the deadline</span>
+                  <span class="st-card-acts"><button type="button" class="st-btn" onclick={acknowledge}>acknowledge · remove now</button></span>
+                </div>
+              {/if}
+              {#each listing.versions as v (v.snapshot)}
+                <div class="st-ver" class:staged={v.staged}>
+                  <p class="st-hist"><i class="info"></i>{v.staged ? "staged" : "previous"} version · epoch {v.epoch} · {reasonText(v.reason)} · {fmtKib(v.bytes)}</p>
+                  <span class="st-card-acts">
+                    <button type="button" class="st-btn ghost" onclick={() => inspect(v)}>{inspected === v.snapshot ? "hide" : "inspect"}</button>
+                    <button type="button" class="st-btn" disabled={!!readOnlyWhy || run?.status === "running"} title="add what is missing; never overwrites" onclick={() => startRecovery(v, "restore")}>restore</button>
+                    <button type="button" class="st-btn" disabled={!!readOnlyWhy || run?.status === "running"} title={isScore ? "may replace same-coordinate cells and recipes, title/BPM/beats/steps and apply retained removals; asks first, each item is previewed separately" : "replace current title/fps and apply the fork's deletions; asks first"} onclick={() => startRecovery(v, "copy")}>{copyConfirm === v.snapshot ? "confirm copy" : "copy"}</button>
+                    <button type="button" class="st-btn ghost" onclick={() => exportVersion(v)}>export</button>
+                  </span>
+                  {#if copyConfirm === v.snapshot}<p class="micro wrap">{#if isScore}Score copy may replace same-coordinate cells and recipes, title, BPM, beats per bar and Steps, and apply retained clear/remove choices. Each item is previewed and saved separately, not an atomic restore; conflicts, missing recipes or out-of-length cells may still need attention. Press confirm copy.{:else}copy replaces the current title and fps with this version's and applies deletions recorded on that fork · nothing deleted here is resurrected · press confirm copy{/if}</p>{/if}
+                  {#if inspected === v.snapshot}
+                    {#if inspectedVersion}
+                      {@const c = inspectedVersion.content}
+                      <p class="micro wrap">{#if c.kind === "flipnote"}title "{c.title?.selected.value ?? ""}" · {c.fps?.selected.value ?? 12} fps · {c.timeline.length} frames · {Object.keys(c.tombstones).length} deleted · {fmtKib(c.declaredFrameBytes)} declared{:else if c.kind === "score"}score "{c.title?.selected.value ?? ""}" · {c.bpm?.selected.value ?? 120} BPM · {Object.keys(c.cells).length} retained cell slots{:else}index · {Object.keys(c.objects).length} entries · {Object.keys(c.overflow).length} overflow · {Object.keys(c.deletedObjects).length} deleted{/if} · historical, not the current view</p>
+                    {:else}
+                      <p class="micro wrap">reading…</p>
+                    {/if}
+                  {/if}
+                  {#if exportFor(v.snapshot)}
+                    {@const x = exportFor(v.snapshot)!}
+                    <div class="st-card">
+                      <span>backup ready · {fmtKib(x.bytes)}</span>
+                      <span class="micro wrap">{x.format} · private history and operation evidence for recovery, not playable media or a .pixa</span>
+                      <span class="st-card-acts"><button type="button" class="st-btn" onclick={() => saveExport(v.snapshot)}>save file</button><button type="button" class="st-btn ghost" onclick={() => copyExport(v.snapshot)}>copy base64</button></span>
+                    </div>
+                  {/if}
+                </div>
+              {:else}
+                <p class="micro wrap">no previous versions retained for this document{#if listing.source === null} · no local source{/if}</p>
+              {/each}
+              {#if run && run.object === objectId}
+                <div class="st-card">
+                  <span>{run.mode} from epoch {listing.versions.find((v) => v.snapshot === run.snapshot)?.epoch ?? "?"} · {run.status === "running" ? "in progress" : run.status === "stopped" ? `stopped${run.error ? ` · ${run.error}` : ""}` : "walked"}</span>
+                  <span class="micro wrap">each choice is previewed, applied only when ready, then the document is re-read · what was applied is saved content, not an all-or-nothing restore</span>
+                  <ul class="st-run">
+                    {#each run.items as it, i (i)}
+                      <li><i class={itemTone(it.state)}></i><span>{it.label}</span><span class="grow"></span><span class="micro">{it.state}{#if it.error} · {it.error}{/if}</span></li>
+                    {/each}
+                  </ul>
+                  {#if run.status === "running"}<span class="st-card-acts"><button type="button" class="st-btn ghost" onclick={() => session.stopRecovery()}>stop after this item</button></span>{/if}
+                </div>
+                {#if run.status !== "running"}
+                  <div class="st-card">
+                    <span>registry pointer · {pointer.status === "done" ? "restored" : pointer.status === "blocked" ? "blocked" : pointer.status === "running" ? "restoring…" : "pending"}</span>
+                    <span class="micro wrap">{#if pointer.status === "done" && pointer.result}checkpoint epoch {pointer.result.checkpointEpoch} · registry epoch {pointer.result.registryEpochId.slice(0, 8)} · provisional{:else if pointer.status === "blocked"}{pointer.error} · content already saved stays saved; retry separately{:else}a separate step that makes the saved document discoverable again; retryable on its own{/if}</span>
+                    <span class="st-card-acts"><button type="button" class="st-btn" disabled={pointer.status === "running"} onclick={() => session.restorePointer(objectId)}>{pointer.status === "blocked" ? "retry pointer" : "restore pointer"}</button></span>
+                  </div>
+                {/if}
+              {/if}
+            {:else if recoveryError}
+              <p class="micro wrap">recovery listing failed: {recoveryError}</p>
+            {/if}
+{/snippet}
 <svelte:window onkeydown={(e) => { if (rootEl && rootEl.contains(document.activeElement)) onKey(e); }} />
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-<div class="studio" bind:this={rootEl} role="application" aria-label="Flipnote editor" tabindex="0">
+<div class="studio" bind:this={rootEl} role="application" aria-label="Studio editor" tabindex="0">
   {#if !objectId || (!model && !doc)}
     <div class="studio-empty">
       {#if !hasScope}
@@ -911,8 +1184,19 @@
       {/if}
     </div>
   {:else if isScore}
-    <div class="studio-empty">
-      <p class="muted">The score editor is not built yet. This entry lives in the studio index as a score; open a flipnote on the left to draw.</p>
+    <div class="st-score">
+      {@render pendingSaves()}
+      <p class="micro wrap">{settlementChip().text} · native Score · {audioState.state} · {Math.floor(audioState.elapsedMs)}ms</p>
+      <label class="micro"><input type="checkbox" bind:checked={loop} disabled={playing} /> loop whole authored score</label>
+      <span class="st-card-acts"><button class="st-btn" disabled={mediaBusy || playing} onclick={() => downloadMedia()}>download .jamtake</button><button class="st-btn" disabled={mediaBusy || playing || !onshareScore} onclick={() => downloadMedia(true)}>share .jamtake</button></span>
+      {#if mediaReceipt}<div class="st-banner info wrap">{mediaReceipt}</div>{/if}
+      {#key objectId}
+        <ScoreEditor model={score} readonlyReason={playing ? "Stop playback before editing" : readOnlyWhy} loading={doc?.loading ?? false} error={doc?.error ?? ""} {patchLibrary}
+          onop={(op) => guard(() => session.applyScoreOp(objectId, op))} onaddpatch={addStudioPatch}
+          onplay={audioActions ? toggleStudioPlay : undefined} onstop={() => audioActions?.stop()} {playing}
+          onnotice={(text, kind) => onnotice(text, kind === "error" ? "error" : "info")} />
+      {/key}
+      <details class="st-score-history"><summary>Saved history, local drafts and recovery</summary>{@render historyRail()}</details>
     </div>
   {:else if !model}
     <div class="studio-empty">
@@ -949,31 +1233,20 @@
       {#if inflight}<span class="st-chip" title="a save is in flight; unsaved pixels stay here until it lands"><i class="pulse"></i><span class="micro">saving…</span></span>{/if}
       <span class="grow"></span>
       <button type="button" class="st-tg" class:on={adaptOn} onclick={() => (adaptOn = !adaptOn)} title="Role colours follow your theme; literals never move"><i></i><span class="micro">adapt to my theme</span></button>
-      <button type="button" class="st-btn" onclick={() => (playing = !playing)}>{playing ? "pause" : "play"}</button>
+      <button type="button" class="st-btn" disabled={!audioActions} onclick={toggleStudioPlay}>{playing ? "stop" : "play"}</button>
       <button type="button" class="st-btn" title="Posting a frame into the channel as a doodle is not connected yet" disabled>
         <svg viewBox="0 0 16 16" style="width: 11px; height: 11px"><path d="M2 8l12-6-4 12-2.5-4.5z"></path></svg>
         post to chat
       </button>
-      <button type="button" class="st-btn primary" title=".pixa export arrives with the backend's Gate 6; recovery backups are exported from the music tab" disabled>export .pixa</button>
+      <button type="button" class="st-btn primary" disabled={mediaBusy || playing} onclick={() => exportMedia("pixa")}>publish .pixa</button>
+      <button type="button" class="st-btn" disabled={mediaBusy || playing} onclick={() => downloadMedia()}>download .pixa</button>
+      <button type="button" class="st-btn" disabled={mediaBusy || playing} onclick={() => exportMedia("gif")}>save GIF</button>
     </div>
+    {#if mediaReceipt}<div class="st-banner info wrap">{mediaReceipt}</div>{/if}
 
-    {#if attention.length}
-      <div class="st-banner warn st-save">
-        <span><b>{attention[0].mayHaveCommitted || attention[0].status !== "blocked" ? "save uncertain" : "local save not written"}</b> · {attention[0].label}{#if attention.length > 1} · and {attention.length - 1} more{/if}</span>
-        <span class="micro wrap">{attention[0].error}{#if attention[0].status === "blocked" && !attention[0].mayHaveCommitted} · the backend confirmed that this attempt wrote nothing{:else if attention[0].epochChanged} · the document moved to a newer epoch since; a retry resends the original request and the backend decides{/if} · attempt {attention[0].attempts} · your work is kept{#if blockedCount} · {blockedCount} later {blockedCount === 1 ? "save waits" : "saves wait"} behind it{/if}</span>
-        {#if attention[0].status === "uncertain" || attention[0].status === "blocked"}<span class="st-card-acts">
-          {#if overlayRetryOf(attention[0]) !== "newTicket" && overlayRetryOf(attention[0]) !== "none"}
-            <button type="button" class="st-btn primary" onclick={() => retrySave(attention[0])}>{overlayRetryOf(attention[0]) === "afterExplicitAccess" ? "access, then retry same request" : "retry same request"}</button>
-          {/if}
-          {#if attention[0].kind === "frame" || attention[0].kind === "apply" || attention[0].kind === "applyIndex" || attention[0].kind === "overlayApply"}
-            <button type="button" class="st-btn" title="available only after the backend proved the old attempt wrote nothing" disabled={!!readOnlyWhy || overlayRetryOf(attention[0]) === "none" || !session.canReauthor(attention[0].id)} onclick={() => reauthorSave(attention[0])}>save again as a new edit</button>
-          {/if}
-          <button type="button" class="st-btn ghost" onclick={() => discardSave(attention[0])}>{discardArmed === attention[0].id ? "discard for real" : "discard"}</button>
-        </span>{/if}
-      </div>
-    {/if}
+    {@render pendingSaves()}
     {#if overCapCount}
-      <div class="st-banner warn">document full: {overCapCount} frame{overCapCount === 1 ? "" : "s"} past the {FLIPNOTE_MAX_FRAMES}-frame list or the 8 MiB promise. Editing is refused until they are trimmed; playback skips them.</div>
+      <div class="st-banner warn">document full: {overCapCount} frame{overCapCount === 1 ? "" : "s"} past the {FLIPNOTE_MAX_FRAMES}-frame list or the 8 MiB promise. Editing and playback/export are refused until they are trimmed.</div>
     {:else if readOnlyWhy}
       <div class="st-banner {view?.phase === 'fault' ? 'danger' : 'warn'}">{readOnlyWhy}</div>
     {/if}
@@ -1183,14 +1456,16 @@
               <p class="micro wrap it">claims show who is drawing what during this call · they never lock a frame</p>
             {/if}
           {:else if inspectorTab === "sound"}
-            <div class="st-sec">frame {frameIndex >= 0 ? frameIndex + 1 : "·"}</div>
-            <p class="muted small">No sound on this frame.</p>
-            <button type="button" class="st-btn ghost dashed" disabled title="Emoji sounds on frames arrive with the backend's Gate 6">+ add emoji sound</button>
-            <p class="micro wrap">a sound is a jam patch on an emoji, played by your own synth · not accepted by the studio yet</p>
+            {#key objectId}<StudioSound model={model.sound} frame={frameId} readonlyReason={playing ? "Stop playback before editing" : readOnlyWhy} {patchLibrary}
+              onpatch={addStudioPatch} onsfx={(sfx) => guard(() => session.setSfx(objectId, { ...sfx, id: sfx.id ?? session.newId(), frame: frameId }))}
+              onremove={(id) => guard(() => session.removeSfx(objectId, id))} onremovepatch={(id) => guard(() => session.removeSoundPatch(objectId, id))} {onnotice} />{/key}
           {:else}
             <div class="st-sec">soundtrack</div>
-            <p class="muted small">No score linked. Linked Music arrives with the backend's Gate 6.</p>
-            <p class="micro wrap">patches 0 of {FLIPNOTE_MAX_PATCHES} · score patches first, then sfx</p>
+            <label class="micro wrap">Linked Score <select value={model.sound.score ?? ""} disabled={!!readOnlyWhy || playing} onchange={(e) => guard(() => session.linkScore(objectId, e.currentTarget.value || null))}><option value="">no Score</option>{#each session.indexModel?.entries.filter((e) => e.kind === "score") ?? [] as s}<option value={s.id}>{s.title || s.id.slice(0, 8)}</option>{/each}{#if model.sound.score && !session.indexModel?.entries.some((e) => e.id === model.sound.score)}<option value={model.sound.score}>linked {model.sound.score.slice(0, 8)} (not in current Index)</option>{/if}</select></label>
+            <p class="micro wrap">patches {Object.keys(model.sound.patches).length} of {FLIPNOTE_MAX_PATCHES} · Score patches first, then SFX · linked Score is resolved in this same group/channel at export</p>
+            {#if model.sound.scoreRegister?.conflicts.length}<p class="micro wrap warn">Score link conflict: choose explicitly before playback/export.</p>{/if}
+            {#each model.sound.exports.slice(0, 8) as exported}<div class="st-card"><p class="micro wrap">published reference {exported.id.slice(0, 8)} · {exported.cid} · {fmtKib(exported.bytes)} · saved locally/provisional, not an owner receipt</p><span class="st-card-acts"><button class="st-btn" disabled={mediaBusy || playing || !audioActions} onclick={() => publishedMedia(exported.id, "play")}>play saved package</button><button class="st-btn" disabled={mediaBusy} onclick={() => publishedMedia(exported.id, "download")}>download saved package</button><button class="st-btn" disabled={mediaBusy || !onsharePixa} onclick={() => publishedMedia(exported.id, "share")}>share saved package</button><button class="st-btn" disabled={!!readOnlyWhy || playing} onclick={() => guard(() => session.removePublishedPixa(objectId, exported.id))}>remove reference</button></span></div>{/each}
+            {#if savedPreview}<div class="st-card"><p class="micro wrap">Saved export preview · actual immutable package frames, not the current edited timeline</p><canvas width={FLIPNOTE_W} height={FLIPNOTE_H} style="width:100%;image-rendering:pixelated" use:thumbBytes={{ bytes: savedPreview.frames[Math.min(savedPreview.frames.length - 1, Math.floor(audioState.elapsedMs * savedPreview.fps / 1000))], rev: 0 }}></canvas><button class="st-btn" onclick={() => { audioActions?.stop(); savedPreview = null; }}>close saved preview</button></div>{/if}
             <div class="st-sec nxt">size</div>
             <div class="st-bar"><i style="width: {Math.min(100, (totalBytes / FLIPNOTE_FRAME_BYTES_PROMISE) * 100)}%"></i></div>
             <p class="micro wrap">{fmtKib(totalBytes)} of 8 mib declared · {frames.length} of {FLIPNOTE_MAX_FRAMES} frames{#if model.deletedFrames.length} · {model.deletedFrames.length} deleted kept in history{/if}</p>
@@ -1216,164 +1491,7 @@
               <p class="micro wrap">this flipnote has no entry in the channel index on this device{#if pending.some((s) => s.kind === "create")} · it appears when the create lands{/if}</p>
             {/if}
 
-            <div class="st-sec nxt">history</div>
-            {#if view}
-              <p class="st-hist"><i class={view.awaitingTenureReceipt ? "warn" : view.phase === "settled" ? "ok" : view.phase === "fault" ? "danger" : view.phase === "closing" ? "warn" : "info"}></i>
-                {#if view.awaitingTenureReceipt}awaiting the owner's tenure receipt · epoch {view.epoch}{:else}{view.phase} · epoch {view.epoch} · saved locally, provisional{/if}
-              </p>
-              <p class="micro wrap">{view.awaitingTenureReceipt ? "the base is unconfirmed; edits stay in a bounded local-only draft until the history is installed or you dispose of it" : view.phase === "closing" ? "rotating: durable edits resume when the owner settles this rotation" : view.phase === "fault" ? "history fault: conflicting owner receipts" : view.phase === "settled" ? "the owner settled this epoch; later edits are provisional until the next receipt" : "an owner receipt settles these edits later"}</p>
-            {/if}
-            {#if overlay?.loading}
-              <p class="micro wrap">checking this device for a retained local draft…</p>
-            {:else if overlay?.error}
-              <div class="st-card warn">
-                <span>local draft status could not be read</span>
-                <span class="micro wrap">{overlay.error}</span>
-                <span class="st-card-acts"><button type="button" class="st-btn" onclick={() => objectId && session.refreshOverlay(objectId)}>retry status</button></span>
-              </div>
-            {:else if overlay?.inspection?.kind === "local-draft"}
-              {@const draft = overlay.inspection}
-              <div class="st-card warn">
-                <span>local-only draft · {draft.accepted} saved {draft.accepted === 1 ? "edit" : "edits"} · {draft.transferState}</span>
-                <span class="micro wrap">{draft.provenance === "unconfirmed" ? "created while the owner's tenure was unconfirmed" : "retained from a closing rotation"} · read-only evidence, not a receipt or shared publication{#if draft.eligibility === "manual" && draft.manualReason} · manual: {words(draft.manualReason)}{/if}{#if draft.handoffAttempt} · handoff {words(draft.handoffAttempt.state)} ({words(draft.handoffAttempt.reason)}){/if}</span>
-                <span class="st-card-acts">
-                  <button type="button" class="st-btn" onclick={() => objectId && draftAction(() => session.exportOverlay(objectId), "local draft export ready below")}>export</button>
-                  <button type="button" class="st-btn" onclick={() => objectId && draftAction(() => session.archiveOverlay(objectId), "local draft preserved in an archive")}>preserve archive</button>
-                  {#if overlay.archive}
-                    <button type="button" class="st-btn ghost" onclick={() => objectId && draftAction(() => session.disposeOverlay(objectId, "preserve"), "live draft removed; archive preserved")}>remove live copy</button>
-                  {/if}
-                  {#if draftDestructiveKey && draftDiscardArmed === draftDestructiveKey}
-                    <button type="button" class="st-btn danger" onclick={() => objectId && draftDiscardArmed === draftDestructiveKey && draftAction(() => session.disposeOverlay(objectId, "discard"), "local draft discarded")}>discard local draft for real</button>
-                    <button type="button" class="st-btn ghost" onclick={() => (draftDiscardArmed = "")}>cancel</button>
-                  {:else}
-                    <button type="button" class="st-btn ghost" onclick={() => (draftDiscardArmed = draftDestructiveKey)}>discard…</button>
-                  {/if}
-                </span>
-                {#if view && !view.awaitingTenureReceipt && view.phase !== "closing" && view.phase !== "fault" && draftChoices.length}
-                  <span class="micro wrap">copy one retained value into the current document · this does not preserve or dispose the branch</span>
-                  <span class="st-card-acts">
-                    {#each draftChoices as choice (JSON.stringify(choice.choice))}
-                      <button type="button" class="st-btn ghost" disabled={overlay.copy?.status === "previewing" || overlay.copy?.status === "applying" || overlay.copy?.status === "refused" || overlay.copy?.status === "uncertain"} onclick={() => copyDraftItem(choice)}>{choice.label}</button>
-                    {/each}
-                  </span>
-                {/if}
-              </div>
-            {:else if overlay?.inspection?.kind === "disposed"}
-              <p class="micro wrap">local draft disposed · {overlay.inspection.mode}{#if overlay.inspection.archive} · archive {overlay.inspection.archive.slice(0, 8)}{/if} · terminal local history, not absence</p>
-            {:else if overlay?.lifecycle?.transferred}
-              <p class="micro wrap">the retained draft was transferred into the successor history; refresh the document to see the installed result</p>
-            {/if}
-            {#if overlay?.copy}
-              <div class="st-card warn">
-                <span>retained copy {overlay.copy.label} · {words(overlay.copy.status)}</span>
-                <span class="micro wrap">this operation remains independent of the source draft{#if overlay.copy.error} · {overlay.copy.error}{/if}</span>
-                {#if overlay.copy.status === "uncertain"}
-                  <span class="micro wrap">Stopping tracking does not undo the copy or prove that it never landed.</span>
-                  <span class="st-card-acts">
-                    <button type="button" class="st-btn primary" onclick={retryDraftCopy}>retry exact copy</button>
-                    {#if copyForgetKey && copyForgetArmed === copyForgetKey}
-                      <button type="button" class="st-btn danger" onclick={forgetDraftCopy}>stop tracking for real</button>
-                      <button type="button" class="st-btn ghost" onclick={() => (copyForgetArmed = "")}>cancel</button>
-                    {:else}
-                      <button type="button" class="st-btn ghost" onclick={() => (copyForgetArmed = copyForgetKey)}>stop tracking…</button>
-                    {/if}
-                  </span>
-                {:else if overlay.copy.status === "refused"}
-                  <span class="st-card-acts">
-                    <button type="button" class="st-btn primary" onclick={repreviewDraftCopy}>preview again as a new copy</button>
-                    {#if overlay.copy.edit}
-                      {#key overlay.copy.edit.nonce}
-                        {@const refusedNonce = overlay.copy.edit.nonce}
-                        <button type="button" class="st-btn ghost" onclick={() => cancelRefusedDraftCopy(refusedNonce)}>cancel this copy</button>
-                      {/key}
-                    {/if}
-                  </span>
-                {/if}
-              </div>
-            {/if}
-            {#if overlay?.archive}
-              <div class="st-card">
-                <span>retained draft archive · {overlay.archive.accepted} edits · {fmtKib(Number(overlay.archive.physicalBytes ?? "0"))}</span>
-                <span class="micro wrap">terminal read-only recovery evidence · no authoring authority · branch {overlay.archive.branch.slice(0, 8)}</span>
-                <span class="st-card-acts">
-                  <button type="button" class="st-btn" onclick={() => objectId && draftAction(() => session.exportOverlayArchive(objectId), "retained draft archive export ready below")}>export archive</button>
-                  {#if archiveDestructiveKey && archiveReleaseArmed === archiveDestructiveKey}
-                    <button type="button" class="st-btn danger" onclick={() => objectId && archiveReleaseArmed === archiveDestructiveKey && draftAction(() => session.releaseOverlayArchive(objectId), "archive released and status reconciled")}>release archive for real</button>
-                    <button type="button" class="st-btn ghost" onclick={() => (archiveReleaseArmed = "")}>cancel</button>
-                  {:else}
-                    <button type="button" class="st-btn ghost" onclick={() => (archiveReleaseArmed = archiveDestructiveKey)}>release…</button>
-                  {/if}
-                </span>
-              </div>
-            {/if}
-            {#if overlay?.exported?.bytesB64}
-              <div class="st-card">
-                <span>local draft backup ready · {fmtKib(overlay.exported.bytes ?? 0)}</span>
-                <span class="micro wrap">{overlay.exported.format} · private operation history, not playable media or a .pixa</span>
-                <span class="st-card-acts"><button type="button" class="st-btn" onclick={downloadDraftExport}>save file</button><button type="button" class="st-btn ghost" onclick={copyDraftExport}>copy base64</button></span>
-              </div>
-            {/if}
-            {#if listing}
-              {#if listing.pendingIntents}<p class="micro wrap">{listing.pendingIntents} of your saves await an owner receipt · not lost, not excluded</p>{/if}
-              {#if listing.evictionPending}
-                <div class="st-card warn">
-                  <span>a previous version will be removed {deadlineText(listing.evictionPending.deadlineMs)} unless exported</span>
-                  <span class="micro wrap">oldest {listing.evictionPending.oldestSnapshot.slice(0, 8)} makes room for staged {listing.evictionPending.stagedSnapshot.slice(0, 8)} · acknowledging removes it now instead of at the deadline</span>
-                  <span class="st-card-acts"><button type="button" class="st-btn" onclick={acknowledge}>acknowledge · remove now</button></span>
-                </div>
-              {/if}
-              {#each listing.versions as v (v.snapshot)}
-                <div class="st-ver" class:staged={v.staged}>
-                  <p class="st-hist"><i class="info"></i>{v.staged ? "staged" : "previous"} version · epoch {v.epoch} · {reasonText(v.reason)} · {fmtKib(v.bytes)}</p>
-                  <span class="st-card-acts">
-                    <button type="button" class="st-btn ghost" onclick={() => inspect(v)}>{inspected === v.snapshot ? "hide" : "inspect"}</button>
-                    <button type="button" class="st-btn" disabled={!!readOnlyWhy || run?.status === "running"} title="add what is missing; never overwrites" onclick={() => startRecovery(v, "restore")}>restore</button>
-                    <button type="button" class="st-btn" disabled={!!readOnlyWhy || run?.status === "running"} title="replace current title/fps and apply the fork's deletions; asks first" onclick={() => startRecovery(v, "copy")}>{copyConfirm === v.snapshot ? "confirm copy" : "copy"}</button>
-                    <button type="button" class="st-btn ghost" onclick={() => exportVersion(v)}>export</button>
-                  </span>
-                  {#if copyConfirm === v.snapshot}<p class="micro wrap">copy replaces the current title and fps with this version's and applies deletions recorded on that fork · nothing deleted here is resurrected · press confirm copy</p>{/if}
-                  {#if inspected === v.snapshot}
-                    {#if inspectedVersion}
-                      {@const c = inspectedVersion.content}
-                      <p class="micro wrap">{#if c.kind === "flipnote"}title "{c.title?.selected.value ?? ""}" · {c.fps?.selected.value ?? 12} fps · {c.timeline.length} frames · {Object.keys(c.tombstones).length} deleted · {fmtKib(c.declaredFrameBytes)} declared{:else if c.kind === "score"}score "{c.title?.selected.value ?? ""}" · {c.bpm?.selected.value ?? 120} BPM · {Object.keys(c.cells).length} retained cell slots{:else}index · {Object.keys(c.objects).length} entries · {Object.keys(c.overflow).length} overflow · {Object.keys(c.deletedObjects).length} deleted{/if} · historical, not the current view</p>
-                    {:else}
-                      <p class="micro wrap">reading…</p>
-                    {/if}
-                  {/if}
-                  {#if exportFor(v.snapshot)}
-                    {@const x = exportFor(v.snapshot)!}
-                    <div class="st-card">
-                      <span>backup ready · {fmtKib(x.bytes)}</span>
-                      <span class="micro wrap">{x.format} · private history and operation evidence for recovery, not playable media or a .pixa</span>
-                      <span class="st-card-acts"><button type="button" class="st-btn" onclick={() => saveExport(v.snapshot)}>save file</button><button type="button" class="st-btn ghost" onclick={() => copyExport(v.snapshot)}>copy base64</button></span>
-                    </div>
-                  {/if}
-                </div>
-              {:else}
-                <p class="micro wrap">no previous versions retained for this document{#if listing.source === null} · no local source{/if}</p>
-              {/each}
-              {#if run && run.object === objectId}
-                <div class="st-card">
-                  <span>{run.mode} from epoch {listing.versions.find((v) => v.snapshot === run.snapshot)?.epoch ?? "?"} · {run.status === "running" ? "in progress" : run.status === "stopped" ? `stopped${run.error ? ` · ${run.error}` : ""}` : "walked"}</span>
-                  <span class="micro wrap">each choice is previewed, applied only when ready, then the document is re-read · what was applied is saved content, not an all-or-nothing restore</span>
-                  <ul class="st-run">
-                    {#each run.items as it, i (i)}
-                      <li><i class={itemTone(it.state)}></i><span>{it.label}</span><span class="grow"></span><span class="micro">{it.state}{#if it.error} · {it.error}{/if}</span></li>
-                    {/each}
-                  </ul>
-                  {#if run.status === "running"}<span class="st-card-acts"><button type="button" class="st-btn ghost" onclick={() => session.stopRecovery()}>stop after this item</button></span>{/if}
-                </div>
-                {#if run.status !== "running"}
-                  <div class="st-card">
-                    <span>registry pointer · {pointer.status === "done" ? "restored" : pointer.status === "blocked" ? "blocked" : pointer.status === "running" ? "restoring…" : "pending"}</span>
-                    <span class="micro wrap">{#if pointer.status === "done" && pointer.result}checkpoint epoch {pointer.result.checkpointEpoch} · registry epoch {pointer.result.registryEpochId.slice(0, 8)} · provisional{:else if pointer.status === "blocked"}{pointer.error} · content already saved stays saved; retry separately{:else}a separate step that makes the saved document discoverable again; retryable on its own{/if}</span>
-                    <span class="st-card-acts"><button type="button" class="st-btn" disabled={pointer.status === "running"} onclick={() => session.restorePointer(objectId)}>{pointer.status === "blocked" ? "retry pointer" : "restore pointer"}</button></span>
-                  </div>
-                {/if}
-              {/if}
-            {:else if recoveryError}
-              <p class="micro wrap">recovery listing failed: {recoveryError}</p>
-            {/if}
+            {@render historyRail()}
           {/if}
         </div>
       </div>
@@ -1384,12 +1502,12 @@
       <div class="st-transport">
         <button type="button" class="st-tool sm" title="first frame" onclick={() => frameIds[0] && openFrame(frameIds[0])}><svg viewBox="0 0 16 16" class="solid"><path d="M8 3 2 8l6 5zM14 3 8 8l6 5z"></path></svg></button>
         <button type="button" class="st-tool sm" title="previous frame [,]" onclick={() => step(-1)}><svg viewBox="0 0 16 16" class="solid"><path d="M3 3h1.5v10H3zM12.5 3 6 8l6.5 5z"></path></svg></button>
-        <button type="button" class="st-tool play" class:on={playing} title={playing ? "pause [space]" : "play [space]"} onclick={() => (playing = !playing)}>
+        <button type="button" class="st-tool play" class:on={playing} disabled={!audioActions} title={playing ? "stop [space]" : "play [space]"} onclick={toggleStudioPlay}>
           {#if playing}<svg viewBox="0 0 16 16" class="solid"><path d="M3.5 2.5h3.5v11H3.5zM9 2.5h3.5v11H9z"></path></svg>{:else}<svg viewBox="0 0 16 16" class="solid"><path d="M4 2.5 13 8 4 13.5z"></path></svg>{/if}
         </button>
         <button type="button" class="st-tool sm" title="next frame [.]" onclick={() => step(1)}><svg viewBox="0 0 16 16" class="solid"><path d="M3.5 3 10 8l-6.5 5zM11.5 3H13v10h-1.5z"></path></svg></button>
         <button type="button" class="st-tool sm" title="last frame" onclick={() => frameIds.length && openFrame(frameIds[frameIds.length - 1])}><svg viewBox="0 0 16 16" class="solid"><path d="M2 3l6 5-6 5zM8 3l6 5-6 5z"></path></svg></button>
-        <button type="button" class="st-tool sm" class:on={loop} title="loop" onclick={() => (loop = !loop)}><svg viewBox="0 0 16 16"><path d="M3 8a5 5 0 015-5h4M13 8a5 5 0 01-5 5H4"></path><path d="M10.5 1.5 12 3l-1.5 1.5M5.5 11.5 4 13l1.5 1.5"></path></svg></button>
+        <button type="button" class="st-tool sm" class:on={loop} disabled={playing} title="loop whole animation and authored sound after all release tails" onclick={() => (loop = !loop)}><svg viewBox="0 0 16 16"><path d="M3 8a5 5 0 015-5h4M13 8a5 5 0 01-5 5H4"></path><path d="M10.5 1.5 12 3l-1.5 1.5M5.5 11.5 4 13l1.5 1.5"></path></svg></button>
         <span class="mono strong">{frameIndex >= 0 ? frameIndex + 1 : "·"} / {frames.length}</span>
         <span class="micro">{((Math.max(0, frameIndex) + 1) / Math.max(1, model.fps)).toFixed(2)} s of {(frames.length / Math.max(1, model.fps)).toFixed(2)} s</span>
         <span class="grow"></span>
@@ -1444,7 +1562,7 @@
       <div class="st-sfxlane">
         <span class="micro lb">sfx</span>
         {#each frames as f (f.id)}
-          <span class="cell"></span>
+          <span class="cell" title={`${model.sound.sfx.filter((s) => s.frame === f.id).length} sound markers`}>{#if model.sound.sfx.some((s) => s.frame === f.id)}♪{/if}</span>
         {/each}
       </div>
     </div>
@@ -1452,6 +1570,8 @@
 </div>
 
 <style>
+  .st-score { flex: 1; overflow: auto; min-height: 0; padding: 10px; }
+  .st-score-history { margin-top: 12px; display: block; }
   .studio { display: flex; flex-direction: column; flex: 1; min-height: 0; outline: none; gap: 0; }
   .studio-empty { padding: 2rem; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
   .micro { font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); white-space: nowrap; }

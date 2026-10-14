@@ -126,6 +126,7 @@
     deckTransportPlan, type DeckDriver, type DeckState,
   } from "./deck-players";
   import { soundcloudDeckUrl } from "./providers-audio";
+  import { StudioAudioSession, type StudioAudioActions, type StudioAudioState } from "./studio-audio.ts";
   import { vimeoFrameUrl } from "./providers-video";
   import {
     CLOCK_SKEW_GRACE_MS, NO_READ_MARK, chatIsObserved, effectiveTs, readCeiling, readChannelChange,
@@ -6419,6 +6420,7 @@
     navAt = -1;
     tickerItems = []; // and so is anything the ticker was naming
     tickerReceipts = new Set(); // receipts can include wiki/page ids; do not retain them behind lock
+    stopStudioAudio();
     studioReset?.(); // and the studio's views, held pixels and unsaved strokes
     servers = [];
     beginViewSwitch(); // a read still in flight must not land behind the lock
@@ -12907,7 +12909,7 @@
   let callHeld = $state<number[]>([]); // notes I am sounding into the call
   let remoteHeld = $state<Record<string, number[]>>({}); // fp -> notes they are sounding
   let peerMeta = $state<Record<string, PeerState>>({}); // mute/video plus their coarse receive bucket
-  let jamEngine: JamEngine | null = null; // one per call; disposed with the call
+  let jamEngine: JamEngine | null = null; // shared call/explicit Studio graph; disposed on call leave
   let jamSelfChan: JamSourceChannel | null = null; // my own local-echo capability
   let jamMySn = ""; // my sender-session nonce, minted with the engine
   let jamMyQ = 0; // ONE monotonic sequence across my note and drum events
@@ -13045,15 +13047,76 @@
     synthCtx ??= new AudioContext();
     if (!jamEngine) {
       jamEngine = new JamEngine(synthCtx);
+      jamEngine.setDeafened(callDeafened);
+    }
+    if (!jamSelfChan && callSelfId) {
       jamMySn = jamNonce();
       jamMyQ = 0;
       // Keep the reserved UI lane while binding seeds/fairness to the authenticated call identity.
       jamSelfChan = jamEngine.openLocalSource(callJamLabel(callSelfId));
       jamEngine.beginSourceSession(jamSelfChan, jamMySn);
-      jamEngine.setDeafened(callDeafened);
     }
     return jamEngine;
   }
+  // Studio uses this same graph/allocator/room. Outside a call it mints no live-call source or
+  // sender session. Joining/leaving a call and membership/Deafen edges revoke archive ownership.
+  let studioAudio: StudioAudioSession | null = null;
+  let studioAudioEngine: JamEngine | null = null;
+  let studioAudioState = $state<StudioAudioState>({ state: "stopped", elapsedMs: 0 });
+  let studioAudioGeneration = 0;
+  let studioMembership = $state(0);
+  function stopStudioAudio() {
+    studioAudioGeneration++;
+    studioAudio?.stop();
+    studioAudioState = { state: "stopped", elapsedMs: 0 };
+  }
+  function studioAudioScope() {
+    return !locked && view === "studio" && activeServerId !== null && cur?.active
+      ? { generation: studioAudioGeneration, server: activeServerId, channel: cur.active, membership: studioMembership } : null;
+  }
+  const studioAudioActions: StudioAudioActions = {
+    start: async (kind, prepare, loop, offset) => {
+      const engine = ensureJamEngine();
+      if (studioAudioEngine !== engine) { studioAudio?.stop(); studioAudioEngine = engine; studioAudio = new StudioAudioSession(engine); }
+      studioAudio!.setScope(studioAudioScope(), callDeafened);
+      const pending = studioAudio!.start(kind, prepare, loop, offset);
+      studioAudioState = studioAudio!.state;
+      const started = await pending; studioAudioState = studioAudio!.state; return started;
+    },
+    stop: stopStudioAudio,
+  };
+  async function shareStudioScore(take: JamTake, server: number): Promise<void> {
+    if (locked || activeServerId !== server || view !== "studio") throw new Error("the Score share target changed");
+    const name = `Mewtual-score${JAM_TAKE_EXT}`;
+    await addSharedFile(new File([JSON.stringify(take)], name, { type: JAM_TAKE_MIME }), "", name, JAM_TAKE_MIME);
+    // Reuse the existing sealed file upload path and jukebox-compatible take, not another media
+    // store. Upload custody is separate from any owner receipt for the original Score document.
+    toast("Score take saved to this server's share; the jukebox can queue it (normal expiry applies)", "ok", 6000);
+  }
+  async function shareStudioPixa(bytes: Uint8Array, server: number): Promise<void> {
+    if (locked || activeServerId !== server || view !== "studio") throw new Error("the animation share target changed");
+    const name = "Mewtual-flipnote.pixa";
+    await addSharedFile(new File([new Uint8Array(bytes)], name, { type: "application/octet-stream" }), "", name, "application/octet-stream");
+    toast("Animation package saved to this server's share; shared-deck PIXA playback is not available yet", "ok", 6000);
+  }
+  $effect(() => {
+    // Reading these values makes every navigation/session/call ABA edge observable; no frame
+    // tick or unrelated Studio redraw is itself a new playback scope.
+    void locked; void view; void activeServerId; void cur?.active; void inCall; void callServer; void callChannel; void callDeafened; void studioMembership;
+    untrack(() => { stopStudioAudio(); studioAudio?.setScope(studioAudioScope(), callDeafened); });
+  });
+  $effect(() => {
+    if (view !== "studio") return;
+    let cancelled = false, timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = async () => {
+      if (cancelled) return;
+      const audio = studioAudio;
+      if (audio) { await audio.tick(); if (!cancelled && studioAudio === audio) studioAudioState = audio.state; }
+      if (!cancelled) timer = setTimeout(() => void tick(), 16);
+    };
+    timer = setTimeout(() => void tick(), 16);
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  });
   function jamCallId(): string {
     // Bridge server numbers are device-local and differ between participants. The shared channel
     // id is the stable musical seed scope; this is reproducibility only, never authorization.
@@ -13379,6 +13442,8 @@
     } catch { return []; }
   }
   let jamSaved = $state(loadJamSaved());
+  const studioPatchLibrary = $derived([...JAM_PRESETS.map((p) => ({ name: p.name, patch: p.patch })), ...jamSaved,
+    ...(myPatch ? [{ name: myPatchName || "current creator recipe", patch: myPatch }] : [])]);
   let jamSaveName = $state("");
   let jamCustomOpen = $state(false); // saved patches expand DOWN, never off the row's right edge
   function jamSavePatch() {
@@ -14300,6 +14365,7 @@
     applyPeerGain(fp, "voice");
   }
   function toggleDeafen() {
+    stopStudioAudio();
     callDeafened = !callDeafened;
     // Both edges delimit a new admission epoch: frames received before or during Deafen stay
     // silent if an async queue drains after audio has been reopened.
@@ -18289,6 +18355,7 @@
     for (const id of revokedCallPeers(Object.keys(callPeers), members)) removePeer(id);
   }
   function leaveVoice() {
+    stopStudioAudio();
     // Permission prompts are not cancellable. Invalidate before any teardown so a chooser that
     // resolves after this point can only stop its returned tracks, never adopt them.
     videoCaptureSession.invalidate();
@@ -20417,6 +20484,7 @@
         finishUnreadDecision(pendingUnread, server, channel, correlation);
       }),
       listen<{ server: number; count: number }>("members-changed", (e) => {
+        if (e.payload.server === activeServerId) { studioMembership++; stopStudioAudio(); }
         spaceActivityAt[e.payload.server] = Date.now();
         // Revocation tears down the data plane: a removed member's live call edges (voice, video,
         // instruments) must not outlive their membership on the strength of an old handshake.
@@ -26941,7 +27009,7 @@
           </div>
         {:else if view === "studio"}
           {#if StudioSurface}
-            <StudioSurface me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} nameOf={nameOfIdentity} colorOf={colorOfIdentity} onnotice={studioNotice} claims={studioClaimScope ? drawClaimSnapshot : null} claimActions={studioClaimActions} />
+            <StudioSurface me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} nameOf={nameOfIdentity} colorOf={colorOfIdentity} onnotice={studioNotice} claims={studioClaimScope ? drawClaimSnapshot : null} claimActions={studioClaimActions} patchLibrary={studioPatchLibrary} audioActions={studioAudioActions} audioState={studioAudioState} onshareScore={shareStudioScore} onsharePixa={shareStudioPixa} />
           {:else}
             <h2>Studio</h2>
             <p class="muted">Loading the studio…</p>

@@ -192,6 +192,7 @@ export type OverlaySaveRefusal = OverlayManualReason
   | "basisChanged" | "basisChangedDuringDetach" | "transferInProgress" | "otherKindDraft"
   | "liveBranchSuperseded" | "staleBranch" | "nonceConflict" | "ordinaryIntentPending"
   | "branchFull" | "pixelUnpublished" | "pixelInvalid" | "pixelMissing"
+  | "exportUnpublished" | "exportInvalid" | "exportMissing"
   | "unconfirmedBranchesPerServer" | "unconfirmedBytesVaultWide" | "referenceCapacity"
   | "storageRefused" | "retry";
 export type OverlaySaveRetry = "sameRequest" | "newTicket" | "none" | "afterExplicitAccess";
@@ -212,7 +213,9 @@ export type OverlayInspection =
       unconfirmedState: OverlayUnconfirmedState | null; basis: Hex64 | null; branch: Hex64;
       contentId: Hex64 | null; generation: Decimal; accepted: number;
       transferState: "active" | "prepared"; provenance: "closing" | "unconfirmed" | null;
-      replayable: boolean; readOnly: true; content: StudioContent | null } & OverlayTarget)
+      replayable: boolean; readOnly: true; content: StudioContent | null;
+      /** Actual rebuilt draft projection identity; old native versions omit these and cannot export a draft. */
+      contentEpoch?: Decimal; group?: string } & OverlayTarget)
   | ({ v: 1; kind: "disposed"; basis: Hex64; branch: Hex64; generation: Decimal;
       accepted: number; mode: "preserved" | "discarded"; archive: Hex64 | null;
       readOnly: true } & OverlayTarget);
@@ -863,6 +866,7 @@ const OVERLAY_SAVE_REFUSALS = new Set<OverlaySaveRefusal>([
   "basisChangedDuringDetach", "transferInProgress", "otherKindDraft", "liveBranchSuperseded",
   "staleBranch", "nonceConflict", "ordinaryIntentPending", "branchFull", "pixelUnpublished",
   "pixelInvalid", "pixelMissing", "unconfirmedBranchesPerServer", "unconfirmedBytesVaultWide",
+  "exportUnpublished", "exportInvalid", "exportMissing",
   "referenceCapacity", "storageRefused", "retry",
 ]);
 
@@ -935,6 +939,7 @@ export function parseOverlayInspection(v: unknown): OverlayInspection {
   const content = nullable(r.content, (x) => parseContent(x, "overlay inspection.content"));
   const replayable = flag(r.replayable, "overlay inspection.replayable");
   if (replayable !== (content !== null)) fail("overlay inspection replayability disagrees with content");
+  if ((r.contentEpoch === undefined) !== (r.group === undefined) || (r.contentEpoch !== undefined && content === null)) fail("overlay media identity must describe actual rebuilt content");
   return {
     v: 1, kind: "local-draft", ...target, ...classified,
     handoffAttempt: nullable(r.handoffAttempt, (x) => overlayHandoffAttempt(x, "overlay inspection.handoffAttempt")),
@@ -945,6 +950,8 @@ export function parseOverlayInspection(v: unknown): OverlayInspection {
     generation: decimal(r.generation, "overlay inspection.generation"),
     accepted: count(r.accepted, "overlay inspection.accepted"), transferState: r.transferState,
     provenance: r.provenance, replayable, readOnly: true, content,
+    ...(r.contentEpoch === undefined ? {} : { contentEpoch: decimal(r.contentEpoch, "overlay inspection.contentEpoch") }),
+    ...(r.group === undefined ? {} : { group: typeof r.group === "string" && /^(?:[0-9a-f]{2}){1,256}$/.test(r.group) ? r.group : fail("overlay inspection.group is not a bounded stable group id") }),
   };
 }
 

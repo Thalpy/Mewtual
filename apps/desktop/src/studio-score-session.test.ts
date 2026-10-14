@@ -47,6 +47,15 @@ test("Score creation reuses coordinated native Create without inventing a first 
   assert.equal(calls("publish_pix").length, 0);
 });
 
+test("Score component title keeps the pinned family and coordinated Index title", async () => {
+  const h = await harness(); h.session.open(object); await h.sync();
+  h.ipc.on("studio_apply", () => ordinaryView(scoreContent()));
+  h.ipc.on("studio_apply_index", () => ordinaryView(indexContent({ objects: { [object]: indexEntry({ kind: "score", title: "new" }) } })));
+  h.session.applyScoreOp(object, { op: "set_header", field: "title", value: "new" }); await h.sync();
+  assert.equal(h.calls("studio_apply")[0].args.objectKind, "score");
+  assert.equal(JSON.parse(String(h.calls("studio_apply_index")[0].args.body)).title, "new");
+});
+
 test("preview Score Save stays local and preserves kind/ticket/nonce/body on exact retry", async () => {
   const { ipc, session, sync, calls } = await harness(true);
   session.open(object); await sync();
