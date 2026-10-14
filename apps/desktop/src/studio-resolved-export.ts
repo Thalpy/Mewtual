@@ -2,6 +2,23 @@
 import { exportScoreTake, type ScoreExportInput } from "./studio-export.ts";
 import { exportFlipnotePixa } from "./pixa.ts";
 import { flipnoteModel, scoreModel, StudioNativeError, type FlipnoteView, type ScoreView } from "./studio-native.ts";
+import { FLIPNOTE_FRAME_BYTES_PROMISE, FLIPNOTE_MAX_FRAMES, PIX_MAX_BYTES } from "./studio-contract.ts";
+
+/** Synchronous preflight before any fetch/hash: never let a permissive display model omit data. */
+export function preflightFlipnoteMedia(view: FlipnoteView): void {
+  const content = view.content, ids = content.timeline;
+  const listed = new Set(ids);
+  const active = Object.keys(content.frames).filter((id) => !Object.hasOwn(content.tombstones, id));
+  if (!ids.length || ids.length > FLIPNOTE_MAX_FRAMES || listed.size !== ids.length || active.length !== ids.length || active.some((id) => !listed.has(id))) throw new StudioNativeError("animation timeline must name every active frame exactly once within its count budget");
+  let sum = 0;
+  for (const id of ids) {
+    const entry = content.frames[id], size = entry?.pixels.selected.value.bytes;
+    if (!entry || Object.hasOwn(content.tombstones, id) || !Number.isSafeInteger(size) || size < 1 || size > PIX_MAX_BYTES) throw new StudioNativeError("animation timeline has a missing or invalid exact frame declaration");
+    sum += size;
+    if (sum > FLIPNOTE_FRAME_BYTES_PROMISE) throw new StudioNativeError("animation frames exceed the bounded package budget");
+  }
+  if (sum !== content.declaredFrameBytes) throw new StudioNativeError("animation aggregate declaration does not match its exact frames");
+}
 
 function scoreInput(object: string, view: ScoreView): ScoreExportInput {
   const model = scoreModel(view.content);
@@ -33,6 +50,7 @@ export async function flipnotePixaFromNative(
   exporter: string,
   linked?: Readonly<{ object: string; view: ScoreView }>,
 ): Promise<Uint8Array> {
+  preflightFlipnoteMedia(view);
   const model = flipnoteModel(view.content), stableGroup = group(view);
   if (!model.frames.length || model.overCapCount || model.titleConflicts.length || model.fpsConflicts.length ||
     model.frames.some((frame) => frame.conflicts.length > 0 || frame.insertions > 1) || !model.sound.ready) {

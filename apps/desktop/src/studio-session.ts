@@ -26,8 +26,7 @@
 import { PixError, decodePix } from "./pix.ts";
 import { validateJamPatch } from "./jam-patch.ts";
 import type { JamPatch, JamTake } from "./jam-contract.ts";
-import { FLIPNOTE_FRAME_BYTES_PROMISE, FLIPNOTE_MAX_FRAMES } from "./studio-contract.ts";
-import { flipnotePixaFromNative, scoreTakeFromNative } from "./studio-resolved-export.ts";
+import { flipnotePixaFromNative, preflightFlipnoteMedia, scoreTakeFromNative } from "./studio-resolved-export.ts";
 import { exportStudioGif, publishStudioPixa, type StudioGifSaved } from "./studio-media.ts";
 import { canonicalJson, randomElementId, type FlipnoteOp, type IndexOp, type ScoreOp, type ScoreCell } from "./studio-contract.ts";
 import {
@@ -1091,6 +1090,7 @@ export class StudioSession {
 
   /** A component emits typed Score operations; family and exact retry identity stay session-owned. */
   applyScoreOp(object: Hex32, op: ScoreOp): void {
+    if (this.objectKind(object) !== "score") throw new StudioNativeError("score edit requires a pinned Score target");
     if (op.op === "set_header" && op.field === "title") this.setTitle(object, op.value as string);
     else this.scoreOp(object, op, "score edit");
   }
@@ -1128,7 +1128,8 @@ export class StudioSession {
     if (this.pendingFor(object).length) throw new StudioNativeError("finish or reconcile this document's pending saves before playback/export");
     const base = doc.view, model = doc.model, score = doc.score, inspection = this.overlay?.inspection;
     let view = base;
-    if (inspection?.kind === "local-draft" && inspection.content) {
+    if (inspection?.kind === "local-draft") {
+      if (!inspection.replayable || !inspection.content) throw new StudioNativeError("the retained local draft cannot be rebuilt; export its private recovery archive instead");
       if (!inspection.contentEpoch || !inspection.group) throw new StudioNativeError("reopen this local draft to obtain its actual native epoch/group before playback/export");
       if (inspection.content.kind !== kind) throw new StudioNativeError("local draft has the wrong media family");
       view = { ...base, epoch: inspection.contentEpoch, group: inspection.group, content: inspection.content } as StudioObjectView;
@@ -1164,7 +1165,7 @@ export class StudioSession {
   private async preparePixa(object: Hex32): Promise<{ bytes: Uint8Array; server: number; assertCurrent: () => void }> {
     const source = this.mediaSource(object, "flipnote"), view = source.view as FlipnoteView;
     const model = flipnoteModel(view.content);
-    if (!model.frames.length || model.frames.length > FLIPNOTE_MAX_FRAMES || model.declaredFrameBytes > FLIPNOTE_FRAME_BYTES_PROMISE) throw new StudioNativeError("animation frames exceed the bounded package budget");
+    preflightFlipnoteMedia(view);
     let linked: { object: string; view: ScoreView } | undefined;
     if (model.sound.score) {
       const score = await studioRead(this.ipc, this.target(), model.sound.score, "score");
@@ -1198,9 +1199,13 @@ export class StudioSession {
       const source = await this.oneMedia(() => this.preparePixa(object));
       source.assertCurrent();
       const publication = await publishStudioPixa(this.ipc, source.server, source.bytes);
-      try { source.assertCurrent(); } catch (e) { return { publication, referenceSaveId: null, warning: `blob published, but its Studio reference was not saved: ${reason(e)}` }; }
-      const save = this.applyOp(object, { op: "set_export", export: this.newId(), cid: publication.cid, bytes: publication.bytes }, "published animation reference");
-      return { publication, referenceSaveId: save.id, warning: null };
+      try {
+        source.assertCurrent();
+        const save = this.applyOp(object, { op: "set_export", export: this.newId(), cid: publication.cid, bytes: publication.bytes }, "published animation reference");
+        return { publication, referenceSaveId: save.id, warning: null };
+      } catch (e) {
+        return { publication, referenceSaveId: null, warning: `blob published, but its Studio reference was not saved: ${reason(e)}` };
+      }
     } finally { this.mediaWrite = false; }
   }
 

@@ -43,3 +43,13 @@ test("conflicted/missing/overflow native state refuses instead of exporting an i
   const unready = score(); unready.content.readiness.headerConflicts = true;
   await assert.rejects(scoreTakeFromNative(object, unready, ME), /resolve score/);
 });
+
+test("leaf export refuses missing/duplicate timeline records, ignored active entries and aggregate lies", async () => {
+  const held = new Map([[`${cid}:${pixBytes().length}`, pixBytes()]]);
+  for (const mutate of [(v: ReturnType<typeof animation>) => v.content.timeline.push(id32(9)),
+    (v: ReturnType<typeof animation>) => v.content.timeline.push(frame),
+    (v: ReturnType<typeof animation>) => v.content.frames[id32(9)] = v.content.frames[frame],
+    (v: ReturnType<typeof animation>) => v.content.declaredFrameBytes = 1]) {
+    const view = animation(); mutate(view); await assert.rejects(flipnotePixaFromNative(object, view, held, ME), /timeline|aggregate/);
+  }
+});

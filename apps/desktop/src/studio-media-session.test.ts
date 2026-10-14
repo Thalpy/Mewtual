@@ -72,3 +72,43 @@ test("SFX session requires explicit authored hold and retains it in exact retry 
   const body = h.calls("studio_apply")[0].args; assert.equal(JSON.parse(String(body.body)).duration_ms, 95_000);
   h.session.retry(h.session.saves[0].id); await h.sync(); assert.deepEqual(h.calls("studio_apply")[1].args, body);
 });
+
+test("an unrebuildable draft never exports its ordinary base", async () => {
+  const h = await harness();
+  h.ipc.on("studio_overlay_read", () => ({ v: 1, kind: "local-draft", channel: CHANNEL, object, eligibility: "manual", manualReason: "unconfirmed",
+    handoffAttempt: null, unconfirmedState: "sourceUnreadable", basis: id64(1), branch: id64(2), contentId: null, generation: "1",
+    accepted: 1, transferState: "active", provenance: "unconfirmed", replayable: false, readOnly: true, content: null }));
+  await h.session.refreshOverlay(object);
+  await assert.rejects(h.session.prepareFlipnotePixa(object), /cannot be rebuilt/);
+  assert.equal(h.calls("request_blob_bounded").length, 0);
+});
+
+test("post-publication reference refusal preserves the real blob receipt", async () => {
+  for (const phase of ["closing", "fault"]) {
+    const h = await harness(); h.ipc.on("studio_read", () => ({ ...h.view(), phase })); await h.session.refreshDoc(object);
+    h.ipc.on("publish_pixa", (args) => ({ cid: id64(5), bytes: atob(String(args.bytesB64)).length }));
+    const result = await h.session.publishFlipnotePixa(object);
+    assert.equal(result.publication.cid, id64(5)); assert.equal(result.referenceSaveId, null); assert.match(result.warning!, /blob published.*not saved/);
+    assert.equal(h.calls("studio_apply").length, 0);
+  }
+  const h = await harness(); h.ipc.on("publish_pixa", (args) => ({ cid: id64(6), bytes: atob(String(args.bytesB64)).length }));
+  Object.defineProperty(h.session, "newId", { value: () => { throw new Error("RNG unavailable"); } });
+  const result = await h.session.publishFlipnotePixa(object); assert.equal(result.publication.cid, id64(6)); assert.match(result.warning!, /RNG unavailable/);
+});
+
+test("timeline gaps, duplicate ids and lying aggregate declarations refuse before frame fetches", async () => {
+  for (const change of [(c: ReturnType<typeof flipnoteContent>) => c.timeline.push(id32(9)),
+    (c: ReturnType<typeof flipnoteContent>) => c.timeline.push(frame), (c: ReturnType<typeof flipnoteContent>) => c.declaredFrameBytes = 1]) {
+    const h = await harness(); change(h.content); await h.session.refreshDoc(object);
+    await assert.rejects(h.session.prepareFlipnotePixa(object), /timeline|aggregate/); assert.equal(h.calls("request_blob_bounded").length, 0);
+  }
+});
+
+test("all Score component operations, including the shared title grammar, refuse a Flipnote target", async () => {
+  const h = await harness();
+  const ops: import("./studio-contract.ts").ScoreOp[] = [{ op: "set_header", field: "title", value: "music" },
+    { op: "set_header", field: "bpm", value: 120 }, { op: "set_cell", step: 0, row: 0, value: { k: "d", pad: 0 } },
+    { op: "clear_cell", step: 0, row: 0 }, { op: "remove_patch", patch: id64(1) }];
+  for (const op of ops) assert.throws(() => h.session.applyScoreOp(object, op), /pinned Score/);
+  assert.equal(h.session.saves.length, 0); assert.equal(h.calls("studio_apply").length, 0); assert.equal(h.calls("studio_apply_index").length, 0);
+});
