@@ -6,7 +6,8 @@ The candidate connects typed Score and complete Flipnote sound state to the exis
 vault, native and UI paths. Parsing alone still grants no authority: explicit document-family
 binding, current membership/tenure, exact retry, recovery preflight and durable custody remain
 separate enforcement steps. [GATE6-ACCEPTANCE](GATE6-ACCEPTANCE.md) records bounded review pins
-and pending final backend/native/startup/hosted verification; old slice-only claims below describe
+and passing complete local backend/native/startup verification, with hosted/Linux CI still pending;
+old slice-only claims below describe
 their original checkpoints, not current feature availability.
 
 Archival playback reuses the existing synth through engine-minted capabilities bound to an owned,
@@ -19,7 +20,7 @@ Blob custody, provisional reference Save, a receipt, browser download and a save
 different outcomes, not interchangeable success claims.
 
 Frontend and backend SoundRecord recovery are separately implemented and bounded-reviewed;
-final cumulative code review is clear; composed suites/startup/CI remain pending.
+final cumulative code review is clear and composed local suites/startup pass; hosted CI remains pending.
 [GATE6-SOUND-RECOVERY](GATE6-SOUND-RECOVERY.md)
 records exact historical selection, current link scope, media custody and permanent deletion rules.
 An explicit selector may choose a retained historical alternative by operation id, but a whole-

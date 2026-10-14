@@ -6,7 +6,8 @@ Score/Sound/linked Music/PIXA/GIF production callers and the existing `.jamtake`
 are connected in the candidate. The leaf codec contracts below remain pure APIs, not a claim
 that native/UI integration is still absent. [FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HOOKS.md) is the
 current caller inventory; [GATE6-ACCEPTANCE](GATE6-ACCEPTANCE.md) distinguishes implemented
-checkpoints from the clear cumulative code review and still-pending final suites/startup/CI evidence.
+checkpoints from the clear cumulative code review, passing complete local suites/startup and
+still-pending hosted/Linux CI evidence.
 Gate 4's bounded lifecycle P5 promotion remains accepted; direct Closing Save/unfinished native
 repair commands, transferable Unconfirmed drafts and automatic Score historical OBJECT replay
 are not introduced.

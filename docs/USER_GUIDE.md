@@ -126,9 +126,10 @@ You're now in a shared, encrypted `#general` channel. Type and send.
 - **Main pane surfaces**; **Chat · Files · Announcements · Wiki · Events · Studio · Transfers**,
   plus the operations surfaces (**Moderation**, **Storage**, **Connectivity**) opened from the
   sidebar. A DM has no Announcements tab. **Profile** is *not* in the strip; open it from your own
-  name at the bottom of the sidebar (or **Settings → My Profile**). **Studio** is an early
-  in-memory preview of the shared flipnote and score editor: what you make there stays in this
-  window, is not shared with the group, and is not saved.
+  name at the bottom of the sidebar (or **Settings → My Profile**). On the Gate 6 candidate,
+  **Studio** uses saved, collaborative channel documents for flipnotes and scores. An ordinary
+  saved edit is provisional until the owner confirms its checkpoint; an explicitly local-only
+  draft is not shared history. Keep uncertain Save requests for their exact retry.
   Click one to switch. If that list feels like a lot, **Settings → Feature Guide** is a searchable
   map with direct **Open** buttons.
 - **Top-bar ticker**; new announcements, wiki changes, events, and messages that notify you crawl
@@ -137,6 +138,34 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   item (including switching server/channel and flashing a message). Non-message headlines use the
   short three-pip news cue configured under **Settings → Notifications**; the **♪** chip in a
   server's **Announcements** header is a shortcut to that server's own switch.
+
+### Studio: flipnotes, sound and music (Gate 6 candidate)
+
+Open a channel's **Studio**, then choose **new flipnote** or **new score**. Art uses the existing
+frame editor. Scores use a paged sixteenth-step grid: choose a recipe or drum, enter the creator's
+note hold, and place notes. Conflicts, removed values and out-of-range cells remain inspectable;
+unready music is not silently shortened or exported with missing notes.
+
+In a flipnote's **Sound** tab, add a recipe from the existing Jam library and choose the marker's
+note and authored hold in milliseconds. You can also explicitly import a local `emoji-sound:v1`
+JSON file (4KiB maximum); this is not a shared verified emoji catalog. The **Music** tab links a
+Score in the same group/channel. **Play** is local; looping is opt-in. Deafen, leaving a call,
+locking, navigation and membership changes stop playback rather than automatically resuming it.
+
+**Publish .pixa** saves a validated immutable animation/audio package, then separately submits
+its Studio reference as an ordinary Save. The published blob and the reference Save are different
+outcomes; the UI retains a publication acknowledgement if the reference fails. Saved references
+can read back and preview/play/download/share their exact package. **Download .pixa** only asks
+the browser to save a file; it is not a publication or a native saved-path acknowledgement.
+**Save GIF** writes a local visual-only file and reports its real path; it contains no sound.
+Scores download/share as `.jamtake`, using the existing take player.
+
+Recovery **Restore** adds absent content without overwriting; **Copy** is an explicit per-item
+replacement/removal, not an atomic restore or proof that every conflict alternative was preserved.
+Unavailable media remains an honest refusal. Recovery/draft backups are private recovery formats,
+not playable `.pixa` files. Direct Closing Save and unfinished native repair controls remain unavailable.
+Gate 6 is locally verified but awaits hosted acceptance; global/shared-deck PIXA viewing and
+two-real-client release acceptance remain later work. See [the exact evidence ledger](GATE6-ACCEPTANCE.md).
 
 ### Server Space
 

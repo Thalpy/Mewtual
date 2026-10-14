@@ -16,8 +16,8 @@ Score historical OBJECT edits stay manual, Unconfirmed drafts stay local/non-tra
 header-only Index Copy stays projection-level, and direct Closing Save/unfinished native repair
 commands remain unavailable. Gate 4's bounded lifecycle P5 promotion is unchanged.
 
-[GATE6-ACCEPTANCE](GATE6-ACCEPTANCE.md) pins the stack, bounded review verdicts and pending final
-root/native/startup/CI evidence. Older first-slice sections describe their named checkpoints,
+[GATE6-ACCEPTANCE](GATE6-ACCEPTANCE.md) pins the stack, clear cumulative review and passing complete
+local suites/startup evidence; hosted/Linux CI remains pending. Older first-slice sections describe their named checkpoints,
 not current missing UI/native activation. Gate 7 release/two-real-client acceptance, broader
 emoji catalog/chat clicks and shared-deck PIXA consensus/global viewer remain later work.
 
@@ -29,7 +29,8 @@ reuses the pure-Rust image encoder, bounded detached work, inline leases and gua
 Downloads publication. It is visual-only, fixed-name, infinite-loop output, not replicated
 audio or synchronization. Command registration, policy/capabilities and review ledger move
 together. SetExport validation/custody and production UI integration are now connected in the
-candidate; final combined evidence remains pending. See `GATE6-NATIVE-EXPORT.md` and the ledger.
+candidate; combined local verification passes, while hosted evidence remains pending.
+See `GATE6-NATIVE-EXPORT.md` and the ledger.
 
 ## Gate 6 Flipnote sound core checkpoint (2026-10-14)
 

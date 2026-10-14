@@ -2,10 +2,11 @@
 
 Current status (2026-10-14): the owner accepted the Gate 4 and Gate 5 merges. PR #43 merged
 into `Create-suite-2` at `7cbe8cbe131e1be8e672d04341c31a1d2b52a98d`. Gate 6's stacked PR #44/#45
-candidate is at `cefe08256acb6ba1e4e70ebc0f159eaf7cfce50d`: Score/Sound/linked Music/PIXA/GIF
+candidate's verified code checkpoint is `818e711641bc8193af5cde3be8e56d4817c475f9`: Score/Sound/linked Music/PIXA/GIF
 production controls and archival take playback are connected. Backend SoundRecord recovery is
-implemented/bounded-reviewed through `9fed4588`; final combined verification remains pending.
-This is not Gate 6 acceptance.
+implemented and cumulatively reviewed. Complete local suites, static/build/startup/flow checks
+and affected mutation/control checks pass; hosted/Linux CI remains pending. This is not final
+Gate 6 acceptance.
 Claims/Ask/Pass remain advisory call features. [GATE6-ACCEPTANCE](GATE6-ACCEPTANCE.md) is the
 current stack/evidence ledger; dated older checkpoint statements retain their original scope.
 

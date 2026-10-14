@@ -12,12 +12,12 @@ every bridge-facing slice; UI layout and rendering remain user-owned.
 Current Gate 6 work (2026-10-14): Gate 5 is owner-accepted and merged in PR #43 at
 `7cbe8cbe131e1be8e672d04341c31a1d2b52a98d`. Export foundations/nonce correction are PR #44
 (`0fe17691fa353cee9b37dc85d4ea4149a5aa8ec5`); stacked PR #45 is an implemented integration
-candidate at `cefe08256acb6ba1e4e70ebc0f159eaf7cfce50d`. Typed Score/SFX/recipes/links/exports,
+candidate at verified code checkpoint `818e711641bc8193af5cde3be8e56d4817c475f9`. Typed Score/SFX/recipes/links/exports,
 causal/preflight/vault support, native publication/GIF, production Sound/Music controls and the
 existing take consumer's archival playback and explicit backend SoundRecord recovery are connected
-and bounded-reviewed through candidate `9fed4588`; final root/native/startup/CI
-evidence is pending. This is not Gate 6
-acceptance. [GATE6-ACCEPTANCE](GATE6-ACCEPTANCE.md) records exact stack, evidence and remaining work;
+and cumulatively reviewed. Complete local root/native/frontend suites, strict lint/build/startup
+and the affected mutation/control checks pass. Hosted/Linux CI remains pending, so this is not
+final Gate 6 acceptance. [GATE6-ACCEPTANCE](GATE6-ACCEPTANCE.md) records exact stack, evidence and remaining work;
 [GATE6-DESIGN](GATE6-DESIGN.md) remains the design/reuse history. Dated implementation records
 below keep their original scope instead of being silently rewritten as present-time claims.
 

@@ -1,17 +1,19 @@
 # Mewtual; Handover
 
-## Current Gate 6 integration candidate (2026-10-14; final verification pending)
+## Current Gate 6 integration candidate (2026-10-14; local verification passed, CI pending)
 
 Gate 5 is owner-accepted at `7cbe8cbe131e1be8e672d04341c31a1d2b52a98d` (PR #43).
 PR #44 supplies export foundations/nonce correction at `0fe17691fa353cee9b37dc85d4ea4149a5aa8ec5`;
-stacked PR #45 is at checkpoint `cefe08256acb6ba1e4e70ebc0f159eaf7cfce50d`. These are exact
+stacked PR #45's verified code checkpoint is `818e711641bc8193af5cde3be8e56d4817c475f9`. These are exact
 checkpoint heads, not final Gate 6 acceptance. [GATE6-ACCEPTANCE](GATE6-ACCEPTANCE.md) is the
 current evidence ledger; earlier dated sections below remain historical evidence for their pins.
 The implementation-complete candidate is `9fed4588d5f29862f18b38f7f44a14e506fefe4b`, including
-reviewed backend SoundRecord recovery `1d8882875e7178f80140e70c102b8ab6e74ae973`; final combined
-runs are in progress, not yet acceptance. Cumulative implementation/integration review is clear
-through mechanical native-formatting successor `8632b7bc69ebc096e5e8a2f8eb19465d902a282c`, with
-47 selected tests independently passing and no remaining B/H/M/L. Root-Rust/TypeScript bytes are unchanged.
+reviewed backend SoundRecord recovery `1d8882875e7178f80140e70c102b8ab6e74ae973`. Cumulative
+implementation/integration review is clear through `818e7116`, including mechanical native
+formatting `8632b7bc` and the two-script CI-anchor correction `cbeb65bf`. Runtime sources are
+unchanged after `8632b7bc`. The reviewer independently passes 47 selected behavior tests and
+verifies all three corrected mutant failures/restored controls, byte-exact restoration and
+224/224 unique anchors. No B/H/M/L remains; hosted acceptance is still pending.
 
 Typed Score and complete Flipnote sound state now use the existing causal/P1/vault/native paths.
 Score composer, Sound markers with authored holds, linked Music, actual-byte PIXA publication/
@@ -28,15 +30,18 @@ alternative by op id, but whole-version walks intentionally choose one effective
 per slot, not every raw alternative in sequence. Only archive preservation proves branch preservation.
 Header-only Index Copy's accepted projection-level limitation remains unchanged.
 
-Current verification: frontend 1555/1555 passes at `9fed4588`; check 0/0 and production build pass
-at `e83f12e4` (29.07s, large-chunk advisory). The host flow rerun passes all nine scenarios at `cefe0825` after a sandbox
-CDP timeout (subsequent App change is CSS only, not a newly claimed flow run).
+Current verification: root complete suite passes 2453 tests / 24 existing ignored (app1116/22),
+native complete suite passes 345 library + 5 ACL tests, and frontend passes 1555/1555. Root/native
+formatting and strict Clippy, native check/build, frontend check/build, cargo-deny and local
+Git-Bash ambient/raw-fs gates pass. The host flow rerun passes all nine scenarios on `818e7116`;
+real native startup also passes. Sandbox CDP/advisory-lock failures were rerun successfully with
+the required host/cache access, never treated as passes. The bundle-size advisory remains.
 Real 900×640 browser inspection covers Score/Sound/link states without App console errors;
 screenshots are under root `target`, not the repository. The reviewed Score loop-checkbox layout
-fix at `e83f12e4` is validated inside that viewport. The native 345+5 and full root aggregate
-2443 passed / 24 existing ignored at `f1151601` precede SoundRecord changes. Fresh final
-root/native runs, startup and hosted checks are PENDING. Local Git-Bash ambient pass is not Linux
-CI evidence. The integration owner must attach final exact heads/runs to the ledger.
+fix at `e83f12e4` is validated inside that viewport. Exact execution pins/source-equivalence and
+local log names are in the ledger. Hosted/Linux CI and the remaining hosted repair/integration
+mutation executions are PENDING, not waived. Older active candidate heads occupy runner capacity;
+no superseded runs have been cancelled. Local Git-Bash ambient pass is not Linux CI evidence.
 
 Gate 4's bounded lifecycle P5 promotion remains accepted; this is not a global P5=false claim.
 Direct Closing Save/native unfinished repair commands stay unavailable, Unconfirmed local drafts
