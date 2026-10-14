@@ -25,6 +25,10 @@
 
 import { PixError, decodePix } from "./pix.ts";
 import { validateJamPatch } from "./jam-patch.ts";
+import type { JamPatch, JamTake } from "./jam-contract.ts";
+import { FLIPNOTE_FRAME_BYTES_PROMISE, FLIPNOTE_MAX_FRAMES } from "./studio-contract.ts";
+import { flipnotePixaFromNative, scoreTakeFromNative } from "./studio-resolved-export.ts";
+import { exportStudioGif, publishStudioPixa, type StudioGifSaved } from "./studio-media.ts";
 import { canonicalJson, randomElementId, type FlipnoteOp, type IndexOp, type ScoreOp, type ScoreCell } from "./studio-contract.ts";
 import {
   DEFAULT_FPS,
@@ -99,6 +103,8 @@ import {
   type StudioObjectKind,
   type StudioObjectView,
   type ScoreModel,
+  type FlipnoteView,
+  type ScoreView,
   type RecoveryTargetArgs,
   type StudioPhase,
   type StudioUnlisten,
@@ -107,6 +113,7 @@ import {
 } from "./studio-native.ts";
 
 export type StudioScope = { server: number; channel: Decimal };
+export type StudioPixaPublished = { publication: PixPublication; referenceSaveId: number | null; warning: string | null };
 
 export type SaveStatus = "queued" | "inflight" | "blocked" | "uncertain";
 export type SaveOutcome = "landed" | "notWritten" | "uncertain" | "discarded";
@@ -312,6 +319,11 @@ export class StudioSession {
   private pendingRecovery = false;
   private cancelFlush: (() => void) | null = null;
   private unlisten: StudioUnlisten[] = [];
+  // One preparation and one publication/save action may be in flight, even across navigation.
+  // Old work must actually drain before another scope can allocate a second full package.
+  private mediaTask: Promise<unknown> | null = null;
+  private mediaWrite = false;
+  private mediaEpoch = 0;
 
   constructor(opts: SessionOptions) {
     this.ipc = opts.ipc;
@@ -361,6 +373,7 @@ export class StudioSession {
   }
 
   private clearScoped(): void {
+    this.mediaEpoch++;
     this.index = null;
     this.indexModel = null;
     this.indexLoading = false;
@@ -476,6 +489,7 @@ export class StudioSession {
   // --- Coalesced refresh ---------------------------------------------------------------------
 
   invalidate(what: { index?: boolean; objects?: Hex32[]; recovery?: boolean }): void {
+    if (what.objects?.length) this.mediaEpoch++;
     if (what.index) this.pendingIndex = true;
     for (const o of what.objects ?? []) this.pendingObjects.add(o);
     if (what.recovery) this.pendingRecovery = true;
@@ -558,6 +572,7 @@ export class StudioSession {
   /// Open (or re-read) a flipnote. Opening a different object drops the previous document but
   /// keeps its pending saves: they are addressed by object and finish or fail on their own.
   open(object: Hex32 | null, opts: { read?: boolean; objectKind?: StudioObjectKind } = {}): void {
+    if (this.doc?.object !== object) this.mediaEpoch++;
     if (object === null) {
       if (this.doc || this.overlay) { this.doc = null; this.overlay = null; this.notify(); }
       return;
@@ -1074,6 +1089,133 @@ export class StudioSession {
     this.applyOp(object, op, label);
   }
 
+  /** A component emits typed Score operations; family and exact retry identity stay session-owned. */
+  applyScoreOp(object: Hex32, op: ScoreOp): void {
+    if (op.op === "set_header" && op.field === "title") this.setTitle(object, op.value as string);
+    else this.scoreOp(object, op, "score edit");
+  }
+
+  setSoundPatch(object: Hex32, patch: Hex64, descriptor: JamPatch): void {
+    if (this.objectKind(object) !== "flipnote") throw new StudioNativeError("sound requires a Flipnote target");
+    const checked = validateJamPatch(descriptor);
+    if (!checked.ok) throw new StudioNativeError(checked.error);
+    this.applyOp(object, { op: "set_patch", patch, descriptor: checked.patch }, "sound recipe");
+  }
+  removeSoundPatch(object: Hex32, patch: Hex64): void {
+    if (this.objectKind(object) !== "flipnote") throw new StudioNativeError("sound requires a Flipnote target");
+    this.applyOp(object, { op: "remove_patch", patch }, "remove sound recipe");
+  }
+  setSfx(object: Hex32, input: { id: Hex32; frame: Hex32; patch: Hex64; note: number; durationMs: number }): void {
+    if (this.objectKind(object) !== "flipnote") throw new StudioNativeError("SFX requires a Flipnote target");
+    if (!Number.isInteger(input.note) || input.note < 0 || input.note > 127 || !Number.isInteger(input.durationMs) || input.durationMs < 1 || input.durationMs > 600_000) {
+      throw new StudioNativeError("SFX needs a MIDI note and an authored duration of 1–600000ms");
+    }
+    this.applyOp(object, { op: "set_sfx", sfx: input.id, frame: input.frame, patch: input.patch, note: input.note, duration_ms: input.durationMs }, "frame sound");
+  }
+  removeSfx(object: Hex32, sfx: Hex32): void {
+    if (this.objectKind(object) !== "flipnote") throw new StudioNativeError("SFX requires a Flipnote target");
+    this.applyOp(object, { op: "remove_sfx", sfx }, "remove frame sound");
+  }
+  linkScore(object: Hex32, score: Hex32 | null): void {
+    if (this.objectKind(object) !== "flipnote") throw new StudioNativeError("a Score link requires a Flipnote target");
+    this.applyOp(object, { op: "set_header", field: "score", value: score }, "linked Score");
+  }
+
+  /** Capture the displayed projection, not a silently substituted ordinary base beneath a draft. */
+  private mediaSource(object: Hex32, kind: StudioObjectKind): { view: StudioObjectView; server: number; assertCurrent: () => void } {
+    const doc = this.doc, scope = this.target(), gen = this.generation, epoch = this.mediaEpoch;
+    if (!doc || doc.object !== object || doc.objectKind !== kind || !doc.view || doc.loading || this.overlay?.loading) throw new StudioNativeError("wait for this document to finish loading");
+    if (this.pendingFor(object).length) throw new StudioNativeError("finish or reconcile this document's pending saves before playback/export");
+    const base = doc.view, model = doc.model, score = doc.score, inspection = this.overlay?.inspection;
+    let view = base;
+    if (inspection?.kind === "local-draft" && inspection.content) {
+      if (!inspection.contentEpoch || !inspection.group) throw new StudioNativeError("reopen this local draft to obtain its actual native epoch/group before playback/export");
+      if (inspection.content.kind !== kind) throw new StudioNativeError("local draft has the wrong media family");
+      view = { ...base, epoch: inspection.contentEpoch, group: inspection.group, content: inspection.content } as StudioObjectView;
+    }
+    const assertCurrent = () => {
+      if (!this.current(gen) || this.scope?.server !== scope.server || this.scope?.channel !== scope.channel || epoch !== this.mediaEpoch ||
+          this.doc?.object !== object || this.doc.objectKind !== kind || this.doc.view !== base || this.doc.model !== model || this.doc.score !== score ||
+          this.overlay?.inspection !== inspection || this.doc.loading || this.overlay?.loading || this.pendingFor(object).length) {
+        throw new StudioNativeError("the displayed source changed; start playback/export again");
+      }
+    };
+    assertCurrent();
+    return { view, server: scope.server, assertCurrent };
+  }
+
+  private oneMedia<T>(run: () => Promise<T>): Promise<T> {
+    if (this.mediaTask) return Promise.reject(new StudioNativeError("another media preparation is still running"));
+    const task = run();
+    this.mediaTask = task;
+    void task.finally(() => { if (this.mediaTask === task) this.mediaTask = null; }).catch(() => {});
+    return task;
+  }
+
+  prepareScoreTake(object: Hex32): Promise<JamTake> {
+    return this.oneMedia(async () => {
+      const source = this.mediaSource(object, "score");
+      const take = await scoreTakeFromNative(object, source.view as ScoreView, this.me);
+      source.assertCurrent();
+      return take;
+    });
+  }
+
+  private async preparePixa(object: Hex32): Promise<{ bytes: Uint8Array; server: number; assertCurrent: () => void }> {
+    const source = this.mediaSource(object, "flipnote"), view = source.view as FlipnoteView;
+    const model = flipnoteModel(view.content);
+    if (!model.frames.length || model.frames.length > FLIPNOTE_MAX_FRAMES || model.declaredFrameBytes > FLIPNOTE_FRAME_BYTES_PROMISE) throw new StudioNativeError("animation frames exceed the bounded package budget");
+    let linked: { object: string; view: ScoreView } | undefined;
+    if (model.sound.score) {
+      const score = await studioRead(this.ipc, this.target(), model.sound.score, "score");
+      source.assertCurrent();
+      if (!score) throw new StudioNativeError("the linked Score is not held locally; no shorter silent export was made");
+      linked = { object: model.sound.score, view: score };
+    }
+    const held = new Map<string, Uint8Array>();
+    for (const frame of model.frames) {
+      const key = contentKey(frame.cid, frame.bytes);
+      if (held.has(key)) continue;
+      const bytes = await this.fetchNow(frame.cid, frame.bytes);
+      source.assertCurrent();
+      if (!bytes) throw new StudioNativeError("an animation frame is unavailable; no partial export was made");
+      held.set(key, bytes);
+    }
+    const bytes = await flipnotePixaFromNative(object, view, held, this.me, linked);
+    source.assertCurrent();
+    return { bytes, server: source.server, assertCurrent: source.assertCurrent };
+  }
+
+  prepareFlipnotePixa(object: Hex32): Promise<Uint8Array> {
+    return this.oneMedia(async () => (await this.preparePixa(object)).bytes);
+  }
+
+  /** Blob custody and the editable export reference are deliberately two different outcomes. */
+  async publishFlipnotePixa(object: Hex32): Promise<StudioPixaPublished> {
+    if (this.mediaWrite) throw new StudioNativeError("another media save is still running");
+    this.mediaWrite = true;
+    try {
+      const source = await this.oneMedia(() => this.preparePixa(object));
+      source.assertCurrent();
+      const publication = await publishStudioPixa(this.ipc, source.server, source.bytes);
+      try { source.assertCurrent(); } catch (e) { return { publication, referenceSaveId: null, warning: `blob published, but its Studio reference was not saved: ${reason(e)}` }; }
+      const save = this.applyOp(object, { op: "set_export", export: this.newId(), cid: publication.cid, bytes: publication.bytes }, "published animation reference");
+      return { publication, referenceSaveId: save.id, warning: null };
+    } finally { this.mediaWrite = false; }
+  }
+
+  async exportFlipnoteGif(object: Hex32): Promise<StudioGifSaved> {
+    if (this.mediaWrite) throw new StudioNativeError("another media save is still running");
+    this.mediaWrite = true;
+    try {
+      const source = await this.oneMedia(() => this.preparePixa(object));
+      source.assertCurrent();
+      // Native owns server-incarnation and worker fences; a successful file remains a saved file
+      // even if the surface navigates away while the operating system reveals it.
+      return await exportStudioGif(this.ipc, source.server, source.bytes);
+    } finally { this.mediaWrite = false; }
+  }
+
   /// Use one of a conflicted frame's live values as the frame's pixels: fetch it bounded, hold it
   /// locally through publication, then replace. The blob is never named by a guessed cid.
   async useVersion(object: Hex32, frame: Hex32, alt: FrameConflictValue, how: "replace" | "insertAfter"): Promise<void> {
@@ -1099,7 +1241,7 @@ export class StudioSession {
     this.applyIndexOp({ op: "tombstone_object", object }, object, "delete flipnote");
   }
 
-  private applyOp(object: Hex32, op: FlipnoteOp | ScoreOp, label: string): void {
+  private applyOp(object: Hex32, op: FlipnoteOp | ScoreOp, label: string): SaveEntry {
     const route = this.editRoute(object);
     if ("refused" in route) throw new StudioNativeError(route.refused);
     // Cell/recipe objects now cross this seam. Freeze their operation identity immediately rather
@@ -1107,10 +1249,10 @@ export class StudioSession {
     const body = canonicalJson(op);
     op = JSON.parse(body) as FlipnoteOp | ScoreOp;
     if (route.kind === "ordinary") {
-      this.enqueue({ kind: "apply", object, op, label, request: { object, epochId: route.epochId, nonce: this.newId(), body,
+      return this.enqueue({ kind: "apply", object, op, label, request: { object, epochId: route.epochId, nonce: this.newId(), body,
         ...(this.objectKind(object) === "score" ? { objectKind: "score" as const } : {}) } });
     } else {
-      this.enqueue({ kind: "overlayApply", object, ...(this.objectKind(object) === "score" ? { objectKind: "score" as const } : {}), op, label, request: null, overlayRetry: null });
+      return this.enqueue({ kind: "overlayApply", object, ...(this.objectKind(object) === "score" ? { objectKind: "score" as const } : {}), op, label, request: null, overlayRetry: null });
     }
   }
   private applyIndexOp(op: IndexOp, object: Hex32, label: string): void {
@@ -1124,6 +1266,7 @@ export class StudioSession {
   }
 
   private enqueue(rec: NewSave): SaveEntry {
+    this.mediaEpoch++;
     const record = { ...rec, id: ++this.saveSeq, status: "queued", attempts: 0, error: "", epochChanged: false, mayHaveCommitted: false } as SaveEntry;
     this.records.push(record);
     this.notify();
