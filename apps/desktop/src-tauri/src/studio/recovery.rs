@@ -15,6 +15,7 @@ pub(crate) enum ChoiceInput {
     FrameDeletion { id: String },
     Title { value: String },
     Fps { value: String },
+    SoundRecord { value: String },
     Object { id: String },
     ObjectTitle { id: String, value: String },
     ObjectExpiry { id: String, value: String },
@@ -36,6 +37,9 @@ impl ChoiceInput {
                 value: hash(&value)?,
             },
             Self::Fps { value } => I::Fps {
+                value: hash(&value)?,
+            },
+            Self::SoundRecord { value } => I::SoundRecord {
                 value: hash(&value)?,
             },
             Self::Object { id: element } => I::Object { id: id(&element)? },

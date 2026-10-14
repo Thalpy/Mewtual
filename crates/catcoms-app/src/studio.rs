@@ -55,6 +55,41 @@ pub use restore::{
 };
 use settlement::SettlementNotices;
 pub use settlement::StudioSettlementState;
+
+/// A linked id/Index hint is not evidence of an existing Score in this group and channel. The
+/// header probe classifies absent/wrong-family sources as missing; the full typed load then
+/// authenticates the actual source. Called under custody at recovery/Copy preview and Apply,
+/// and immediately before ordinary Save's intent barrier. No network request is made here.
+fn sound_link_exists(
+    store: &mut ServerStore,
+    server: u64,
+    group: &catcoms_mls::ServerGroup,
+    device: &catcoms_mls::MlsDevice,
+    target: StudioTarget,
+    body: &[u8],
+) -> Result<bool, AppError> {
+    if !matches!(target, StudioTarget::Flipnote { .. }) {
+        return Ok(true);
+    }
+    let FlipnoteOp::SetHeader(FlipnoteHeader::Score(Some(object))) =
+        FlipnoteOp::decode(body).map_err(invalid)?
+    else {
+        return Ok(true);
+    };
+    let score = StudioTarget::Score {
+        channel: target.channel(),
+        object,
+    };
+    if !store.studio_object_holds_work(server, group, score)? {
+        return Ok(false);
+    }
+    Ok(store
+        .with_studio_source(server, group, score, device, |state| {
+            Ok((state.op_count() > 0 || state.epoch() > 0)
+                && matches!(state.projection()?, StudioProjection::Score(_)))
+        })?
+        .unwrap_or(false))
+}
 mod dispatch;
 pub(crate) use dispatch::{StudioDispatch, StudioReply, StudioResponse};
 mod receiver;
@@ -354,6 +389,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         // Capture that checked source under the SAME exclusive transaction as both writes;
         // never derive a current Index epoch from a UI fixture or a Registry pointer hint.
         let mut create_index_epoch = None;
+        let mut accepted_sound_retry = false;
         self.sync.with_registry_context(|group, device, _, _| {
             if group.member_signature_key(&device.device_id()).as_deref()
                 != Some(device.public_key_bytes().as_slice())
@@ -374,6 +410,37 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     &device.device_id(),
                 )
                 .map_err(invalid)?;
+            }
+            if let StudioRequest::Apply {
+                target: StudioTarget::Flipnote { .. },
+                epoch_id,
+                nonce,
+                body,
+            } = &request
+            {
+                if matches!(
+                    FlipnoteOp::decode(body).map_err(invalid)?,
+                    FlipnoteOp::SetHeader(FlipnoteHeader::Score(Some(_)))
+                        | FlipnoteOp::SetExport { .. }
+                ) {
+                    // An acknowledgement of an exact accepted edit is not new link authority and
+                    // remains retryable after the dependency later disappears. Fresh edits must
+                    // independently authenticate the actual linked source before any new intent.
+                    let op = domain(target, *nonce, body.clone());
+                    accepted_sound_retry = store
+                        .with_studio_source(server, group, target, device, |state| {
+                            Ok(state.doc_id() == *epoch_id
+                                && state.contains_exact_operation(device.device_id(), &op)?)
+                        })?
+                        .unwrap_or(false);
+                    if !accepted_sound_retry
+                        && !sound_link_exists(store, server, group, device, target, body)?
+                    {
+                        return Err(invalid(
+                            "linked Score is not installed in this group and channel",
+                        ));
+                    }
+                }
             }
             if let StudioRequest::Create {
                 channel,
@@ -475,6 +542,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     if !blobs.promote_staged_bounded(&cid, pixels.len())? {
                         return Err(invalid("frame promotion failed"));
                     }
+                }
+                FlipnoteOp::SetExport { .. } if accepted_sound_retry => {
+                    // Recovery/Copy's receiver still executes the ordinary Save transaction
+                    // after its own exact-accepted shortcut. This is acknowledgement, not new
+                    // media admission: lost bytes or evicted source history cannot strand it.
+                    // The full current signed own log above, not a pending intent, proves it.
                 }
                 FlipnoteOp::SetExport { cid, bytes, .. } => {
                     // A renderer's declaration or prior publication ACK is not evidence that

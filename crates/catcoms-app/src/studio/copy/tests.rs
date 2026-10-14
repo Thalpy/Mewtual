@@ -20,6 +20,7 @@ use rand_core::SeedableRng;
 /// Copy between two Flipnotes: the source and destination holds told apart (L-2), and a Save
 /// landing on the source mid-copy (L-1).
 mod cross;
+mod sound;
 
 const SERVER: u64 = 7;
 const OBJECT: [u8; 16] = [6; 16];

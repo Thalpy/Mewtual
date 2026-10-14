@@ -6,6 +6,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+mod sound_recovery;
 
 fn rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(79)

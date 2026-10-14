@@ -159,11 +159,25 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// object stored under another channel's label is missing in this channel, not an error that
     /// fails the preview (the review's wrong-object-channel Low).
     fn probe_copy_object(
-        store: &ServerStore,
+        store: &mut ServerStore,
         server: u64,
         group: &catcoms_mls::ServerGroup,
+        device: &catcoms_mls::MlsDevice,
         plan: &StudioOverlayCopyPlan,
     ) -> Result<bool, AppError> {
+        if plan.disposition() == StudioRecoveryDisposition::Ready
+            && matches!(plan.choice().item, StudioRecoveryItem::SoundRecord { .. })
+        {
+            return super::sound_link_exists(
+                store,
+                server,
+                group,
+                device,
+                plan.destination_target(),
+                plan.body()
+                    .ok_or_else(|| invalid("ready sound copy has no operation"))?,
+            );
+        }
         let StudioRecoveryItem::Object { id } = plan.choice().item else {
             return Ok(true);
         };
@@ -340,8 +354,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         if plan.phase() != EpochPhase::Open {
             return Err(invalid("Studio copy requires an Open destination epoch"));
         }
-        if !self.sync.with_registry_context(|group, _, _, _| {
-            Self::probe_copy_object(store, server, group, &plan)
+        if !self.sync.with_registry_context(|group, device, _, _| {
+            Self::probe_copy_object(store, server, group, device, &plan)
         })? {
             plan.hold(StudioRecoveryDisposition::MissingTarget);
         }
@@ -435,7 +449,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         let capture = self.sync.with_registry_context(|group, device, _, _| {
             store.capture_studio_overlay_copy(server, group, source, apply.destination, device)
         })?;
-        self.sync.with_registry_context(|group, _device, _, _| {
+        self.sync.with_registry_context(|group, device, _, _| {
             let plan = capture.plan(choice, scope)?;
             if plan.epoch_id() != apply.epoch_id || plan.fingerprint() != apply.expected_projection
             {
@@ -455,7 +469,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             // Refused rather than downgraded here: at C4 there is nothing left to offer the user,
             // and an object that vanished between the preview and the apply is exactly the race
             // this probe exists for.
-            if !Self::probe_copy_object(store, server, group, &plan)? {
+            if !Self::probe_copy_object(store, server, group, device, &plan)? {
                 return Err(AppError::StudioCopyRefused {
                     reason: StudioOverlayCopyRefusal::StalePreview,
                     message:
