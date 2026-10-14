@@ -29,6 +29,13 @@ revoked/render-failed non-completion and empty-loop refusal. Complete suites and
 native verification remain integration-owned; this is not shared-deck PIXA support or Gate 6
 acceptance by itself.
 
+Candidate verification: 84 engine/planner/transport/controller/Studio-audio tests pass, followed
+by all 97 legacy take/jukebox focused tests. Three source-layout guards intentionally moved from
+the retired raw-channel scheduler to its new archival-controller enforcement path; their drain,
+stale timer, Deafen and seek guarantees remain asserted and have behavioral transport regressions.
+Static check reports zero errors/warnings. Production build passes with the existing large-chunk
+warning. Independent caller review is pending for this checkpoint, not inferred from engine tests.
+
 ## Combined-review corrections (2026-10-14)
 
 Archival drum events now retain their receiver-owned kit closing time. Delayed ticks consume
