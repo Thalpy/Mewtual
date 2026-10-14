@@ -46,6 +46,7 @@ export class StudioPlaybackController {
   private readonly preparation = new JamLatestTaskQueue<JamArchivalPlayback | null>();
   private active: Active | null = null;
   private stateValue: StudioPlaybackState = "stopped";
+  private completedValue = false;
   private lastTick = 0;
 
   private readonly engine: StudioPlaybackEngine;
@@ -57,6 +58,8 @@ export class StudioPlaybackController {
   }
 
   get state(): StudioPlaybackState { return this.stateValue; }
+  /** True only for natural horizon completion; cancellation/revocation/render failure is not EOF. */
+  get completed(): boolean { return this.completedValue; }
   get elapsedMs(): number {
     const active = this.active;
     return active ? active.offset + Math.max(0, this.nowMs() - active.origin) : 0;
@@ -74,6 +77,7 @@ export class StudioPlaybackController {
   }
 
   stop(): void {
+    this.completedValue = false;
     this.generation++;
     const active = this.active;
     this.active = null;
@@ -96,7 +100,9 @@ export class StudioPlaybackController {
     if (!this.scope || this.deafened || !Number.isFinite(offsetMs) || offsetMs < 0) return false;
     let plan: JamArchivalPlan;
     try { plan = planJamArchivalPlayback(take, animation); } catch { return false; }
-    if (offsetMs > plan.endMs) return false;
+    // A late deck join/seek beyond EOF is a completed valid take, not a failed start or a fresh
+    // replay of its final drum. No source is minted for an already elapsed complete horizon.
+    if (offsetMs >= plan.endMs + archivalReleaseTailMs(plan) + 5) { this.completedValue = true; return true; }
     const scope = this.scope, generation = this.generation;
     const current = () => generation === this.generation && !this.deafened && scopeEqual(scope, this.scope);
     this.stateValue = "preparing";
@@ -160,7 +166,7 @@ export class StudioPlaybackController {
         if (this.active !== active || active.generation !== this.generation) return count;
       }
       if (active.seekNext >= active.seek.length && active.next >= active.plan.events.length &&
-        readElapsed() >= active.plan.endMs + archivalReleaseTailMs(active.plan) + 5) this.stop();
+        readElapsed() >= active.plan.endMs + archivalReleaseTailMs(active.plan) + 5) { this.stop(); this.completedValue = true; }
       return count;
     } catch {
       // Rendering failure is not success and never strands a long archival note.

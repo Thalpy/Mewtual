@@ -45,7 +45,7 @@ export class StudioAudioSession {
       const value = kind === "score" ? planJamArchivalPlayback(input).take : encodePixa(decodePixa(input as Uint8Array));
       const started = kind === "score" ? await this.controller.startTake(value as JamTake, offsetMs) : await this.controller.startPixa(value as Uint8Array, offsetMs);
       if (!current()) return false;
-      if (started) this.active = { kind, value, loop, generation };
+      if (started) this.active = { kind, value, loop: loop && (kind !== "score" || (value as JamTake).events.length > 0), generation };
       return started;
     } finally { if (current()) this.preparing = false; }
   }
@@ -61,7 +61,7 @@ export class StudioAudioSession {
       await this.controller.tick();
       if (this.active !== active || active.generation !== this.generation) return;
       if (this.controller.state === "stopped") {
-        if (!active.loop || this.deafened || !this.scopeKey || this.engine.context.state !== "running") { this.active = null; return; }
+        if (!this.controller.completed || !active.loop || this.deafened || !this.scopeKey || this.engine.context.state !== "running") { this.active = null; return; }
         // An explicit loop owns a complete package, including its longest hold/release horizon.
         // Restart mints a fresh engine capability only after all authored sound has completed.
         const started = active.kind === "score" ? await this.controller.startTake(active.value as JamTake) : await this.controller.startPixa(active.value as Uint8Array);

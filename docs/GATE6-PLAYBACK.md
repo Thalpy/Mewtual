@@ -1,5 +1,48 @@
 # Gate 6 archival playback controller
 
+## Existing local/shared take consumer candidate (review pending)
+
+The existing App `jamStartTakePlayback` path now delegates to `JamTakeTransport` around the same
+archival controller. It no longer sends imported/take notes through raw live `noteOn`; a 95-second
+authored hold or mid-hold seek therefore uses the exact remaining duration and the same allocator
+deadline. Take files, shared-deck transport/consent and live-call packet formats are unchanged.
+The existing call/server/channel/deck-CID/generation lease gates preparation, event dispatch and
+gain changes. One App-owned latest-task queue bounds preparation across replacement instances;
+the controller retains the combined 128-event work budget, delayed-drum age and release horizon.
+
+Remote deck state cannot resume a suspended context. A local take/deck gesture can; in-progress
+suspension cancels rather than queuing a burst for eventual reopen. Studio and local/shared takes
+explicitly retire the other archival UI owner on a new Play. Deafen and membership edges retire
+pending/live take ownership and suppress the previous shared CID until a new local deck control
+or another track; a heartbeat alone cannot resurrect it. Leaving the call resets that suppression.
+
+The controller exposes `completed` separately from `state === "stopped"`. Only the complete
+authored horizon (or a valid seek already beyond it) marks natural EOF. Manual stop, stale scope,
+revocation, suspended audio and render failure do not advance the DJ or restart a Studio loop.
+The DJ alone advances after genuine EOF; listeners retain the existing done marker. Empty Scores
+do not spin a zero-length automatic loop. The engine's opaque gain API applies the existing
+jukebox volume to current/future archival lanes without exposing channels or changing live gains.
+
+Focused transport/controller/Studio-loop tests cover remote/local resume, 95-second seek holds,
+release completion, late EOF seeks, stale asynchronous leases, suspension, gain validation,
+revoked/render-failed non-completion and empty-loop refusal. Complete suites and final audible
+native verification remain integration-owned; this is not shared-deck PIXA support or Gate 6
+acceptance by itself.
+
+Candidate verification: 84 engine/planner/transport/controller/Studio-audio tests pass, followed
+by all 97 legacy take/jukebox focused tests. Three source-layout guards intentionally moved from
+the retired raw-channel scheduler to its new archival-controller enforcement path; their drain,
+stale timer, Deafen and seek guarantees remain asserted and have behavioral transport regressions.
+Static check reports zero errors/warnings. Production build passes with the existing large-chunk
+warning. Independent caller review is pending for this checkpoint, not inferred from engine tests.
+
+The caller review found one pending-download/approval/paused-track cancellation race: no seated
+transport meant the old suppression missed its CID. `JamTakeSuppression` now captures the adopted
+deck CID before seating and reconciles exact entry/CID/source/link identity before **every** media
+dispatch. Pause/unpause, DJ and offset heartbeats do not restore consent; an actual ordinary
+audio/video/linked-track replacement also clears obsolete suppression. Five focused seam/binding
+regressions plus legacy take/transport checks pass 34/34. Review closure remains pending.
+
 ## Combined-review corrections (2026-10-14)
 
 Archival drum events now retain their receiver-owned kit closing time. Delayed ticks consume
