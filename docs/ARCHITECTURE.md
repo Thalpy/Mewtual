@@ -97,8 +97,10 @@ then removes only the matching own intents through the accounted ledger writer. 
 recovery, not receipt finality. Missing evidence stays pending. Settlement invalidations are
 queued under custody but emitted after its release; reads do not emit refresh-triggering events.
 
-Studio's first Rust schema layer (`catcoms_replication::studio`) decodes the closed IndexOp and
-FlipnoteOp bodies, preserving stable element ids and the frontend's canonical JSON bytes.
+Studio's Rust schema layer (`catcoms_replication::studio`) decodes the closed IndexOp, FlipnoteOp
+and ScoreOp bodies, preserving stable element ids and the frontend's canonical JSON bytes.
+ScoreOp adds only static musical grammar and complete-envelope checks, not a score target/writer.
+Its codec must be selected from trusted root kind; shared title/patch shapes do not identify it.
 Contextual decoding checks the whole P1 envelope and expected type/key; Index creation additionally
 binds `created_by` to a caller-supplied, independently verified full author. This decoder grants
 no membership, causal-mutation, storage or publication authority. The first read-only projection

@@ -49,6 +49,14 @@ table with the commit that closed it.
   must enforce current scope/readiness, actual CID/length binding, native validation and durability
   before publishing a reference. Sound/score/export commands remain unavailable in this slice.
 
+- **Typed score parsing is not persistent score admission.** The Gate 6 `ScoreOp` codec reuses
+  strict Studio parsing, recipe hash checks and complete-envelope bounds. It requires a fixed
+  16-byte object key, but neither that key nor overlapping Flipnote title/patch body shapes prove
+  a root kind, member, group or physical epoch. Only a future trusted typed target may enable
+  stateful score edits, with causal checks, exact recovery/preflight and durable ownership intact.
+  Numeric/array take session nonces now refuse in the shared recorder/import validator before
+  regex coercion; this closes the external schema finding without changing legal take bytes.
+
 - **Renderer access to retained Studio work is local authority, not protocol authority.** The Gate 4
   completion candidate registers the reviewed overlay lifecycle family and a ticketed Unconfirmed
   Save for awaiting-tenure previews. The session gate, command allow-list and actor/store custody

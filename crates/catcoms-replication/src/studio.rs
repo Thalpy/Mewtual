@@ -16,6 +16,11 @@ use crate::{DomainOp, LogicalDocument, ReplError};
 
 mod patch;
 pub use patch::StudioPatch;
+mod score;
+pub use score::{
+    ScoreCell, ScoreHeader, ScoreOp, SCORE_MAX_CELLS, SCORE_MAX_PATCHES, SCORE_MAX_STEPS,
+    SCORE_ROWS,
+};
 mod index;
 pub use index::{
     studio_index_document, validate_index_change, IndexCreation, IndexEntry, IndexRegister,

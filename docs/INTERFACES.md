@@ -554,6 +554,16 @@ pub enum IndexOp;       // put_object, tombstone_object, set_title, set_expiry
 pub enum FlipnoteOp;    // frame, sfx, patch, export and discriminated header operations
   encode() -> Result<Vec<u8>>; decode(canonical_body) -> Result<Self>;
   decode_domain(&LogicalDocument, &DomainOp) -> Result<Self>;
+pub enum ScoreOp;       // static set_cell, clear_cell, set_patch, remove_patch, set_header
+  encode() -> Result<Vec<u8>>; decode(canonical_body) -> Result<Self>;
+  decode_domain(&LogicalDocument, &DomainOp) -> Result<Self>;
+pub enum ScoreCell { Note { patch:[u8;32], len:Option<u16> }, Drum { pad:u8 } }
+pub enum ScoreHeader { Title(String), Bpm(u16), Bpb(u8), Steps(u16) }
+// Score envelope decoding also requires a 16-byte object key. Omitted len retains its bytes and
+// means one step; explicit len is 1..256-step. Coordinates are step 0..255, row 0..24. Headers:
+// BPM 40..240, BPB 1..8, steps 1..256. This codec adds no StudioTarget::Score or native writer.
+// Caller selects trusted root kind; shared title/patch shapes cannot establish it. Actual score
+// extent, missing recipes, overlaps, caps, causal admission and recovery remain stateful work.
 pub enum StudioExpiry { Unrecorded, Never, At(u64) } // absent / null / integer; zero is At(0)
 pub struct StudioPatch; // private validated jam descriptor plus the existing SHA-256 identity
   new(&serde_json::Value) -> Result<Self>; id() -> [u8;32]; value() -> &serde_json::Value;
@@ -3962,4 +3972,8 @@ already available recovery/draft backup formats. See `GATE6-DESIGN.md` for remai
 These helpers preserve authored duration in content. Playback is not yet connected; the current
 engine's archival-note watchdog also stops holds after 30 seconds. Later integration must provide
 bounded archival timing without weakening the live lost-note-off watchdog.
+
+The next isolated `gate6-typed-score` slice adds a static Rust `ScoreOp` body/envelope codec
+and frontend `ScoreCell`/`ScoreOp` types. Export input reuses that cell type. Shared canonical
+vectors and exact bounds are documented in `GATE6-SCORE-CONTRACT.md`; no command is added.
 

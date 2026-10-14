@@ -164,6 +164,23 @@ export type FlipnoteOp =
   | { op: "remove_export"; export: string }
   | { op: "set_header"; field: "title" | "fps" | "score"; value: string | number | null };
 
+// --- score:v1 grammar (2.8/2.9; static contract, not a callable native writer) ------------------
+export const SCORE_MAX_STEPS = 256;
+export const SCORE_ROWS = 25;
+export const SCORE_MAX_CELLS = 4096;
+export const SCORE_MAX_PATCHES = 64;
+
+/** Authored sixteenth-step length; absence preserves the original one-step draft bytes. */
+export type ScoreCell = { k: "n"; p: string; len?: number } | { k: "d"; pad: number };
+/** Body schema mirrored by Rust ScoreOp. Backend admission and causal validation remain required. */
+export type ScoreOp =
+  | { op: "set_cell"; step: number; row: number; value: ScoreCell }
+  | { op: "clear_cell"; step: number; row: number }
+  | { op: "set_patch"; patch: string; descriptor: unknown }
+  | { op: "remove_patch"; patch: string }
+  | { op: "set_header"; field: "title"; value: string }
+  | { op: "set_header"; field: "bpm" | "bpb" | "steps"; value: number };
+
 export type IndexOp =
   | { op: "put_object"; object: string; kind: "flipnote" | "score"; title: string; created_by: string; ts: number; expiry: number }
   | { op: "tombstone_object"; object: string }

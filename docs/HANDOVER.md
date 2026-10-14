@@ -1,5 +1,18 @@
 # Mewtual; Handover
 
+## Gate 6 typed score contract (2026-10-14; isolated continuation)
+
+`gate6-typed-score` continues from nonce correction `863fe0fe`, keeping PR #44's correction
+separate. It adds the static Rust `ScoreOp`/cell/header codec, mirrored frontend types and sixteen
+shared vectors. Eight focused Rust regressions and 29 frontend score/export checks pass. No Score
+target, causal projection, persistence, registration, playback or UI activation is added.
+Complete frontend 1423/1423, check/build, separate native 337+5, root strict Clippy, formatting,
+local Git-Bash ambient check and dependency audit pass. The full root suite also passes, including
+integrations/doc tests; existing opt-in ignored fixtures remain ignored. Hosted checks are not
+claimed green. Read-only design/actual-diff implementation review reports
+no remaining finding. See `GATE6-SCORE-CONTRACT.md` for precise evidence, scope and stateful
+obligations; this is not Gate 6 completion.
+
 ## Gate 6 nonce validation correction (2026-10-14)
 
 External review of PR #44's `575f01de` checkpoint found an inherited `RegExp.test` coercion:

@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "patch_id": "6ef42672dfee8b336c82d5466a84dceaa6dd18f405e5a4710ea24c9db47eaf6c",
+  "cases": [
+    {
+      "name": "note_legacy",
+      "body": "{\"op\":\"set_cell\",\"row\":0,\"step\":0,\"value\":{\"k\":\"n\",\"p\":\"6ef42672dfee8b336c82d5466a84dceaa6dd18f405e5a4710ea24c9db47eaf6c\"}}"
+    },
+    {
+      "name": "note_one",
+      "body": "{\"op\":\"set_cell\",\"row\":0,\"step\":0,\"value\":{\"k\":\"n\",\"len\":1,\"p\":\"6ef42672dfee8b336c82d5466a84dceaa6dd18f405e5a4710ea24c9db47eaf6c\"}}"
+    },
+    {
+      "name": "note_hold",
+      "body": "{\"op\":\"set_cell\",\"row\":24,\"step\":0,\"value\":{\"k\":\"n\",\"len\":256,\"p\":\"6ef42672dfee8b336c82d5466a84dceaa6dd18f405e5a4710ea24c9db47eaf6c\"}}"
+    },
+    {
+      "name": "note_last",
+      "body": "{\"op\":\"set_cell\",\"row\":24,\"step\":255,\"value\":{\"k\":\"n\",\"len\":1,\"p\":\"6ef42672dfee8b336c82d5466a84dceaa6dd18f405e5a4710ea24c9db47eaf6c\"}}"
+    },
+    {
+      "name": "drum_last",
+      "body": "{\"op\":\"set_cell\",\"row\":24,\"step\":255,\"value\":{\"k\":\"d\",\"pad\":9}}"
+    },
+    {
+      "name": "clear_min",
+      "body": "{\"op\":\"clear_cell\",\"row\":0,\"step\":0}"
+    },
+    {
+      "name": "clear_max",
+      "body": "{\"op\":\"clear_cell\",\"row\":24,\"step\":255}"
+    },
+    {
+      "name": "set_patch",
+      "body": "{\"descriptor\":{\"e\":{\"a\":12,\"d\":380,\"r\":120,\"s\":45},\"f\":{\"c\":18000,\"e\":0,\"m\":0,\"q\":0},\"l\":{\"d\":0,\"r\":100,\"t\":0},\"o\":[{\"c\":0,\"l\":100,\"t\":0,\"w\":1}],\"v\":1,\"x\":{\"c\":0,\"d\":0,\"r\":0}},\"op\":\"set_patch\",\"patch\":\"6ef42672dfee8b336c82d5466a84dceaa6dd18f405e5a4710ea24c9db47eaf6c\"}"
+    },
+    {
+      "name": "remove_patch",
+      "body": "{\"op\":\"remove_patch\",\"patch\":\"6ef42672dfee8b336c82d5466a84dceaa6dd18f405e5a4710ea24c9db47eaf6c\"}"
+    },
+    {
+      "name": "title",
+      "body": "{\"field\":\"title\",\"op\":\"set_header\",\"value\":\"score 🐈\\n\\u0000é\"}"
+    },
+    {
+      "name": "bpm_min",
+      "body": "{\"field\":\"bpm\",\"op\":\"set_header\",\"value\":40}"
+    },
+    {
+      "name": "bpm_max",
+      "body": "{\"field\":\"bpm\",\"op\":\"set_header\",\"value\":240}"
+    },
+    {
+      "name": "bpb_min",
+      "body": "{\"field\":\"bpb\",\"op\":\"set_header\",\"value\":1}"
+    },
+    {
+      "name": "bpb_max",
+      "body": "{\"field\":\"bpb\",\"op\":\"set_header\",\"value\":8}"
+    },
+    {
+      "name": "steps_min",
+      "body": "{\"field\":\"steps\",\"op\":\"set_header\",\"value\":1}"
+    },
+    {
+      "name": "steps_max",
+      "body": "{\"field\":\"steps\",\"op\":\"set_header\",\"value\":256}"
+    }
+  ]
+}

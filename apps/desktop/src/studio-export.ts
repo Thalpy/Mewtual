@@ -3,11 +3,8 @@
 import { PATCH_OSC_WAVES, TAKE_ID_MAX_BYTES, type JamPatch, type JamTake, type JamTakeEvent } from "./jam-contract.ts";
 import { jamPatchId, validateJamPatch } from "./jam-patch.ts";
 import { validateJamTake } from "./jam-recorder.ts";
-import { FLIPNOTE_MAX_PATCHES, hex } from "./studio-contract.ts";
-
-export const SCORE_MAX_STEPS = 256;
-export const SCORE_ROWS = 25;
-export const SCORE_MAX_CELLS = 4096;
+import { FLIPNOTE_MAX_PATCHES, hex, SCORE_MAX_STEPS, SCORE_ROWS, SCORE_MAX_CELLS, type ScoreCell } from "./studio-contract.ts";
+export { SCORE_MAX_STEPS, SCORE_ROWS, SCORE_MAX_CELLS } from "./studio-contract.ts";
 
 /** A resolved export view. Conflicts, overflow and native authority must be handled by its caller. */
 export type ScoreExportInput = Readonly<{
@@ -17,7 +14,7 @@ export type ScoreExportInput = Readonly<{
   steps: number;
   patches: Readonly<Record<string, JamPatch>>;
   /** Note length is sixteenth steps; omitted len preserves the original one-step draft input. */
-  cells: Readonly<Record<string, { k: "n"; p: string; len?: number } | { k: "d"; pad: number }>>;
+  cells: Readonly<Record<string, ScoreCell>>;
 }>;
 
 export type StudioExportContext = Readonly<{
