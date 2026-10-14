@@ -153,6 +153,9 @@ fn selected(
         };
     }
     Ok(match projection {
+        // A final score register cannot prove absence of an intervening reusable-slot clear.
+        // Until that proof exists, exact own historical score effects require manual recovery.
+        StudioProjection::Score(_) => None,
         StudioProjection::Flipnote(p) => {
             match FlipnoteOp::decode(&intent.operation.body).map_err(invalid)? {
                 FlipnoteOp::SetHeader(FlipnoteHeader::Title(_)) => p

@@ -1307,9 +1307,10 @@ pub(super) fn put_target(e: &mut Encoder, target: StudioTarget) -> Result<(), Re
     e.put_u8(match target {
         StudioTarget::Index { .. } => 0,
         StudioTarget::Flipnote { .. } => 1,
+        StudioTarget::Score { .. } => 2,
     });
     put(e, &target.channel())?;
-    if let StudioTarget::Flipnote { object, .. } = target {
+    if let StudioTarget::Flipnote { object, .. } | StudioTarget::Score { object, .. } = target {
         put(e, &object)?;
     }
     Ok(())
@@ -1320,6 +1321,10 @@ pub(super) fn get_target(d: &mut Decoder<'_>) -> Result<StudioTarget, ReplError>
     match tag {
         0 => Ok(StudioTarget::Index { channel }),
         1 => Ok(StudioTarget::Flipnote {
+            channel,
+            object: fixed(d)?,
+        }),
+        2 => Ok(StudioTarget::Score {
             channel,
             object: fixed(d)?,
         }),

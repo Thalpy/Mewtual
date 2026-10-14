@@ -131,6 +131,9 @@ fn deleted(current: &StudioProjection, history: &[StudioRecovery], id: ElementId
         .any(|p| match p {
             StudioProjection::Index(p) => p.tombstones.contains_key(&id),
             StudioProjection::Flipnote(p) => p.tombstones.contains_key(&id),
+            // Score addresses/hashes are reusable registers, not permanent ElementId tombstones.
+            // Existing art/index recovery items do not apply to the score family.
+            StudioProjection::Score(_) => false,
         })
 }
 

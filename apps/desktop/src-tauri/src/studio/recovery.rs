@@ -281,7 +281,7 @@ fn listing(v: StudioRecoveryListing) -> Result<Value, String> {
     };
     Ok(
         json!({"v":1,"kind":"recoveryList","channel":u128::from_be_bytes(v.target.channel()).to_string(),
-        "object":match v.target {StudioTarget::Index{..}=>None,StudioTarget::Flipnote{object,..}=>Some(hex::encode(object))},
+        "object":match v.target {StudioTarget::Index{..}=>None,StudioTarget::Flipnote{object,..}|StudioTarget::Score{object,..}=>Some(hex::encode(object))},
         "source":v.source.map(|s|json!({"epochId":format!("{:032x}",s.epoch_id),"epoch":s.epoch.to_string(),
             "provisional":true,"phase":match s.phase {EpochPhase::Open=>"open",EpochPhase::Closing=>"closing",EpochPhase::Settled=>"settled",EpochPhase::Fault=>"fault"}})),
         "versions":v.versions.iter().map(summary).collect::<Vec<_>>(),"evictionPending":warning,"pendingIntents":v.pending_intents}),
@@ -322,7 +322,7 @@ pub(super) fn response_value(response: Response) -> Result<Value, String> {
             registry_epoch_id,
         } => json!({"v":1,"kind":"recoveryPointerRestored",
             "channel":u128::from_be_bytes(target.channel()).to_string(),
-            "object":match target {StudioTarget::Index{..}=>None,StudioTarget::Flipnote{object,..}=>Some(hex::encode(object))},
+            "object":match target {StudioTarget::Index{..}=>None,StudioTarget::Flipnote{object,..}|StudioTarget::Score{object,..}=>Some(hex::encode(object))},
             "checkpointEpoch":epoch.to_string(),"registryEpochId":format!("{registry_epoch_id:032x}"),
             "provisional":true}),
         Response::Preview(v) => {

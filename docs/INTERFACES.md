@@ -3588,7 +3588,15 @@ steals the requesting sender's own oldest RELEASING tail first, then the oldest 
 globally; if every voice is genuinely held, the new note is rejected; a held voice is never
 stolen (fairness: stealing must not be a griefing mechanism). Stealing and every teardown path
 disconnect all nodes and cancel all voice-owned scheduled automation, not merely `stop()`. A remote note held
-over 30 s auto-releases (watchdog: a lost note-off may never drone). Repeated note-on for an already
+over 30 s auto-releases (watchdog: a lost note-off may never drone). The separate Gate 6
+`prepareArchivalPlayback` capability binds a complete validated take/SFX log and gives only its
+bound event indices their remaining authored hold, up to 600000 ms; raw local/remote `noteOn`
+keeps the 30-second limit. Audio-clock and allocator deadlines agree. The unconnected
+`StudioPlaybackController` has explicit user-gesture starts, scope/generation cancellation,
+one-running/one-latest preparation and at most 128 combined events per tick. Same-pitch SFX have
+independent lanes but share one bounded engine-owned fairness domain; source cleanup is itself
+scheduled bounded work. See [`GATE6-PLAYBACK.md`](GATE6-PLAYBACK.md) for the integration contract.
+Repeated note-on for an already
 held `(source,note)` is rejected, while a same-pitch note may be retriggered once the prior voice is
 a releasing tail. On an inst-channel reopen the receiver replaces that channel's capability,
 clears that peer's held state, and both sides re-announce state + patch via the existing `onopen`
@@ -3995,4 +4003,16 @@ bounded archival timing without weakening the live lost-note-off watchdog.
 The next isolated `gate6-typed-score` slice adds a static Rust `ScoreOp` body/envelope codec
 and frontend `ScoreCell`/`ScoreOp` types. Export input reuses that cell type. Shared canonical
 vectors and exact bounds are documented in `GATE6-SCORE-CONTRACT.md`; no command is added.
+
+The stateful continuation adds `StudioTarget::Score` and `StudioProjection::Score` in core P1.
+Optional authored title/BPM/BPB/step registers preserve complete winner/alternatives. Absent
+values default to empty/120/4/16 without invented provenance. Cell/recipe slots retain a raw
+register of optional values; any live removal makes effective presence false. Clear and remove
+on absent slots record intent. Later Sets supersede exact observed same-property predecessors,
+not unseen removals. Readiness flags conflicts, overlap, missing recipes, extent and cap overflow.
+Score snapshots use explicit payload prefix2, and score restart units require trailing family2
+even when pristine. Existing Index/art bytes are unchanged. See `GATE6-STATE-DESIGN.md`.
+The native diagnostic shape `kind:"score"` uses optional header registers and cell/patch maps
+whose entries contain `{removed,register}`; `removed` is not inferred from raw selected content.
+No score request/wire activation follows from exposing these core types; unfinished adapters refuse.
 

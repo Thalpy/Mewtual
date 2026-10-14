@@ -98,6 +98,7 @@ fn prepared(
     match t.read(logical, epoch, before).unwrap() {
         StudioProjection::Index(_) => index::prepare(logical, epoch, domain, who).unwrap(),
         StudioProjection::Flipnote(p) => frames::prepare(&p, domain, who, 1234).unwrap(),
+        StudioProjection::Score(p) => score::prepare(&p, domain, who).unwrap(),
     }
 }
 // Deliberately bypass local policy for well-formed concurrent/malicious ingress fixtures. The
@@ -215,6 +216,9 @@ impl Fixture {
             }
             StudioTarget::Flipnote { channel, .. } => {
                 FlipnoteFrameProjection::verify_checkpoint(&verified, channel, seed.bytes())
+            }
+            StudioTarget::Score { channel, .. } => {
+                ScoreProjection::verify_checkpoint(&verified, channel, seed.bytes())
             }
         }
         .unwrap();
@@ -857,6 +861,14 @@ fn studio_public_projection_bounds_are_checked_before_compaction_and_recovery_cl
                         r.selected.value = "x".repeat(MAX_DOMAIN_OP_BYTES + 1);
                     }
                 }
+                StudioProjection::Score(p) => {
+                    let r = p.title.as_mut().unwrap();
+                    if oversized_count {
+                        r.conflicts = vec![r.selected.clone(); snapshot::MAX_VALUES + 1];
+                    } else {
+                        r.selected.value = "x".repeat(MAX_DOMAIN_OP_BYTES + 1);
+                    }
+                }
             }
             assert!(matches!(p.checkpoint([7; 32]), Err(ReplError::EpochBound)));
             assert!(matches!(
@@ -1020,6 +1032,9 @@ fn studio_signed_concurrency_retains_overflow_while_local_edits_refuse_more_grow
                     p.declared_frame_bytes,
                     FLIPNOTE_FRAME_BYTES + MAX_FRAME_BYTES
                 );
+            }
+            StudioProjection::Score(_) => {
+                panic!("this cap fixture only constructs art or index targets")
             }
         }
         let snap = StudioRecovery::snapshot(

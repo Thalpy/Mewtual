@@ -22,7 +22,7 @@ fn destination(target: StudioTarget) -> Value {
     json!({"channel":u128::from_be_bytes(target.channel()).to_string(),
     "object":match target {
         StudioTarget::Index{..} => Value::Null,
-        StudioTarget::Flipnote{object,..} => hex::encode(object).into(),
+        StudioTarget::Flipnote{object,..} | StudioTarget::Score{object,..} => hex::encode(object).into(),
     }})
 }
 

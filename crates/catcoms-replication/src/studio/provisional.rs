@@ -99,6 +99,7 @@ impl UnconfirmedStudioSeed {
         match &mut projection {
             StudioProjection::Index(p) => p.epoch = receipt.closed_epoch,
             StudioProjection::Flipnote(p) => p.epoch = receipt.closed_epoch,
+            StudioProjection::Score(p) => p.epoch = receipt.closed_epoch,
         }
         if projection.checkpoint(receipt.close_record_hash)?.bytes() != bytes {
             return Err(ReplError::Malformed);
@@ -106,6 +107,7 @@ impl UnconfirmedStudioSeed {
         match &mut projection {
             StudioProjection::Index(p) => p.epoch = epoch,
             StudioProjection::Flipnote(p) => p.epoch = epoch,
+            StudioProjection::Score(p) => p.epoch = epoch,
         }
         let doc_id = crate::epoch_id(
             receipt.document.doc_type,

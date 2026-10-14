@@ -4538,7 +4538,7 @@ where
                         }
                         if let Some(target) = updated {
                             let object = match target { catcoms_replication::studio::StudioTarget::Index { .. } => None,
-                                catcoms_replication::studio::StudioTarget::Flipnote { object, .. } => Some(object) };
+                                catcoms_replication::studio::StudioTarget::Flipnote { object, .. } | catcoms_replication::studio::StudioTarget::Score { object, .. } => Some(object) };
                             let _ = event_tx.send(AppEvent::StudioUpdated { channel: u128::from_be_bytes(target.channel()), object }).await;
                         }
                         if studio_receiver.take_pause_notice() {

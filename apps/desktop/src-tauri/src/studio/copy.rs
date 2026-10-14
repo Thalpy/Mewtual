@@ -161,7 +161,7 @@ pub(super) fn preview_value(v: &StudioOverlayCopyPreview) -> Result<Value, Strin
         json!({"channel":u128::from_be_bytes(t.channel()).to_string(),
         "object":match t {
             StudioTarget::Index{..} => Value::Null,
-            StudioTarget::Flipnote{object,..} => hex::encode(object).into(),
+            StudioTarget::Flipnote{object,..} | StudioTarget::Score{object,..} => hex::encode(object).into(),
         }})
     };
     bounded_view(json!({"v":1,"kind":"overlayCopyPreview",

@@ -545,7 +545,7 @@ async fn lifecycle_classifies_a_live_branch_without_writing_to_the_vault() {
         );
         match f.target {
             StudioTarget::Index { .. } => assert!(value["object"].is_null()),
-            StudioTarget::Flipnote { object, .. } => {
+            StudioTarget::Flipnote { object, .. } | StudioTarget::Score { object, .. } => {
                 assert_eq!(value["object"], hex::encode(object));
             }
         }

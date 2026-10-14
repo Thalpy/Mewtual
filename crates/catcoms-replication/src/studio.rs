@@ -18,8 +18,9 @@ mod patch;
 pub use patch::StudioPatch;
 mod score;
 pub use score::{
-    ScoreCell, ScoreHeader, ScoreOp, SCORE_MAX_CELLS, SCORE_MAX_PATCHES, SCORE_MAX_STEPS,
-    SCORE_ROWS,
+    score_document, validate_score_change, ScoreAddress, ScoreCell, ScoreCellIssues, ScoreHeader,
+    ScoreOp, ScorePatchIssues, ScoreProjection, ScoreReadiness, ScoreRegister, ScoreSlot,
+    ScoreSource, ScoreValue, SCORE_MAX_CELLS, SCORE_MAX_PATCHES, SCORE_MAX_STEPS, SCORE_ROWS,
 };
 mod index;
 pub use index::{

@@ -149,6 +149,11 @@ fn acknowledged(saved: StudioOverlaySave) -> ([u8; 32], usize) {
 /// A new-authoring operation the empty seed accepts: a fresh Index entry, or a Flipnote title.
 fn draft_op(p: &Pair, target: StudioTarget, nonce: u8, text: &str) -> DomainOp {
     let body = match target {
+        StudioTarget::Score { .. } => catcoms_replication::studio::ScoreOp::SetHeader(
+            catcoms_replication::studio::ScoreHeader::Title(text.into()),
+        )
+        .encode()
+        .unwrap(),
         StudioTarget::Flipnote { .. } => FlipnoteOp::SetHeader(FlipnoteHeader::Title(text.into()))
             .encode()
             .unwrap(),

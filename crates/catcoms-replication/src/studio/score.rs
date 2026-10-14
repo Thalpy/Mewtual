@@ -1,8 +1,18 @@
-//! Static score grammar only. This module does not admit Automerge changes or enable score
-//! persistence: a future typed consumer must bind the trusted root kind, author and causal state,
-//! and preflight the complete checkpoint/recovery through the existing P1 gate.
+//! Typed score grammar, bounded state and causal validation. These helpers do not themselves
+//! authenticate membership, persist intents or publish: the existing P1 gate owns those steps.
 
 use super::*;
+
+mod state;
+pub use state::{
+    score_document, ScoreAddress, ScoreCellIssues, ScorePatchIssues, ScoreProjection,
+    ScoreReadiness, ScoreRegister, ScoreSlot, ScoreSource, ScoreValue,
+};
+mod snapshot;
+pub(in crate::studio) use snapshot::SCORE_PAYLOAD;
+mod change;
+pub(in crate::studio) use change::prepare;
+pub use change::validate_score_change;
 
 /// Maximum sixteenth-step score extent; the current header may select fewer steps.
 pub const SCORE_MAX_STEPS: u16 = 256;
@@ -234,5 +244,7 @@ impl ScoreOp {
     }
 }
 
+#[cfg(test)]
+mod integration_tests;
 #[cfg(test)]
 mod tests;

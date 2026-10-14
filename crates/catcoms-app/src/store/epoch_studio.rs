@@ -10,7 +10,7 @@ use super::*;
 use catcoms_mls::{MlsDevice, ServerGroup};
 use catcoms_replication::epoch::{MAX_RECEIPT_BYTES, MAX_SIGNED_EPOCH_OP_BYTES};
 use catcoms_replication::studio::{
-    FlipnoteOp, IndexOp, StudioEpoch, StudioProjection, StudioTarget,
+    FlipnoteOp, IndexOp, ScoreOp, StudioEpoch, StudioProjection, StudioTarget,
     MAX_STUDIO_EPOCH_SNAPSHOT_BYTES,
 };
 use catcoms_replication::{
@@ -394,6 +394,9 @@ impl ServerStore {
             StudioTarget::Flipnote { .. } => {
                 FlipnoteOp::decode_domain(&logical, &operation).map_err(invalid)?;
             }
+            StudioTarget::Score { .. } => {
+                ScoreOp::decode_domain(&logical, &operation).map_err(invalid)?;
+            }
         }
         current_member(group, device)?;
         self.enter_studio_budget(server, group, budget)?;
@@ -681,6 +684,11 @@ impl ServerStore {
             if intent_link {
                 e.put_u8(1);
             }
+            // Additive sealed-wrapper family tag. Existing art/Index bytes are identical;
+            // older readers refuse scores, rather than guessing from shared title bodies.
+            if matches!(unit.target(), StudioTarget::Score { .. }) {
+                e.put_u8(2);
+            }
             let plain = Zeroizing::new(e.finish());
             let record = storage_record(
                 server,
@@ -860,7 +868,7 @@ fn decode_record_link<'a>(
         .map_err(invalid)?
         .try_into()
         .map_err(|_| invalid("bad channel"))?;
-    let target = match logical.doc_type {
+    let mut target = match logical.doc_type {
         catcoms_wire::DocType::StudioIndex => StudioTarget::Index { channel },
         catcoms_wire::DocType::StudioObject => StudioTarget::Flipnote {
             channel,
@@ -876,14 +884,24 @@ fn decode_record_link<'a>(
         return Err(invalid("wrong target"));
     }
     let snapshot = d.get_bytes().map_err(invalid)?;
-    let intent_link = if d.is_empty() {
-        false
-    } else {
-        if d.get_u8().map_err(invalid)? != 1 {
+    let mut intent_link = false;
+    if !d.is_empty() {
+        let mut extension = d.get_u8().map_err(invalid)?;
+        if extension == 1 {
+            intent_link = true;
+            if d.is_empty() {
+                return Ok((target, snapshot, intent_link));
+            }
+            extension = d.get_u8().map_err(invalid)?;
+        }
+        if extension != 2 {
             return Err(invalid("unknown Studio source extension"));
         }
-        true
-    };
+        let StudioTarget::Flipnote { channel, object } = target else {
+            return Err(invalid("score family requires StudioObject"));
+        };
+        target = StudioTarget::Score { channel, object };
+    }
     d.finish().map_err(invalid)?;
     Ok((target, snapshot, intent_link))
 }

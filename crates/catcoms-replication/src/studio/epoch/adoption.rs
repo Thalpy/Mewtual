@@ -144,6 +144,9 @@ impl StudioEpoch {
             StudioTarget::Flipnote { channel, .. } => {
                 FlipnoteFrameProjection::verify_checkpoint(&verified, channel, raw_seed)
             }
+            StudioTarget::Score { channel, .. } => {
+                ScoreProjection::verify_checkpoint(&verified, channel, raw_seed)
+            }
         }?;
         let recovery = if self.op_count() == 0 && self.opening.is_none() {
             None

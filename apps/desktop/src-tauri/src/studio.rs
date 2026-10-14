@@ -637,6 +637,25 @@ fn projection_content(projection: &StudioProjection) -> Value {
                 "source":fsource(&v.source),"value":{"checkpoint":v.value.checkpoint,"after":v.value.after.map(hex::encode),"anchor":v.value.anchor.map(hex::encode),"before":v.value.before.map(hex::encode),"blob":blob(&v.value.blob)}
             })).collect::<Vec<_>>()}))).collect::<std::collections::BTreeMap<_,_>>() })
         }
+        // This diagnostic family is explicit even before score command activation. Never
+        // flatten a removal into the AM selected value or discard losing source provenance.
+        StudioProjection::Score(p) => {
+            let cell = |v: &ScoreCell| match v {
+                ScoreCell::Note { patch, len } => {
+                    let mut value = json!({"k":"n","p":hex::encode(patch)});
+                    if let Some(len) = len {
+                        value["len"] = json!(len);
+                    }
+                    value
+                }
+                ScoreCell::Drum { pad } => json!({"k":"d","pad":pad}),
+            };
+            json!({"kind":"score","title":p.title.as_ref().map(|v|ireg(v,|v|json!(v))),
+                "bpm":p.bpm.as_ref().map(|v|ireg(v,|v|json!(v))),"bpb":p.bpb.as_ref().map(|v|ireg(v,|v|json!(v))),
+                "steps":p.steps.as_ref().map(|v|ireg(v,|v|json!(v))),
+                "cells":p.cells.iter().map(|((step,row),slot)|(format!("{step}:{row}"),json!({"removed":slot.removed(),"register":ireg(&slot.register,|v|json!(v.as_ref().map(&cell)))}))).collect::<std::collections::BTreeMap<_,_>>(),
+                "patches":p.patches.iter().map(|(id,slot)|(hex::encode(id),json!({"removed":slot.removed(),"register":ireg(&slot.register,|v|json!(v.as_ref().map(|v|v.value())))}))).collect::<std::collections::BTreeMap<_,_>>()})
+        }
     }
 }
 const MAX_STUDIO_VIEW_BYTES: usize = 32 * 1024 * 1024;

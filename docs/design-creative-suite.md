@@ -501,6 +501,13 @@ a tombstone wins over any insertion of the same id, scalars project by Automerge
 concurrent-put rule with other values shown as conflicts, and delivery order never changes a
 projection. Restore adds and never overwrites; conflicts are shown, not resolved silently.
 
+Reusable musical slots are an explicit exception to permanent element tombstones: score cell
+coordinates and content-hash recipe slots use a remove-wins register. Clear/remove wins among
+live concurrent alternatives, while a later Set that observes those alternatives may replace
+their exact same-property predecessors. This permits erase/retype and remove/readd without losing
+concurrent removal evidence. Score defaults, causal checks, compaction and recovery requirements
+are specified in `GATE6-STATE-DESIGN.md`; body decoding alone does not implement this state.
+
 **Rust index representation (gate 1, read-only so far).** The logical root above is a view,
 not nested Automerge map allocation. Physical root headers are `v`, `kind`, `channel` (the
 16-byte channel key as lowercase hex) and `epoch`. Insertion candidates live at
