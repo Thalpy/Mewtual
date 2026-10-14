@@ -55,6 +55,7 @@ use zeroize::Zeroizing;
 
 mod admission_storage;
 mod creative_blobs;
+mod studio_exports;
 mod discovery_timer;
 mod durable_chat;
 mod errors;
@@ -16466,6 +16467,8 @@ pub fn run() {
             get_file_usage,
             get_wiki_pinned_cids,
             creative_blobs::publish_pix,
+            studio_exports::publish_pixa,
+            studio_exports::export_studio_gif,
             creative_blobs::request_blob_bounded,
             studio::studio_list,
             studio::studio_read,

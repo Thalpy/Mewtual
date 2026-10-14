@@ -1,5 +1,14 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Gate 6 native export interfaces (2026-10-14)
+
+`publish_pixa({server,bytesB64})->{cid,bytes}` publishes fully validated persistent animation
+content only. `export_studio_gif({server,bytesB64})->{path,displayed,warning,contentValidation}`
+writes a fixed-name local visual-only GIF; reveal failure returns a saved-path warning. Both
+retain inline cancellation/session/server-incarnation fences. `creative::validate_pixa` returns
+borrowed encoded-frame spans only after whole-container validation. Exact bounds, canonical
+take semantics and GIF timing/save contract are in `GATE6-NATIVE-EXPORT.md`.
+
 ## Gate 6 Flipnote sound core (2026-10-14)
 
 `FlipnoteOp::SetSfx` now requires creator-authored `duration_ms:u32` in1..600000. Typed frame

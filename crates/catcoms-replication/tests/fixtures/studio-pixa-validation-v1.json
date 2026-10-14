@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "cases": [
+    {"name":"zero_nonce_is_a_string","patch":{"lanes":[{"src":0,"sn":"0000000000000000"}]},"accepted":true},
+    {"name":"nonce_number_no_coercion","patch":{"lanes":[{"src":0,"sn":1234567890123456}]},"accepted":false},
+    {"name":"nonce_array_no_coercion","patch":{"lanes":[{"src":0,"sn":["1234567890123456"]}]},"accepted":false},
+    {"name":"nonce_uppercase","patch":{"lanes":[{"src":0,"sn":"0123456789ABCDEF"}]},"accepted":false},
+    {"name":"lane_wrong_participant","patch":{"lanes":[{"src":1,"sn":"0123456789abcdef"}]},"accepted":false},
+    {"name":"duplicate_lane","patch":{"lanes":[{"src":0,"sn":"0123456789abcdef"},{"src":0,"sn":"0123456789abcdef"}]},"accepted":false},
+    {"name":"duplicate_participant","patch":{"parts":["same","same"]},"accepted":false},
+    {"name":"meter_lower","patch":{"met":{"bpm":39,"bpb":4}},"accepted":false},
+    {"name":"meter_upper_valid","patch":{"met":{"bpm":240,"bpb":8}},"accepted":true},
+    {"name":"meter_unknown_field","patch":{"met":{"bpm":120,"bpb":4,"extra":1}},"accepted":false},
+    {"name":"event_drum_valid","patch":{"events":[{"ms":600000,"lane":0,"n":9,"d":1,"q":4294967295}]},"accepted":true},
+    {"name":"event_drum_invalid_pad","patch":{"events":[{"ms":0,"lane":0,"n":10,"d":1,"q":0}]},"accepted":false},
+    {"name":"event_unknown_wave","patch":{"events":[{"ms":0,"lane":0,"n":60,"on":1,"w":"pulse","q":0}]},"accepted":false},
+    {"name":"event_missing_recipe","patch":{"events":[{"ms":0,"lane":0,"n":60,"on":1,"w":"sine","p":0,"q":0}]},"accepted":false},
+    {"name":"event_duplicate_sequence","patch":{"events":[{"ms":0,"lane":0,"n":60,"on":0,"q":1},{"ms":1,"lane":0,"n":60,"on":0,"q":1}]},"accepted":false},
+    {"name":"unknown_root_field","patch":{"extra":1},"accepted":false}
+  ]
+}

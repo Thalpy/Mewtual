@@ -128,6 +128,7 @@
     "allow-delete-file",
     "allow-set-file-expiry",
     "allow-publish-pix",
+    "allow-publish-pixa",
     "allow-studio-create",
     "allow-studio-apply",
     "allow-studio-apply-index",
@@ -198,6 +199,7 @@
     "allow-save-and-open-space-guide",
     "allow-save-space-layout",
     "allow-save-jam-sheet",
+    "allow-export-studio-gif",
     "allow-save-group-file",
 
     "allow-call-media-key",

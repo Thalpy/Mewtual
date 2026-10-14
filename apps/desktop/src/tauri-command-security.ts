@@ -212,6 +212,10 @@ export const TAURI_COMMAND_GROUPS = {
       // CID, which is what makes this a write to shared state rather than a local cache fill. The
       // encoded input is refused on length before base64 allocates anything.
       "publish_pix",
+      // Same immutable content-only boundary for complete, native-validated PIXA animations.
+      // No export record or expiry is written; the real persistent blob CID follows promotion
+      // and flush. Inline concurrency/cancellation and session/server fences remain in force.
+      "publish_pixa",
       // Restoring historical Studio content is an ordinary save, not a privileged rewind. The
       // renderer names a retained snapshot and echoes preview's canonical body back; the actor
       // recomputes eligibility against the current projection, refuses when the expected
@@ -307,6 +311,10 @@ export const TAURI_COMMAND_GROUPS = {
       // Sheet-music export: frontend-rendered SVG only (name shape + document prefix pinned
       // native-side), so peer bytes can never ride it into Downloads.
       "save_jam_sheet",
+      // Local visual-only GIF from a fully validated PIXA container, never raw arbitrary bytes.
+      // One raster at a time, bounded output, fixed safe Downloads name, and exact unlocked
+      // session/server incarnation rechecked after worker completion through save and reveal.
+      "export_studio_gif",
       // Atomic public-diagnostics launcher. It accepts no report/title/URL payload: native code
       // reads the bounded ring, renders the typed allowlist, constructs the exact fixed tracker URL
       // and launches it. Only the exact full publication envelope is returned for clipboard fallback

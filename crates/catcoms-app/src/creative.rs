@@ -8,6 +8,8 @@ use crate::{AppError, Cid, Server};
 /// PIX1 encoded-byte ceiling, checked before parsing or entering the actor queue.
 pub const PIX_MAX_BYTES: usize = 64 * 1024;
 pub use catcoms_sync::MAX_BOUNDED_BLOB_BYTES;
+mod pixa;
+pub use pixa::{validate_pixa, ValidatedPixa};
 
 /// A real, verified held blob; this is not a Studio frame record or a fileshare index entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +17,8 @@ pub struct PublishedPix {
     pub cid: String,
     pub bytes: usize,
 }
+/// Validated animation bytes promoted and flushed; metadata publication is a separate edit.
+pub type PublishedPixa = PublishedPix;
 
 /// Validate PIX1 without allocating a raster. Matches the frontend's format, including maximal
 /// runs split at 256 pixels and duplicate *entries* (not merely duplicate RGB or role) rejection.
@@ -78,6 +82,21 @@ pub fn validate_pix(bytes: &[u8]) -> Result<(), AppError> {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
+    /// Validate actual bytes, then reuse the same bounded persistent blob publication as PIX.
+    /// This returns content only: no export record, expiry, score reference or receipt is created.
+    pub fn publish_pixa(&mut self, bytes: &[u8]) -> Result<PublishedPixa, AppError> {
+        validate_pixa(bytes)?;
+        if !self.sync.has_persistent_blob_store() {
+            return Err(AppError::Invalid(
+                "PIXA publication requires an attached persistent blob store".into(),
+            ));
+        }
+        let cid = self.sync.publish_blob_bounded(bytes)?;
+        Ok(PublishedPixa {
+            cid: cid.to_hex(),
+            bytes: bytes.len(),
+        })
+    }
     /// Validate, stage, promote and flush an immutable PIX blob. No frame/index/expiry reference
     /// is published here. A failed call can leave an orphan but must never justify a reference.
     pub fn publish_pix(&mut self, bytes: &[u8]) -> Result<PublishedPix, AppError> {
