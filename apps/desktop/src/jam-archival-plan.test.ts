@@ -75,3 +75,19 @@ test("maximal SFX expansion is bounded and malformed timing never reaches schedu
     assert.throws(() => planJamArchivalPlayback(input, { fps: 1, frameCount: 1, sfx: [{ ...sfx[0], durationMs }] }), /SFX/);
   }
 });
+
+test("custom zero-release notes reserve the legacy fallback tail for both SFX cleanup and completion", () => {
+  const input = take(); input.patches[0].e.r = 0;
+  const plan = planJamArchivalPlayback(input, { fps: 24, frameCount: 1,
+    sfx: [{ frame: 0, patch: 0, note: 60, durationMs: 1 }] });
+  assert.equal(archivalReleaseTailMs(plan), 120);
+  assert.equal(plan.events.find((event) => event.kind === "cleanup")?.ms, 126);
+});
+
+test("snapshot text budget charges property names before downstream key sorting or joining", () => {
+  const hostile = { ...take(), ["x".repeat(524_289)]: 0 };
+  assert.throws(() => planJamArchivalPlayback(hostile), /archival input text exceeds its bound/);
+  const repeated = take();
+  repeated.events = Array.from({ length: 20_000 }, (_, q) => ({ ms: 0, lane: 0, n: 60, on: 1, w: "sine", q, ["x".repeat(32)]: 0 }));
+  assert.throws(() => planJamArchivalPlayback(repeated), /archival input text exceeds its bound/);
+});

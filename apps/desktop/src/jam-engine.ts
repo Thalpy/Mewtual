@@ -63,6 +63,8 @@ type ArchivalPlaybackData = {
   played: Set<number>;
   generation: number;
   sfxChannels: number;
+  /** SFX belongs to the exporting take's first performer, not a second polyphony allowance. */
+  sfxOwner: string;
 };
 type PlaybackPatchData = Readonly<{
   patches: readonly JamPatch[];
@@ -591,9 +593,11 @@ export class JamEngine {
       roomGeneration === this.roomPolicyGeneration && isCurrent();
     const patches = await this.preparePlaybackPatches(plan.take.patches, current, { callId: plan.take.call, sources: plan.take.parts });
     if (!patches || !current()) return null;
+    const sfxOwner = this.playbackPatchSets.get(patches)?.owners?.[0];
+    if (!sfxOwner) return null;
     this.closeArchival();
     const capability = Object.freeze({ [ARCHIVAL_PLAYBACK]: true as const });
-    this.archival = { capability, plan, patches, channels: new Map(), played: new Set(), generation, sfxChannels: 0 };
+    this.archival = { capability, plan, patches, channels: new Map(), played: new Set(), generation, sfxChannels: 0, sfxOwner };
     return capability;
   }
 
@@ -648,7 +652,7 @@ export class JamEngine {
       if (!channel) return { ok: false, reason: "channel" };
       if (sfx) {
         this.channelProvenance.set(channel, {
-          owner: `archival-sfx\u0000${archival.generation}`,
+          owner: archival.sfxOwner,
           seedSource: archival.plan.take.parts[0],
           seedCallId: archival.plan.take.call,
           playbackPatches: archival.patches,

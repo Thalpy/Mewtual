@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { TAKE_PLAYBACK_EVENTS_PER_TICK, type JamTake } from "./jam-contract.ts";
 import { planJamArchivalPlayback, type JamArchivalAnimation, type JamArchivalPlan } from "./jam-archival-plan.ts";
+import { legacyJamPatch } from "./jam-patch.ts";
 import type { JamArchivalPlayback, JamPlayResult } from "./jam-engine.ts";
 import { StudioPlaybackController, type StudioPlaybackEngine, type StudioPlaybackScope } from "./studio-playback.ts";
 
@@ -186,4 +187,17 @@ test("caller mutation while preparation is queued cannot change admitted content
   assert.equal(await start, true);
   assert.equal(engine.plan?.events[0].note, 60);
   assert.equal(engine.plan?.events[0].holdMs, 600_000);
+});
+
+test("completion reserves a zero-release custom note's possible legacy fallback tail", async () => {
+  const { controller, now } = setup();
+  const input = take();
+  input.patches = [legacyJamPatch("sine")]; input.patches[0].e.r = 0;
+  input.events[0] = { ms: 0, lane: 0, n: 60, on: 1, w: "sine", p: 0, q: 0 };
+  input.events[1].ms = 1;
+  assert.equal(await controller.startTake(input), true);
+  await controller.tick(); now.value = 13; await controller.tick();
+  assert.equal(controller.state, "playing", "the fallback is still releasing at the old teardown time");
+  now.value = 125; await controller.tick(); assert.equal(controller.state, "playing");
+  now.value = 126; await controller.tick(); assert.equal(controller.state, "stopped");
 });

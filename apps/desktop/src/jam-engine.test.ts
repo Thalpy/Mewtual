@@ -216,6 +216,34 @@ test("short authored hold ends inside attack without jumping to the sustain shel
   assert.ok(!output.gain.events.some(([kind, , time]) => kind === "linear" && time === 0.85));
 });
 
+test("SFX shares the score performer's held-note allowance rather than adding another sixteen", async () => {
+  const { engine } = contextAndEngine();
+  const input = archiveTake();
+  input.events = Array.from({ length: 16 }, (_, q) => ({ ms: 0, lane: 0, n: 60 + q, on: 1, w: "sine", p: 0, q }));
+  input.events.push({ ms: 60_000, lane: 0, n: 60, on: 0, q: 16 });
+  const capability = await engine.prepareArchivalPlayback(input, { fps: 1, frameCount: 1,
+    sfx: [{ frame: 0, patch: 0, note: 60, durationMs: 10_000 }] }); assert.ok(capability);
+  const plan = engine.archivalPlaybackPlan(capability)!;
+  for (let index = 0; index < 16; index++) assert.equal((await engine.playArchivalEvent(capability, index)).ok, true);
+  assert.equal(plan.events[16].kind, "on");
+  assert.equal((await engine.playArchivalEvent(capability, 16)).reason, "source-held");
+  assert.equal(engine.snapshot().voices.length, 16);
+});
+
+test("Legacy Sounds Only keeps a zero-release SFX's fallback tail past the old thirteen-ms cleanup", async () => {
+  const { fake, engine } = contextAndEngine();
+  const input = archiveTake(); input.events = []; input.patches[0].e.r = 0;
+  const capability = await engine.prepareArchivalPlayback(input, { fps: 24, frameCount: 1,
+    sfx: [{ frame: 0, patch: 0, note: 60, durationMs: 1 }] }); assert.ok(capability);
+  engine.setLegacyOnly(true);
+  const start = fake.sources.length;
+  assert.equal((await engine.playArchivalEvent(capability, 0)).ok, true);
+  assert.ok(fake.sources.slice(start).every((source) => source.stops[0] === 0.126));
+  assert.equal(engine.archivalPlaybackPlan(capability)?.events.find((event) => event.kind === "cleanup")?.ms, 126);
+  fake.currentTime = 0.013;
+  assert.equal(engine.snapshot().voices.length, 1);
+});
+
 test("archival preparation owns values before hashing and Deafen ABA cancels its capability", async () => {
   const fake = new FakeContext();
   let release!: (id: string) => void;

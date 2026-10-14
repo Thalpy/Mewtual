@@ -46,8 +46,9 @@ Take notes retain their exact matching key-up, or end-of-log for an unmatched he
 attacks at an already held pitch do not replace the first attack's closing time. Frame SFX starts
 at `floor(frame * 1000 / fps)` and holds for its authored `durationMs`, never a global fixed hold.
 Each SFX has its own synthetic lane, so same-pitch overlapping occurrences remain independent.
-All SFX share one engine-minted fairness owner, distinct from live identities; occurrences cannot
-mint extra polyphony allowances. Reconnected take lanes retain their original engine-owned
+All SFX share the take's first engine-minted performer owner, distinct from live identities; neither
+occurrences nor the SFX track mint extra polyphony allowances beside that performer's score notes.
+Reconnected take lanes retain their original engine-owned
 performer grouping. Unsigned labels cannot consume or choke same-named live member voices.
 
 Only bound archival dispatch receives a long remaining hold (`authored hold - seek/delivery age`,
@@ -66,6 +67,8 @@ in force. Receiver overload may refuse an attack; it never steals a held chord o
 The entire animation is not capped to the take's ten minutes: 999 frames at 1 FPS ends at
 999000 ms, and its last SFX can end at 1598000 ms plus bounded release. Controller completion
 uses the maximum animation/take/SFX horizon plus the actual conservative release tail.
+Cleanup and completion reserve the larger of authored recipe release, the receiver's legacy-wave
+fallback release and the de-click floor, because Legacy Sounds Only can change after preparation.
 
 ## Verification scope
 
@@ -76,7 +79,13 @@ one-running/one-latest preparation, 128-event passes, no overlapping ticks and o
 The existing engine/allocator suites remain intact. The parent agent owns complete root/native/
 frontend suites and actual production lifecycle/visual validation after App connection.
 
-At this checkpoint 70 focused plan/controller/engine/allocator tests pass; `npm.cmd run check`
+At this checkpoint 75 focused plan/controller/engine/allocator tests pass; `npm.cmd run check`
 reports zero errors/warnings and `git diff --check` passes. Design review reports no blocker.
-Actual-diff adversarial implementation review is requested and pending; this published checkpoint
-is not review acceptance or a claim that the complete mandatory suites have run on these changes.
+Actual-diff adversarial implementation review and short re-reviews close two MEDIUM and one LOW
+finding, with no remaining finding on this bounded capability/controller checkpoint. This is not
+acceptance of App/native integration or a claim that the complete mandatory suites have run here.
+
+The first actual-diff review identified and regression-pinned the joint score/SFX owner and
+Legacy Sounds Only release-tail corrections above. Snapshot text accounting also charges field
+names before downstream validation, including repeated names across events. The reviewer independently
+ran the two final targeted plan regressions (2/2 pass); broader production integration remains open.

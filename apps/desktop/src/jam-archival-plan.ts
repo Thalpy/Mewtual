@@ -65,6 +65,8 @@ function snapshot(value: unknown): unknown {
     for (const key of keys) {
       if (array && key === "length") continue;
       if (typeof key !== "string") throw new TypeError("archival input has a symbol field");
+      textUnits += key.length;
+      if (textUnits > TAKE_MAX_BYTES) throw new TypeError("archival input text exceeds its bound");
       if (array && (!/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= length)) throw new TypeError("archival input array has an extra field");
       const descriptor = Object.getOwnPropertyDescriptor(item, key)!;
       if (!descriptor.enumerable || !("value" in descriptor)) throw new TypeError("archival input has an accessor or hidden field");
@@ -81,6 +83,13 @@ function freezeDeep<T>(value: T): T {
     Object.freeze(value);
   }
   return value;
+}
+
+function noteTailMs(take: JamTake, patch: number | undefined, wave: "sine" | "triangle" | "square" | "sawtooth"): number {
+  // Legacy Sounds Only is receiver policy and can change after preparation. Reserve either
+  // rendering's release, not just the archived recipe's, so a zero-release custom patch cannot
+  // have its 120-ms fallback cut off by an earlier source cleanup or transport completion.
+  return Math.max(8, legacyJamPatch(wave).e.r, patch === undefined ? 0 : take.patches[patch].e.r);
 }
 
 /**
@@ -137,7 +146,7 @@ export function planJamArchivalPlayback(takeInput: unknown, animationInput?: Jam
     events.push({ ms, lane, kind: "on", sequence: 0, note: sfx.note, patch: sfx.patch, wave, holdMs: sfx.durationMs, offMs, index });
     events.push({ ms: offMs, lane, kind: "off", sequence: 1, note: sfx.note, index });
     // A cleanup is separately bounded scheduler work, never an unbounded timer per frame sound.
-    events.push({ ms: offMs + Math.max(8, take.patches[sfx.patch].e.r) + 5, lane, kind: "cleanup", sequence: 2, note: sfx.note, index });
+    events.push({ ms: offMs + noteTailMs(take, sfx.patch, wave) + 5, lane, kind: "cleanup", sequence: 2, note: sfx.note, index });
     endMs = Math.max(endMs, offMs);
   });
   events.sort((a, b) => a.ms - b.ms || a.lane - b.lane || a.sequence - b.sequence);
@@ -162,8 +171,7 @@ export function archivalReleaseTailMs(plan: JamArchivalPlan): number {
   let tail = 0;
   for (const event of plan.events) {
     if (event.kind === "drum") tail = Math.max(tail, JAM_KIT[event.note].tailMs);
-    else if (event.kind === "on") tail = Math.max(tail, Math.max(8,
-      event.patch === undefined ? legacyJamPatch(event.wave!).e.r : plan.take.patches[event.patch].e.r));
+    else if (event.kind === "on") tail = Math.max(tail, noteTailMs(plan.take, event.patch, event.wave!));
   }
   return tail;
 }
