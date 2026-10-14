@@ -83,17 +83,20 @@ fn apply_request(
     nonce: &str,
     body: String,
 ) -> Result<StudioRequest, String> {
+    apply_request_with_kind(channel, object, None, epoch_id, nonce, body)
+}
+fn apply_request_with_kind(
+    channel: &str,
+    object: Option<&str>,
+    object_kind: Option<&str>,
+    epoch_id: &str,
+    nonce: &str,
+    body: String,
+) -> Result<StudioRequest, String> {
     if body.len() > 64 * 1024 {
         return Err("Studio body exceeds 64 KiB".into());
     }
-    let channel = channel_id(channel)?;
-    let target = match object {
-        Some(object) => StudioTarget::Flipnote {
-            channel,
-            object: id(object)?,
-        },
-        None => StudioTarget::Index { channel },
-    };
+    let target = recovery::target_with_kind(channel, object, object_kind)?;
     let request = StudioRequest::Apply {
         target,
         epoch_id: u128::from_be_bytes(id(epoch_id)?),
@@ -497,15 +500,13 @@ pub(crate) async fn studio_read(
     server: u64,
     channel: String,
     object: String,
+    object_kind: Option<String>,
 ) -> Result<Option<Value>, String> {
     invoke(
         &state,
         server,
         StudioRequest::Read {
-            target: StudioTarget::Flipnote {
-                channel: channel_id(&channel)?,
-                object: id(&object)?,
-            },
+            target: recovery::target_with_kind(&channel, Some(&object), object_kind.as_deref())?,
         },
     )
     .await
@@ -520,19 +521,28 @@ pub(crate) async fn studio_create(
     nonce: String,
     title: String,
     created_at_ms: u64,
+    object_kind: Option<String>,
 ) -> Result<Option<Value>, String> {
-    invoke(
-        &state,
-        server,
-        StudioRequest::Create {
-            channel: channel_id(&channel)?,
-            object: id(&object)?,
-            nonce: id(&nonce)?,
+    let target = recovery::target_with_kind(&channel, Some(&object), object_kind.as_deref())?;
+    let nonce = id(&nonce)?;
+    let request = match target {
+        StudioTarget::Flipnote { channel, object } => StudioRequest::Create {
+            channel,
+            object,
+            nonce,
             title,
             ts: created_at_ms,
         },
-    )
-    .await
+        StudioTarget::Score { channel, object } => StudioRequest::CreateScore {
+            channel,
+            object,
+            nonce,
+            title,
+            ts: created_at_ms,
+        },
+        StudioTarget::Index { .. } => unreachable!("create always names an object"),
+    };
+    invoke(&state, server, request).await
 }
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -544,11 +554,19 @@ pub(crate) async fn studio_apply(
     epoch_id: String,
     nonce: String,
     body: String,
+    object_kind: Option<String>,
 ) -> Result<Option<Value>, String> {
     invoke(
         &state,
         server,
-        apply_request(&channel, Some(&object), &epoch_id, &nonce, body)?,
+        apply_request_with_kind(
+            &channel,
+            Some(&object),
+            object_kind.as_deref(),
+            &epoch_id,
+            &nonce,
+            body,
+        )?,
     )
     .await
 }
@@ -666,7 +684,7 @@ fn projection_content(projection: &StudioProjection) -> Result<Value, String> {
             json!({"kind":"score","title":p.title.as_ref().map(|v|ireg(v,|v|json!(v))),
                 "bpm":p.bpm.as_ref().map(|v|ireg(v,|v|json!(v))),"bpb":p.bpb.as_ref().map(|v|ireg(v,|v|json!(v))),
                 "steps":p.steps.as_ref().map(|v|ireg(v,|v|json!(v))),
-                "cells":p.cells.iter().map(|((step,row),slot)|(format!("{step}:{row}"),json!({"removed":slot.removed(),"register":ireg(&slot.register,|v|json!(v.as_ref().map(&cell)))}))).collect::<std::collections::BTreeMap<_,_>>(),
+                "cells":p.cells.iter().map(|((step,row),slot)|(format!("{step}:{row}"),json!({"removed":slot.removed(),"register":ireg(&slot.register,|v|json!(v.as_ref().map(cell)))}))).collect::<std::collections::BTreeMap<_,_>>(),
                 "patches":p.patches.iter().map(|(id,slot)|(hex::encode(id),json!({"removed":slot.removed(),"register":ireg(&slot.register,|v|json!(v.as_ref().map(|v|v.value())))}))).collect::<std::collections::BTreeMap<_,_>>(),
                 "readiness":{"headerConflicts":ready.header_conflicts,
                     "cells":ready.cells.iter().map(|((step,row),v)|(format!("{step}:{row}"),json!({"count":v.count,"extent":v.extent,"recipe":v.recipe,"overlap":v.overlap,"conflict":v.conflict}))).collect::<std::collections::BTreeMap<_,_>>(),

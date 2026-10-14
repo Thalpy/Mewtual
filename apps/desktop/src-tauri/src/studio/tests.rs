@@ -1,3 +1,4 @@
+use super::recovery as recovery_ipc;
 use super::*;
 // The shared fixture below reaches its crate through `super::app`.
 use catcoms_app as app;
@@ -586,6 +587,139 @@ fn native_studio_contract_rejects_bad_ids_bodies_and_preserves_expiry_states() {
     )
     .is_err());
     assert!(!format!("{:?}", create()).contains("moon cat"));
+}
+
+#[test]
+fn native_object_family_and_score_recovery_choices_are_explicit_and_closed() {
+    let object = hex::encode([9; 16]);
+    let channel = channel();
+    let typed = recovery_ipc::target_with_kind(&channel, Some(&object), Some("score")).unwrap();
+    assert!(matches!(typed, StudioTarget::Score { .. }));
+    assert!(matches!(
+        recovery_ipc::target_with_kind(&channel, Some(&object), None).unwrap(),
+        StudioTarget::Flipnote { .. }
+    ));
+    assert!(recovery_ipc::target_with_kind(&channel, None, Some("score")).is_err());
+    for bad in ["", "Score", "index", "audio"] {
+        assert!(recovery_ipc::target_with_kind(&channel, Some(&object), Some(bad)).is_err());
+    }
+    let body = String::from_utf8(
+        ScoreOp::SetCell {
+            step: 0,
+            row: 0,
+            value: ScoreCell::Drum { pad: 0 },
+        }
+        .encode()
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(apply_request_with_kind(
+        &channel,
+        Some(&object),
+        Some("score"),
+        &hex::encode([1; 16]),
+        &hex::encode([2; 16]),
+        body.clone()
+    )
+    .is_ok());
+    assert!(apply_request_with_kind(
+        &channel,
+        Some(&object),
+        None,
+        &hex::encode([1; 16]),
+        &hex::encode([2; 16]),
+        body
+    )
+    .is_err());
+    let value = hex::encode([3; 32]);
+    for choice in [
+        json!({"kind":"scoreCell","step":255,"row":24,"value":value}),
+        json!({"kind":"scorePatch","patch":value,"value":value}),
+        json!({"kind":"scoreHeader","field":"steps","value":value}),
+    ] {
+        serde_json::from_value::<recovery_ipc::ChoiceInput>(choice)
+            .unwrap()
+            .checked()
+            .unwrap();
+    }
+    for bad in [
+        json!({"kind":"scoreCell","step":256,"row":0,"value":value}),
+        json!({"kind":"scoreCell","step":0,"row":25,"value":value}),
+        json!({"kind":"scoreCell","step":0,"row":0,"value":value,"author":value}),
+        json!({"kind":"scoreHeader","field":"fps","value":value}),
+        json!({"kind":"scorePatch","patch":"AB".repeat(32),"value":value}),
+    ] {
+        assert!(serde_json::from_value::<recovery_ipc::ChoiceInput>(bad)
+            .map_err(|e| e.to_string())
+            .and_then(|c| c.checked())
+            .is_err());
+    }
+}
+
+#[tokio::test]
+async fn native_score_create_edit_and_wrong_family_refusal_use_real_custody() {
+    let (_root, state, actor, task, drain) = fixture().await;
+    let channel_id = channel_id(&channel()).unwrap();
+    let created = invoke(
+        &state,
+        7,
+        StudioRequest::CreateScore {
+            channel: channel_id,
+            object: [7; 16],
+            nonce: [9; 16],
+            title: "authored music".into(),
+            ts: 123,
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(created["content"]["kind"], "score");
+    let request = apply_request_with_kind(
+        &channel(),
+        Some(&hex::encode([7; 16])),
+        Some("score"),
+        created["epochId"].as_str().unwrap(),
+        &hex::encode([8; 16]),
+        String::from_utf8(
+            ScoreOp::SetCell {
+                step: 0,
+                row: 0,
+                value: ScoreCell::Drum { pad: 4 },
+            }
+            .encode()
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let saved = invoke(&state, 7, request).await.unwrap().unwrap();
+    assert_eq!(
+        saved["content"]["cells"]["0:0"]["register"]["selected"]["value"]["pad"],
+        4
+    );
+    assert!(invoke(&state, 7, StudioRequest::Read { target: target() })
+        .await
+        .is_err());
+    assert_eq!(
+        invoke(
+            &state,
+            7,
+            StudioRequest::Read {
+                target: StudioTarget::Score {
+                    channel: channel_id,
+                    object: [7; 16]
+                }
+            }
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        saved
+    );
+    actor.shutdown().await;
+    task.await.unwrap();
+    drain.await.unwrap();
 }
 
 #[tokio::test]

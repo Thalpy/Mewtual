@@ -11,15 +11,9 @@ pub(crate) async fn studio_overlay_read(
     server: u64,
     channel: String,
     object: Option<String>,
+    object_kind: Option<String>,
 ) -> Result<Value, String> {
-    let channel = channel_id(&channel)?;
-    let target = match object {
-        Some(object) => StudioTarget::Flipnote {
-            channel,
-            object: id(&object)?,
-        },
-        None => StudioTarget::Index { channel },
-    };
+    let target = recovery::target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?;
     read(&state, server, target).await
 }
 

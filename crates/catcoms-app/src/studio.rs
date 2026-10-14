@@ -51,6 +51,7 @@ pub use control::{
 };
 pub use restore::{
     StudioRecoveryDisposition, StudioRecoveryItem, StudioRecoveryMode, StudioRecoveryPlan,
+    StudioScoreHeaderField,
 };
 use settlement::SettlementNotices;
 pub use settlement::StudioSettlementState;
@@ -131,19 +132,10 @@ impl StudioRequest {
                         IndexOp::decode(body).map_err(invalid)?;
                     }
                     StudioTarget::Flipnote { .. } => {
-                        match FlipnoteOp::decode(body).map_err(invalid)? {
-                            FlipnoteOp::InsertFrame { .. }
-                            | FlipnoteOp::RemoveFrame { .. }
-                            | FlipnoteOp::ReplaceFrame { .. }
-                            | FlipnoteOp::SetHeader(
-                                FlipnoteHeader::Title(_) | FlipnoteHeader::Fps(_),
-                            ) => {}
-                            _ => {
-                                return Err(invalid(
-                                    "sound, score and export operations are not available yet",
-                                ))
-                            }
-                        }
+                        // All sound families now have causal admission, bounded state, native
+                        // evidence and durability. Static parsing never grants write authority;
+                        // the ordinary current-member/epoch gate still runs below.
+                        FlipnoteOp::decode(body).map_err(invalid)?;
                     }
                     StudioTarget::Score { .. } => {
                         ScoreOp::decode(body).map_err(invalid)?;
@@ -473,6 +465,26 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     blobs.put_staged(&pixels)?;
                     if !blobs.promote_staged_bounded(&cid, pixels.len())? {
                         return Err(invalid("frame promotion failed"));
+                    }
+                }
+                FlipnoteOp::SetExport { cid, bytes, .. } => {
+                    // A renderer's declaration or prior publication ACK is not evidence that
+                    // this mounted vault still holds a valid package. Validate exact held bytes
+                    // before writing a durable intent/reference; the earlier conservative
+                    // transient hold protects candidates from reclamation, not publication.
+                    // Never fetch at a Save boundary.
+                    let mut blobs = store.blob_store(&hex::encode(self.group_id()))?;
+                    let cid = crate::Cid::from_bytes(cid);
+                    let package = blobs.get_bounded(&cid, bytes as usize)?.ok_or_else(|| {
+                        invalid("publish the PIXA before saving its export reference")
+                    })?;
+                    if package.len() as u64 != bytes {
+                        return Err(invalid("export byte declaration differs from PIXA"));
+                    }
+                    crate::creative::validate_pixa(&package)?;
+                    blobs.put_staged(&package)?;
+                    if !blobs.promote_staged_bounded(&cid, package.len())? {
+                        return Err(invalid("export promotion failed"));
                     }
                 }
                 _ => {}

@@ -1,5 +1,26 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Gate 6 typed native document access (2026-10-14)
+
+Existing Studio object commands and every draft/recovery/copy lifecycle command accept optional
+`objectKind: "flipnote" | "score"`; omission preserves the legacy art meaning. Unknown values
+and a kind without an object refuse. Copy destinations carry their own optional discriminator.
+Score Create uses the same durable object-then-Index workflow, current-member checks, exact
+retry ownership and native custody as art. Score settlement events and Copy preview targets
+include additive `objectKind:"score"`; old art/Index shapes remain unchanged.
+
+Native content retains authored optional headers, raw register winners/alternatives/removals and
+derived readiness. Sound records retain canonical operation bodies including `duration_ms`.
+Missing-frame/patch readiness lists name the affected SFX ids, not missing target ids. Ordinary,
+awaiting-receipt and historical views include `group`, hex of the authenticated logical group;
+it is never reconstructed from a numeric UI server alias. Manual Score choices and additive
+Restore/explicit Copy rules are documented in `GATE6-ACTIVATION-DESIGN.md`. Direct Closing Save
+and unfinished native repair commands remain unavailable; no P5 authority is added.
+
+Local SetExport requires the exact CID/length of a held, fully validated PIXA package, promoted
+durably before any reference intent/source is written. It performs no network fetch. A failed
+record Save may leave a published orphan, not a successful export record.
+
 ## Gate 6 native export interfaces (2026-10-14)
 
 `publish_pixa({server,bytesB64})->{cid,bytes}` publishes fully validated persistent animation

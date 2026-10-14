@@ -3,6 +3,7 @@
 //! through ordinary Studio Save; whole-version Restore is a sequence of re-previewed steps.
 use super::*;
 use types::{ElementId, FrameRegister, FrameValue, IndexRegister, IndexValue, StudioRecovery};
+mod score;
 #[cfg(test)]
 mod tests;
 
@@ -16,14 +17,56 @@ pub enum StudioRecoveryMode {
 /// Stable ids and original value provenance, never a timeline position or a caller's value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StudioRecoveryItem {
-    Frame { id: ElementId, value: [u8; 32] },
-    FrameDeletion { id: ElementId },
-    Title { value: [u8; 32] },
-    Fps { value: [u8; 32] },
-    Object { id: ElementId },
-    ObjectTitle { id: ElementId, value: [u8; 32] },
-    ObjectExpiry { id: ElementId, value: [u8; 32] },
-    ObjectDeletion { id: ElementId },
+    Frame {
+        id: ElementId,
+        value: [u8; 32],
+    },
+    FrameDeletion {
+        id: ElementId,
+    },
+    Title {
+        value: [u8; 32],
+    },
+    Fps {
+        value: [u8; 32],
+    },
+    Object {
+        id: ElementId,
+    },
+    ObjectTitle {
+        id: ElementId,
+        value: [u8; 32],
+    },
+    ObjectExpiry {
+        id: ElementId,
+        value: [u8; 32],
+    },
+    ObjectDeletion {
+        id: ElementId,
+    },
+    /// A reusable musical coordinate, selected by original source operation (including Clear).
+    ScoreCell {
+        step: u16,
+        row: u8,
+        value: [u8; 32],
+    },
+    /// A reusable recipe slot, selected by original source operation (including Remove).
+    ScorePatch {
+        patch: [u8; 32],
+        value: [u8; 32],
+    },
+    ScoreHeader {
+        field: StudioScoreHeaderField,
+        value: [u8; 32],
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StudioScoreHeaderField {
+    Title,
+    Bpm,
+    Bpb,
+    Steps,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,10 +225,14 @@ pub(crate) fn plan(
     if history.iter().any(|r| {
         r.projection().document() != current.document()
             || r.projection().channel() != current.channel()
+            || std::mem::discriminant(r.projection()) != std::mem::discriminant(current)
     }) {
         return Err(invalid("recovery document scope differs"));
     }
     match (current, historical, item) {
+        (StudioProjection::Score(now), StudioProjection::Score(old), item) => {
+            score::plan(now, old, history, item, mode)
+        }
         (
             StudioProjection::Flipnote(now),
             StudioProjection::Flipnote(old),
@@ -357,9 +404,6 @@ pub(crate) fn plan(
             }
             if now.objects.len() + now.overflow.len() >= types::MAX_INDEX_OBJECTS {
                 return held(D::Full);
-            }
-            if birth.value.kind != StudioKind::Flipnote {
-                return Err(invalid("score recovery is not available yet"));
             }
             StudioRecoveryPlan::ready(
                 IndexOp::PutObject {
