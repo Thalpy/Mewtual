@@ -18,6 +18,8 @@ use catcoms_replication::studio::{
 use catcoms_replication::CloseRecord;
 use catcoms_rt::Clock;
 
+mod exports;
+
 type Mint = Result<StudioUnconfirmedOverlayBasis, AppError>;
 
 /// Pin the typed MAP carrier at the store boundary while retaining the diagnostic for legacy text

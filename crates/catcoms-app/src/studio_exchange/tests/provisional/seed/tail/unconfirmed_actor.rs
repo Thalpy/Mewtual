@@ -15,6 +15,92 @@ use crate::studio::{
 use crate::studio_exchange::ServerStudioWatch;
 use catcoms_replication::studio::{StudioOverlayProvenance, StudioOverlaySaveRefusal};
 
+#[tokio::test]
+async fn unconfirmed_export_receiver_ticket_never_reports_saved_without_valid_held_package() {
+    let mut p = pages::proven_pair().await;
+    let target = target();
+    let mut receiver = previewing_receiver(&mut p, target).await;
+    let StudioControlResponse::UnconfirmedOverlaySaveTicket { basis, branch, .. } = control(
+        &mut receiver,
+        &mut p,
+        target,
+        StudioControlAction::BeginUnconfirmedOverlaySave,
+    )
+    .unwrap() else {
+        panic!()
+    };
+    let vector: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../catcoms-replication/tests/fixtures/studio-export-v1.json"
+    )))
+    .unwrap();
+    let bytes = hex::decode(vector["pixaHex"].as_str().unwrap()).unwrap();
+    let cid = crate::Cid::of(&bytes);
+    let request = StudioUnconfirmedOverlaySaveRequest {
+        basis,
+        branch,
+        nonce: [77; 16],
+        body: FlipnoteOp::SetExport {
+            export: [77; 16],
+            cid: *cid.as_bytes(),
+            bytes: bytes.len() as u64,
+            expiry: StudioExpiry::Never,
+        }
+        .encode()
+        .unwrap(),
+    };
+    let result = save(&mut receiver, &mut p, target, &request).unwrap();
+    assert!(
+        matches!(
+            result,
+            StudioUnconfirmedSaveOutcome::Refused {
+                reason: StudioOverlaySaveRefusal::ExportUnpublished,
+                ..
+            }
+        ),
+        "a valid live ticket was falsely answered as saved: {result:?}"
+    );
+    let logical = target.document(&p.bob.group_id()).unwrap();
+    assert_eq!(
+        p.b_store
+            .load_epoch_intents(SERVER, &logical)
+            .unwrap()
+            .pending()
+            .len(),
+        0
+    );
+    assert_eq!(p.b_store.live_transient_holds_for_test(), 0);
+    p.b_store
+        .blob_store(&hex::encode(p.bob.group_id()))
+        .unwrap()
+        .put(&bytes)
+        .unwrap();
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &request).unwrap(),
+        StudioUnconfirmedSaveOutcome::Scheduled
+    ));
+    settle(&mut receiver, &mut p).await;
+    assert!(matches!(
+        save(&mut receiver, &mut p, target, &request).unwrap(),
+        StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+    ));
+    assert_eq!(p.b_store.live_transient_holds_for_test(), 0);
+    let path = p
+        .b_root
+        .path()
+        .join("blobs")
+        .join(hex::encode(p.bob.group_id()))
+        .join(cid.to_hex());
+    std::fs::remove_file(path).unwrap();
+    assert!(
+        matches!(
+            save(&mut receiver, &mut p, target, &request).unwrap(),
+            StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }
+        ),
+        "accepted exact retry incorrectly re-admitted missing media"
+    );
+}
+
 fn control(
     receiver: &mut StudioReceiver,
     p: &mut Pair,

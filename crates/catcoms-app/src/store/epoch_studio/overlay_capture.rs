@@ -176,15 +176,104 @@ struct MediaOrigin {
 /// Verified media facts for one new acceptance, together with the hold that protects them and the
 /// identity of the request they came from.
 ///
-/// Only `admit_studio_overlay_authoring` can produce this, and it derives the frame reference from
-/// the operation itself. A caller therefore cannot present verified frame facts without the hold
+/// Only `admit_studio_overlay_authoring` can produce this, and it derives the typed reference from
+/// the operation itself. A caller therefore cannot present verified media facts without the hold
 /// that protects them, nor a hold without the facts S3 needs. Before this type existed the staged
 /// capture took the three independently and stored them, so a future caller could have disabled the
 /// S3 recheck or N12(a)'s protection by passing `None`.
 struct AdmittedOverlayMedia {
     origin: MediaOrigin,
-    frame: Option<(catcoms_storage::Cid, u64)>,
+    reference: Option<OverlayMediaReference>,
     hold: Option<CreativeHold>,
+}
+
+/// The format is part of admitted authority, not guessed from a blob's prefix at S3. An export
+/// cannot borrow frame validation/diagnostics or lose its hold merely because it is not pixels.
+enum OverlayMediaReference {
+    FramePix(catcoms_storage::Cid, u64),
+    ExportPixa(catcoms_storage::Cid, u64),
+}
+
+impl OverlayMediaReference {
+    fn parts(&self) -> (&catcoms_storage::Cid, u64) {
+        match self {
+            Self::FramePix(cid, bytes) | Self::ExportPixa(cid, bytes) => (cid, *bytes),
+        }
+    }
+
+    fn read_bound(&self) -> usize {
+        match self {
+            Self::FramePix(_, bytes) => *bytes as usize,
+            // A smaller false declaration must produce ExportInvalid, rather than a bounded
+            // reader's opaque storage error. The family cap still bounds the allocation/work.
+            Self::ExportPixa(..) => crate::creative::MAX_BOUNDED_BLOB_BYTES,
+        }
+    }
+
+    fn unpublished(&self) -> AppError {
+        match self {
+            Self::FramePix(..) => studio_refused(
+                StudioOverlaySaveRefusal::PixelUnpublished,
+                "publish the frame PIX before saving its reference",
+            ),
+            Self::ExportPixa(..) => studio_refused(
+                StudioOverlaySaveRefusal::ExportUnpublished,
+                "publish the PIXA before saving its export reference",
+            ),
+        }
+    }
+
+    fn check_size(&self, payload: &[u8]) -> Result<(), AppError> {
+        if payload.len() as u64 == self.parts().1 {
+            return Ok(());
+        }
+        Err(match self {
+            Self::FramePix(..) => studio_refused(
+                StudioOverlaySaveRefusal::PixelInvalid,
+                "frame byte declaration differs from PIX",
+            ),
+            Self::ExportPixa(..) => studio_refused(
+                StudioOverlaySaveRefusal::ExportInvalid,
+                "export byte declaration differs from PIXA",
+            ),
+        })
+    }
+
+    fn validate(&self, payload: &[u8]) -> Result<(), AppError> {
+        self.check_size(payload)?;
+        match self {
+            Self::FramePix(..) => {
+                crate::creative::validate_pix(payload).map_err(|error| {
+                    studio_refused(StudioOverlaySaveRefusal::PixelInvalid, error)
+                })?;
+                if payload[4] != 191 || payload[5] != 143 {
+                    return Err(studio_refused(
+                        StudioOverlaySaveRefusal::PixelInvalid,
+                        "Flipnote frames must be 192x144",
+                    ));
+                }
+            }
+            Self::ExportPixa(..) => {
+                crate::creative::validate_pixa(payload).map_err(|error| {
+                    studio_refused(StudioOverlaySaveRefusal::ExportInvalid, error)
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn missing(&self) -> AppError {
+        match self {
+            Self::FramePix(..) => studio_refused(
+                StudioOverlaySaveRefusal::PixelMissing,
+                "accepted frame PIX is no longer held; republish it",
+            ),
+            Self::ExportPixa(..) => studio_refused(
+                StudioOverlaySaveRefusal::ExportMissing,
+                "accepted export PIXA is no longer held; republish it",
+            ),
+        }
+    }
 }
 
 /// One authorized new acceptance: the intent that will be appended, and the media facts and hold
@@ -192,7 +281,7 @@ struct AdmittedOverlayMedia {
 ///
 /// A-001. Carrying the intent and the media as separate arguments let a caller pair media admitted
 /// for operation A with an intent carrying operation B: the detached plan would append B while S3
-/// rechecked and protected A's pixels. Nothing in the synchronous adapter did that, but the point
+/// rechecked and protected A's media. Nothing in the synchronous adapter did that, but the point
 /// of the staged seam is that the receiver becomes a second caller. Both halves are now minted
 /// together, the fields are private and there is no second constructor, so the mismatch cannot be
 /// expressed; `capture_studio_overlay_save` rechecks the binding anyway, which is what the
@@ -220,20 +309,23 @@ impl AdmittedOverlayAuthoring {
     }
 }
 
-/// The pixel reference a frame operation carries, with its declared size. Index operations and
+/// The typed blob reference an art operation carries, with its declared size. Index operations and
 /// header edits carry none. This only reads the request; possession is a separate question.
-fn frame_pixels(
+fn operation_media(
     logical: &LogicalDocument,
     operation: &DomainOp,
-) -> Result<Option<(catcoms_storage::Cid, u64)>, AppError> {
+) -> Result<Option<OverlayMediaReference>, AppError> {
     Ok(
         match catcoms_replication::studio::FlipnoteOp::decode_domain(logical, operation)
             .map_err(invalid)?
         {
             catcoms_replication::studio::FlipnoteOp::InsertFrame { cid, bytes, .. }
-            | catcoms_replication::studio::FlipnoteOp::ReplaceFrame { cid, bytes, .. } => {
-                Some((catcoms_storage::Cid::from_bytes(cid), bytes))
-            }
+            | catcoms_replication::studio::FlipnoteOp::ReplaceFrame { cid, bytes, .. } => Some(
+                OverlayMediaReference::FramePix(catcoms_storage::Cid::from_bytes(cid), bytes),
+            ),
+            catcoms_replication::studio::FlipnoteOp::SetExport { cid, bytes, .. } => Some(
+                OverlayMediaReference::ExportPixa(catcoms_storage::Cid::from_bytes(cid), bytes),
+            ),
             _ => None,
         },
     )
@@ -285,7 +377,7 @@ pub(crate) struct StudioOverlayCapture {
     joins: OverlayBranch,
     intent: LocalIntent,
     ts: u64,
-    /// Verified frame facts and the hold that protects them, minted together at S1b. Possession
+    /// Verified format/reference facts and their protective hold, minted together at S1b. Possession
     /// itself is never carried across the detach; only what to recheck is.
     media: AdmittedOverlayMedia,
 }
@@ -482,47 +574,35 @@ impl ServerStore {
         document: &LogicalDocument,
         operation: &DomainOp,
     ) -> Result<AdmittedOverlayMedia, AppError> {
-        let frame = match origin.target {
-            StudioTarget::Flipnote { .. } => frame_pixels(document, operation)?,
+        let reference = match origin.target {
+            StudioTarget::Flipnote { .. } => operation_media(document, operation)?,
             StudioTarget::Index { .. } => None,
             StudioTarget::Score { .. } => {
                 ScoreOp::decode_domain(document, operation).map_err(invalid)?;
                 None
             }
         };
-        let Some((cid, bytes)) = frame else {
+        let Some(reference) = reference else {
             return Ok(AdmittedOverlayMedia {
                 origin,
-                frame: None,
+                reference: None,
                 hold: None,
             });
         };
+        let (cid, _) = reference.parts();
         let mut blobs = self.blob_store(&hex::encode(&document.server_id))?;
-        let pixels = blobs.get_bounded(&cid, bytes as usize)?.ok_or_else(|| {
-            studio_refused(
-                StudioOverlaySaveRefusal::PixelUnpublished,
-                "publish the frame PIX before saving its reference",
-            )
-        })?;
-        if pixels.len() as u64 != bytes {
-            return Err(studio_refused(
-                StudioOverlaySaveRefusal::PixelInvalid,
-                "frame byte declaration differs from PIX",
-            ));
-        }
-        crate::creative::validate_pix(&pixels)
-            .map_err(|error| studio_refused(StudioOverlaySaveRefusal::PixelInvalid, error))?;
-        if pixels[4] != 191 || pixels[5] != 143 {
-            return Err(studio_refused(
-                StudioOverlaySaveRefusal::PixelInvalid,
-                "Flipnote frames must be 192x144",
-            ));
-        }
-        blobs.put_staged(&pixels)?;
-        if !blobs.promote_staged_bounded(&cid, pixels.len())? {
+        let payload = blobs
+            .get_bounded(cid, reference.read_bound())?
+            .ok_or_else(|| reference.unpublished())?;
+        reference.validate(&payload)?;
+        blobs.put_staged(&payload)?;
+        if !blobs.promote_staged_bounded(cid, payload.len())? {
             return Err(studio_refused(
                 StudioOverlaySaveRefusal::Retry,
-                "frame promotion failed",
+                match reference {
+                    OverlayMediaReference::FramePix(..) => "frame promotion failed",
+                    OverlayMediaReference::ExportPixa(..) => "export promotion failed",
+                },
             ));
         }
         let hold = self
@@ -542,7 +622,7 @@ impl ServerStore {
             })?;
         Ok(AdmittedOverlayMedia {
             origin,
-            frame: Some((cid, bytes)),
+            reference: Some(reference),
             hold: Some(hold),
         })
     }
@@ -550,25 +630,17 @@ impl ServerStore {
     /// S3 possession recheck, immediately before the first durable acceptance. The transient hold
     /// is a liveness claim over an address, not proof the bytes are still present: external
     /// deletion or storage damage during the detached stage must refuse here rather than produce a
-    /// durable draft naming pixels the store does not possess. S1b already validated the content
+    /// durable draft naming media the store does not possess. S1b already validated the content
     /// addressed by this CID, so only presence and exact size are rechecked.
-    fn check_studio_frame_pixels(
+    fn check_studio_overlay_media(
         &self,
         group: &[u8],
-        cid: &catcoms_storage::Cid,
-        bytes: u64,
+        reference: &OverlayMediaReference,
     ) -> Result<(), AppError> {
         let blobs = self.blob_store(&hex::encode(group))?;
-        match blobs.get_bounded(cid, bytes as usize)? {
-            Some(pixels) if pixels.len() as u64 == bytes => Ok(()),
-            Some(_) => Err(studio_refused(
-                StudioOverlaySaveRefusal::PixelInvalid,
-                "frame byte declaration differs from PIX",
-            )),
-            None => Err(studio_refused(
-                StudioOverlaySaveRefusal::PixelMissing,
-                "accepted frame PIX is no longer held; republish it",
-            )),
+        match blobs.get_bounded(reference.parts().0, reference.read_bound())? {
+            Some(payload) => reference.check_size(&payload),
+            None => Err(reference.missing()),
         }
     }
 
@@ -870,7 +942,7 @@ impl ServerStore {
         } = plan;
         let AdmittedOverlayMedia {
             origin,
-            frame,
+            reference,
             hold,
         } = media;
         if stamp.server != server || stamp.target != target {
@@ -909,7 +981,7 @@ impl ServerStore {
         }
         drop(fresh);
         // S3, design 8.3's per-server and vault-wide rails, checked again at the exact size the
-        // write below would give the record, from the budget entered in this call. Before the pixel
+        // write below would give the record, from the budget entered in this call. Before the media
         // check, the holds and the write, so a refusal writes nothing and holds nothing.
         if matches!(
             state.live_overlay_provenance(),
@@ -921,12 +993,12 @@ impl ServerStore {
                 .intents
                 .admit_unconfirmed(server, *blake3::hash(&scope).as_bytes(), next)?;
         }
-        // S3: the referenced pixels must still be physically present. The transient hold is a
+        // S3: the referenced PIX/PIXA must still be physically present. The transient hold is a
         // liveness claim over an address, not proof the bytes survived the detached stage, so
         // this runs before the ordinary holds and before the intent barrier. A missing blob must
         // not become a newly accepted durable reference.
-        if let Some((cid, bytes)) = &frame {
-            self.check_studio_frame_pixels(&stamp.document.server_id, cid, *bytes)?;
+        if let Some(reference) = &reference {
+            self.check_studio_overlay_media(&stamp.document.server_id, reference)?;
         }
         // I-3, second half: the protection transfer. These run BEFORE the write attempt and while
         // the plan's job-owned hold is still alive, so dropping that hold below is safe whatever
