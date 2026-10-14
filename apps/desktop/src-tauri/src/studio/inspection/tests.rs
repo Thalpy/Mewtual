@@ -36,6 +36,8 @@ fn check(value: &Value, f: &InspectionFixture) {
     assert_ne!(value["manualReason"], "notReplayable");
     assert_eq!(value["readOnly"], true);
     assert_eq!(value["content"], projection_content(&f.expected).unwrap());
+    assert_eq!(value["contentEpoch"], f.expected.epoch().to_string());
+    assert_eq!(value["group"], hex::encode(&f.group));
     for field in [
         "epochId",
         "epoch",

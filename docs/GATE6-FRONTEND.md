@@ -86,8 +86,11 @@ the operation identity immediately. Re-authoring refuses to redirect a retained 
 different object family. Scope/read generations retain the existing late-result fences.
 
 Recovery choices use `scorePatch`, `scoreHeader` and `scoreCell` with exact source operation ids.
-Whole-version walks put recipes before dependent cells. Restore adds selected effective content;
-headers and selected removals are Copy-only. Native preview/fingerprint/current-state checks remain
+Whole-version walks put recipes before dependent cells. The frontend conservatively offers
+headers and selected removals through Copy, while Restore walks add selected effective recipes
+and cells under the current header/extent. The native per-item planner additionally permits
+additive Restore of an absent, unconflicted authored header (defaults are not authored values);
+it never overwrites an existing header through Restore. Native preview/fingerprint/current-state checks remain
 the authority, and all raw conflicts remain available in the read model. This frontend does not
 claim automatic replay of historical Score edits or old-author authority.
 

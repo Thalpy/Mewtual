@@ -178,6 +178,9 @@ fn every_typed_save_refusal_has_a_distinct_native_literal_and_action() {
         (R::PixelUnpublished, "pixelUnpublished", "newTicket"),
         (R::PixelInvalid, "pixelInvalid", "newTicket"),
         (R::PixelMissing, "pixelMissing", "newTicket"),
+        (R::ExportUnpublished, "exportUnpublished", "newTicket"),
+        (R::ExportInvalid, "exportInvalid", "newTicket"),
+        (R::ExportMissing, "exportMissing", "newTicket"),
         (
             R::UnconfirmedBranchesPerServer,
             "unconfirmedBranchesPerServer",

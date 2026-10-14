@@ -76,4 +76,5 @@ Read-only design and actual-diff implementation review found no remaining BLOCKE
 LOW in this bounded checkpoint; the reviewer independently checked the16shared TypeScript
 verdicts and diff whitespace. Main owns the
 complete combined root/native/frontend suites and UI/playback/SetExport integration. This
-checkpoint alone cannot close Gate6 or the frame core's pending native sound DTO finding.
+checkpoint alone cannot close Gate6. The frame core's native sound DTO finding has since been
+closed by the integrated shared fallible converter and its reviewed ordinary/provisional tests.

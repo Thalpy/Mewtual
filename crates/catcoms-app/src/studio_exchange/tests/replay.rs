@@ -4,12 +4,16 @@ use catcoms_replication::{EpochPhase, InheritedCheckpoint, Receipt};
 use catcoms_rt::Clock;
 
 fn install_empty(p: &mut Pair) -> (Receipt, u128) {
+    install_empty_target(p, target())
+}
+
+fn install_empty_target(p: &mut Pair, selected: StudioTarget) -> (Receipt, u128) {
     let (receipt, seed) = p.alice.sync.with_registry_context(|g, d, _, _| {
         let empty =
-            catcoms_replication::studio::StudioEpoch::new(g, target(), d.device_id()).unwrap();
+            catcoms_replication::studio::StudioEpoch::new(g, selected, d.device_id()).unwrap();
         let seed = empty.projection().unwrap().checkpoint([81; 32]).unwrap();
         let receipt = Receipt::sign(
-            target().document(&g.group_id()).unwrap(),
+            selected.document(&g.group_id()).unwrap(),
             0,
             [81; 32],
             seed.change_hash(),
@@ -27,7 +31,7 @@ fn install_empty(p: &mut Pair) -> (Receipt, u128) {
             .adopt_studio_checkpoint(
                 SERVER,
                 g,
-                target(),
+                selected,
                 d,
                 &receipt,
                 Some(seed.bytes()),
@@ -42,6 +46,116 @@ fn install_empty(p: &mut Pair) -> (Receipt, u128) {
         epoch
     });
     (receipt, epoch)
+}
+
+#[tokio::test]
+async fn studio_score_index_replay_requires_typed_source_and_makes_wrong_family_manual() {
+    use catcoms_replication::studio::{ScoreHeader, ScoreOp};
+    for held in [StudioKind::Flipnote, StudioKind::Score] {
+        let mut p = Pair::new().await;
+        let index = StudioTarget::Index { channel: channel() };
+        let object = [8; 16];
+        let referenced = crate::studio::object_target(channel(), object, held);
+        let logical = referenced.document(&p.bob.group_id()).unwrap();
+        let body = match held {
+            StudioKind::Flipnote => {
+                FlipnoteOp::SetHeader(FlipnoteHeader::Title("actual art".into()))
+                    .encode()
+                    .unwrap()
+            }
+            StudioKind::Score => ScoreOp::SetHeader(ScoreHeader::Title("actual Score".into()))
+                .encode()
+                .unwrap(),
+        };
+        p.bob
+            .studio_transaction(
+                &mut p.b_store,
+                SERVER,
+                StudioRequest::Apply {
+                    target: referenced,
+                    epoch_id: epoch_zero_id(logical.doc_type, &logical.logical_key),
+                    nonce: [11; 16],
+                    body,
+                },
+            )
+            .unwrap();
+        let index_document = index.document(&p.bob.group_id()).unwrap();
+        let body = IndexOp::PutObject {
+            object,
+            kind: StudioKind::Score,
+            title: "historical Score claim".into(),
+            created_by: p.bob.device_id(),
+            ts: 100,
+            expiry: StudioExpiry::Never,
+        }
+        .encode()
+        .unwrap();
+        p.bob
+            .studio_transaction(
+                &mut p.b_store,
+                SERVER,
+                StudioRequest::Apply {
+                    target: index,
+                    epoch_id: epoch_zero_id(index_document.doc_type, &index_document.logical_key),
+                    nonce: [12; 16],
+                    body,
+                },
+            )
+            .unwrap();
+        install_empty_target(&mut p, index);
+        let mut receiver = StudioReceiver::default();
+        receiver.inject_overlay_pool_for_test(4);
+        receiver
+            .run(
+                &mut p.bob,
+                &mut p.b_store,
+                SERVER,
+                Some(StudioRequest::Read { target: index }),
+            )
+            .unwrap();
+        settle_replay(&mut p, &mut receiver).await;
+        p.bob.sync.with_registry_context(|g, d, _, _| {
+            let source = p
+                .b_store
+                .load_studio_epoch(SERVER, g, index, d)
+                .unwrap()
+                .unwrap();
+            let StudioProjection::Index(projection) = source.projection().unwrap() else {
+                panic!()
+            };
+            let pending = p
+                .b_store
+                .load_epoch_intents(SERVER, &index_document)
+                .unwrap()
+                .pending()
+                .len();
+            if matches!(held, StudioKind::Score) {
+                assert!(
+                    projection.objects.contains_key(&object),
+                    "valid Score dependency was not replayed"
+                );
+                assert_eq!(pending, 1, "replayed work stays receipt-owned pending");
+            } else {
+                assert!(
+                    !projection.objects.contains_key(&object),
+                    "wrong-family historical claim was republished"
+                );
+                assert_eq!(
+                    pending, 0,
+                    "wrong-family claim did not finish its bounded manual move"
+                );
+                assert!(
+                    p.b_store
+                        .load_epoch_recovery(SERVER, &index_document)
+                        .unwrap()
+                        .retained()
+                        .next()
+                        .is_some(),
+                    "manual move lost historical evidence"
+                );
+            }
+        });
+    }
 }
 fn own_title(p: &mut Pair, epoch: u128, n: u8, text: &str) {
     p.bob

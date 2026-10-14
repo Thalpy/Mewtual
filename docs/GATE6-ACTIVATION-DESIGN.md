@@ -47,6 +47,18 @@ blob transfer supplies readback; format validation remains separate from availab
 scope/generation checks fence async UI export/playback work. GIF is local visual output only;
 its bounded encoding/save contract is independently reviewed before its command is registered.
 
+The held-package rule covers new Unconfirmed local authoring too, not only ordinary Open Save.
+Shared Flow S admission derives an owned Frame-PIX or Export-PIXA reference from the exact
+operation, validates/promotes those bytes at S1b, holds the CID throughout detached planning,
+and rechecks verifying content-addressed presence and length at S3 before the intent barrier.
+Successful/uncertain writes transfer protection to conservative durable-reference holds before
+the transient owner is released; cancelled or stale plans release their hold without accepting.
+Export-specific reasons are `ExportUnpublished`, `ExportInvalid` and `ExportMissing`, each with
+the NewTicket action. These are local typed IPC diagnostics, not a persisted or wire format.
+An exact retry of already accepted work remains an acknowledgement before media admission and
+does not require the media or a fresh preview again. Unconfirmed provenance remains explicitly
+non-transferable; this correction grants no native Closing Save/P5 or handoff authority.
+
 ## Recovery and activation
 
 Historical score replay remains manual: absence of a reusable coordinate cannot prove that a
@@ -54,6 +66,21 @@ different intervening clear never occurred. Explicit per-item restore/copy names
 ids, previews against the complete current fingerprint, and authors fresh ordinary operations
 under current membership/capacity/lifecycle checks. It never replays old signed authority. Missing
 recipes, conflicts, out-of-current-range cells and cap overflow stay visible and cleanable.
+
+Index dependencies are different from automatic replay of an object's own edits. The exact
+validated `PutObject.kind` selects an expected art/Score target in Index replay, P2 classification,
+H1/H5 handoff and historical Object restore/copy probes. The sealed wrapper, typed restart unit,
+group, channel and nonempty/installed work then independently establish the source. No Index
+winner/hint retags storage, and there is no parser fallback. Same-id claims of both families
+retain two distinct obligations: one physical wrapper cannot satisfy both. An unavailable or
+wrong-family historical pointer becomes bounded manual work; transient local I/O stays retryable.
+H5 and copy Apply recheck source existence, rather than trusting a previous preview. Existing
+documented header-only copy/H5 checks remain header-only; H1 still full-loads the typed source.
+An Index refresh preserves an already opened Score graph just as it preserves opened art.
+
+Cross-document copy requires the same channel and the same object family. Score-to-Score can
+use the manual planner; art-to-Score, Score-to-art and Index-to-object refuse before fresh intent
+creation. Score operation replay remains manual even though safe Index pointers can be replayed.
 
 Manual native choices are `scoreCell {step,row,value}`, `scorePatch {patch,value}` and
 `scoreHeader {field,value}` where `value` is a historical source operation id, never a supplied

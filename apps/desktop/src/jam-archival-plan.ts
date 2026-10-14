@@ -120,7 +120,8 @@ export function planJamArchivalPlayback(takeInput: unknown, animationInput?: Jam
     const event = take.events[index];
     const key = `${event.lane}:${event.n}`;
     if ("d" in event) {
-      events.push({ ms: event.ms, lane: event.lane, kind: "drum", sequence: event.q, note: event.n, index });
+      events.push({ ms: event.ms, lane: event.lane, kind: "drum", sequence: event.q, note: event.n,
+        offMs: event.ms + JAM_KIT[event.n].tailMs, index });
     } else if (event.on === 1) {
       // A duplicate held attack is rejected by the renderer. It does not replace the first on
       // here either, so the next key-up closes exactly the voice the engine actually admitted.

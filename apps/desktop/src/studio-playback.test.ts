@@ -163,6 +163,26 @@ test("timer/hash delay skips already-ended attacks and recalculates age after ea
   assert.deepEqual(engine.calls.map((call) => call.index), [0, 2], "an ended attack is not a catch-up burst");
 });
 
+test("backgrounded ticks consume expired drum work without replaying an old-hit burst", async () => {
+  const { engine, controller, now } = setup();
+  const input = take();
+  input.events = Array.from({ length: 200 }, (_, q) => ({ ms: 0, lane: 0, n: 4, d: 1, q }));
+  assert.equal(await controller.startTake(input), true);
+  now.value = 300; // jam-kit:v1 hat's exact closing boundary.
+  assert.equal(await controller.tick(), TAKE_PLAYBACK_EVENTS_PER_TICK);
+  assert.equal(await controller.tick(), 200 - TAKE_PLAYBACK_EVENTS_PER_TICK);
+  assert.deepEqual(engine.calls, [], "expired one-shots never become fresh attacks");
+});
+
+test("an eligible delayed drum carries its actual age into the engine deadline", async () => {
+  const { engine, controller, now } = setup();
+  const input = take(); input.events = [{ ms: 0, lane: 0, n: 4, d: 1, q: 0 }];
+  assert.equal(await controller.startTake(input), true);
+  now.value = 100;
+  await controller.tick();
+  assert.deepEqual(engine.calls, [{ index: 0, age: 100 }]);
+});
+
 test("invalid package/take/scope and denied gesture resume fail without synthesis", async () => {
   const { engine, controller } = setup();
   assert.equal(await controller.startPixa(new Uint8Array([1, 2, 3])), false);

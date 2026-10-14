@@ -1154,10 +1154,19 @@ fn preview(
         if let StudioRecoveryItem::Object { id } = item {
             // An index entry itself proves nothing about its object. Do not republish a dangling
             // or differently scoped historical object, even when the requested Put is well formed.
-            let target = StudioTarget::Flipnote {
-                channel: target.channel(),
-                object: id,
+            let IndexOp::PutObject { object, kind, .. } = IndexOp::decode(
+                plan.body
+                    .as_deref()
+                    .ok_or_else(|| invalid("ready object restore has no operation"))?,
+            )
+            .map_err(invalid)?
+            else {
+                return Err(invalid("object restore is not a PutObject"));
             };
+            if object != id {
+                return Err(invalid("object restore target differs from its operation"));
+            }
+            let target = super::object_target(target.channel(), object, kind);
             let exists = store
                 .with_studio_source(server, group, target, device, |s| {
                     Ok(s.op_count() > 0 || s.epoch() > 0)

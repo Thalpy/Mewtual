@@ -17,6 +17,10 @@ it is never reconstructed from a numeric UI server alias. Manual Score choices a
 Restore/explicit Copy rules are documented in `GATE6-ACTIVATION-DESIGN.md`. Direct Closing Save
 and unfinished native repair commands remain unavailable; no P5 authority is added.
 
+Rebuilt local-draft inspection additionally carries `contentEpoch` (decimal) and `group` from
+that exact displayed projection, not the live base. Missing rebuild content carries neither;
+old backends lacking these fields cannot justify a local-draft playable export derivation.
+
 Local SetExport requires the exact CID/length of a held, fully validated PIXA package, promoted
 durably before any reference intent/source is written. It performs no network fetch. A failed
 record Save may leave a published orphan, not a successful export record.
@@ -38,7 +42,8 @@ effective `sfx()/patches()/exports()` and `score()` accessors, plus `sound_readi
 records are distinct from active prefixes4096/64/8. Sound uses existing signed P1 mutation and
 exact checkpoint/recovery preflight, an optional canonical trailer preserving art-only bytes,
 and complete retained export CID enumeration. See `GATE6-FRAME-SOUND.md` for property grammar,
-seed omission and DTO obligations. Native sound DTO/consumer integration remains pending.
+seed omission and DTO obligations. Native sound DTO integration is now implemented and reviewed;
+the final production consumer/UI composition and combined verification remain pending.
 
 ## Exact device admin authority (security update, 2026-10-13)
 

@@ -60,6 +60,49 @@ fn pristine_score_restart_binds_family_before_any_authored_root_header() {
 }
 
 #[test]
+fn score_vault_history_fences_consume_only_the_exact_family_trailer() {
+    let owner = MlsDevice::generate().unwrap();
+    let group = ServerGroup::create(&owner).unwrap();
+    let mut unit = StudioEpoch::new(&group, target(), owner.device_id()).unwrap();
+    let domain = operation(&unit, &drum(), 1);
+    unit.edit_or_reseal(
+        &owner,
+        &group,
+        &mut ChaCha20Rng::from_seed([66; 32]),
+        &domain,
+        100,
+    )
+    .unwrap();
+    let bytes = unit.snapshot().unwrap();
+    let protected = std::collections::BTreeSet::from([domain.id(&owner.device_id())]);
+    assert!(unit.preserves_vault_source(&bytes, &protected).unwrap());
+    assert_eq!(
+        crate::studio::epoch::VaultShape::read(&bytes, target())
+            .unwrap()
+            .signed_operations()
+            .unwrap()
+            .len(),
+        1
+    );
+    let mut wrong = bytes.clone();
+    *wrong.last_mut().unwrap() = 1;
+    let mut extra = bytes.clone();
+    extra.push(2);
+    for invalid in [
+        &bytes[..bytes.len() - 1],
+        wrong.as_slice(),
+        extra.as_slice(),
+    ] {
+        assert!(unit.preserves_vault_source(invalid, &protected).is_err());
+        assert!(crate::studio::epoch::VaultShape::read(invalid, target())
+            .unwrap()
+            .signed_operations()
+            .is_err());
+        assert!(StudioEpoch::restore(invalid, &group, target(), owner.device_id()).is_err());
+    }
+}
+
+#[test]
 fn signed_score_restarts_and_exact_retry_does_not_resurrect_a_clear() {
     let owner = MlsDevice::generate().unwrap();
     let group = ServerGroup::create(&owner).unwrap();

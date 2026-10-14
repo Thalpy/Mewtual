@@ -141,7 +141,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         })
     }
 
-    /// An `Object` put must name a Flipnote that actually exists, and only custody can tell.
+    /// An `Object` put must name an object of its exact family that exists; only custody can tell.
     ///
     /// Recovery already refuses exactly this: an index entry proves nothing about its object, so a
     /// dangling or differently scoped historical object must not be republished however well formed
@@ -155,7 +155,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// object can disappear between the two.
     ///
     /// Answered from the object record's header (`studio_object_holds_work`), with the same
-    /// predicate a full load would apply and no restore of a whole Flipnote on the actor. An
+    /// predicate a full load would apply and no restore of a whole object on the actor. An
     /// object stored under another channel's label is missing in this channel, not an error that
     /// fails the preview (the review's wrong-object-channel Low).
     fn probe_copy_object(
@@ -170,10 +170,18 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         if plan.disposition() != StudioRecoveryDisposition::Ready {
             return Ok(true);
         }
-        let object = StudioTarget::Flipnote {
-            channel: plan.destination_target().channel(),
-            object: id,
+        let IndexOp::PutObject { object, kind, .. } = IndexOp::decode(
+            plan.body()
+                .ok_or_else(|| invalid("ready object copy has no operation"))?,
+        )
+        .map_err(invalid)?
+        else {
+            return Err(invalid("object copy is not a PutObject"));
         };
+        if object != id {
+            return Err(invalid("object copy target differs from its operation"));
+        }
+        let object = super::object_target(plan.destination_target().channel(), object, kind);
         store.studio_object_holds_work(server, group, object)
     }
 
@@ -231,13 +239,16 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
         Ok(match (source, destination) {
             _ if source == destination => PlanScope::SameDocument,
-            (StudioTarget::Flipnote { .. }, StudioTarget::Flipnote { .. }) => {
-                PlanScope::CrossDocument
-            }
+            (StudioTarget::Flipnote { .. }, StudioTarget::Flipnote { .. })
+            | (StudioTarget::Score { .. }, StudioTarget::Score { .. }) => PlanScope::CrossDocument,
             // The Index is one document per channel, so "another Index" does not exist, and an
-            // Index/Flipnote pair is a document-type change that the planner refuses anyway. Saying
+            // Index/object or art/Score pair changes the family the planner validates. Saying
             // so here gives the caller the real reason.
-            _ => return Err(invalid("Index copies are same-document only")),
+            _ => {
+                return Err(invalid(
+                    "copies must keep their object family; Index copies are same-document only",
+                ))
+            }
         })
     }
 

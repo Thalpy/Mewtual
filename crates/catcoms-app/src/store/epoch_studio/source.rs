@@ -133,11 +133,14 @@ impl ServerStore {
         };
         let view = read(&state)?;
         // Every StudioUpdated also invalidates the channel list. Its independent Index read
-        // must not make refresh order evict the large art graph and pause its next packet.
+        // must not make refresh order evict the opened art/Score graph and pause its next packet.
         // Keep only the Index's pure verified footprint, not a second retained graph.
         if matches!(target, StudioTarget::Index { .. })
             && self.studio_source.as_ref().is_some_and(|held| {
-                matches!(held.state.unit.target(), StudioTarget::Flipnote { .. })
+                matches!(
+                    held.state.unit.target(),
+                    StudioTarget::Flipnote { .. } | StudioTarget::Score { .. }
+                )
             })
         {
             self.cache_studio_source_footprint(group, &state);

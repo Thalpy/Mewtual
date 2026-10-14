@@ -109,6 +109,41 @@ fn studio_export_reference_requires_exact_held_valid_package_before_any_referenc
         .unwrap()
         .for_group(&server.group_id())
         .any(|held| held == &cid));
+    let snapshot = store.load_server(7).unwrap();
+    let group = server.group_id();
+    drop(server);
+    drop(store);
+    let mut store = ServerStore::open(dir.path(), b"studio-export-test", &mut rng()).unwrap();
+    let mut restored = Server::restore(
+        &snapshot,
+        Hub::new().join(PeerId::from_u64(2)),
+        rng(),
+        Box::new(ManualClock::new(999)),
+        "alice",
+    )
+    .unwrap();
+    restored.set_blob_store(store.blob_store(&hex::encode(&group)).unwrap());
+    assert_eq!(
+        restored
+            .studio_transaction(&mut store, 7, read())
+            .unwrap()
+            .unwrap()
+            .projection,
+        saved.projection
+    );
+    let held = store
+        .blob_store(&hex::encode(&group))
+        .unwrap()
+        .get_bounded(&cid, bytes.len())
+        .unwrap()
+        .unwrap();
+    assert_eq!(held, bytes, "published export bytes survive a fresh mount");
+    crate::creative::validate_pixa(&held).unwrap();
+    assert!(store
+        .creative_pinned_cids()
+        .unwrap()
+        .for_group(&group)
+        .any(|held| held == &cid));
 }
 fn read() -> StudioRequest {
     StudioRequest::Read { target: target() }

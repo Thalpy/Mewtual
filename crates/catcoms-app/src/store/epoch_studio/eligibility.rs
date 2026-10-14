@@ -152,7 +152,7 @@ impl ServerStore {
             Err(_) => return manual(R::SourceUnreadable),
         }
         if let StudioTarget::Index { channel } = target {
-            // One header read per DISTINCT object, at most `MAX_STUDIO_OVERLAY_OPS` of them: each
+            // One header read per DISTINCT family/object, at most `MAX_STUDIO_OVERLAY_OPS`: each
             // is an unseal of a bounded record, never a restore.
             let mut objects = std::collections::BTreeSet::new();
             for (_, intent) in state.pending().filter(|(id, _)| state.is_overlay(id)) {
@@ -162,16 +162,17 @@ impl ServerStore {
                     // the successor either; the handoff refuses the same way.
                     return manual(R::NotReplayable);
                 };
-                if let IndexOp::PutObject { object, .. } = op {
-                    objects.insert(object);
+                if let IndexOp::PutObject { object, kind, .. } = op {
+                    // Preserve distinct family obligations for a same-id collision. An Index
+                    // claim cannot retag the independently authenticated object source.
+                    objects.insert(crate::studio::object_target(channel, object, kind));
                 }
             }
             for object in objects {
-                let flipnote = StudioTarget::Flipnote { channel, object };
                 // An authenticated record that cannot be opened is as unusable to the handoff as
                 // absence. Transient local-storage failures are not durable evidence about the
                 // object, so both P2 and H1 return an error and let runtime back off.
-                match self.studio_object_holds_work(server, group, flipnote) {
+                match self.studio_object_holds_work(server, group, object) {
                     Ok(true) => {}
                     Ok(false) => return manual(R::ObjectMissing),
                     Err(error @ (AppError::Io(_) | AppError::Storage(_))) => return Err(error),
@@ -200,13 +201,13 @@ impl ServerStore {
         Ok(Some(StudioOverlayEligibility::Transferable))
     }
 
-    /// Whether the Flipnote `object` names exists **in `object`'s channel** and holds work: an
+    /// Whether the explicitly typed `object` exists **in its exact family/channel** and holds work: an
     /// operation, or an epoch past zero. The same predicate the handoff's Index object check
     /// applies after a full load (`op_count() > 0 || epoch() > 0`), answered here from the record's
     /// header with no restore, so it is cheap enough to run under custody per object.
     ///
     /// `false` for no record. `false` too for a record stored under **another channel's label**:
-    /// a Flipnote's logical key omits its channel, so one record answers for every label of that
+    /// a Studio object's logical key omits its channel/family, so one record answers for each label of that
     /// object id, and an Index entry in this channel naming another channel's object would name
     /// nothing here. Copy's probe reports that as a missing target rather than failing the whole
     /// preview (the review's wrong-object-channel Low), and P2 calls it `ObjectMissing`. An

@@ -1,5 +1,21 @@
 # Gate 6 archival playback controller
 
+## Combined-review corrections (2026-10-14)
+
+Archival drum events now retain their receiver-owned kit closing time. Delayed ticks consume
+expired events within the same bounded work budget without replaying old hits. Eligible hits
+carry their actual age; a private deadline is rechecked before and after queued seed hashing,
+and limits the rendered tail to its remaining window (plus the existing 5-ms de-click margin).
+Live drum behavior and seek's no-drum reconstruction rule are unchanged. Four regressions were
+demonstrated failing before the correction; a seed-started signal explicitly pins the post-hash
+expiry, partial-tail and regressing-clock cases. Engine/planner/controller tests pass73/73;
+independent re-review closes the MEDIUM timing finding and LOW async-test gap.
+
+`setArchivalPlaybackLevel(handle, level)` accepts only a current engine capability and finite
+0..1 gain, applies it to existing and future lazy archival lanes, and never changes live sources.
+Replacement, disposal and Deafen revoke that control. Its focused regression passes; integration
+into the pre-existing shared/local take consumer remains a separately reviewed caller change.
+
 This isolated implementation extends the existing JamEngine, not a second synthesizer. It does
 not activate Studio controls, fetch content, publish files, register commands or close Gate 6.
 The parent integration owns App lifecycle wiring and the combined mandatory full suites.
