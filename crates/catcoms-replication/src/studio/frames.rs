@@ -1,9 +1,9 @@
-//! Read-only art/frame projection, NOT signed admission or the complete Flipnote consumer.
+//! Complete frame/sound projection, NOT signed admission or an application consumer.
 //!
 //! Flat root properties avoid conflicting nested-map roots. `i/<frame>/<op-id>` and
 //! `d/<frame>/<op-id>` are immutable insertion/deletion records; `r/<frame>` is a replacement
-//! register; `h/title` and `h/fps` are header registers. All other operations/properties reject.
-//! Sound/score/export support must not be silently filtered out to produce an incomplete view.
+//! register; title/fps/score are header registers. Sound/export records use the same bounded
+//! source/envelope framing; unknown properties still reject, never silently filter evidence.
 //!
 //! Insertions reference insertion OP ids for their resolved left and right origins, not mutable
 //! winning frame ids. Losing and deleted insertions remain anchors. See `order` for the stable
@@ -25,8 +25,13 @@ use crate::{DomainOp, LogicalDocument, ReplError, MAX_CHECKPOINT_BYTES};
 
 mod change;
 mod snapshot;
+mod sound;
 pub(super) use change::prepare;
 pub use change::validate_frame_change;
+pub use sound::{
+    FrameSoundReadiness, FrameSoundState, FLIPNOTE_MAX_EXPORTS, FLIPNOTE_MAX_PATCHES,
+    FLIPNOTE_MAX_SFX,
+};
 
 /// List-length ceiling, separate from the sum of declared selected-frame sizes.
 pub const FLIPNOTE_MAX_FRAMES: usize = 999;
@@ -112,7 +117,7 @@ pub struct FrameLimits {
     pub bytes: bool,
 }
 
-/// Art-only projection with ALL live insertion/replacement/deletion evidence, including hidden
+/// Projection with ALL live insertion/replacement/deletion evidence, including hidden
 /// frames. Not a persisted recovery snapshot, admission capability, exporter or retention pass.
 #[derive(Clone, PartialEq, Eq)]
 pub struct FlipnoteFrameProjection {
@@ -123,6 +128,8 @@ pub struct FlipnoteFrameProjection {
     /// Defaults have no invented author and are not stored as authenticated operations.
     pub title: Option<FrameRegister<String>>,
     pub fps: Option<FrameRegister<u8>>,
+    /// Complete sound/export evidence, including removals and over-cap records.
+    pub sound: FrameSoundState,
     /// Includes deleted frames and all conflicts; reference/recovery consumers must inspect it.
     pub frames: BTreeMap<ElementId, FrameEntry>,
     pub tombstones: BTreeMap<ElementId, Vec<FrameSource>>,
@@ -268,6 +275,7 @@ impl FlipnoteFrameProjection {
         let mut deletions: BTreeMap<ElementId, BTreeMap<OpId, FrameSource>> = BTreeMap::new();
         let mut title = None;
         let mut fps = None;
+        let mut sound = FrameSoundState::default();
         let mut operations = BTreeMap::new();
         let seed = match heads {
             Some(heads) => doc.get_all_at(ROOT, super::snapshot::SEED_KEY, heads),
@@ -284,6 +292,7 @@ impl FlipnoteFrameProjection {
             inherited_ids = baseline.source_ids();
             title = baseline.title;
             fps = baseline.fps;
+            sound = baseline.sound;
             for (frame, entry) in baseline.frames {
                 for insertion in entry.insertions {
                     nodes.insert(insertion.source.op_id, Node { frame, insertion });
@@ -335,6 +344,44 @@ impl FlipnoteFrameProjection {
                 continue;
             }
             let (tag, suffix) = key.split_once('/').ok_or(ReplError::Malformed)?;
+            if sound::is_key(&key) {
+                let winner = match heads {
+                    Some(heads) => doc.get_at(ROOT, &key, heads),
+                    None => doc.get(ROOT, &key),
+                }
+                .map_err(am_error)?
+                .ok_or(ReplError::Malformed)?
+                .1;
+                let mut selected = None;
+                let mut records = BTreeMap::new();
+                for (value, am_id) in values {
+                    let bytes = record_bytes(&value)?;
+                    let record = decode_record(document, bytes)?;
+                    let id = record.source.op_id;
+                    if inherited_ids.contains(&id) {
+                        return Err(ReplError::IntentConflict);
+                    }
+                    let digest = *blake3::hash(bytes).as_bytes();
+                    if operations
+                        .insert(id, digest)
+                        .is_some_and(|old| old != digest)
+                    {
+                        return Err(ReplError::Malformed);
+                    }
+                    if winner == am_id {
+                        selected = Some(id);
+                    }
+                    records.insert(
+                        id,
+                        FrameValue {
+                            source: record.source,
+                            value: record.operation,
+                        },
+                    );
+                }
+                sound.insert(key, register(records, selected)?)?;
+                continue;
+            }
             let (frame, immutable_id) = match tag {
                 "i" | "d" => {
                     let (id, op_id) = suffix.split_once('/').ok_or(ReplError::Malformed)?;
@@ -458,7 +505,7 @@ impl FlipnoteFrameProjection {
         if header_count != expected.len() && !pristine {
             return Err(ReplError::Malformed);
         }
-        Self::from_parts(
+        let mut projection = Self::from_parts(
             document,
             channel,
             epoch,
@@ -470,7 +517,9 @@ impl FlipnoteFrameProjection {
                 .into_iter()
                 .map(|(id, sources)| (id, sources.into_values().collect()))
                 .collect(),
-        )
+        )?;
+        projection.sound = sound;
+        Ok(projection)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -544,6 +593,7 @@ impl FlipnoteFrameProjection {
             epoch,
             title,
             fps,
+            sound: FrameSoundState::default(),
             frames,
             tombstones,
             timeline,

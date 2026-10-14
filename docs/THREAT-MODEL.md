@@ -1,5 +1,22 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Gate 6 Flipnote sound core boundary (2026-10-14)
+
+Sound Sets require an existing live frame and effective recipe at their sender's complete causal
+frontier; receiver-only state cannot authorize them. Every mutation still uses exact signed P1
+record/actor/body/key and same-property predecessor validation. A raw recipe Set winner cannot
+override any live concurrent removal. Missing/deleted references after a valid concurrent edit
+remain retained unready evidence, with cleanup available. Linked score ids and export declarations
+grant no cross-object authority or blob-format/availability guarantee. Complete retained export
+CIDs stay held even when deleted, expired, losing or overflow; patch hashes are not CIDs.
+
+An optional sound snapshot trailer preserves complete records; empty trailers and source reuse
+reject. Compaction omits whole removed slots, only under the existing recovery-before-replacement
+barrier. Omitted historical deletions cannot be interpreted as proof of safe automatic replay.
+The native DTO currently omits remotely admitted sound and must be fixed before integrated
+acceptance; a local Save refusal does not close that ingress path. `GATE6-FRAME-SOUND.md` records
+the bounded checkpoint's contract and pending integration obligations.
+
 ## Admin collision hardening (2026-10-13)
 
 Current moderation-record roles also use the verified full signing-device identity.

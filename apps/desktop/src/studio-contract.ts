@@ -114,7 +114,7 @@ export const STUDIO_INDEX_MAX_OBJECTS = 64;
 export const ELEMENT_ID_HEX = 32;
 
 export type FrameRecord = { cid: string; bytes: number; author: string; ts: number };
-export type SfxRecord = { fr: string; p: string; n: number };
+export type SfxRecord = { fr: string; p: string; n: number; duration_ms: number };
 export type ExportRecord = { cid: string; bytes: number; author: string; ts: number; expiry: number; deleted?: boolean };
 export type FlipnoteRoot = {
   v: 1;
@@ -156,7 +156,7 @@ export type FlipnoteOp =
   | { op: "insert_frame"; frame: string; after: string | null; cid: string; bytes: number }
   | { op: "remove_frame"; frame: string }
   | { op: "replace_frame"; frame: string; cid: string; bytes: number }
-  | { op: "set_sfx"; sfx: string; frame: string; patch: string; note: number }
+  | { op: "set_sfx"; sfx: string; frame: string; patch: string; note: number; duration_ms: number }
   | { op: "remove_sfx"; sfx: string }
   | { op: "set_patch"; patch: string; descriptor: unknown }
   | { op: "remove_patch"; patch: string }

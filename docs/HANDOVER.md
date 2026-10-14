@@ -1,5 +1,13 @@
 # Mewtual; Handover
 
+## Gate 6 Flipnote sound core (2026-10-14; isolated checkpoint)
+
+`gate6-frame-sound` implements typed SFX/recipes/linked-score/export state, causal checks,
+bounded checkpoint/recovery and complete export holds. Required authored duration is1..600000ms.
+Art-only checkpoint bytes stay unchanged. See `GATE6-FRAME-SOUND.md` for full record/accessor
+semantics, test evidence and native DTO integration obligation. This is not Gate6 completion;
+native sound omission on remote ingress remains a confirmed MEDIUM pending main integration.
+
 ## Gate 6 typed score contract (2026-10-14; isolated continuation)
 
 `gate6-typed-score` continues from nonce correction `863fe0fe`, keeping PR #44's correction

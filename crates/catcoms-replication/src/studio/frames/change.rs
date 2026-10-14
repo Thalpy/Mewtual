@@ -1,4 +1,4 @@
-//! Open-epoch art mutations, including typed checkpoint baselines; not persistence ownership.
+//! Open-epoch Flipnote mutations, including typed checkpoint baselines; not persistence ownership.
 
 use automerge::legacy::{Key, ObjectId, OpId as AmOpId, OpType};
 use automerge::{Change, ObjId};
@@ -12,8 +12,9 @@ use super::*;
 /// `before` is previously authenticated accepted history, NOT a peer-supplied snapshot. This
 /// semantic callback alone grants no membership, blob availability or publication authority.
 ///
-/// Supported operations are insert/remove/replace frame and title/fps. Checkpoint epochs require
-/// the typed immutable seed at the causal frontier; sound/score/export operations still refuse.
+/// All Flipnote operation families are supported. Sound Sets require their frame/recipe in the
+/// sender's causal view; exports declare content only, not blob availability/format validity.
+/// Checkpoint epochs require the typed immutable seed at the causal frontier.
 /// Aggregate editing/cap policy and exact checkpoint/recovery preflight remain separate required
 /// callbacks; the mere presence of an over-cap frame does not make it an unknown target here.
 /// `StudioTarget` provides those core callbacks, not a durable actor/native Save. Exact signed
@@ -130,6 +131,9 @@ pub fn validate_frame_change(
 }
 
 fn entry(operation: &FlipnoteOp, op_id: &OpId) -> Result<(String, bool), ReplError> {
+    if let Some(entry) = sound::key(operation, op_id) {
+        return Ok(entry);
+    }
     Ok(match operation {
         FlipnoteOp::InsertFrame { frame, .. } => {
             (format!("i/{}/{}", hex(frame), hex(op_id)), false)
@@ -191,12 +195,42 @@ fn placement(
         FlipnoteOp::SetHeader(FlipnoteHeader::Title(_) | FlipnoteHeader::Fps(_)) => {
             Ok((None, None))
         }
-        _ => Err(ReplError::Malformed),
+        FlipnoteOp::SetSfx {
+            sfx, frame, patch, ..
+        } => {
+            if projection.sound.deleted_sfx(sfx) || !projection.sound.patches().contains_key(patch)
+            {
+                return Err(ReplError::Malformed);
+            }
+            live(frame)?;
+            Ok((None, None))
+        }
+        FlipnoteOp::RemoveSfx { sfx } => {
+            if !projection.sound.sfx().contains_key(sfx) {
+                return Err(ReplError::Malformed);
+            }
+            Ok((None, None))
+        }
+        FlipnoteOp::SetExport { export, .. } => {
+            if projection.sound.known(export, true) {
+                return Err(ReplError::Malformed);
+            }
+            Ok((None, None))
+        }
+        FlipnoteOp::RemoveExport { export } => {
+            if !projection.sound.exports().contains_key(export) {
+                return Err(ReplError::Malformed);
+            }
+            Ok((None, None))
+        }
+        FlipnoteOp::SetPatch { .. }
+        | FlipnoteOp::RemovePatch { .. }
+        | FlipnoteOp::SetHeader(FlipnoteHeader::Score(_)) => Ok((None, None)),
     }
 }
 
 // Canonical metadata framing. This produces bytes only; it is NOT a mutation/publication API.
-fn encode_record(
+pub(super) fn encode_record(
     domain: &DomainOp,
     author: &DeviceId,
     ts: u64,

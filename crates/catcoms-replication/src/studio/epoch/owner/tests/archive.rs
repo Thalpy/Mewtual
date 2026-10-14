@@ -161,6 +161,7 @@ pub(super) fn unreplayable_branch(f: &mut Fixture) -> (StudioOverlay, IntentLedg
             frame: [1; 16],
             patch: [0xc3; 32],
             note: 7,
+            duration_ms: 500,
         }
         .encode()
         .unwrap(),

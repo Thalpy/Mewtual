@@ -57,8 +57,9 @@ pub use epoch::{
 mod references;
 pub use frames::{
     flipnote_document, validate_frame_change, FlipnoteFrameProjection, FrameBlob, FrameEntry,
-    FrameInsertion, FrameLimits, FrameRegister, FrameSource, FrameValue, FLIPNOTE_FRAME_BYTES,
-    FLIPNOTE_MAX_FRAMES,
+    FrameInsertion, FrameLimits, FrameRegister, FrameSoundReadiness, FrameSoundState, FrameSource,
+    FrameValue, FLIPNOTE_FRAME_BYTES, FLIPNOTE_MAX_EXPORTS, FLIPNOTE_MAX_FRAMES,
+    FLIPNOTE_MAX_PATCHES, FLIPNOTE_MAX_SFX,
 };
 pub use references::operation_blob_cid;
 #[cfg(test)]
@@ -287,6 +288,8 @@ pub enum FlipnoteOp {
         frame: ElementId,
         patch: ContentId,
         note: u8,
+        /// Creator-authored hold; never inferred from animation FPS.
+        duration_ms: u32,
     },
     RemoveSfx {
         sfx: ElementId,
@@ -342,11 +345,12 @@ impl FlipnoteOp {
                 frame,
                 patch,
                 note,
+                duration_ms,
             } => {
-                if *note > 127 {
+                if *note > 127 || !(1..=600_000).contains(duration_ms) {
                     return Err(ReplError::Malformed);
                 }
-                json!({"op":"set_sfx", "sfx":hex(sfx), "frame":hex(frame), "patch":hex(patch), "note":note})
+                json!({"op":"set_sfx", "sfx":hex(sfx), "frame":hex(frame), "patch":hex(patch), "note":note, "duration_ms":duration_ms})
             }
             Self::RemoveSfx { sfx } => json!({"op":"remove_sfx", "sfx":hex(sfx)}),
             Self::SetPatch { patch, descriptor } => {
@@ -410,6 +414,8 @@ impl FlipnoteOp {
                 frame: fixed_hex(text(obj, "frame")?)?,
                 patch: fixed_hex(text(obj, "patch")?)?,
                 note: u8::try_from(unsigned(obj, "note")?).map_err(|_| ReplError::Malformed)?,
+                duration_ms: u32::try_from(unsigned(obj, "duration_ms")?)
+                    .map_err(|_| ReplError::Malformed)?,
             },
             "remove_sfx" => Self::RemoveSfx {
                 sfx: fixed_hex(text(obj, "sfx")?)?,

@@ -280,13 +280,9 @@ fn validate_operation(
         DocType::StudioIndex => {
             IndexOp::decode_domain(document, &intent.operation, &intent.author)?;
         }
-        DocType::StudioObject => match FlipnoteOp::decode_domain(document, &intent.operation)? {
-            FlipnoteOp::InsertFrame { .. }
-            | FlipnoteOp::RemoveFrame { .. }
-            | FlipnoteOp::ReplaceFrame { .. }
-            | FlipnoteOp::SetHeader(FlipnoteHeader::Title(_) | FlipnoteHeader::Fps(_)) => {}
-            _ => return Err(ReplError::Malformed),
-        },
+        DocType::StudioObject => {
+            FlipnoteOp::decode_domain(document, &intent.operation)?;
+        }
         _ => return Err(ReplError::EpochScope),
     }
     Ok(())
