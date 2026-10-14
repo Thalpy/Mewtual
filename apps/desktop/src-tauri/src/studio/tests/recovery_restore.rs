@@ -6,6 +6,25 @@ use catcoms_app::studio::{
 
 #[test]
 fn native_recovery_choice_and_apply_envelopes_reject_unknown_keys_and_noncanonical_ids() {
+    let sound = json!({"kind":"soundRecord","value":"02".repeat(32)});
+    assert!(
+        matches!(serde_json::from_value::<ChoiceInput>(sound.clone()).unwrap().checked().unwrap(), Item::SoundRecord { value } if value == [2; 32])
+    );
+    for bad in [
+        json!({"kind":"soundRecord","value":"AA".repeat(32)}),
+        json!({"kind":"soundRecord","value":"02".repeat(31)}),
+    ] {
+        assert!(serde_json::from_value::<ChoiceInput>(bad)
+            .unwrap()
+            .checked()
+            .is_err());
+    }
+    let mut injected = sound;
+    injected["op"] = json!({"op":"remove_export","export":"01".repeat(16)});
+    assert!(
+        serde_json::from_value::<ChoiceInput>(injected).is_err(),
+        "renderer cannot supply the historical operation"
+    );
     let good = json!({"kind":"frame","id":"01".repeat(16),"value":"02".repeat(32)});
     assert!(serde_json::from_value::<ChoiceInput>(good.clone())
         .unwrap()

@@ -4,6 +4,7 @@
 use super::*;
 use types::{ElementId, FrameRegister, FrameValue, IndexRegister, IndexValue, StudioRecovery};
 mod score;
+mod sound;
 #[cfg(test)]
 mod tests;
 
@@ -28,6 +29,11 @@ pub enum StudioRecoveryItem {
         value: [u8; 32],
     },
     Fps {
+        value: [u8; 32],
+    },
+    /// One authenticated historical sound operation, including a losing value or removal.
+    /// The planner derives its family, target ids, recipe and authored duration from this source.
+    SoundRecord {
         value: [u8; 32],
     },
     Object {
@@ -116,7 +122,7 @@ impl std::fmt::Debug for StudioRecoveryPlan {
     }
 }
 impl StudioRecoveryPlan {
-    fn held(disposition: StudioRecoveryDisposition) -> Self {
+    pub(super) fn held(disposition: StudioRecoveryDisposition) -> Self {
         Self {
             disposition,
             body: None,
@@ -233,6 +239,11 @@ pub(crate) fn plan(
         (StudioProjection::Score(now), StudioProjection::Score(old), item) => {
             score::plan(now, old, history, item, mode)
         }
+        (
+            StudioProjection::Flipnote(now),
+            StudioProjection::Flipnote(old),
+            I::SoundRecord { value },
+        ) => sound::plan(now, old, history, value, mode),
         (
             StudioProjection::Flipnote(now),
             StudioProjection::Flipnote(old),

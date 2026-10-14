@@ -7,6 +7,7 @@ use StudioRecoveryDisposition as D;
 use StudioRecoveryItem as I;
 use StudioRecoveryMode as M;
 mod score;
+mod sound;
 
 struct Fixture {
     device: MlsDevice,
