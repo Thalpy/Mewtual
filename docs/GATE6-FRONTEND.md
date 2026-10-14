@@ -1,6 +1,6 @@
 # Gate 6 frontend integration checkpoints
 
-## Connected editor/media candidate (review pending)
+## Connected editor/media candidate (bounded review complete through 9330fc08)
 
 The production Studio now composes the reviewed Score editor, Sound marker controls and linked
 Score selection against the native session. Score creation reuses coordinated Create with an
@@ -54,6 +54,14 @@ integration owns complete root/native/frontend suites, visual fixture inspection
 acceptance. Actual audible native playback has not been manually claimed. Global shared-deck
 PIXA media-kind/consensus and a standalone package viewer are follow-ups, not this candidate's
 claim. The existing take consumer's archival-capability migration is the next bounded checkpoint.
+
+The bounded read-only review closed four media findings plus orphan-SFX cleanup and Score Copy
+consent findings. The reviewer independently ran 22 compiled Sound/Studio tests and the earlier
+33 media/Score/audio/emoji group. Frame-bound forms reset on navigation, monotonic form generation
+fences asynchronous A→B→A file reads, and destroyed imports cannot queue a recipe into another
+object. Cleanup is available for all active sound IDs, including missing/deleted frames and
+overflow, without having to select the old frame. No B/H/M/L remains for this checkpoint;
+final combined suites/visual/native validation remain primary-owned.
 
 ## Typed Score bridge and session
 

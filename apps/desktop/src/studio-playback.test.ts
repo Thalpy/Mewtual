@@ -72,6 +72,19 @@ test("explicit local Play resumes immediately and late/seek attacks use remainin
   now.value = 100_125;
   assert.equal(await controller.tick(), 0);
   assert.equal(controller.state, "stopped");
+  assert.equal(controller.completed, true);
+});
+
+test("only natural completion marks EOF; manual, revoked and render-failed ownership never does", async () => {
+  const h = setup(); await h.controller.startTake(take()); h.controller.stop(); assert.equal(h.controller.completed, false);
+  await h.controller.startTake(take()); h.engine.capability = null; await h.controller.tick(); assert.equal(h.controller.completed, false);
+  await h.controller.startTake(take()); h.engine.rendering = Promise.reject(new Error("renderer failed"));
+  await h.controller.tick(); assert.equal(h.controller.state, "stopped"); assert.equal(h.controller.completed, false);
+});
+
+test("late seek beyond the entire authored horizon is silent natural completion, not final-event replay", async () => {
+  const h = setup(); assert.equal(await h.controller.startTake(take(), 600_125), true);
+  assert.equal(h.controller.state, "stopped"); assert.equal(h.controller.completed, true); assert.equal(h.engine.prepared, 0); assert.equal(h.engine.calls.length, 0);
 });
 
 test("Deafen, leave, scope and membership changes synchronously revoke playback; reopening never auto-plays", async () => {
