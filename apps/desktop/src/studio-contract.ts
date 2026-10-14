@@ -115,7 +115,7 @@ export const ELEMENT_ID_HEX = 32;
 
 export type FrameRecord = { cid: string; bytes: number; author: string; ts: number };
 export type SfxRecord = { fr: string; p: string; n: number; duration_ms: number };
-export type ExportRecord = { cid: string; bytes: number; author: string; ts: number; expiry: number; deleted?: boolean };
+export type ExportRecord = { cid: string; bytes: number; author: string; ts: number; expiry?: number | null; deleted?: boolean };
 export type FlipnoteRoot = {
   v: 1;
   kind: "flipnote";
@@ -160,7 +160,7 @@ export type FlipnoteOp =
   | { op: "remove_sfx"; sfx: string }
   | { op: "set_patch"; patch: string; descriptor: unknown }
   | { op: "remove_patch"; patch: string }
-  | { op: "set_export"; export: string; cid: string; bytes: number; expiry: number }
+  | { op: "set_export"; export: string; cid: string; bytes: number; expiry?: number | null }
   | { op: "remove_export"; export: string }
   | { op: "set_header"; field: "title" | "fps" | "score"; value: string | number | null };
 
