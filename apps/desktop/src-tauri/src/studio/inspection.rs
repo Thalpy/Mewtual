@@ -97,7 +97,7 @@ fn view(read: StudioOverlayInspection) -> Result<Value, String> {
             None => None,
         };
         let (eligibility, manual_reason) = super::lifecycle::eligibility_fields(v.eligibility);
-        bounded_view(match (v.branch, v.disposed) {
+        let mut value = match (v.branch, v.disposed) {
             (Some(branch), _) => json!({"v":1,"kind":"local-draft","channel":channel,
                 "eligibility":eligibility,
                 "manualReason":manual_reason,
@@ -132,6 +132,16 @@ fn view(read: StudioOverlayInspection) -> Result<Value, String> {
                 },
                 "readOnly":true}),
             (None, None) => json!({"v":1,"kind":"absent","channel":channel,"object":object}),
-        })
+        };
+        if let Some(draft) = v.draft {
+            // These describe the exact displayed local projection, not the live owner's epoch.
+            // A local-only .pixa derivation must never substitute a different base version.
+            value["contentEpoch"] = draft.projection().epoch().to_string().into();
+            value["group"] = hex::encode(&draft.projection().document().server_id).into();
+        }
+        if matches!(v.target, StudioTarget::Score { .. }) {
+            value["objectKind"] = "score".into();
+        }
+        bounded_view(value)
     })?
 }
