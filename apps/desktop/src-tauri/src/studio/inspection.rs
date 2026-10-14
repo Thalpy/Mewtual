@@ -93,7 +93,7 @@ fn view(read: StudioOverlayInspection) -> Result<Value, String> {
         let channel = u128::from_be_bytes(v.target.channel()).to_string();
         let object = match v.target {
             StudioTarget::Index { .. } => None,
-            StudioTarget::Flipnote { object, .. } => Some(hex::encode(object)),
+            StudioTarget::Flipnote { object, .. } | StudioTarget::Score { object, .. } => Some(hex::encode(object)),
         };
         let provenance = match v.provenance {
             Some(StudioOverlayProvenance::Closing) => Some("closing"),

@@ -138,6 +138,9 @@ pub(super) fn check(accepted: bool) {
             // request names pixels that were never published, so a media-first order would answer
             // "publish the frame PIX" instead - that difference is what makes the order visible.
             let doomed = match f.target {
+                StudioTarget::Score { .. } => {
+                    panic!("this media-admission fixture only constructs art and index targets")
+                }
                 StudioTarget::Flipnote { .. } => f.domain(
                     FlipnoteOp::InsertFrame {
                         frame: [9; 16],

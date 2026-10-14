@@ -1,5 +1,30 @@
 # Mewtual; Handover
 
+## Gate 6 stateful score continuation (2026-10-14; not gate acceptance)
+
+The isolated `gate6-typed-score` candidate now adds a bounded Score projection, causal validator,
+reusable remove-wins cell/recipe registers, explicit-family checkpoints/recovery, exact P1
+preflight and scoped core restart/settlement. Native diagnostics retain raw winners and removal
+evidence separately. No score native command or legacy wire activation is enabled yet; app/store
+and exchange adapters explicitly refuse that unfinished family. Historical replay remains manual.
+See `GATE6-STATE-DESIGN.md` for defaults, compatibility and omitted-evidence obligations.
+
+Focused score regressions pass 24/24, including real signed edits, exact retry after clear,
+recovery-first omission, seed reuse and pristine restart-family binding. Current root source builds
+with strict Clippy, and all root test targets compile after invalidating affected crate artifacts.
+An audit found that shared Cargo caches could reuse another worktree's artifacts: earlier aggregate
+root/native suite assertions are not final verification of these new score changes. Affected root
+and native crate artifacts have been invalidated; fresh final combined suites and hosted Linux
+ambient evidence remain required. Prior focused frontend/score and accepted review findings retain
+their narrower scope. Independent current-diff review is still pending for this stateful slice.
+The freshly rebuilt native diagnostic regression also passes (1/1). The wider replication run
+passes all 384 unit tests from before the last two cap/forgery additions (those additions pass
+in the 24-test focused set); its integration tests are still running, not yet a complete result.
+
+Parallel isolated branches own frame sound state (`gate6-frame-sound`) and authored archival
+playback (`gate6-playback`). Application/native durability, actual-byte export validation,
+publication/readback, GIF and real Sound/Music/export UI wiring remain open. Gate 6 is not closed.
+
 ## Gate 6 typed score contract (2026-10-14; isolated continuation)
 
 `gate6-typed-score` continues from nonce correction `863fe0fe`, keeping PR #44's correction

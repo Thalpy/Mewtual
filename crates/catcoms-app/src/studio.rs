@@ -102,6 +102,11 @@ impl StudioRequest {
     }
     /// Static bounds/grammar only; identity, causal state and persistence are checked in actor.
     pub fn validate(&self) -> Result<(), AppError> {
+        // Native activation follows the typed store/recovery and wire adapters, not merely
+        // the existence of a core codec. Keep this boundary fail-closed in the interim.
+        if matches!(self.target(), StudioTarget::Score { .. }) {
+            return Err(invalid("score commands are not available yet"));
+        }
         match self {
             Self::Read { .. } => Ok(()),
             Self::Apply {
@@ -128,6 +133,9 @@ impl StudioRequest {
                                 ))
                             }
                         }
+                    }
+                    StudioTarget::Score { .. } => {
+                        return Err(invalid("score commands are not available yet"))
                     }
                 }
                 domain(*target, *nonce, body.clone())
@@ -180,7 +188,9 @@ impl StudioRequest {
 fn domain(target: StudioTarget, nonce: [u8; 16], body: Vec<u8>) -> DomainOp {
     let (doc_type, key) = match target {
         StudioTarget::Index { channel } => (catcoms_wire::DocType::StudioIndex, channel),
-        StudioTarget::Flipnote { object, .. } => (catcoms_wire::DocType::StudioObject, object),
+        StudioTarget::Flipnote { object, .. } | StudioTarget::Score { object, .. } => {
+            (catcoms_wire::DocType::StudioObject, object)
+        }
     };
     DomainOp {
         nonce,

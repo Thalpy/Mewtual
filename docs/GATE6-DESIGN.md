@@ -29,10 +29,11 @@ later slices connect the remaining persistent document families and the real UI.
 5. **Combined acceptance.** Full suites, real export readback/restart/recovery scenarios,
    adversarial review and a complete UI hook inventory. This first slice cannot close Gate 6.
 
-The isolated `gate6-typed-score` continuation starts step 2 with the missing static ScoreOp
-grammar, mirrored frontend types and shared vectors (`GATE6-SCORE-CONTRACT.md`). It does not
-yet add a Score target, causal projection, seed/recovery codec or durable writer. PR #44 retains
-the export checkpoint and the external nonce-validation correction separately.
+The isolated `gate6-typed-score` continuation now supplies the static ScoreOp grammar plus
+bounded core score state, causal admission and explicit-family seed/recovery/restart handling
+(`GATE6-STATE-DESIGN.md`). Native/store and wire activation are still refused until their complete
+adapters are in place. Parallel isolated frame-sound/playback branches will be reviewed and merged
+normally into this candidate. PR #44 retains the export checkpoint and nonce correction separately.
 
 ## Existing code to reuse
 

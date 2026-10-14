@@ -15,18 +15,21 @@ use crate::{LocalIntent, RecoveryReason, RecoverySnapshot};
 pub enum StudioProjection {
     Index(StudioIndexProjection),
     Flipnote(Box<FlipnoteFrameProjection>),
+    Score(Box<ScoreProjection>),
 }
 impl StudioProjection {
     pub fn document(&self) -> &LogicalDocument {
         match self {
             Self::Index(p) => p.document(),
             Self::Flipnote(p) => p.document(),
+            Self::Score(p) => p.document(),
         }
     }
     pub fn epoch(&self) -> u64 {
         match self {
             Self::Index(p) => p.epoch,
             Self::Flipnote(p) => p.epoch,
+            Self::Score(p) => p.epoch,
         }
     }
     pub fn channel(&self) -> ElementId {
@@ -38,12 +41,14 @@ impl StudioProjection {
                 .try_into()
                 .expect("validated index channel"),
             Self::Flipnote(p) => p.channel,
+            Self::Score(p) => p.channel,
         }
     }
     pub fn checkpoint(&self, close: [u8; 32]) -> Result<crate::CheckpointSeed, ReplError> {
         match self {
             Self::Index(p) => p.checkpoint(close),
             Self::Flipnote(p) => p.checkpoint(close),
+            Self::Score(p) => p.checkpoint(close),
         }
     }
     /// Local optimistic-concurrency fence for explicit recovery choices. Unlike a compact
@@ -70,6 +75,7 @@ impl StudioProjection {
         match self {
             Self::Index(p) => p.encode_snapshot(limit),
             Self::Flipnote(p) => p.encode_snapshot(limit),
+            Self::Score(p) => p.encode_snapshot(limit),
         }
     }
     fn decode(
@@ -82,6 +88,11 @@ impl StudioProjection {
             DocType::StudioIndex if document.logical_key == channel => Ok(Self::Index(
                 StudioIndexProjection::decode_snapshot(document, epoch, bytes)?,
             )),
+            DocType::StudioObject if bytes.first() == Some(&score::SCORE_PAYLOAD) => {
+                Ok(Self::Score(Box::new(ScoreProjection::decode_snapshot(
+                    document, channel, epoch, bytes,
+                )?)))
+            }
             DocType::StudioObject => Ok(Self::Flipnote(Box::new(
                 FlipnoteFrameProjection::decode_snapshot(document, channel, epoch, bytes)?,
             ))),
@@ -163,7 +174,7 @@ impl StudioRecovery {
         // Encode operations before projection, so the latter receives the exact remaining budget.
         e.count(operations.len())?;
         for (id, intent) in operations {
-            validate_operation(projection.document(), id, intent)?;
+            validate_operation(projection, id, intent)?;
             e.bytes(intent.author.as_bytes())?;
             e.bytes(&intent.operation.encode()?)?;
         }
@@ -232,7 +243,6 @@ impl StudioRecovery {
             let operation = DomainOp::decode(bytes)?;
             let id = operation.id(&author);
             let intent = LocalIntent { author, operation };
-            validate_operation(document, &id, &intent)?;
             if operations.last_key_value().is_some_and(|(p, _)| p >= &id) {
                 return Err(ReplError::Malformed);
             }
@@ -244,6 +254,11 @@ impl StudioRecovery {
             None => super::snapshot::payload_channel(payload)?,
         };
         let projection = StudioProjection::decode(document, channel, snapshot.epoch, payload)?;
+        // The authenticated typed payload selects the operation family. Do not infer it from
+        // an operation parser: title/recipe bodies are deliberately shared between families.
+        for (id, intent) in &operations {
+            validate_operation(&projection, id, intent)?;
+        }
         d.finish().map_err(malformed)?;
         if operations.keys().copied().collect::<Vec<_>>() != snapshot.applied_ops {
             return Err(ReplError::Malformed);
@@ -269,25 +284,30 @@ impl StudioRecovery {
 }
 
 fn validate_operation(
-    document: &LogicalDocument,
+    projection: &StudioProjection,
     id: &[u8; 32],
     intent: &LocalIntent,
 ) -> Result<(), ReplError> {
+    let document = projection.document();
     if *id != intent.operation.id(&intent.author) {
         return Err(ReplError::Malformed);
     }
-    match document.doc_type {
-        DocType::StudioIndex => {
+    match projection {
+        StudioProjection::Index(_) => {
             IndexOp::decode_domain(document, &intent.operation, &intent.author)?;
         }
-        DocType::StudioObject => match FlipnoteOp::decode_domain(document, &intent.operation)? {
-            FlipnoteOp::InsertFrame { .. }
-            | FlipnoteOp::RemoveFrame { .. }
-            | FlipnoteOp::ReplaceFrame { .. }
-            | FlipnoteOp::SetHeader(FlipnoteHeader::Title(_) | FlipnoteHeader::Fps(_)) => {}
-            _ => return Err(ReplError::Malformed),
-        },
-        _ => return Err(ReplError::EpochScope),
+        StudioProjection::Flipnote(_) => {
+            match FlipnoteOp::decode_domain(document, &intent.operation)? {
+                FlipnoteOp::InsertFrame { .. }
+                | FlipnoteOp::RemoveFrame { .. }
+                | FlipnoteOp::ReplaceFrame { .. }
+                | FlipnoteOp::SetHeader(FlipnoteHeader::Title(_) | FlipnoteHeader::Fps(_)) => {}
+                _ => return Err(ReplError::Malformed),
+            }
+        }
+        StudioProjection::Score(_) => {
+            ScoreOp::decode_domain(document, &intent.operation)?;
+        }
     }
     Ok(())
 }

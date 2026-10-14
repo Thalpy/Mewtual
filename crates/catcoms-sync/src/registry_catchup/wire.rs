@@ -101,6 +101,7 @@ pub(super) fn encode_scoped_query(
             e.put_u128(match target {
                 StudioTarget::Index { .. } => 0,
                 StudioTarget::Flipnote { object, .. } => u128::from_be_bytes(object),
+                StudioTarget::Score { .. } => return Err(SyncError::Malformed),
             });
         }
     }

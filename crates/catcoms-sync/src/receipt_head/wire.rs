@@ -125,6 +125,9 @@ fn encode_scoped_query_v1(
                     wire(e.put_bytes(&channel))?;
                     wire(e.put_bytes(&object))?;
                 }
+                // Score family negotiation is not encoded by the legacy StudioObject tag.
+                // Refuse until its explicit wire binding is connected, never serialize as art.
+                StudioTarget::Score { .. } => return Err(SyncError::Malformed),
             }
             wire(e.put_bytes(&nonce))?;
             Ok(e.finish())

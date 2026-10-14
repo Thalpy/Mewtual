@@ -452,7 +452,7 @@ fn channel_of(target: StudioTarget) -> Value {
 fn object_of(target: StudioTarget) -> Value {
     match target {
         StudioTarget::Index { .. } => Value::Null,
-        StudioTarget::Flipnote { object, .. } => hex::encode(object).into(),
+        StudioTarget::Flipnote { object, .. } | StudioTarget::Score { object, .. } => hex::encode(object).into(),
     }
 }
 fn provenance_value(provenance: &StudioOverlayProvenance) -> Value {

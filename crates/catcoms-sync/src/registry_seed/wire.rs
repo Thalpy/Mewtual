@@ -77,6 +77,9 @@ pub(super) fn encode_scoped_query(q: &ScopedQuery, group: &[u8]) -> Result<Vec<u
             let object = match target {
                 catcoms_replication::studio::StudioTarget::Index { .. } => [0; 16],
                 catcoms_replication::studio::StudioTarget::Flipnote { object, .. } => object,
+                catcoms_replication::studio::StudioTarget::Score { .. } => {
+                    return Err(SyncError::Malformed)
+                }
             };
             wire(e.put_bytes(&object))?;
             e.put_u128(q.doc_id);

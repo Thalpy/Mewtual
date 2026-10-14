@@ -877,6 +877,11 @@ fakes own no detached lower work.
 
 ### File reliability and explicit retention
 
+Studio's Gate 6 core continuation extends the existing P1 `StudioTarget` with a score family,
+not a new store or transport. Reusable remove-wins musical slots, sender-frontier checks and
+explicit-family snapshots/restart units are specified in `GATE6-STATE-DESIGN.md`. Existing art
+and Index bytes remain unchanged; app/native/wire score activation is still a separate boundary.
+
 [File reliability](design-file-reliability.md) separates actor-owned authorization/storage from bounded
 network tasks, projects conflicting first file-index lists consistently, and adds explicit local kept
 copies. Kept-copy ownership never comes from replicated expiry. One exact manifest is reserved and

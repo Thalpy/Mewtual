@@ -485,6 +485,9 @@ impl ServerStore {
         let frame = match origin.target {
             StudioTarget::Flipnote { .. } => frame_pixels(document, operation)?,
             StudioTarget::Index { .. } => None,
+            StudioTarget::Score { .. } => {
+                return Err(invalid("score persistence is not available yet"))
+            }
         };
         let Some((cid, bytes)) = frame else {
             return Ok(AdmittedOverlayMedia {

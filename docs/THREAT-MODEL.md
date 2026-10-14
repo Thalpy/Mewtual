@@ -1617,6 +1617,17 @@ design that shipped:
 
 ### Detached file reads and explicit kept copies
 
+Gate 6's core score reader checks byte/primitive rails before materializing conflicts and uses
+one complete causal frontier for headers, recipes, keys, alternatives and winners. Mutable
+coordinates/hashes are not permanent frame tombstones: live removals dominate raw Set winners,
+while later exact same-property edits can reuse observed cleared slots. Omitted removals and
+conflicts require recovery-before-replacement. Explicit family tags prevent pristine score
+restart data from becoming art; shared title/recipe body shapes never identify authority.
+Typed reference inspection validates complete score envelopes before returning no CIDs. The
+untyped legacy operation inspector remains conservative (score-specific bodies refuse).
+No native score/wire capability is enabled by the current core slice, and historical score
+replay stays manual because final absence cannot prove no intervening reusable-slot clear.
+
 Network workers own only an opaque signed blob request. Completion rechecks the exact sync owner,
 current group/epoch/local membership, expected provider, request nonce and response signature/CID;
 the application rechecks its current manifest-set identity and cancellation before storage. Each

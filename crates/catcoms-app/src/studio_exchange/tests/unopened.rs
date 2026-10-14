@@ -596,6 +596,11 @@ async fn actor_newcomer(selected_target: StudioTarget, restart_closing: bool) {
     let (_, _, id) = super::discovery::prepared_checkpoint(&mut p, selected_target);
     let bucket = prepared_registry(&mut p, selected_target, false);
     let tail = match selected_target {
+        StudioTarget::Score { .. } => catcoms_replication::studio::ScoreOp::SetHeader(
+            catcoms_replication::studio::ScoreHeader::Title("post-checkpoint tail".into()),
+        )
+        .encode()
+        .unwrap(),
         StudioTarget::Flipnote { .. } => title(99, "post-checkpoint tail").body,
         StudioTarget::Index { .. } => IndexOp::SetTitle {
             object: [7; 16],
@@ -729,6 +734,7 @@ async fn actor_newcomer(selected_target: StudioTarget, restart_closing: bool) {
         StudioTarget::Flipnote { .. } if restart_closing => assert_eq!(initial.unwrap().epoch, 0),
         StudioTarget::Flipnote { .. } => assert!(initial.is_none()),
         StudioTarget::Index { .. } => assert_eq!(initial.unwrap().epoch, 0),
+        StudioTarget::Score { .. } => panic!("this fixture only starts art and index workers"),
     };
     // No provider Read and no more newcomer Read/Save. Drive only the existing native-facing
     // worker; neither endpoint can monopolize Server while it waits on the other's response.
@@ -772,6 +778,9 @@ async fn actor_newcomer(selected_target: StudioTarget, restart_closing: bool) {
     .unwrap();
     assert_eq!(view.epoch_id, id);
     match view.projection {
+        StudioProjection::Score(score) => {
+            assert_eq!(score.title.unwrap().selected.value, "post-checkpoint tail")
+        }
         StudioProjection::Flipnote(art) => {
             assert_eq!(art.title.unwrap().selected.value, "post-checkpoint tail")
         }

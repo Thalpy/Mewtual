@@ -25,7 +25,9 @@ impl CheckpointTarget {
         match self {
             Self::Registry(_) => DocType::DocRegistry,
             Self::Studio(StudioTarget::Index { .. }) => DocType::StudioIndex,
-            Self::Studio(StudioTarget::Flipnote { .. }) => DocType::StudioObject,
+            Self::Studio(StudioTarget::Flipnote { .. } | StudioTarget::Score { .. }) => {
+                DocType::StudioObject
+            }
         }
     }
     pub(super) fn bucket(self) -> Result<u8, SyncError> {
@@ -71,6 +73,7 @@ impl CheckpointTarget {
             Self::Studio(StudioTarget::Flipnote { channel, .. }) => {
                 FlipnoteFrameProjection::verify_checkpoint(receipt, channel, raw)?
             }
+            Self::Studio(StudioTarget::Score { .. }) => return Err(SyncError::Malformed),
         })
     }
 }

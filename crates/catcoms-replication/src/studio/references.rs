@@ -26,6 +26,30 @@ pub fn operation_blob_cid(op: &DomainOp) -> Result<Option<ContentId>, ReplError>
     }
 }
 
+impl StudioTarget {
+    /// Typed reference inspection. Recipe hashes are not blobs, but an empty result is valid
+    /// only after checking the complete score envelope against the independently held target.
+    pub fn operation_blob_cid(
+        &self,
+        document: &LogicalDocument,
+        op: &DomainOp,
+    ) -> Result<Option<ContentId>, ReplError> {
+        if *document != self.document(&document.server_id)? {
+            return Err(ReplError::EpochScope);
+        }
+        match self {
+            Self::Score { .. } => {
+                ScoreOp::decode_domain(document, op)?;
+                Ok(None)
+            }
+            Self::Index { .. } | Self::Flipnote { .. } => {
+                scope(document, op, document.doc_type)?;
+                operation_blob_cid(op)
+            }
+        }
+    }
+}
+
 pub(super) fn projection_cids(projection: &StudioProjection) -> BTreeSet<ContentId> {
     let mut out = BTreeSet::new();
     if let StudioProjection::Flipnote(p) = projection {
@@ -44,7 +68,12 @@ impl StudioRecovery {
     pub fn blob_cids(&self) -> Result<BTreeSet<ContentId>, ReplError> {
         let mut out = projection_cids(self.projection());
         for intent in self.operations().values() {
-            out.extend(operation_blob_cid(&intent.operation)?);
+            // from_snapshot/snapshot already checked every operation against this family.
+            if matches!(self.projection(), StudioProjection::Score(_)) {
+                ScoreOp::decode_domain(self.projection().document(), &intent.operation)?;
+            } else {
+                out.extend(operation_blob_cid(&intent.operation)?);
+            }
         }
         Ok(out)
     }

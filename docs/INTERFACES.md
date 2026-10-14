@@ -3977,3 +3977,15 @@ The next isolated `gate6-typed-score` slice adds a static Rust `ScoreOp` body/en
 and frontend `ScoreCell`/`ScoreOp` types. Export input reuses that cell type. Shared canonical
 vectors and exact bounds are documented in `GATE6-SCORE-CONTRACT.md`; no command is added.
 
+The stateful continuation adds `StudioTarget::Score` and `StudioProjection::Score` in core P1.
+Optional authored title/BPM/BPB/step registers preserve complete winner/alternatives. Absent
+values default to empty/120/4/16 without invented provenance. Cell/recipe slots retain a raw
+register of optional values; any live removal makes effective presence false. Clear and remove
+on absent slots record intent. Later Sets supersede exact observed same-property predecessors,
+not unseen removals. Readiness flags conflicts, overlap, missing recipes, extent and cap overflow.
+Score snapshots use explicit payload prefix2, and score restart units require trailing family2
+even when pristine. Existing Index/art bytes are unchanged. See `GATE6-STATE-DESIGN.md`.
+The native diagnostic shape `kind:"score"` uses optional header registers and cell/patch maps
+whose entries contain `{removed,register}`; `removed` is not inferred from raw selected content.
+No score request/wire activation follows from exposing these core types; unfinished adapters refuse.
+

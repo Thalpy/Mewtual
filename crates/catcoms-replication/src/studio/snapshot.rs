@@ -238,6 +238,12 @@ pub(super) fn check_header(
 /// typed header and payload. This value alone is never an authorization context.
 pub(super) fn payload_channel(bytes: &[u8]) -> Result<ElementId, ReplError> {
     payload_bound(bytes)?;
+    // Score adds a family prefix without changing any existing Index/art payload bytes.
+    let bytes = if bytes.first() == Some(&super::score::SCORE_PAYLOAD) {
+        &bytes[1..]
+    } else {
+        bytes
+    };
     let mut d = Decoder::new(bytes);
     if d.get_u8().map_err(malformed)? != 1 {
         return Err(ReplError::Malformed);

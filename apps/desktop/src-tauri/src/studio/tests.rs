@@ -14,6 +14,28 @@ mod receiver;
 mod recovery;
 mod recovery_restore;
 
+#[test]
+fn score_diagnostics_distinguish_effective_removal_from_raw_winner() {
+    use app::studio::types::{ScoreCell, ScoreOp, ScoreProjection, ScoreRegister, ScoreSlot, ScoreSource, ScoreValue};
+    let document = app::studio::types::score_document(b"native-score-view",[9;16]).unwrap();
+    let mut score = ScoreProjection::read(&document,[7;16],0,&automerge::AutoCommit::new()).unwrap();
+    let author = DeviceId::from_bytes([3;32]);
+    let source = |nonce: u8, body: ScoreOp| {
+        let op = catcoms_replication::DomainOp { nonce:[nonce;16],doc_type:document.doc_type,logical_key:document.logical_key.clone(),body:body.encode().unwrap() };
+        ScoreSource {op_id:op.id(&author),author,nonce:op.nonce}
+    };
+    let cell = ScoreCell::Drum {pad:0};
+    score.cells.insert((0,0),ScoreSlot {register:ScoreRegister {
+        selected:ScoreValue {source:source(1,ScoreOp::SetCell{step:0,row:0,value:cell.clone()}),value:Some(cell)},
+        conflicts:vec![ScoreValue {source:source(2,ScoreOp::ClearCell{step:0,row:0}),value:None}],
+    }});
+    let view = projection_content(&StudioProjection::Score(Box::new(score)));
+    assert_eq!(view["kind"],"score"); assert_eq!(view["cells"]["0:0"]["removed"],true);
+    assert_eq!(view["cells"]["0:0"]["register"]["selected"]["value"],json!({"k":"d","pad":0}));
+    assert!(view["cells"]["0:0"]["register"]["conflicts"][0]["value"].is_null());
+    assert_eq!(view["cells"]["0:0"]["register"]["selected"]["source"]["author"],author.to_string());
+}
+
 fn save_response(outcome: app::studio::StudioUnconfirmedSaveOutcome) -> InvokeResponse {
     InvokeResponse::Control(app::studio::StudioControlResponse::UnconfirmedOverlaySaved {
         target: StudioTarget::Index {

@@ -394,6 +394,9 @@ impl ServerStore {
             StudioTarget::Flipnote { .. } => {
                 FlipnoteOp::decode_domain(&logical, &operation).map_err(invalid)?;
             }
+            StudioTarget::Score { .. } => {
+                return Err(invalid("score persistence is not available yet"))
+            }
         }
         current_member(group, device)?;
         self.enter_studio_budget(server, group, budget)?;
