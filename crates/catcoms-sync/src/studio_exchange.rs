@@ -4,7 +4,7 @@
 
 use super::*;
 use catcoms_replication::epoch::MAX_SIGNED_EPOCH_OP_BYTES;
-use catcoms_replication::studio::{FlipnoteOp, IndexOp, StudioTarget};
+use catcoms_replication::studio::{FlipnoteOp, IndexOp, ScoreOp, StudioTarget};
 use catcoms_replication::DomainOp;
 use catcoms_rt::PublishSubmission;
 use registry_ingress::Rate;
@@ -75,11 +75,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         target: StudioTarget,
         doc_id: u128,
     ) -> Result<StudioWatch, SyncError> {
-        // Core scores exist, but legacy exchange tags do not yet bind that family. Do not
-        // subscribe or allocate a watch that a peer could mistake for an art object.
-        if matches!(target, StudioTarget::Score { .. }) {
-            return Err(SyncError::Malformed);
-        }
         let key = key(target);
         if !self.studio_exchange.watches.contains_key(&key)
             && self.studio_exchange.watches.len() >= MAX_WATCHES
@@ -276,7 +271,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             StudioTarget::Flipnote { .. } => {
                 FlipnoteOp::decode_domain(&logical, &domain)?;
             }
-            StudioTarget::Score { .. } => return Err(SyncError::Malformed),
+            StudioTarget::Score { .. } => {
+                ScoreOp::decode_domain(&logical, &domain)?;
+            }
         }
         Ok(signed.author_device)
     }

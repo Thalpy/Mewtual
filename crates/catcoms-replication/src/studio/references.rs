@@ -16,12 +16,28 @@ pub fn operation_blob_cid(op: &DomainOp) -> Result<Option<ContentId>, ReplError>
             IndexOp::decode(&op.body)?;
             Ok(None)
         }
-        DocType::StudioObject => Ok(match FlipnoteOp::decode(&op.body)? {
-            FlipnoteOp::InsertFrame { cid, .. }
-            | FlipnoteOp::ReplaceFrame { cid, .. }
-            | FlipnoteOp::SetExport { cid, .. } => Some(cid),
-            _ => None,
-        }),
+        DocType::StudioObject => {
+            // Vault intent records have logical scope, not current object-family authority.
+            // Select the STATIC union by explicit operation/field discriminants, not a parser
+            // fallback. Every selected grammar still checks all fields and canonical bytes.
+            // This inspection grants no admission or fetch capability; both families' shared
+            // title/recipe shapes have no CIDs, while art blob-bearing shapes stay art-only.
+            let value = parse(&op.body)?;
+            let obj = object(&value)?;
+            let name = text(obj, "op")?;
+            if matches!(name, "set_cell" | "clear_cell")
+                || name == "set_header" && matches!(text(obj, "field")?, "bpm" | "bpb" | "steps")
+            {
+                ScoreOp::decode(&op.body)?;
+                return Ok(None);
+            }
+            Ok(match FlipnoteOp::decode(&op.body)? {
+                FlipnoteOp::InsertFrame { cid, .. }
+                | FlipnoteOp::ReplaceFrame { cid, .. }
+                | FlipnoteOp::SetExport { cid, .. } => Some(cid),
+                _ => None,
+            })
+        }
         _ => Err(ReplError::EpochScope),
     }
 }
@@ -42,8 +58,15 @@ impl StudioTarget {
                 ScoreOp::decode_domain(document, op)?;
                 Ok(None)
             }
-            Self::Index { .. } | Self::Flipnote { .. } => {
+            Self::Index { .. } => {
                 scope(document, op, document.doc_type)?;
+                IndexOp::decode(&op.body)?;
+                Ok(None)
+            }
+            Self::Flipnote { .. } => {
+                // The family-less vault helper admits a static union. A held art target must
+                // FIRST enforce its own complete grammar, not accidentally inherit that union.
+                FlipnoteOp::decode_domain(document, op)?;
                 operation_blob_cid(op)
             }
         }
@@ -86,6 +109,41 @@ mod tests {
     use catcoms_mls::{MlsDevice, ServerGroup};
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
+
+    #[test]
+    fn typed_reference_inspection_does_not_inherit_the_vault_static_union() {
+        let target = StudioTarget::Flipnote {
+            channel: [7; 16],
+            object: [9; 16],
+        };
+        let document = target.document(b"reference-union").unwrap();
+        for body in [
+            ScoreOp::ClearCell { step: 0, row: 0 },
+            ScoreOp::SetCell {
+                step: 0,
+                row: 0,
+                value: ScoreCell::Drum { pad: 0 },
+            },
+            ScoreOp::SetHeader(ScoreHeader::Bpm(120)),
+        ] {
+            let mut op = DomainOp {
+                nonce: [1; 16],
+                doc_type: document.doc_type,
+                logical_key: document.logical_key.clone(),
+                body: body.encode().unwrap(),
+            };
+            assert_eq!(operation_blob_cid(&op).unwrap(), None);
+            assert!(target.operation_blob_cid(&document, &op).is_err());
+            assert!(StudioTarget::Score {
+                channel: [7; 16],
+                object: [9; 16]
+            }
+            .operation_blob_cid(&document, &op)
+            .is_ok());
+            op.body.push(b' ');
+            assert!(operation_blob_cid(&op).is_err());
+        }
+    }
 
     #[test]
     fn retained_sources_and_recovery_keep_sequentially_superseded_and_deleted_pixels() {

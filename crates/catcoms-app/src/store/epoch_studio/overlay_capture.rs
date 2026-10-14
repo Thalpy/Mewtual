@@ -486,7 +486,8 @@ impl ServerStore {
             StudioTarget::Flipnote { .. } => frame_pixels(document, operation)?,
             StudioTarget::Index { .. } => None,
             StudioTarget::Score { .. } => {
-                return Err(invalid("score persistence is not available yet"))
+                ScoreOp::decode_domain(document, operation).map_err(invalid)?;
+                None
             }
         };
         let Some((cid, bytes)) = frame else {

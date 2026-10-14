@@ -1,5 +1,17 @@
 # Mewtual; Handover
 
+## Gate 6 application/wire work in progress (2026-10-14)
+
+The continuation now implements explicit typed `CreateScore` through the existing object-then-
+Index transaction, additive sealed-wrapper family2 and Studio-only query scope selector0x8010.
+Actual logical/physical DocType remains16. Legacy art/Index wrapper and query bytes are unchanged.
+Native `objectKind`, complete score recovery and frontend activation are still being integrated;
+this partial application/wire checkpoint has design review, not final implementation acceptance.
+Three real vault regressions, three query byte/round-trip tests and one typed-reference/static-
+union regression pass. Root strict Clippy passes after moving a test-only module.
+Fresh replication verification at the preceding core boundary passed384unit+49integration tests;
+the final combined backend/native/frontend suites and hosted evidence remain required.
+
 ## Gate 6 stateful score continuation (2026-10-14; not gate acceptance)
 
 The isolated `gate6-typed-score` candidate now adds a bounded Score projection, causal validator,
@@ -16,7 +28,8 @@ An audit found that shared Cargo caches could reuse another worktree's artifacts
 root/native suite assertions are not final verification of these new score changes. Affected root
 and native crate artifacts have been invalidated; fresh final combined suites and hosted Linux
 ambient evidence remain required. Prior focused frontend/score and accepted review findings retain
-their narrower scope. Independent current-diff review is still pending for this stateful slice.
+their narrower scope. Independent current-diff review finds no remaining finding in this bounded
+core slice; it does not accept later native/wire, frame sound, playback or UI integration.
 The freshly rebuilt native diagnostic regression also passes (1/1). The wider replication run
 passes all 384 unit tests from before the last two cap/forgery additions (those additions pass
 in the 24-test focused set); its integration tests are still running, not yet a complete result.

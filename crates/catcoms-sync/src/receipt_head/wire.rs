@@ -125,9 +125,11 @@ fn encode_scoped_query_v1(
                     wire(e.put_bytes(&channel))?;
                     wire(e.put_bytes(&object))?;
                 }
-                // Score family negotiation is not encoded by the legacy StudioObject tag.
-                // Refuse until its explicit wire binding is connected, never serialize as art.
-                StudioTarget::Score { .. } => return Err(SyncError::Malformed),
+                StudioTarget::Score { channel, object } => {
+                    e.put_u16(crate::checkpoint_exchange::studio_scope_tag(target));
+                    wire(e.put_bytes(&channel))?;
+                    wire(e.put_bytes(&object))?;
+                }
             }
             wire(e.put_bytes(&nonce))?;
             Ok(e.finish())
@@ -216,7 +218,6 @@ fn decode_scoped_query_v1(
     if kind != KIND_STUDIO_HEAD || bytes.len() > MAX_QUERY {
         return Err(SyncError::Malformed);
     }
-    use catcoms_replication::studio::StudioTarget;
     let mut d = Decoder::new(bytes);
     if wire(d.get_u8())? != 1 {
         return Err(SyncError::Malformed);
@@ -232,11 +233,7 @@ fn decode_scoped_query_v1(
         .try_into()
         .map_err(|_| SyncError::Malformed)?;
     wire(d.finish())?;
-    let target = match tag {
-        15 if object == [0; 16] => StudioTarget::Index { channel },
-        16 => StudioTarget::Flipnote { channel, object },
-        _ => return Err(SyncError::Malformed),
-    };
+    let target = crate::checkpoint_exchange::studio_scope_from_tag(tag, channel, object)?;
     Ok((CheckpointTarget::Studio(target), nonce))
 }
 
@@ -335,4 +332,66 @@ pub(super) fn decode_response(bytes: &[u8]) -> Result<SignedHeadResponse<'_>, Sy
     }
     wire(d.finish())?;
     Ok((key, signature, answer))
+}
+
+#[cfg(test)]
+mod score_scope_tests {
+    use super::*;
+    use catcoms_replication::studio::StudioTarget;
+    #[test]
+    fn score_head_scope_is_explicit_and_legacy_headers_remain_byte_identical() {
+        for (target, tag, object) in [
+            (StudioTarget::Index { channel: [7; 16] }, 15u16, [0; 16]),
+            (
+                StudioTarget::Flipnote {
+                    channel: [7; 16],
+                    object: [9; 16],
+                },
+                16,
+                [9; 16],
+            ),
+            (
+                StudioTarget::Score {
+                    channel: [7; 16],
+                    object: [9; 16],
+                },
+                0x8010,
+                [9; 16],
+            ),
+        ] {
+            let bytes =
+                encode_scoped_query(CheckpointTarget::Studio(target), b"group", [3; 16], None)
+                    .unwrap();
+            let mut expected = Encoder::new();
+            expected.put_u8(1).put_u16(tag);
+            expected.put_bytes(&[7; 16]).unwrap();
+            expected.put_bytes(&object).unwrap();
+            expected.put_bytes(&[3; 16]).unwrap();
+            assert_eq!(bytes, expected.finish());
+            let decoded = decode_scoped_query(KIND_STUDIO_HEAD, &bytes, b"group").unwrap();
+            assert_eq!(decoded.0, CheckpointTarget::Studio(target));
+            assert_eq!(decoded.1, [3; 16]);
+            assert!(decoded.2.is_none());
+            assert_eq!(
+                decoded.0.doc_type(),
+                if tag == 15 {
+                    DocType::StudioIndex
+                } else {
+                    DocType::StudioObject
+                }
+            );
+            let mut v2 = bytes.clone();
+            v2[0] = 2;
+            v2.push(0);
+            assert_eq!(
+                decode_scoped_query(KIND_STUDIO_HEAD, &v2, b"group")
+                    .unwrap()
+                    .0,
+                decoded.0
+            );
+            let mut bad = bytes;
+            bad[1..3].copy_from_slice(&0x8011u16.to_be_bytes());
+            assert!(decode_scoped_query(KIND_STUDIO_HEAD, &bad, b"group").is_err());
+        }
+    }
 }
