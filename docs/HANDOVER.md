@@ -10,6 +10,19 @@ this bounded checkpoint. `GATE6-NATIVE-EXPORT.md` documents exact contracts. Mai
 SetExport held-byte validation, sound DTO/UI connection and full combined suites; this is not
 Gate6 completion.
 
+## Gate 6 native activation/recovery checkpoint (2026-10-14)
+
+The isolated candidate now routes explicit optional objectKind throughout native document,
+recovery and draft lifecycle/Copy commands. Manual Score choices select authenticated old
+operation ids, re-preview against current fingerprints and author fresh ordinary saves; Restore
+adds only, Copy is explicit replacement/deletion. Local export records require exact held,
+validated and promoted PIXA bytes before durable references. No direct Closing Save/P5 change.
+Root recovery tests pass11/11 and the real export-reference test passes; new native family/Score
+custody tests pass within the still-running broader native Studio set. Strict root and separate
+native all-target/all-feature Clippy pass. Independent actual-diff review finds no remaining
+findings in this bounded checkpoint. Runtime kind probes/two-peer Score integration, production
+UI connection and final combined suites/CI/review are still open; Gate6 is not complete.
+
 ## Gate 6 application/wire work in progress (2026-10-14)
 
 The continuation now implements explicit typed `CreateScore` through the existing object-then-
@@ -54,7 +67,8 @@ publication/readback, GIF and real Sound/Music/export UI wiring remain open. Gat
 bounded checkpoint/recovery and complete export holds. Required authored duration is1..600000ms.
 Art-only checkpoint bytes stay unchanged. See `GATE6-FRAME-SOUND.md` for full record/accessor
 semantics, test evidence and native DTO integration obligation. This is not Gate6 completion;
-native sound omission on remote ingress remains a confirmed MEDIUM pending main integration.
+native sound omission on remote ingress is closed by the reviewed shared DTO correction,
+with actual provisional seed and unready/conflicted SFX regressions. Final integration remains open.
 
 ## Gate 6 typed score contract (2026-10-14; isolated continuation)
 

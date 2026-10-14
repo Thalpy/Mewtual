@@ -4,6 +4,7 @@ use catcoms_app::studio::{
     RecoveryReason, RecoveryTransition, StudioControlAction as Action, StudioControlRequest,
     StudioControlResponse as Response, StudioRecoveryApply, StudioRecoveryDisposition,
     StudioRecoveryItem, StudioRecoveryListing, StudioRecoveryMode, StudioRecoverySummary,
+    StudioScoreHeaderField,
 };
 
 /// Typed, exact-key choices; no renderer-provided historical value or author is accepted.
@@ -18,6 +19,9 @@ pub(crate) enum ChoiceInput {
     ObjectTitle { id: String, value: String },
     ObjectExpiry { id: String, value: String },
     ObjectDeletion { id: String },
+    ScoreCell { step: u16, row: u8, value: String },
+    ScorePatch { patch: String, value: String },
+    ScoreHeader { field: String, value: String },
 }
 impl ChoiceInput {
     pub(super) fn checked(self) -> Result<StudioRecoveryItem, String> {
@@ -44,6 +48,30 @@ impl ChoiceInput {
                 value: hash(&value)?,
             },
             Self::ObjectDeletion { id: element } => I::ObjectDeletion { id: id(&element)? },
+            Self::ScoreCell { step, row, value } => {
+                if step >= SCORE_MAX_STEPS || row >= SCORE_ROWS {
+                    return Err("score coordinate out of range".into());
+                }
+                I::ScoreCell {
+                    step,
+                    row,
+                    value: hash(&value)?,
+                }
+            }
+            Self::ScorePatch { patch, value } => I::ScorePatch {
+                patch: named_hash("score recipe", &patch)?,
+                value: hash(&value)?,
+            },
+            Self::ScoreHeader { field, value } => I::ScoreHeader {
+                field: match field.as_str() {
+                    "title" => StudioScoreHeaderField::Title,
+                    "bpm" => StudioScoreHeaderField::Bpm,
+                    "bpb" => StudioScoreHeaderField::Bpb,
+                    "steps" => StudioScoreHeaderField::Steps,
+                    _ => return Err("unknown score header".into()),
+                },
+                value: hash(&value)?,
+            },
         })
     }
 }
@@ -56,11 +84,14 @@ fn mode(mode: &str) -> Result<StudioRecoveryMode, String> {
 }
 
 #[tauri::command]
+// Keep the shipped command's flat arguments and add only the optional family discriminator.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn studio_recovery_preview(
     state: State<'_, AppState>,
     server: u64,
     channel: String,
     object: Option<String>,
+    object_kind: Option<String>,
     snapshot: String,
     choice: ChoiceInput,
     mode: String,
@@ -68,7 +99,7 @@ pub(crate) async fn studio_recovery_preview(
     invoke_control(
         &state,
         server,
-        target(&channel, object.as_deref())?,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
         Action::Preview {
             snapshot: hash(&snapshot)?,
             item: choice.checked()?,
@@ -113,12 +144,13 @@ pub(crate) async fn studio_recovery_apply(
     server: u64,
     channel: String,
     object: Option<String>,
+    object_kind: Option<String>,
     edit: RecoveryApplyInput,
 ) -> Result<Value, String> {
     invoke_control(
         &state,
         server,
-        target(&channel, object.as_deref())?,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
         Action::Apply(Box::new(edit.checked()?)),
     )
     .await
@@ -145,14 +177,25 @@ pub(super) fn named_hash(noun: &str, value: &str) -> Result<[u8; 32], String> {
         .try_into()
         .map_err(|_| format!("invalid {noun} id"))
 }
-pub(super) fn target(channel: &str, object: Option<&str>) -> Result<StudioTarget, String> {
+/// Family is part of the trusted request identity, never inferred from an operation body or an
+/// Index hint. Omission retains the legacy art contract; Index has no object family at all.
+pub(super) fn target_with_kind(
+    channel: &str,
+    object: Option<&str>,
+    object_kind: Option<&str>,
+) -> Result<StudioTarget, String> {
     let channel = channel_id(channel)?;
-    Ok(match object {
-        Some(object) => StudioTarget::Flipnote {
+    Ok(match (object, object_kind) {
+        (Some(object), None | Some("flipnote")) => StudioTarget::Flipnote {
             channel,
             object: id(object)?,
         },
-        None => StudioTarget::Index { channel },
+        (Some(object), Some("score")) => StudioTarget::Score {
+            channel,
+            object: id(object)?,
+        },
+        (None, None) => StudioTarget::Index { channel },
+        _ => return Err("objectKind must be flipnote or score and requires an object".into()),
     })
 }
 pub(super) async fn invoke_control(
@@ -179,11 +222,12 @@ pub(crate) async fn studio_recovery_list(
     server: u64,
     channel: String,
     object: Option<String>,
+    object_kind: Option<String>,
 ) -> Result<Value, String> {
     invoke_control(
         &state,
         server,
-        target(&channel, object.as_deref())?,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
         Action::List,
     )
     .await
@@ -194,11 +238,12 @@ pub(crate) async fn studio_recovery_restore_pointer(
     server: u64,
     channel: String,
     object: Option<String>,
+    object_kind: Option<String>,
 ) -> Result<Value, String> {
     invoke_control(
         &state,
         server,
-        target(&channel, object.as_deref())?,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
         Action::RestorePointer,
     )
     .await
@@ -209,12 +254,13 @@ pub(crate) async fn studio_recovery_read(
     server: u64,
     channel: String,
     object: Option<String>,
+    object_kind: Option<String>,
     snapshot: String,
 ) -> Result<Value, String> {
     invoke_control(
         &state,
         server,
-        target(&channel, object.as_deref())?,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
         Action::Read {
             snapshot: hash(&snapshot)?,
         },
@@ -227,12 +273,13 @@ pub(crate) async fn studio_recovery_export(
     server: u64,
     channel: String,
     object: Option<String>,
+    object_kind: Option<String>,
     snapshot: String,
 ) -> Result<Value, String> {
     invoke_control(
         &state,
         server,
-        target(&channel, object.as_deref())?,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
         Action::Export {
             snapshot: hash(&snapshot)?,
         },
@@ -245,13 +292,14 @@ pub(crate) async fn studio_recovery_acknowledge(
     server: u64,
     channel: String,
     object: Option<String>,
+    object_kind: Option<String>,
     oldest_snapshot: String,
     staged_snapshot: String,
 ) -> Result<Value, String> {
     invoke_control(
         &state,
         server,
-        target(&channel, object.as_deref())?,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
         Action::Acknowledge {
             oldest_snapshot: hash(&oldest_snapshot)?,
             staged_snapshot: hash(&staged_snapshot)?,
@@ -348,7 +396,7 @@ pub(super) fn response_value(response: Response) -> Result<Value, String> {
         }
         Response::Version(value) => json!({"v":1,"kind":"recoveryVersion","historical":true,
             "version":summary(&value.summary),"channel":u128::from_be_bytes(value.projection.channel()).to_string(),
-            "content":projection_content(&value.projection)}),
+            "group":hex::encode(&value.projection.document().server_id),"content":projection_content(&value.projection)?}),
         Response::Export { snapshot, bytes } => {
             use base64::Engine;
             json!({"v":1,"kind":"recoveryExport","snapshot":hex::encode(snapshot),

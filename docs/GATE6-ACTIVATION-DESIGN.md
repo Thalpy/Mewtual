@@ -55,6 +55,17 @@ ids, previews against the complete current fingerprint, and authors fresh ordina
 under current membership/capacity/lifecycle checks. It never replays old signed authority. Missing
 recipes, conflicts, out-of-current-range cells and cap overflow stay visible and cleanable.
 
+Manual native choices are `scoreCell {step,row,value}`, `scorePatch {patch,value}` and
+`scoreHeader {field,value}` where `value` is a historical source operation id, never a supplied
+musical value. Header fields are title/bpm/bpb/steps. Restore is additive: no existing register
+(including a retained clear or conflict) is overwritten; identical unconflicted content is
+Unchanged. Retained destination-history removals block resurrection. Copy explicitly resolves
+a selected alternative/removal through the ordinary fresh-operation Save gate. Recipes must be
+recovered before notes, and note extent uses current authored steps. Copy may introduce the
+same visible overlap/conflict readiness state as an ordinary edit; export/playback must refuse
+unready content, not silently trim it. Source/destination family, full group and channel remain
+mandatory; manual recovery does not grant old membership or automatic replay authority.
+
 Required tests include legacy wrapper/query byte compatibility; wrong/unknown family and object
 collision rejection; score create/edit/reopen, exact retry and scoped two-member exchange; source
 and recovery enumeration; remote sound ordinary/awaiting/recovery DTO coverage; manual recovery;

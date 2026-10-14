@@ -18,7 +18,7 @@ use catcoms_app::studio::{
     StudioOverlayCopyApply, StudioOverlayCopyPreview, StudioRecoveryDisposition,
     StudioRecoveryMode,
 };
-use recovery::{named_hash, target, ChoiceInput};
+use recovery::{named_hash, target_with_kind, ChoiceInput};
 
 fn mode(mode: &str) -> Result<StudioRecoveryMode, String> {
     match mode {
@@ -36,24 +36,32 @@ fn mode(mode: &str) -> Result<StudioRecoveryMode, String> {
 pub(crate) struct DestinationInput {
     channel: String,
     object: Option<String>,
+    object_kind: Option<String>,
 }
 impl DestinationInput {
     fn checked(&self) -> Result<StudioTarget, String> {
-        target(&self.channel, self.object.as_deref())
+        target_with_kind(
+            &self.channel,
+            self.object.as_deref(),
+            self.object_kind.as_deref(),
+        )
     }
 }
 
 #[tauri::command]
+// Additive family selection preserves the existing flat IPC payload and exact retry contract.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn studio_overlay_copy_preview(
     state: State<'_, AppState>,
     server: u64,
     channel: String,
     object: Option<String>,
+    object_kind: Option<String>,
     destination: DestinationInput,
     choice: ChoiceInput,
     mode: String,
 ) -> Result<Value, String> {
-    let source = target(&channel, object.as_deref())?;
+    let source = target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?;
     let choice = StudioOverlayCopyChoice {
         destination: destination.checked()?,
         item: choice.checked()?,
@@ -134,12 +142,13 @@ pub(crate) async fn studio_overlay_copy_apply(
     server: u64,
     channel: String,
     object: Option<String>,
+    object_kind: Option<String>,
     edit: CopyApplyInput,
 ) -> Result<Value, String> {
     recovery::invoke_control(
         &state,
         server,
-        target(&channel, object.as_deref())?,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
         Action::ApplyOverlayCopy(Box::new(edit.checked()?)),
     )
     .await
@@ -158,11 +167,15 @@ fn disposition(value: StudioRecoveryDisposition) -> &'static str {
 
 pub(super) fn preview_value(v: &StudioOverlayCopyPreview) -> Result<Value, String> {
     let describe = |t: StudioTarget| {
-        json!({"channel":u128::from_be_bytes(t.channel()).to_string(),
+        let mut value = json!({"channel":u128::from_be_bytes(t.channel()).to_string(),
         "object":match t {
             StudioTarget::Index{..} => Value::Null,
             StudioTarget::Flipnote{object,..} | StudioTarget::Score{object,..} => hex::encode(object).into(),
-        }})
+        }});
+        if matches!(t, StudioTarget::Score { .. }) {
+            value["objectKind"] = "score".into();
+        }
+        value
     };
     bounded_view(json!({"v":1,"kind":"overlayCopyPreview",
         "source":describe(v.source),"destination":describe(v.destination),
