@@ -1,0 +1,170 @@
+import { TAKE_PLAYBACK_EVENTS_PER_TICK, type JamTake } from "./jam-contract.ts";
+import { archivalReleaseTailMs, planJamArchivalPlayback, planJamArchivalSeek, type JamArchivalAnimation, type JamArchivalPlan } from "./jam-archival-plan.ts";
+import { JamLatestTaskQueue } from "./jam-publication.ts";
+import type { JamArchivalPlayback, JamPlayResult } from "./jam-engine.ts";
+import { decodePixa } from "./pixa.ts";
+
+/** Current native/UI custody, not metadata from the imported take. Change generation at every ABA edge. */
+export type StudioPlaybackScope = Readonly<{ generation: number; server: number; channel: string; membership: number }>;
+export type StudioPlaybackState = "stopped" | "preparing" | "playing";
+
+/** Small injectable engine seam; production passes the existing JamEngine, never another synth. */
+export interface StudioPlaybackEngine {
+  readonly context: Pick<AudioContext, "state" | "resume">;
+  prepareArchivalPlayback(take: unknown, animation: JamArchivalAnimation | undefined, isCurrent: () => boolean): Promise<JamArchivalPlayback | null>;
+  archivalPlaybackPlan(playback: JamArchivalPlayback): JamArchivalPlan | null;
+  playArchivalEvent(playback: JamArchivalPlayback, index: number, ageMs?: number): JamPlayResult | Promise<JamPlayResult>;
+  revokeArchivalPlayback(playback: JamArchivalPlayback): boolean;
+}
+
+type Active = {
+  capability: JamArchivalPlayback;
+  plan: JamArchivalPlan;
+  generation: number;
+  origin: number;
+  offset: number;
+  next: number;
+  seek: readonly number[];
+  seekNext: number;
+  draining: boolean;
+};
+
+function scopeEqual(a: StudioPlaybackScope | null, b: StudioPlaybackScope | null): boolean {
+  return !!a && !!b && a.generation === b.generation && a.server === b.server && a.channel === b.channel && a.membership === b.membership;
+}
+
+/**
+ * Explicit local playback of retained score/take/.pixa content. It neither fetches nor auto-plays
+ * incoming content. The owning surface calls setScope on leave, lock, navigation, membership and
+ * Deafen edges, and calls tick from one bounded animation/timer loop. There are no hidden timers.
+ * Reopening audio does not resume a revoked playback: another explicit press is required.
+ */
+export class StudioPlaybackController {
+  private scope: StudioPlaybackScope | null = null;
+  private deafened = true;
+  private generation = 0;
+  private readonly preparation = new JamLatestTaskQueue<JamArchivalPlayback | null>();
+  private active: Active | null = null;
+  private stateValue: StudioPlaybackState = "stopped";
+  private lastTick = 0;
+
+  private readonly engine: StudioPlaybackEngine;
+  private readonly nowMs: () => number;
+
+  constructor(engine: StudioPlaybackEngine, nowMs: () => number = () => performance.now()) {
+    this.engine = engine;
+    this.nowMs = nowMs;
+  }
+
+  get state(): StudioPlaybackState { return this.stateValue; }
+  get elapsedMs(): number {
+    const active = this.active;
+    return active ? active.offset + Math.max(0, this.nowMs() - active.origin) : 0;
+  }
+
+  setScope(scope: StudioPlaybackScope | null, deafened: boolean): void {
+    const owned = scope ? { generation: scope.generation, server: scope.server, channel: scope.channel, membership: scope.membership } : null;
+    if (owned && (!Number.isSafeInteger(owned.generation) || owned.generation < 0 || !Number.isSafeInteger(owned.server) || owned.server < 0 ||
+      !Number.isSafeInteger(owned.membership) || owned.membership < 0 || typeof owned.channel !== "string" || owned.channel.length < 1 || owned.channel.length > 256)) {
+      throw new TypeError("invalid studio playback scope");
+    }
+    if (!scopeEqual(this.scope, owned) || this.deafened !== deafened) this.stop();
+    this.scope = owned;
+    this.deafened = deafened;
+  }
+
+  stop(): void {
+    this.generation++;
+    const active = this.active;
+    this.active = null;
+    this.stateValue = "stopped";
+    if (active) this.engine.revokeArchivalPlayback(active.capability);
+  }
+
+  /** Call directly from the local Play gesture; audio resume must not be deferred to a remote callback. */
+  async startTake(take: JamTake, offsetMs = 0): Promise<boolean> { return this.start(take, undefined, offsetMs); }
+
+  /** Byte-capped package decode reuses PIX/take validators before any synthesis is prepared. */
+  async startPixa(bytes: Uint8Array, offsetMs = 0): Promise<boolean> {
+    let packageValue;
+    try { packageValue = decodePixa(bytes); } catch { return false; }
+    return this.start(packageValue.take, { fps: packageValue.fps, frameCount: packageValue.frames.length, sfx: packageValue.sfx }, offsetMs);
+  }
+
+  private async start(take: unknown, animation: JamArchivalAnimation | undefined, offsetMs: number): Promise<boolean> {
+    this.stop();
+    if (!this.scope || this.deafened || !Number.isFinite(offsetMs) || offsetMs < 0) return false;
+    let plan: JamArchivalPlan;
+    try { plan = planJamArchivalPlayback(take, animation); } catch { return false; }
+    if (offsetMs > plan.endMs) return false;
+    const scope = this.scope, generation = this.generation;
+    const current = () => generation === this.generation && !this.deafened && scopeEqual(scope, this.scope);
+    this.stateValue = "preparing";
+    // Invoke synchronously in the gesture turn, then fence both completion and later digests.
+    let resumed: Promise<boolean>;
+    try { resumed = this.engine.context.state === "suspended" ? this.engine.context.resume().then(() => true, () => false) : Promise.resolve(true); }
+    catch { this.stateValue = "stopped"; return false; }
+    let capability: JamArchivalPlayback | null;
+    try {
+      capability = await this.preparation.submit(async () => {
+        if (!await resumed) return null;
+        return current() ? this.engine.prepareArchivalPlayback(plan.take, plan.animation, current) : null;
+      });
+    } catch { capability = null; }
+    if (!capability || !current()) {
+      if (capability) this.engine.revokeArchivalPlayback(capability);
+      if (current()) this.stateValue = "stopped";
+      return false;
+    }
+    const admitted = this.engine.archivalPlaybackPlan(capability);
+    if (!admitted) { this.engine.revokeArchivalPlayback(capability); this.stateValue = "stopped"; return false; }
+    const seek = planJamArchivalSeek(admitted, offsetMs);
+    const origin = this.nowMs();
+    if (!Number.isFinite(origin)) { this.engine.revokeArchivalPlayback(capability); this.stateValue = "stopped"; return false; }
+    this.active = { capability, plan: admitted, generation, origin, offset: offsetMs, next: seek.next, seek: seek.sounding, seekNext: 0, draining: false };
+    this.lastTick = offsetMs;
+    this.stateValue = "playing";
+    return true;
+  }
+
+  /** At most 128 attacks/releases/cleanups per pass, including reconstructed seek voices. */
+  async tick(): Promise<number> {
+    const active = this.active;
+    if (!active || active.draining) return 0;
+    if (!this.scope || this.deafened || active.generation !== this.generation || !this.engine.archivalPlaybackPlan(active.capability)) {
+      this.stop(); return 0;
+    }
+    active.draining = true;
+    let count = 0;
+    // A regressing/invalid clock never replays history or extends playback authority.
+    const readElapsed = () => {
+      const observed = this.elapsedMs;
+      return this.lastTick = Number.isFinite(observed) ? Math.max(this.lastTick, observed) : this.lastTick;
+    };
+    try {
+      while (count < TAKE_PLAYBACK_EVENTS_PER_TICK) {
+        const elapsed = readElapsed();
+        let index: number;
+        if (active.seekNext < active.seek.length) index = active.seek[active.seekNext++];
+        else {
+          if (active.next >= active.plan.events.length || active.plan.events[active.next].ms > elapsed) break;
+          index = active.next++;
+        }
+        const event = active.plan.events[index];
+        count++;
+        // A backgrounded tick must not turn already-ended notes into a new burst. Sequencing and
+        // cleanup still advance; only attacks with future authored hold remain eligible.
+        if (event.kind === "on" && event.offMs! <= elapsed) continue;
+        await this.engine.playArchivalEvent(active.capability, index, event.kind === "on" ? Math.max(0, elapsed - event.ms) : 0);
+        if (this.active !== active || active.generation !== this.generation) return count;
+      }
+      if (active.seekNext >= active.seek.length && active.next >= active.plan.events.length &&
+        readElapsed() >= active.plan.endMs + archivalReleaseTailMs(active.plan) + 5) this.stop();
+      return count;
+    } catch {
+      // Rendering failure is not success and never strands a long archival note.
+      if (this.active === active) this.stop();
+      return count;
+    } finally { active.draining = false; }
+  }
+}

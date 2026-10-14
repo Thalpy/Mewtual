@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { JAM_DRUM_DIGESTS_GLOBAL, JAM_DRUM_DIGESTS_PER_LANE, JAM_DRUM_PENDING_GLOBAL, JAM_DRUM_PENDING_PER_SOURCE, JAM_HELD_PER_PEER, JAM_LEGACY_SESSION_NONCE, JAM_REMOTE_HOLD_MAX_MS, JAM_SESSION_NONCE_HEX_CHARS, JAM_VOICE_DECLICK_SECONDS, type JamPatch } from "./jam-contract.ts";
+import { JAM_DRUM_DIGESTS_GLOBAL, JAM_DRUM_DIGESTS_PER_LANE, JAM_DRUM_PENDING_GLOBAL, JAM_DRUM_PENDING_PER_SOURCE, JAM_HELD_PER_PEER, JAM_LEGACY_SESSION_NONCE, JAM_REMOTE_HOLD_MAX_MS, JAM_SESSION_NONCE_HEX_CHARS, JAM_VOICE_DECLICK_SECONDS, type JamPatch, type JamTake } from "./jam-contract.ts";
 import { drumSeed, JamEngine, type JamDrumSeedInput, type JamPlaybackPatchSet } from "./jam-engine.ts";
 import { jamPatchId } from "./jam-patch.ts";
 import { JamLatestTaskQueue } from "./jam-publication.ts";
@@ -130,6 +130,138 @@ function contextAndEngine(now = { value: 0 }) {
   const engine = new JamEngine(fake as unknown as AudioContext, () => now.value);
   return { fake, engine, now };
 }
+
+function archiveTake(): JamTake {
+  return { v: 1, group: "group", call: "archival-call", met: { bpm: 120, bpb: 4 }, parts: ["author"],
+    lanes: [{ src: 0, sn }], patches: [structuredClone(patch)], events: [
+      { ms: 0, lane: 0, n: 60, on: 1, w: "sawtooth", p: 0, q: 0 },
+      { ms: 600_000, lane: 0, n: 60, on: 0, q: 1 },
+    ] };
+}
+
+test("only a bound archival event gains long hold; audio and allocator use identical remaining time", async () => {
+  const { fake, engine, now } = contextAndEngine();
+  const capability = await engine.prepareArchivalPlayback(archiveTake(), undefined);
+  assert.ok(capability);
+  const before = fake.sources.length;
+  assert.equal((await engine.playArchivalEvent(capability, 0, 500_000)).ok, true);
+  assert.ok(fake.sources.slice(before).every((source) => source.stops[0] === 106.005));
+  now.value = 99_999;
+  assert.deepEqual(engine.sweepWatchdogs(), []);
+  now.value++;
+  assert.equal(engine.sweepWatchdogs().length, 1);
+  assert.equal(engine.snapshot().voices[0].phase, "tail");
+  const live = engine.openSource("live"); engine.beginSourceSession(live, sn);
+  for (const remote of [false, true]) {
+    const start = fake.sources.length;
+    assert.equal(engine.noteOn({ channel: live, sequence: remote ? 1 : 0, note: remote ? 64 : 62, wave: "sine", remote }).ok, true);
+    assert.ok(fake.sources.slice(start).every((source) => source.stops[0] === 30.125));
+  }
+});
+
+test("archival capabilities bind exact engine/event indices and cannot survive replay/replacement/Deafen", async () => {
+  const { engine } = contextAndEngine();
+  const capability = await engine.prepareArchivalPlayback(archiveTake(), undefined); assert.ok(capability);
+  assert.equal((await engine.playArchivalEvent({} as typeof capability, 0)).reason, "channel");
+  assert.equal((await engine.playArchivalEvent(capability, -1)).reason, "invalid");
+  assert.equal((await engine.playArchivalEvent(capability, 99)).reason, "invalid");
+  assert.equal((await engine.playArchivalEvent(capability, 0)).ok, true);
+  assert.equal((await engine.playArchivalEvent(capability, 0)).reason, "sequence");
+  const other = contextAndEngine().engine;
+  assert.equal((await other.playArchivalEvent(capability, 1)).reason, "channel");
+  engine.setDeafened(true); engine.setDeafened(false);
+  assert.equal(engine.snapshot().voices.length, 0);
+  assert.equal(engine.archivalPlaybackPlan(capability), null);
+  assert.equal((await engine.playArchivalEvent(capability, 1)).reason, "channel");
+  const next = await engine.prepareArchivalPlayback(archiveTake(), undefined); assert.ok(next);
+  assert.equal(engine.revokeArchivalPlayback(capability), false);
+  assert.equal((await engine.playArchivalEvent(next, 0, 600_000)).ok, true);
+  assert.equal(engine.snapshot().voices.length, 0, "already-ended seek attack remains silent");
+  assert.equal(engine.revokeArchivalPlayback(next), true);
+  other.dispose(); engine.dispose();
+});
+
+test("overlapping same-pitch frame sounds remain independent and keep their authored deadlines", async () => {
+  const { fake, engine } = contextAndEngine();
+  const input = archiveTake(); input.events = [];
+  const capability = await engine.prepareArchivalPlayback(input, { fps: 24, frameCount: 1, sfx: [
+    { frame: 0, patch: 0, note: 60, durationMs: 60_000 },
+    { frame: 0, patch: 0, note: 60, durationMs: 600_000 },
+  ] }); assert.ok(capability);
+  const plan = engine.archivalPlaybackPlan(capability)!;
+  const attacks = plan.events.flatMap((event, index) => event.kind === "on" ? [index] : []);
+  const before = fake.sources.length;
+  for (const index of attacks) assert.equal((await engine.playArchivalEvent(capability, index)).ok, true);
+  assert.equal(engine.snapshot().voices.length, 2);
+  assert.equal(new Set(engine.snapshot().voices.map((voice) => voice.source)).size, 2);
+  assert.equal(new Set(engine.snapshot().voices.map((voice) => voice.owner)).size, 1, "SFX cannot mint fairness allowance per occurrence");
+  assert.deepEqual([...new Set(fake.sources.slice(before).flatMap((source) => source.stops))], [66.005, 606.005]);
+  const off = plan.events.findIndex((event) => event.kind === "off" && event.lane === plan.events[attacks[0]].lane);
+  assert.equal((await engine.playArchivalEvent(capability, off)).ok, true);
+  assert.deepEqual(engine.snapshot().voices.map((voice) => voice.phase), ["tail", "held"]);
+});
+
+test("short authored hold ends inside attack without jumping to the sustain shelf", async () => {
+  const { fake, engine } = contextAndEngine();
+  const input = archiveTake(); input.events[1].ms = 10;
+  const capability = await engine.prepareArchivalPlayback(input, undefined); assert.ok(capability);
+  const before = fake.nodes.length;
+  assert.equal((await engine.playArchivalEvent(capability, 0)).ok, true);
+  const output = fake.nodes.slice(before).filter((node): node is FakeGain => node instanceof FakeGain)
+    .find((node) => node.gain.events.some(([kind, , time]) => kind === "linear" && time === 6.01));
+  assert.ok(output);
+  const ending = output.gain.events.find(([kind, , time]) => kind === "set" && time === 0.01);
+  assert.ok(ending);
+  assert.ok(Math.abs(ending[1] - 0.11 * 0.01 / 0.85) < 1e-12);
+  assert.ok(!output.gain.events.some(([kind, , time]) => kind === "linear" && time === 0.85));
+});
+
+test("archival preparation owns values before hashing and Deafen ABA cancels its capability", async () => {
+  const fake = new FakeContext();
+  let release!: (id: string) => void;
+  const hashing = new Promise<string>((resolve) => { release = resolve; });
+  const engine = new JamEngine(fake as unknown as AudioContext, () => 0, fake.destination as unknown as AudioNode,
+    undefined, undefined, () => hashing);
+  const input = archiveTake();
+  const preparing = engine.prepareArchivalPlayback(input, undefined);
+  input.events[0].n = 72; input.events[1].ms = 1;
+  release(await jamPatchId(patch));
+  const capability = await preparing; assert.ok(capability);
+  assert.equal(engine.archivalPlaybackPlan(capability)?.events[0].note, 60);
+  assert.equal(engine.archivalPlaybackPlan(capability)?.events[0].holdMs, 600_000);
+  let releaseAgain!: (id: string) => void;
+  const secondFake = new FakeContext();
+  const second = new JamEngine(secondFake as unknown as AudioContext, () => 0, secondFake.destination as unknown as AudioNode,
+    undefined, undefined, () => new Promise((resolve) => { releaseAgain = resolve; }));
+  const stale = second.prepareArchivalPlayback(archiveTake(), undefined);
+  second.setDeafened(true); second.setDeafened(false);
+  releaseAgain(await jamPatchId(patch));
+  assert.equal(await stale, null);
+  assert.equal(second.snapshot().voices.length, 0);
+});
+
+test("archival SFX source lifecycles remain bounded even after release tails are stolen", async () => {
+  const { engine } = contextAndEngine();
+  const input = archiveTake(); input.events = [];
+  const capability = await engine.prepareArchivalPlayback(input, { fps: 1, frameCount: 1,
+    sfx: Array.from({ length: 100 }, () => ({ frame: 0, patch: 0, note: 60, durationMs: 1 })) }); assert.ok(capability);
+  const plan = engine.archivalPlaybackPlan(capability)!;
+  const attacks = plan.events.flatMap((event, index) => event.kind === "on" ? [index] : []);
+  for (const index of attacks.slice(0, 64)) {
+    assert.equal((await engine.playArchivalEvent(capability, index)).ok, true);
+    const off = plan.events.findIndex((event) => event.kind === "off" && event.lane === plan.events[index].lane);
+    assert.equal((await engine.playArchivalEvent(capability, off)).ok, true);
+  }
+  // A live attack steals one release tail, but its old archival bus is still owned until cleanup.
+  const live = engine.openSource("live"); engine.beginSourceSession(live, sn);
+  assert.equal(engine.noteOn({ channel: live, sequence: 0, note: 62, wave: "sine" }).ok, true);
+  assert.equal((await engine.playArchivalEvent(capability, attacks[64])).reason, "room-held");
+  const cleanup = plan.events.findIndex((event) => event.kind === "cleanup" && event.lane === plan.events[attacks[0]].lane);
+  assert.equal((await engine.playArchivalEvent(capability, cleanup)).ok, true);
+  assert.equal((await engine.playArchivalEvent(capability, attacks[65])).ok, true);
+  engine.revokeArchivalPlayback(capability);
+  assert.deepEqual(engine.snapshot().voices.map((voice) => voice.source), ["live"]);
+});
 
 test("validated immutable patches render through one receiver-owned room effect graph", async () => {
   const { fake, engine } = contextAndEngine();

@@ -3569,7 +3569,15 @@ steals the requesting sender's own oldest RELEASING tail first, then the oldest 
 globally; if every voice is genuinely held, the new note is rejected; a held voice is never
 stolen (fairness: stealing must not be a griefing mechanism). Stealing and every teardown path
 disconnect all nodes and cancel all voice-owned scheduled automation, not merely `stop()`. A remote note held
-over 30 s auto-releases (watchdog: a lost note-off may never drone). Repeated note-on for an already
+over 30 s auto-releases (watchdog: a lost note-off may never drone). The separate Gate 6
+`prepareArchivalPlayback` capability binds a complete validated take/SFX log and gives only its
+bound event indices their remaining authored hold, up to 600000 ms; raw local/remote `noteOn`
+keeps the 30-second limit. Audio-clock and allocator deadlines agree. The unconnected
+`StudioPlaybackController` has explicit user-gesture starts, scope/generation cancellation,
+one-running/one-latest preparation and at most 128 combined events per tick. Same-pitch SFX have
+independent lanes but share one bounded engine-owned fairness domain; source cleanup is itself
+scheduled bounded work. See [`GATE6-PLAYBACK.md`](GATE6-PLAYBACK.md) for the integration contract.
+Repeated note-on for an already
 held `(source,note)` is rejected, while a same-pitch note may be retriggered once the prior voice is
 a releasing tail. On an inst-channel reopen the receiver replaces that channel's capability,
 clears that peer's held state, and both sides re-announce state + patch via the existing `onopen`
