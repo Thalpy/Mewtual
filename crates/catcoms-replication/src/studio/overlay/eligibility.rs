@@ -163,6 +163,12 @@ pub enum StudioOverlaySaveRefusal {
     PixelUnpublished,
     PixelInvalid,
     PixelMissing,
+    /// New export authoring has no held content-addressed PIXA package yet.
+    ExportUnpublished,
+    /// Held export bytes disagree with their declaration or the complete PIXA grammar.
+    ExportInvalid,
+    /// The package admitted at S1b disappeared before the durable S3 acceptance.
+    ExportMissing,
     UnconfirmedBranchesPerServer,
     UnconfirmedBytesVaultWide,
     ReferenceCapacity,
@@ -189,7 +195,10 @@ impl StudioOverlaySaveRefusal {
             | R::StaleBranch
             | R::PixelUnpublished
             | R::PixelInvalid
-            | R::PixelMissing => A::NewTicket,
+            | R::PixelMissing
+            | R::ExportUnpublished
+            | R::ExportInvalid
+            | R::ExportMissing => A::NewTicket,
             R::SourceAdopting | R::TransferInProgress | R::Retry => A::SameRequest,
             R::Durable(_)
             | R::NotMember

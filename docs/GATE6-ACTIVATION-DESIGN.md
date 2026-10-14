@@ -47,6 +47,18 @@ blob transfer supplies readback; format validation remains separate from availab
 scope/generation checks fence async UI export/playback work. GIF is local visual output only;
 its bounded encoding/save contract is independently reviewed before its command is registered.
 
+The held-package rule covers new Unconfirmed local authoring too, not only ordinary Open Save.
+Shared Flow S admission derives an owned Frame-PIX or Export-PIXA reference from the exact
+operation, validates/promotes those bytes at S1b, holds the CID throughout detached planning,
+and rechecks verifying content-addressed presence and length at S3 before the intent barrier.
+Successful/uncertain writes transfer protection to conservative durable-reference holds before
+the transient owner is released; cancelled or stale plans release their hold without accepting.
+Export-specific reasons are `ExportUnpublished`, `ExportInvalid` and `ExportMissing`, each with
+the NewTicket action. These are local typed IPC diagnostics, not a persisted or wire format.
+An exact retry of already accepted work remains an acknowledgement before media admission and
+does not require the media or a fresh preview again. Unconfirmed provenance remains explicitly
+non-transferable; this correction grants no native Closing Save/P5 or handoff authority.
+
 ## Recovery and activation
 
 Historical score replay remains manual: absence of a reusable coordinate cannot prove that a
