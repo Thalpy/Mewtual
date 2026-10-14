@@ -394,6 +394,30 @@ async fn studio_actors_new_member_after_index_checkpoint_installs_registry_and_i
     actor_newcomer(StudioTarget::Index { channel: channel() }, false).await;
 }
 
+#[tokio::test]
+async fn studio_score_actors_new_member_installs_registry_score_seed_and_tail() {
+    actor_newcomer(
+        StudioTarget::Score {
+            channel: channel(),
+            object: [8; 16],
+        },
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn studio_score_actors_closing_reopen_resumes_explicit_family_seed_and_tail() {
+    actor_newcomer(
+        StudioTarget::Score {
+            channel: channel(),
+            object: [8; 16],
+        },
+        true,
+    )
+    .await;
+}
+
 /// Deliberately drains production's global pools, so execute this diagnostic alone. It must not
 /// run beside other tests that intentionally exercise those pools. Before `actor_newcomer` gave
 /// each actor its own pools, every variant failed here exactly as the parallel suite sometimes
@@ -731,10 +755,11 @@ async fn actor_newcomer(selected_target: StudioTarget, restart_closing: bool) {
     .await
     .unwrap();
     match selected_target {
-        StudioTarget::Flipnote { .. } if restart_closing => assert_eq!(initial.unwrap().epoch, 0),
-        StudioTarget::Flipnote { .. } => assert!(initial.is_none()),
+        StudioTarget::Flipnote { .. } | StudioTarget::Score { .. } if restart_closing => {
+            assert_eq!(initial.unwrap().epoch, 0)
+        }
+        StudioTarget::Flipnote { .. } | StudioTarget::Score { .. } => assert!(initial.is_none()),
         StudioTarget::Index { .. } => assert_eq!(initial.unwrap().epoch, 0),
-        StudioTarget::Score { .. } => panic!("this fixture only starts art and index workers"),
     };
     // No provider Read and no more newcomer Read/Save. Drive only the existing native-facing
     // worker; neither endpoint can monopolize Server while it waits on the other's response.

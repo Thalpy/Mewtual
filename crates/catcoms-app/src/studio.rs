@@ -193,6 +193,15 @@ fn creation_kind(target: StudioTarget) -> Result<StudioKind, AppError> {
         StudioTarget::Index { .. } => Err(invalid("an index is not an object creation target")),
     }
 }
+/// Select the EXPECTED object family from a validated Index/restore operation. This is routing,
+/// not evidence that the object exists: every caller must independently check its authenticated
+/// sealed wrapper and typed source under this exact family/channel. Never fall back to art.
+pub(crate) fn object_target(channel: [u8; 16], object: [u8; 16], kind: StudioKind) -> StudioTarget {
+    match kind {
+        StudioKind::Flipnote => StudioTarget::Flipnote { channel, object },
+        StudioKind::Score => StudioTarget::Score { channel, object },
+    }
+}
 fn initial_header(target: StudioTarget, title: &str) -> Result<Vec<u8>, AppError> {
     match creation_kind(target)? {
         StudioKind::Flipnote => FlipnoteOp::SetHeader(FlipnoteHeader::Title(title.into()))

@@ -1,5 +1,32 @@
 # Mewtual; Handover
 
+## Gate 6 typed runtime checkpoint (2026-10-14)
+
+The isolated runtime integration propagates exact expected Score/art family through Index
+dependency replay, historical Object restore/copy and P2/H1/H5 handoff. Independently authenticated
+typed sources remain mandatory; same-id claims cannot retag another family. Wrong-family
+historical pointers become bounded manual work, not infinite retries. Open Score graphs survive
+Index refresh. Score's own historical edits still require explicit manual recovery.
+
+Seventeen focused Score tests, eight legacy receiver-replay and six source-reuse tests pass,
+including real actor create/save/clear/exact retry/reopen, signed page catch-up, newcomer
+Registry/Score seed-plus-tail and Closing restart, wrong-family cold/warm refusal, typed
+historical Object preview/actor Apply and H5 disappearance. Scoped app strict all-target/all-feature
+Clippy, root formatting, ambient and diff checks pass. Existing copy (13/13) and handoff eligibility
+(6/6) regression sets also pass. Independent actual-diff inspection is clear, with final bounded
+review confirmation requested. Primary integration owns full backend/native/frontend suites,
+final combined review/CI and remaining UI work. This checkpoint does not close Gate 6.
+
+## Gate 6 native export checkpoint (2026-10-14)
+
+The isolated frame-sound branch adds native actual-byte PIXA validation/publication and
+bounded local visual GIF export. Six Rust validator, one actor publication, four native GIF,
+18frontend PIXA and9permission-chain tests pass; scoped app/native strict Clippy, check0/0,
+format/ambient/diff gates pass. Independent actual-diff review reports no remaining finding in
+this bounded checkpoint. `GATE6-NATIVE-EXPORT.md` documents exact contracts. Main still owns
+SetExport held-byte validation, sound DTO/UI connection and full combined suites; this is not
+Gate6 completion.
+
 ## Gate 6 native activation/recovery checkpoint (2026-10-14)
 
 The isolated candidate now routes explicit optional objectKind throughout native document,
@@ -50,15 +77,6 @@ additions pass in the 24-test focused set). This is not a final combined Gate6 s
 Parallel isolated branches own frame sound state (`gate6-frame-sound`) and authored archival
 playback (`gate6-playback`). Application/native durability, actual-byte export validation,
 publication/readback, GIF and real Sound/Music/export UI wiring remain open. Gate 6 is not closed.
-## Gate 6 native export checkpoint (2026-10-14)
-
-The isolated frame-sound branch adds native actual-byte PIXA validation/publication and
-bounded local visual GIF export. Six Rust validator, one actor publication, four native GIF,
-18frontend PIXA and9permission-chain tests pass; scoped app/native strict Clippy, check0/0,
-format/ambient/diff gates pass. Independent actual-diff review reports no remaining finding in
-this bounded checkpoint. `GATE6-NATIVE-EXPORT.md` documents exact contracts. Main still owns
-SetExport held-byte validation, sound DTO/UI connection and full combined suites; this is not
-Gate6 completion.
 
 ## Gate 6 Flipnote sound core (2026-10-14; isolated checkpoint)
 

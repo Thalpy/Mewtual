@@ -55,6 +55,21 @@ ids, previews against the complete current fingerprint, and authors fresh ordina
 under current membership/capacity/lifecycle checks. It never replays old signed authority. Missing
 recipes, conflicts, out-of-current-range cells and cap overflow stay visible and cleanable.
 
+Index dependencies are different from automatic replay of an object's own edits. The exact
+validated `PutObject.kind` selects an expected art/Score target in Index replay, P2 classification,
+H1/H5 handoff and historical Object restore/copy probes. The sealed wrapper, typed restart unit,
+group, channel and nonempty/installed work then independently establish the source. No Index
+winner/hint retags storage, and there is no parser fallback. Same-id claims of both families
+retain two distinct obligations: one physical wrapper cannot satisfy both. An unavailable or
+wrong-family historical pointer becomes bounded manual work; transient local I/O stays retryable.
+H5 and copy Apply recheck source existence, rather than trusting a previous preview. Existing
+documented header-only copy/H5 checks remain header-only; H1 still full-loads the typed source.
+An Index refresh preserves an already opened Score graph just as it preserves opened art.
+
+Cross-document copy requires the same channel and the same object family. Score-to-Score can
+use the manual planner; art-to-Score, Score-to-art and Index-to-object refuse before fresh intent
+creation. Score operation replay remains manual even though safe Index pointers can be replayed.
+
 Manual native choices are `scoreCell {step,row,value}`, `scorePatch {patch,value}` and
 `scoreHeader {field,value}` where `value` is a historical source operation id, never a supplied
 musical value. Header fields are title/bpm/bpb/steps. Restore is additive: no existing register

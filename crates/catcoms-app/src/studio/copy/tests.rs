@@ -9,8 +9,8 @@ use crate::store::{EpochStudioBudget, StudioDisposalRequestMode, StudioOverlayDi
 use crate::studio::StudioRequest;
 use catcoms_mls::MlsDevice;
 use catcoms_replication::studio::{
-    FlipnoteHeader, FlipnoteOp, IndexOp, StudioDiscardConfirmation, StudioExpiry, StudioKind,
-    StudioOverlaySave,
+    FlipnoteHeader, FlipnoteOp, IndexOp, ScoreHeader, ScoreOp, StudioDiscardConfirmation,
+    StudioExpiry, StudioKind, StudioOverlaySave,
 };
 use catcoms_replication::DomainOp;
 use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
@@ -193,6 +193,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_kind(StudioKind::Flipnote).await
+    }
+
+    async fn with_kind(kind: StudioKind) -> Self {
         let hub = Hub::new();
         let clock = ManualClock::new(1000);
         let mut server = Server::found(
@@ -212,7 +216,7 @@ impl Fixture {
         let put = |object: [u8; 16], title: &str| {
             IndexOp::PutObject {
                 object,
-                kind: StudioKind::Flipnote,
+                kind,
                 title: title.into(),
                 created_by: device,
                 ts: 100,
@@ -221,7 +225,7 @@ impl Fixture {
             .encode()
             .unwrap()
         };
-        // The overlay entry the copy will take: a PutObject naming a Flipnote nobody created.
+        // The overlay entry the copy will take: a PutObject naming an object nobody created.
         let close = closing_branch(
             &mut server,
             &mut store,
@@ -289,24 +293,33 @@ impl Fixture {
 
     /// The Flipnote the overlay entry names, created for real in the same channel.
     fn create_object(&mut self) {
-        let flipnote = StudioTarget::Flipnote {
-            channel: self.index.channel(),
-            object: OBJECT,
+        self.create_object_kind(StudioKind::Flipnote);
+    }
+
+    fn create_object_kind(&mut self, kind: StudioKind) {
+        let target = crate::studio::object_target(self.index.channel(), OBJECT, kind);
+        let body = match kind {
+            StudioKind::Flipnote => {
+                FlipnoteOp::SetHeader(FlipnoteHeader::Title("the real object".into()))
+                    .encode()
+                    .unwrap()
+            }
+            StudioKind::Score => ScoreOp::SetHeader(ScoreHeader::Title("the real Score".into()))
+                .encode()
+                .unwrap(),
         };
         self.server
             .studio_transaction(
                 &mut self.store,
                 SERVER,
                 StudioRequest::Apply {
-                    target: flipnote,
+                    target,
                     epoch_id: catcoms_replication::epoch_zero_id(
                         catcoms_wire::DocType::StudioObject,
                         &OBJECT,
                     ),
                     nonce: [0x33; 16],
-                    body: FlipnoteOp::SetHeader(FlipnoteHeader::Title("the real object".into()))
-                        .encode()
-                        .unwrap(),
+                    body,
                 },
             )
             .unwrap();
@@ -400,6 +413,98 @@ async fn the_copy_probe_refuses_an_object_that_is_missing_or_disappears_before_a
         refused.contains("no longer exists"),
         "the C4 refusal must be the probe's, got: {refused}"
     );
+}
+
+#[tokio::test]
+async fn studio_score_index_copy_probes_exact_family_at_preview_and_apply() {
+    for held in [StudioKind::Flipnote, StudioKind::Score] {
+        let mut f = Fixture::with_kind(StudioKind::Score).await;
+        f.create_object_kind(held);
+        let prepared = f.plan().await;
+        assert_eq!(
+            prepared.plan.disposition(),
+            StudioRecoveryDisposition::Ready
+        );
+        let echo = f.echo(&prepared.plan);
+        let preview = f
+            .server
+            .finish_studio_copy_preview(&mut f.store, SERVER, f.index, prepared)
+            .unwrap();
+        if matches!(held, StudioKind::Flipnote) {
+            assert_eq!(
+                preview.value().disposition,
+                StudioRecoveryDisposition::MissingTarget
+            );
+            let before = f.destination_ops();
+            let error = f.apply(echo).unwrap_err();
+            assert!(
+                error.to_string().contains("no longer exists"),
+                "wrong refusal: {error}"
+            );
+            assert_eq!(
+                f.destination_ops(),
+                before,
+                "wrong-family echo wrote a pointer"
+            );
+        } else {
+            assert_eq!(
+                preview.value().disposition,
+                StudioRecoveryDisposition::Ready
+            );
+            let (request, already) = f.apply(echo).expect("valid Score copy was routed as art");
+            assert!(!already);
+            f.publish(request);
+            let index = f.index;
+            let store = &f.store;
+            f.server.sync.with_registry_context(|g, d, _, _| {
+                let state = store
+                    .load_studio_epoch(SERVER, g, index, d)
+                    .unwrap()
+                    .unwrap();
+                let StudioProjection::Index(p) = state.projection().unwrap() else {
+                    panic!()
+                };
+                assert!(matches!(
+                    p.objects[&OBJECT].creations[0].value.kind,
+                    StudioKind::Score
+                ));
+            });
+        }
+    }
+}
+
+#[test]
+fn studio_score_copy_scope_preserves_family_channel_and_same_document_guards() {
+    let source = StudioTarget::Score {
+        channel: [7; 16],
+        object: [1; 16],
+    };
+    let destination = StudioTarget::Score {
+        channel: [7; 16],
+        object: [2; 16],
+    };
+    assert!(matches!(
+        Node::copy_scope(source, source).unwrap(),
+        PlanScope::SameDocument
+    ));
+    assert!(matches!(
+        Node::copy_scope(source, destination).unwrap(),
+        PlanScope::CrossDocument
+    ));
+    for wrong in [
+        StudioTarget::Flipnote {
+            channel: [7; 16],
+            object: [2; 16],
+        },
+        StudioTarget::Index { channel: [7; 16] },
+        StudioTarget::Score {
+            channel: [8; 16],
+            object: [2; 16],
+        },
+    ] {
+        assert!(Node::copy_scope(source, wrong).is_err());
+        assert!(Node::copy_scope(wrong, source).is_err());
+    }
 }
 
 impl Fixture {
