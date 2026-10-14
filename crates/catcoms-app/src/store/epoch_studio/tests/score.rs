@@ -328,7 +328,11 @@ fn score_open_source_survives_index_refresh_without_retagging_or_cold_restore() 
     );
     assert!(store.studio_source_is_warm(SERVER, &f.group, f.target, &f.device));
     let after_index = crate::store::studio_full_restores_for_test();
-    assert!(after_index >= before);
+    assert_eq!(
+        after_index,
+        before + 1,
+        "the independent cold Index rebuild is expected once"
+    );
     assert_eq!(
         store
             .with_studio_source(SERVER, &f.group, f.target, &f.device, |s| Ok(s.op_count()))

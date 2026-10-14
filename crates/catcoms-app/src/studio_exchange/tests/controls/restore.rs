@@ -708,3 +708,177 @@ async fn studio_recovery_index_object_checks_actual_existence_and_same_channel()
         }
     }
 }
+
+#[tokio::test]
+async fn studio_score_historical_index_object_preview_and_apply_use_exact_authored_kind() {
+    use catcoms_replication::studio::{ScoreHeader, ScoreOp};
+    for held in [None, Some(StudioKind::Flipnote), Some(StudioKind::Score)] {
+        let mut p = Pair::new().await;
+        let index = StudioTarget::Index { channel: channel() };
+        let object = [8; 16];
+        let historical = p.alice.sync.with_registry_context(|g, d, _, _| {
+            let mut source =
+                catcoms_replication::studio::StudioEpoch::new(g, index, d.device_id()).unwrap();
+            source
+                .edit_or_reseal(
+                    d,
+                    g,
+                    &mut rng(),
+                    &domain(
+                        index,
+                        IndexOp::PutObject {
+                            object,
+                            kind: StudioKind::Score,
+                            title: "old indexed Score".into(),
+                            created_by: d.device_id(),
+                            ts: 1,
+                            expiry: StudioExpiry::Never,
+                        }
+                        .encode()
+                        .unwrap(),
+                        1,
+                    ),
+                    1,
+                )
+                .unwrap();
+            source.projection().unwrap()
+        });
+        let logical = index.document(&p.alice.group_id()).unwrap();
+        let saved = snapshot(&historical, 1);
+        let snapshot = saved.id().unwrap();
+        p.a_store
+            .update_epoch_recovery(
+                SERVER,
+                &logical,
+                crate::store::EpochRecoveryAction::Stage(saved),
+                &p.clock,
+                &mut rng(),
+            )
+            .unwrap();
+        if let Some(kind) = held {
+            let target = crate::studio::object_target(channel(), object, kind);
+            let document = target.document(&p.alice.group_id()).unwrap();
+            let body = match kind {
+                StudioKind::Flipnote => {
+                    FlipnoteOp::SetHeader(FlipnoteHeader::Title("actual art".into()))
+                        .encode()
+                        .unwrap()
+                }
+                StudioKind::Score => ScoreOp::SetHeader(ScoreHeader::Title("actual Score".into()))
+                    .encode()
+                    .unwrap(),
+            };
+            p.alice
+                .studio_transaction(
+                    &mut p.a_store,
+                    SERVER,
+                    StudioRequest::Apply {
+                        target,
+                        epoch_id: epoch_zero_id(document.doc_type, &document.logical_key),
+                        nonce: [2; 16],
+                        body,
+                    },
+                )
+                .unwrap();
+        }
+        let result = p.alice.studio_control_transaction(
+            &mut p.a_store,
+            SERVER,
+            StudioControlRequest {
+                target: index,
+                action: Action::Preview {
+                    snapshot,
+                    item: I::Object { id: object },
+                    mode: M::Restore,
+                },
+            },
+        );
+        match held {
+            Some(StudioKind::Flipnote) => {
+                assert!(
+                    result.is_err(),
+                    "a Score claim reinterpreted the art wrapper"
+                );
+                assert_eq!(
+                    p.a_store
+                        .load_epoch_intents(SERVER, &logical)
+                        .unwrap()
+                        .pending()
+                        .len(),
+                    0
+                );
+            }
+            None => {
+                let Response::Preview(preview) = result.unwrap() else {
+                    panic!()
+                };
+                assert_eq!(preview.plan.disposition, D::MissingTarget);
+                assert!(preview.plan.body.is_none());
+                assert!(preview.plan.source_ops.is_empty());
+            }
+            Some(StudioKind::Score) => {
+                let Response::Preview(preview) = result.unwrap() else {
+                    panic!()
+                };
+                assert_eq!(
+                    preview.plan.disposition,
+                    D::Ready,
+                    "valid Score was probed as art"
+                );
+                let edit = StudioRecoveryApply {
+                    snapshot,
+                    item: I::Object { id: object },
+                    mode: M::Restore,
+                    epoch_id: preview.epoch_id,
+                    expected_projection: preview.fingerprint,
+                    nonce: [3; 16],
+                    body: preview.plan.body.unwrap(),
+                };
+                // Apply must take the real actor's ordinary publication path, never the
+                // read-only synchronous control adapter used for preview above.
+                let store = Arc::new(Mutex::new(Some(p.a_store)));
+                let (actor, mut events, task) = crate::spawn(p.alice);
+                let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+                let response = actor
+                    .studio_control_begin(StudioControlRequest {
+                        target: index,
+                        action: Action::Apply(Box::new(edit)),
+                    })
+                    .await
+                    .unwrap()
+                    .execute(StudioVaultLease::new(
+                        store.clone().try_lock_owned().unwrap(),
+                        SERVER,
+                        (),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    response,
+                    Response::Applied {
+                        already_saved: false,
+                        ..
+                    }
+                ));
+                let view = super::super::actor_save::save(
+                    &actor,
+                    &store,
+                    StudioRequest::Read { target: index },
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let StudioProjection::Index(current) = view.projection else {
+                    panic!()
+                };
+                assert!(matches!(
+                    current.objects[&object].creations[0].value.kind,
+                    StudioKind::Score
+                ));
+                actor.shutdown().await;
+                task.await.unwrap();
+                drain.await.unwrap();
+            }
+        }
+    }
+}

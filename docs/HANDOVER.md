@@ -1,5 +1,22 @@
 # Mewtual; Handover
 
+## Gate 6 typed runtime checkpoint (2026-10-14)
+
+The isolated runtime integration propagates exact expected Score/art family through Index
+dependency replay, historical Object restore/copy and P2/H1/H5 handoff. Independently authenticated
+typed sources remain mandatory; same-id claims cannot retag another family. Wrong-family
+historical pointers become bounded manual work, not infinite retries. Open Score graphs survive
+Index refresh. Score's own historical edits still require explicit manual recovery.
+
+Seventeen focused Score tests, eight legacy receiver-replay and six source-reuse tests pass,
+including real actor create/save/clear/exact retry/reopen, signed page catch-up, newcomer
+Registry/Score seed-plus-tail and Closing restart, wrong-family cold/warm refusal, typed
+historical Object preview/actor Apply and H5 disappearance. Scoped app strict all-target/all-feature
+Clippy, root formatting, ambient and diff checks pass. Existing copy and handoff regression sets
+are running at this checkpoint; independent actual-diff inspection is clear, with final bounded
+review confirmation requested. Primary integration owns full backend/native/frontend suites,
+final combined review/CI and remaining UI work. This checkpoint does not close Gate 6.
+
 ## Gate 6 native export checkpoint (2026-10-14)
 
 The isolated frame-sound branch adds native actual-byte PIXA validation/publication and

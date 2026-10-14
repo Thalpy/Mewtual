@@ -180,7 +180,7 @@ fn studio_score_index_capture_and_commit_transfer_only_while_typed_source_exists
             &mut WriteHooks::None,
         );
         if disappeared {
-            let error = result.err().expect("H5 published a dangling Score pointer");
+            let error = result.expect_err("H5 published a dangling Score pointer");
             assert!(
                 error.to_string().contains("unavailable Score"),
                 "wrong refusal: {error}"
