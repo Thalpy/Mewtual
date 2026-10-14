@@ -221,7 +221,7 @@ export class StudioStore {
         if (!root.frame[op.frame]) throw new StudioError("no such frame");
         if (!root.sfx[op.sfx] && Object.keys(root.sfx).length >= this.caps.sfx) throw new StudioError("too many sfx");
         if (!Number.isInteger(op.note) || op.note < 0 || op.note > 127) throw new StudioError("note range");
-        if (!Number.isInteger(op.duration_ms) || op.duration_ms < 1 || op.duration_ms > 600000) throw new StudioError("duration range");
+        if (!Number.isSafeInteger(op.duration_ms) || op.duration_ms < 1 || op.duration_ms > 600_000) throw new StudioError("sound duration range");
         root.sfx[op.sfx] = { fr: op.frame, p: op.patch, n: op.note, duration_ms: op.duration_ms };
         break;
       case "remove_sfx":

@@ -1335,7 +1335,7 @@
                   {#if inspected === v.snapshot}
                     {#if inspectedVersion}
                       {@const c = inspectedVersion.content}
-                      <p class="micro wrap">{#if c.kind === "flipnote"}title "{c.title?.selected.value ?? ""}" · {c.fps?.selected.value ?? 12} fps · {c.timeline.length} frames · {Object.keys(c.tombstones).length} deleted · {fmtKib(c.declaredFrameBytes)} declared{:else}index · {Object.keys(c.objects).length} entries · {Object.keys(c.overflow).length} overflow · {Object.keys(c.deletedObjects).length} deleted{/if} · historical, not the current view</p>
+                      <p class="micro wrap">{#if c.kind === "flipnote"}title "{c.title?.selected.value ?? ""}" · {c.fps?.selected.value ?? 12} fps · {c.timeline.length} frames · {Object.keys(c.tombstones).length} deleted · {fmtKib(c.declaredFrameBytes)} declared{:else if c.kind === "score"}score "{c.title?.selected.value ?? ""}" · {c.bpm?.selected.value ?? 120} BPM · {Object.keys(c.cells).length} retained cell slots{:else}index · {Object.keys(c.objects).length} entries · {Object.keys(c.overflow).length} overflow · {Object.keys(c.deletedObjects).length} deleted{/if} · historical, not the current view</p>
                     {:else}
                       <p class="micro wrap">reading…</p>
                     {/if}
