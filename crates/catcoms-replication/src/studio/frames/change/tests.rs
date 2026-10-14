@@ -135,6 +135,574 @@ fn merge(base: &AutoCommit, changes: &[(DomainOp, Change)]) -> AutoCommit {
     doc
 }
 
+fn sound_patch() -> crate::studio::StudioPatch {
+    crate::studio::StudioPatch::new(&serde_json::json!({"v":1,"o":[{"w":0,"t":0,"c":0,"l":100}],"e":{"a":0,"d":0,"s":100,"r":500},"f":{"m":0,"c":18000,"q":0,"e":0},"l":{"r":1,"d":0,"t":0},"x":{"c":0,"d":0,"r":0}})).unwrap()
+}
+fn set_sound(sfx: u128, duration_ms: u32) -> FlipnoteOp {
+    FlipnoteOp::SetSfx {
+        sfx: id(sfx),
+        frame: id(1),
+        patch: sound_patch().id(),
+        note: 60,
+        duration_ms,
+    }
+}
+fn sound_base() -> AutoCommit {
+    let mut base = empty(&author(1));
+    accept(&mut base, 1, &insert(1, None), 1);
+    let descriptor = sound_patch();
+    accept(
+        &mut base,
+        1,
+        &FlipnoteOp::SetPatch {
+            patch: descriptor.id(),
+            descriptor,
+        },
+        2,
+    );
+    base
+}
+
+#[test]
+fn frame_sound_authored_duration_upsert_remove_and_hash_bounds() {
+    let mut doc = sound_base();
+    accept(&mut doc, 1, &set_sound(1, 600_000), 3);
+    accept(&mut doc, 1, &set_sound(1, 1), 4);
+    let projection = read(&doc);
+    assert!(matches!(
+        projection.sound.sfx()[&id(1)].value,
+        FlipnoteOp::SetSfx { duration_ms: 1, .. }
+    ));
+    assert!(projection
+        .sound_readiness()
+        .unwrap()
+        .missing_patches
+        .is_empty());
+    accept(&mut doc, 1, &FlipnoteOp::RemoveSfx { sfx: id(1) }, 5);
+    assert!(read(&doc).sound.sfx().is_empty());
+    assert!(
+        placement(&read(&doc), &set_sound(1, 500)).is_err(),
+        "retained deletion blocks id reuse"
+    );
+    for duration_ms in [0, 600_001, u32::MAX] {
+        assert!(set_sound(2, duration_ms).encode().is_err());
+    }
+    let mut missing: serde_json::Value =
+        serde_json::from_slice(&set_sound(2, 500).encode().unwrap()).unwrap();
+    missing.as_object_mut().unwrap().remove("duration_ms");
+    assert!(FlipnoteOp::decode(&crate::studio::canonical(&missing).unwrap()).is_err());
+    let descriptor = sound_patch();
+    assert!(FlipnoteOp::SetPatch {
+        patch: [0; 32],
+        descriptor
+    }
+    .encode()
+    .is_err());
+}
+
+#[test]
+fn frame_sound_removal_wins_raw_set_and_readd_consumes_only_observed_values() {
+    let mut base = sound_base();
+    accept(&mut base, 1, &set_sound(1, 500), 3);
+    let remove = domain(
+        &logical(),
+        &FlipnoteOp::RemovePatch {
+            patch: sound_patch().id(),
+        },
+        4,
+    );
+    let (_, remove_change) = draft(&base, &logical(), &remove, &author(2), 1234);
+    let set = domain(
+        &logical(),
+        &FlipnoteOp::SetPatch {
+            patch: sound_patch().id(),
+            descriptor: sound_patch(),
+        },
+        5,
+    );
+    let (_, set_change) = draft(&base, &logical(), &set, &author(250), 1234);
+    let mut combined = merge(
+        &base,
+        &[
+            (remove.clone(), remove_change.clone()),
+            (set.clone(), set_change.clone()),
+        ],
+    );
+    let reversed = merge(&base, &[(set, set_change), (remove, remove_change)]);
+    assert_eq!(read(&combined), read(&reversed));
+    let p = read(&combined);
+    let raw = &p.sound.records[&format!("p/{}", hex(&sound_patch().id()))];
+    assert!(
+        matches!(raw.selected.value, FlipnoteOp::SetPatch { .. }),
+        "regression must exercise a raw Set winner"
+    );
+    assert!(p.sound.patches().is_empty());
+    assert!(p
+        .sound_readiness()
+        .unwrap()
+        .missing_patches
+        .contains(&id(1)));
+    accept(
+        &mut combined,
+        1,
+        &FlipnoteOp::SetPatch {
+            patch: sound_patch().id(),
+            descriptor: sound_patch(),
+        },
+        6,
+    );
+    assert_eq!(read(&combined).sound.patches().len(), 1);
+
+    let remove_sfx = domain(&logical(), &FlipnoteOp::RemoveSfx { sfx: id(1) }, 7);
+    let (_, deletion) = draft(&base, &logical(), &remove_sfx, &author(2), 1234);
+    let edit_sfx = domain(&logical(), &set_sound(1, 600_000), 8);
+    let (_, edit) = draft(&base, &logical(), &edit_sfx, &author(250), 1234);
+    assert!(
+        read(&merge(&base, &[(remove_sfx, deletion), (edit_sfx, edit)]))
+            .sound
+            .sfx()
+            .is_empty()
+    );
+}
+
+#[test]
+fn frame_sound_readd_does_not_consume_an_unseen_concurrent_removal() {
+    let base = sound_base();
+    let ra = domain(
+        &logical(),
+        &FlipnoteOp::RemovePatch {
+            patch: sound_patch().id(),
+        },
+        20,
+    );
+    let (branch_a, ca) = draft(&base, &logical(), &ra, &author(2), 1234);
+    let rb = domain(
+        &logical(),
+        &FlipnoteOp::RemovePatch {
+            patch: sound_patch().id(),
+        },
+        21,
+    );
+    let (_, cb) = draft(&base, &logical(), &rb, &author(3), 1234);
+    let readd = domain(
+        &logical(),
+        &FlipnoteOp::SetPatch {
+            patch: sound_patch().id(),
+            descriptor: sound_patch(),
+        },
+        22,
+    );
+    let (_, cr) = draft(&branch_a, &logical(), &readd, &author(4), 1234);
+    let combined = merge(&base, &[(ra, ca), (rb, cb), (readd, cr)]);
+    assert!(
+        read(&combined).sound.patches().is_empty(),
+        "readd observed only one of two concurrent removals"
+    );
+}
+
+#[test]
+fn frame_sound_concurrent_export_candidates_and_removal_keep_all_content_holds() {
+    let base = sound_base();
+    let export = |cid| FlipnoteOp::SetExport {
+        export: id(8),
+        cid: [cid; 32],
+        bytes: 100,
+        expiry: crate::studio::StudioExpiry::Never,
+    };
+    let a = domain(&logical(), &export(8), 30);
+    let (_, ca) = draft(&base, &logical(), &a, &author(2), 1234);
+    let b = domain(&logical(), &export(9), 31);
+    let (_, cb) = draft(&base, &logical(), &b, &author(3), 1234);
+    let mut combined = merge(&base, &[(a, ca), (b, cb)]);
+    let p = read(&combined);
+    assert_eq!(p.sound.exports().len(), 1);
+    assert!(p.sound_readiness().unwrap().conflicts);
+    let projected = crate::studio::StudioProjection::Flipnote(Box::new(p));
+    assert_eq!(
+        crate::studio::references::projection_cids(&projected),
+        BTreeSet::from([[1; 32], [8; 32], [9; 32]])
+    );
+    accept(
+        &mut combined,
+        1,
+        &FlipnoteOp::RemoveExport { export: id(8) },
+        32,
+    );
+    let p = read(&combined);
+    assert!(p.sound.exports().is_empty());
+    assert!(placement(&p, &export(10)).is_err());
+    assert_eq!(
+        crate::studio::references::projection_cids(&crate::studio::StudioProjection::Flipnote(
+            Box::new(p)
+        )),
+        BTreeSet::from([[1; 32], [8; 32], [9; 32]])
+    );
+}
+
+#[test]
+fn frame_sound_checks_sender_frontier_and_retains_concurrent_invalidated_reference() {
+    let mut base = empty(&author(1));
+    accept(&mut base, 1, &insert(1, None), 1);
+    let operation = domain(&logical(), &set_sound(1, 500), 10);
+    let (_, invalid) = raw(
+        &base,
+        &logical(),
+        &operation,
+        &author(2),
+        1234,
+        (None, None),
+    );
+    let mut receiver = base.clone();
+    accept(
+        &mut receiver,
+        1,
+        &FlipnoteOp::SetPatch {
+            patch: sound_patch().id(),
+            descriptor: sound_patch(),
+        },
+        2,
+    );
+    assert!(
+        validate_frame_change(&logical(), CHANNEL, 0, &operation, &invalid, &receiver).is_err(),
+        "receiver-only patch cannot grant authority"
+    );
+    let base = sound_base();
+    let (_, sound) = draft(&base, &logical(), &operation, &author(2), 1234);
+    let removal = domain(&logical(), &FlipnoteOp::RemoveFrame { frame: id(1) }, 11);
+    let (_, removed) = draft(&base, &logical(), &removal, &author(3), 1234);
+    let p = read(&merge(&base, &[(removal, removed), (operation, sound)]));
+    assert_eq!(
+        p.sound.sfx().len(),
+        1,
+        "valid concurrent sound evidence is not silently deleted"
+    );
+    assert!(p.sound_readiness().unwrap().missing_frames.contains(&id(1)));
+}
+
+#[test]
+fn frame_sound_seed_recovery_preserve_unlink_deletion_exports_and_prevent_resurrection() {
+    let mut doc = sound_base();
+    accept(&mut doc, 1, &set_sound(1, 600_000), 3);
+    accept(&mut doc, 1, &FlipnoteOp::RemoveSfx { sfx: id(1) }, 4);
+    accept(
+        &mut doc,
+        1,
+        &FlipnoteOp::RemovePatch {
+            patch: sound_patch().id(),
+        },
+        5,
+    );
+    accept(
+        &mut doc,
+        1,
+        &FlipnoteOp::SetHeader(FlipnoteHeader::Score(None)),
+        6,
+    );
+    accept(
+        &mut doc,
+        1,
+        &FlipnoteOp::SetExport {
+            export: id(8),
+            cid: [8; 32],
+            bytes: 123,
+            expiry: crate::studio::StudioExpiry::At(0),
+        },
+        7,
+    );
+    accept(&mut doc, 1, &FlipnoteOp::RemoveExport { export: id(8) }, 8);
+    let p = read(&doc);
+    let bytes = p
+        .encode_snapshot(crate::epoch::MAX_RECOVERY_SNAPSHOT_BYTES)
+        .unwrap();
+    assert_eq!(
+        FlipnoteFrameProjection::decode_snapshot(&logical(), CHANNEL, 0, &bytes).unwrap(),
+        p
+    );
+    assert!(FlipnoteFrameProjection::decode_snapshot(
+        &logical(),
+        CHANNEL,
+        0,
+        &bytes[..bytes.len() - 1]
+    )
+    .is_err());
+    assert!(p.checkpoint_omits_evidence().unwrap());
+    let seed = p.checkpoint([9; 32]).unwrap();
+    let mut next = AutoCommit::new();
+    next.apply_changes([Change::from_bytes(seed.bytes().to_vec()).unwrap()])
+        .unwrap();
+    let projected = FlipnoteFrameProjection::read(&logical(), CHANNEL, 1, &next).unwrap();
+    assert!(projected.sound.patches().is_empty());
+    assert!(projected.sound.sfx().is_empty());
+    assert!(projected.sound.exports().is_empty());
+    assert!(
+        projected.sound.score().is_some(),
+        "explicit unlink retains provenance despite silence"
+    );
+    let projection = crate::studio::StudioProjection::Flipnote(Box::new(p));
+    assert!(
+        crate::studio::references::projection_cids(&projection).contains(&[8; 32]),
+        "deleted export still pins retained bytes"
+    );
+}
+
+#[test]
+fn frame_sound_post_seed_values_override_fallback_and_cannot_reuse_source_nonce() {
+    let mut doc = sound_base();
+    accept(&mut doc, 1, &set_sound(1, 500), 3);
+    let seed = read(&doc).checkpoint([4; 32]).unwrap();
+    let mut next = empty(&author(1));
+    next.apply_changes([Change::from_bytes(seed.bytes().to_vec()).unwrap()])
+        .unwrap();
+    for (nonce, accepted) in [(3, false), (4, true)] {
+        let operation = domain(&logical(), &set_sound(1, 600_000), nonce);
+        let projected = FlipnoteFrameProjection::read(&logical(), CHANNEL, 1, &next).unwrap();
+        let prepared = prepare(&projected, &operation, &author(1), 1234).unwrap();
+        let mut candidate = next
+            .clone()
+            .with_actor(ActorId::from(author(1).as_bytes().to_vec()));
+        prepared.write(&mut candidate).unwrap();
+        candidate
+            .put(
+                ROOT,
+                format!("_p1/op/{}", hex(&operation.id(&author(1)))),
+                1u64,
+            )
+            .unwrap();
+        candidate.commit();
+        let change = candidate.get_last_local_change().unwrap();
+        assert_eq!(
+            validate_frame_change(&logical(), CHANNEL, 1, &operation, &change, &next).is_ok(),
+            accepted
+        );
+        if accepted {
+            next = candidate;
+        }
+    }
+    let projected = FlipnoteFrameProjection::read(&logical(), CHANNEL, 1, &next).unwrap();
+    let selected = projected.sound.sfx()[&id(1)];
+    assert!(matches!(
+        selected.value,
+        FlipnoteOp::SetSfx {
+            duration_ms: 600_000,
+            ..
+        }
+    ));
+    assert!(projected.sound.records[&format!("s/{}", hex(&id(1)))]
+        .conflicts
+        .is_empty());
+}
+
+#[test]
+fn frame_sound_mutable_pred_sets_cannot_hide_a_concurrent_removal() {
+    let base = sound_base();
+    let a = domain(
+        &logical(),
+        &FlipnoteOp::RemovePatch {
+            patch: sound_patch().id(),
+        },
+        10,
+    );
+    let (_, ac) = draft(&base, &logical(), &a, &author(2), 1234);
+    let b = domain(
+        &logical(),
+        &FlipnoteOp::SetPatch {
+            patch: sound_patch().id(),
+            descriptor: sound_patch(),
+        },
+        11,
+    );
+    let (_, bc) = draft(&base, &logical(), &b, &author(3), 1234);
+    let combined = merge(&base, &[(a, ac), (b, bc)]);
+    let readd = domain(
+        &logical(),
+        &FlipnoteOp::SetPatch {
+            patch: sound_patch().id(),
+            descriptor: sound_patch(),
+        },
+        12,
+    );
+    let (_, good) = draft(&combined, &logical(), &readd, &author(1), 1234);
+    let key = format!("p/{}", hex(&sound_patch().id()));
+    let mut decoded = good.decode();
+    let op = decoded
+        .operations
+        .iter_mut()
+        .find(|op| matches!(&op.key, Key::Map(k) if k.as_str() == key))
+        .unwrap();
+    assert_eq!(op.pred.len(), 2);
+    op.pred = vec![op.pred.iter().next().unwrap().clone()].into();
+    assert!(validate_frame_change(
+        &logical(),
+        CHANNEL,
+        0,
+        &readd,
+        &Change::from(decoded),
+        &combined
+    )
+    .is_err());
+}
+
+fn public_sound_record(p: &mut FlipnoteFrameProjection, op: FlipnoteOp, nonce: u128) {
+    let domain = domain(p.document(), &op, nonce);
+    let source = FrameSource {
+        op_id: domain.id(&author(1)),
+        author: author(1),
+        nonce: domain.nonce,
+        ts: 1234,
+    };
+    let key = sound::key(&op, &source.op_id).unwrap().0;
+    p.sound.records.insert(
+        key,
+        FrameRegister {
+            selected: FrameValue { source, value: op },
+            conflicts: vec![],
+        },
+    );
+}
+
+#[test]
+fn frame_sound_optional_trailer_rejects_independent_malformed_framing_and_source_reuse() {
+    use crate::studio::snapshot::Writer;
+    let mut doc = empty(&author(1));
+    accept(&mut doc, 1, &insert(1, None), 1);
+    let p = read(&doc);
+    let art = p
+        .encode_snapshot(crate::epoch::MAX_RECOVERY_SNAPSHOT_BYTES)
+        .unwrap();
+    for suffix in [
+        vec![1, 0, 0, 0, 0],
+        vec![2, 0, 0, 0, 0],
+        vec![1, 255, 255, 255, 255],
+    ] {
+        let mut bytes = art.clone();
+        bytes.extend(suffix);
+        assert!(FlipnoteFrameProjection::decode_snapshot(&logical(), CHANNEL, 0, &bytes).is_err());
+    }
+    let op = domain(
+        &logical(),
+        &FlipnoteOp::SetHeader(FlipnoteHeader::Score(None)),
+        10,
+    );
+    let record = encode_record(&op, &author(1), 1234, None, None).unwrap();
+    let mut suffix = Writer::new(crate::epoch::MAX_RECOVERY_SNAPSHOT_BYTES);
+    suffix.byte(1).unwrap();
+    suffix.count(2).unwrap();
+    for _ in 0..2 {
+        suffix.bytes(b"h/score").unwrap();
+        suffix.count(0).unwrap();
+        suffix.bytes(&record).unwrap();
+    }
+    let mut duplicate = art.clone();
+    duplicate.extend(suffix.finish());
+    assert!(FlipnoteFrameProjection::decode_snapshot(&logical(), CHANNEL, 0, &duplicate).is_err());
+    let mut p = p;
+    public_sound_record(
+        &mut p,
+        FlipnoteOp::SetHeader(FlipnoteHeader::Score(None)),
+        10,
+    );
+    let valid = p
+        .encode_snapshot(crate::epoch::MAX_RECOVERY_SNAPSHOT_BYTES)
+        .unwrap();
+    for cut in art.len() + 1..valid.len() {
+        assert!(
+            FlipnoteFrameProjection::decode_snapshot(&logical(), CHANNEL, 0, &valid[..cut])
+                .is_err(),
+            "trailer truncation {cut}"
+        );
+    }
+    public_sound_record(
+        &mut p,
+        FlipnoteOp::RemovePatch {
+            patch: sound_patch().id(),
+        },
+        10,
+    );
+    assert!(
+        p.encode_snapshot(crate::epoch::MAX_RECOVERY_SNAPSHOT_BYTES)
+            .is_err(),
+        "one source cannot appear under two sound bodies"
+    );
+    p.sound.records.clear();
+    public_sound_record(
+        &mut p,
+        FlipnoteOp::SetHeader(FlipnoteHeader::Score(None)),
+        1,
+    );
+    assert!(
+        p.encode_snapshot(crate::epoch::MAX_RECOVERY_SNAPSHOT_BYTES)
+            .is_err(),
+        "sound source cannot reuse an art source"
+    );
+    assert!(!format!("{:?}", p.sound_readiness().unwrap()).contains(&hex(&id(1))));
+}
+
+#[test]
+fn frame_sound_capacity_flags_preserve_every_export_and_exact_seed_byte_preflight() {
+    let mut p = read(&sound_base());
+    for n in 1..=4097 {
+        public_sound_record(&mut p, set_sound(n, 600_000), 100 + n);
+    }
+    for n in 1..=9 {
+        public_sound_record(
+            &mut p,
+            FlipnoteOp::SetExport {
+                export: id(n),
+                cid: [n as u8; 32],
+                bytes: 123,
+                expiry: crate::studio::StudioExpiry::Never,
+            },
+            5000 + n,
+        );
+    }
+    let readiness = p.sound_readiness().unwrap();
+    assert_eq!(readiness.sfx_overflow, BTreeSet::from([id(4097)]));
+    assert_eq!(readiness.export_overflow, BTreeSet::from([id(9)]));
+    let payload = p
+        .encode_snapshot(crate::epoch::MAX_RECOVERY_SNAPSHOT_BYTES)
+        .unwrap();
+    assert_eq!(p.encode_snapshot(payload.len()).unwrap(), payload);
+    assert!(matches!(
+        p.encode_snapshot(payload.len() - 1),
+        Err(ReplError::EpochBound)
+    ));
+    let seed = p.checkpoint([1; 32]).unwrap();
+    assert!(seed.bytes().len() < MAX_CHECKPOINT_BYTES);
+    let mut next = AutoCommit::new();
+    next.apply_changes([Change::from_bytes(seed.bytes().to_vec()).unwrap()])
+        .unwrap();
+    let compact = FlipnoteFrameProjection::read(&logical(), CHANNEL, 1, &next).unwrap();
+    assert_eq!(compact.sound.sfx().len(), FLIPNOTE_MAX_SFX);
+    assert_eq!(compact.sound.exports().len(), FLIPNOTE_MAX_EXPORTS);
+    assert!(p.checkpoint_omits_evidence().unwrap());
+    let projection = crate::studio::StudioProjection::Flipnote(Box::new(p.clone()));
+    assert_eq!(
+        crate::studio::references::projection_cids(&projection).len(),
+        9
+    );
+    let t = crate::studio::StudioTarget::Flipnote {
+        channel: CHANNEL,
+        object: [9; 16],
+    };
+    let operation = domain(&logical(), &set_sound(4098, 500), 9000);
+    assert!(t.local_policy(&projection, &operation, &author(1)).is_err());
+    let cleanup = domain(&logical(), &FlipnoteOp::RemoveSfx { sfx: id(4097) }, 9001);
+    assert!(t.local_policy(&projection, &cleanup, &author(1)).is_ok());
+    let mut damaged = p;
+    damaged
+        .sound
+        .records
+        .values_mut()
+        .next()
+        .unwrap()
+        .selected
+        .source
+        .op_id = [0; 32];
+    assert!(damaged
+        .encode_snapshot(crate::epoch::MAX_RECOVERY_SNAPSHOT_BYTES)
+        .is_err());
+}
+
 #[test]
 fn frame_change_sequential_placement_and_art_operations_preserve_exact_intent() {
     let mut doc = empty(&author(1));
@@ -590,11 +1158,10 @@ fn frame_change_exact_metadata_and_root_mutations_reject_tampering() {
             "mode {mode}"
         );
     }
-    // A sound/score/export body is statically valid but not supported by this art validator.
+    // Sound removals still require a live target at the sender frontier. Explicit score unlink
+    // and removal of an absent reusable patch are now valid intent, tested in frame_sound_*.
     for operation in [
-        FlipnoteOp::SetHeader(FlipnoteHeader::Score(None)),
         FlipnoteOp::RemoveSfx { sfx: id(1) },
-        FlipnoteOp::RemovePatch { patch: [1; 32] },
         FlipnoteOp::RemoveExport { export: id(1) },
     ] {
         let unsupported = domain(&logical(), &operation, 1);

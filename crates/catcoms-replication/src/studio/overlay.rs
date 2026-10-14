@@ -346,6 +346,7 @@ impl BasisData {
         e.put_u8(match self.target {
             StudioTarget::Index { .. } => 0,
             StudioTarget::Flipnote { .. } => 1,
+            StudioTarget::Score { .. } => 2,
         });
         e.put_bytes(&self.target.channel())
             .map_err(|_| ReplError::EpochBound)?;
@@ -719,6 +720,15 @@ impl StudioOverlay {
         let target = match (kind, ledger.document().doc_type) {
             (0, DocType::StudioIndex) => StudioTarget::Index { channel },
             (1, DocType::StudioObject) => StudioTarget::Flipnote {
+                channel,
+                object: ledger
+                    .document()
+                    .logical_key
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| ReplError::EpochScope)?,
+            },
+            (2, DocType::StudioObject) => StudioTarget::Score {
                 channel,
                 object: ledger
                     .document()

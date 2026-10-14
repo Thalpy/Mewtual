@@ -54,7 +54,7 @@ test("a tombstone wins over any later insertion of the same id, and drops its sf
   const { store } = fresh();
   const id = store.createFlipnote("t");
   const a = store.insertFrame(id, null, sceneFrame("A"));
-  store.apply(id, { op: "set_sfx", sfx: "s".repeat(32), frame: a, patch: "meow", note: 60, duration_ms: 300 });
+  store.apply(id, { op: "set_sfx", sfx: "s".repeat(32), frame: a, patch: "meow", note: 60, duration_ms: 500 });
   store.claim(a, ME);
   store.apply(id, { op: "remove_frame", frame: a });
   assert.deepEqual(store.root(id).frames, []);
@@ -75,6 +75,21 @@ test("replace produces an op only when the bytes changed, and the record moves w
   assert.equal(store.ops.length, n + 1);
   const bytes = store.frameBytes(id, a)!;
   assert.deepEqual(decodePix(bytes).palette, DEFAULT_PALETTE);
+});
+
+test("sound holds preserve authored duration and reject absent or out-of-range duration", () => {
+  const { store } = fresh();
+  const id = store.createFlipnote("sound");
+  const frame = store.insertFrame(id, null, sceneFrame("A"));
+  const op = { op: "set_sfx" as const, sfx: "a".repeat(32), frame, patch: "meow", note: 60, duration_ms: 600000 };
+  store.apply(id, op);
+  assert.equal(store.root(id).sfx[op.sfx].duration_ms, 600000);
+  for (const duration_ms of [undefined, 0, -1, 1.5, 600001, NaN]) {
+    assert.throws(() => store.apply(id, { ...op, duration_ms } as typeof op), /duration range/);
+    assert.equal(store.root(id).sfx[op.sfx].duration_ms, 600000);
+  }
+  store.apply(id, { ...op, duration_ms: 1 });
+  assert.equal(store.root(id).sfx[op.sfx].duration_ms, 1);
 });
 
 test("caps: the frame list, the byte promise and fps are refused before anything changes", () => {

@@ -36,7 +36,9 @@ impl PageScope {
         match self {
             Self::Registry(_) => DocType::DocRegistry,
             Self::Studio(StudioTarget::Index { .. }) => DocType::StudioIndex,
-            Self::Studio(StudioTarget::Flipnote { .. }) => DocType::StudioObject,
+            Self::Studio(StudioTarget::Flipnote { .. } | StudioTarget::Score { .. }) => {
+                DocType::StudioObject
+            }
         }
     }
     fn domain(self) -> &'static str {

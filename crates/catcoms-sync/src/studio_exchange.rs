@@ -4,7 +4,7 @@
 
 use super::*;
 use catcoms_replication::epoch::MAX_SIGNED_EPOCH_OP_BYTES;
-use catcoms_replication::studio::{FlipnoteOp, IndexOp, StudioTarget};
+use catcoms_replication::studio::{FlipnoteOp, IndexOp, ScoreOp, StudioTarget};
 use catcoms_replication::DomainOp;
 use catcoms_rt::PublishSubmission;
 use registry_ingress::Rate;
@@ -18,7 +18,9 @@ type Key = (DocType, [u8; 16]);
 fn key(target: StudioTarget) -> Key {
     match target {
         StudioTarget::Index { channel } => (DocType::StudioIndex, channel),
-        StudioTarget::Flipnote { object, .. } => (DocType::StudioObject, object),
+        StudioTarget::Flipnote { object, .. } | StudioTarget::Score { object, .. } => {
+            (DocType::StudioObject, object)
+        }
     }
 }
 
@@ -268,6 +270,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
             StudioTarget::Flipnote { .. } => {
                 FlipnoteOp::decode_domain(&logical, &domain)?;
+            }
+            StudioTarget::Score { .. } => {
+                ScoreOp::decode_domain(&logical, &domain)?;
             }
         }
         Ok(signed.author_device)

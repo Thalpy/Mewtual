@@ -458,9 +458,9 @@ export function demoStudio(people: DemoPeople, now: () => number = () => Date.no
   store.frameState.set(frames[12], "replaying");
   // Sfx on frames 8, 12 and 16; a linked score.
   store.apply(moonCat, { op: "set_patch", patch: "meow", descriptor: { v: 1, name: "meow" } });
-  store.apply(moonCat, { op: "set_sfx", sfx: newId(), frame: frames[7], patch: "meow", note: 79, duration_ms: 240 });
-  store.apply(moonCat, { op: "set_sfx", sfx: newId(), frame: frames[11], patch: "meow", note: 72, duration_ms: 360 });
-  store.apply(moonCat, { op: "set_sfx", sfx: newId(), frame: frames[15], patch: "meow", note: 36, duration_ms: 480 });
+  store.apply(moonCat, { op: "set_sfx", sfx: newId(), frame: frames[7], patch: "meow", note: 79, duration_ms: 250 });
+  store.apply(moonCat, { op: "set_sfx", sfx: newId(), frame: frames[11], patch: "meow", note: 72, duration_ms: 250 });
+  store.apply(moonCat, { op: "set_sfx", sfx: newId(), frame: frames[15], patch: "meow", note: 36, duration_ms: 500 });
   store.apply(moonCat, { op: "set_export", export: newId(), cid: "e".repeat(64), bytes: 1_258_291, expiry: t0 + 21 * 86_400_000 });
   store.settlement.set(moonCat, { gate: "settled", epoch: 3, label: "settled", receiptBy: people.owner, receiptTs: t0 - 2 * 3_600_000 });
   store.recovery.set(moonCat, {

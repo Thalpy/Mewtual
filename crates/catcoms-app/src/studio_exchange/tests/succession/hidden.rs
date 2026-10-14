@@ -67,6 +67,7 @@ fn a_receipt(
         match &mut projection {
             StudioProjection::Flipnote(art) => art.epoch = closed,
             StudioProjection::Index(index) => index.epoch = closed,
+            StudioProjection::Score(score) => score.epoch = closed,
         };
         let seed = projection.checkpoint(close).unwrap();
         let receipt = Receipt::sign(

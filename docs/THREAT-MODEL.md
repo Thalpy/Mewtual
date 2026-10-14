@@ -1,5 +1,32 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Gate 6 native animation export boundary (2026-10-14)
+
+Actual-byte PIXA publication validates whole framing, strict canonical take grammar, bounded
+source labels/lanes/recipes/events, native PIX192x144 and authored SFX duration before the
+existing persistent stage/promotion/flush. It creates no metadata authority. Local visual GIF
+encodes one raster at a time under a32MiB writer and detached inline lease. Exact session and
+server incarnation are rechecked through safe staged fixed-name publication/reveal; the commit
+guard orders an admitted commit before a concurrent lock rather than undoing a committed export.
+All ignored audio still validates. See `GATE6-NATIVE-EXPORT.md` for limits and honest durability.
+
+## Gate 6 Flipnote sound core boundary (2026-10-14)
+
+Sound Sets require an existing live frame and effective recipe at their sender's complete causal
+frontier; receiver-only state cannot authorize them. Every mutation still uses exact signed P1
+record/actor/body/key and same-property predecessor validation. A raw recipe Set winner cannot
+override any live concurrent removal. Missing/deleted references after a valid concurrent edit
+remain retained unready evidence, with cleanup available. Linked score ids and export declarations
+grant no cross-object authority or blob-format/availability guarantee. Complete retained export
+CIDs stay held even when deleted, expired, losing or overflow; patch hashes are not CIDs.
+
+An optional sound snapshot trailer preserves complete records; empty trailers and source reuse
+reject. Compaction omits whole removed slots, only under the existing recovery-before-replacement
+barrier. Omitted historical deletions cannot be interpreted as proof of safe automatic replay.
+The native DTO currently omits remotely admitted sound and must be fixed before integrated
+acceptance; a local Save refusal does not close that ingress path. `GATE6-FRAME-SOUND.md` records
+the bounded checkpoint's contract and pending integration obligations.
+
 ## Admin collision hardening (2026-10-13)
 
 Current moderation-record roles also use the verified full signing-device identity.
@@ -1616,6 +1643,17 @@ design that shipped:
   the frontend suite checks the ledger against the native handler and every literal invocation.
 
 ### Detached file reads and explicit kept copies
+
+Gate 6's core score reader checks byte/primitive rails before materializing conflicts and uses
+one complete causal frontier for headers, recipes, keys, alternatives and winners. Mutable
+coordinates/hashes are not permanent frame tombstones: live removals dominate raw Set winners,
+while later exact same-property edits can reuse observed cleared slots. Omitted removals and
+conflicts require recovery-before-replacement. Explicit family tags prevent pristine score
+restart data from becoming art; shared title/recipe body shapes never identify authority.
+Typed reference inspection validates complete score envelopes before returning no CIDs. The
+untyped legacy operation inspector remains conservative (score-specific bodies refuse).
+No native score/wire capability is enabled by the current core slice, and historical score
+replay stays manual because final absence cannot prove no intervening reusable-slot clear.
 
 Network workers own only an opaque signed blob request. Completion rechecks the exact sync owner,
 current group/epoch/local membership, expected provider, request nonce and response signature/CID;

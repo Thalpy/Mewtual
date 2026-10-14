@@ -4,7 +4,8 @@
 
 use crate::{AppError, Server, ServerStore};
 use catcoms_replication::studio::{
-    FlipnoteHeader, FlipnoteOp, IndexOp, StudioExpiry, StudioKind, StudioProjection, StudioTarget,
+    FlipnoteHeader, FlipnoteOp, IndexOp, ScoreHeader, ScoreOp, StudioExpiry, StudioKind,
+    StudioProjection, StudioTarget,
 };
 use catcoms_replication::{epoch_zero_id, DomainOp};
 pub use catcoms_replication::{studio as types, EpochPhase, RecoveryReason, RecoveryTransition};
@@ -50,6 +51,7 @@ pub use control::{
 };
 pub use restore::{
     StudioRecoveryDisposition, StudioRecoveryItem, StudioRecoveryMode, StudioRecoveryPlan,
+    StudioScoreHeaderField,
 };
 use settlement::SettlementNotices;
 pub use settlement::StudioSettlementState;
@@ -82,6 +84,15 @@ pub enum StudioRequest {
         title: String,
         ts: u64,
     },
+    /// The same durable object-then-index workflow with an explicit score family. Keeping the
+    /// original Create variant preserves existing typed Rust callers as well as native defaults.
+    CreateScore {
+        channel: [u8; 16],
+        object: [u8; 16],
+        nonce: [u8; 16],
+        title: String,
+        ts: u64,
+    },
 }
 impl std::fmt::Debug for StudioRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -95,6 +106,12 @@ impl StudioRequest {
             Self::Create {
                 channel, object, ..
             } => StudioTarget::Flipnote {
+                channel: *channel,
+                object: *object,
+            },
+            Self::CreateScore {
+                channel, object, ..
+            } => StudioTarget::Score {
                 channel: *channel,
                 object: *object,
             },
@@ -115,19 +132,13 @@ impl StudioRequest {
                         IndexOp::decode(body).map_err(invalid)?;
                     }
                     StudioTarget::Flipnote { .. } => {
-                        match FlipnoteOp::decode(body).map_err(invalid)? {
-                            FlipnoteOp::InsertFrame { .. }
-                            | FlipnoteOp::RemoveFrame { .. }
-                            | FlipnoteOp::ReplaceFrame { .. }
-                            | FlipnoteOp::SetHeader(
-                                FlipnoteHeader::Title(_) | FlipnoteHeader::Fps(_),
-                            ) => {}
-                            _ => {
-                                return Err(invalid(
-                                    "sound, score and export operations are not available yet",
-                                ))
-                            }
-                        }
+                        // All sound families now have causal admission, bounded state, native
+                        // evidence and durability. Static parsing never grants write authority;
+                        // the ordinary current-member/epoch gate still runs below.
+                        FlipnoteOp::decode(body).map_err(invalid)?;
+                    }
+                    StudioTarget::Score { .. } => {
+                        ScoreOp::decode(body).map_err(invalid)?;
                     }
                 }
                 domain(*target, *nonce, body.clone())
@@ -135,16 +146,14 @@ impl StudioRequest {
                     .map(|_| ())
                     .map_err(invalid)
             }
-            Self::Create { title, ts, .. } => {
+            Self::Create { title, ts, .. } | Self::CreateScore { title, ts, .. } => {
                 if title.len() > 64 * 1024 {
                     return Err(invalid("Studio title exceeds the operation bound"));
                 }
                 if *ts > 9_007_199_254_740_991 {
                     return Err(invalid("invalid creation timestamp"));
                 }
-                let header = FlipnoteOp::SetHeader(FlipnoteHeader::Title(title.clone()))
-                    .encode()
-                    .map_err(invalid)?;
+                let header = initial_header(self.target(), title)?;
                 domain(self.target(), [0; 16], header)
                     .encode()
                     .map_err(invalid)?;
@@ -152,7 +161,7 @@ impl StudioRequest {
                 // is supplied later from the live actor; every identity has the same hex width.
                 let index = IndexOp::PutObject {
                     object: [0; 16],
-                    kind: StudioKind::Flipnote,
+                    kind: creation_kind(self.target())?,
                     title: title.clone(),
                     created_by: crate::DeviceId::from_bytes([0; 32]),
                     ts: *ts,
@@ -177,10 +186,29 @@ impl StudioRequest {
         !matches!(self, Self::Read { .. })
     }
 }
+fn creation_kind(target: StudioTarget) -> Result<StudioKind, AppError> {
+    match target {
+        StudioTarget::Flipnote { .. } => Ok(StudioKind::Flipnote),
+        StudioTarget::Score { .. } => Ok(StudioKind::Score),
+        StudioTarget::Index { .. } => Err(invalid("an index is not an object creation target")),
+    }
+}
+fn initial_header(target: StudioTarget, title: &str) -> Result<Vec<u8>, AppError> {
+    match creation_kind(target)? {
+        StudioKind::Flipnote => FlipnoteOp::SetHeader(FlipnoteHeader::Title(title.into()))
+            .encode()
+            .map_err(invalid),
+        StudioKind::Score => ScoreOp::SetHeader(ScoreHeader::Title(title.into()))
+            .encode()
+            .map_err(invalid),
+    }
+}
 fn domain(target: StudioTarget, nonce: [u8; 16], body: Vec<u8>) -> DomainOp {
     let (doc_type, key) = match target {
         StudioTarget::Index { channel } => (catcoms_wire::DocType::StudioIndex, channel),
-        StudioTarget::Flipnote { object, .. } => (catcoms_wire::DocType::StudioObject, object),
+        StudioTarget::Flipnote { object, .. } | StudioTarget::Score { object, .. } => {
+            (catcoms_wire::DocType::StudioObject, object)
+        }
     };
     DomainOp {
         nonce,
@@ -344,15 +372,16 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 nonce,
                 title,
                 ts,
+            }
+            | StudioRequest::CreateScore {
+                channel,
+                object,
+                nonce,
+                title,
+                ts,
             } = &request
             {
-                let initial = domain(
-                    target,
-                    *nonce,
-                    FlipnoteOp::SetHeader(FlipnoteHeader::Title(title.clone()))
-                        .encode()
-                        .map_err(invalid)?,
-                );
+                let initial = domain(target, *nonce, initial_header(target, title)?);
                 if let Some(held) = store.load_studio_epoch(server, group, target, device)? {
                     if !held.contains_exact_operation(device.device_id(), &initial)? {
                         return Err(invalid("object already exists; use Apply to edit it"));
@@ -374,7 +403,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                             *nonce,
                             IndexOp::PutObject {
                                 object: *object,
-                                kind: StudioKind::Flipnote,
+                                kind: creation_kind(target)?,
                                 title: title.clone(),
                                 created_by: device.device_id(),
                                 ts: *ts,
@@ -436,6 +465,26 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     blobs.put_staged(&pixels)?;
                     if !blobs.promote_staged_bounded(&cid, pixels.len())? {
                         return Err(invalid("frame promotion failed"));
+                    }
+                }
+                FlipnoteOp::SetExport { cid, bytes, .. } => {
+                    // A renderer's declaration or prior publication ACK is not evidence that
+                    // this mounted vault still holds a valid package. Validate exact held bytes
+                    // before writing a durable intent/reference; the earlier conservative
+                    // transient hold protects candidates from reclamation, not publication.
+                    // Never fetch at a Save boundary.
+                    let mut blobs = store.blob_store(&hex::encode(self.group_id()))?;
+                    let cid = crate::Cid::from_bytes(cid);
+                    let package = blobs.get_bounded(&cid, bytes as usize)?.ok_or_else(|| {
+                        invalid("publish the PIXA before saving its export reference")
+                    })?;
+                    if package.len() as u64 != bytes {
+                        return Err(invalid("export byte declaration differs from PIXA"));
+                    }
+                    crate::creative::validate_pixa(&package)?;
+                    blobs.put_staged(&package)?;
+                    if !blobs.promote_staged_bounded(&cid, package.len())? {
+                        return Err(invalid("export promotion failed"));
                     }
                 }
                 _ => {}
@@ -539,15 +588,20 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                         nonce,
                         title,
                         ts,
+                    }
+                    | StudioRequest::CreateScore {
+                        channel,
+                        object,
+                        nonce,
+                        title,
+                        ts,
                     } => {
-                        let object_target = StudioTarget::Flipnote { channel, object };
+                        let object_target = target;
                         apply(
                             object_target,
                             epoch_zero_id(catcoms_wire::DocType::StudioObject, &object),
                             nonce,
-                            FlipnoteOp::SetHeader(FlipnoteHeader::Title(title.clone()))
-                                .encode()
-                                .map_err(invalid)?,
+                            initial_header(object_target, &title)?,
                         )?;
                         apply(
                             StudioTarget::Index { channel },
@@ -557,7 +611,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                             nonce,
                             IndexOp::PutObject {
                                 object,
-                                kind: StudioKind::Flipnote,
+                                kind: creation_kind(object_target)?,
                                 title,
                                 created_by: device.device_id(),
                                 ts,

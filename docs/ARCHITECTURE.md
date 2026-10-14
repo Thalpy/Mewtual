@@ -1,5 +1,24 @@
 # Mewtual; Architecture
 
+## Gate 6 native exports (2026-10-14)
+
+Native `publish_pixa` now validates complete actual bytes and reuses the existing persistent
+blob stage/promotion/flush path, without writing Studio metadata. Local `export_studio_gif`
+reuses the pure-Rust image encoder, bounded detached work, inline leases and guarded safe
+Downloads publication. It is visual-only, fixed-name, infinite-loop output, not replicated
+audio or synchronization. Command registration, policy/capabilities and review ledger move
+together. See `GATE6-NATIVE-EXPORT.md`; SetExport and full UI integration remain main-owned.
+
+## Gate 6 Flipnote sound core checkpoint (2026-10-14)
+
+The typed Flipnote projection now retains SFX, reusable recipes, linked-score provenance and
+exports through the existing P1 causal/checkpoint/recovery path. Art-only bytes stay unchanged;
+an optional canonical sound trailer retains complete source/body records. Effective removal
+and visible prefixes are separate from retained evidence and conservative blob holds. Native
+DTO/UI activation is not implied; the native sound omission remains an explicit integration
+defect until connected. See `GATE6-FRAME-SOUND.md` for the exact contract and review scope. Older
+art-only/refusal statements below describe their earlier checkpoints.
+
 ## Exact device admin authority (2026-10-13)
 
 Current moderation-record roles also use the verified full signing-device identity.
@@ -876,6 +895,11 @@ fakes own no detached lower work.
 10. Hardening: calendar, cover traffic, supply-chain attestation, security review.
 
 ### File reliability and explicit retention
+
+Studio's Gate 6 core continuation extends the existing P1 `StudioTarget` with a score family,
+not a new store or transport. Reusable remove-wins musical slots, sender-frontier checks and
+explicit-family snapshots/restart units are specified in `GATE6-STATE-DESIGN.md`. Existing art
+and Index bytes remain unchanged; app/native/wire score activation is still a separate boundary.
 
 [File reliability](design-file-reliability.md) separates actor-owned authorization/storage from bounded
 network tasks, projects conflicting first file-index lists consistently, and adds explicit local kept

@@ -1,5 +1,45 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Gate 6 typed native document access (2026-10-14)
+
+Existing Studio object commands and every draft/recovery/copy lifecycle command accept optional
+`objectKind: "flipnote" | "score"`; omission preserves the legacy art meaning. Unknown values
+and a kind without an object refuse. Copy destinations carry their own optional discriminator.
+Score Create uses the same durable object-then-Index workflow, current-member checks, exact
+retry ownership and native custody as art. Score settlement events and Copy preview targets
+include additive `objectKind:"score"`; old art/Index shapes remain unchanged.
+
+Native content retains authored optional headers, raw register winners/alternatives/removals and
+derived readiness. Sound records retain canonical operation bodies including `duration_ms`.
+Missing-frame/patch readiness lists name the affected SFX ids, not missing target ids. Ordinary,
+awaiting-receipt and historical views include `group`, hex of the authenticated logical group;
+it is never reconstructed from a numeric UI server alias. Manual Score choices and additive
+Restore/explicit Copy rules are documented in `GATE6-ACTIVATION-DESIGN.md`. Direct Closing Save
+and unfinished native repair commands remain unavailable; no P5 authority is added.
+
+Local SetExport requires the exact CID/length of a held, fully validated PIXA package, promoted
+durably before any reference intent/source is written. It performs no network fetch. A failed
+record Save may leave a published orphan, not a successful export record.
+
+## Gate 6 native export interfaces (2026-10-14)
+
+`publish_pixa({server,bytesB64})->{cid,bytes}` publishes fully validated persistent animation
+content only. `export_studio_gif({server,bytesB64})->{path,displayed,warning,contentValidation}`
+writes a fixed-name local visual-only GIF; reveal failure returns a saved-path warning. Both
+retain inline cancellation/session/server-incarnation fences. `creative::validate_pixa` returns
+borrowed encoded-frame spans only after whole-container validation. Exact bounds, canonical
+take semantics and GIF timing/save contract are in `GATE6-NATIVE-EXPORT.md`.
+
+## Gate 6 Flipnote sound core (2026-10-14)
+
+`FlipnoteOp::SetSfx` now requires creator-authored `duration_ms:u32` in1..600000. Typed frame
+projection exposes `sound:FrameSoundState`, complete raw `records` with source/value conflicts,
+effective `sfx()/patches()/exports()` and `score()` accessors, plus `sound_readiness()`. Retained
+records are distinct from active prefixes4096/64/8. Sound uses existing signed P1 mutation and
+exact checkpoint/recovery preflight, an optional canonical trailer preserving art-only bytes,
+and complete retained export CID enumeration. See `GATE6-FRAME-SOUND.md` for property grammar,
+seed omission and DTO obligations. Native sound DTO/consumer integration remains pending.
+
 ## Exact device admin authority (security update, 2026-10-13)
 
 Current moderation-record roles also use the verified full signing-device identity.
@@ -3984,4 +4024,16 @@ bounded archival timing without weakening the live lost-note-off watchdog.
 The next isolated `gate6-typed-score` slice adds a static Rust `ScoreOp` body/envelope codec
 and frontend `ScoreCell`/`ScoreOp` types. Export input reuses that cell type. Shared canonical
 vectors and exact bounds are documented in `GATE6-SCORE-CONTRACT.md`; no command is added.
+
+The stateful continuation adds `StudioTarget::Score` and `StudioProjection::Score` in core P1.
+Optional authored title/BPM/BPB/step registers preserve complete winner/alternatives. Absent
+values default to empty/120/4/16 without invented provenance. Cell/recipe slots retain a raw
+register of optional values; any live removal makes effective presence false. Clear and remove
+on absent slots record intent. Later Sets supersede exact observed same-property predecessors,
+not unseen removals. Readiness flags conflicts, overlap, missing recipes, extent and cap overflow.
+Score snapshots use explicit payload prefix2, and score restart units require trailing family2
+even when pristine. Existing Index/art bytes are unchanged. See `GATE6-STATE-DESIGN.md`.
+The native diagnostic shape `kind:"score"` uses optional header registers and cell/patch maps
+whose entries contain `{removed,register}`; `removed` is not inferred from raw selected content.
+No score request/wire activation follows from exposing these core types; unfinished adapters refuse.
 

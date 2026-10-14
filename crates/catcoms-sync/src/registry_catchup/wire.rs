@@ -95,12 +95,14 @@ pub(super) fn encode_scoped_query(
             e.put_u8(bucket);
         }
         PageScope::Studio(target) => {
-            e.put_u16(scope.doc_type().tag());
+            e.put_u16(crate::checkpoint_exchange::studio_scope_tag(target));
             // Fixed-width identifiers, not renderer-controlled strings.
             e.put_u128(u128::from_be_bytes(target.channel()));
             e.put_u128(match target {
                 StudioTarget::Index { .. } => 0,
-                StudioTarget::Flipnote { object, .. } => u128::from_be_bytes(object),
+                StudioTarget::Flipnote { object, .. } | StudioTarget::Score { object, .. } => {
+                    u128::from_be_bytes(object)
+                }
             });
         }
     }
@@ -140,11 +142,9 @@ pub(super) fn decode_scoped_query(kind: u8, bytes: &[u8]) -> Result<OwnedQuery, 
             let tag = malformed(d.get_u16())?;
             let channel = malformed(d.get_u128())?.to_be_bytes();
             let object = malformed(d.get_u128())?.to_be_bytes();
-            PageScope::Studio(match tag {
-                15 if object == [0; 16] => StudioTarget::Index { channel },
-                16 => StudioTarget::Flipnote { channel, object },
-                _ => return Err(SyncError::Malformed),
-            })
+            PageScope::Studio(crate::checkpoint_exchange::studio_scope_from_tag(
+                tag, channel, object,
+            )?)
         }
         _ => return Err(SyncError::Malformed),
     };
@@ -334,3 +334,7 @@ pub(super) fn decode_response(bytes: &[u8]) -> Result<SignedPageResponse<'_>, Sy
 }
 
 type SignedPageResponse<'a> = (&'a [u8], [u8; 64], &'a [u8]);
+
+#[cfg(test)]
+#[path = "wire_score_tests.rs"]
+mod score_scope_tests;

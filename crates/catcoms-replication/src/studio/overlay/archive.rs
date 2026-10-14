@@ -255,7 +255,10 @@ impl StudioDraftArchive {
             UnconfirmedStudioSeed::parse_graph(self.target, &self.receipt, &self.seed)?;
         let mut cids = crate::studio::references::projection_cids(&projection);
         for entry in &self.entries {
-            if let Some(cid) = references::operation_blob_cid(&entry.operation)? {
+            if let Some(cid) = self
+                .target
+                .operation_blob_cid(&self.receipt.document, &entry.operation)?
+            {
                 cids.insert(cid);
             }
         }
@@ -461,9 +464,10 @@ fn put_target(e: &mut Encoder, target: StudioTarget) -> Result<(), ReplError> {
     e.put_u8(match target {
         StudioTarget::Index { .. } => 0,
         StudioTarget::Flipnote { .. } => 1,
+        StudioTarget::Score { .. } => 2,
     });
     put(e, &target.channel())?;
-    if let StudioTarget::Flipnote { object, .. } = target {
+    if let StudioTarget::Flipnote { object, .. } | StudioTarget::Score { object, .. } = target {
         put(e, &object)?;
     }
     Ok(())
@@ -474,6 +478,10 @@ fn get_target(d: &mut Decoder<'_>) -> Result<StudioTarget, ReplError> {
     match tag {
         0 => Ok(StudioTarget::Index { channel }),
         1 => Ok(StudioTarget::Flipnote {
+            channel,
+            object: fixed(d)?,
+        }),
+        2 => Ok(StudioTarget::Score {
             channel,
             object: fixed(d)?,
         }),

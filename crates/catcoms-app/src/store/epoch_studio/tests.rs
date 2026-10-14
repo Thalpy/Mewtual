@@ -14,6 +14,7 @@ mod recovery_disposition;
 mod registry;
 mod repair;
 mod rotation;
+mod score;
 mod source;
 
 const SERVER: u64 = 73;

@@ -35,7 +35,7 @@ fn check(value: &Value, f: &InspectionFixture) {
     assert_eq!(value["manualReason"].is_string(), eligibility == "manual");
     assert_ne!(value["manualReason"], "notReplayable");
     assert_eq!(value["readOnly"], true);
-    assert_eq!(value["content"], projection_content(&f.expected));
+    assert_eq!(value["content"], projection_content(&f.expected).unwrap());
     for field in [
         "epochId",
         "epoch",
@@ -50,6 +50,9 @@ fn check(value: &Value, f: &InspectionFixture) {
         );
     }
     let title = match f.target {
+        StudioTarget::Score { .. } => {
+            panic!("this inspection fixture only constructs art and index targets")
+        }
         StudioTarget::Index { .. } => {
             assert!(value["object"].is_null());
             &value["content"]["objects"][hex::encode(fixture::ELEMENT)]["title"]["selected"]
@@ -257,8 +260,11 @@ fn native_studio_inspection_maximal_typed_content_preserves_all_retained_conflic
         },
     ] {
         let projection = shapes::maximal(b"maximal-inspection-codec", target);
-        let value = bounded_view(projection_content(&projection)).unwrap();
+        let value = bounded_view(projection_content(&projection).unwrap()).unwrap();
         match &projection {
+            StudioProjection::Score(_) => {
+                panic!("this maximal fixture only constructs art and index targets")
+            }
             StudioProjection::Index(p) => {
                 assert_eq!(value["objects"].as_object().unwrap().len(), 64);
                 for (id, entry) in &p.objects {

@@ -159,6 +159,9 @@ impl StudioEpoch {
             StudioTarget::Flipnote { channel, .. } => {
                 FlipnoteFrameProjection::verify_checkpoint(&verified, channel, seed)
             }
+            StudioTarget::Score { channel, .. } => {
+                ScoreProjection::verify_checkpoint(&verified, channel, seed)
+            }
         }?;
         let doc = EncryptedDoc::from_checkpoint(&seed, &actor)?;
         let seed_blob_cids = super::references::projection_cids(&target.read(
@@ -262,7 +265,8 @@ impl StudioEpoch {
         let mut out = super::references::projection_cids(&self.projection()?);
         out.extend(self.seed_blob_cids.iter().copied());
         for op in self.doc.signed_log() {
-            out.extend(operation_blob_cid(
+            out.extend(self.target.operation_blob_cid(
+                &self.logical,
                 &op.parsed_domain_op()?.ok_or(ReplError::Malformed)?,
             )?);
         }
@@ -334,6 +338,9 @@ impl StudioEpoch {
             StudioTarget::Flipnote { .. } => {
                 FlipnoteOp::decode_domain(&self.logical, domain)?;
             }
+            StudioTarget::Score { .. } => {
+                ScoreOp::decode_domain(&self.logical, domain)?;
+            }
         }
         if self.held(self.actor, domain)?.is_some() {
             return Ok(());
@@ -345,6 +352,7 @@ impl StudioEpoch {
                 index::prepare(&self.logical, self.epoch(), domain, &self.actor)?
             }
             StudioProjection::Flipnote(p) => frames::prepare(p, domain, &self.actor, ts)?,
+            StudioProjection::Score(p) => score::prepare(p, domain, &self.actor)?,
         };
         let mut draft = self
             .doc
@@ -466,6 +474,12 @@ impl StudioEpoch {
             e.put_bytes(&op.encode())
                 .map_err(|_| ReplError::EpochBound)?;
         }
+        // Scores share StudioObject's logical namespace, including pristine empty graphs.
+        // Bind their trusted family explicitly; all existing Index/art snapshot bytes stay
+        // unchanged and older readers refuse the new trailing tag instead of treating it as art.
+        if matches!(self.target, StudioTarget::Score { .. }) {
+            e.put_u8(score::SCORE_PAYLOAD);
+        }
         let bytes = e.finish();
         if bytes.len() > MAX_STUDIO_EPOCH_SNAPSHOT_BYTES {
             return Err(ReplError::EpochBound);
@@ -569,6 +583,11 @@ impl StudioEpoch {
                 return Err(ReplError::EpochBound);
             }
             operations.push(SignedOp::decode(bytes)?);
+        }
+        if matches!(target, StudioTarget::Score { .. })
+            && d.get_u8().map_err(|_| ReplError::Malformed)? != score::SCORE_PAYLOAD
+        {
+            return Err(ReplError::EpochScope);
         }
         d.finish().map_err(|_| ReplError::Malformed)?;
         let mut result = if opening.is_empty() {

@@ -74,6 +74,7 @@ impl Fixture {
         match &mut projection {
             StudioProjection::Index(p) => p.epoch = epoch,
             StudioProjection::Flipnote(p) => p.epoch = epoch,
+            StudioProjection::Score(p) => p.epoch = epoch,
         }
         let seed = projection.checkpoint([close; 32]).unwrap();
         let receipt = Receipt::sign(

@@ -55,7 +55,7 @@ fn outcome(v: Outcome) -> Value {
 
 fn view(v: &StudioFaultView) -> Value {
     json!({"v":1,"kind":"fault","scope":scope(v.scope),"channel":u128::from_be_bytes(v.target.channel()).to_string(),
-    "object":match v.target {StudioTarget::Index{..}=>None,StudioTarget::Flipnote{object,..}=>Some(hex::encode(object))},
+    "object":match v.target {StudioTarget::Index{..}=>None,StudioTarget::Flipnote{object,..}|StudioTarget::Score{object,..}=>Some(hex::encode(object))},
     "source":json!({"epochId":format!("{:032x}",v.source.epoch_id),"epoch":v.source.epoch.to_string(),
         "phase":match v.source.phase {EpochPhase::Open=>"open",EpochPhase::Closing=>"closing",EpochPhase::Settled=>"settled",EpochPhase::Fault=>"fault"}}),
     "candidates":v.candidates.as_ref().map(|c|c.iter().map(candidate).collect::<Vec<_>>()),

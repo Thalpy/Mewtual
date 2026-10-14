@@ -1,5 +1,10 @@
 # Gate 6: typed score operation contract
 
+Historical static-codec checkpoint (`794eb6d2`): statements below describe that bounded slice.
+The current stateful continuation is specified in `GATE6-STATE-DESIGN.md` and tracked at the top
+of `HANDOVER.md`. Earlier aggregate Rust suite runs require fresh combined verification after
+the cross-worktree Cargo-cache audit; focused score/frontend results retain their exact scope.
+
 Continuation branch `gate6-typed-score` starts from the nonce correction
 `863fe0fedd51cc28314c64562baa858370fe4130` on `gate6-sound-export`. PR #44 retains the export
 checkpoint and its correction separately. This slice supplies the missing Rust score body codec,

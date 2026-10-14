@@ -676,6 +676,7 @@ fn malformed_and_unsupported_content_rejects_including_empty_score_and_orphan_re
             frame: id(1),
             patch: [1; 32],
             note: 60,
+            duration_ms: 500,
         },
         FlipnoteOp::RemoveSfx { sfx: id(1) },
         FlipnoteOp::RemovePatch { patch: [1; 32] },
@@ -688,7 +689,8 @@ fn malformed_and_unsupported_content_rejects_including_empty_score_and_orphan_re
         FlipnoteOp::RemoveExport { export: id(1) },
     ] {
         let (_, bytes, _) = record(&op, 1, 1, None, None);
-        for key in ["h/score", "h/title", "sfx", "exports", "patches"] {
+        // Sound is now admitted only at its exact flat key; these malformed aliases still fail.
+        for key in ["h/title", "sfx", "exports", "patches"] {
             let mut doc = root(1);
             doc.put(ROOT, key, bytes.clone()).unwrap();
             doc.commit();

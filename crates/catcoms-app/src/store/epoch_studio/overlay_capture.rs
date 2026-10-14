@@ -485,6 +485,10 @@ impl ServerStore {
         let frame = match origin.target {
             StudioTarget::Flipnote { .. } => frame_pixels(document, operation)?,
             StudioTarget::Index { .. } => None,
+            StudioTarget::Score { .. } => {
+                ScoreOp::decode_domain(document, operation).map_err(invalid)?;
+                None
+            }
         };
         let Some((cid, bytes)) = frame else {
             return Ok(AdmittedOverlayMedia {

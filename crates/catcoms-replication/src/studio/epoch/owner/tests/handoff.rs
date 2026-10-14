@@ -1056,14 +1056,15 @@ fn studio_overlay_structural_decode_accepts_a_branch_the_full_decoder_cannot_rep
     // A supported operation, used only to obtain one canonical accepted entry.
     let supported = f.domain(f.title_body("a replayable title"));
     let supported_id = ledger.prepare(f.owner.device_id(), supported).unwrap();
-    // An operation the typed writer does not support. It decodes as a FlipnoteOp, so it reaches
-    // the writer, and the writer refuses it.
+    // A statically valid sound whose recipe does not exist at the sender frontier. Sound
+    // operations now have typed support, but this retained draft still requires manual recovery.
     let unsupported = f.domain(
         FlipnoteOp::SetSfx {
             sfx: [0xc3; 16],
             frame: [1; 16],
             patch: [0xc3; 32],
             note: 7,
+            duration_ms: 500,
         }
         .encode()
         .unwrap(),
