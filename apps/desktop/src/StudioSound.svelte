@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy, untrack } from "svelte";
   import type { JamPatch } from "./jam-contract.ts";
   import type { StudioSoundModel, SfxView } from "./studio-sound.ts";
   import { EMOJI_SOUND_MAX_BYTES, parseEmojiSoundJson, type EmojiSound } from "./emoji-sound.ts";
@@ -11,14 +12,17 @@
   }>();
   let patch = $state(""), note = $state(60), duration = $state<number | "">(""), editing = $state("");
   let busy = $state(false), emoji = $state<EmojiSound | null>(null), page = $state(0), evidencePage = $state(0), altPage = $state(0);
+  let disposed = false;
+  onDestroy(() => { disposed = true; });
+  $effect(() => { void frame; untrack(() => { editing = ""; emoji = null; duration = ""; page = 0; }); });
   const here = $derived<SfxView[]>(model.sfx.filter((sfx: SfxView) => sfx.frame === frame));
   const shown = $derived(here.slice(page * 8, page * 8 + 8));
   const records = $derived(Object.entries<StudioSoundModel["records"][string]>(model.records).sort(([a], [b]) => a.localeCompare(b)));
   function edit(sfx: (typeof here)[number]) { editing = sfx.id; patch = sfx.patch; note = sfx.note; duration = sfx.durationMs; }
   async function addPatch(descriptor: JamPatch) {
     if (busy || readonlyReason) return;
-    const source = model; busy = true;
-    try { const id = await onpatch(descriptor); if (source === model) patch = id; }
+    const source = model, sourceFrame = frame; busy = true;
+    try { const id = await onpatch(descriptor); if (!disposed && source === model && sourceFrame === frame) patch = id; }
     catch (e) { onnotice(String(e), "error"); } finally { busy = false; }
   }
   async function importEmoji(file: File | undefined) {
@@ -27,9 +31,9 @@
     const source = model, sourceFrame = frame; busy = true;
     try {
       const parsed = parseEmojiSoundJson(await file.text());
-      if (source !== model || sourceFrame !== frame || readonlyReason) return;
+      if (disposed || source !== model || sourceFrame !== frame || readonlyReason) return;
       emoji = parsed; note = parsed.lo; duration = parsed.len;
-      const id = await onpatch(parsed.patch); if (source === model) patch = id;
+      const id = await onpatch(parsed.patch); if (!disposed && source === model && sourceFrame === frame) patch = id;
     } catch (e) { onnotice(String(e), "error"); } finally { busy = false; }
   }
   function save() {

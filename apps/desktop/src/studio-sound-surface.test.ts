@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { legacyJamPatch } from "./jam-patch.ts";
 import { studioSoundModel } from "./studio-sound.ts";
-import { fsource, id32, id64, reg } from "./studio-testkit.ts";
+import { deferred, fsource, id32, id64, reg } from "./studio-testkit.ts";
 const w = (globalThis as unknown as { window: Window & typeof globalThis }).window;
 Object.assign(globalThis, { MutationObserver: w.MutationObserver, HTMLInputElement: w.HTMLInputElement, HTMLMediaElement: w.HTMLMediaElement, Event: w.Event });
 const { mount, unmount, flushSync } = await import("svelte");
@@ -33,4 +33,14 @@ test("emoji file source preserves validated length and does not claim a verified
     [...target.querySelectorAll("button")].find(b => b.textContent === "add sound marker")!.click(); flushSync();
     assert.deepEqual(ops, [{ patch: patchId, note: 70, durationMs: 333 }]); assert.deepEqual(notices, []);
   } finally { await unmount(app); target.remove(); }
+});
+
+test("a file chooser/read completing after Sound unmount cannot queue a recipe into another object", async () => {
+  const target = document.createElement("div"); document.body.append(target); const read = deferred<string>(); let patches = 0;
+  const app = mount(StudioSound, { target, props: { model: model(), frame, onpatch: async () => { patches++; return patchId; }, onsfx: () => {}, onremove: () => {}, onremovepatch: () => {}, onnotice: () => {} } }); flushSync();
+  const file = target.querySelector<HTMLInputElement>('input[type="file"]')!;
+  Object.defineProperty(file, "files", { value: [{ size: 500, text: () => read.promise }] }); file.dispatchEvent(new w.Event("change", { bubbles: true }));
+  await unmount(app); target.remove();
+  read.resolve(JSON.stringify({ v: 1, img: id64(3), patch, lo: 70, hi: 75, len: 333 }));
+  for (let i = 0; i < 5; i++) await Promise.resolve(); assert.equal(patches, 0);
 });

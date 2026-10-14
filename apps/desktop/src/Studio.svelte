@@ -678,9 +678,10 @@
   }
   async function addStudioPatch(patch: JamPatch): Promise<string> {
     const object = objectId, gen = session.generation, kind = isScore ? "score" : "flipnote";
+    const sourceView = session.doc?.view, sourceEpoch = session.mediaGeneration;
     const checked = validateJamPatch(patch); if (!checked.ok) throw new Error(checked.error);
     const id = await jamPatchId(checked.patch);
-    if (!object || gen !== session.generation || session.doc?.object !== object || session.doc.objectKind !== kind) throw new Error("the recipe target changed; choose it again");
+    if (!object || gen !== session.generation || session.doc?.object !== object || session.doc.objectKind !== kind || session.doc.view !== sourceView || session.mediaGeneration !== sourceEpoch) throw new Error("the recipe target changed; choose it again");
     if (kind === "score") session.setScorePatch(object, id, checked.patch); else session.setSoundPatch(object, id, checked.patch);
     return id;
   }
