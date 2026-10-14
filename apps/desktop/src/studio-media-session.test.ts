@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { StudioSession } from "./studio-session.ts";
 import { decodePixa } from "./pixa.ts";
-import { CHANNEL, ME, SERVER, b64, deferred, fakeIpc, flipnoteContent, id32, id64, indexContent, ordinaryView, pixBytes, settle } from "./studio-testkit.ts";
+import { parseFlipnoteView, bytesToBase64 } from "./studio-native.ts";
+import { flipnotePixaFromNative } from "./studio-resolved-export.ts";
+import { CHANNEL, ME, SERVER, b64, deferred, fakeIpc, flipnoteContent, id32, id64, indexContent, ordinaryView, pixBytes, previewView, settle } from "./studio-testkit.ts";
 
 const object = id32(1), frame = id32(2), cid = id64(3);
 async function harness() {
@@ -111,4 +113,30 @@ test("all Score component operations, including the shared title grammar, refuse
     { op: "clear_cell", step: 0, row: 0 }, { op: "remove_patch", patch: id64(1) }];
   for (const op of ops) assert.throws(() => h.session.applyScoreOp(object, op), /pinned Score/);
   assert.equal(h.session.saves.length, 0); assert.equal(h.calls("studio_apply").length, 0); assert.equal(h.calls("studio_apply_index").length, 0);
+});
+
+test("Flow-S export custody refusals are proven no-write PIXA diagnostics, never ambiguous PIX failures", async () => {
+  for (const reason of ["exportUnpublished", "exportInvalid", "exportMissing"]) {
+    const h = await harness(); h.ipc.on("studio_read", () => ({ ...previewView(h.content), group: "deadbeef" })); await h.session.refreshDoc(object);
+    h.ipc.on("publish_pixa", (args) => ({ cid: id64(5), bytes: atob(String(args.bytesB64)).length }));
+    h.ipc.on("studio_unconfirmed_overlay_save_begin", () => ({ v: 1, kind: "unconfirmedOverlaySaveTicket", channel: CHANNEL, object, basis: id64(1), branch: id64(2), provenance: "unconfirmed" }));
+    h.ipc.on("studio_unconfirmed_overlay_save", () => ({ v: 1, kind: "unconfirmedOverlaySave", channel: CHANNEL, object, state: "refused", reason, retry: "newTicket" }));
+    const result = await h.session.publishFlipnotePixa(object); await h.sync();
+    assert.ok(result.referenceSaveId); assert.equal(h.session.saves[0].status, "blocked"); assert.equal(h.session.saves[0].mayHaveCommitted, false);
+    assert.match(h.session.saves[0].error, /PIXA/); assert.match(h.session.saves[0].error, new RegExp(reason));
+    h.session.retry(h.session.saves[0].id); await h.sync(); assert.equal(h.calls("studio_unconfirmed_overlay_save").length, 1, "newTicket is not an exact retry");
+  }
+});
+
+test("saved export readback fetches exact package bytes, validates group, and never routes PIXA through the PIX cache", async () => {
+  const h = await harness(), exportId = id32(8), exportCid = id64(9);
+  const bytes = await flipnotePixaFromNative(object, parseFlipnoteView(h.view()), new Map([[`${cid}:${pixBytes().length}`, pixBytes()]]), ME);
+  const content = { ...h.content, sound: { records: { [`x/${exportId}/${id64(44)}`]: { selected: { value: { op: "set_export", export: exportId, cid: exportCid, bytes: bytes.length }, source: { opId: id64(44), author: ME, nonce: id32(44), ts: 44 } }, conflicts: [] } },
+    readiness: { sfxOverflow: [], patchOverflow: [], exportOverflow: [], missingFrames: [], missingPatches: [], conflicts: false } } };
+  h.ipc.on("studio_read", () => ({ ...h.view(), content })); await h.session.refreshDoc(object);
+  h.ipc.on("request_blob_bounded", (args) => { assert.equal(args.cid, exportCid); assert.equal(args.maxBytes, bytes.length); return { bytes_b64: bytesToBase64(bytes), bytes: bytes.length }; });
+  assert.deepEqual(await h.session.preparePublishedPixa(object, exportId), bytes);
+  assert.equal(h.session.blob(exportCid), undefined, "PIXA is not admitted to the PIX-only thumbnail cache");
+  h.ipc.on("studio_read", () => ({ ...h.view(), content, group: "aabb" })); await h.session.refreshDoc(object);
+  await assert.rejects(h.session.preparePublishedPixa(object, exportId), /another group/);
 });

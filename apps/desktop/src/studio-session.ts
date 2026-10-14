@@ -28,6 +28,7 @@ import { validateJamPatch } from "./jam-patch.ts";
 import type { JamPatch, JamTake } from "./jam-contract.ts";
 import { flipnotePixaFromNative, preflightFlipnoteMedia, scoreTakeFromNative } from "./studio-resolved-export.ts";
 import { exportStudioGif, publishStudioPixa, type StudioGifSaved } from "./studio-media.ts";
+import { decodePixa, encodePixa } from "./pixa.ts";
 import { canonicalJson, randomElementId, type FlipnoteOp, type IndexOp, type ScoreOp, type ScoreCell } from "./studio-contract.ts";
 import {
   DEFAULT_FPS,
@@ -87,6 +88,7 @@ import {
   type OverlayInspection,
   type OverlayLifecycle,
   type OverlaySaveRetry,
+  type OverlaySaveRefusal,
   type PixPublication,
   type PointerRestored,
   type RecoveryApplied,
@@ -323,6 +325,8 @@ export class StudioSession {
   private mediaTask: Promise<unknown> | null = null;
   private mediaWrite = false;
   private mediaEpoch = 0;
+  /** Immediate invalidation edge used to revoke an already prepared UI playback snapshot. */
+  get mediaGeneration(): number { return this.mediaEpoch; }
 
   constructor(opts: SessionOptions) {
     this.ipc = opts.ipc;
@@ -488,7 +492,7 @@ export class StudioSession {
   // --- Coalesced refresh ---------------------------------------------------------------------
 
   invalidate(what: { index?: boolean; objects?: Hex32[]; recovery?: boolean }): void {
-    if (what.objects?.length) this.mediaEpoch++;
+    if (what.objects?.length) { this.mediaEpoch++; this.notify(); }
     if (what.index) this.pendingIndex = true;
     for (const o of what.objects ?? []) this.pendingObjects.add(o);
     if (what.recovery) this.pendingRecovery = true;
@@ -1191,6 +1195,27 @@ export class StudioSession {
     return this.oneMedia(async () => (await this.preparePixa(object)).bytes);
   }
 
+  /** Read the actual immutable record bytes; its sealed blob CID is not a fileshare file CID. */
+  preparePublishedPixa(object: Hex32, exportId: Hex32): Promise<Uint8Array> {
+    return this.oneMedia(async () => {
+      const source = this.mediaSource(object, "flipnote"), view = source.view as FlipnoteView;
+      const record = flipnoteModel(view.content).sound.exports.find((record) => record.id === exportId);
+      if (!record) throw new StudioNativeError("the published animation reference is no longer active");
+      // The one-preparation slot is the bound for this larger media request. Do not feed PIXA
+      // through the thumbnail scheduler: that cache deliberately accepts PIX1 frames only.
+      const bytes = await requestBlobBounded(this.ipc, source.server, record.cid, record.bytes);
+      source.assertCurrent();
+      if (!bytes) throw new StudioNativeError("the exact published animation package is unavailable");
+      const packageValue = decodePixa(bytes);
+      if (!view.group || packageValue.take.group !== view.group) throw new StudioNativeError("published animation package belongs to another group");
+      return encodePixa(packageValue);
+    });
+  }
+  removePublishedPixa(object: Hex32, exportId: Hex32): void {
+    if (this.objectKind(object) !== "flipnote") throw new StudioNativeError("an export reference requires a Flipnote target");
+    this.applyOp(object, { op: "remove_export", export: exportId }, "remove published animation reference");
+  }
+
   /** Blob custody and the editable export reference are deliberately two different outcomes. */
   async publishFlipnotePixa(object: Hex32): Promise<StudioPixaPublished> {
     if (this.mediaWrite) throw new StudioNativeError("another media save is still running");
@@ -1510,7 +1535,7 @@ export class StudioSession {
       if (!this.current(gen)) throw new StudioNativeError("Studio session changed while obtaining a local draft ticket");
       if (begun.kind === "unconfirmedOverlaySave") {
         s.overlayRetry = begun.retry;
-        throw new OverlayNoWrite(`local draft refused (${begun.reason}); retry=${begun.retry}`);
+        throw new OverlayNoWrite(`local draft refused (${overlayRefusalText(begun.reason)}); retry=${begun.retry}`);
       }
       request = { basis: begun.basis, branch: begun.branch, nonce: this.newId(), body };
       if (s.kind === "frame") s.overlay = request;
@@ -1526,7 +1551,7 @@ export class StudioSession {
     }
     s.overlayRetry = result.retry;
     if (result.state === "refused") {
-      throw new OverlayNoWrite(`local draft refused (${result.reason}); retry=${result.retry}`);
+      throw new OverlayNoWrite(`local draft refused (${overlayRefusalText(result.reason)}); retry=${result.retry}`);
     }
     if (result.state === "paused") {
       throw new OverlayNoWrite("local draft Save paused; explicit document access is required before retrying the same request");
@@ -2009,6 +2034,15 @@ export function reason(e: unknown): string {
   if (e instanceof StudioNativeError) return e.reason;
   if (e instanceof Error) return e.message;
   return String(e);
+}
+
+function overlayRefusalText(reason: OverlaySaveRefusal): string {
+  switch (reason) {
+    case "exportUnpublished": return "exportUnpublished: the PIXA package has no matching native publication receipt; explicitly publish again before a new Save";
+    case "exportInvalid": return "exportInvalid: the PIXA package failed complete media validation; no reference was written";
+    case "exportMissing": return "exportMissing: the published PIXA package is no longer held; explicitly publish again before a new Save";
+    default: return reason;
+  }
 }
 
 export { DEFAULT_FPS };

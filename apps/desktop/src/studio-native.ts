@@ -192,6 +192,7 @@ export type OverlaySaveRefusal = OverlayManualReason
   | "basisChanged" | "basisChangedDuringDetach" | "transferInProgress" | "otherKindDraft"
   | "liveBranchSuperseded" | "staleBranch" | "nonceConflict" | "ordinaryIntentPending"
   | "branchFull" | "pixelUnpublished" | "pixelInvalid" | "pixelMissing"
+  | "exportUnpublished" | "exportInvalid" | "exportMissing"
   | "unconfirmedBranchesPerServer" | "unconfirmedBytesVaultWide" | "referenceCapacity"
   | "storageRefused" | "retry";
 export type OverlaySaveRetry = "sameRequest" | "newTicket" | "none" | "afterExplicitAccess";
@@ -865,6 +866,7 @@ const OVERLAY_SAVE_REFUSALS = new Set<OverlaySaveRefusal>([
   "basisChangedDuringDetach", "transferInProgress", "otherKindDraft", "liveBranchSuperseded",
   "staleBranch", "nonceConflict", "ordinaryIntentPending", "branchFull", "pixelUnpublished",
   "pixelInvalid", "pixelMissing", "unconfirmedBranchesPerServer", "unconfirmedBytesVaultWide",
+  "exportUnpublished", "exportInvalid", "exportMissing",
   "referenceCapacity", "storageRefused", "retry",
 ]);
 
