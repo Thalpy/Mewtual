@@ -7,8 +7,13 @@ numeric/array session nonces could survive shared take validation and `.pixa` im
 guard now requires a primitive string; legal nonce representation is unchanged. Three new
 regressions were demonstrated red before the fix, and all 44 recorder/export focused tests now
 pass. Independent read-only re-review closes the MEDIUM finding with no remaining finding.
-The mandatory root/native/frontend suites and frontend check/build are being rerun. Earlier
-checkpoint counts below describe that earlier head, not completed verification of this correction.
+On correction `863fe0fe`, mandatory root/native suites pass in full (native 337+5, plus binary/doc
+targets); frontend passes 1421/1421, check reports zero errors/warnings, production build passes
+with its large-chunk advisory, and `git diff --check` passes. Hosted checks remain queued, not
+confirmed green. Startup/flow and Rust lint/ambient/deny checks were not repeated for this
+TypeScript-only correction: setup/UI/flows, Rust sources and dependencies are unchanged.
+Earlier counts below retain their earlier-head scope. A separate `gate6-typed-score` continuation
+owns the next static score contract; this correction does not enable sound state or close Gate 6.
 
 ## Gate 6 export foundations (2026-10-14; first bounded checkpoint)
 

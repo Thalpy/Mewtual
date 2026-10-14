@@ -166,5 +166,11 @@ Three new regressions failed before the correction and pass afterward. They cove
 and direct take validation, recorder rejection before coercion/lane allocation, and independent
 `.pixa` framing through decoder/encoder rejection. All 44 recorder/export focused tests pass.
 Independent read-only correction review closes the MEDIUM finding with no remaining finding;
-the prior export ownership/bounds review remains intact. Complete suites are being rerun for this
-correction; the earlier checkpoint results above must not be mistaken for new-head evidence.
+the prior export ownership/bounds review remains intact. On correction `863fe0fe`, complete
+root `cargo test --all --all-features` and separate native suites pass (337 native library and
+5 command-ACL tests, plus binary/doc targets). Complete frontend passes 1421/1421; check has zero
+errors/warnings, production build passes with its large-chunk advisory, and `git diff --check`
+passes. No Rust source/dependency or setup/UI/flow change was made by this correction, so Rust
+lint/ambient/deny and startup/flow gates were not repeated for this TypeScript-only fix.
+Exact-head hosted checks remain queued, not confirmed green. These results supersede the earlier
+checkpoint counts only for the correction; they do not close Gate 6.
