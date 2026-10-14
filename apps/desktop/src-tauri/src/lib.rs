@@ -55,7 +55,6 @@ use zeroize::Zeroizing;
 
 mod admission_storage;
 mod creative_blobs;
-mod studio_exports;
 mod discovery_timer;
 mod durable_chat;
 mod errors;
@@ -64,6 +63,7 @@ mod leaving;
 mod media_decode;
 mod media_worker;
 mod member_reconnect;
+mod studio_exports;
 // This broker model has no registered command consumers yet. Retain its contract tests without
 // presenting the unwired implementation as a production pairing boundary.
 #[cfg(test)]
