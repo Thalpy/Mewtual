@@ -65,6 +65,8 @@ type ArchivalPlaybackData = {
   sfxChannels: number;
   /** SFX belongs to the exporting take's first performer, not a second polyphony allowance. */
   sfxOwner: string;
+  /** Receiver-owned gain for current and future lazy lanes; never a recipe/network field. */
+  level: number;
 };
 type PlaybackPatchData = Readonly<{
   patches: readonly JamPatch[];
@@ -597,13 +599,25 @@ export class JamEngine {
     if (!sfxOwner) return null;
     this.closeArchival();
     const capability = Object.freeze({ [ARCHIVAL_PLAYBACK]: true as const });
-    this.archival = { capability, plan, patches, channels: new Map(), played: new Set(), generation, sfxChannels: 0, sfxOwner };
+    this.archival = { capability, plan, patches, channels: new Map(), played: new Set(), generation, sfxChannels: 0, sfxOwner, level: 1 };
     return capability;
   }
 
   /** Read-only schedule for the exact currently owned capability, not a capability constructor. */
   archivalPlaybackPlan(capability: JamArchivalPlayback): JamArchivalPlan | null {
     return !this.disposed && !this.deafened && this.archival?.capability === capability ? this.archival.plan : null;
+  }
+
+  /** Change only this current archival owner's volume, including lanes not opened yet.
+   * Exposing opaque playback gain instead of raw channels preserves source/owner provenance.
+   * Replacement, Deafen and disposal invalidate this control just like event dispatch.
+   */
+  setArchivalPlaybackLevel(capability: JamArchivalPlayback, level: number): boolean {
+    const archival = this.archival;
+    if (!this.archivalPlaybackPlan(capability) || !archival || !Number.isFinite(level) || level < 0 || level > 1) return false;
+    archival.level = level;
+    for (const channel of archival.channels.values()) this.setSourceLevel(channel.source, level);
+    return true;
   }
 
   /** Stop only this exact playback; stale async cleanup cannot retire its replacement. */
@@ -642,6 +656,9 @@ export class JamEngine {
     }
     if (event.kind === "off") return channel ? this.noteOff({ channel, note: event.note, sequence: event.sequence }) : { ok: true };
     if (event.kind === "on" && ageMs >= event.holdMs!) return { ok: true };
+    // A throttled archival tick cannot resurrect an already finished one-shot. Unlike a live
+    // hit, its receiver-owned kit tail has an authored closing time; consume the index silently.
+    if (event.kind === "drum" && ageMs >= JAM_KIT[event.note].tailMs) return { ok: true };
     if (!channel) {
       // A dense SFX file cannot leave thousands of idle source buses behind stolen release tails.
       // This receiver-owned lifecycle cap supplements, not replaces, the shared voice allocator.
@@ -662,12 +679,13 @@ export class JamEngine {
       const opened = nonce === JAM_LEGACY_SESSION_NONCE ? this.beginLegacySourceSession(channel) : this.beginSourceSession(channel, nonce);
       if (!opened) { this.removeChannel(channel); return { ok: false, reason: "channel" }; }
       archival.channels.set(event.lane, channel);
+      this.setSourceLevel(channel.source, archival.level);
       if (sfx) archival.sfxChannels++;
     }
     if (event.kind === "drum") {
       const lane = archival.plan.take.lanes[event.lane];
-      return this.drum({ callId: archival.plan.take.call, channel, sessionNonce: lane.sn, sequence: event.sequence, pad: event.note, remote: true },
-        { patches: archival.patches, part: lane.src });
+      return this.drumWithDeadline({ callId: archival.plan.take.call, channel, sessionNonce: lane.sn, sequence: event.sequence, pad: event.note, remote: true },
+        { patches: archival.patches, part: lane.src }, this.nowMs() + JAM_KIT[event.note].tailMs - ageMs);
     }
     const result = this.noteOnWithHold({ channel, sequence: event.sequence, note: event.note, wave: event.wave!, ageMs, remote: true },
       event.patch === undefined ? undefined : { patches: archival.patches, index: event.patch }, event.holdMs! - ageMs);
@@ -786,6 +804,15 @@ export class JamEngine {
     input: JamDrumInput,
     playback?: Readonly<{ patches: JamPlaybackPatchSet; part: number }>,
   ): Promise<JamPlayResult> {
+    return this.drumWithDeadline(input, playback);
+  }
+
+  /** Only the bound archival dispatcher supplies a deadline. Live hit behavior is unchanged. */
+  private async drumWithDeadline(
+    input: JamDrumInput,
+    playback?: Readonly<{ patches: JamPlaybackPatchSet; part: number }>,
+    expiresAtMs?: number,
+  ): Promise<JamPlayResult> {
     const playbackTable = playback ? this.playbackPatchSets.get(playback.patches) : undefined;
     if (
       this.disposed || !Number.isInteger(input.pad) || input.pad < 0 || input.pad >= JAM_KIT.length ||
@@ -827,17 +854,29 @@ export class JamEngine {
     };
     const roomGeneration = this.roomPolicyGeneration;
     const sourceGeneration = this.state(source).renderGeneration;
+    let observedAtMs = expiresAtMs === undefined ? 0 : this.nowMs();
+    const remainingTailMs = () => {
+      if (expiresAtMs === undefined) return JAM_KIT[queuedInput.pad].tailMs;
+      const now = this.nowMs();
+      // Invalid/regressing receiver time refuses an archival attack, never renews its window.
+      if (!Number.isFinite(now) || !Number.isFinite(observedAtMs) || !Number.isFinite(expiresAtMs) || now < observedAtMs) return 0;
+      observedAtMs = now;
+      return Math.max(0, expiresAtMs - now);
+    };
     return this.enqueueDrum(owner, queuedInput.channel, roomGeneration, sourceGeneration, sequence, async () => {
       // A queued event may have lost its channel/session or receiver permission before hashing.
       // Check once before spending crypto work and again after the unavoidable await.
       const currentBeforeHash = this.currentDrumPolicy(queuedInput, source, roomGeneration, sourceGeneration);
       if (currentBeforeHash) return { ok: false, reason: currentBeforeHash, sequence };
+      if (remainingTailMs() <= 0) return { ok: true, sequence };
       let seed: number;
       try { seed = await this.seedDrum(seedInput); }
       catch { return { ok: false, reason: "audio", sequence }; }
 
       const currentAfterHash = this.currentDrumPolicy(queuedInput, source, roomGeneration, sourceGeneration);
       if (currentAfterHash) return { ok: false, reason: currentAfterHash, sequence };
+      const tailMs = remainingTailMs();
+      if (tailMs <= 0) return { ok: true, sequence };
 
       const pad = JAM_KIT[queuedInput.pad];
       for (const voice of [...this.voices.values()]) {
@@ -857,7 +896,7 @@ export class JamEngine {
       if (!allocation.ok) return { ok: false, reason: allocation.reason, sequence };
 
       try {
-        runtime = this.createDrumVoice(id, queuedInput, seed, owner);
+        runtime = this.createDrumVoice(id, queuedInput, seed, owner, tailMs);
         this.voices.set(id, runtime);
         return { ok: true, sequence, stolen: allocation.stolen };
       } catch {
@@ -1352,12 +1391,13 @@ export class JamEngine {
     }
   }
 
-  private createDrumVoice(id: string, input: JamDrumInput, seed: number, owner: string): VoiceRuntime {
+  private createDrumVoice(id: string, input: JamDrumInput, seed: number, owner: string, remainingTailMs = JAM_KIT[input.pad].tailMs): VoiceRuntime {
     const ctx = this.context;
     if (input.remote === false && ctx.state === "suspended") void ctx.resume().catch(() => {});
     const at = ctx.currentTime;
     const pad = JAM_KIT[input.pad];
-    const tailSeconds = Math.min(pad.tailMs, JAM_DRUM_TAIL_MAX_MS) / 1_000;
+    // Hash/queue latency may shorten an archival hit, never move its stop beyond its kit tail.
+    const tailSeconds = Math.min(remainingTailMs, pad.tailMs, JAM_DRUM_TAIL_MAX_MS) / 1_000;
     const sourceName = input.channel.source;
     const bus = this.sourceBus(sourceName);
     const nodes: AudioNode[] = [];

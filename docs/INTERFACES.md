@@ -42,7 +42,8 @@ effective `sfx()/patches()/exports()` and `score()` accessors, plus `sound_readi
 records are distinct from active prefixes4096/64/8. Sound uses existing signed P1 mutation and
 exact checkpoint/recovery preflight, an optional canonical trailer preserving art-only bytes,
 and complete retained export CID enumeration. See `GATE6-FRAME-SOUND.md` for property grammar,
-seed omission and DTO obligations. Native sound DTO/consumer integration remains pending.
+seed omission and DTO obligations. Native sound DTO integration is now implemented and reviewed;
+the final production consumer/UI composition and combined verification remain pending.
 
 ## Exact device admin authority (security update, 2026-10-13)
 

@@ -154,8 +154,9 @@ export class StudioPlaybackController {
         count++;
         // A backgrounded tick must not turn already-ended notes into a new burst. Sequencing and
         // cleanup still advance; only attacks with future authored hold remain eligible.
-        if (event.kind === "on" && event.offMs! <= elapsed) continue;
-        await this.engine.playArchivalEvent(active.capability, index, event.kind === "on" ? Math.max(0, elapsed - event.ms) : 0);
+        const attack = event.kind === "on" || event.kind === "drum";
+        if (attack && event.offMs! <= elapsed) continue;
+        await this.engine.playArchivalEvent(active.capability, index, attack ? Math.max(0, elapsed - event.ms) : 0);
         if (this.active !== active || active.generation !== this.generation) return count;
       }
       if (active.seekNext >= active.seek.length && active.next >= active.plan.events.length &&

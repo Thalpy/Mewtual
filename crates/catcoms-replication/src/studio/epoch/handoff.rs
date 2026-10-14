@@ -11,6 +11,7 @@ pub(in crate::studio) use preparation::PreparedOverlayChanges;
 /// with the same bounds, stopping at the operation count. For classification only: nothing here is
 /// verified against the operations, so it must never stand in for a restore.
 pub(in crate::studio) struct VaultShape<'a> {
+    target: StudioTarget,
     adopting: bool,
     opening: &'a [u8],
     seed: &'a [u8],
@@ -44,7 +45,7 @@ impl<'a> VaultShape<'a> {
             }
             operations.push(SignedOp::decode(bytes)?);
         }
-        d.finish().map_err(|_| ReplError::Malformed)?;
+        finish_vault_frame(d, self.target)?;
         Ok(operations)
     }
     pub(in crate::studio) fn read(
@@ -72,6 +73,7 @@ impl<'a> VaultShape<'a> {
         }
         let consumed = bytes.len() - d.remaining();
         Ok(Self {
+            target,
             adopting,
             opening,
             seed,
@@ -184,7 +186,7 @@ impl StudioEpoch {
             kept &= next.contains(&hash);
             old.insert(hash);
         }
-        d.finish().map_err(|_| ReplError::Malformed)?;
+        finish_vault_frame(d, self.target)?;
         for op in self.doc.signed_log() {
             let domain = op.parsed_domain_op()?.ok_or(ReplError::Malformed)?;
             if protected.contains(&domain.id(&op.author_device))

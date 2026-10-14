@@ -1,5 +1,23 @@
 # Mewtual; Handover
 
+## Gate 6 combined-review corrections (2026-10-14; acceptance still open)
+
+Fresh cross-layer review found and closed three MEDIUM defects: ticketed local-only SetExport
+now validates/promotes exact held PIXA with transient protection and S3 possession recheck;
+complete Score vault readers share exact family-trailer handling; delayed archival drums retain
+kit deadlines through queued hashing rather than replaying expired hits. Unconfirmed remains
+non-transferable and no native Closing Save/P5 command is enabled. Native export-media refusals
+have distinct Export* literals and preserve the existing NewTicket action. All three fixes and
+the capability-bound archival volume API passed independent actual-diff re-review.
+
+The preceding full root suite passed (including1100app tests plus integration/doc targets) and
+native passed345+5. These runs precede the above corrective commits and are not final acceptance.
+Corrective focused checks pass:26Score,16handoff,73playback/engine/controller, native refusal
+mapping1; backend FlowS6new/37broader/3preserved-frame checks passed on its reviewed checkpoint.
+Root strict Clippy/format/ambient and Svelte check0/0 pass after the correction. Production UI
+integration, legacy take-consumer archival wiring, fixture/visual checks and fresh full combined
+suites/CI evidence remain open. Gate6 is not closed by these bounded reviews.
+
 ## Gate 6 typed runtime checkpoint (2026-10-14)
 
 The isolated runtime integration propagates exact expected Score/art family through Index

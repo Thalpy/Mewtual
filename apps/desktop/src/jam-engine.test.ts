@@ -181,6 +181,71 @@ test("archival capabilities bind exact engine/event indices and cannot survive r
   other.dispose(); engine.dispose();
 });
 
+test("expired archival drums consume their event once without hashing or allocating audio", async () => {
+  const fake = new FakeContext(); let hashes = 0;
+  const engine = new JamEngine(fake as unknown as AudioContext, () => 0, undefined, undefined, async () => { hashes++; return 1; });
+  const input = archiveTake(); input.events = [{ ms:0, lane:0, n:4, d:1, q:0 }];
+  const capability = await engine.prepareArchivalPlayback(input, undefined); assert.ok(capability);
+  const sources = fake.sources.length;
+  assert.equal((await engine.playArchivalEvent(capability,0,300)).ok,true);
+  assert.equal(hashes,0); assert.equal(fake.sources.length,sources);
+  assert.equal((await engine.playArchivalEvent(capability,0,0)).reason,"sequence");
+  engine.dispose();
+});
+
+test("archival volume is capability-bound and reaches current and future lazy lanes only", async () => {
+  const {fake,engine}=contextAndEngine();
+  const live=engine.openSource("live-performer"); engine.beginSourceSession(live,sn);
+  const liveBefore=fake.nodes.length;
+  engine.noteOn({channel:live,sequence:0,note:60,wave:"sine"});
+  const liveGates=fake.nodes.slice(liveBefore,liveBefore+4) as FakeGain[];
+  const input=archiveTake(); input.lanes.push({src:0,sn:otherSn});
+  input.events=[{ms:0,lane:0,n:60,on:1,w:"sine",q:0},{ms:1,lane:1,n:62,on:1,w:"sine",q:1},{ms:1000,lane:0,n:60,on:0,q:2},{ms:1000,lane:1,n:62,on:0,q:3}];
+  const capability=await engine.prepareArchivalPlayback(input,undefined); assert.ok(capability);
+  assert.equal(engine.setArchivalPlaybackLevel(capability,0.25),true);
+  const first=fake.nodes.length; await engine.playArchivalEvent(capability,0);
+  const gates=fake.nodes.slice(first,first+4) as FakeGain[];
+  assert.ok(gates.every(g=>g instanceof FakeGain&&g.gain.value===0.25));
+  assert.equal(engine.setArchivalPlaybackLevel(capability,0),true);
+  assert.ok(gates.every(g=>g.gain.value===0));
+  const second=fake.nodes.length; await engine.playArchivalEvent(capability,1);
+  assert.ok((fake.nodes.slice(second,second+4) as FakeGain[]).every(g=>g instanceof FakeGain&&g.gain.value===0));
+  for (const level of [-1,1.01,NaN,Infinity]) assert.equal(engine.setArchivalPlaybackLevel(capability,level),false);
+  assert.equal(engine.setArchivalPlaybackLevel({} as typeof capability,1),false);
+  assert.ok(liveGates.every(g=>g.gain.value===1),"archival volume never changes live performers");
+  const next=await engine.prepareArchivalPlayback(input,undefined); assert.ok(next);
+  assert.equal(engine.setArchivalPlaybackLevel(capability,1),false);
+  engine.setDeafened(true);
+  assert.equal(engine.setArchivalPlaybackLevel(next,1),false);
+  engine.dispose();
+});
+
+test("an archival drum digest cannot renew an expired or partially elapsed one-shot", async () => {
+  for (const outcome of ["partial", "expired", "regressing"] as const) {
+    const fake = new FakeContext(), now = { value:0 };
+    let resolve!: (value:number)=>void;
+    const gate = new Promise<number>(yes => { resolve=yes; });
+    let hashing!: ()=>void;
+    const started = new Promise<void>(yes => { hashing=yes; });
+    const engine = new JamEngine(fake as unknown as AudioContext, () => now.value, undefined, undefined, () => { hashing(); return gate; });
+    const input=archiveTake(); input.events=[{ms:0,lane:0,n:4,d:1,q:0}];
+    const capability=await engine.prepareArchivalPlayback(input,undefined); assert.ok(capability);
+    const before=fake.sources.length;
+    const hit=engine.playArchivalEvent(capability,0,100);
+    await started; // Pin the POST-hash fence, not merely a queued job's pre-hash expiry.
+    assert.equal(fake.sources.length,before,"digest entered before any audio allocation");
+    now.value=outcome === "expired" ? 200 : outcome === "regressing" ? -1 : 75;
+    fake.currentTime=Math.max(0,now.value)/1000;
+    resolve(1); assert.equal((await hit).ok,true);
+    if (outcome !== "partial") assert.equal(fake.sources.length,before,"expired/regressing hash completion stays silent");
+    else {
+      assert.ok(fake.sources.length>before);
+      assert.ok(fake.sources.slice(before).every(source => Math.abs(source.stops[0] - 0.205) < 1e-9),"audio stop keeps only the remaining authored tail plus the existing de-click margin");
+    }
+    engine.dispose();
+  }
+});
+
 test("overlapping same-pitch frame sounds remain independent and keep their authored deadlines", async () => {
   const { fake, engine } = contextAndEngine();
   const input = archiveTake(); input.events = [];

@@ -23,9 +23,10 @@ CIDs stay held even when deleted, expired, losing or overflow; patch hashes are 
 An optional sound snapshot trailer preserves complete records; empty trailers and source reuse
 reject. Compaction omits whole removed slots, only under the existing recovery-before-replacement
 barrier. Omitted historical deletions cannot be interpreted as proof of safe automatic replay.
-The native DTO currently omits remotely admitted sound and must be fixed before integrated
-acceptance; a local Save refusal does not close that ingress path. `GATE6-FRAME-SOUND.md` records
-the bounded checkpoint's contract and pending integration obligations.
+The earlier native sound omission is closed: the shared fallible converter retains all admitted
+sound evidence on ordinary, provisional, draft and recovery reads. A local Save refusal alone
+would not have closed that ingress path. `GATE6-FRAME-SOUND.md` records the bounded core and DTO
+reviews; final UI composition and combined acceptance remain separate obligations.
 
 ## Admin collision hardening (2026-10-13)
 

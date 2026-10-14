@@ -584,12 +584,7 @@ impl StudioEpoch {
             }
             operations.push(SignedOp::decode(bytes)?);
         }
-        if matches!(target, StudioTarget::Score { .. })
-            && d.get_u8().map_err(|_| ReplError::Malformed)? != score::SCORE_PAYLOAD
-        {
-            return Err(ReplError::EpochScope);
-        }
-        d.finish().map_err(|_| ReplError::Malformed)?;
+        finish_vault_frame(d, target)?;
         let mut result = if opening.is_empty() {
             if !seed.is_empty() {
                 return Err(ReplError::Malformed);
@@ -660,6 +655,19 @@ fn field<'a>(d: &mut Decoder<'a>, max: usize) -> Result<&'a [u8], ReplError> {
         return Err(ReplError::EpochBound);
     }
     Ok(bytes)
+}
+
+/// Finish the complete vault frame according to the independently selected family. Score uses
+/// StudioObject's namespace even when pristine, so its mandatory trailer must be checked by
+/// structural handoff/preservation readers too, not only full restore. Legacy art/Index have NO
+/// trailer; a missing, substituted or extra family byte must never acquire a second meaning.
+fn finish_vault_frame(mut d: Decoder<'_>, target: StudioTarget) -> Result<(), ReplError> {
+    if matches!(target, StudioTarget::Score { .. })
+        && d.get_u8().map_err(|_| ReplError::Malformed)? != score::SCORE_PAYLOAD
+    {
+        return Err(ReplError::EpochScope);
+    }
+    d.finish().map_err(|_| ReplError::Malformed)
 }
 
 #[cfg(test)]

@@ -1,5 +1,13 @@
 # Gate 6 stateful sound design
 
+Combined review identified two structural vault readers which had not consumed Score's mandatory
+family trailer. Full restore, signed-operation framing and source-preservation now share one
+exact target-selected frame finish. Legacy art/Index still have no trailer. Missing, substituted
+or extra family bytes refuse in every complete reader, including Prepared handoff evidence after
+restart. Two new genuine signed-source/Closing handoff regressions were demonstrated red before
+the correction; all26focused Score and16broader handoff tests pass. Independent actual-diff
+re-review closes the MEDIUM finding; this does not enable unfinished native Closing Save/P5.
+
 This extends the existing Studio P1 target, not a second store, journal or transport. All writes
 retain signed actor/scope checks, intent-before-source durability, exact seed/recovery preflight,
 and recovery-before-replacement. No new native surface is enabled until its complete path works.
