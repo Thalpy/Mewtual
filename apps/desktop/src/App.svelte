@@ -248,6 +248,7 @@
   } from "./callroutes";
   import { JamEngine, jamSequenceAccepted, type JamArchivalPlayback } from "./jam-engine";
   import { JamTakeTransport } from "./jam-take-transport.ts";
+  import { JamTakeSuppression } from "./jam-take-suppression.ts";
   import { JamPeerBudget } from "./jam-budget";
   import { JamFrameDecoder, toggleJamPeerMute, type JamFrameDecode } from "./jam-wire";
   import {
@@ -13737,18 +13738,19 @@
   let jamPendingPlay: { gen: number; id: number | null; deckCid: string | null } | null = null;
   // Deafen/membership or a local Studio/take press suppress the previous shared take until a
   // fresh local deck gesture or another track. A heartbeat cannot resurrect cancelled ownership.
-  let jamSuppressedDeckCid: string | null = null;
+  const jamTakeSuppression = new JamTakeSuppression();
   function jamDeckPlaybackCid(): string | null { return jamPlay?.deckCid ?? jamPendingPlay?.deckCid ?? null; }
   function takeEndMs(take: JamTake): number { return take.events[take.events.length - 1]?.ms ?? 0; }
   function suppressCurrentTake() {
-    jamSuppressedDeckCid = jamDeckPlaybackCid() ?? jamSuppressedDeckCid;
+    // The adopted CID exists before approval/download/hash/transport seating. Capturing any
+    // current file CID is conservative: only the archival take path consults this local gate.
+    jamTakeSuppression.suppress(jamDeckPlaybackCid(), jukeNow?.cid || null);
     jamStopPlayback();
   }
   async function jamStartTakePlayback(take: JamTake, offsetMs: number, localId: number | null, deckCid: string | null) {
-    if (deckCid && jamSuppressedDeckCid === deckCid) return;
+    if (deckCid && !jamTakeSuppression.allows(deckCid)) return;
     if (!inCall || callServer === null || !callChannel || callDeafened) return;
     if (!deckCid) suppressCurrentTake();
-    else if (jamSuppressedDeckCid !== deckCid) jamSuppressedDeckCid = null;
     jamStopPlayback();
     stopStudioAudio();
     const gen = jamPlayGen, server = callServer, channel = callChannel;
@@ -16094,6 +16096,9 @@
     jukeNow = entry || cid || link
       ? { entry, cid, src, link, name, paused, dj: fromFp === callSelfId ? "" : fromFp }
       : null;
+    // A real track change clears obsolete cancellation for ALL media kinds. A heartbeat,
+    // remote pause/unpause or another DJ for the same track does not restore local consent.
+    jamTakeSuppression.reconcile(jukeNow);
     if (!jukeNow) {
       jukeDur = 0;
       jukeStop(); // entry "" is the DJ saying the queue ran out
@@ -16728,7 +16733,7 @@
   // Takes replay through the jam engine, whose AudioContext may still be suspended; presses are
   // user gestures, so they are exactly when a resume is allowed to succeed.
   function jukeWakeSynth() {
-    jamSuppressedDeckCid = null; // a fresh local deck control, not a remote heartbeat
+    jamTakeSuppression.localGesture(); // a fresh local deck control, not a remote heartbeat
     if (jamEngine && jamEngine.context.state === "suspended") {
       void jamEngine.context.resume().then(() => { jukeBlocked = false; }).catch(() => { /* next press */ });
     }
@@ -18285,7 +18290,7 @@
     // with the call, and consent resets so the next call starts from an explicit yes.
     jamStopPlayback();
     jamPlaybackPreparationQueue = new JamLatestTaskQueue<JamArchivalPlayback | null>();
-    jamSuppressedDeckCid = null;
+    jamTakeSuppression.reset();
     if (jamRec) { jamRec.stop(); jamRec = null; }
     clearInterval(jamRecTimer);
     jamRecTimer = undefined;

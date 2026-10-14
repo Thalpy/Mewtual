@@ -36,6 +36,13 @@ stale timer, Deafen and seek guarantees remain asserted and have behavioral tran
 Static check reports zero errors/warnings. Production build passes with the existing large-chunk
 warning. Independent caller review is pending for this checkpoint, not inferred from engine tests.
 
+The caller review found one pending-download/approval/paused-track cancellation race: no seated
+transport meant the old suppression missed its CID. `JamTakeSuppression` now captures the adopted
+deck CID before seating and reconciles exact entry/CID/source/link identity before **every** media
+dispatch. Pause/unpause, DJ and offset heartbeats do not restore consent; an actual ordinary
+audio/video/linked-track replacement also clears obsolete suppression. Five focused seam/binding
+regressions plus legacy take/transport checks pass 34/34. Review closure remains pending.
+
 ## Combined-review corrections (2026-10-14)
 
 Archival drum events now retain their receiver-owned kit closing time. Delayed ticks consume

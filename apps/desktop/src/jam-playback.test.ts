@@ -203,7 +203,7 @@ test("Deafen advances the App gate epoch and retires take ownership on both togg
   assert.match(body, /stopStudioAudio\(\);\s*suppressCurrentTake\(\);\s*callDeafened = !callDeafened;/,
     "both edges retire pending/live archival playback before changing the master gate");
   const suppress = source.slice(source.indexOf("function suppressCurrentTake()"), source.indexOf("async function jamStartTakePlayback("));
-  assert.match(suppress, /jamSuppressedDeckCid = jamDeckPlaybackCid\(\) \?\? jamSuppressedDeckCid;/);
+  assert.match(suppress, /jamTakeSuppression\.suppress\(jamDeckPlaybackCid\(\), jukeNow\?\.cid \|\| null\)/);
   assert.match(suppress, /jamStopPlayback\(\)/, "a heartbeat cannot renew retired take ownership after reopen");
 });
 
