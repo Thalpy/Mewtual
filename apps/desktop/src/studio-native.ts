@@ -140,10 +140,11 @@ export type RecoveryListing = {
   evictionPending: RecoveryEviction | null;
   pendingIntents: number;
 };
-export type RecoveryVersionRead = { v: 1; kind: "recoveryVersion"; historical: true; version: RecoveryVersion; channel: Decimal; content: StudioContent };
+export type RecoveryVersionRead = { v: 1; kind: "recoveryVersion"; historical: true; version: RecoveryVersion; channel: Decimal; group?: string; content: StudioContent };
 export type RecoveryExport = { v: 1; kind: "recoveryExport"; snapshot: Hex64; format: "p1-recovery-v1"; bytes: number; bytesB64: string };
 export type RecoveryMode = "restore" | "copy";
 export type RecoveryChoice =
+  | { kind: "soundRecord"; value: Hex64 }
   | { kind: "scoreCell"; step: number; row: number; value: Hex64 }
   | { kind: "scorePatch"; patch: Hex64; value: Hex64 }
   | { kind: "scoreHeader"; field: "title" | "bpm" | "bpb" | "steps"; value: Hex64 }
@@ -800,7 +801,9 @@ export function parseRecoveryVersionRead(v: unknown): RecoveryVersionRead {
   const r = record(v, "version");
   if (r.v !== 1 || r.kind !== "recoveryVersion") fail("not a recovery version");
   if (r.historical !== true) fail("version.historical is not true");
-  return { v: 1, kind: "recoveryVersion", historical: true, version: recoveryVersion(r.version, "version.version"), channel: decimal(r.channel, "version.channel"), content: parseContent(r.content, "version.content") };
+  return { v: 1, kind: "recoveryVersion", historical: true, version: recoveryVersion(r.version, "version.version"), channel: decimal(r.channel, "version.channel"),
+    ...(r.group === undefined ? {} : { group: typeof r.group === "string" && /^(?:[0-9a-f]{2}){1,256}$/.test(r.group) ? r.group : fail("version.group is not a bounded stable group id") }),
+    content: parseContent(r.content, "version.content") };
 }
 
 export function parseRecoveryExport(v: unknown): RecoveryExport {

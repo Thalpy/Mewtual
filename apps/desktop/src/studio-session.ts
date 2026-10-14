@@ -28,7 +28,8 @@ import { validateJamPatch } from "./jam-patch.ts";
 import type { JamPatch, JamTake } from "./jam-contract.ts";
 import { flipnotePixaFromNative, preflightFlipnoteMedia, scoreTakeFromNative } from "./studio-resolved-export.ts";
 import { exportStudioGif, publishStudioPixa, type StudioGifSaved } from "./studio-media.ts";
-import { decodePixa, encodePixa } from "./pixa.ts";
+import { decodePixa, encodePixa, PIXA_MAX_BYTES } from "./pixa.ts";
+import { historicalSoundOperation, soundRecoveryChoices } from "./studio-sound-recovery.ts";
 import { canonicalJson, randomElementId, type FlipnoteOp, type IndexOp, type ScoreOp, type ScoreCell } from "./studio-contract.ts";
 import {
   DEFAULT_FPS,
@@ -839,6 +840,7 @@ export class StudioSession {
     this.retainOverlayCopy(object, run);
     this.publishOverlayCopy(object, run);
     try {
+      const inspection = this.overlayFor(object)?.inspection;
       const preview = await overlayCopyPreview(this.ipc, source, destination, choice, mode);
       if (!this.current(gen) || this.overlayCopyFor(object) !== run) return;
       run.preview = preview;
@@ -846,6 +848,12 @@ export class StudioSession {
         run.status = preview.disposition;
         this.publishOverlayCopy(object, run);
         return;
+      }
+      if (choice.kind === "soundRecord") {
+        if (inspection?.kind !== "local-draft" || !inspection.content) throw new StudioNativeError("the local sound draft cannot be rebuilt");
+        await this.holdRecoveryExport(inspection.content, choice, preview.body, source.server, inspection.group,
+          () => this.current(gen) && this.overlayCopyFor(object) === run && this.overlayFor(object)?.inspection === inspection);
+        if (!this.current(gen) || this.overlayCopyFor(object) !== run) return;
       }
       run.edit = {
         destination,
@@ -1155,6 +1163,34 @@ export class StudioSession {
     this.mediaTask = task;
     void task.finally(() => { if (this.mediaTask === task) this.mediaTask = null; }).catch(() => {});
     return task;
+  }
+
+  /** Recovery declarations do not prove blob availability. Hold the exact historical PIXA through
+   * the existing native validator/publication before Apply; never put packages in the PIX cache.
+   * Navigation may leave an idempotently published historical blob, but can never redirect Save. */
+  private async holdRecoveryExport(content: StudioContent, choice: RecoveryChoice, body: string, server: number, group: string | undefined, live: () => boolean): Promise<void> {
+    const op = historicalSoundOperation(content, choice);
+    if (choice.kind === "soundRecord" && !op) throw new StudioNativeError("the historical sound operation is not in this version");
+    if (op?.op !== "set_export") return;
+    if (canonicalJson(JSON.parse(body)) !== canonicalJson(op)) throw new StudioNativeError("the export preview differs from its historical value");
+    if (!group) throw new StudioNativeError("reopen this historical sound source to obtain its native group before recovering PIXA");
+    if (op.bytes < 1 || op.bytes > PIXA_MAX_BYTES) throw new StudioNativeError("the historical PIXA declaration exceeds its media bound");
+    if (this.mediaWrite) throw new StudioNativeError("another media save is still running");
+    const assertLive = () => { if (!live()) throw new StudioNativeError("the recovery source changed; no export reference was applied"); };
+    this.mediaWrite = true;
+    try {
+      await this.oneMedia(async () => {
+        assertLive();
+        const bytes = await requestBlobBounded(this.ipc, server, op.cid, op.bytes);
+        assertLive();
+        if (!bytes) throw new StudioNativeError("historical PIXA unavailable; reference not applied");
+        const value = decodePixa(bytes);
+        if (value.take.group !== group) throw new StudioNativeError("historical PIXA belongs to another group; reference not applied");
+        const publication = await publishStudioPixa(this.ipc, server, bytes);
+        assertLive();
+        if (publication.cid !== op.cid || publication.bytes !== op.bytes) throw new StudioNativeError("held PIXA does not name the historical CID and length; reference not applied");
+      });
+    } finally { this.mediaWrite = false; }
   }
 
   prepareScoreTake(object: Hex32): Promise<JamTake> {
@@ -1884,6 +1920,12 @@ export class StudioSession {
         if (!live()) return;
         item.originalAuthor = preview.originalAuthor;
         if (preview.disposition !== "ready" || preview.body === null) { item.state = preview.disposition; publish(); continue; }
+        if (item.choice.kind === "soundRecord") {
+          item.state = "fetching";
+          publish();
+          await this.holdRecoveryExport(version.content, item.choice, preview.body, target.server, version.group, live);
+          if (!live()) return;
+        }
         if (item.choice.kind === "frame") {
           // Pixels must be held locally before the Save that references them: fetch the exact
           // historical value bounded by its declared size, then hold it through publication.
@@ -1965,6 +2007,7 @@ function choicesForContent(content: StudioContent, mode: RecoveryMode): { choice
       const entry = content.frames[id];
       if (entry) out.push({ choice: { kind: "frame", id, value: entry.pixels.selected.source.opId }, label: `frame ${i + 1}` });
     });
+    out.push(...soundRecoveryChoices(content.sound, mode));
     if (mode === "copy") {
       if (content.title) out.push({ choice: { kind: "title", value: content.title.selected.source.opId }, label: `title "${content.title.selected.value}"` });
       if (content.fps) out.push({ choice: { kind: "fps", value: content.fps.selected.source.opId }, label: `${content.fps.selected.value} fps` });
