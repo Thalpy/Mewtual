@@ -12,8 +12,8 @@ Seventeen focused Score tests, eight legacy receiver-replay and six source-reuse
 including real actor create/save/clear/exact retry/reopen, signed page catch-up, newcomer
 Registry/Score seed-plus-tail and Closing restart, wrong-family cold/warm refusal, typed
 historical Object preview/actor Apply and H5 disappearance. Scoped app strict all-target/all-feature
-Clippy, root formatting, ambient and diff checks pass. Existing copy and handoff regression sets
-are running at this checkpoint; independent actual-diff inspection is clear, with final bounded
+Clippy, root formatting, ambient and diff checks pass. Existing copy (13/13) and handoff eligibility
+(6/6) regression sets also pass. Independent actual-diff inspection is clear, with final bounded
 review confirmation requested. Primary integration owns full backend/native/frontend suites,
 final combined review/CI and remaining UI work. This checkpoint does not close Gate 6.
 
