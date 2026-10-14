@@ -244,3 +244,103 @@ fn score_wrong_family_and_malformed_operations_refuse_before_intent_write() {
         before
     );
 }
+
+#[test]
+fn score_open_source_survives_index_refresh_without_retagging_or_cold_restore() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let f = score_fixture();
+    let mut b = budget(&mut store, &f);
+    let (_, state) = f.edit(
+        &mut store,
+        &mut b,
+        f.domain(
+            ScoreOp::SetHeader(ScoreHeader::Title("opened score".into()))
+                .encode()
+                .unwrap(),
+            1,
+        ),
+    );
+    store.retain_studio_source(&f.group, &f.device, state);
+    assert!(store.studio_source_is_warm(SERVER, &f.group, f.target, &f.device));
+
+    // The numeric/physical object namespace is shared. Opposite-family labels cannot borrow
+    // the warm Score graph or satisfy a pointer, even though their logical keys are identical.
+    let art = target(true);
+    assert_eq!(f.logical, art.document(&f.group.group_id()).unwrap());
+    assert!(!store.studio_source_is_warm(SERVER, &f.group, art, &f.device));
+    assert!(!store
+        .studio_object_holds_work(SERVER, &f.group, art)
+        .unwrap());
+    assert!(store
+        .studio_object_holds_work(SERVER, &f.group, f.target)
+        .unwrap());
+    let obligations = [
+        crate::studio::object_target([7; 16], [9; 16], StudioKind::Flipnote),
+        crate::studio::object_target([7; 16], [9; 16], StudioKind::Score),
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        obligations.len(),
+        2,
+        "conflicting same-id claims must retain both family obligations"
+    );
+
+    let index = target(false);
+    let document = index.document(&f.group.group_id()).unwrap();
+    let body = IndexOp::PutObject {
+        object: [9; 16],
+        kind: StudioKind::Score,
+        title: "opened score".into(),
+        created_by: f.device.device_id(),
+        ts: 100,
+        expiry: StudioExpiry::Never,
+    }
+    .encode()
+    .unwrap();
+    let operation = DomainOp {
+        doc_type: document.doc_type,
+        logical_key: document.logical_key.clone(),
+        nonce: [2; 16],
+        body,
+    };
+    let mut b = budget(&mut store, &f);
+    store
+        .edit_studio_epoch(
+            SERVER,
+            &f.group,
+            index,
+            epoch_zero_id(document.doc_type, &document.logical_key),
+            &f.device,
+            operation,
+            100,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    let before = crate::store::studio_full_restores_for_test();
+    assert_eq!(
+        store
+            .with_studio_source(SERVER, &f.group, index, &f.device, |s| Ok(s.op_count()))
+            .unwrap(),
+        Some(1)
+    );
+    assert!(store.studio_source_is_warm(SERVER, &f.group, f.target, &f.device));
+    let after_index = crate::store::studio_full_restores_for_test();
+    assert!(after_index >= before);
+    assert_eq!(
+        store
+            .with_studio_source(SERVER, &f.group, f.target, &f.device, |s| Ok(s.op_count()))
+            .unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        crate::store::studio_full_restores_for_test(),
+        after_index,
+        "Index refresh evicted the Score graph"
+    );
+    assert!(store
+        .load_studio_epoch(SERVER, &f.group, art, &f.device)
+        .is_err());
+}

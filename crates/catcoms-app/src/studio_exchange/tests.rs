@@ -25,6 +25,7 @@ mod reconnect;
 mod registry_runtime;
 mod replay;
 mod scheduling;
+mod score;
 mod succession;
 mod unopened;
 

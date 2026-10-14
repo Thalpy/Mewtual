@@ -443,10 +443,12 @@ pub(crate) fn choose(
             let birth = old.creations[0].source.op_id;
             let held = now.objects.get(object).or_else(|| now.overflow.get(object));
             match op {
-                IndexOp::PutObject { kind, .. } => Ok(
+                // This is an Index pointer, not automatic replay of the referenced object's
+                // operations. The receiver separately verifies its explicit expected family
+                // against the authenticated object source before publishing a Ready choice.
+                IndexOp::PutObject { .. } => Ok(
                     if birth == id
                         && held.is_none()
-                        && kind == StudioKind::Flipnote
                         && now.objects.len() + now.overflow.len() < types::MAX_INDEX_OBJECTS
                     {
                         ready
