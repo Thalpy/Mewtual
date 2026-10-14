@@ -596,6 +596,7 @@ dependencies = [
  "catcoms-sync",
  "catcoms-wire",
  "hex",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

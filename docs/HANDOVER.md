@@ -37,6 +37,15 @@ additions pass in the 24-test focused set). This is not a final combined Gate6 s
 Parallel isolated branches own frame sound state (`gate6-frame-sound`) and authored archival
 playback (`gate6-playback`). Application/native durability, actual-byte export validation,
 publication/readback, GIF and real Sound/Music/export UI wiring remain open. Gate 6 is not closed.
+## Gate 6 native export checkpoint (2026-10-14)
+
+The isolated frame-sound branch adds native actual-byte PIXA validation/publication and
+bounded local visual GIF export. Six Rust validator, one actor publication, four native GIF,
+18frontend PIXA and9permission-chain tests pass; scoped app/native strict Clippy, check0/0,
+format/ambient/diff gates pass. Independent actual-diff review reports no remaining finding in
+this bounded checkpoint. `GATE6-NATIVE-EXPORT.md` documents exact contracts. Main still owns
+SetExport held-byte validation, sound DTO/UI connection and full combined suites; this is not
+Gate6 completion.
 
 ## Gate 6 Flipnote sound core (2026-10-14; isolated checkpoint)
 
@@ -44,7 +53,8 @@ publication/readback, GIF and real Sound/Music/export UI wiring remain open. Gat
 bounded checkpoint/recovery and complete export holds. Required authored duration is1..600000ms.
 Art-only checkpoint bytes stay unchanged. See `GATE6-FRAME-SOUND.md` for full record/accessor
 semantics, test evidence and native DTO integration obligation. This is not Gate6 completion;
-native sound omission on remote ingress remains a confirmed MEDIUM pending main integration.
+native sound omission on remote ingress is closed by the reviewed shared DTO correction,
+with actual provisional seed and unready/conflicted SFX regressions. Final integration remains open.
 
 ## Gate 6 typed score contract (2026-10-14; isolated continuation)
 

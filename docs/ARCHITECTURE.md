@@ -1,5 +1,14 @@
 # Mewtual; Architecture
 
+## Gate 6 native exports (2026-10-14)
+
+Native `publish_pixa` now validates complete actual bytes and reuses the existing persistent
+blob stage/promotion/flush path, without writing Studio metadata. Local `export_studio_gif`
+reuses the pure-Rust image encoder, bounded detached work, inline leases and guarded safe
+Downloads publication. It is visual-only, fixed-name, infinite-loop output, not replicated
+audio or synchronization. Command registration, policy/capabilities and review ledger move
+together. See `GATE6-NATIVE-EXPORT.md`; SetExport and full UI integration remain main-owned.
+
 ## Gate 6 Flipnote sound core checkpoint (2026-10-14)
 
 The typed Flipnote projection now retains SFX, reusable recipes, linked-score provenance and

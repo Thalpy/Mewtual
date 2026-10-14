@@ -1,5 +1,15 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Gate 6 native animation export boundary (2026-10-14)
+
+Actual-byte PIXA publication validates whole framing, strict canonical take grammar, bounded
+source labels/lanes/recipes/events, native PIX192x144 and authored SFX duration before the
+existing persistent stage/promotion/flush. It creates no metadata authority. Local visual GIF
+encodes one raster at a time under a32MiB writer and detached inline lease. Exact session and
+server incarnation are rechecked through safe staged fixed-name publication/reveal; the commit
+guard orders an admitted commit before a concurrent lock rather than undoing a committed export.
+All ignored audio still validates. See `GATE6-NATIVE-EXPORT.md` for limits and honest durability.
+
 ## Gate 6 Flipnote sound core boundary (2026-10-14)
 
 Sound Sets require an existing live frame and effective recipe at their sender's complete causal
