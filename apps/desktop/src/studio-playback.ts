@@ -1,4 +1,4 @@
-import { TAKE_PLAYBACK_EVENTS_PER_TICK, type JamTake } from "./jam-contract.ts";
+import { TAKE_MAX_DURATION_MS, TAKE_PLAYBACK_EVENTS_PER_TICK, type JamTake } from "./jam-contract.ts";
 import { archivalReleaseTailMs, planJamArchivalPlayback, planJamArchivalSeek, type JamArchivalAnimation, type JamArchivalPlan } from "./jam-archival-plan.ts";
 import { JamLatestTaskQueue } from "./jam-publication.ts";
 import type { JamArchivalPlayback, JamPlayResult } from "./jam-engine.ts";
@@ -23,6 +23,8 @@ type Active = {
   generation: number;
   origin: number;
   offset: number;
+  /** Natural EOF in elapsed playback time; see completionMs. */
+  complete: number;
   next: number;
   seek: readonly number[];
   seekNext: number;
@@ -35,6 +37,14 @@ type Active = {
  * `channel`, `invalid`, `muted`, or none given) means the take is not being rendered as authored.
  */
 const DROPPED_EVENT: ReadonlySet<JamPlayResult["reason"]> = new Set(["room-held", "source-held", "duplicate", "sequence"]);
+
+/**
+ * Natural EOF: every authored release has finished AND any authored length the take format cannot
+ * carry (a Score's trailing rests and empty bars) has elapsed. A release crossing that length wins.
+ */
+function completionMs(plan: JamArchivalPlan, horizonMs: number): number {
+  return Math.max(horizonMs, plan.endMs + archivalReleaseTailMs(plan) + 5);
+}
 
 function scopeEqual(a: StudioPlaybackScope | null, b: StudioPlaybackScope | null): boolean {
   return !!a && !!b && a.generation === b.generation && a.server === b.server && a.channel === b.channel && a.membership === b.membership;
@@ -92,24 +102,29 @@ export class StudioPlaybackController {
     if (active) this.engine.revokeArchivalPlayback(active.capability);
   }
 
-  /** Call directly from the local Play gesture; audio resume must not be deferred to a remote callback. */
-  async startTake(take: JamTake, offsetMs = 0): Promise<boolean> { return this.start(take, undefined, offsetMs); }
+  /**
+   * Call directly from the local Play gesture; audio resume must not be deferred to a remote callback.
+   * `horizonMs` is authored length beyond the last event (a Score grid end). The shared deck passes
+   * none: jam-take:v1 carries no such length, so a received take ends with its last release.
+   */
+  async startTake(take: JamTake, offsetMs = 0, horizonMs = 0): Promise<boolean> { return this.start(take, undefined, offsetMs, horizonMs); }
 
   /** Byte-capped package decode reuses PIX/take validators before any synthesis is prepared. */
   async startPixa(bytes: Uint8Array, offsetMs = 0): Promise<boolean> {
     let packageValue;
     try { packageValue = decodePixa(bytes); } catch { return false; }
-    return this.start(packageValue.take, { fps: packageValue.fps, frameCount: packageValue.frames.length, sfx: packageValue.sfx }, offsetMs);
+    return this.start(packageValue.take, { fps: packageValue.fps, frameCount: packageValue.frames.length, sfx: packageValue.sfx }, offsetMs, 0);
   }
 
-  private async start(take: unknown, animation: JamArchivalAnimation | undefined, offsetMs: number): Promise<boolean> {
+  private async start(take: unknown, animation: JamArchivalAnimation | undefined, offsetMs: number, horizonMs: number): Promise<boolean> {
     this.stop();
-    if (!this.scope || this.deafened || !Number.isFinite(offsetMs) || offsetMs < 0) return false;
+    if (!this.scope || this.deafened || !Number.isFinite(offsetMs) || offsetMs < 0 ||
+      !Number.isSafeInteger(horizonMs) || horizonMs < 0 || horizonMs > TAKE_MAX_DURATION_MS) return false;
     let plan: JamArchivalPlan;
     try { plan = planJamArchivalPlayback(take, animation); } catch { return false; }
     // A late deck join/seek beyond EOF is a completed valid take, not a failed start or a fresh
     // replay of its final drum. No source is minted for an already elapsed complete horizon.
-    if (offsetMs >= plan.endMs + archivalReleaseTailMs(plan) + 5) { this.completedValue = true; return true; }
+    if (offsetMs >= completionMs(plan, horizonMs)) { this.completedValue = true; return true; }
     const scope = this.scope, generation = this.generation;
     const current = () => generation === this.generation && !this.deafened && scopeEqual(scope, this.scope);
     this.stateValue = "preparing";
@@ -134,7 +149,8 @@ export class StudioPlaybackController {
     const seek = planJamArchivalSeek(admitted, offsetMs);
     const origin = this.nowMs();
     if (!Number.isFinite(origin)) { this.engine.revokeArchivalPlayback(capability); this.stateValue = "stopped"; return false; }
-    this.active = { capability, plan: admitted, generation, origin, offset: offsetMs, next: seek.next, seek: seek.sounding, seekNext: 0, draining: false };
+    this.active = { capability, plan: admitted, generation, origin, offset: offsetMs, complete: completionMs(admitted, horizonMs),
+      next: seek.next, seek: seek.sounding, seekNext: 0, draining: false };
     this.lastTick = offsetMs;
     this.stateValue = "playing";
     return true;
@@ -176,7 +192,7 @@ export class StudioPlaybackController {
         if (!result.ok && !DROPPED_EVENT.has(result.reason)) { this.stop(); return count; }
       }
       if (active.seekNext >= active.seek.length && active.next >= active.plan.events.length &&
-        readElapsed() >= active.plan.endMs + archivalReleaseTailMs(active.plan) + 5) { this.stop(); this.completedValue = true; }
+        readElapsed() >= active.complete) { this.stop(); this.completedValue = true; }
       return count;
     } catch {
       // Rendering failure is not success and never strands a long archival note.

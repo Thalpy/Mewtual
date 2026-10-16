@@ -1,5 +1,5 @@
 // Conversion from typed native views, not fixture roots. Publication and authority remain separate.
-import { exportScoreTake, type ScoreExportInput } from "./studio-export.ts";
+import { exportScorePlayback, exportScoreTake, type ScoreExportInput } from "./studio-export.ts";
 import { exportFlipnotePixa } from "./pixa.ts";
 import { flipnoteModel, scoreModel, StudioNativeError, type FlipnoteView, type ScoreView } from "./studio-native.ts";
 import { FLIPNOTE_FRAME_BYTES_PROMISE, FLIPNOTE_MAX_FRAMES, PIX_MAX_BYTES } from "./studio-contract.ts";
@@ -36,6 +36,11 @@ function group(view: FlipnoteView | ScoreView): string {
 /** A resolved score is an ordinary validated jam take consumed by the same engine/jukebox. */
 export async function scoreTakeFromNative(object: string, view: ScoreView, exporter: string) {
   return exportScoreTake(scoreInput(object, view), { group: group(view), exporter });
+}
+
+/** Studio playback of the same resolved score, carrying its authored grid end for looping. */
+export async function scorePlaybackFromNative(object: string, view: ScoreView, exporter: string) {
+  return exportScorePlayback(scoreInput(object, view), { group: group(view), exporter });
 }
 
 /**

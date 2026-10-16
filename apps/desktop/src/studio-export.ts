@@ -25,6 +25,11 @@ export type StudioExportContext = Readonly<{
 }>;
 
 export type StudioPatchUnion = Readonly<{ ids: string[]; patches: JamPatch[] }>;
+/**
+ * A resolved Score take plus its authored grid end. jam-take:v1 ends at its last event, so
+ * trailing rests and empty bars exist only here: Studio playback keeps them, a shared take does not.
+ */
+export type ScorePlayback = Readonly<{ take: JamTake; gridMs: number }>;
 type PatchTable = Map<string, JamPatch>;
 type Cell = { step: number; row: number; value: { k: "n"; p: string; len: number } | { k: "d"; pad: number } };
 type ScoreSnapshot = { id: string; bpm: number; bpb: number; steps: number; patches: PatchTable; cells: Cell[] };
@@ -145,6 +150,11 @@ function snapshotScore(input: unknown): ScoreSnapshot {
   return { id: object, bpm: source.bpm, bpb: source.bpb, steps: source.steps, patches, cells };
 }
 
+/** Start of a sixteenth step; `scoreStepMs(steps, bpm)` is the authored grid end. */
+export function scoreStepMs(step: number, bpm: number): number {
+  return Math.floor(step * 15000 / bpm);
+}
+
 /** The design's H(domain, parts...) with u32 BE framing; patch identities use their existing exception. */
 async function framedHash(domain: string, ...parts: Uint8Array[]): Promise<string> {
   const all = [encoder.encode(domain), ...parts];
@@ -171,7 +181,7 @@ async function scoreTake(score: ScoreSnapshot, ctx: StudioExportContext, union: 
   const indices = new Map(union.ids.map((key, index) => [key, index]));
   const pending: Array<{ ms: number; order: number; row: number; event: JamTakeEvent }> = [];
   for (const { step, row, value } of score.cells) {
-    const ms = Math.floor(step * 15000 / score.bpm);
+    const ms = scoreStepMs(step, score.bpm);
     if (value.k === "d") {
       pending.push({ ms, order: 1, row, event: { ms, lane: 0, n: value.pad, d: 1, q: 0 } });
     } else {
@@ -179,7 +189,7 @@ async function scoreTake(score: ScoreSnapshot, ctx: StudioExportContext, union: 
       // the first oscillator, making the byte representation deterministic for every recipe.
       const w = PATCH_OSC_WAVES[score.patches.get(value.p)!.o[0].w];
       pending.push({ ms, order: 1, row, event: { ms, lane: 0, n: row + 60, on: 1, w, p: indices.get(value.p)!, q: 0 } });
-      const off = Math.floor((step + value.len) * 15000 / score.bpm) - 1;
+      const off = scoreStepMs(step + value.len, score.bpm) - 1;
       pending.push({ ms: off, order: 0, row, event: { ms: off, lane: 0, n: row + 60, on: 0, q: 0 } });
     }
   }
@@ -194,9 +204,14 @@ async function scoreTake(score: ScoreSnapshot, ctx: StudioExportContext, union: 
 
 /** Export a resolved score through the jukebox's validator. No calls, timers or audio are started. */
 export async function exportScoreTake(input: unknown, inputContext: StudioExportContext): Promise<JamTake> {
+  return (await exportScorePlayback(input, inputContext)).take;
+}
+
+/** The same export plus the grid end, taken from the validated snapshot rather than the caller. */
+export async function exportScorePlayback(input: unknown, inputContext: StudioExportContext): Promise<ScorePlayback> {
   const score = snapshotScore(input), ctx = context(inputContext);
   await verifyPatches(score.patches);
-  return scoreTake(score, ctx, mergePatches(score.patches, new Map()));
+  return { take: await scoreTake(score, ctx, mergePatches(score.patches, new Map())), gridMs: scoreStepMs(score.steps, score.bpm) };
 }
 
 /** Package a linked score or derive the exact no-score take; epoch is lossless all the way to H(). */

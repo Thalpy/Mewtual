@@ -2,10 +2,11 @@ import type { JamTake } from "./jam-contract.ts";
 import { StudioPlaybackController, type StudioPlaybackEngine, type StudioPlaybackScope, type StudioPlaybackState } from "./studio-playback.ts";
 import { planJamArchivalPlayback } from "./jam-archival-plan.ts";
 import { decodePixa, encodePixa } from "./pixa.ts";
+import type { ScorePlayback } from "./studio-export.ts";
 
 export type StudioAudioState = Readonly<{ state: StudioPlaybackState; elapsedMs: number }>;
 export type StudioAudioActions = {
-  start: (kind: "score" | "flipnote", prepare: () => Promise<JamTake | Uint8Array>, loop: boolean, offsetMs?: number) => Promise<boolean>;
+  start: (kind: "score" | "flipnote", prepare: () => Promise<ScorePlayback | Uint8Array>, loop: boolean, offsetMs?: number) => Promise<boolean>;
   stop: () => void;
 };
 
@@ -16,7 +17,7 @@ export class StudioAudioSession {
   private generation = 0;
   private deafened = true;
   private preparing = false;
-  private active: { kind: "score" | "flipnote"; value: JamTake | Uint8Array; loop: boolean; generation: number } | null = null;
+  private active: { kind: "score" | "flipnote"; value: JamTake | Uint8Array; gridMs: number; loop: boolean; generation: number } | null = null;
   private elapsed = 0;
   private ticking = false;
   private readonly engine: StudioPlaybackEngine;
@@ -28,7 +29,7 @@ export class StudioAudioSession {
     this.scopeKey = key; this.deafened = deafened; this.controller.setScope(scope, deafened);
   }
   stop(): void { this.generation++; this.preparing = false; this.active = null; this.elapsed = 0; this.controller.stop(); }
-  async start(kind: "score" | "flipnote", prepare: () => Promise<JamTake | Uint8Array>, loop: boolean, offsetMs = 0): Promise<boolean> {
+  async start(kind: "score" | "flipnote", prepare: () => Promise<ScorePlayback | Uint8Array>, loop: boolean, offsetMs = 0): Promise<boolean> {
     this.stop();
     if (!this.scopeKey || this.deafened) return false;
     const generation = this.generation;
@@ -41,11 +42,17 @@ export class StudioAudioSession {
       const [input] = await Promise.all([prepare(), resumed]);
       if (!current() || this.engine.context.state !== "running") return false;
       // Keep one owned immutable loop source. A caller mutating its original take/Buffer after
-      // the initial press must not change the content of a later automatic loop.
-      const value = kind === "score" ? planJamArchivalPlayback(input).take : encodePixa(decodePixa(input as Uint8Array));
-      const started = kind === "score" ? await this.controller.startTake(value as JamTake, offsetMs) : await this.controller.startPixa(value as Uint8Array, offsetMs);
+      // the initial press must not change the content of a later automatic loop. A Score's grid
+      // end is read once: trailing rests are part of the loop, not trimmed to the last release.
+      let value: JamTake | Uint8Array, gridMs = 0;
+      if (kind === "score") {
+        const score = input as ScorePlayback;
+        gridMs = score.gridMs;
+        value = planJamArchivalPlayback(score.take).take;
+      } else value = encodePixa(decodePixa(input as Uint8Array));
+      const started = kind === "score" ? await this.controller.startTake(value as JamTake, offsetMs, gridMs) : await this.controller.startPixa(value as Uint8Array, offsetMs);
       if (!current()) return false;
-      if (started) this.active = { kind, value, loop: loop && (kind !== "score" || (value as JamTake).events.length > 0), generation };
+      if (started) this.active = { kind, value, gridMs, loop: loop && (kind !== "score" || (value as JamTake).events.length > 0), generation };
       return started;
     } finally { if (current()) this.preparing = false; }
   }
@@ -62,9 +69,9 @@ export class StudioAudioSession {
       if (this.active !== active || active.generation !== this.generation) return;
       if (this.controller.state === "stopped") {
         if (!this.controller.completed || !active.loop || this.deafened || !this.scopeKey || this.engine.context.state !== "running") { this.active = null; return; }
-        // An explicit loop owns a complete package, including its longest hold/release horizon.
-        // Restart mints a fresh engine capability only after all authored sound has completed.
-        const started = active.kind === "score" ? await this.controller.startTake(active.value as JamTake) : await this.controller.startPixa(active.value as Uint8Array);
+        // An explicit loop owns a complete package, including its longest hold/release horizon
+        // and a Score's grid end. Restart mints a fresh engine capability only after both.
+        const started = active.kind === "score" ? await this.controller.startTake(active.value as JamTake, 0, active.gridMs) : await this.controller.startPixa(active.value as Uint8Array);
         if (this.active !== active || active.generation !== this.generation) return;
         if (!started) this.active = null;
         else this.elapsed = 0;

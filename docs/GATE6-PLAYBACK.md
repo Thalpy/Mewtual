@@ -25,7 +25,11 @@ Render failure includes a resolved refusal: any dispatch result other than a voi
 (`room-held`/`source-held`), same-note `duplicate` or consumed-index `sequence` drop stops the
 take without EOF, whether the engine returns it synchronously or asynchronously.
 The DJ alone advances after genuine EOF; listeners retain the existing done marker. Empty Scores
-do not spin a zero-length automatic loop. The engine's opaque gain API applies the existing
+do not spin a zero-length automatic loop. A Studio Score's horizon is max(authored grid end, last
+release end): `ScorePlayback.gridMs` travels beside the unchanged jam-take:v1 export, so trailing
+rests and empty bars are part of every loop, and a release crossing the grid delays the restart
+instead of being cut. A shared `.jamtake` carries no grid; deck playback still ends at its last
+release. The engine's opaque gain API applies the existing
 jukebox volume to current/future archival lanes without exposing channels or changing live gains.
 
 Focused transport/controller/Studio-loop tests cover remote/local resume, 95-second seek holds,

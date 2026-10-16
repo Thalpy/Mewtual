@@ -117,6 +117,21 @@ test("voice-budget drops, sync or async, keep the take playing through natural E
   }
 });
 
+test("an authored horizon past the last release keeps playing through the silence; invalid horizons refuse", async () => {
+  const h = setup(), input = take(); input.events = [{ ms: 0, lane: 0, n: 60, on: 1, w: "sine", q: 0 }, { ms: 124, lane: 0, n: 60, on: 0, q: 1 }];
+  assert.equal(await h.controller.startTake(input, 0, 2_000), true);
+  await h.controller.tick(); h.now.value = 1_999; await h.controller.tick();
+  assert.equal(h.controller.state, "playing", "trailing rests are part of the authored length");
+  assert.equal(h.controller.elapsedMs, 1_999);
+  h.now.value = 2_000; await h.controller.tick();
+  assert.equal(h.controller.state, "stopped"); assert.equal(h.controller.completed, true);
+  assert.equal(await h.controller.startTake(input, 1_000, 2_000), true, "a seek inside the trailing rests still plays to the grid end");
+  assert.equal(h.controller.state, "playing");
+  assert.equal(await h.controller.startTake(input, 2_000, 2_000), true);
+  assert.equal(h.controller.state, "stopped"); assert.equal(h.controller.completed, true, "a seek at the grid end is complete");
+  for (const bad of [-1, 1.5, NaN, Infinity, 600_001]) assert.equal(await h.controller.startTake(input, 0, bad), false, String(bad));
+});
+
 test("late seek beyond the entire authored horizon is silent natural completion, not final-event replay", async () => {
   const h = setup(); assert.equal(await h.controller.startTake(take(), 600_125), true);
   assert.equal(h.controller.state, "stopped"); assert.equal(h.controller.completed, true); assert.equal(h.engine.prepared, 0); assert.equal(h.engine.calls.length, 0);

@@ -26,7 +26,8 @@
 import { PixError, decodePix } from "./pix.ts";
 import { validateJamPatch } from "./jam-patch.ts";
 import type { JamPatch, JamTake } from "./jam-contract.ts";
-import { flipnotePixaFromNative, preflightFlipnoteMedia, scoreTakeFromNative } from "./studio-resolved-export.ts";
+import { flipnotePixaFromNative, preflightFlipnoteMedia, scorePlaybackFromNative } from "./studio-resolved-export.ts";
+import type { ScorePlayback } from "./studio-export.ts";
 import { exportStudioGif, publishStudioPixa, type StudioGifSaved } from "./studio-media.ts";
 import { decodePixa, encodePixa, PIXA_MAX_BYTES } from "./pixa.ts";
 import { historicalSoundOperation, soundRecoveryChoices } from "./studio-sound-recovery.ts";
@@ -1193,12 +1194,17 @@ export class StudioSession {
     } finally { this.mediaWrite = false; }
   }
 
-  prepareScoreTake(object: Hex32): Promise<JamTake> {
+  async prepareScoreTake(object: Hex32): Promise<JamTake> {
+    return (await this.prepareScorePlayback(object)).take;
+  }
+
+  /** The same take plus its authored grid end, which Studio looping must honour. */
+  prepareScorePlayback(object: Hex32): Promise<ScorePlayback> {
     return this.oneMedia(async () => {
       const source = this.mediaSource(object, "score");
-      const take = await scoreTakeFromNative(object, source.view as ScoreView, this.me);
+      const playback = await scorePlaybackFromNative(object, source.view as ScoreView, this.me);
       source.assertCurrent();
-      return take;
+      return playback;
     });
   }
 

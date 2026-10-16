@@ -670,7 +670,7 @@
     commit();
     savedPreview = null;
     const object = objectId, kind = isScore ? "score" : "flipnote";
-    const prepare = () => kind === "score" ? session.prepareScoreTake(object) : session.prepareFlipnotePixa(object);
+    const prepare = () => kind === "score" ? session.prepareScorePlayback(object) : session.prepareFlipnotePixa(object);
     // The App adapter resumes its existing context immediately, before prepare fetches/hashes.
     void audioActions.start(kind, prepare, loop, kind === "flipnote" ? Math.max(0, frameIndex) * 1000 / (model?.fps ?? 12) : 0)
       .then((started: boolean) => { if (!started) onnotice("playback was cancelled or audio is unavailable; press Play to try again", "warn"); })

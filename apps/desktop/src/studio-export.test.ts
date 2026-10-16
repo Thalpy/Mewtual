@@ -6,7 +6,7 @@ import { PATCH_OSC_WAVES, TAKE_MAX_BYTES, type JamPatch } from "./jam-contract.t
 import { jamPatchId } from "./jam-patch.ts";
 import { validateJamTake } from "./jam-recorder.ts";
 import { canonicalJson } from "./studio-contract.ts";
-import { exportFlipnoteTake, exportScoreTake, studioPatchUnion, type ScoreExportInput } from "./studio-export.ts";
+import { exportFlipnoteTake, exportScorePlayback, exportScoreTake, studioPatchUnion, type ScoreExportInput } from "./studio-export.ts";
 
 const vector = JSON.parse(readFileSync(new URL("../../../crates/catcoms-replication/tests/fixtures/studio-export-v1.json", import.meta.url), "utf8"));
 const ctx = { group: vector.group as string, exporter: vector.exporter as string };
@@ -81,6 +81,17 @@ test("every tempo and both score bounds produce positive bounded note holds", as
     assert.ok(take.events[3].ms > take.events[2].ms);
     assert.equal(take.events[3].ms, Math.floor(256 * 15000 / bpm) - 1);
   }
+});
+
+test("Score playback carries the authored grid end beside the unchanged jam-take:v1 export", async () => {
+  for (const [bpm, steps] of [[120, 16], [120, 64], [40, 256], [240, 1], [97, 37]]) {
+    const input = score({ bpm, steps, cells: { "0:0": { k: "n", p: vector.patchId } } });
+    const playback = await exportScorePlayback(input, ctx);
+    assert.equal(playback.gridMs, Math.floor(steps * 15000 / bpm), `${steps} steps at ${bpm} BPM`);
+    assert.deepEqual(playback.take, await exportScoreTake(input, ctx), "the shared take format is unchanged");
+    assert.ok(playback.take.events.at(-1)!.ms < playback.gridMs, "trailing rests exist only in gridMs");
+  }
+  assert.equal((await exportScorePlayback(score({ steps: 16 }), ctx)).gridMs, 2000, "an empty grid still has its length");
 });
 
 test("authored grid lengths preserve note-off times, adjacency, independent rows and drum hits", async () => {
