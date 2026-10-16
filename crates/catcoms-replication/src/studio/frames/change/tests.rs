@@ -492,6 +492,68 @@ fn frame_sound_post_seed_values_override_fallback_and_cannot_reuse_source_nonce(
         .is_empty());
 }
 
+/// Decided contract (GATE6-FRAME-SOUND, checkpoint section): an SFX tombstone and an export
+/// birth fence their id only while those records are retained causal history. A seed omits
+/// removed slots whole, so after compaction a same-id Set with different content is a fresh slot,
+/// both when its author prepares it and when a receiver admits it. A lifetime fence would be a
+/// seed format change and must change this test deliberately.
+#[test]
+fn frame_sound_compacted_removals_stop_fencing_their_ids_after_the_seed() {
+    let export = |cid: u8| FlipnoteOp::SetExport {
+        export: id(8),
+        cid: [cid; 32],
+        bytes: 100,
+        expiry: crate::studio::StudioExpiry::Never,
+    };
+    let mut doc = sound_base();
+    accept(&mut doc, 1, &set_sound(1, 500), 3);
+    accept(&mut doc, 1, &FlipnoteOp::RemoveSfx { sfx: id(1) }, 4);
+    accept(&mut doc, 1, &export(8), 5);
+    accept(&mut doc, 1, &FlipnoteOp::RemoveExport { export: id(8) }, 6);
+    let retained = read(&doc);
+    assert!(placement(&retained, &set_sound(1, 600_000)).is_err());
+    assert!(placement(&retained, &export(9)).is_err());
+
+    let seed = retained.checkpoint([5; 32]).unwrap();
+    // The receiver is a third member, so both new changes below arrive from someone else.
+    let mut next = empty(&author(3));
+    next.apply_changes([Change::from_bytes(seed.bytes().to_vec()).unwrap()])
+        .unwrap();
+    let seeded = FlipnoteFrameProjection::read(&logical(), CHANNEL, 1, &next).unwrap();
+    assert!(!seeded.sound.known(&id(1), false), "the seed keeps no SFX tombstone");
+    assert!(!seeded.sound.known(&id(8), true), "the seed keeps no export birth");
+
+    for (who, op, nonce) in [(1, set_sound(1, 600_000), 10), (2, export(9), 11)] {
+        let projected = FlipnoteFrameProjection::read(&logical(), CHANNEL, 1, &next).unwrap();
+        let operation = domain(&logical(), &op, nonce);
+        // Ordinary local authoring on the author's replica...
+        let prepared = prepare(&projected, &operation, &author(who), 1234).unwrap();
+        let mut sender = next
+            .clone()
+            .with_actor(ActorId::from(author(who).as_bytes().to_vec()));
+        prepared.write(&mut sender).unwrap();
+        sender
+            .put(
+                ROOT,
+                format!("_p1/op/{}", hex(&operation.id(&author(who)))),
+                1u64,
+            )
+            .unwrap();
+        sender.commit();
+        let change = sender.get_last_local_change().unwrap();
+        // ...then the receiver's causal admission of that inbound change.
+        validate_frame_change(&logical(), CHANNEL, 1, &operation, &change, &next).unwrap();
+        next.apply_changes([change]).unwrap();
+    }
+    let reborn = FlipnoteFrameProjection::read(&logical(), CHANNEL, 1, &next).unwrap();
+    assert!(reborn.sound.sfx()[&id(1)].value == set_sound(1, 600_000));
+    assert!(reborn.sound.exports()[&id(8)].value == export(9));
+    assert!(
+        placement(&reborn, &export(10)).is_err(),
+        "the new birth fences its id again while it is retained"
+    );
+}
+
 #[test]
 fn frame_sound_mutable_pred_sets_cannot_hide_a_concurrent_removal() {
     let base = sound_base();

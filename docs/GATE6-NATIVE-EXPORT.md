@@ -46,11 +46,16 @@ capacity growth. It remembers failed writes including the encoder's otherwise un
 Drop-time trailer, so a truncated-at-cap GIF cannot report success.
 
 Detached encoding retains its own cancellation/inline keepalive even when the caller disappears.
-After encoding, the same unlocked generation and exact server incarnation are held through
-filesystem publication/reveal. A stale, cancelled, removed or replaced scope at that final
-admission boundary writes/reveals nothing. The commit guard linearizes an admitted write/reveal
+After encoding, the `.part` is created, written in 1-MiB chunks with cancellation checked between
+them, and synced on the blocking pool with no UI-session guard or server-registry lock held, so a
+slow Downloads volume delays only this export. Only the rename onto the reserved name runs under
+the same unlocked generation and exact server incarnation. A stale, cancelled, removed or replaced
+scope at that boundary publishes nothing, and the staging file and reservation are removed, also
+when the staging worker outlives its caller. The commit guard linearizes an admitted rename
 before a concurrently completing lock; it does not promise retroactive cancellation once that
-guarded commit has started.
+rename has started. Reveal runs after both locks are released and only while the same UI
+generation is current: a lock that wins after the rename leaves the GIF in Downloads without
+revealing it or reporting success.
 The renderer supplies no filename/path: `Mewtual-flipnote.gif` uses the existing create-new safe
 Downloads suffix/reservation helper. A synced staging file is atomically renamed onto its own
 reserved final filename; failure cleans up staging/reservation and never overwrites an older

@@ -195,6 +195,8 @@ fn placement(
         FlipnoteOp::SetHeader(FlipnoteHeader::Title(_) | FlipnoteHeader::Fps(_)) => {
             Ok((None, None))
         }
+        // Deleted-SFX and known-export fences cover retained history only; a seed omits removed
+        // slots, so a compacted id is admitted as a fresh slot (see the sound module contract).
         FlipnoteOp::SetSfx {
             sfx, frame, patch, ..
         } => {

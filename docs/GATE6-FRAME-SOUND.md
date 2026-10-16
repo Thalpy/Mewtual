@@ -13,9 +13,9 @@ canonical bodies and keys are revalidated before serialization. Debug is content
 | Property | Contract |
 | --- | --- |
 | `s/<sfx id>` | Mutable SetSfx register; sequential editing keeps the id. Every Set requires a live frame and effective local recipe at the sender frontier. |
-| `q/<sfx id>/<op id>` | Immutable deletion; any retained deletion suppresses every Set alternative and prevents same-id reuse. |
+| `q/<sfx id>/<op id>` | Immutable deletion; any retained deletion suppresses every Set alternative and prevents same-id reuse while it is retained (see checkpoint compaction below). |
 | `p/<recipe hash>` | Mutable SetPatch/RemovePatch register. ANY live Remove wins even when the raw AM winner is Set. Later Set consumes observed same-property predecessors only. |
-| `x/<export id>/<op id>` | Immutable export candidate, smallest derived op id selects a same-id collision. Replacement uses a new export id. |
+| `x/<export id>/<op id>` | Immutable export candidate, smallest derived op id selects a same-id collision. Replacement uses a new export id. The birth fences its id while any candidate or deletion for it is retained. |
 | `z/<export id>/<op id>` | Immutable export deletion, suppressing all same-id candidates. |
 | `h/score` | Mutable optional score id; explicit None preserves unlink provenance. This grants no authority about the other object's existence, kind, channel or readiness. |
 
@@ -51,7 +51,13 @@ not tombstones alone, and share art's four-value/1024-conflict-field budget. Exp
 conflicts count as one field per id; removed groups and overflow disappear only into the existing
 recovery-before-replacement barrier. Deletion permanence means retained causal history, not an
 unbounded lifetime ledger after compaction. Historical replay must remain conservative when a
-compacted deletion cannot be proven absent. Post-seed explicit registers replace fallback values;
+compacted deletion cannot be proven absent. The decided consequence for ordinary admission: once a
+seed has omitted a removed SFX or export slot, the next epoch's local preparation and inbound causal
+validation both accept a Set that reuses its id with different content, as a fresh slot. Honest
+clients mint new random ids, so only a deliberate author reuses one. Anything that refers to an
+SFX or export id from outside the retained history (a chat post, another document) must name the
+epoch or the content address, not the bare id. A lifetime fence would be a seed format change;
+`frame_sound_compacted_removals_stop_fencing_their_ids_after_the_seed` pins the current contract. Post-seed explicit registers replace fallback values;
 inherited source ids cannot be reused as fresh edits.
 
 Reference enumeration includes every retained export candidate, even losing/deleted/overflow

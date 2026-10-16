@@ -65,9 +65,10 @@ pub(crate) async fn export_studio_gif(
         server,
         instance,
         generation,
-        &downloads,
-        &gif,
+        downloads,
+        gif,
         &cancellation,
+        || {},
         std::future::ready(()),
         reveal_path,
     )
@@ -168,60 +169,128 @@ fn encode_gif(bytes: &[u8], limit: usize, cancelled: impl Fn() -> bool) -> Resul
     Ok(output.bytes)
 }
 
+/// Stage, publish, then reveal. Only the rename makes plaintext visible under the final name, so
+/// only it runs under the UI-session guard and server-registry lock. Creating, writing and syncing
+/// the `.part` on a slow Downloads volume holds neither, and runs off the async workers. Every
+/// failure or cancellation before the rename removes the staging file and the reserved name.
+/// `before_chunk` and `before_commit` are test seams; production passes no-ops.
 #[allow(clippy::too_many_arguments)]
-async fn save_gif<F, R>(
+async fn save_gif<W, F, R>(
     state: &AppState,
     server: u64,
     instance: u64,
     generation: u64,
-    downloads: &Path,
-    gif: &[u8],
+    downloads: PathBuf,
+    gif: Vec<u8>,
     cancellation: &RequestCancellation,
+    before_chunk: W,
     before_commit: F,
     reveal: R,
 ) -> Result<SavedFileResult, String>
 where
+    W: FnMut() + Send + 'static,
     F: Future<Output = ()>,
     R: FnOnce(&Path) -> Result<(), String>,
 {
     if gif.len() > GIF_MAX_BYTES || !gif.starts_with(b"GIF89a") {
         return Err("invalid generated flipnote GIF".into());
     }
+    let owned = cancellation.clone();
+    // A worker that outlives this future still drops its unpublished result, which cleans up.
+    let mut staged = tokio::task::spawn_blocking(move || {
+        stage_gif(&downloads, &gif, || owned.is_cancelled(), before_chunk)
+    })
+    .await
+    .map_err(|_| "GIF save worker failed".to_string())??;
     before_commit.await;
     creative_blobs::finish_response(state, server, instance, generation, || {
         if cancellation.is_cancelled() {
-            return Err("request cancelled".into());
+            return Err("request cancelled".to_string());
         }
-        write_gif(downloads, gif, reveal)
+        staged.publish()
     })
-    .await?
+    .await??;
+    // Revealing opens a system window, so it waits for no lock. It still belongs to the session
+    // that started the export: a lock that won after the rename leaves the GIF in Downloads but
+    // neither reveals it nor reports success behind the lock screen.
+    drop(require_ui_session_generation(state, generation).await?);
+    Ok(revealed(&staged.path, reveal))
 }
 
-fn write_gif<R: FnOnce(&Path) -> Result<(), String>>(
+/// Bytes written and synced to a `.part` beside a reserved final name, which stays empty until
+/// [`StagedGif::publish`]. Dropping it unpublished removes both.
+struct StagedGif {
+    staging: PathBuf,
+    path: PathBuf,
+    published: bool,
+}
+
+impl StagedGif {
+    fn publish(&mut self) -> Result<(), String> {
+        publish_staged_download(&self.staging, &self.path)?;
+        self.published = true;
+        Ok(())
+    }
+}
+
+impl Drop for StagedGif {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = std::fs::remove_file(&self.staging);
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// One bounded write between cancellation checks. The whole GIF is at most 32 MiB.
+const GIF_WRITE_CHUNK: usize = 1024 * 1024;
+
+fn stage_gif(
     downloads: &Path,
     gif: &[u8],
-    reveal: R,
-) -> Result<SavedFileResult, String> {
-    let (mut file, staging, path) = create_staged_download(downloads, GIF_NAME)?;
-    let result = file
-        .write_all(gif)
-        .and_then(|()| file.sync_all())
-        .map_err(|e| e.to_string());
-    drop(file);
-    if let Err(error) = result.and_then(|()| publish_staged_download(&staging, &path)) {
-        let _ = std::fs::remove_file(&staging);
-        let _ = std::fs::remove_file(&path);
-        return Err(error);
+    cancelled: impl Fn() -> bool,
+    mut before_chunk: impl FnMut(),
+) -> Result<StagedGif, String> {
+    let (file, staging, path) = create_staged_download(downloads, GIF_NAME)?;
+    let staged = StagedGif {
+        staging,
+        path,
+        published: false,
+    };
+    // The handle closes when this returns, before any failure path removes the files.
+    write_staging(file, gif, &cancelled, &mut before_chunk)?;
+    if cancelled() {
+        return Err("request cancelled".into());
     }
-    let warning = reveal(&path)
+    Ok(staged)
+}
+
+fn write_staging(
+    mut file: std::fs::File,
+    gif: &[u8],
+    cancelled: &impl Fn() -> bool,
+    before_chunk: &mut impl FnMut(),
+) -> Result<(), String> {
+    for chunk in gif.chunks(GIF_WRITE_CHUNK) {
+        before_chunk();
+        if cancelled() {
+            return Err("request cancelled".into());
+        }
+        file.write_all(chunk).map_err(|e| e.to_string())?;
+    }
+    file.sync_all().map_err(|e| e.to_string())
+}
+
+fn revealed<R: FnOnce(&Path) -> Result<(), String>>(path: &Path, reveal: R) -> SavedFileResult {
+    let warning = reveal(path)
         .err()
         .map(|e| format!("The GIF was saved, but Downloads could not be opened: {e}"));
-    Ok(SavedFileResult {
+    SavedFileResult {
         path: path.to_string_lossy().into_owned(),
         displayed: warning.is_none(),
         warning,
         content_validation: Some("matched".into()),
-    })
+    }
 }
 
 #[cfg(test)]

@@ -29,6 +29,13 @@ type Active = {
   draining: boolean;
 };
 
+/**
+ * Refusals that drop one bound event while the rest of the take stays playable: shared voice
+ * budget, a same-note overlap and an already-consumed index. Any other refusal (`audio`, a lost
+ * `channel`, `invalid`, `muted`, or none given) means the take is not being rendered as authored.
+ */
+const DROPPED_EVENT: ReadonlySet<JamPlayResult["reason"]> = new Set(["room-held", "source-held", "duplicate", "sequence"]);
+
 function scopeEqual(a: StudioPlaybackScope | null, b: StudioPlaybackScope | null): boolean {
   return !!a && !!b && a.generation === b.generation && a.server === b.server && a.channel === b.channel && a.membership === b.membership;
 }
@@ -162,8 +169,11 @@ export class StudioPlaybackController {
         // cleanup still advance; only attacks with future authored hold remain eligible.
         const attack = event.kind === "on" || event.kind === "drum";
         if (attack && event.offMs! <= elapsed) continue;
-        await this.engine.playArchivalEvent(active.capability, index, attack ? Math.max(0, elapsed - event.ms) : 0);
+        const result = await this.engine.playArchivalEvent(active.capability, index, attack ? Math.max(0, elapsed - event.ms) : 0);
         if (this.active !== active || active.generation !== this.generation) return count;
+        // A resolved refusal is as much a render failure as a rejection: stop without EOF so a
+        // shared deck cannot advance past a take that never sounded.
+        if (!result.ok && !DROPPED_EVENT.has(result.reason)) { this.stop(); return count; }
       }
       if (active.seekNext >= active.seek.length && active.next >= active.plan.events.length &&
         readElapsed() >= active.plan.endMs + archivalReleaseTailMs(active.plan) + 5) { this.stop(); this.completedValue = true; }

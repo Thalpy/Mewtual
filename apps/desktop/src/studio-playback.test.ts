@@ -29,6 +29,9 @@ class FakeEngine implements StudioPlaybackEngine {
   calls: Array<{ index: number; age: number }> = [];
   preparing: Promise<unknown> | null = null;
   rendering: Promise<unknown> | null = null;
+  /** What dispatch resolves to; `sync` returns it directly, as the engine does for note events. */
+  outcome: JamPlayResult = { ok: true };
+  sync = false;
   async prepareArchivalPlayback(input: unknown, animation: JamArchivalAnimation | undefined): Promise<JamArchivalPlayback> {
     this.prepared++;
     const plan = planJamArchivalPlayback(input, animation);
@@ -37,10 +40,11 @@ class FakeEngine implements StudioPlaybackEngine {
     return this.capability = {} as JamArchivalPlayback;
   }
   archivalPlaybackPlan(capability: JamArchivalPlayback): JamArchivalPlan | null { return capability === this.capability ? this.plan : null; }
-  async playArchivalEvent(_capability: JamArchivalPlayback, index: number, age = 0): Promise<JamPlayResult> {
+  playArchivalEvent(_capability: JamArchivalPlayback, index: number, age = 0): JamPlayResult | Promise<JamPlayResult> {
     this.calls.push({ index, age });
-    if (this.rendering) await this.rendering;
-    return { ok: true };
+    if (this.sync) return this.outcome;
+    const rendering = this.rendering;
+    return (async () => { if (rendering) await rendering; return this.outcome; })();
   }
   revokeArchivalPlayback(capability: JamArchivalPlayback): boolean {
     this.revoked.push(capability);
@@ -80,6 +84,37 @@ test("only natural completion marks EOF; manual, revoked and render-failed owner
   await h.controller.startTake(take()); h.engine.capability = null; await h.controller.tick(); assert.equal(h.controller.completed, false);
   await h.controller.startTake(take()); h.engine.rendering = Promise.reject(new Error("renderer failed"));
   await h.controller.tick(); assert.equal(h.controller.state, "stopped"); assert.equal(h.controller.completed, false);
+});
+
+test("a resolved audio refusal, sync or async, stops without EOF and is not resumed by later ticks", async () => {
+  for (const sync of [true, false]) {
+    const h = setup(); h.engine.sync = sync;
+    assert.equal(await h.controller.startTake(take()), true);
+    h.engine.outcome = { ok: false, reason: "audio" };
+    assert.equal(await h.controller.tick(), 1, `sync=${sync}`);
+    assert.equal(h.controller.state, "stopped", `sync=${sync}`);
+    assert.equal(h.controller.completed, false, `sync=${sync}: an unrendered take is not natural EOF`);
+    assert.equal(h.engine.revoked.length, 1, `sync=${sync}: the failed capability is released`);
+    h.engine.outcome = { ok: true }; h.now.value = 600_125;
+    assert.equal(await h.controller.tick(), 0, `sync=${sync}`);
+    assert.equal(h.engine.calls.length, 1, `sync=${sync}: the later release is never dispatched`);
+    assert.equal(h.controller.completed, false, `sync=${sync}`);
+  }
+});
+
+test("voice-budget drops, sync or async, keep the take playing through natural EOF", async () => {
+  for (const sync of [true, false]) for (const reason of ["room-held", "source-held"] as const) {
+    const h = setup(); h.engine.sync = sync;
+    assert.equal(await h.controller.startTake(take()), true);
+    h.engine.outcome = { ok: false, reason };
+    assert.equal(await h.controller.tick(), 1);
+    assert.equal(h.controller.state, "playing", `${reason} sync=${sync}: one dropped voice is not a failed take`);
+    h.engine.outcome = { ok: true };
+    h.now.value = 600_000; assert.equal(await h.controller.tick(), 1);
+    h.now.value = 600_125; await h.controller.tick();
+    assert.equal(h.controller.state, "stopped");
+    assert.equal(h.controller.completed, true, `${reason} sync=${sync}`);
+  }
 });
 
 test("late seek beyond the entire authored horizon is silent natural completion, not final-event replay", async () => {

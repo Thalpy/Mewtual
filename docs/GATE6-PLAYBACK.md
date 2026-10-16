@@ -14,11 +14,16 @@ Remote deck state cannot resume a suspended context. A local take/deck gesture c
 suspension cancels rather than queuing a burst for eventual reopen. Studio and local/shared takes
 explicitly retire the other archival UI owner on a new Play. Deafen and membership edges retire
 pending/live take ownership and suppress the previous shared CID until a new local deck control
-or another track; a heartbeat alone cannot resurrect it. Leaving the call resets that suppression.
+or another track; a heartbeat alone cannot resurrect it. When the active transport CID and the
+adopted, still-loading deck CID differ at that edge, both stay suppressed. Leaving the call resets
+that suppression.
 
 The controller exposes `completed` separately from `state === "stopped"`. Only the complete
 authored horizon (or a valid seek already beyond it) marks natural EOF. Manual stop, stale scope,
 revocation, suspended audio and render failure do not advance the DJ or restart a Studio loop.
+Render failure includes a resolved refusal: any dispatch result other than a voice-budget
+(`room-held`/`source-held`), same-note `duplicate` or consumed-index `sequence` drop stops the
+take without EOF, whether the engine returns it synchronously or asynchronously.
 The DJ alone advances after genuine EOF; listeners retain the existing done marker. Empty Scores
 do not spin a zero-length automatic loop. The engine's opaque gain API applies the existing
 jukebox volume to current/future archival lanes without exposing channels or changing live gains.

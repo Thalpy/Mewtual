@@ -1,9 +1,13 @@
 //! Sound/export evidence shares the frame record framing and P1 admission boundary.
 //!
 //! Random SFX ids are mutable values plus tombstones permanent in retained causal history;
-//! exports have immutable births. Recipes are reusable mutable slots: any live removal wins,
-//! even when Automerge selected a Set. A later
-//! Set may consume exactly the removals it observed; an unseen concurrent removal still wins.
+//! exports have immutable births. Both fences end at compaction: a checkpoint seed omits removed
+//! slots whole, so the next epoch admits a same-id Set as a fresh slot. Honest authors mint
+//! fresh random ids, never reuse; a reference to an SFX/export id from outside this document's
+//! retained history must also carry the epoch or the content address it means.
+//! Recipes are reusable mutable slots: any live removal wins, even when Automerge selected a
+//! Set. A later Set may consume exactly the removals it observed; an unseen concurrent removal
+//! still wins.
 
 use super::*;
 

@@ -99,7 +99,14 @@ fn studio_gif_safe_download_never_overwrites_and_reports_reveal_failure() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join(GIF_NAME), b"existing").unwrap();
     let gif = encode_gif(&golden(), GIF_MAX_BYTES, || false).unwrap();
-    let saved = write_gif(dir.path(), &gif, |_| Err("no desktop".into())).unwrap();
+    let abandoned = stage_gif(dir.path(), &gif, || false, || {}).unwrap();
+    assert_eq!(std::fs::read(&abandoned.staging).unwrap(), gif);
+    assert_eq!(std::fs::read(&abandoned.path).unwrap(), b"", "the reserved name holds no bytes");
+    drop(abandoned);
+    let mut staged = stage_gif(dir.path(), &gif, || false, || {}).unwrap();
+    staged.publish().unwrap();
+    let saved = revealed(&staged.path, |_| Err("no desktop".into()));
+    drop(staged);
     assert!(!saved.displayed);
     assert!(saved.warning.unwrap().contains("saved"));
     assert_eq!(
@@ -112,33 +119,27 @@ fn studio_gif_safe_download_never_overwrites_and_reports_reveal_failure() {
         .file_name()
         .to_string_lossy()
         .ends_with(".part")));
+    assert_eq!(
+        std::fs::read_dir(dir.path()).unwrap().count(),
+        2,
+        "an unpublished stage removes both its staging file and its reserved name"
+    );
 }
 
-#[tokio::test]
-async fn studio_gif_stale_session_and_missing_server_never_write_or_reveal() {
+async fn unlocked_state(vault: &Path) -> (AppState, u64) {
     let state = AppState::default();
-    let vault = tempfile::tempdir().unwrap();
     *state.store.lock().await =
-        Some(ServerStore::open(vault.path(), b"correct horse", &mut OsCryptoRng).unwrap());
+        Some(ServerStore::open(vault, b"correct horse", &mut OsCryptoRng).unwrap());
     *state.session_resumable.lock().await = true;
     let generation = unlocked_ui_session_generation(&state).await.unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let gif = encode_gif(&golden(), GIF_MAX_BYTES, || false).unwrap();
-    let (_signal, rx) = watch::channel(false);
-    let cancellation = RequestCancellation::new(rx, None);
-    assert!(save_gif(
-        &state,
-        12,
-        40,
-        generation,
-        dir.path(),
-        &gif,
-        &cancellation,
-        std::future::ready(()),
-        |_| panic!("missing server must not reveal")
-    )
-    .await
-    .is_err());
+    (state, generation)
+}
+
+/// Register a real actor as server 12, as the export command would find it.
+async fn register_server(
+    state: &AppState,
+    instance: u64,
+) -> (ServerActor, impl Sized, tokio::task::JoinHandle<()>) {
     use catcoms_rt::{Hub, ManualClock};
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
@@ -157,7 +158,7 @@ async fn studio_gif_stale_session_and_missing_server_never_write_or_reveal() {
         12,
         ServerEntry {
             actor: actor.clone(),
-            instance: 41,
+            instance,
             group_id,
             device_id,
             invite: None,
@@ -173,14 +174,41 @@ async fn studio_gif_stale_session_and_missing_server_never_write_or_reveal() {
             persist: PersistCounters::default(),
         },
     );
+    (actor, events, task)
+}
+
+#[tokio::test]
+async fn studio_gif_stale_session_and_missing_server_never_write_or_reveal() {
+    let vault = tempfile::tempdir().unwrap();
+    let (state, generation) = unlocked_state(vault.path()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let gif = encode_gif(&golden(), GIF_MAX_BYTES, || false).unwrap();
+    let (_signal, rx) = watch::channel(false);
+    let cancellation = RequestCancellation::new(rx, None);
     assert!(save_gif(
         &state,
         12,
         40,
         generation,
-        dir.path(),
-        &gif,
+        dir.path().to_path_buf(),
+        gif.clone(),
         &cancellation,
+        || {},
+        std::future::ready(()),
+        |_| panic!("missing server must not reveal")
+    )
+    .await
+    .is_err());
+    let (actor, events, task) = register_server(&state, 41).await;
+    assert!(save_gif(
+        &state,
+        12,
+        40,
+        generation,
+        dir.path().to_path_buf(),
+        gif.clone(),
+        &cancellation,
+        || {},
         std::future::ready(()),
         |_| panic!("replaced server must not reveal")
     )
@@ -193,9 +221,10 @@ async fn studio_gif_stale_session_and_missing_server_never_write_or_reveal() {
         12,
         41,
         generation,
-        dir.path(),
-        &gif,
+        dir.path().to_path_buf(),
+        gif.clone(),
         &cancelled,
+        || {},
         std::future::ready(()),
         |_| panic!("cancelled work must not reveal")
     )
@@ -204,14 +233,16 @@ async fn studio_gif_stale_session_and_missing_server_never_write_or_reveal() {
     let before_commit = async {
         state.ui_session_generation.fetch_add(1, Ordering::AcqRel);
     };
+    // The current instance, so the session fence after staging is what refuses publication.
     assert!(save_gif(
         &state,
         12,
-        40,
+        41,
         generation,
-        dir.path(),
-        &gif,
+        dir.path().to_path_buf(),
+        gif.clone(),
         &cancellation,
+        || {},
         before_commit,
         |_| panic!("stale session must not reveal")
     )
@@ -224,15 +255,102 @@ async fn studio_gif_stale_session_and_missing_server_never_write_or_reveal() {
         12,
         41,
         current,
-        dir.path(),
-        &gif,
+        dir.path().to_path_buf(),
+        gif.clone(),
         &cancellation,
+        || {},
         std::future::ready(()),
         |_| Ok(()),
     )
     .await
     .unwrap();
     assert_eq!(std::fs::read(result.path).unwrap(), gif);
+    actor.shutdown().await;
+    task.await.unwrap();
+    drop(events);
+}
+
+fn staging_files(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().ends_with(".part"))
+        .count()
+}
+
+/// A stalled `.part` write waits inside the staging worker, so unrelated commands still take the
+/// UI-session guard and the server registry. Cancellation during the stall removes both files;
+/// an uncancelled stall publishes once released and reveals with neither lock held.
+#[tokio::test]
+async fn studio_gif_stalled_staging_holds_no_lock_and_cancels_cleanly() {
+    let vault = tempfile::tempdir().unwrap();
+    let (state, generation) = unlocked_state(vault.path()).await;
+    let (actor, events, task) = register_server(&state, 41).await;
+    let dir = tempfile::tempdir().unwrap();
+    let gif = encode_gif(&golden(), GIF_MAX_BYTES, || false).unwrap();
+    for cancel in [true, false] {
+        let (signal, rx) = watch::channel(false);
+        let cancellation = RequestCancellation::new(rx, None);
+        let (entered, stalled) = tokio::sync::oneshot::channel::<()>();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let mut entered = Some(entered);
+        let stall = move || {
+            if let Some(entered) = entered.take() {
+                let _ = entered.send(());
+                let _ = released.recv();
+            }
+        };
+        let revealed_unlocked = Cell::new(false);
+        let save = save_gif(
+            &state,
+            12,
+            41,
+            generation,
+            dir.path().to_path_buf(),
+            gif.clone(),
+            &cancellation,
+            stall,
+            std::future::ready(()),
+            |_| {
+                assert!(!cancel, "cancelled work must not reveal");
+                let session_free = state.ui_session_commit.try_lock().is_ok();
+                let registry_free = state.servers.try_lock().is_ok();
+                revealed_unlocked.set(session_free && registry_free);
+                Ok(())
+            },
+        );
+        let probe = async {
+            stalled.await.unwrap();
+            let unrelated = timeout(Duration::from_secs(10), async {
+                drop(require_ui_session_generation(&state, generation).await.unwrap());
+                drop(state.servers.lock().await);
+            })
+            .await;
+            assert!(
+                unrelated.is_ok(),
+                "cancel={cancel}: a stalled GIF write must not hold either lock"
+            );
+            assert_eq!(staging_files(dir.path()), 1, "the stall is inside staging");
+            if cancel {
+                signal.send(true).unwrap();
+            }
+            release.send(()).unwrap();
+        };
+        let (result, ()) = tokio::join!(save, probe);
+        if cancel {
+            assert_eq!(result.err().as_deref(), Some("request cancelled"));
+            assert_eq!(
+                std::fs::read_dir(dir.path()).unwrap().count(),
+                0,
+                "cancellation removes the staging file and the reserved name"
+            );
+        } else {
+            let saved = result.unwrap();
+            assert!(saved.displayed);
+            assert!(revealed_unlocked.get(), "reveal runs after the critical section");
+            assert_eq!(std::fs::read(&saved.path).unwrap(), gif);
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        }
+    }
     actor.shutdown().await;
     task.await.unwrap();
     drop(events);

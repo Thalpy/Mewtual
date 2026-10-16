@@ -17,6 +17,22 @@ test("pending-download Deafen ABA suppresses the actual deck CID before any tran
   gate.localGesture(); assert.equal(gate.allows(takeA.cid), true);
 });
 
+test("one cancellation while a replacement deck take is still preparing covers it and the outgoing transport", async () => {
+  const takeC = { entry: "entry-c", cid: "c".repeat(64), src: "", link: "" };
+  const gate = new JamTakeSuppression(), download = deferred<void>(); gate.reconcile(takeA);
+  // takeA's transport is still the active CID when the deck moves to takeC, which starts loading.
+  gate.reconcile(takeC);
+  let starts = 0;
+  const completion = download.promise.then(() => { if (gate.allows(takeC.cid)) starts++; });
+  // A single edge (Studio Play, Deafen on, membership, suspended context) with distinct CIDs.
+  gate.suppress(takeA.cid, takeC.cid);
+  gate.reconcile({ ...takeC }); // Same-track heartbeat is not a new local gesture.
+  download.resolve(); await completion;
+  assert.equal(starts, 0, "the adopted CID seats no transport after cancellation");
+  assert.equal(gate.allows(takeA.cid), false, "the outgoing CID stays cancelled too");
+  gate.localGesture(); assert.equal(gate.allows(takeC.cid), true);
+});
+
 test("paused or approval-pending take stays suppressed through remote unpause and heartbeats", () => {
   const gate = new JamTakeSuppression(); gate.reconcile(takeA); gate.suppress(null, takeA.cid);
   for (let i = 0; i < 4; i++) gate.reconcile({ ...takeA }); // pause/DJ/offset are intentionally not identity fields.
