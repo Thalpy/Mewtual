@@ -1,5 +1,70 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Current Gate 6 caller status (2026-10-14)
+
+Score/Sound/linked Music/PIXA/GIF production callers and the existing `.jamtake` archival consumer
+are connected in the candidate. The leaf codec contracts below remain pure APIs, not a claim
+that native/UI integration is still absent. [FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HOOKS.md) is the
+current caller inventory; [GATE6-ACCEPTANCE](GATE6-ACCEPTANCE.md) distinguishes implemented
+checkpoints from the clear cumulative code review, passing complete local suites/startup and
+still-pending hosted/Linux CI evidence.
+Gate 4's bounded lifecycle P5 promotion remains accepted; direct Closing Save/unfinished native
+repair commands, transferable Unconfirmed drafts and automatic Score historical OBJECT replay
+are not introduced.
+
+## Gate 6 typed native document access (2026-10-14)
+
+Existing Studio object commands and every draft/recovery/copy lifecycle command accept optional
+`objectKind: "flipnote" | "score"`; omission preserves the legacy art meaning. Unknown values
+and a kind without an object refuse. Copy destinations carry their own optional discriminator.
+Score Create uses the same durable object-then-Index workflow, current-member checks, exact
+retry ownership and native custody as art. Score settlement events and Copy preview targets
+include additive `objectKind:"score"`; old art/Index shapes remain unchanged.
+
+Native content retains authored optional headers, raw register winners/alternatives/removals and
+derived readiness. Sound records retain canonical operation bodies including `duration_ms`.
+Missing-frame/patch readiness lists name the affected SFX ids, not missing target ids. Ordinary,
+awaiting-receipt and historical views include `group`, hex of the authenticated logical group;
+it is never reconstructed from a numeric UI server alias. Manual Score choices and additive
+Restore/explicit Copy rules are documented in `GATE6-ACTIVATION-DESIGN.md`. Direct Closing Save
+and unfinished native repair commands remain unavailable; no P5 authority is added.
+
+Rebuilt local-draft inspection additionally carries `contentEpoch` (decimal) and `group` from
+that exact displayed projection, not the live base. Missing rebuild content carries neither;
+old backends lacking these fields cannot justify a local-draft playable export derivation.
+
+Local SetExport requires the exact CID/length of a held, fully validated PIXA package, promoted
+durably before any reference intent/source is written. It performs no network fetch. A failed
+record Save may leave a published orphan, not a successful export record.
+
+Explicit Flipnote sound recovery uses `{kind:"soundRecord",value:<64-lowercase-hex opId>}` to
+name an operation from authenticated historical content. The reviewed frontend enumerates one
+effective value/removal per physical slot for whole-version walks; it does not replay every
+retained alternative. Backend SoundRecord recovery is implemented/bounded-reviewed at `1d888287`;
+see [GATE6-SOUND-RECOVERY](GATE6-SOUND-RECOVERY.md) for exact Restore/Copy and media/link custody rules.
+Raw alternatives remain evidence, not an automatic branch-preservation proof.
+
+## Gate 6 native export interfaces (2026-10-14)
+
+`publish_pixa({server,bytesB64})->{cid,bytes}` publishes fully validated persistent animation
+content only. `export_studio_gif({server,bytesB64})->{path,displayed,warning,contentValidation}`
+writes a fixed-name local visual-only GIF; reveal failure returns a saved-path warning. Both
+retain inline cancellation/session/server-incarnation fences. `creative::validate_pixa` returns
+borrowed encoded-frame spans only after whole-container validation. Exact bounds, canonical
+take semantics and GIF timing/save contract are in `GATE6-NATIVE-EXPORT.md`.
+
+## Gate 6 Flipnote sound core (2026-10-14)
+
+`FlipnoteOp::SetSfx` now requires creator-authored `duration_ms:u32` in1..600000. Typed frame
+projection exposes `sound:FrameSoundState`, complete raw `records` with source/value conflicts,
+effective `sfx()/patches()/exports()` and `score()` accessors, plus `sound_readiness()`. Retained
+records are distinct from active prefixes4096/64/8. Sound uses existing signed P1 mutation and
+exact checkpoint/recovery preflight, an optional canonical trailer preserving art-only bytes,
+and complete retained export CID enumeration. See `GATE6-FRAME-SOUND.md` for property grammar,
+seed omission and DTO obligations. Native sound DTO integration is now implemented and reviewed;
+production consumer/UI composition is connected and bounded-reviewed. Explicit SoundRecord
+backend recovery is separately reviewed; final combined verification remains pending at the ledger checkpoint.
+
 ## Exact device admin authority (security update, 2026-10-13)
 
 Current moderation-record roles also use the verified full signing-device identity.
@@ -554,6 +619,16 @@ pub enum IndexOp;       // put_object, tombstone_object, set_title, set_expiry
 pub enum FlipnoteOp;    // frame, sfx, patch, export and discriminated header operations
   encode() -> Result<Vec<u8>>; decode(canonical_body) -> Result<Self>;
   decode_domain(&LogicalDocument, &DomainOp) -> Result<Self>;
+pub enum ScoreOp;       // static set_cell, clear_cell, set_patch, remove_patch, set_header
+  encode() -> Result<Vec<u8>>; decode(canonical_body) -> Result<Self>;
+  decode_domain(&LogicalDocument, &DomainOp) -> Result<Self>;
+pub enum ScoreCell { Note { patch:[u8;32], len:Option<u16> }, Drum { pad:u8 } }
+pub enum ScoreHeader { Title(String), Bpm(u16), Bpb(u8), Steps(u16) }
+// Score envelope decoding also requires a 16-byte object key. Omitted len retains its bytes and
+// means one step; explicit len is 1..256-step. Coordinates are step 0..255, row 0..24. Headers:
+// BPM 40..240, BPB 1..8, steps 1..256. This codec adds no StudioTarget::Score or native writer.
+// Caller selects trusted root kind; shared title/patch shapes cannot establish it. Actual score
+// extent, missing recipes, overlaps, caps, causal admission and recovery remain stateful work.
 pub enum StudioExpiry { Unrecorded, Never, At(u64) } // absent / null / integer; zero is At(0)
 pub struct StudioPatch; // private validated jam descriptor plus the existing SHA-256 identity
   new(&serde_json::Value) -> Result<Self>; id() -> [u8;32]; value() -> &serde_json::Value;
@@ -588,7 +663,7 @@ validate_frame_change(&LogicalDocument, channel:[u8;16], epoch:u64, &DomainOp, &
 // Over-cap targets still exist semantically (notably for trimming); this is not aggregate edit
 // policy, checkpoint preflight, blob validation or a production Studio edit/ingest adapter.
 // Title/fps registers are optional until set; no fabricated author for empty-title/12-fps defaults.
-// Art-only reader rejects unsupported sound/score/export state, including an explicit score:null.
+// Historical art-only checkpoint reader shape; current sound trailers/Score targets are above.
 // Frames includes deleted/over-cap entries and all live CID alternatives. This reader applies no
 // expiry/retention policy; the store guard is described under Creative byte-reference protection.
 // Index record provenance is internally consistent, not independently authenticated. Read checks
@@ -876,8 +951,9 @@ Kept-copy release acts on its separate copy; staging discard never removes held 
 
 This is conservative physical byte-liveness, not expiry/circulation enforcement. A tombstone or
 deadline alone does not make a still-retained checkpoint, history, intent or recovery version
-expendable. Actual sound/export/doodle projections are not enabled; the body codec recognizes
-export CIDs but its hash extraction is not full production export coverage. Unknown future
+expendable. The Gate 6 candidate enumerates actual retained sound/export CIDs through typed
+source/seed/intent/recovery state; body-codec hash extraction alone is not that coverage. Doodle
+projection support remains deferred. Unknown future
 typed recovery fails closed. Dense-source latency and blob quota/expiry remain separate limits.
 
 ### Native Studio recovery (gate 4 integration)
@@ -993,8 +1069,9 @@ rename/deletion does not undo that change. Closing/Fault and stale physical-epoc
 On a Create error, the initiating caller should reread its known object id before retrying;
 an uncertain/partial write is not reported through a durable-success event.
 
-Apply supports InsertFrame, RemoveFrame, ReplaceFrame and Title/Fps headers. Sound, score and
-export operations reject until gate 6. IndexOp retains its closed grammar and live-author creator
+Apply supports InsertFrame, RemoveFrame, ReplaceFrame and Title/Fps headers, and the Gate 6
+candidate adds typed SFX/recipes/score-link/export operations and an explicit Score family.
+IndexOp retains its closed grammar and live-author creator
 binding. Local Insert/Replace first requires the actual held PIX blob at the declared length,
 valid PIX1 and exactly 192x144 dimensions; it re-promotes/flushes before saving the reference.
 Use `publish_pix` below first; a placeholder CID or missing blob is an error, not a fetch request.
@@ -3559,7 +3636,16 @@ steals the requesting sender's own oldest RELEASING tail first, then the oldest 
 globally; if every voice is genuinely held, the new note is rejected; a held voice is never
 stolen (fairness: stealing must not be a griefing mechanism). Stealing and every teardown path
 disconnect all nodes and cancel all voice-owned scheduled automation, not merely `stop()`. A remote note held
-over 30 s auto-releases (watchdog: a lost note-off may never drone). Repeated note-on for an already
+over 30 s auto-releases (watchdog: a lost note-off may never drone). The separate Gate 6
+`prepareArchivalPlayback` capability binds a complete validated take/SFX log and gives only its
+bound event indices their remaining authored hold, up to 600000 ms; raw local/remote `noteOn`
+keeps the 30-second limit. Audio-clock and allocator deadlines agree. The connected
+`StudioPlaybackController`/`JamTakeTransport` callers have explicit local-gesture starts, remote
+no-resume, scope/generation cancellation, truthful natural-EOF versus cancellation/failure,
+one-running/one-latest preparation and at most 128 combined events per tick. Same-pitch SFX have
+independent lanes but share one bounded engine-owned fairness domain; source cleanup is itself
+scheduled bounded work. See [`GATE6-PLAYBACK.md`](GATE6-PLAYBACK.md) for the integration contract.
+Repeated note-on for an already
 held `(source,note)` is rejected, while a same-pitch note may be retriggered once the prior voice is
 a releasing tail. On an inst-channel reopen the receiver replaces that channel's capability,
 clears that peer's held state, and both sides re-announce state + patch via the existing `onopen`
@@ -3910,7 +3996,7 @@ The four `on`/`ask` combinations:
 
   `App.svelte` and `scripts/claims-webrtc-check.mjs` both use it.
 
-## 14. Gate 6 export foundations (no native exposure yet)
+## 14. Gate 6 export codecs and connected candidate
 
 `apps/desktop/src/studio-export.ts` provides `exportScoreTake`, `exportFlipnoteTake` and
 `studioPatchUnion`. Inputs are resolved export views, not native admission capabilities.
@@ -3920,7 +4006,8 @@ the creative design ranges, cell keys are canonical `step:row`, and values are e
 the remaining score steps; absent `len` preserves the original one-step draft. Same-row note
 overlap refuses rather than silently shortening authored holds. Patch keys must equal the existing
 jam recipe hashes. Up to 4096 cells and 64 recipes are accepted. Cells beyond the requested score length
-refuse; a future projection consumer must resolve overflow/conflicts before exporting.
+refuse; the connected native projection consumer refuses unresolved overflow/conflicts before
+exporting, without silently dropping frames or notes.
 
 Context carries `{group,exporter}`. `group` must come from the stable backend group identifier,
 not a local numeric server alias; the helper can enforce only scalar-text/UTF-8 size bounds.
@@ -3954,12 +4041,34 @@ equality to the take validator's
 normalized, canonical Studio JSON reject duplicate fields and alternate byte spellings. Trailing
 bytes, invalid SFX indices/notes, missing recipes and malformed PIX/takes refuse.
 
-No native command, publication, sound rendering or persistence is introduced here. Later Gate 6
-work must connect these helpers to current scope/readiness checks and existing media, storage,
-reference and audio lifecycle owners. A `.pixa` is playable-content packaging, distinct from the
-already available recovery/draft backup formats. See `GATE6-DESIGN.md` for remaining work.
+The leaf helpers do not perform native calls or own persistence. Connected session/native callers
+now enforce current scope/readiness, actual held CID/length custody and durable promotion before
+publishing a separate reference. `publish_pixa` and `export_studio_gif` are documented above.
+A PIXA is playable-content packaging, distinct from recovery/draft backups; browser download
+requests, blob custody, provisional reference Save and native GIF saved-path acknowledgement are
+different outcomes and must not be reported interchangeably.
 
-These helpers preserve authored duration in content. Playback is not yet connected; the current
-engine's archival-note watchdog also stops holds after 30 seconds. Later integration must provide
-bounded archival timing without weakening the live lost-note-off watchdog.
+Authored durations now reach the same engine through engine-minted archival event capabilities,
+including the existing local/shared `.jamtake` consumer; raw live notes keep the 30s lost-off
+watchdog. Combined events/seek reconstruction are bounded per tick, suspended remote playback
+cannot resume the context and pending download cancellation survives Deafen/navigation edges.
+Shared-deck PIXA media-kind/consensus and a standalone global viewer remain later Gate 7/UI work.
+
+The static Rust `ScoreOp` codec and frontend types are reused by the implemented typed Score
+target/native/session path. Shared canonical vectors and exact bounds remain documented in
+`GATE6-SCORE-CONTRACT.md`; final evidence after the reviewed SoundRecord backend recovery correction
+are in `GATE6-ACCEPTANCE.md`, not inferred from this codec contract.
+
+The stateful continuation adds `StudioTarget::Score` and `StudioProjection::Score` in core P1.
+Optional authored title/BPM/BPB/step registers preserve complete winner/alternatives. Absent
+values default to empty/120/4/16 without invented provenance. Cell/recipe slots retain a raw
+register of optional values; any live removal makes effective presence false. Clear and remove
+on absent slots record intent. Later Sets supersede exact observed same-property predecessors,
+not unseen removals. Readiness flags conflicts, overlap, missing recipes, extent and cap overflow.
+Score snapshots use explicit payload prefix2, and score restart units require trailing family2
+even when pristine. Existing Index/art bytes are unchanged. See `GATE6-STATE-DESIGN.md`.
+The native diagnostic shape `kind:"score"` uses optional header registers and cell/patch maps
+whose entries contain `{removed,register}`; `removed` is not inferred from raw selected content.
+Exposing these core types alone grants no request/wire authority; the candidate's explicit native
+family/custody path is described above. Unsupported adapters refuse rather than falling back to art.
 

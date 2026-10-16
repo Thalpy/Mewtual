@@ -14,6 +14,7 @@ import {
   JAM_FILTER_Q_MAX,
   JAM_FILTER_Q_MIN,
   JAM_HELD_PER_PEER,
+  JAM_VOICES_GLOBAL,
   JAM_KIT,
   JAM_LEGACY_SESSION_NONCE,
   JAM_LFO_CUTOFF_MAX_OCTAVES,
@@ -42,6 +43,7 @@ import {
   type LegacyWave,
 } from "./jam-contract.ts";
 import { jamPatchId, legacyJamPatch, validateJamPatch } from "./jam-patch.ts";
+import { planJamArchivalPlayback, type JamArchivalAnimation, type JamArchivalPlan } from "./jam-archival-plan.ts";
 
 export type JamSequenceResult = "first" | "next" | "gap" | "duplicate" | "no-session";
 export type JamPatchInstallResult = "installed" | "cached" | "invalid-session" | "invalid-patch" |
@@ -50,6 +52,22 @@ export type JamPatchInstallResult = "installed" | "cached" | "invalid-session" |
 const PLAYBACK_PATCH_SET = Symbol("mewtual-jam-playback-patches");
 /** Opaque, engine-validated archival patch table; callers cannot supply an unchecked recipe. */
 export type JamPlaybackPatchSet = Readonly<{ [PLAYBACK_PATCH_SET]: true }>;
+const ARCHIVAL_PLAYBACK = Symbol("mewtual-jam-archival-playback");
+/** A bounded, owned event log; only its minting engine can dispatch it with authored long holds. */
+export type JamArchivalPlayback = Readonly<{ [ARCHIVAL_PLAYBACK]: true }>;
+type ArchivalPlaybackData = {
+  capability: JamArchivalPlayback;
+  plan: JamArchivalPlan;
+  patches: JamPlaybackPatchSet;
+  channels: Map<number, JamSourceChannel>;
+  played: Set<number>;
+  generation: number;
+  sfxChannels: number;
+  /** SFX belongs to the exporting take's first performer, not a second polyphony allowance. */
+  sfxOwner: string;
+  /** Receiver-owned gain for current and future lazy lanes; never a recipe/network field. */
+  level: number;
+};
 type PlaybackPatchData = Readonly<{
   patches: readonly JamPatch[];
   ids: readonly string[];
@@ -300,6 +318,9 @@ export class JamEngine {
   private readonly buses = new Map<string, SourceBus>();
   private readonly voices = new Map<string, VoiceRuntime>();
   private readonly playbackPatchSets = new WeakMap<JamPlaybackPatchSet, PlaybackPatchData>();
+  /** One active archival transport per engine; preparing replacements cannot accumulate owners. */
+  private archival: ArchivalPlaybackData | null = null;
+  private archivalGeneration = 0;
   // Provenance is capability-bound and engine-owned. Neither a wire event nor a parsed take can
   // claim a different owner after the trusted App seam has opened its exact channel generation.
   private readonly channelProvenance = new WeakMap<JamSourceChannel, ChannelProvenance>();
@@ -556,6 +577,125 @@ export class JamEngine {
   }
 
   /**
+   * Mint long-hold authority from a complete validated immutable log, never a wire duration or
+   * caller-selected patch/event. Hash preparation is bounded by the existing 64-recipe rail and
+   * fenced against replacement and Deafen ABA even if a caller forgets its own continuation fence.
+   */
+  async prepareArchivalPlayback(
+    take: unknown,
+    animation: JamArchivalAnimation | undefined,
+    isCurrent: () => boolean = () => true,
+  ): Promise<JamArchivalPlayback | null> {
+    if (this.disposed || this.deafened || !isCurrent()) return null;
+    let plan: JamArchivalPlan;
+    try { plan = planJamArchivalPlayback(take, animation); } catch { return null; }
+    const generation = ++this.archivalGeneration;
+    const roomGeneration = this.roomPolicyGeneration;
+    const current = () => !this.disposed && !this.deafened && generation === this.archivalGeneration &&
+      roomGeneration === this.roomPolicyGeneration && isCurrent();
+    const patches = await this.preparePlaybackPatches(plan.take.patches, current, { callId: plan.take.call, sources: plan.take.parts });
+    if (!patches || !current()) return null;
+    const sfxOwner = this.playbackPatchSets.get(patches)?.owners?.[0];
+    if (!sfxOwner) return null;
+    this.closeArchival();
+    const capability = Object.freeze({ [ARCHIVAL_PLAYBACK]: true as const });
+    this.archival = { capability, plan, patches, channels: new Map(), played: new Set(), generation, sfxChannels: 0, sfxOwner, level: 1 };
+    return capability;
+  }
+
+  /** Read-only schedule for the exact currently owned capability, not a capability constructor. */
+  archivalPlaybackPlan(capability: JamArchivalPlayback): JamArchivalPlan | null {
+    return !this.disposed && !this.deafened && this.archival?.capability === capability ? this.archival.plan : null;
+  }
+
+  /** Change only this current archival owner's volume, including lanes not opened yet.
+   * Exposing opaque playback gain instead of raw channels preserves source/owner provenance.
+   * Replacement, Deafen and disposal invalidate this control just like event dispatch.
+   */
+  setArchivalPlaybackLevel(capability: JamArchivalPlayback, level: number): boolean {
+    const archival = this.archival;
+    if (!this.archivalPlaybackPlan(capability) || !archival || !Number.isFinite(level) || level < 0 || level > 1) return false;
+    archival.level = level;
+    for (const channel of archival.channels.values()) this.setSourceLevel(channel.source, level);
+    return true;
+  }
+
+  /** Stop only this exact playback; stale async cleanup cannot retire its replacement. */
+  revokeArchivalPlayback(capability: JamArchivalPlayback): boolean {
+    if (this.archival?.capability !== capability) return false;
+    this.archivalGeneration++;
+    this.closeArchival();
+    return true;
+  }
+
+  private closeArchival(): void {
+    const archival = this.archival;
+    this.archival = null;
+    if (archival) for (const channel of archival.channels.values()) this.removeChannel(channel);
+  }
+
+  /**
+   * Dispatch a bound log index once. Neither a renderer callback nor untrusted package metadata
+   * can substitute a live channel, recipe, owner, sequence or longer hold. Late/seek attacks use
+   * only the remaining authored duration; the same deadline reaches audio and allocator watchdogs.
+   */
+  playArchivalEvent(capability: JamArchivalPlayback, index: number, ageMs = 0): JamPlayResult | Promise<JamPlayResult> {
+    const archival = this.archival;
+    if (this.disposed || this.deafened || !archival || archival.capability !== capability) return { ok: false, reason: "channel" };
+    if (!Number.isInteger(index) || index < 0 || index >= archival.plan.events.length || !Number.isFinite(ageMs) || ageMs < 0) return { ok: false, reason: "invalid" };
+    if (archival.played.has(index)) return { ok: false, reason: "sequence" };
+    const event = archival.plan.events[index];
+    archival.played.add(index);
+    const sfx = event.lane >= archival.plan.take.lanes.length;
+    let channel = archival.channels.get(event.lane);
+    if (event.kind === "cleanup") {
+      if (channel) {
+        this.removeChannel(channel); archival.channels.delete(event.lane); archival.sfxChannels--;
+      }
+      return { ok: true };
+    }
+    if (event.kind === "off") return channel ? this.noteOff({ channel, note: event.note, sequence: event.sequence }) : { ok: true };
+    if (event.kind === "on" && ageMs >= event.holdMs!) return { ok: true };
+    // A throttled archival tick cannot resurrect an already finished one-shot. Unlike a live
+    // hit, its receiver-owned kit tail has an authored closing time; consume the index silently.
+    if (event.kind === "drum" && ageMs >= JAM_KIT[event.note].tailMs) return { ok: true };
+    if (!channel) {
+      // A dense SFX file cannot leave thousands of idle source buses behind stolen release tails.
+      // This receiver-owned lifecycle cap supplements, not replaces, the shared voice allocator.
+      if (sfx && archival.sfxChannels >= JAM_VOICES_GLOBAL) return { ok: false, reason: "room-held" };
+      const source = `archive\u0000${archival.generation}\u0000${event.lane}`;
+      const lane = archival.plan.take.lanes[event.lane];
+      channel = sfx ? this.openSource(source) : this.openPlaybackSource(source, archival.patches, lane.src) ?? undefined;
+      if (!channel) return { ok: false, reason: "channel" };
+      if (sfx) {
+        this.channelProvenance.set(channel, {
+          owner: archival.sfxOwner,
+          seedSource: archival.plan.take.parts[0],
+          seedCallId: archival.plan.take.call,
+          playbackPatches: archival.patches,
+        });
+      }
+      const nonce = sfx ? "0000000000000001" : lane.sn;
+      const opened = nonce === JAM_LEGACY_SESSION_NONCE ? this.beginLegacySourceSession(channel) : this.beginSourceSession(channel, nonce);
+      if (!opened) { this.removeChannel(channel); return { ok: false, reason: "channel" }; }
+      archival.channels.set(event.lane, channel);
+      this.setSourceLevel(channel.source, archival.level);
+      if (sfx) archival.sfxChannels++;
+    }
+    if (event.kind === "drum") {
+      const lane = archival.plan.take.lanes[event.lane];
+      return this.drumWithDeadline({ callId: archival.plan.take.call, channel, sessionNonce: lane.sn, sequence: event.sequence, pad: event.note, remote: true },
+        { patches: archival.patches, part: lane.src }, this.nowMs() + JAM_KIT[event.note].tailMs - ageMs);
+    }
+    const result = this.noteOnWithHold({ channel, sequence: event.sequence, note: event.note, wave: event.wave!, ageMs, remote: true },
+      event.patch === undefined ? undefined : { patches: archival.patches, index: event.patch }, event.holdMs! - ageMs);
+    if (sfx && !result.ok) {
+      this.removeChannel(channel); archival.channels.delete(event.lane); archival.sfxChannels--;
+    }
+    return result;
+  }
+
+  /**
    * Return the exact validated live-cache recipe available to an authenticated event.
    *
    * Recorder integration uses this read-only view instead of maintaining a second LRU that can
@@ -569,6 +709,14 @@ export class JamEngine {
   noteOn(
     input: JamNoteInput,
     playback?: Readonly<{ patches: JamPlaybackPatchSet; index: number }>,
+  ): JamPlayResult {
+    return this.noteOnWithHold(input, playback, JAM_REMOTE_HOLD_MAX_MS);
+  }
+
+  private noteOnWithHold(
+    input: JamNoteInput,
+    playback: Readonly<{ patches: JamPlaybackPatchSet; index: number }> | undefined,
+    holdMs: number,
   ): JamPlayResult {
     if (
       this.disposed || !isMidiNote(input.note) || !isLegacyWave(input.wave) || !validSequence(input.sequence) ||
@@ -615,12 +763,13 @@ export class JamEngine {
       owner,
       phase: "held",
       startedAtMs: this.nowMs(),
+      holdMs,
       teardown: (reason) => runtime?.teardown(reason),
     });
     if (!allocation.ok) return { ok: false, reason: allocation.reason, sequence };
 
     try {
-      runtime = this.createPatchVoice(id, input, patch, !!custom, owner);
+      runtime = this.createPatchVoice(id, input, patch, !!custom, owner, holdMs);
       this.voices.set(id, runtime);
       // A failed duplicate/allocation/graph build never changes LRU recency. This lets recorder
       // integration query the same cache after the result without maintaining a fallible mirror.
@@ -654,6 +803,15 @@ export class JamEngine {
   async drum(
     input: JamDrumInput,
     playback?: Readonly<{ patches: JamPlaybackPatchSet; part: number }>,
+  ): Promise<JamPlayResult> {
+    return this.drumWithDeadline(input, playback);
+  }
+
+  /** Only the bound archival dispatcher supplies a deadline. Live hit behavior is unchanged. */
+  private async drumWithDeadline(
+    input: JamDrumInput,
+    playback?: Readonly<{ patches: JamPlaybackPatchSet; part: number }>,
+    expiresAtMs?: number,
   ): Promise<JamPlayResult> {
     const playbackTable = playback ? this.playbackPatchSets.get(playback.patches) : undefined;
     if (
@@ -696,17 +854,29 @@ export class JamEngine {
     };
     const roomGeneration = this.roomPolicyGeneration;
     const sourceGeneration = this.state(source).renderGeneration;
+    let observedAtMs = expiresAtMs === undefined ? 0 : this.nowMs();
+    const remainingTailMs = () => {
+      if (expiresAtMs === undefined) return JAM_KIT[queuedInput.pad].tailMs;
+      const now = this.nowMs();
+      // Invalid/regressing receiver time refuses an archival attack, never renews its window.
+      if (!Number.isFinite(now) || !Number.isFinite(observedAtMs) || !Number.isFinite(expiresAtMs) || now < observedAtMs) return 0;
+      observedAtMs = now;
+      return Math.max(0, expiresAtMs - now);
+    };
     return this.enqueueDrum(owner, queuedInput.channel, roomGeneration, sourceGeneration, sequence, async () => {
       // A queued event may have lost its channel/session or receiver permission before hashing.
       // Check once before spending crypto work and again after the unavoidable await.
       const currentBeforeHash = this.currentDrumPolicy(queuedInput, source, roomGeneration, sourceGeneration);
       if (currentBeforeHash) return { ok: false, reason: currentBeforeHash, sequence };
+      if (remainingTailMs() <= 0) return { ok: true, sequence };
       let seed: number;
       try { seed = await this.seedDrum(seedInput); }
       catch { return { ok: false, reason: "audio", sequence }; }
 
       const currentAfterHash = this.currentDrumPolicy(queuedInput, source, roomGeneration, sourceGeneration);
       if (currentAfterHash) return { ok: false, reason: currentAfterHash, sequence };
+      const tailMs = remainingTailMs();
+      if (tailMs <= 0) return { ok: true, sequence };
 
       const pad = JAM_KIT[queuedInput.pad];
       for (const voice of [...this.voices.values()]) {
@@ -726,7 +896,7 @@ export class JamEngine {
       if (!allocation.ok) return { ok: false, reason: allocation.reason, sequence };
 
       try {
-        runtime = this.createDrumVoice(id, queuedInput, seed, owner);
+        runtime = this.createDrumVoice(id, queuedInput, seed, owner, tailMs);
         this.voices.set(id, runtime);
         return { ok: true, sequence, stolen: allocation.stolen };
       } catch {
@@ -882,6 +1052,8 @@ export class JamEngine {
     if (enabled) {
       this.roomPolicyGeneration += 1;
       this.deafened = true;
+      this.archivalGeneration++;
+      this.closeArchival();
       this.cancelQueuedDrums();
       const soundingSources = new Set([...this.voices.values()].map((voice) => voice.source));
       for (const source of soundingSources) this.releaseSource(source);
@@ -997,6 +1169,8 @@ export class JamEngine {
 
   dispose(): void {
     if (this.disposed) return;
+    this.archivalGeneration++;
+    this.closeArchival();
     this.disposed = true;
     // A stalled digest must not retain every later closure after this call epoch is gone.
     this.cancelQueuedDrums();
@@ -1096,6 +1270,7 @@ export class JamEngine {
     patch: JamPatch,
     customPatch: boolean,
     owner: string,
+    holdMs: number,
   ): VoiceRuntime {
     const ctx = this.context;
     if (input.remote === false && ctx.state === "suspended") void ctx.resume().catch(() => {});
@@ -1127,9 +1302,15 @@ export class JamEngine {
 
     const releaseSeconds = effectiveReleaseSeconds(patch.e.r);
     const sustain = patch.e.s / 100;
+    const holdEnd = now + holdMs / 1_000;
+    const envelopeLevel = (age: number) => JAM_VOICE_PEAK_GAIN * (age < attack && attack > 0 ? age / attack
+      : age < attack + decay && decay > 0 ? 1 - (1 - sustain) * (age - attack) / decay : sustain);
     output.gain.setValueAtTime(0, at);
-    output.gain.linearRampToValueAtTime(JAM_VOICE_PEAK_GAIN, at + attack);
-    output.gain.linearRampToValueAtTime(JAM_VOICE_PEAK_GAIN * sustain, at + attack + decay);
+    // Short authored notes may close inside their attack/decay. Stop the envelope at that exact
+    // level rather than jumping to sustain or leaving a later attack ramp beyond the key-up.
+    if (at + attack <= holdEnd) output.gain.linearRampToValueAtTime(JAM_VOICE_PEAK_GAIN, at + attack);
+    if (at + attack + decay <= holdEnd) output.gain.linearRampToValueAtTime(JAM_VOICE_PEAK_GAIN * sustain, at + attack + decay);
+    else output.gain.linearRampToValueAtTime(envelopeLevel(holdEnd - at), holdEnd);
 
     const baseCutoff = Math.min(patch.f.c, ctx.sampleRate * JAM_FILTER_NYQUIST_RATIO);
     let envelopeCutoff = baseCutoff;
@@ -1197,9 +1378,9 @@ export class JamEngine {
       sources,
       params,
       releaseSeconds,
-      hardHoldSeconds: JAM_REMOTE_HOLD_MAX_MS / 1_000,
+      hardHoldSeconds: holdMs / 1_000,
       startAt: now,
-      watchdogLevel: JAM_VOICE_PEAK_GAIN * sustain,
+      watchdogLevel: envelopeLevel(holdEnd - at),
     });
     return runtime;
     } catch (error) {
@@ -1210,12 +1391,13 @@ export class JamEngine {
     }
   }
 
-  private createDrumVoice(id: string, input: JamDrumInput, seed: number, owner: string): VoiceRuntime {
+  private createDrumVoice(id: string, input: JamDrumInput, seed: number, owner: string, remainingTailMs = JAM_KIT[input.pad].tailMs): VoiceRuntime {
     const ctx = this.context;
     if (input.remote === false && ctx.state === "suspended") void ctx.resume().catch(() => {});
     const at = ctx.currentTime;
     const pad = JAM_KIT[input.pad];
-    const tailSeconds = Math.min(pad.tailMs, JAM_DRUM_TAIL_MAX_MS) / 1_000;
+    // Hash/queue latency may shorten an archival hit, never move its stop beyond its kit tail.
+    const tailSeconds = Math.min(remainingTailMs, pad.tailMs, JAM_DRUM_TAIL_MAX_MS) / 1_000;
     const sourceName = input.channel.source;
     const bus = this.sourceBus(sourceName);
     const nodes: AudioNode[] = [];

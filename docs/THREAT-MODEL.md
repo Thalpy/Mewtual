@@ -1,5 +1,66 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Current Gate 6 enforcement status (2026-10-14; candidate, not final acceptance)
+
+The candidate connects typed Score and complete Flipnote sound state to the existing causal/P1,
+vault, native and UI paths. Parsing alone still grants no authority: explicit document-family
+binding, current membership/tenure, exact retry, recovery preflight and durable custody remain
+separate enforcement steps. [GATE6-ACCEPTANCE](GATE6-ACCEPTANCE.md) records bounded review pins
+and passing complete local backend/native/startup verification, with hosted/Linux CI still pending;
+old slice-only claims below describe
+their original checkpoints, not current feature availability.
+
+Archival playback reuses the existing synth through engine-minted capabilities bound to an owned,
+validated schedule. Authored holds may exceed 30 seconds without weakening the live-call watchdog.
+Scope/membership/lock/Deafen revoke admission, including a shared take still awaiting download or
+approval; a remote heartbeat/unpause cannot recreate local consent. Natural completion is distinct
+from failure, cancellation or revocation. Rendering and schedule expansion retain bounded work.
+Native publication validates actual PIXA bytes; reference Save verifies exact held content.
+Blob custody, provisional reference Save, a receipt, browser download and a saved local GIF are
+different outcomes, not interchangeable success claims.
+
+Frontend and backend SoundRecord recovery are separately implemented and bounded-reviewed;
+final cumulative code review is clear and composed local suites/startup pass; hosted CI remains pending.
+[GATE6-SOUND-RECOVERY](GATE6-SOUND-RECOVERY.md)
+records exact historical selection, current link scope, media custody and permanent deletion rules.
+An explicit selector may choose a retained historical alternative by operation id, but a whole-
+version walk chooses one effective value/removal per slot, not all alternatives. Raw evidence
+retention is not branch preservation; only archive preservation supplies that proof. Score
+historical OBJECT replay stays manual and header-only Index Copy remains projection-level.
+Gate 4's bounded lifecycle P5 promotion remains accepted, while direct Closing Save/unfinished
+native repair commands remain absent and Unconfirmed drafts stay local/non-transferable.
+Local emoji-sound import is not a verified shared catalog/chat-click feature. Shared-deck PIXA
+consensus/global viewing and audible hardware/two-real-client release acceptance remain later work.
+
+## Gate 6 native animation export boundary (2026-10-14)
+
+Actual-byte PIXA publication validates whole framing, strict canonical take grammar, bounded
+source labels/lanes/recipes/events, native PIX192x144 and authored SFX duration before the
+existing persistent stage/promotion/flush. It creates no metadata authority. Local visual GIF
+encodes one raster at a time under a32MiB writer and detached inline lease. Exact session and
+server incarnation are rechecked through safe staged fixed-name publication/reveal; the commit
+guard orders an admitted commit before a concurrent lock rather than undoing a committed export.
+All ignored audio still validates. See `GATE6-NATIVE-EXPORT.md` for limits and honest durability.
+
+## Gate 6 Flipnote sound core boundary (2026-10-14)
+
+Sound Sets require an existing live frame and effective recipe at their sender's complete causal
+frontier; receiver-only state cannot authorize them. Every mutation still uses exact signed P1
+record/actor/body/key and same-property predecessor validation. A raw recipe Set winner cannot
+override any live concurrent removal. Missing/deleted references after a valid concurrent edit
+remain retained unready evidence, with cleanup available. Linked score ids and export declarations
+grant no cross-object authority or blob-format/availability guarantee. Complete retained export
+CIDs stay held even when deleted, expired, losing or overflow; patch hashes are not CIDs.
+
+An optional sound snapshot trailer preserves complete records; empty trailers and source reuse
+reject. Compaction omits whole removed slots, only under the existing recovery-before-replacement
+barrier. Omitted historical deletions cannot be interpreted as proof of safe automatic replay.
+The earlier native sound omission is closed: the shared fallible converter retains all admitted
+sound evidence on ordinary, provisional, draft and recovery reads. A local Save refusal alone
+would not have closed that ingress path. `GATE6-FRAME-SOUND.md` records the bounded core and DTO
+reviews; connected UI composition and SoundRecord backend recovery have their own bounded reviews.
+Final combined acceptance remains a separate obligation in the current ledger.
+
 ## Admin collision hardening (2026-10-13)
 
 Current moderation-record roles also use the verified full signing-device identity.
@@ -42,12 +103,22 @@ table with the commit that closed it.
   duplicate JSON and invalid UTF-8 and returns owned encoded frames, including for Buffer,
   typed-array subclass or shared-memory callers.
   Authored score holds and SFX durations are bounded and preserved, not derived from animation
-  FPS. Overlapping same-row score holds refuse export; persistent conflict display and archival
-  playback beyond the existing engine's 30-second watchdog remain explicit later Gate 6 work.
+  FPS. Overlapping same-row score holds refuse export. The connected candidate displays retained
+  conflicts/readiness and uses opaque archival capabilities for authored holds beyond 30 seconds;
+  raw live-call note admission retains its original watchdog.
   Export inputs are snapshotted before asynchronous hashing. Exporter/group labels do not prove
-  membership, authorship of source edits, a receipt, publication or persistence. A later consumer
-  must enforce current scope/readiness, actual CID/length binding, native validation and durability
-  before publishing a reference. Sound/score/export commands remain unavailable in this slice.
+  membership, authorship of source edits, a receipt, publication or persistence. Current production
+  callers separately enforce scope/readiness, actual CID/length binding, native validation and
+  durability before publishing a reference. A leaf codec does not replace those checks.
+
+- **Typed score parsing is not persistent score admission.** The Gate 6 `ScoreOp` codec reuses
+  strict Studio parsing, recipe hash checks and complete-envelope bounds. It requires a fixed
+  16-byte object key, but neither that key nor overlapping Flipnote title/patch body shapes prove
+  a root kind, member, group or physical epoch. The separate typed ScoreTarget now enables
+  stateful edits through causal/P1 validation, exact recovery/preflight, durable ownership and
+  explicit native object-family binding; the codec itself is still not an admission capability.
+  Numeric/array take session nonces now refuse in the shared recorder/import validator before
+  regex coercion; this closes the external schema finding without changing legal take bytes.
 
 - **Renderer access to retained Studio work is local authority, not protocol authority.** The Gate 4
   completion candidate registers the reviewed overlay lifecycle family and a ticketed Unconfirmed
@@ -887,13 +958,13 @@ table with the commit that closed it.
   New operations require the inner author's current roster key, so resealing with a member's group
   key cannot mint shares for outsider identities. Registry validation binds predecessor ids to
   their causal root property; an allowed header write cannot hide a seed's protected slot through
-  a cross-key predecessor. Typed Studio validators must provide equivalent semantic checks when
-  implemented; generic callbacks are not an authorization policy by themselves.
-  The new Studio body codecs enforce static operation grammar, complete envelope size and
+  a cross-key predecessor. Typed Studio validators now provide corresponding causal semantic
+  checks; generic callbacks are not an authorization policy by themselves.
+  Studio body codecs enforce static operation grammar, complete envelope size and
   expected type/key; a `put_object` creator must match the supplied full verified author.
-  They are not installed as live admission callbacks: no proof of membership, group binding,
+  The codecs alone are not live admission callbacks: no proof of membership, group binding,
   causal delta equivalence, aggregate projection caps, blob availability or persistence follows
-  from decoding. Production writes remain unavailable until those boundaries are implemented.
+  from decoding. Production writes use the separate typed causal/P1/store enforcement paths.
   Shared vectors pin valid Unicode-scalar titles, safe JSON integers, lowercase fixed-size ids,
   FileExpiry's three states and the existing declaration-order jam patch hash. Schema checking
   does not make a declared frame length or an indexed creator claim authenticated by itself.
@@ -906,15 +977,16 @@ table with the commit that closed it.
   It cannot prove an immutable record was never causally overwritten, that a rename saw its
   target at the author's frontier, or that a missing tombstone was never deleted. The reader
   alone is neither signed admission nor checkpoint-size/recovery completeness verification.
-  The art-only Flipnote frame reader uses the same unauthenticated-claims boundary, with
+  The original art-only Flipnote frame reader uses the same unauthenticated-claims boundary, with
   caller-supplied server scope and object/channel/epoch/dimension header checks, 188,192 primitive
   and 6 MiB reader bounds,
   and iterative cycle/missing-origin checks. Insertion op-id origins retain losing/deleted nodes;
   the signed causal validator must independently derive those origins and validate every
   property predecessor. Timestamp metadata is author-asserted, not an independent signed clock;
   it never orders frames or grants freshness. Over-cap/deleted frames retain all live CID evidence.
-  Sound/score/export state rejects rather than being silently omitted. The frame reader does not
-  implement PIX verification, retention, signed admission or a checkpoint/recovery persistence path.
+  The candidate adds complete sound/export records and a separate typed Score projection rather
+  than treating their absence as empty art. Unknown unsupported state still refuses. A projection
+  reader alone does not implement PIX verification, retention, signed admission or durable recovery.
   A separate `validate_index_change` checks Index deltas against the canonical
   domain operation and the author's complete dependency frontier. It binds record bytes to the
   change actor, requires fresh markers and immutable insertion/deletion/header writes, rejects
@@ -1112,9 +1184,10 @@ table with the commit that closed it.
   Explicit Save warms inventory; Read warms only its actual Studio record and resumes a paused
   watch. The pause event has no user-owned UI listener yet.
   No pixels are fetched, no intent is retired, and no update is emitted for duplicate/quarantined
-  input. Catch-up/seed discovery and bounded unopened-key service now use this same coordinator;
-  automatic owner rotation and Registry tail/pointer publication remain Gate 4.
-  Sound/score/export state continues to refuse pending its typed support.
+  input. Catch-up/seed discovery and bounded unopened-key service use this same coordinator;
+  Gate 4 subsequently integrated automatic owner rotation and Registry tail/pointer publication.
+  The Gate 6 candidate extends these existing paths with typed Score and complete sound/export
+  validation; it does not grant authority to an untyped or silently truncated projection.
   Studio's cooperative page adapter now shares the existing prefix/ancestor walk rather than
   copying the registry protocol. A distinct cursor domain binds the actual Studio type/key and
   channel as well as full group/provider/requester/concrete epoch/initial heads/seed. Registry
@@ -1608,6 +1681,20 @@ design that shipped:
   the frontend suite checks the ledger against the native handler and every literal invocation.
 
 ### Detached file reads and explicit kept copies
+
+Gate 6's core score reader checks byte/primitive rails before materializing conflicts and uses
+one complete causal frontier for headers, recipes, keys, alternatives and winners. Mutable
+coordinates/hashes are not permanent frame tombstones: live removals dominate raw Set winners,
+while later exact same-property edits can reuse observed cleared slots. Omitted removals and
+conflicts require recovery-before-replacement. Explicit family tags prevent pristine score
+restart data from becoming art; shared title/recipe body shapes never identify authority.
+Typed reference inspection validates complete score envelopes before returning no CIDs. The
+legacy operation inspector selects a static grammar union and fully validates Score-specific
+cells/clears/musical headers before returning no CIDs; it grants no authority. Typed art inspection
+still rejects Score bodies rather than inferring a document family from common body shapes.
+The core codec itself grants no native/wire capability. The candidate connects its separate
+typed target to existing native/wire custody; historical Score replay stays manual because
+final absence cannot prove no intervening reusable-slot clear.
 
 Network workers own only an opaque signed blob request. Completion rechecks the exact sync owner,
 current group/epoch/local membership, expected provider, request nonce and response signature/CID;

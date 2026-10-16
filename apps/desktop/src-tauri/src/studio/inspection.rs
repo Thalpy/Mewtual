@@ -11,15 +11,9 @@ pub(crate) async fn studio_overlay_read(
     server: u64,
     channel: String,
     object: Option<String>,
+    object_kind: Option<String>,
 ) -> Result<Value, String> {
-    let channel = channel_id(&channel)?;
-    let target = match object {
-        Some(object) => StudioTarget::Flipnote {
-            channel,
-            object: id(&object)?,
-        },
-        None => StudioTarget::Index { channel },
-    };
+    let target = recovery::target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?;
     read(&state, server, target).await
 }
 
@@ -93,7 +87,9 @@ fn view(read: StudioOverlayInspection) -> Result<Value, String> {
         let channel = u128::from_be_bytes(v.target.channel()).to_string();
         let object = match v.target {
             StudioTarget::Index { .. } => None,
-            StudioTarget::Flipnote { object, .. } => Some(hex::encode(object)),
+            StudioTarget::Flipnote { object, .. } | StudioTarget::Score { object, .. } => {
+                Some(hex::encode(object))
+            }
         };
         let provenance = match v.provenance {
             Some(StudioOverlayProvenance::Closing) => Some("closing"),
@@ -101,7 +97,7 @@ fn view(read: StudioOverlayInspection) -> Result<Value, String> {
             None => None,
         };
         let (eligibility, manual_reason) = super::lifecycle::eligibility_fields(v.eligibility);
-        bounded_view(match (v.branch, v.disposed) {
+        let mut value = match (v.branch, v.disposed) {
             (Some(branch), _) => json!({"v":1,"kind":"local-draft","channel":channel,
                 "eligibility":eligibility,
                 "manualReason":manual_reason,
@@ -122,7 +118,7 @@ fn view(read: StudioOverlayInspection) -> Result<Value, String> {
                 "provenance":provenance,
                 "replayable":v.replayable,
                 "readOnly":true,
-                "content":v.draft.map(|d| projection_content(d.projection()))}),
+                "content":v.draft.map(|d| projection_content(d.projection())).transpose()?}),
             (None, Some(d)) => json!({"v":1,"kind":"disposed","channel":channel,"object":object,
                 "basis":hex::encode(d.basis),"branch":hex::encode(d.branch),
                 "generation":d.generation.to_string(),"accepted":d.accepted,
@@ -136,6 +132,16 @@ fn view(read: StudioOverlayInspection) -> Result<Value, String> {
                 },
                 "readOnly":true}),
             (None, None) => json!({"v":1,"kind":"absent","channel":channel,"object":object}),
-        })
+        };
+        if let Some(draft) = v.draft {
+            // These describe the exact displayed local projection, not the live owner's epoch.
+            // A local-only .pixa derivation must never substitute a different base version.
+            value["contentEpoch"] = draft.projection().epoch().to_string().into();
+            value["group"] = hex::encode(&draft.projection().document().server_id).into();
+        }
+        if matches!(v.target, StudioTarget::Score { .. }) {
+            value["objectKind"] = "score".into();
+        }
+        bounded_view(value)
     })?
 }

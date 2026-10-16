@@ -1,5 +1,177 @@
 # Mewtual; Handover
 
+## Current Gate 6 integration candidate (2026-10-14; local verification passed, CI pending)
+
+Gate 5 is owner-accepted at `7cbe8cbe131e1be8e672d04341c31a1d2b52a98d` (PR #43).
+PR #44 supplies export foundations/nonce correction at `0fe17691fa353cee9b37dc85d4ea4149a5aa8ec5`;
+stacked PR #45's verified code checkpoint is `818e711641bc8193af5cde3be8e56d4817c475f9`. These are exact
+checkpoint heads, not final Gate 6 acceptance. [GATE6-ACCEPTANCE](GATE6-ACCEPTANCE.md) is the
+current evidence ledger; earlier dated sections below remain historical evidence for their pins.
+The implementation-complete candidate is `9fed4588d5f29862f18b38f7f44a14e506fefe4b`, including
+reviewed backend SoundRecord recovery `1d8882875e7178f80140e70c102b8ab6e74ae973`. Cumulative
+implementation/integration review is clear through `818e7116`, including mechanical native
+formatting `8632b7bc` and the two-script CI-anchor correction `cbeb65bf`. Runtime sources are
+unchanged after `8632b7bc`. The reviewer independently passes 47 selected behavior tests and
+verifies all three corrected mutant failures/restored controls, byte-exact restoration and
+224/224 unique anchors. No B/H/M/L remains; hosted acceptance is still pending.
+
+Typed Score and complete Flipnote sound state now use the existing causal/P1/vault/native paths.
+Score composer, Sound markers with authored holds, linked Music, actual-byte PIXA publication/
+readback/preview/download/share and local visual-only GIF export are connected. The existing local/
+shared `.jamtake` consumer reuses the same archival engine capability; long holds no longer enter
+the live 30-second watchdog. Scope, membership, lock, Deafen and pending-download cancellation
+remain fenced. Bounded actual-diff reviews are clear through UI `9330fc08`, take consumer
+`b8969aa3`, combined native/vault/drum corrections `bc86a44c` and frontend sound recovery `cefe0825`.
+
+Explicit backend SoundRecord recovery is implemented and bounded-reviewed; its ten focused,
+eighteen broader Restore and one native-choice tests pass. [GATE6-SOUND-RECOVERY](GATE6-SOUND-RECOVERY.md)
+records the exact derived-body/custody/removal rules. The contract permits an explicit retained
+alternative by op id, but whole-version walks intentionally choose one effective value/removal
+per slot, not every raw alternative in sequence. Only archive preservation proves branch preservation.
+Header-only Index Copy's accepted projection-level limitation remains unchanged.
+
+Current verification: root complete suite passes 2453 tests / 24 existing ignored (app1116/22),
+native complete suite passes 345 library + 5 ACL tests, and frontend passes 1555/1555. Root/native
+formatting and strict Clippy, native check/build, frontend check/build, cargo-deny and local
+Git-Bash ambient/raw-fs gates pass. The host flow rerun passes all nine scenarios on `818e7116`;
+real native startup also passes. Sandbox CDP/advisory-lock failures were rerun successfully with
+the required host/cache access, never treated as passes. The bundle-size advisory remains.
+Real 900×640 browser inspection covers Score/Sound/link states without App console errors;
+screenshots are under root `target`, not the repository. The reviewed Score loop-checkbox layout
+fix at `e83f12e4` is validated inside that viewport. Exact execution pins/source-equivalence and
+local log names are in the ledger. Hosted/Linux CI and the remaining hosted repair/integration
+mutation executions are PENDING, not waived. Older active candidate heads occupy runner capacity;
+no superseded runs have been cancelled. Local Git-Bash ambient pass is not Linux CI evidence.
+
+Gate 4's bounded lifecycle P5 promotion remains accepted; this is not a global P5=false claim.
+Direct Closing Save/native unfinished repair commands stay unavailable, Unconfirmed local drafts
+remain non-transferable and Score historical OBJECT replay remains manual. Local emoji JSON
+import does not implement the shared emoji catalog/chat clicks. Shared-deck PIXA consensus/global
+viewer and native audible/two-real-client release acceptance remain later Gate 7/UI work.
+
+## Historical implementation checkpoints
+
+The entries below record what existed and what was pending at their named commits. They do not
+override the current candidate/verification status above or expand a bounded review verdict.
+
+## Gate 6 combined-review corrections (2026-10-14; acceptance still open)
+
+Fresh cross-layer review found and closed three MEDIUM defects: ticketed local-only SetExport
+now validates/promotes exact held PIXA with transient protection and S3 possession recheck;
+complete Score vault readers share exact family-trailer handling; delayed archival drums retain
+kit deadlines through queued hashing rather than replaying expired hits. Unconfirmed remains
+non-transferable and no native Closing Save/P5 command is enabled. Native export-media refusals
+have distinct Export* literals and preserve the existing NewTicket action. All three fixes and
+the capability-bound archival volume API passed independent actual-diff re-review.
+
+The preceding full root suite passed (including1100app tests plus integration/doc targets) and
+native passed345+5. These runs precede the above corrective commits and are not final acceptance.
+Corrective focused checks pass:26Score,16handoff,73playback/engine/controller, native refusal
+mapping1; backend FlowS6new/37broader/3preserved-frame checks passed on its reviewed checkpoint.
+Root strict Clippy/format/ambient and Svelte check0/0 pass after the correction. Production UI
+integration, legacy take-consumer archival wiring, fixture/visual checks and fresh full combined
+suites/CI evidence remain open. Gate6 is not closed by these bounded reviews.
+
+## Gate 6 typed runtime checkpoint (2026-10-14)
+
+The isolated runtime integration propagates exact expected Score/art family through Index
+dependency replay, historical Object restore/copy and P2/H1/H5 handoff. Independently authenticated
+typed sources remain mandatory; same-id claims cannot retag another family. Wrong-family
+historical pointers become bounded manual work, not infinite retries. Open Score graphs survive
+Index refresh. Score's own historical edits still require explicit manual recovery.
+
+Seventeen focused Score tests, eight legacy receiver-replay and six source-reuse tests pass,
+including real actor create/save/clear/exact retry/reopen, signed page catch-up, newcomer
+Registry/Score seed-plus-tail and Closing restart, wrong-family cold/warm refusal, typed
+historical Object preview/actor Apply and H5 disappearance. Scoped app strict all-target/all-feature
+Clippy, root formatting, ambient and diff checks pass. Existing copy (13/13) and handoff eligibility
+(6/6) regression sets also pass. Independent actual-diff inspection is clear, with final bounded
+review confirmation requested. Primary integration owns full backend/native/frontend suites,
+final combined review/CI and remaining UI work. This checkpoint does not close Gate 6.
+
+## Gate 6 native export checkpoint (2026-10-14)
+
+The isolated frame-sound branch adds native actual-byte PIXA validation/publication and
+bounded local visual GIF export. Six Rust validator, one actor publication, four native GIF,
+18frontend PIXA and9permission-chain tests pass; scoped app/native strict Clippy, check0/0,
+format/ambient/diff gates pass. Independent actual-diff review reports no remaining finding in
+this bounded checkpoint. `GATE6-NATIVE-EXPORT.md` documents exact contracts. Main still owns
+SetExport held-byte validation, sound DTO/UI connection and full combined suites; this is not
+Gate6 completion.
+
+## Gate 6 native activation/recovery checkpoint (2026-10-14)
+
+The isolated candidate now routes explicit optional objectKind throughout native document,
+recovery and draft lifecycle/Copy commands. Manual Score choices select authenticated old
+operation ids, re-preview against current fingerprints and author fresh ordinary saves; Restore
+adds only, Copy is explicit replacement/deletion. Local export records require exact held,
+validated and promoted PIXA bytes before durable references. No direct Closing Save/P5 change.
+Root recovery tests pass11/11 and the real export-reference test passes; new native family/Score
+custody tests pass within the still-running broader native Studio set. Strict root and separate
+native all-target/all-feature Clippy pass. Independent actual-diff review finds no remaining
+findings in this bounded checkpoint. Runtime kind probes/two-peer Score integration, production
+UI connection and final combined suites/CI/review are still open; Gate6 is not complete.
+
+## Gate 6 application/wire work in progress (2026-10-14)
+
+The continuation now implements explicit typed `CreateScore` through the existing object-then-
+Index transaction, additive sealed-wrapper family2 and Studio-only query scope selector0x8010.
+Actual logical/physical DocType remains16. Legacy art/Index wrapper and query bytes are unchanged.
+Native `objectKind`, complete score recovery and frontend activation are still being integrated;
+this partial application/wire checkpoint has design review, not final implementation acceptance.
+Three real vault regressions, three query byte/round-trip tests and one typed-reference/static-
+union regression pass. Root strict Clippy passes after moving a test-only module.
+Fresh replication verification at the preceding core boundary passed384unit+49integration tests;
+the final combined backend/native/frontend suites and hosted evidence remain required.
+
+## Gate 6 stateful score continuation (2026-10-14; not gate acceptance)
+
+At core checkpoint `78c79faa`, isolated `gate6-typed-score` added a bounded Score projection, causal validator,
+reusable remove-wins cell/recipe registers, explicit-family checkpoints/recovery, exact P1
+preflight and scoped core restart/settlement. Native diagnostics retain raw winners and removal
+evidence separately. No score native command or legacy wire activation is enabled yet; app/store
+and exchange adapters explicitly refuse that unfinished family. Historical replay remains manual.
+See `GATE6-STATE-DESIGN.md` for defaults, compatibility and omitted-evidence obligations.
+
+Focused score regressions pass 24/24, including real signed edits, exact retry after clear,
+recovery-first omission, seed reuse and pristine restart-family binding. Current root source builds
+with strict Clippy, and all root test targets compile after invalidating affected crate artifacts.
+An audit found that shared Cargo caches could reuse another worktree's artifacts: earlier aggregate
+root/native suite assertions are not final verification of these new score changes. Affected root
+and native crate artifacts have been invalidated; fresh final combined suites and hosted Linux
+ambient evidence remain required. Prior focused frontend/score and accepted review findings retain
+their narrower scope. Independent current-diff review finds no remaining finding in this bounded
+core slice; it does not accept later native/wire, frame sound, playback or UI integration.
+The freshly rebuilt native diagnostic regression also passes (1/1). The wider replication run
+passed all384unit+49integration tests from before the last two cap/forgery additions (those
+additions pass in the 24-test focused set). This is not a final combined Gate6 suite result.
+
+Parallel isolated branches own frame sound state (`gate6-frame-sound`) and authored archival
+playback (`gate6-playback`). Application/native durability, actual-byte export validation,
+publication/readback, GIF and real Sound/Music/export UI wiring remain open. Gate 6 is not closed.
+
+## Gate 6 Flipnote sound core (2026-10-14; isolated checkpoint)
+
+`gate6-frame-sound` implements typed SFX/recipes/linked-score/export state, causal checks,
+bounded checkpoint/recovery and complete export holds. Required authored duration is1..600000ms.
+Art-only checkpoint bytes stay unchanged. See `GATE6-FRAME-SOUND.md` for full record/accessor
+semantics, test evidence and native DTO integration obligation. This is not Gate6 completion;
+native sound omission on remote ingress is closed by the reviewed shared DTO correction,
+with actual provisional seed and unready/conflicted SFX regressions. Final integration remains open.
+
+## Gate 6 typed score contract (2026-10-14; isolated continuation)
+
+`gate6-typed-score` continues from nonce correction `863fe0fe`, keeping PR #44's correction
+separate. It adds the static Rust `ScoreOp`/cell/header codec, mirrored frontend types and sixteen
+shared vectors. Eight focused Rust regressions and 29 frontend score/export checks pass. No Score
+target, causal projection, persistence, registration, playback or UI activation is added.
+Complete frontend 1423/1423, check/build, separate native 337+5, root strict Clippy, formatting,
+local Git-Bash ambient check and dependency audit pass. The full root suite also passes, including
+integrations/doc tests; existing opt-in ignored fixtures remain ignored. Hosted checks are not
+claimed green. Read-only design/actual-diff implementation review reports
+no remaining finding. See `GATE6-SCORE-CONTRACT.md` for precise evidence, scope and stateful
+obligations; this is not Gate 6 completion.
+
 ## Gate 6 nonce validation correction (2026-10-14)
 
 External review of PR #44's `575f01de` checkpoint found an inherited `RegExp.test` coercion:

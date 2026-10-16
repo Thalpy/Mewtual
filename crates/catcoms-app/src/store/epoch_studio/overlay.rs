@@ -359,6 +359,9 @@ impl ServerStore {
                 // reference has been resolved and its declared/content dimensions disagree.
                 FlipnoteOp::decode_domain(&logical, &operation).map_err(invalid)?;
             }
+            StudioTarget::Score { .. } => {
+                ScoreOp::decode_domain(&logical, &operation).map_err(invalid)?;
+            }
         }
         self.enter_studio_budget(server, group, budget)?;
         let state = self.checked_epoch_replay_state(

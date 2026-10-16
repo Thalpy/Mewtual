@@ -156,6 +156,7 @@ pub(super) fn maximal(group: &[u8], target: StudioTarget) -> StudioProjection {
     match &mut projection {
         StudioProjection::Index(p) => p.epoch = 0,
         StudioProjection::Flipnote(p) => p.epoch = 0,
+        StudioProjection::Score(p) => p.epoch = 0,
     }
     let seed = projection.checkpoint([7; 32]).unwrap();
     eprintln!(

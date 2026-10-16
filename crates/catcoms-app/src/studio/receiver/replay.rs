@@ -285,40 +285,35 @@ impl StudioReceiver {
                 })
                 .transpose()?;
             if choice == Some(ReplayChoice::Ready) && matches!(target, StudioTarget::Index { .. }) {
-                if let IndexOp::PutObject { object, .. } =
+                if let IndexOp::PutObject { object, kind, .. } =
                     IndexOp::decode(&evidence.own[&op_id].operation.body).map_err(invalid)?
                 {
-                    let exists = server
-                        .sync
-                        .with_registry_context(|g, d, _, _| {
-                            let referenced = StudioTarget::Flipnote {
-                                channel: target.channel(),
-                                object,
-                            };
-                            // Background replay must not use explicit Restore's cold rebuild
-                            // allowance. A large unprepared target goes to manual recovery;
-                            // that deliberate action can open/fetch it under normal UI custody.
-                            if !store.studio_source_is_warm(id, g, referenced, d)
-                                && store.studio_receive_needs_preparation(
-                                    id,
-                                    &g.group_id(),
-                                    referenced,
-                                )?
-                            {
-                                return Ok(None);
-                            }
-                            store.with_studio_source(
+                    let exists = match server.sync.with_registry_context(|g, d, _, _| {
+                        let referenced =
+                            crate::studio::object_target(target.channel(), object, kind);
+                        // Background replay must not use explicit Restore's cold rebuild
+                        // allowance. A large unprepared target goes to manual recovery;
+                        // that deliberate action can open/fetch it under normal UI custody.
+                        if !store.studio_source_is_warm(id, g, referenced, d)
+                            && store.studio_receive_needs_preparation(
                                 id,
-                                g,
-                                StudioTarget::Flipnote {
-                                    channel: target.channel(),
-                                    object,
-                                },
-                                d,
-                                |s| Ok(s.op_count() > 0 || s.epoch() > 0),
-                            )
-                        })?
-                        .unwrap_or(false);
+                                &g.group_id(),
+                                referenced,
+                            )?
+                        {
+                            return Ok(None);
+                        }
+                        store.with_studio_source(id, g, referenced, d, |s| {
+                            Ok(s.op_count() > 0 || s.epoch() > 0)
+                        })
+                    }) {
+                        Ok(exists) => exists.unwrap_or(false),
+                        // Local I/O is retryable. A wrong-family/channel or unreadable
+                        // authenticated source is not: keep the historical Put manual,
+                        // rather than retrying a claim that cannot reinterpret that source.
+                        Err(error @ (AppError::Io(_) | AppError::Storage(_))) => return Err(error),
+                        Err(_) => false,
+                    };
                     if !exists {
                         choice = Some(ReplayChoice::Manual);
                     }

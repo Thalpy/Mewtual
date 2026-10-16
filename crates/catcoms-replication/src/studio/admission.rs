@@ -38,6 +38,10 @@ pub enum StudioTarget {
         channel: ElementId,
         object: ElementId,
     },
+    Score {
+        channel: ElementId,
+        object: ElementId,
+    },
 }
 impl std::fmt::Debug for StudioTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -49,11 +53,14 @@ impl StudioTarget {
         match *self {
             Self::Index { channel } => studio_index_document(server, channel),
             Self::Flipnote { object, .. } => flipnote_document(server, object),
+            Self::Score { object, .. } => score_document(server, object),
         }
     }
     pub fn channel(&self) -> ElementId {
         match *self {
-            Self::Index { channel } | Self::Flipnote { channel, .. } => channel,
+            Self::Index { channel }
+            | Self::Flipnote { channel, .. }
+            | Self::Score { channel, .. } => channel,
         }
     }
     pub fn read(
@@ -72,6 +79,9 @@ impl StudioTarget {
             Self::Flipnote { channel, .. } => Ok(StudioProjection::Flipnote(Box::new(
                 FlipnoteFrameProjection::read(document, channel, epoch, doc)?,
             ))),
+            Self::Score { channel, .. } => Ok(StudioProjection::Score(Box::new(
+                ScoreProjection::read(document, channel, epoch, doc)?,
+            ))),
         }
     }
     pub(super) fn validate(
@@ -86,6 +96,9 @@ impl StudioTarget {
             Self::Index { .. } => validate_index_change(logical, epoch, domain, change, before),
             Self::Flipnote { channel, .. } => {
                 validate_frame_change(logical, channel, epoch, domain, change, before)
+            }
+            Self::Score { channel, .. } => {
+                validate_score_change(logical, channel, epoch, domain, change, before)
             }
         }
     }
@@ -187,6 +200,7 @@ impl StudioTarget {
         match projection {
             StudioProjection::Index(p) => index::prepare(p.document(), p.epoch, domain, author),
             StudioProjection::Flipnote(p) => frames::prepare(p, domain, author, ts),
+            StudioProjection::Score(p) => score::prepare(p, domain, author),
         }
     }
     pub(super) fn local_policy(
@@ -206,6 +220,26 @@ impl StudioTarget {
             }
             StudioProjection::Flipnote(p) => {
                 let op = FlipnoteOp::decode_domain(p.document(), domain)?;
+                match &op {
+                    FlipnoteOp::SetSfx { sfx, .. }
+                        if !p.sound.sfx().contains_key(sfx)
+                            && p.sound.sfx().len() >= FLIPNOTE_MAX_SFX =>
+                    {
+                        return Err(ReplError::EpochBound)
+                    }
+                    FlipnoteOp::SetPatch { patch, .. }
+                        if !p.sound.patches().contains_key(patch)
+                            && p.sound.patches().len() >= FLIPNOTE_MAX_PATCHES =>
+                    {
+                        return Err(ReplError::EpochBound)
+                    }
+                    FlipnoteOp::SetExport { .. }
+                        if p.sound.exports().len() >= FLIPNOTE_MAX_EXPORTS =>
+                    {
+                        return Err(ReplError::EpochBound)
+                    }
+                    _ => {}
+                }
                 let total = match op {
                     FlipnoteOp::InsertFrame { bytes, .. } => {
                         if p.timeline.len() >= FLIPNOTE_MAX_FRAMES {
@@ -234,6 +268,31 @@ impl StudioTarget {
                 };
                 if total.is_some_and(|n| n > FLIPNOTE_FRAME_BYTES) {
                     return Err(ReplError::EpochBound);
+                }
+            }
+            StudioProjection::Score(p) => {
+                let op = ScoreOp::decode_domain(p.document(), domain)?;
+                // Local growth refuses cap overflow; concurrent valid remote growth is retained
+                // by ingest and flagged by readiness. Existing slots/removals remain editable.
+                match op {
+                    ScoreOp::SetCell { step, row, .. }
+                        if p.cells
+                            .get(&(step, row))
+                            .and_then(ScoreSlot::value)
+                            .is_none()
+                            && p.cells.values().filter(|s| s.value().is_some()).count()
+                                >= SCORE_MAX_CELLS =>
+                    {
+                        return Err(ReplError::EpochBound)
+                    }
+                    ScoreOp::SetPatch { patch, .. }
+                        if p.patches.get(&patch).and_then(ScoreSlot::value).is_none()
+                            && p.patches.values().filter(|s| s.value().is_some()).count()
+                                >= SCORE_MAX_PATCHES =>
+                    {
+                        return Err(ReplError::EpochBound)
+                    }
+                    _ => {}
                 }
             }
         }

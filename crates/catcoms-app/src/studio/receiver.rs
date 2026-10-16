@@ -132,6 +132,10 @@ fn overlay_request_fingerprint(
             hash.update(&[1]);
             hash.update(&object);
         }
+        StudioTarget::Score { object, .. } => {
+            hash.update(&[2]);
+            hash.update(&object);
+        }
     }
     hash.update(basis);
     hash.update(branch);

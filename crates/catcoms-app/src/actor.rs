@@ -260,6 +260,12 @@ pub enum AppCommand {
         cancellation: Option<RequestCancellation>,
         reply: oneshot::Sender<Result<crate::creative::PublishedPix, String>>,
     },
+    /// Validated animation publication, with the same owned cancellation/concurrency lease.
+    PublishPixa {
+        bytes: Vec<u8>,
+        cancellation: Option<RequestCancellation>,
+        reply: oneshot::Sender<Result<crate::creative::PublishedPixa, String>>,
+    },
     /// Fetch bounded, authenticated blob bytes, retaining cancellation through the transport.
     RequestBlobBounded {
         cid: Cid,
@@ -2324,6 +2330,25 @@ impl ServerActor {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
             .send(AppCommand::PublishPix {
+                bytes,
+                cancellation,
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Validate before enqueueing; publication creates no Studio metadata reference.
+    pub async fn publish_pixa(
+        &self,
+        bytes: Vec<u8>,
+        cancellation: Option<RequestCancellation>,
+    ) -> Result<crate::creative::PublishedPixa, String> {
+        crate::creative::validate_pixa(&bytes).map_err(|e| e.to_string())?;
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::PublishPixa {
                 bytes,
                 cancellation,
                 reply,
@@ -4513,7 +4538,7 @@ where
                         }
                         if let Some(target) = updated {
                             let object = match target { catcoms_replication::studio::StudioTarget::Index { .. } => None,
-                                catcoms_replication::studio::StudioTarget::Flipnote { object, .. } => Some(object) };
+                                catcoms_replication::studio::StudioTarget::Flipnote { object, .. } | catcoms_replication::studio::StudioTarget::Score { object, .. } => Some(object) };
                             let _ = event_tx.send(AppEvent::StudioUpdated { channel: u128::from_be_bytes(target.channel()), object }).await;
                         }
                         if studio_receiver.take_pause_notice() {
@@ -4524,6 +4549,12 @@ where
                         let res = if cancellation.as_ref().is_some_and(RequestCancellation::is_cancelled) || reply.is_closed() {
                             Err("request cancelled".into())
                         } else { server.publish_pix(&bytes).map_err(|e| e.to_string()) };
+                        let _ = reply.send(res);
+                    }
+                    Some(AppCommand::PublishPixa { bytes, cancellation, reply }) => {
+                        let res = if cancellation.as_ref().is_some_and(RequestCancellation::is_cancelled) || reply.is_closed() {
+                            Err("request cancelled".into())
+                        } else { server.publish_pixa(&bytes).map_err(|e| e.to_string()) };
                         let _ = reply.send(res);
                     }
                     Some(AppCommand::RequestBlobBounded { cid, max_bytes, cancellation, reply }) => {
@@ -6086,6 +6117,57 @@ mod tests {
     use tokio::time::timeout;
 
     const GENERAL: u128 = 1;
+
+    #[tokio::test]
+    async fn pixa_publication_actor_validates_promotes_and_returns_no_metadata() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../catcoms-replication/tests/fixtures/studio-export-v1.json"
+        )))
+        .unwrap();
+        let bytes = hex::decode(fixture["pixaHex"].as_str().unwrap()).unwrap();
+        let hub = Hub::new();
+        let mut server = founder(&hub, PeerId::from_u64(1), "alice", 1);
+        assert!(server
+            .publish_pixa(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("persistent"));
+        let dir = tempfile::tempdir().unwrap();
+        server.set_blob_store(Box::new(
+            catcoms_storage::SealingBlobStore::open(
+                dir.path(),
+                [7; 32],
+                ChaCha20Rng::seed_from_u64(3),
+            )
+            .unwrap(),
+        ));
+        let (actor, _events, handle) = spawn(server);
+        let published = actor.publish_pixa(bytes.clone(), None).await.unwrap();
+        let cid = Cid::of(&bytes);
+        assert_eq!(published.cid, cid.to_hex());
+        assert_eq!(published.bytes, bytes.len());
+        assert_eq!(
+            actor
+                .request_blob_bounded(cid, bytes.len(), None)
+                .await
+                .unwrap()
+                .unwrap(),
+            bytes
+        );
+        assert!(actor.publish_pixa(b"PIXA".to_vec(), None).await.is_err());
+        let (_signal, rx) = tokio::sync::watch::channel(true);
+        assert!(actor
+            .publish_pixa(bytes, Some(RequestCancellation::new(rx, None)))
+            .await
+            .is_err());
+        assert!(
+            actor.files().await.is_empty(),
+            "publication does not create a file or Studio reference"
+        );
+        actor.shutdown().await;
+        handle.await.unwrap();
+    }
 
     #[tokio::test]
     async fn pix_publication_actor_returns_real_cid_and_rejects_failed_or_cancelled_calls() {

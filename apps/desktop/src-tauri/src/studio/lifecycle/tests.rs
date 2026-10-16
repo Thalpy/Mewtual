@@ -178,6 +178,9 @@ fn every_typed_save_refusal_has_a_distinct_native_literal_and_action() {
         (R::PixelUnpublished, "pixelUnpublished", "newTicket"),
         (R::PixelInvalid, "pixelInvalid", "newTicket"),
         (R::PixelMissing, "pixelMissing", "newTicket"),
+        (R::ExportUnpublished, "exportUnpublished", "newTicket"),
+        (R::ExportInvalid, "exportInvalid", "newTicket"),
+        (R::ExportMissing, "exportMissing", "newTicket"),
         (
             R::UnconfirmedBranchesPerServer,
             "unconfirmedBranchesPerServer",
@@ -216,10 +219,10 @@ fn every_typed_save_refusal_has_a_distinct_native_literal_and_action() {
 
 #[test]
 fn handoff_attempt_uses_the_manual_vocabulary_and_hides_transient_detail() {
+    use catcoms_app::studio::types::StudioOverlayManualReason as M;
     use catcoms_app::studio::{
         StudioHandoffAttempt, StudioHandoffAttemptReason as R, StudioHandoffAttemptState as S,
     };
-    use catcoms_app::studio::types::StudioOverlayManualReason as M;
 
     let refused = handoff_attempt_value(Some(StudioHandoffAttempt {
         state: S::Refused,
@@ -479,7 +482,10 @@ fn an_archive_failure_is_uncertain_exactly_when_it_may_have_followed_the_write()
 #[test]
 fn a_save_failure_is_uncertain_only_when_the_actor_may_have_written() {
     for post_write in [
-        format!("{}: intent rename committed", catcoms_app::UNCERTAIN_OUTCOME),
+        format!(
+            "{}: intent rename committed",
+            catcoms_app::UNCERTAIN_OUTCOME
+        ),
         catcoms_app::studio::CONTROL_REPLY_DROPPED.to_string(),
     ] {
         assert!(
@@ -490,10 +496,7 @@ fn a_save_failure_is_uncertain_only_when_the_actor_may_have_written() {
         );
     }
     let refused = "draft body exceeds the operation bound".to_string();
-    assert_eq!(
-        save_classified(Err(refused.clone())).unwrap_err(),
-        refused
-    );
+    assert_eq!(save_classified(Err(refused.clone())).unwrap_err(), refused);
     let classified = format!("{} (x)", super::super::UNDELIVERED_SAVE);
     assert_eq!(
         save_classified(Err(classified.clone())).unwrap_err(),
@@ -545,7 +548,7 @@ async fn lifecycle_classifies_a_live_branch_without_writing_to_the_vault() {
         );
         match f.target {
             StudioTarget::Index { .. } => assert!(value["object"].is_null()),
-            StudioTarget::Flipnote { object, .. } => {
+            StudioTarget::Flipnote { object, .. } | StudioTarget::Score { object, .. } => {
                 assert_eq!(value["object"], hex::encode(object));
             }
         }
@@ -1045,9 +1048,7 @@ async fn a_release_withheld_by_the_final_session_fence_is_uncertain_and_is_on_di
             action: Action::ReleaseOverlayArchive(Box::new(request)),
         }),
         |response| {
-            state
-                .session_lock_requested
-                .store(true, Ordering::Release);
+            state.session_lock_requested.store(true, Ordering::Release);
             match response {
                 InvokeResponse::Control(response) => response_value(response),
                 _ => Err("mismatched release response".into()),
@@ -1056,9 +1057,7 @@ async fn a_release_withheld_by_the_final_session_fence_is_uncertain_and_is_on_di
     )
     .await
     .expect_err("a release blocked by the final fence must not be delivered");
-    state
-        .session_lock_requested
-        .store(false, Ordering::Release);
+    state.session_lock_requested.store(false, Ordering::Release);
     assert!(
         withheld.starts_with(super::super::UNDELIVERED_RELEASE),
         "a completed release must be reported uncertain, said: {withheld}"
@@ -1104,9 +1103,7 @@ async fn a_disposal_withheld_by_the_final_session_fence_is_uncertain_and_is_on_d
             action: Action::DisposeOverlay(Box::new(request)),
         }),
         |response| {
-            state
-                .session_lock_requested
-                .store(true, Ordering::Release);
+            state.session_lock_requested.store(true, Ordering::Release);
             match response {
                 InvokeResponse::Control(response) => response_value(response),
                 _ => Err("mismatched disposal response".into()),
@@ -1115,9 +1112,7 @@ async fn a_disposal_withheld_by_the_final_session_fence_is_uncertain_and_is_on_d
     )
     .await
     .expect_err("a disposal blocked by the final fence must not be delivered");
-    state
-        .session_lock_requested
-        .store(false, Ordering::Release);
+    state.session_lock_requested.store(false, Ordering::Release);
     assert!(
         withheld.starts_with(super::super::UNDELIVERED_DISPOSE),
         "a completed disposal must be reported uncertain, said: {withheld}"

@@ -126,6 +126,7 @@
     deckTransportPlan, type DeckDriver, type DeckState,
   } from "./deck-players";
   import { soundcloudDeckUrl } from "./providers-audio";
+  import { StudioAudioSession, type StudioAudioActions, type StudioAudioState } from "./studio-audio.ts";
   import { vimeoFrameUrl } from "./providers-video";
   import {
     CLOCK_SKEW_GRACE_MS, NO_READ_MARK, chatIsObserved, effectiveTs, readCeiling, readChannelChange,
@@ -245,7 +246,9 @@
     callBarStatus, mappableIcePort, mappingAddressPolicy, routerMappedCandidate,
     shouldSignalHostCandidate, type MappedPort,
   } from "./callroutes";
-  import { JamEngine, jamSequenceAccepted, type JamPlaybackPatchSet } from "./jam-engine";
+  import { JamEngine, jamSequenceAccepted, type JamArchivalPlayback } from "./jam-engine";
+  import { JamTakeTransport } from "./jam-take-transport.ts";
+  import { JamTakeSuppression } from "./jam-take-suppression.ts";
   import { JamPeerBudget } from "./jam-budget";
   import { JamFrameDecoder, toggleJamPeerMute, type JamFrameDecode } from "./jam-wire";
   import {
@@ -275,9 +278,8 @@
   } from "./jam-recorder";
   import {
     decodeJamTakeBase64, jamTakePlaybackLeaseCurrent, JamTakeCache, JamTakeLoadCoordinator,
-    mayFetchJamTake, planTakeSeek, shouldApplyJamTakeProgress, shouldDispatchTakeEvent,
-    takeDueBatchEnd, takePlaybackIsRemote, takeReleaseTailMs,
-    type JamTakePlaybackLease, type JamTakeProgressLease, type JamTakeSeekVoice,
+    mayFetchJamTake, shouldApplyJamTakeProgress, takePlaybackIsRemote,
+    type JamTakePlaybackLease, type JamTakeProgressLease,
   } from "./jam-playback";
   import { JamCausalQueue, JamCausalQueueOverflow, JamInitialPublicationGate, JamLatestTaskQueue, JamOutboundEdge, JamPublicationGeneration, JamPublicationPacer, JamResettableCausalQueue, type JamPublishedFrame } from "./jam-publication";
   import { jamTakeSheetSvg } from "./jam-sheet";
@@ -6419,6 +6421,7 @@
     navAt = -1;
     tickerItems = []; // and so is anything the ticker was naming
     tickerReceipts = new Set(); // receipts can include wiki/page ids; do not retain them behind lock
+    stopStudioAudio();
     studioReset?.(); // and the studio's views, held pixels and unsaved strokes
     servers = [];
     beginViewSwitch(); // a read still in flight must not land behind the lock
@@ -12907,7 +12910,7 @@
   let callHeld = $state<number[]>([]); // notes I am sounding into the call
   let remoteHeld = $state<Record<string, number[]>>({}); // fp -> notes they are sounding
   let peerMeta = $state<Record<string, PeerState>>({}); // mute/video plus their coarse receive bucket
-  let jamEngine: JamEngine | null = null; // one per call; disposed with the call
+  let jamEngine: JamEngine | null = null; // shared call/explicit Studio graph; disposed on call leave
   let jamSelfChan: JamSourceChannel | null = null; // my own local-echo capability
   let jamMySn = ""; // my sender-session nonce, minted with the engine
   let jamMyQ = 0; // ONE monotonic sequence across my note and drum events
@@ -13045,15 +13048,77 @@
     synthCtx ??= new AudioContext();
     if (!jamEngine) {
       jamEngine = new JamEngine(synthCtx);
+      jamEngine.setDeafened(callDeafened);
+    }
+    if (!jamSelfChan && callSelfId) {
       jamMySn = jamNonce();
       jamMyQ = 0;
       // Keep the reserved UI lane while binding seeds/fairness to the authenticated call identity.
       jamSelfChan = jamEngine.openLocalSource(callJamLabel(callSelfId));
       jamEngine.beginSourceSession(jamSelfChan, jamMySn);
-      jamEngine.setDeafened(callDeafened);
     }
     return jamEngine;
   }
+  // Studio uses this same graph/allocator/room. Outside a call it mints no live-call source or
+  // sender session. Joining/leaving a call and membership/Deafen edges revoke archive ownership.
+  let studioAudio: StudioAudioSession | null = null;
+  let studioAudioEngine: JamEngine | null = null;
+  let studioAudioState = $state<StudioAudioState>({ state: "stopped", elapsedMs: 0 });
+  let studioAudioGeneration = 0;
+  let studioMembership = $state(0);
+  function stopStudioAudio() {
+    studioAudioGeneration++;
+    studioAudio?.stop();
+    studioAudioState = { state: "stopped", elapsedMs: 0 };
+  }
+  function studioAudioScope() {
+    return !locked && view === "studio" && activeServerId !== null && cur?.active
+      ? { generation: studioAudioGeneration, server: activeServerId, channel: cur.active, membership: studioMembership } : null;
+  }
+  const studioAudioActions: StudioAudioActions = {
+    start: async (kind, prepare, loop, offset) => {
+      suppressCurrentTake();
+      const engine = ensureJamEngine();
+      if (studioAudioEngine !== engine) { studioAudio?.stop(); studioAudioEngine = engine; studioAudio = new StudioAudioSession(engine); }
+      studioAudio!.setScope(studioAudioScope(), callDeafened);
+      const pending = studioAudio!.start(kind, prepare, loop, offset);
+      studioAudioState = studioAudio!.state;
+      const started = await pending; studioAudioState = studioAudio!.state; return started;
+    },
+    stop: stopStudioAudio,
+  };
+  async function shareStudioScore(take: JamTake, server: number): Promise<void> {
+    if (locked || activeServerId !== server || view !== "studio") throw new Error("the Score share target changed");
+    const name = `Mewtual-score${JAM_TAKE_EXT}`;
+    await addSharedFile(new File([JSON.stringify(take)], name, { type: JAM_TAKE_MIME }), "", name, JAM_TAKE_MIME);
+    // Reuse the existing sealed file upload path and jukebox-compatible take, not another media
+    // store. Upload custody is separate from any owner receipt for the original Score document.
+    toast("Score take saved to this server's share; the jukebox can queue it (normal expiry applies)", "ok", 6000);
+  }
+  async function shareStudioPixa(bytes: Uint8Array, server: number): Promise<void> {
+    if (locked || activeServerId !== server || view !== "studio") throw new Error("the animation share target changed");
+    const name = "Mewtual-flipnote.pixa";
+    await addSharedFile(new File([new Uint8Array(bytes)], name, { type: "application/octet-stream" }), "", name, "application/octet-stream");
+    toast("Animation package saved to this server's share; shared-deck PIXA playback is not available yet", "ok", 6000);
+  }
+  $effect(() => {
+    // Reading these values makes every navigation/session/call ABA edge observable; no frame
+    // tick or unrelated Studio redraw is itself a new playback scope.
+    void locked; void view; void activeServerId; void cur?.active; void inCall; void callServer; void callChannel; void callDeafened; void studioMembership;
+    untrack(() => { stopStudioAudio(); studioAudio?.setScope(studioAudioScope(), callDeafened); });
+  });
+  $effect(() => {
+    if (view !== "studio") return;
+    let cancelled = false, timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = async () => {
+      if (cancelled) return;
+      const audio = studioAudio;
+      if (audio) { await audio.tick(); if (!cancelled && studioAudio === audio) studioAudioState = audio.state; }
+      if (!cancelled) timer = setTimeout(() => void tick(), 16);
+    };
+    timer = setTimeout(() => void tick(), 16);
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  });
   function jamCallId(): string {
     // Bridge server numbers are device-local and differ between participants. The shared channel
     // id is the stable musical seed scope; this is reproducibility only, never authorization.
@@ -13379,6 +13444,8 @@
     } catch { return []; }
   }
   let jamSaved = $state(loadJamSaved());
+  const studioPatchLibrary = $derived([...JAM_PRESETS.map((p) => ({ name: p.name, patch: p.patch })), ...jamSaved,
+    ...(myPatch ? [{ name: myPatchName || "current creator recipe", patch: myPatch }] : [])]);
   let jamSaveName = $state("");
   let jamCustomOpen = $state(false); // saved patches expand DOWN, never off the row's right edge
   function jamSavePatch() {
@@ -13657,232 +13724,83 @@
     for (const [fp, st] of Object.entries(peerMeta)) if (st.rec) rows.push({ fp, rec: st.rec });
     return rows;
   });
-  // --- Take playback: local synthesis through the same engine and gates as live playing. Every
-  // lane becomes a synthetic engine source (NUL in the id: no fingerprint can collide), patches
-  // re-validate and re-hash before installing, and nothing is ever re-broadcast. One scheduler
-  // serves both owners: a take-row press (id set, plays from 0) and the jukebox deck (deckCid
-  // set, starts at the room's offset; only the DJ moves the room on when it runs out).
+  // Take playback shares Studio's opaque archival renderer: authored long holds, seek age and
+  // release tails are never sent through the live-call 30-second note API. Existing deck/call
+  // leases, explicit file consent and DJ ownership remain the outer authorization boundary.
   let jamPlay: {
-    id: number | null;
-    deckCid: string | null;
-    take: JamTake;
-    chans: (JamSourceChannel | null)[];
-    patches: JamPlaybackPatchSet;
-    startMs: number;
-    baseMs: number;
-    next: number;
-    timer: ReturnType<typeof setInterval>;
-    catchupTimer: ReturnType<typeof setTimeout> | undefined;
-    endTimer: ReturnType<typeof setTimeout> | undefined;
-    draining: boolean;
-    /** Latest take time covered by a Deafen interval; delayed attacks through here stay dropped. */
-    dropAttacksThroughMs: number;
-    done: boolean;
+    id: number | null; deckCid: string | null; transport: JamTakeTransport;
+    startMs: number; baseMs: number; timer: ReturnType<typeof setInterval>;
+    catchupTimer: ReturnType<typeof setTimeout> | undefined; done: boolean; draining: boolean;
   } | null = null;
   let jamPlayingId = $state<number | null>(null);
-  let jamPlayGen = 0; // the installs below await; only the newest press may seat itself
-  let jamPlaybackPreparationQueue = new JamLatestTaskQueue<JamPlaybackPatchSet | null>();
+  let jamPlayGen = 0;
+  let jamPlaybackPreparationQueue = new JamLatestTaskQueue<JamArchivalPlayback | null>();
   let jamPendingPlay: { gen: number; id: number | null; deckCid: string | null } | null = null;
-  function jamDeckPlaybackCid(): string | null {
-    return jamPlay?.deckCid ?? jamPendingPlay?.deckCid ?? null;
-  }
-  function takeEndMs(take: JamTake): number {
-    return take.events[take.events.length - 1]?.ms ?? 0;
+  // Deafen/membership or a local Studio/take press suppress the previous shared take until a
+  // fresh local deck gesture or another track. A heartbeat cannot resurrect cancelled ownership.
+  const jamTakeSuppression = new JamTakeSuppression();
+  function jamDeckPlaybackCid(): string | null { return jamPlay?.deckCid ?? jamPendingPlay?.deckCid ?? null; }
+  function takeEndMs(take: JamTake): number { return take.events[take.events.length - 1]?.ms ?? 0; }
+  function suppressCurrentTake() {
+    // The adopted CID exists before approval/download/hash/transport seating. Capturing any
+    // current file CID is conservative: only the archival take path consults this local gate.
+    jamTakeSuppression.suppress(jamDeckPlaybackCid(), jukeNow?.cid || null);
+    jamStopPlayback();
   }
   async function jamStartTakePlayback(take: JamTake, offsetMs: number, localId: number | null, deckCid: string | null) {
+    if (deckCid && !jamTakeSuppression.allows(deckCid)) return;
+    if (!inCall || callServer === null || !callChannel || callDeafened) return;
+    if (!deckCid) suppressCurrentTake();
     jamStopPlayback();
-    const gen = jamPlayGen;
+    stopStudioAudio();
+    const gen = jamPlayGen, server = callServer, channel = callChannel;
     jamPendingPlay = { gen, id: localId, deckCid };
     const engine = ensureJamEngine();
-    // A local take-row press is a gesture. Shared deck state is remote-controlled and may never
-    // resume audio or queue work into a suspended context on its own.
-    if (!takePlaybackIsRemote(deckCid) && engine.context.state === "suspended") {
-      void engine.context.resume().catch(() => { /* next local gesture */ });
-    }
-    const patches = await jamPlaybackPreparationQueue.submit(() => engine.preparePlaybackPatches(
-      take.patches,
-      () => gen === jamPlayGen && jamEngine === engine,
-      { callId: take.call, sources: take.parts },
-    ));
-    if (gen !== jamPlayGen || !patches) {
-      if (jamPendingPlay?.gen === gen) jamPendingPlay = null;
-      return;
-    }
-    const chans = take.lanes.map((lane, index) => {
-      // The lane name owns sequencing/lifecycle; the opaque patch set binds every reconnect lane
-      // back to its original participant for allocator fairness, hat choke and drum seed material.
-      const chan = engine.openPlaybackSource(`take\u0000${index}`, patches, lane.src);
-      if (!chan) return null;
-      const opened = lane.sn === JAM_LEGACY_SESSION_NONCE
-        ? engine.beginLegacySourceSession(chan)
-        : engine.beginSourceSession(chan, lane.sn);
-      return opened ? chan : null;
-    });
-    // Cleanup is capability-scoped. A later playback reuses these source names, so stale async
-    // work must be unable to remove the newer generation when it finally resumes.
-    const abandon = () => {
-      for (const chan of chans) if (chan) engine.removeChannel(chan);
-      if (jamPendingPlay?.gen === gen) jamPendingPlay = null;
-    };
-    if (gen !== jamPlayGen) { abandon(); return; }
-    // Patch-table preparation yields to WebCrypto. Read jukeVol only after that await so a slider
-    // move during loading cannot leave this take at the stale level captured when loading began.
-    // No take graph is constructed until jamPlayTick below, so every lane is gated first.
-    if (deckCid) {
-      const live = jukeNow;
-      if (!live || live.cid !== deckCid || live.paused || jukeStale) {
-        // Retire this still-current lease before releasing its channels. A late continuation must
-        // not be able to seat itself after pause, track replacement, DJ expiry, or call teardown.
-        if (gen === jamPlayGen) jamPlayGen += 1;
-        abandon();
-        return;
-      }
-      for (const chan of chans) if (chan) engine.setSourceLevel(chan.source, jukeVol);
-    }
-    const baseMs = Math.max(0, offsetMs);
-    const plan = planTakeSeek(take, baseMs);
-    jamPlay = {
-      id: localId,
-      deckCid,
-      take,
-      chans,
-      patches,
-      startMs: performance.now(),
-      baseMs,
-      next: plan.next,
-      timer: setInterval(() => { void jamPlayTick(); }, 40),
-      catchupTimer: undefined,
-      endTimer: undefined,
-      draining: false,
-      dropAttacksThroughMs: -1,
-      done: false,
-    };
-    jamPendingPlay = null;
-    jamPlayingId = localId;
-    // Before the first scheduled event, whatever the take was already holding at this offset. Only
-    // the jukebox deck ever starts anywhere but zero, and joining it mid-track used to mean hearing
-    // nothing until the next attack: the note-ons were behind the start point and only their
-    // note-offs were still due. Every gate a scheduled event passes applies here too.
-    jamOpenSeekVoices(jamPlay, engine, plan.sounding);
+    const current = () => gen === jamPlayGen && jamEngine === engine && inCall && callServer === server &&
+      callChannel === channel && !callDeafened && (!deckCid || (!!jukeNow && jukeNow.cid === deckCid && !jukeNow.paused && !jukeStale));
+    const transport = new JamTakeTransport(engine, jamPlaybackPreparationQueue);
+    transport.setLevel(deckCid ? jukeVol : 1);
+    const started = await transport.start(take, Math.max(0, offsetMs),
+      { generation: gen, server, channel, membership: studioMembership }, takePlaybackIsRemote(deckCid), current);
+    if (!current() || !started) { transport.stop(); if (jamPendingPlay?.gen === gen) jamPendingPlay = null; return; }
+    // A slider may move across hashing; this exact capability gets the latest receiver level,
+    // including lazy lanes that have not constructed their first source bus yet.
+    transport.setLevel(deckCid ? jukeVol : 1);
+    jamPlay = { id: localId, deckCid, transport, startMs: performance.now(), baseMs: Math.max(0, offsetMs),
+      timer: setInterval(() => { void jamPlayTick(); }, 40), catchupTimer: undefined, done: false, draining: false };
+    jamPendingPlay = null; jamPlayingId = localId;
     void jamPlayTick();
   }
-  /** Re-open the notes a seek landed in the middle of, at the age each has already reached. */
-  function jamOpenSeekVoices(
-    pl: NonNullable<typeof jamPlay>,
-    engine: JamEngine,
-    sounding: readonly JamTakeSeekVoice[],
-  ) {
-    for (const voice of sounding) {
-      const event = pl.take.events[voice.index];
-      if (!event || "d" in event || event.on !== 1) continue;
-      if (!shouldDispatchTakeEvent(event, callDeafened)) continue;
-      const chan = pl.chans[event.lane];
-      if (!chan) continue;
-      engine.noteOn(
-        {
-          channel: chan,
-          sequence: event.q,
-          note: event.n,
-          wave: event.w,
-          remote: takePlaybackIsRemote(pl.deckCid),
-          ageMs: voice.ageMs,
-        },
-        event.p === undefined ? undefined : { patches: pl.patches, index: event.p },
-      );
-    }
-  }
-  function jamPlayTake(entry: { id: number; take: JamTake }) {
-    void jamStartTakePlayback(entry.take, 0, entry.id, null);
-  }
-  function jamPlayElapsed(): number {
-    return jamPlay ? jamPlay.baseMs + (performance.now() - jamPlay.startMs) : 0;
-  }
+  function jamPlayTake(entry: { id: number; take: JamTake }) { void jamStartTakePlayback(entry.take, 0, entry.id, null); }
+  function jamPlayElapsed(): number { return jamPlay ? jamPlay.baseMs + performance.now() - jamPlay.startMs : 0; }
   async function jamPlayTick() {
     const pl = jamPlay;
-    const engine = jamEngine;
-    if (!pl || !engine) { jamStopPlayback(); return; }
-    if (pl.draining) return;
+    if (!pl || !jamEngine) { jamStopPlayback(); return; }
+    if (pl.draining || pl.done) return;
+    if (jamEngine.context.state !== "running") { jukeBlocked = !!pl.deckCid; suppressCurrentTake(); return; }
     pl.draining = true;
     try {
-      const elapsed = jamPlayElapsed();
-      const batchEnd = takeDueBatchEnd(pl.take.events, pl.next, elapsed);
-      while (pl.next < batchEnd) {
-        const event = pl.take.events[pl.next];
-        pl.next += 1;
-        // Deafen drops new attacks but note-offs still close voices that began before its master
-        // gate shut; otherwise those obsolete notes would resurrect when the gate reopened.
-        if (!shouldDispatchTakeEvent(
-          event,
-          callDeafened || event.ms <= pl.dropAttacksThroughMs,
-        )) continue;
-        const chan = pl.chans[event.lane];
-        if (!chan) continue;
-        const lane = pl.take.lanes[event.lane];
-        const remote = takePlaybackIsRemote(pl.deckCid);
-        if ("d" in event) {
-          // Backpressure is part of playback correctness: advancing through a dense take without
-          // awaiting its seed would fill the bounded digest lane and silently lose valid hits.
-          await engine.drum(
-            { callId: pl.take.call, channel: chan, sessionNonce: lane.sn, sequence: event.q, pad: event.n, remote },
-            { patches: pl.patches, part: lane.src },
-          );
-          if (jamPlay !== pl || jamEngine !== engine) return;
-        } else if (event.on === 1) {
-          engine.noteOn(
-            { channel: chan, sequence: event.q, note: event.n, wave: event.w, remote },
-            event.p === undefined ? undefined : { patches: pl.patches, index: event.p },
-          );
-        } else {
-          engine.noteOff({ channel: chan, sequence: event.q, note: event.n });
-        }
+      const count = await pl.transport.tick();
+      if (jamPlay !== pl) return;
+      if (count >= 128 && pl.catchupTimer === undefined) pl.catchupTimer = setTimeout(() => {
+        if (jamPlay !== pl) return;
+        pl.catchupTimer = undefined; void jamPlayTick();
+      }, 0);
+      if (pl.transport.state === "stopped") {
+        if (!pl.transport.completed) { suppressCurrentTake(); return; }
+        pl.done = true; clearInterval(pl.timer); clearTimeout(pl.catchupTimer); pl.catchupTimer = undefined;
+        // The controller has already retained the entire authored release/drum horizon. The DJ
+        // alone advances; listeners keep a done marker so ordinary pings do not restart it.
+        if (pl.deckCid) { if (jukeIsDj() && jukeNow?.cid === pl.deckCid && !jukeNow.paused && !jukeStale && !callDeafened) jukeAdvance(true); }
+        else jamStopPlayback();
       }
-      if (
-        pl.next < pl.take.events.length && pl.take.events[pl.next].ms <= elapsed &&
-        pl.catchupTimer === undefined
-      ) {
-        // Yield between dense/seek catch-up batches. One zero-delay continuation is enough; the
-        // ordinary interval remains the fallback if the platform clamps timers.
-        pl.catchupTimer = setTimeout(() => {
-          if (jamPlay !== pl) return;
-          pl.catchupTimer = undefined;
-          void jamPlayTick();
-        }, 0);
-      }
-      if (pl.next >= pl.take.events.length && !pl.done && elapsed >= takeEndMs(pl.take)) {
-        pl.done = true;
-        clearInterval(pl.timer);
-        // A take may end while a key is still held. Enter its ordinary envelope release now; simply
-        // retaining the channel would sustain for the whole wait and then hard-cut at teardown.
-        for (const chan of pl.chans) if (chan) engine.releaseChannelHeld(chan);
-        // Keep the transport on this take until its longest permitted release/drum tail has rung.
-        // A listener retains the done marker until the DJ advances, preventing heartbeat-driven
-        // restarts; local previews simply tear down when their bounded tail ends.
-        pl.endTimer = setTimeout(() => {
-          if (jamPlay !== pl) return;
-          if (pl.deckCid) {
-            if (jukeIsDj() && jukeNow?.cid === pl.deckCid) jukeAdvance(true);
-          } else {
-            jamStopPlayback();
-          }
-        }, takeReleaseTailMs(pl.take));
-      }
-    } finally {
-      pl.draining = false;
-    }
+    } finally { pl.draining = false; }
   }
   function jamStopPlayback() {
-    // Invalidate pending setup even when no playback has seated yet. Patch hashing/installing is
-    // async, and a stop, replacement, or leave must win that race deterministically.
-    jamPlayGen += 1;
-    jamPendingPlay = null;
-    const pl = jamPlay;
-    jamPlay = null;
-    jamPlayingId = null;
+    jamPlayGen++; jamPendingPlay = null;
+    const pl = jamPlay; jamPlay = null; jamPlayingId = null;
     if (!pl) return;
-    clearInterval(pl.timer);
-    clearTimeout(pl.catchupTimer);
-    clearTimeout(pl.endTimer);
-    for (const chan of pl.chans) if (chan) jamEngine?.removeChannel(chan);
+    clearInterval(pl.timer); clearTimeout(pl.catchupTimer); pl.transport.stop();
   }
   function pad2(value: number): string {
     return String(value).padStart(2, "0");
@@ -14300,13 +14218,13 @@
     applyPeerGain(fp, "voice");
   }
   function toggleDeafen() {
+    stopStudioAudio();
+    suppressCurrentTake();
     callDeafened = !callDeafened;
     // Both edges delimit a new admission epoch: frames received before or during Deafen stay
     // silent if an async queue drains after audio has been reopened.
     jamRoomRenderGeneration += 1;
-    // A digest may keep the take drain busy across a fast on→off cycle. Mark the whole interval
-    // on both edges so attacks due inside it remain suppressed after reopen; note-offs still run.
-    if (jamPlay) jamPlay.dropAttacksThroughMs = Math.max(jamPlay.dropAttacksThroughMs, jamPlayElapsed());
+    // Retired take ownership is suppressed on both edges; a remote heartbeat cannot revive it.
     // Deafen reaches the gains, not the elements: silence has to be applied where the level lives
     // or lifting it would come back at whatever the level was, at the wrong moment or not at all.
     applyAllPeerGains();
@@ -15888,7 +15806,7 @@
     // A .jamtake has no media element: it plays as synthetic per-lane engine sources. Apply the
     // same slider to those bounded receiver-owned buses without changing live performers' gains.
     if (jamPlay?.deckCid) {
-      for (const chan of jamPlay.chans) if (chan) jamEngine?.setSourceLevel(chan.source, jukeVol);
+      jamPlay.transport.setLevel(jukeVol);
     }
     // A linked video keeps its own volume inside its own document, so the slider has to be sent
     // rather than set. Its scale is 0..100, not 0..1.
@@ -16178,6 +16096,9 @@
     jukeNow = entry || cid || link
       ? { entry, cid, src, link, name, paused, dj: fromFp === callSelfId ? "" : fromFp }
       : null;
+    // A real track change clears obsolete cancellation for ALL media kinds. A heartbeat,
+    // remote pause/unpause or another DJ for the same track does not restore local consent.
+    jamTakeSuppression.reconcile(jukeNow);
     if (!jukeNow) {
       jukeDur = 0;
       jukeStop(); // entry "" is the DJ saying the queue ran out
@@ -16812,6 +16733,7 @@
   // Takes replay through the jam engine, whose AudioContext may still be suspended; presses are
   // user gestures, so they are exactly when a resume is allowed to succeed.
   function jukeWakeSynth() {
+    jamTakeSuppression.localGesture(); // a fresh local deck control, not a remote heartbeat
     if (jamEngine && jamEngine.context.state === "suspended") {
       void jamEngine.context.resume().then(() => { jukeBlocked = false; }).catch(() => { /* next press */ });
     }
@@ -18289,6 +18211,7 @@
     for (const id of revokedCallPeers(Object.keys(callPeers), members)) removePeer(id);
   }
   function leaveVoice() {
+    stopStudioAudio();
     // Permission prompts are not cancellable. Invalidate before any teardown so a chooser that
     // resolves after this point can only stop its returned tracks, never adopt them.
     videoCaptureSession.invalidate();
@@ -18366,7 +18289,8 @@
     // Takes are ephemeral BY CONTRACT: the recorder, the playback deck and every kept take die
     // with the call, and consent resets so the next call starts from an explicit yes.
     jamStopPlayback();
-    jamPlaybackPreparationQueue = new JamLatestTaskQueue<JamPlaybackPatchSet | null>();
+    jamPlaybackPreparationQueue = new JamLatestTaskQueue<JamArchivalPlayback | null>();
+    jamTakeSuppression.reset();
     if (jamRec) { jamRec.stop(); jamRec = null; }
     clearInterval(jamRecTimer);
     jamRecTimer = undefined;
@@ -20417,6 +20341,8 @@
         finishUnreadDecision(pendingUnread, server, channel, correlation);
       }),
       listen<{ server: number; count: number }>("members-changed", (e) => {
+        if (inCall && callServer === e.payload.server) suppressCurrentTake();
+        if (e.payload.server === activeServerId) { studioMembership++; stopStudioAudio(); }
         spaceActivityAt[e.payload.server] = Date.now();
         // Revocation tears down the data plane: a removed member's live call edges (voice, video,
         // instruments) must not outlive their membership on the strength of an old handshake.
@@ -26941,7 +26867,7 @@
           </div>
         {:else if view === "studio"}
           {#if StudioSurface}
-            <StudioSurface me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} nameOf={nameOfIdentity} colorOf={colorOfIdentity} onnotice={studioNotice} claims={studioClaimScope ? drawClaimSnapshot : null} claimActions={studioClaimActions} />
+            <StudioSurface me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} nameOf={nameOfIdentity} colorOf={colorOfIdentity} onnotice={studioNotice} claims={studioClaimScope ? drawClaimSnapshot : null} claimActions={studioClaimActions} patchLibrary={studioPatchLibrary} audioActions={studioAudioActions} audioState={studioAudioState} onshareScore={shareStudioScore} onsharePixa={shareStudioPixa} />
           {:else}
             <h2>Studio</h2>
             <p class="muted">Loading the studio…</p>

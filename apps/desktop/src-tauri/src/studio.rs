@@ -83,17 +83,20 @@ fn apply_request(
     nonce: &str,
     body: String,
 ) -> Result<StudioRequest, String> {
+    apply_request_with_kind(channel, object, None, epoch_id, nonce, body)
+}
+fn apply_request_with_kind(
+    channel: &str,
+    object: Option<&str>,
+    object_kind: Option<&str>,
+    epoch_id: &str,
+    nonce: &str,
+    body: String,
+) -> Result<StudioRequest, String> {
     if body.len() > 64 * 1024 {
         return Err("Studio body exceeds 64 KiB".into());
     }
-    let channel = channel_id(channel)?;
-    let target = match object {
-        Some(object) => StudioTarget::Flipnote {
-            channel,
-            object: id(object)?,
-        },
-        None => StudioTarget::Index { channel },
-    };
+    let target = recovery::target_with_kind(channel, object, object_kind)?;
     let request = StudioRequest::Apply {
         target,
         epoch_id: u128::from_be_bytes(id(epoch_id)?),
@@ -298,19 +301,23 @@ pub(crate) const UNDELIVERED_ARCHIVE: &str = "outcome=uncertain; the archive was
 /// A completed or still-running Save whose typed response was withheld by a final native fence.
 /// The caller must re-read before claiming either success or refusal; an identical retry remains
 /// safe because Save classification recognizes already accepted work.
-pub(crate) const UNDELIVERED_SAVE: &str = "outcome=uncertain; the Save may have completed, but its \
+pub(crate) const UNDELIVERED_SAVE: &str =
+    "outcome=uncertain; the Save may have completed, but its \
      result could not be delivered; refresh the Studio document, or retry exactly";
 
 /// A release or disposal cannot safely be repeated after a withheld result: each exact retry may
 /// now find that the thing it destroyed is absent. The caller must reconcile the lifecycle view.
-pub(crate) const UNDELIVERED_RELEASE: &str = "outcome=uncertain; the archive release completed, but \
+pub(crate) const UNDELIVERED_RELEASE: &str =
+    "outcome=uncertain; the archive release completed, but \
      its result could not be delivered; refresh the local-draft lifecycle before acting again";
-pub(crate) const UNDELIVERED_DISPOSE: &str = "outcome=uncertain; the draft disposal completed, but \
+pub(crate) const UNDELIVERED_DISPOSE: &str =
+    "outcome=uncertain; the draft disposal completed, but \
      its result could not be delivered; refresh the local-draft lifecycle before acting again";
 
 /// Copy Apply is nonce-idempotent. Its result may be withheld after the destination write, so the
 /// safe recovery is the same exact prepared request, never a newly previewed copy.
-pub(crate) const UNDELIVERED_COPY: &str = "outcome=uncertain; the draft copy may have completed, but \
+pub(crate) const UNDELIVERED_COPY: &str =
+    "outcome=uncertain; the draft copy may have completed, but \
      its result could not be delivered; retry the exact prepared copy";
 
 /// The weaker form, for an archive finish that failed without producing a result: the store could
@@ -493,15 +500,13 @@ pub(crate) async fn studio_read(
     server: u64,
     channel: String,
     object: String,
+    object_kind: Option<String>,
 ) -> Result<Option<Value>, String> {
     invoke(
         &state,
         server,
         StudioRequest::Read {
-            target: StudioTarget::Flipnote {
-                channel: channel_id(&channel)?,
-                object: id(&object)?,
-            },
+            target: recovery::target_with_kind(&channel, Some(&object), object_kind.as_deref())?,
         },
     )
     .await
@@ -516,19 +521,28 @@ pub(crate) async fn studio_create(
     nonce: String,
     title: String,
     created_at_ms: u64,
+    object_kind: Option<String>,
 ) -> Result<Option<Value>, String> {
-    invoke(
-        &state,
-        server,
-        StudioRequest::Create {
-            channel: channel_id(&channel)?,
-            object: id(&object)?,
-            nonce: id(&nonce)?,
+    let target = recovery::target_with_kind(&channel, Some(&object), object_kind.as_deref())?;
+    let nonce = id(&nonce)?;
+    let request = match target {
+        StudioTarget::Flipnote { channel, object } => StudioRequest::Create {
+            channel,
+            object,
+            nonce,
             title,
             ts: created_at_ms,
         },
-    )
-    .await
+        StudioTarget::Score { channel, object } => StudioRequest::CreateScore {
+            channel,
+            object,
+            nonce,
+            title,
+            ts: created_at_ms,
+        },
+        StudioTarget::Index { .. } => unreachable!("create always names an object"),
+    };
+    invoke(&state, server, request).await
 }
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -540,11 +554,19 @@ pub(crate) async fn studio_apply(
     epoch_id: String,
     nonce: String,
     body: String,
+    object_kind: Option<String>,
 ) -> Result<Option<Value>, String> {
     invoke(
         &state,
         server,
-        apply_request(&channel, Some(&object), &epoch_id, &nonce, body)?,
+        apply_request_with_kind(
+            &channel,
+            Some(&object),
+            object_kind.as_deref(),
+            &epoch_id,
+            &nonce,
+            body,
+        )?,
     )
     .await
 }
@@ -608,36 +630,88 @@ fn read_view(read: StudioRead) -> Result<Value, String> {
                 "v": 1, "epochId": format!("{epoch_id:032x}"),
                 "epoch": projection.epoch().to_string(),
                 "channel": u128::from_be_bytes(projection.channel()).to_string(),
+                "group": hex::encode(&projection.document().server_id),
                 "provisional": true, "awaitingTenureReceipt": true,
-                "content": projection_content(projection),
+                "content": projection_content(projection)?,
             }))
         })?,
     }
 }
 
 fn view(v: StudioView) -> Result<Value, String> {
-    let content = projection_content(&v.projection);
+    let content = projection_content(&v.projection)?;
     let value = json!({"v":1,"epochId":format!("{:032x}",v.epoch_id),"epoch":v.epoch.to_string(),
-        "channel":u128::from_be_bytes(v.projection.channel()).to_string(),"publication":"local", "provisional":true,
+        "channel":u128::from_be_bytes(v.projection.channel()).to_string(),"group":hex::encode(&v.projection.document().server_id),"publication":"local", "provisional":true,
         "phase":match v.phase {EpochPhase::Open=>"open",EpochPhase::Closing=>"closing",EpochPhase::Settled=>"settled",EpochPhase::Fault=>"fault"},"content":content});
     bounded_view(value)
 }
-fn projection_content(projection: &StudioProjection) -> Value {
-    match projection {
+fn projection_content(projection: &StudioProjection) -> Result<Value, String> {
+    Ok(match projection {
         StudioProjection::Index(p) => {
             json!({"kind":"index","objects":objects(&p.objects),"overflow":objects(&p.overflow),
             "deletedObjects":objects(&p.deleted_objects),"tombstones":p.tombstones.iter().map(|(id,vs)|(hex::encode(id),vs.iter().map(isource).collect::<Vec<_>>())).collect::<std::collections::BTreeMap<_,_>>() })
         }
         StudioProjection::Flipnote(p) => {
-            json!({"kind":"flipnote","title":p.title.as_ref().map(|v|freg(v,|v|json!(v))),"fps":p.fps.as_ref().map(|v|freg(v,|v|json!(v))),
+            let mut content = json!({"kind":"flipnote","title":p.title.as_ref().map(|v|freg(v,|v|json!(v))),"fps":p.fps.as_ref().map(|v|freg(v,|v|json!(v))),
             "timeline":p.timeline.iter().map(hex::encode).collect::<Vec<_>>(),"declaredFrameBytes":p.declared_frame_bytes,
             "overCap":p.over_cap.iter().map(|(id,v)|(hex::encode(id),json!({"count":v.count,"bytes":v.bytes}))).collect::<std::collections::BTreeMap<_,_>>(),
             "tombstones":p.tombstones.iter().map(|(id,vs)|(hex::encode(id),vs.iter().map(fsource).collect::<Vec<_>>())).collect::<std::collections::BTreeMap<_,_>>(),
             "frames":p.frames.iter().map(|(id,e)|(hex::encode(id),json!({"pixels":freg(&e.pixels,blob),"insertions":e.insertions.iter().map(|v| json!({
                 "source":fsource(&v.source),"value":{"checkpoint":v.value.checkpoint,"after":v.value.after.map(hex::encode),"anchor":v.value.anchor.map(hex::encode),"before":v.value.before.map(hex::encode),"blob":blob(&v.value.blob)}
-            })).collect::<Vec<_>>()}))).collect::<std::collections::BTreeMap<_,_>>() })
+            })).collect::<Vec<_>>()}))).collect::<std::collections::BTreeMap<_,_>>() });
+            // Remote edits and checkpoint seeds can already contain sound. Ordinary, preview,
+            // draft and recovery readers share this converter: none may silently strip it.
+            // Omit only genuinely absent evidence, preserving the legacy art-only shape.
+            if !p.sound.records.is_empty() {
+                content["sound"] = frame_sound_content(p)?;
+            }
+            content
         }
-    }
+        // This diagnostic family is explicit even before score command activation. Never
+        // flatten a removal into the AM selected value or discard losing source provenance.
+        StudioProjection::Score(p) => {
+            let ready = p.readiness().map_err(|e| e.to_string())?;
+            let cell = |v: &ScoreCell| match v {
+                ScoreCell::Note { patch, len } => {
+                    let mut value = json!({"k":"n","p":hex::encode(patch)});
+                    if let Some(len) = len {
+                        value["len"] = json!(len);
+                    }
+                    value
+                }
+                ScoreCell::Drum { pad } => json!({"k":"d","pad":pad}),
+            };
+            json!({"kind":"score","title":p.title.as_ref().map(|v|ireg(v,|v|json!(v))),
+                "bpm":p.bpm.as_ref().map(|v|ireg(v,|v|json!(v))),"bpb":p.bpb.as_ref().map(|v|ireg(v,|v|json!(v))),
+                "steps":p.steps.as_ref().map(|v|ireg(v,|v|json!(v))),
+                "cells":p.cells.iter().map(|((step,row),slot)|(format!("{step}:{row}"),json!({"removed":slot.removed(),"register":ireg(&slot.register,|v|json!(v.as_ref().map(cell)))}))).collect::<std::collections::BTreeMap<_,_>>(),
+                "patches":p.patches.iter().map(|(id,slot)|(hex::encode(id),json!({"removed":slot.removed(),"register":ireg(&slot.register,|v|json!(v.as_ref().map(|v|v.value())))}))).collect::<std::collections::BTreeMap<_,_>>(),
+                "readiness":{"headerConflicts":ready.header_conflicts,
+                    "cells":ready.cells.iter().map(|((step,row),v)|(format!("{step}:{row}"),json!({"count":v.count,"extent":v.extent,"recipe":v.recipe,"overlap":v.overlap,"conflict":v.conflict}))).collect::<std::collections::BTreeMap<_,_>>(),
+                    "patches":ready.patches.iter().map(|(id,v)|(hex::encode(id),json!({"count":v.count,"conflict":v.conflict}))).collect::<std::collections::BTreeMap<_,_>>()}})
+        }
+    })
+}
+
+fn frame_sound_content(p: &FlipnoteFrameProjection) -> Result<Value, String> {
+    // Measure/validate the complete retained sound set before allocating a JSON expansion.
+    let ready = p.sound_readiness().map_err(|e| e.to_string())?;
+    let value = |v: &FrameValue<FlipnoteOp>| -> Result<Value, String> {
+        let body: Value = serde_json::from_slice(&v.value.encode().map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        Ok(json!({"value":body,"source":fsource(&v.source)}))
+    };
+    let records = p.sound.records.iter().map(|(key,r)| -> Result<_,String> {
+        Ok((key.clone(),json!({"selected":value(&r.selected)?,"conflicts":r.conflicts.iter().map(&value).collect::<Result<Vec<_>,_>>()?})))
+    }).collect::<Result<std::collections::BTreeMap<_,_>,_>>()?;
+    Ok(json!({"records":records,"readiness":{
+        "sfxOverflow":ready.sfx_overflow.iter().map(hex::encode).collect::<Vec<_>>(),
+        "patchOverflow":ready.patch_overflow.iter().map(hex::encode).collect::<Vec<_>>(),
+        "exportOverflow":ready.export_overflow.iter().map(hex::encode).collect::<Vec<_>>(),
+        "missingFrames":ready.missing_frames.iter().map(hex::encode).collect::<Vec<_>>(),
+        "missingPatches":ready.missing_patches.iter().map(hex::encode).collect::<Vec<_>>(),
+        "conflicts":ready.conflicts,
+    }}))
 }
 const MAX_STUDIO_VIEW_BYTES: usize = 32 * 1024 * 1024;
 fn bounded_view(value: Value) -> Result<Value, String> {

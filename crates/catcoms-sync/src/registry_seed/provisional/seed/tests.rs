@@ -41,6 +41,11 @@ pub(in crate::registry_seed::provisional) fn seed(
     let mut source =
         StudioEpoch::new(&provider.group, target, provider.device.device_id()).unwrap();
     let body = match target {
+        StudioTarget::Score { .. } => catcoms_replication::studio::ScoreOp::SetHeader(
+            catcoms_replication::studio::ScoreHeader::Title("unconfirmed title".into()),
+        )
+        .encode()
+        .unwrap(),
         StudioTarget::Flipnote { .. } => {
             FlipnoteOp::SetHeader(FlipnoteHeader::Title("unconfirmed title".into()))
                 .encode()
@@ -205,6 +210,10 @@ async fn provisional_seed_nonowner_index_and_flipnote_are_only_unconfirmed_typed
                         "unconfirmed title"
                     ),
                     StudioProjection::Index(p) => assert!(p.objects.contains_key(&[7; 16])),
+                    StudioProjection::Score(p) => assert_eq!(
+                        p.title.as_ref().unwrap().selected.value,
+                        "unconfirmed title"
+                    ),
                 }
             })
             .unwrap();

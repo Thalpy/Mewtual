@@ -15,7 +15,7 @@ use catcoms_app::studio::{
     StudioControlResponse as Response, StudioOverlayLifecycle, StudioPreparedInspection,
     StudioReleaseConfirmation, StudioUnconfirmedOverlaySaveRequest, StudioUnconfirmedSaveOutcome,
 };
-use recovery::{named_hash, target};
+use recovery::{named_hash, target_with_kind};
 
 #[tauri::command]
 pub(crate) async fn studio_overlay_lifecycle(
@@ -23,11 +23,12 @@ pub(crate) async fn studio_overlay_lifecycle(
     server: u64,
     channel: String,
     object: Option<String>,
+    object_kind: Option<String>,
 ) -> Result<Value, String> {
     recovery::invoke_control(
         &state,
         server,
-        target(&channel, object.as_deref())?,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
         Action::OverlayLifecycle,
     )
     .await
@@ -39,11 +40,12 @@ pub(crate) async fn studio_overlay_archive_read(
     server: u64,
     channel: String,
     object: Option<String>,
+    object_kind: Option<String>,
 ) -> Result<Value, String> {
     recovery::invoke_control(
         &state,
         server,
-        target(&channel, object.as_deref())?,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
         Action::ReadOverlayArchive,
     )
     .await
@@ -58,11 +60,12 @@ pub(crate) async fn studio_overlay_archive_export(
     server: u64,
     channel: String,
     object: Option<String>,
+    object_kind: Option<String>,
 ) -> Result<Value, String> {
     invoke_archive(
         &state,
         server,
-        target(&channel, object.as_deref())?,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
         |archive, id, physical_bytes| {
             let mut value = with_payload(archive_value(&archive, id, physical_bytes)?, &archive)?;
             value["kind"] = "overlayArchiveExport".into();
@@ -83,11 +86,12 @@ pub(crate) async fn studio_overlay_export(
     server: u64,
     channel: String,
     object: Option<String>,
+    object_kind: Option<String>,
 ) -> Result<Value, String> {
     two_visit_archive(
         &state,
         server,
-        target(&channel, object.as_deref())?,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
         Action::ExportOverlay,
         Action::FinishOverlayExport,
         "overlay export",
@@ -107,11 +111,12 @@ pub(crate) async fn studio_overlay_archive(
     server: u64,
     channel: String,
     object: Option<String>,
+    object_kind: Option<String>,
 ) -> Result<Value, String> {
     two_visit_archive(
         &state,
         server,
-        target(&channel, object.as_deref())?,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
         Action::ArchiveOverlay,
         Action::FinishOverlayArchive,
         "overlay archive",
@@ -203,6 +208,7 @@ pub(crate) async fn studio_overlay_archive_release(
     server: u64,
     channel: String,
     object: Option<String>,
+    object_kind: Option<String>,
     archive: String,
     confirmation: String,
 ) -> Result<Value, String> {
@@ -211,7 +217,7 @@ pub(crate) async fn studio_overlay_archive_release(
         recovery::invoke_control(
             &state,
             server,
-            target(&channel, object.as_deref())?,
+            target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
             Action::ReleaseOverlayArchive(Box::new(request)),
         )
         .await,
@@ -324,13 +330,14 @@ pub(crate) async fn studio_overlay_dispose(
     server: u64,
     channel: String,
     object: Option<String>,
+    object_kind: Option<String>,
     disposal: DisposalRequestInput,
 ) -> Result<Value, String> {
     classified(
         recovery::invoke_control(
             &state,
             server,
-            target(&channel, object.as_deref())?,
+            target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
             Action::DisposeOverlay(Box::new(disposal.checked()?)),
         )
         .await,
@@ -372,11 +379,12 @@ pub(crate) async fn studio_unconfirmed_overlay_save_begin(
     server: u64,
     channel: String,
     object: Option<String>,
+    object_kind: Option<String>,
 ) -> Result<Value, String> {
     recovery::invoke_control(
         &state,
         server,
-        target(&channel, object.as_deref())?,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
         Action::BeginUnconfirmedOverlaySave,
     )
     .await
@@ -390,13 +398,14 @@ pub(crate) async fn studio_unconfirmed_overlay_save(
     server: u64,
     channel: String,
     object: Option<String>,
+    object_kind: Option<String>,
     save: UnconfirmedOverlaySaveInput,
 ) -> Result<Value, String> {
     save_classified(
         recovery::invoke_control(
             &state,
             server,
-            target(&channel, object.as_deref())?,
+            target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
             Action::SaveUnconfirmedOverlay(Box::new(save.checked()?)),
         )
         .await,
@@ -452,7 +461,9 @@ fn channel_of(target: StudioTarget) -> Value {
 fn object_of(target: StudioTarget) -> Value {
     match target {
         StudioTarget::Index { .. } => Value::Null,
-        StudioTarget::Flipnote { object, .. } => hex::encode(object).into(),
+        StudioTarget::Flipnote { object, .. } | StudioTarget::Score { object, .. } => {
+            hex::encode(object).into()
+        }
     }
 }
 fn provenance_value(provenance: &StudioOverlayProvenance) -> Value {
@@ -552,9 +563,7 @@ fn lifecycle_value(v: &StudioOverlayLifecycle) -> Result<Value, String> {
 pub(super) fn handoff_attempt_value(
     attempt: Option<catcoms_app::studio::StudioHandoffAttempt>,
 ) -> Value {
-    use catcoms_app::studio::{
-        StudioHandoffAttemptReason as R, StudioHandoffAttemptState as S,
-    };
+    use catcoms_app::studio::{StudioHandoffAttemptReason as R, StudioHandoffAttemptState as S};
     let Some(attempt) = attempt else {
         return Value::Null;
     };
@@ -609,7 +618,9 @@ pub(super) fn eligibility_fields(
 /// One literal table for every surface that reports the durable handoff vocabulary. Save's
 /// `Durable` variant delegates here so lifecycle and authoring can never spell the same fact
 /// differently.
-fn manual_reason_value(reason: catcoms_app::studio::types::StudioOverlayManualReason) -> &'static str {
+fn manual_reason_value(
+    reason: catcoms_app::studio::types::StudioOverlayManualReason,
+) -> &'static str {
     use catcoms_app::studio::types::StudioOverlayManualReason as R;
     match reason {
         R::NotReplayable => "notReplayable",
@@ -636,9 +647,7 @@ fn manual_reason_value(reason: catcoms_app::studio::types::StudioOverlayManualRe
 fn save_refusal_fields(
     reason: catcoms_app::studio::types::StudioOverlaySaveRefusal,
 ) -> (&'static str, &'static str) {
-    use catcoms_app::studio::types::{
-        StudioOverlaySaveAction as A, StudioOverlaySaveRefusal as R,
-    };
+    use catcoms_app::studio::types::{StudioOverlaySaveAction as A, StudioOverlaySaveRefusal as R};
     let literal = match reason {
         R::Durable(reason) => manual_reason_value(reason),
         R::NotMember => "notMember",
@@ -665,6 +674,9 @@ fn save_refusal_fields(
         R::PixelUnpublished => "pixelUnpublished",
         R::PixelInvalid => "pixelInvalid",
         R::PixelMissing => "pixelMissing",
+        R::ExportUnpublished => "exportUnpublished",
+        R::ExportInvalid => "exportInvalid",
+        R::ExportMissing => "exportMissing",
         R::UnconfirmedBranchesPerServer => "unconfirmedBranchesPerServer",
         R::UnconfirmedBytesVaultWide => "unconfirmedBytesVaultWide",
         R::ReferenceCapacity => "referenceCapacity",
@@ -719,10 +731,7 @@ fn unconfirmed_save_value(
         StudioUnconfirmedSaveOutcome::HandedOff(outcome) => json!({"state":"handedOff",
             "basis":hex::encode(outcome.basis),"epoch":outcome.epoch.to_string(),
             "docId":format!("{:032x}",outcome.doc_id),"accepted":outcome.accepted}),
-        StudioUnconfirmedSaveOutcome::Refused {
-            reason,
-            message: _,
-        } => {
+        StudioUnconfirmedSaveOutcome::Refused { reason, message: _ } => {
             let (reason, retry) = save_refusal_fields(reason);
             json!({"state":"refused","reason":reason,"retry":retry})
         }

@@ -400,6 +400,7 @@ fn studio_inspection_maximal_canonical_seed_and_bounded_record_input() {
         match &mut large {
             StudioProjection::Index(p) => p.epoch = 0,
             StudioProjection::Flipnote(p) => p.epoch = 0,
+            StudioProjection::Score(p) => p.epoch = 0,
         }
         let seed = large.checkpoint(receipt.close_record_hash).unwrap();
         let receipt = Receipt::sign(

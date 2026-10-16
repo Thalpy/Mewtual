@@ -6,6 +6,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+mod sound_recovery;
 
 fn rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(79)
@@ -27,6 +28,123 @@ fn create() -> StudioRequest {
         title: "moon cat".into(),
         ts: 123,
     }
+}
+
+#[test]
+fn studio_export_reference_requires_exact_held_valid_package_before_any_reference_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = ServerStore::open(dir.path(), b"studio-export-test", &mut rng()).unwrap();
+    let mut server = Server::found(
+        Hub::new().join(PeerId::from_u64(1)),
+        MlsDevice::generate().unwrap(),
+        rng(),
+        Box::new(ManualClock::new(123)),
+        "alice",
+    )
+    .unwrap();
+    server.set_blob_store(store.blob_store(&hex::encode(server.group_id())).unwrap());
+    let created = server
+        .studio_transaction(&mut store, 7, create())
+        .unwrap()
+        .unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../catcoms-replication/tests/fixtures/studio-export-v1.json"
+    )))
+    .unwrap();
+    let bytes = hex::decode(fixture["pixaHex"].as_str().unwrap()).unwrap();
+    let cid = crate::Cid::of(&bytes);
+    let request = |cid: crate::Cid, len, nonce| StudioRequest::Apply {
+        target: target(),
+        epoch_id: created.epoch_id,
+        nonce: [nonce; 16],
+        body: FlipnoteOp::SetExport {
+            export: [6; 16],
+            cid: *cid.as_bytes(),
+            bytes: len,
+            expiry: StudioExpiry::Never,
+        }
+        .encode()
+        .unwrap(),
+    };
+    assert!(server
+        .studio_transaction(&mut store, 7, request(cid, bytes.len() as u64, 1))
+        .is_err());
+    let published = server.publish_pixa(&bytes).unwrap();
+    assert_eq!(published.cid, cid.to_hex());
+    assert!(server
+        .studio_transaction(&mut store, 7, request(cid, bytes.len() as u64 + 1, 1))
+        .is_err());
+    let invalid = b"PIXA-not-a-valid-package";
+    let bad = server.sync.put_blob(invalid).unwrap();
+    assert!(server
+        .studio_transaction(&mut store, 7, request(bad, invalid.len() as u64, 1))
+        .is_err());
+    let before = server
+        .studio_transaction(&mut store, 7, read())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        before.projection, created.projection,
+        "refused references never changed the document"
+    );
+    let saved = server
+        .studio_transaction(&mut store, 7, request(cid, bytes.len() as u64, 1))
+        .unwrap()
+        .unwrap();
+    let StudioProjection::Flipnote(ref art) = saved.projection else {
+        panic!()
+    };
+    assert_eq!(art.sound.exports().len(), 1);
+    assert_eq!(
+        server
+            .studio_transaction(&mut store, 7, request(cid, bytes.len() as u64, 1))
+            .unwrap()
+            .unwrap()
+            .projection,
+        saved.projection,
+        "same nonce remains retryable after all pre-intent refusals"
+    );
+    assert!(store
+        .creative_pinned_cids()
+        .unwrap()
+        .for_group(&server.group_id())
+        .any(|held| held == &cid));
+    let snapshot = store.load_server(7).unwrap();
+    let group = server.group_id();
+    drop(server);
+    drop(store);
+    let mut store = ServerStore::open(dir.path(), b"studio-export-test", &mut rng()).unwrap();
+    let mut restored = Server::restore(
+        &snapshot,
+        Hub::new().join(PeerId::from_u64(2)),
+        rng(),
+        Box::new(ManualClock::new(999)),
+        "alice",
+    )
+    .unwrap();
+    restored.set_blob_store(store.blob_store(&hex::encode(&group)).unwrap());
+    assert_eq!(
+        restored
+            .studio_transaction(&mut store, 7, read())
+            .unwrap()
+            .unwrap()
+            .projection,
+        saved.projection
+    );
+    let held = store
+        .blob_store(&hex::encode(&group))
+        .unwrap()
+        .get_bounded(&cid, bytes.len())
+        .unwrap()
+        .unwrap();
+    assert_eq!(held, bytes, "published export bytes survive a fresh mount");
+    crate::creative::validate_pixa(&held).unwrap();
+    assert!(store
+        .creative_pinned_cids()
+        .unwrap()
+        .for_group(&group)
+        .any(|held| held == &cid));
 }
 fn read() -> StudioRequest {
     StudioRequest::Read { target: target() }

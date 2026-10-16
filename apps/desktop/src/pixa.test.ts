@@ -68,6 +68,16 @@ test("no-score pixa is byte-exact to its independent golden vector and reuses th
   assert.deepEqual(decoded.sfx, []);
 });
 
+test("native and frontend pixa take validation share exact malformed-input verdicts", () => {
+  const shared = JSON.parse(readFileSync(new URL("../../../crates/catcoms-replication/tests/fixtures/studio-pixa-validation-v1.json", import.meta.url), "utf8"));
+  for (const entry of shared.cases) {
+    const take = { ...emptyTake(), ...entry.patch };
+    let accepted = true;
+    try { decodePixa(rawPackage(canonicalJson(take))); } catch { accepted = false; }
+    assert.equal(accepted, entry.accepted, entry.name);
+  }
+});
+
 test("pixa builder orders stable SFX ids while preserving frame order and score patch indices", async () => {
   const patch = { [vector.patchId]: vector.patch };
   const input = source({ frames: [{ id: otherFrameId, bytes: goldenFrame() }, { id: frameId, bytes: pixWithRuns() }], patches: patch, sfx: [

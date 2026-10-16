@@ -65,7 +65,7 @@
     {
       "name": "set_sfx",
       "kind": "flipnote",
-      "body": "{\"frame\":\"01010101010101010101010101010101\",\"note\":127,\"op\":\"set_sfx\",\"patch\":\"6ef42672dfee8b336c82d5466a84dceaa6dd18f405e5a4710ea24c9db47eaf6c\",\"sfx\":\"02020202020202020202020202020202\"}"
+      "body": "{\"duration_ms\":500,\"frame\":\"01010101010101010101010101010101\",\"note\":127,\"op\":\"set_sfx\",\"patch\":\"6ef42672dfee8b336c82d5466a84dceaa6dd18f405e5a4710ea24c9db47eaf6c\",\"sfx\":\"02020202020202020202020202020202\"}"
     },
     {
       "name": "remove_sfx",
