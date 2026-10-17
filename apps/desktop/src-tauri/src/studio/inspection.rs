@@ -17,7 +17,11 @@ pub(crate) async fn studio_overlay_read(
     read(&state, server, target).await
 }
 
-async fn read(state: &AppState, server: u64, target: StudioTarget) -> Result<Value, String> {
+pub(super) async fn read(
+    state: &AppState,
+    server: u64,
+    target: StudioTarget,
+) -> Result<Value, String> {
     read_with(state, server, target, |_| {}, view).await
 }
 

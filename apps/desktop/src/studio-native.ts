@@ -316,7 +316,7 @@ export type UnconfirmedOverlaySaveInput = { basis: Hex64; branch: Hex64; nonce: 
 
 export type StudioUpdatedEvent = { server: number; channel: Decimal; object: Hex32 | null; objectKind?: StudioObjectKind };
 export type StudioReceivePausedEvent = { server: number };
-export type SettlementState = "open" | "closing" | "settled" | "fault" | "recoveryAvailable" | "recoveryEvictionPending" | "refreshRequired";
+export type SettlementState = "open" | "closing" | "settled" | "fault" | "recoveryAvailable" | "recoveryEvictionPending" | "refreshRequired" | "repairing" | "storageRefused";
 export type SettlementChangedEvent = { server: number; docType: 15 | 16; logicalKey: Hex32; channel: Decimal; object: Hex32 | null; objectKind?: StudioObjectKind; state: SettlementState };
 
 // --- Checks --------------------------------------------------------------------------------------
@@ -1098,7 +1098,9 @@ export function parseReceivePaused(v: unknown): StudioReceivePausedEvent {
 export function parseSettlementChanged(v: unknown): SettlementChangedEvent {
   const r = record(v, "settlement-changed");
   const s = r.state;
-  if (s !== "open" && s !== "closing" && s !== "settled" && s !== "fault" && s !== "recoveryAvailable" && s !== "recoveryEvictionPending" && s !== "refreshRequired") fail("event.state is unknown");
+  // These notifications invalidate observations; accepting runtime repair/storage states
+  // grants no renderer repair authority. Do not depend on a companion refreshRequired event.
+  if (s !== "open" && s !== "closing" && s !== "settled" && s !== "fault" && s !== "recoveryAvailable" && s !== "recoveryEvictionPending" && s !== "refreshRequired" && s !== "repairing" && s !== "storageRefused") fail("event.state is unknown");
   if (r.docType !== 15 && r.docType !== 16) fail("event.docType is unknown");
   return {
     server: count(r.server, "event.server"),

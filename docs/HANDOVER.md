@@ -1,6 +1,21 @@
 # Mewtual; Handover
 
-## Gate 7 acceptance work (2026-10-17)
+## Gate 7 OPEN: PR #46 review corrections and interrupted verification (2026-10-17)
+
+External review of `5a15ba1e` correctly identifies missing actual composition export, a
+receive-only restart supplied from live memory, agreement-only preservation checks and two
+rejected frontend settlement states. The new worktree corrects these through bounded native/
+Node production-session acceptance, disk-only receive restart, independent live-content
+assertions, and all-nine-state frontend contract coverage. See the current section of
+[GATE7-ACCEPTANCE](GATE7-ACCEPTANCE.md). Earlier focused passes/re-review below predate these
+findings; they establish narrower backend progress and do not close the whole delivery.
+The corrected actor and receive-only TCP regressions pass. New native production-session
+composition export/readback and helper rejection tests, focused frontend events/session/media,
+native media tests, frontend check/build, native check and focused root/native strict Clippy pass.
+The final native module passes 2/2, including valid-input lock refusal; adversarial re-review
+has no remaining findings. The ledger owns exact commands, logs and checkpoint results. No complete suite
+is rerun during these corrections; remaining whole-gate UI/release and verification obligations
+stay open.
 
 The owner accepts Gate 6; PR #44 is merged at `82631a81` on `Create-suite-2`. Gate 7 now
 composes the existing actor/vault lifecycle, real TCP cold joining and media readback, and
@@ -10,7 +25,15 @@ refused, while recipe Copy uses current fingerprints and ordinary exact-retry Sa
 [GATE7-ACCEPTANCE](GATE7-ACCEPTANCE.md) owns the verification results and remaining evidence;
 [GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md) is the command/event/limit/recovery surface map.
 The hook guide's stale art-only materializer and seven-state notification claims are corrected.
-No production protocol, persistence, native command or visual layout changes are introduced.
+No protocol, persistence, registered native command or visual layout contract changes are
+introduced. Current corrections share existing native command bodies via internal helpers and
+accept the two already-emitted settlement states in the frontend parser.
+Focused actor/TCP/native tests and 65 selected frontend tests pass; adversarial re-review is
+clear. The complete frontend suite passes 1563/1563 and dependency audit passes. Concurrent
+full backend verification was interrupted by a machine restart, with one native six-client
+failure already observed. Do not mark the full backend gate passed; finish verification
+sequentially with limited concurrency and investigate that failure. The owner explicitly
+defers the two-desktop observation because two desktops are unavailable.
 Older dated candidate statements below retain their historical scope.
 
 ## Current Gate 6 integration candidate (2026-10-14; local verification passed, CI pending)

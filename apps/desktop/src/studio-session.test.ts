@@ -1037,6 +1037,41 @@ test("events for another server or channel are ignored; matching ones coalesce i
   assert.equal(h.session.receivePaused, false, "a successful explicit read resumes the receiver");
 });
 
+test("all nine native settlement states invalidate media and reread the matching document and recovery", async () => {
+  const h = await harness();
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => docView());
+  h.ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ }));
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  h.session.watchRecovery(OBJ);
+  await h.sync();
+  // Pin the native vocabulary independently: a companion refreshRequired notice must not
+  // conceal rejection of repairing/storageRefused at the documented frontend boundary.
+  for (const state of ["open", "closing", "settled", "fault", "recoveryAvailable",
+    "recoveryEvictionPending", "refreshRequired", "repairing", "storageRefused"]) {
+    const reads = h.calls("studio_read").length, recovery = h.calls("studio_recovery_list").length;
+    const media = h.session.mediaGeneration;
+    for (const foreign of [{ server: SERVER + 1, channel: CHANNEL }, { server: SERVER, channel: "9" }]) {
+      h.ipc.emit("settlement-changed", { ...foreign, object: OBJ, logicalKey: OBJ, docType: 16, state });
+    }
+    assert.equal(h.session.mediaGeneration, media, `${state} cannot invalidate a different scope`);
+    h.ipc.emit("settlement-changed", { server: SERVER, channel: CHANNEL, object: OBJ,
+      logicalKey: OBJ, docType: 16, state });
+    assert.equal(h.session.mediaGeneration, media + 1, `${state} revokes prepared media immediately`);
+    await h.sync();
+    assert.equal(h.calls("studio_read").length, reads + 1, `${state} rereads the object`);
+    assert.equal(h.calls("studio_recovery_list").length, recovery + 1, `${state} rereads recovery`);
+  }
+  const media = h.session.mediaGeneration, reads = h.calls("studio_read").length;
+  h.ipc.emit("settlement-changed", { server: SERVER, channel: CHANNEL, object: OBJ,
+    logicalKey: OBJ, docType: 16, state: "repairGranted" });
+  await h.sync();
+  assert.equal(h.session.mediaGeneration, media, "unknown state cannot acquire contract meaning");
+  assert.equal(h.calls("studio_read").length, reads);
+  h.session.detach();
+});
+
 test("reset forgets scoped state, pending saves and held pixels; late results do not repopulate it", async () => {
   const h = await harness();
   const pending = deferred<unknown>();

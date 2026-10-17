@@ -6,6 +6,7 @@ use catcoms_rt::{Hub, ManualClock, PeerId};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::future::Future;
+mod export_acceptance;
 /// The shared genuine-accepted-draft fixture, declared once for the whole Studio test tree.
 /// `#[path]`-including it from two test modules would compile two unrelated copies of it.
 #[path = "../../../../../crates/catcoms-app/tests/support/studio_inspection.rs"]

@@ -10,6 +10,67 @@ use catcoms_replication::studio::{ScoreCell, ScoreOp, StudioPatch};
 use catcoms_replication::EpochPhase;
 use tokio::sync::Mutex;
 
+/// Independently authored semantic expectations. Peer agreement alone cannot detect a compact
+/// seed which lost the same live content at both endpoints; provenance may legitimately change.
+struct Composition {
+    pixel: crate::Cid,
+    pixel_bytes: u64,
+    recipe: StudioPatch,
+    package: crate::Cid,
+    package_bytes: u64,
+}
+impl Composition {
+    fn assert_preserved(&self, projection: &StudioProjection, fps: u8) {
+        let StudioProjection::Flipnote(art) = projection else {
+            panic!("expected art")
+        };
+        assert_eq!(art.timeline, vec![[4; 16]]);
+        assert_eq!(
+            art.frames[&[4; 16]].pixels.selected.value.cid,
+            *self.pixel.as_bytes()
+        );
+        assert_eq!(
+            art.frames[&[4; 16]].pixels.selected.value.bytes,
+            self.pixel_bytes
+        );
+        assert_eq!(art.fps.as_ref().map_or(12, |r| r.selected.value), fps);
+        assert_eq!(
+            art.sound.records["h/score"].selected.value,
+            FlipnoteOp::SetHeader(FlipnoteHeader::Score(Some([8; 16])))
+        );
+        assert_eq!(
+            art.sound.patches()[&self.recipe.id()].value,
+            FlipnoteOp::SetPatch {
+                patch: self.recipe.id(),
+                descriptor: self.recipe.clone()
+            }
+        );
+        assert_eq!(art.sound.sfx().len(), 1);
+        assert_eq!(
+            art.sound.sfx()[&[6; 16]].value,
+            FlipnoteOp::SetSfx {
+                sfx: [6; 16],
+                frame: [4; 16],
+                patch: self.recipe.id(),
+                note: 72,
+                duration_ms: 375,
+            }
+        );
+        assert_eq!(art.sound.exports().len(), 1);
+        assert_eq!(
+            art.sound.exports()[&[7; 16]].value,
+            FlipnoteOp::SetExport {
+                export: [7; 16],
+                cid: *self.package.as_bytes(),
+                bytes: self.package_bytes,
+                expiry: StudioExpiry::Never,
+            }
+        );
+        assert!(!art.sound.sfx().contains_key(&[3; 16]));
+        assert!(!art.sound.exports().contains_key(&[5; 16]));
+    }
+}
+
 async fn control(
     actor: &crate::ServerActor,
     store: &Arc<Mutex<Option<ServerStore>>>,
@@ -182,6 +243,13 @@ async fn gate7_create_sound_score_restart_rotate_recover_export_through_actor_cu
         crate::Cid::from_hex(&a.publish_pix(pix.clone(), None).await.unwrap().cid).unwrap();
     let package_cid =
         crate::Cid::from_hex(&a.publish_pixa(pixa.clone(), None).await.unwrap().cid).unwrap();
+    let expected = Composition {
+        pixel: pixel_cid,
+        pixel_bytes: pix.len() as u64,
+        recipe: descriptor.clone(),
+        package: package_cid,
+        package_bytes: pixa.len() as u64,
+    };
     let sfx = FlipnoteOp::SetSfx {
         sfx: [3; 16],
         frame: [4; 16],
@@ -212,6 +280,25 @@ async fn gate7_create_sound_score_restart_rotate_recover_export_through_actor_cu
             FlipnoteOp::SetHeader(FlipnoteHeader::Score(Some([8; 16]))),
         ),
         (81, export.clone()),
+        (
+            88,
+            FlipnoteOp::SetSfx {
+                sfx: [6; 16],
+                frame: [4; 16],
+                patch,
+                note: 72,
+                duration_ms: 375,
+            },
+        ),
+        (
+            89,
+            FlipnoteOp::SetExport {
+                export: [7; 16],
+                cid: *package_cid.as_bytes(),
+                bytes: pixa.len() as u64,
+                expiry: StudioExpiry::Never,
+            },
+        ),
     ] {
         actor_save::save(&a, &store, apply(nonce, op))
             .await
@@ -321,6 +408,7 @@ async fn gate7_create_sound_score_restart_rotate_recover_export_through_actor_cu
     let rotated =
         rotated.expect("idle rotation must install AND publish the Registry pointer/owner journal");
     assert_ne!(rotated.doc_id(), created.epoch_id);
+    expected.assert_preserved(&rotated.projection().unwrap(), 12);
     // This cold member has no installed Studio source. Learn the ACTUAL runtime-issued seed
     // and its retained tail through both actors; prepared receipts would miss publication gaps.
     p.bob
@@ -377,6 +465,11 @@ async fn gate7_create_sound_score_restart_rotate_recover_export_through_actor_cu
         caught_up,
         "cold member must learn runtime-issued rotated art and linked Score"
     );
+    let bob_view = actor_save::save(&b, &b_store, StudioRequest::Read { target: target() })
+        .await
+        .unwrap()
+        .unwrap();
+    expected.assert_preserved(&bob_view.projection, 12);
     assert_eq!(
         b.request_blob_bounded(pixel_cid, pix.len(), None)
             .await
@@ -598,8 +691,7 @@ async fn gate7_create_sound_score_restart_rotate_recover_export_through_actor_cu
     let StudioProjection::Flipnote(art) = &final_view.projection else {
         panic!()
     };
-    assert!(art.sound.sfx().is_empty());
-    assert!(art.sound.exports().is_empty());
+    expected.assert_preserved(&final_view.projection, 24);
     assert_eq!(art.sound.patches().len(), 1);
     assert!(art.sound_readiness().unwrap().missing_patches.is_empty());
     a.shutdown().await;
@@ -624,6 +716,7 @@ async fn gate7_create_sound_score_restart_rotate_recover_export_through_actor_cu
         reopened.projection, final_view.projection,
         "the recovered recipe and newer FPS survive a second cold restart"
     );
+    expected.assert_preserved(&reopened.projection, 24);
     assert!(held
         .creative_pinned_cids()
         .unwrap()

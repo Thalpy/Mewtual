@@ -324,7 +324,6 @@ async fn lifecycle() {
     );
     // Both clients stop before a cold vault and actor reopen. This checks persistence without
     // accidentally fetching missing state from a live provider during the final readback.
-    let snapshot = bob.snapshot().await.unwrap();
     bob.shutdown().await;
     alice.shutdown().await;
     b_task.await.unwrap();
@@ -335,6 +334,11 @@ async fn lifecycle() {
     drop(alice);
     drop(b_vault.lock().await.take());
     let held = ServerStore::open(b_root.path(), b"gate7-b", &mut OsCryptoRng).unwrap();
+    // Bob performed no local authoring. Require the RECEIVE path's persisted membership/device
+    // state, with no live snapshot or explicit pre-shutdown save covering a missing barrier.
+    let snapshot = held
+        .load_server(SERVER)
+        .expect("receive-only peer snapshot must survive on disk");
     let network = catcoms_rt::Hub::new().join(catcoms_rt::PeerId::from_u64(73));
     let mut restored =
         Server::restore(&snapshot, network, OsCryptoRng, Box::new(clock), "Bob").unwrap();
