@@ -52,6 +52,34 @@ impl DeviceId {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    /// Parse the canonical text form: exactly 64 **lowercase** hex characters, the encoding
+    /// [`fmt::Display`] writes and the frontend's `MemberView.identity` carries.
+    ///
+    /// This is the one accepted spelling of a full device identity at a string boundary (the
+    /// desktop bridge's call-signal target, for instance). It is deliberately strict: uppercase,
+    /// a `0x` prefix, whitespace or any other length returns `None`, so two different strings can
+    /// never name the same device and a caller cannot smuggle a short fingerprint through as an
+    /// identity. A successful parse proves only the spelling, never membership or key possession;
+    /// callers still check the id against the current roster.
+    pub fn from_canonical_hex(text: &str) -> Option<Self> {
+        let raw = text.as_bytes();
+        if raw.len() != 64 {
+            return None;
+        }
+        fn nibble(c: u8) -> Option<u8> {
+            match c {
+                b'0'..=b'9' => Some(c - b'0'),
+                b'a'..=b'f' => Some(c - b'a' + 10),
+                _ => None,
+            }
+        }
+        let mut bytes = [0u8; 32];
+        for (i, pair) in raw.chunks_exact(2).enumerate() {
+            bytes[i] = (nibble(pair[0])? << 4) | nibble(pair[1])?;
+        }
+        Some(Self(bytes))
+    }
 }
 
 impl fmt::Debug for DeviceId {
@@ -129,6 +157,31 @@ mod tests {
         assert_ne!(
             DeviceId::from_verifying_key(&vk(1)),
             DeviceId::from_verifying_key(&vk(2))
+        );
+    }
+
+    #[test]
+    fn canonical_hex_round_trips_the_display_form_and_nothing_else() {
+        let id = DeviceId::from_verifying_key(&vk(4));
+        let text = id.to_string();
+        assert_eq!(text.len(), 64);
+        assert_eq!(DeviceId::from_canonical_hex(&text), Some(id));
+        // Every non-canonical spelling of the same id is refused, so one device has one name.
+        assert_eq!(DeviceId::from_canonical_hex(&text.to_uppercase()), None);
+        assert_eq!(DeviceId::from_canonical_hex(&format!("0x{text}")), None);
+        assert_eq!(
+            DeviceId::from_canonical_hex(&format!(" {}", &text[1..])),
+            None
+        );
+        assert_eq!(DeviceId::from_canonical_hex(&text[..62]), None);
+        assert_eq!(DeviceId::from_canonical_hex(&format!("{text}00")), None);
+        // The eight-character display fingerprint is not an identity.
+        assert_eq!(DeviceId::from_canonical_hex(&text[..8]), None);
+        assert_eq!(DeviceId::from_canonical_hex(&"g".repeat(64)), None);
+        // A multi-byte character can never pass as two hex digits.
+        assert_eq!(
+            DeviceId::from_canonical_hex(&format!("é{}", &text[2..])),
+            None
         );
     }
 

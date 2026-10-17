@@ -10,6 +10,7 @@ catcoms-rt = { path = "../catcoms-rt" }
 catcoms-crypto = { path = "../catcoms-crypto" }
 catcoms-discovery = { path = "../catcoms-discovery" }
 catcoms-mls = { path = "../catcoms-mls" }
+catcoms-replication = { path = "../catcoms-replication" }
 catcoms-sync = { path = "../catcoms-sync" }
 catcoms-storage = { path = "../catcoms-storage" }
 catcoms-wire = { path = "../catcoms-wire" }
@@ -23,9 +24,22 @@ hex = "0.4"
 zeroize = "1"
 thiserror.workspace = true
 tracing.workspace = true
+serde_json = "1"
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 
+[target.'cfg(windows)'.dependencies]
+# Opening a directory for an actual metadata flush requires Windows' backup-semantics flag.
+# Keep this target-specific: Unix uses the standard File directory handle below.
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
+# Turns on the replication crate's test-only reconstruction counter for this crate's tests, so the
+# exact-retry regression can see a branch rebuilt by any path, not only the app's own draft reader.
+catcoms-replication = { path = "../catcoms-replication", features = ["test-counters"] }
+# A driver-acknowledgement seam exercises replay cancellation and ambiguous submission without
+# sockets or sleeps. These are existing workspace dependencies, used only by test transports.
+async-trait.workspace = true
+bytes.workspace = true
 # The product layer is transport-generic, so almost every test here runs on the in-memory mesh.
 # `tcp_product_e2e` is the exception: connect/disconnect only exist on a real transport, and
 # presence is defined in terms of them, so that one test needs a real libp2p node.

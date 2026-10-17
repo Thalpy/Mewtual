@@ -1,6 +1,12 @@
 # Operations, recovery, and durable local history
 
-Status: implementation contract for phases 12b-12d.
+Status: **shipped (phases 12b-12d, verified 2026-08-20)**; this remains the implementation contract
+for them. Storage health and repair is `repair_storage`
+(`apps/desktop/src-tauri/src/lib.rs:7871`); durable local UI state is `get_ui_state` (`:10484`);
+sealed backup export is `create_backup` (`:12382`); vault-secret rotation is `change_vault_secret`
+(`:12479`). Still deliberately absent, and still correct as written below: there is **no import
+action** and **no in-app destructive restore** (see item 9 and the note above the checklist), which
+is future work rather than a gap in these phases.
 
 ## Storage health and repair
 
@@ -79,7 +85,10 @@ manual live-overwrite recipe.
 
 ## Vault-secret rotation
 
-`change_vault_passphrase` authenticates the current secret, generates a fresh salt and nonce, and
+The storage primitive is `change_vault_passphrase`
+(`crates/catcoms-storage/src/vault.rs:151`); the desktop bridge command that calls it, and the name
+to grep for from the frontend, is `change_vault_secret`
+(`apps/desktop/src-tauri/src/lib.rs:12479`). It authenticates the current secret, generates a fresh salt and nonce, and
 atomically replaces only `vault.bin` with the same random root DEK rewrapped by the new Argon2-derived
 key. Database/blob/MLS subkeys are derived from the DEK, not from the human secret, so all existing
 sealed records remain openable and a bulk half-rekeyed tree is impossible. The generated wrapper is
@@ -90,7 +99,11 @@ Passphrase, sigil and melody entry all produce the same bounded secret string. T
 current/new values only for the three-step ceremony and clears them on success, failure, cancel or
 session lock. This is best-effort in JavaScript memory, not a live-process compromise defence.
 
-## Antagonist review checklist
+## Antagonist review checklist ✅ satisfied (except 9, which is not yet due)
+
+This was the gate on 12b-12d, and they passed it (2026-08-20). The list stays as the standing
+regression contract. Item 9 is the one genuinely outstanding entry, and by design: it is
+conditioned on "before import ships", and import has not shipped.
 
 1. Corrupt a sealed blob, snapshot, network record, registry, and UI state independently.
 2. Ensure health never labels a physical-but-unreadable blob “ready”.

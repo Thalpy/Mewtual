@@ -9,6 +9,7 @@ import {
   JamTakeCache,
   JamTakeLoadCoordinator,
   mayFetchJamTake,
+  planTakeSeek,
   shouldApplyJamTakeProgress,
   shouldDispatchTakeEvent,
   takeDueBatchEnd,
@@ -162,17 +163,20 @@ test("a finished take cannot leave a stale timer that stops its replacement", ()
   const end = source.indexOf("function jamStopPlayback()", start);
   assert.ok(start >= 0 && end > start);
   const body = source.slice(start, end);
-  assert.match(body, /if \(pl\.draining\) return;/, "overlapping timer ticks must not race the async drain");
-  assert.match(body, /await engine\.drum\(/, "dense take playback must backpressure async drum hashing");
-  assert.match(body, /event\.ms <= pl\.dropAttacksThroughMs/,
-    "attacks due during a completed Deafen interval must remain suppressed after reopen");
-  const release = body.indexOf("engine.releaseChannelHeld(chan)");
-  const arm = body.indexOf("pl.endTimer = setTimeout(() => {");
+  // The transport migration intentionally moves seek/drum/tail scheduling into the tested
+  // archival controller. Pin the new enforcement path, not the retired raw-channel spelling.
+  assert.match(body, /if \(pl\.draining \|\| pl\.done\) return;/, "overlapping timer ticks must not race the async drain");
+  assert.match(body, /await pl\.transport\.tick\(\)/, "the App awaits bounded archival dispatch, including drum seed hashing");
+  assert.match(body, /if \(!pl\.transport\.completed\) \{ suppressCurrentTake\(\); return; \}/,
+    "failed/revoked ownership must never advance the DJ as natural completion");
+  const completed = body.indexOf("if (pl.transport.state === \"stopped\")");
+  const retireTimer = body.indexOf("pl.done = true; clearInterval(pl.timer)");
   const advance = body.indexOf("jukeAdvance(true)");
-  assert.ok(release >= 0 && release < arm, "unmatched held notes must enter release before tail cleanup is armed");
-  assert.ok(arm >= 0 && advance > arm, "tail cleanup must be armed before a cached next take can start");
+  assert.ok(completed >= 0 && retireTimer > completed && advance > retireTimer, "complete authored tail and timer retirement precede advancing a cached next take");
   assert.match(body, /if \(jamPlay !== pl\) return;/);
-  assert.match(body, /else \{\s*jamStopPlayback\(\);/);
+  assert.match(body, /else jamStopPlayback\(\);/);
+  const stop = source.slice(end, source.indexOf("function pad2(", end));
+  assert.match(stop, /jamPlayGen\+\+/); assert.match(stop, /clearTimeout\(pl\.catchupTimer\); pl\.transport\.stop\(\)/);
 });
 
 test("local note and drum echoes share one causal render lane", () => {
@@ -189,14 +193,18 @@ test("local note and drum echoes share one causal render lane", () => {
     "each local gesture must capture its room gate epoch before patch publication can await");
 });
 
-test("Deafen advances the App gate epoch and marks the take interval on both toggle edges", () => {
+test("Deafen advances the App gate epoch and retires take ownership on both toggle edges", () => {
   const source = readFileSync(fileURLToPath(new URL("./App.svelte", import.meta.url)), "utf8");
   const start = source.indexOf("function toggleDeafen()");
   const end = source.indexOf("// Flood control moved", start);
   assert.ok(start >= 0 && end > start);
   const body = source.slice(start, end);
   assert.match(body, /callDeafened = !callDeafened;[\s\S]*?jamRoomRenderGeneration \+= 1;/);
-  assert.match(body, /jamPlay\.dropAttacksThroughMs = Math\.max\(jamPlay\.dropAttacksThroughMs, jamPlayElapsed\(\)\)/);
+  assert.match(body, /stopStudioAudio\(\);\s*suppressCurrentTake\(\);\s*callDeafened = !callDeafened;/,
+    "both edges retire pending/live archival playback before changing the master gate");
+  const suppress = source.slice(source.indexOf("function suppressCurrentTake()"), source.indexOf("async function jamStartTakePlayback("));
+  assert.match(suppress, /jamTakeSuppression\.suppress\(jamDeckPlaybackCid\(\), jukeNow\?\.cid \|\| null\)/);
+  assert.match(suppress, /jamStopPlayback\(\)/, "a heartbeat cannot renew retired take ownership after reopen");
 });
 
 test("source mute advances the App admission epoch on both gate edges", () => {
@@ -246,6 +254,130 @@ test("take ingress rejects oversized listings and encoded payloads before alloca
   const oversized = "A".repeat(Math.ceil(TAKE_MAX_BYTES / 3) * 4 + 1);
   assert.equal(decodeJamTakeBase64(oversized, () => { decodes += 1; return ""; }), null);
   assert.equal(decodes, 0, "encoded-size rejection happens before base64 decoding");
+});
+
+function seekTake(events: JamTakeEvent[], lanes = 1): JamTake {
+  return {
+    v: 1,
+    group: "g",
+    call: "c",
+    met: { bpm: 120, bpb: 4 },
+    parts: ["alice", "bob"],
+    lanes: Array.from({ length: lanes }, (_u, i) => ({ src: i, sn: `000000000000000${i}` })),
+    patches: [],
+    events,
+  };
+}
+
+test("a seek past a note-on re-opens the note it landed inside, at the age it has reached", () => {
+  // The original defect, stated as a take: one note held from 0 to 10 s, joined at 5 s. Starting at
+  // the first event whose ms reaches the offset leaves nothing due but the key-up, so the listener
+  // hears silence for five seconds and then a note-off for a voice that was never opened.
+  const take = seekTake([
+    { ms: 0, lane: 0, n: 60, on: 1, w: "triangle", q: 1 },
+    { ms: 10_000, lane: 0, n: 60, on: 0, q: 2 },
+  ]);
+  const plan = planTakeSeek(take, 5_000);
+  assert.equal(plan.next, 1, "the key-up is still the next scheduled event");
+  assert.deepEqual(plan.sounding, [{ index: 0, ageMs: 5_000 }],
+    "the note that is sounding at the offset has to come back, five seconds into its life");
+});
+
+test("a seek reconstructs only what is still held, per lane and per pitch", () => {
+  const take = seekTake([
+    { ms: 0, lane: 0, n: 60, on: 1, w: "sine", q: 1 }, // closed before the offset
+    { ms: 100, lane: 0, n: 62, on: 1, w: "sine", q: 2 }, // still held
+    { ms: 200, lane: 1, n: 64, on: 1, w: "square", q: 1 }, // still held, other lane
+    { ms: 300, lane: 0, n: 60, on: 0, q: 3 },
+    { ms: 400, lane: 0, n: 60, on: 1, w: "sine", q: 4 }, // re-pressed, still held
+    { ms: 500, lane: 1, n: 9, d: 1, q: 2 }, // a pad is a one-shot, never revived
+    { ms: 900, lane: 0, n: 62, on: 0, q: 5 },
+  ], 2);
+  const plan = planTakeSeek(take, 600);
+  assert.equal(plan.next, 6);
+  assert.deepEqual(plan.sounding, [
+    { index: 1, ageMs: 500 },
+    { index: 2, ageMs: 400 },
+    { index: 4, ageMs: 200 },
+  ], "the latest un-closed note-on per lane and pitch, in log order");
+});
+
+test("a seek emits reconstructed note-ons in an order each lane's sequencing accepts", () => {
+  // The engine rejects a sequence at or below the last one it saw on that source, so the revived
+  // note-ons have to reach it in the same per-lane order the log had them in, ahead of every event
+  // the ordinary scheduler is about to dispatch.
+  const take = seekTake([
+    { ms: 0, lane: 1, n: 40, on: 1, w: "sine", q: 7 },
+    { ms: 10, lane: 0, n: 60, on: 1, w: "sine", q: 3 },
+    { ms: 20, lane: 0, n: 67, on: 1, w: "sine", q: 4 },
+    { ms: 999, lane: 0, n: 60, on: 0, q: 5 },
+  ], 2);
+  const plan = planTakeSeek(take, 500);
+  const lastPerLane = new Map<number, number>();
+  for (const voice of plan.sounding) {
+    const event = take.events[voice.index];
+    const previous = lastPerLane.get(event.lane);
+    assert.ok(previous === undefined || event.q > previous, "sequence must strictly increase per lane");
+    lastPerLane.set(event.lane, event.q);
+  }
+  for (const voice of plan.sounding) {
+    assert.ok(voice.index < plan.next, "a revived note-on always precedes the first scheduled event");
+    const previous = lastPerLane.get(take.events[voice.index].lane);
+    assert.ok(previous !== undefined);
+  }
+  const scheduled = take.events[plan.next];
+  const revivedOnThatLane = plan.sounding
+    .filter((v) => take.events[v.index].lane === scheduled.lane)
+    .map((v) => take.events[v.index].q);
+  assert.ok(revivedOnThatLane.every((q) => q < scheduled.q),
+    "everything revived on a lane is below the first event that lane is about to receive");
+});
+
+test("playing a take from the start reconstructs nothing", () => {
+  const take = seekTake([
+    { ms: 0, lane: 0, n: 60, on: 1, w: "sine", q: 1 },
+    { ms: 500, lane: 0, n: 60, on: 0, q: 2 },
+  ]);
+  assert.deepEqual(planTakeSeek(take, 0), { next: 0, sounding: [] });
+  assert.deepEqual(planTakeSeek(take, -1), { next: 0, sounding: [] }, "a negative offset is the start");
+});
+
+test("a seek past the end of a take holds nothing and has nothing left to schedule", () => {
+  const take = seekTake([
+    { ms: 0, lane: 0, n: 60, on: 1, w: "sine", q: 1 },
+    { ms: 500, lane: 0, n: 60, on: 0, q: 2 },
+  ]);
+  const plan = planTakeSeek(take, 60_000);
+  assert.equal(plan.next, take.events.length);
+  assert.deepEqual(plan.sounding, [], "a note the take already released is not revived by a late seek");
+});
+
+test("an unterminated note is revived by a seek past it, because the take never closes it", () => {
+  const take = seekTake([{ ms: 0, lane: 0, n: 60, on: 1, w: "sine", q: 1 }]);
+  const plan = planTakeSeek(take, 60_000);
+  assert.equal(plan.next, take.events.length);
+  assert.deepEqual(plan.sounding, [{ index: 0, ageMs: 60_000 }]);
+});
+
+test("App delegates seek reconstruction and its first bounded dispatch to the owned archival transport", () => {
+  const source = readFileSync(fileURLToPath(new URL("./App.svelte", import.meta.url)), "utf8");
+  const start = source.indexOf("async function jamStartTakePlayback(");
+  const end = source.indexOf("function jamPlayTake(", start);
+  assert.ok(start >= 0 && end > start);
+  const body = source.slice(start, end);
+  assert.doesNotMatch(body, /take\.events\.findIndex/,
+    "a seek is held state plus a schedule, never just the first event at or after the offset");
+  assert.match(body, /const transport = new JamTakeTransport\(engine, jamPlaybackPreparationQueue\)/);
+  assert.match(body, /takePlaybackIsRemote\(deckCid\), current\)/);
+  assert.doesNotMatch(body, /engine\.noteOn\(/, "imported holds cannot enter the raw live 30-second watchdog API");
+  const revive = body.indexOf("await transport.start(take, Math.max(0, offsetMs)");
+  const firstTick = body.lastIndexOf("void jamPlayTick()");
+  assert.ok(revive >= 0 && firstTick > revive,
+    "a frozen seek/capability must be prepared before the first App dispatch");
+  const controller = readFileSync(fileURLToPath(new URL("./studio-playback.ts", import.meta.url)), "utf8");
+  assert.match(controller, /planJamArchivalSeek\(admitted, offsetMs\)/);
+  assert.match(controller, /active\.seekNext < active\.seek\.length/);
+  assert.match(controller, /elapsed - event\.ms/, "seek voices pass their remaining authored age rather than fresh attack time");
 });
 
 test("validated take cache is a bounded LRU", () => {

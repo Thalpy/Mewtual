@@ -1,0 +1,1452 @@
+use super::*;
+use catcoms_replication::studio::{FlipnoteHeader, StudioExpiry, StudioKind};
+use catcoms_replication::{epoch_zero_id, InheritedCheckpoint, SignedOp};
+use rand_chacha::ChaCha20Rng;
+use rand_core::SeedableRng;
+
+mod adoption;
+mod discovery;
+mod inventory_cache;
+mod pages;
+pub(crate) mod performance;
+mod preparation;
+mod recovery_disposition;
+mod registry;
+mod repair;
+mod rotation;
+mod score;
+mod source;
+
+const SERVER: u64 = 73;
+fn rng() -> ChaCha20Rng {
+    ChaCha20Rng::seed_from_u64(123)
+}
+fn open(path: &Path) -> ServerStore {
+    ServerStore::open(path, b"studio-vault-test", &mut rng()).unwrap()
+}
+fn target(frame: bool) -> StudioTarget {
+    if frame {
+        StudioTarget::Flipnote {
+            channel: [7; 16],
+            object: [9; 16],
+        }
+    } else {
+        StudioTarget::Index { channel: [7; 16] }
+    }
+}
+fn inventory(store: &mut ServerStore) -> EpochStorageInventory {
+    let mut scan = store.scan_epoch_storage_with_studio().unwrap();
+    while !scan.step().unwrap().complete {}
+    scan.finish().unwrap()
+}
+fn budget(store: &mut ServerStore, f: &Fixture) -> EpochStudioBudget {
+    let inv = inventory(store);
+    store.studio_storage_budget(SERVER, &f.group, &inv).unwrap()
+}
+struct Fixture {
+    device: MlsDevice,
+    group: ServerGroup,
+    target: StudioTarget,
+    logical: LogicalDocument,
+    id: u128,
+}
+impl Fixture {
+    fn new(frame: bool) -> Self {
+        let device = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&device).unwrap();
+        let target = target(frame);
+        let logical = target.document(&group.group_id()).unwrap();
+        let id = epoch_zero_id(logical.doc_type, &logical.logical_key);
+        Self {
+            device,
+            group,
+            target,
+            logical,
+            id,
+        }
+    }
+    fn domain(&self, body: Vec<u8>, n: u8) -> DomainOp {
+        DomainOp {
+            nonce: [n; 16],
+            doc_type: self.logical.doc_type,
+            logical_key: self.logical.logical_key.clone(),
+            body,
+        }
+    }
+    fn insert(&self) -> DomainOp {
+        self.domain(
+            match self.target {
+                StudioTarget::Index { .. } => IndexOp::PutObject {
+                    object: [1; 16],
+                    kind: StudioKind::Flipnote,
+                    title: "private moon".into(),
+                    created_by: self.device.device_id(),
+                    ts: 100,
+                    expiry: StudioExpiry::Never,
+                }
+                .encode()
+                .unwrap(),
+                _ => FlipnoteOp::InsertFrame {
+                    frame: [1; 16],
+                    after: None,
+                    cid: [3; 32],
+                    bytes: 10,
+                }
+                .encode()
+                .unwrap(),
+            },
+            1,
+        )
+    }
+    fn title(&self) -> DomainOp {
+        self.domain(
+            match self.target {
+                StudioTarget::Index { .. } => IndexOp::SetTitle {
+                    object: [1; 16],
+                    title: "private renamed".into(),
+                }
+                .encode()
+                .unwrap(),
+                _ => FlipnoteOp::SetHeader(FlipnoteHeader::Title("private renamed".into()))
+                    .encode()
+                    .unwrap(),
+            },
+            2,
+        )
+    }
+    fn load(&self, store: &ServerStore) -> Option<EpochStudioState> {
+        store
+            .load_studio_epoch(SERVER, &self.group, self.target, &self.device)
+            .unwrap()
+    }
+    fn path(&self, store: &ServerStore) -> PathBuf {
+        store.studio_epoch_path(&scope_bytes(SERVER, &self.logical).unwrap())
+    }
+    fn intents(&self, store: &ServerStore) -> usize {
+        store
+            .load_epoch_intents(SERVER, &self.logical)
+            .unwrap()
+            .pending()
+            .len()
+    }
+    fn edit(
+        &self,
+        store: &mut ServerStore,
+        budget: &mut EpochStudioBudget,
+        op: DomainOp,
+    ) -> (SealedOp, EpochStudioState) {
+        store
+            .edit_studio_epoch(
+                SERVER,
+                &self.group,
+                self.target,
+                self.id,
+                &self.device,
+                op,
+                100,
+                &mut rng(),
+                budget,
+            )
+            .unwrap()
+    }
+    fn signed(&self, op: &SealedOp) -> SignedOp {
+        op.open(
+            &self
+                .group
+                .channel_secret(&self.device, op.doc_type, op.doc_id)
+                .unwrap(),
+        )
+        .unwrap()
+    }
+    fn receipt(&self, state: &EpochStudioState, close: u8) -> Receipt {
+        Receipt::sign(
+            self.logical.clone(),
+            state.epoch(),
+            [close; 32],
+            state
+                .projection()
+                .unwrap()
+                .checkpoint([close; 32])
+                .unwrap()
+                .change_hash(),
+            0,
+            InheritedCheckpoint::EpochZero,
+            &self.device,
+        )
+        .unwrap()
+    }
+}
+
+#[test]
+fn studio_store_save_reopen_and_retry_preserves_exact_signed_work_and_ledger() {
+    for frame in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let f = Fixture::new(frame);
+        let mut store = open(root.path());
+        let mut b = budget(&mut store, &f);
+        let (first, _) = f.edit(&mut store, &mut b, f.insert());
+        let (_, state) = f.edit(&mut store, &mut b, f.title());
+        let projection = state.projection().unwrap();
+        let saved = fs::read(f.path(&store)).unwrap();
+        assert!(!saved.windows(b"private".len()).any(|s| s == b"private"));
+        assert_eq!(f.intents(&store), 2);
+        drop(store);
+        let mut store = open(root.path());
+        assert_eq!(f.load(&store).unwrap().projection().unwrap(), projection);
+        assert!(
+            store
+                .edit_studio_epoch(
+                    SERVER,
+                    &f.group,
+                    f.target,
+                    f.id,
+                    &f.device,
+                    f.insert(),
+                    100,
+                    &mut rng(),
+                    &mut b
+                )
+                .is_err(),
+            "old mount budget"
+        );
+        let mut b = budget(&mut store, &f);
+        let (retry, state) = f.edit(&mut store, &mut b, f.insert());
+        assert_eq!(f.signed(&first), f.signed(&retry));
+        assert_eq!(state.op_count(), 2);
+        assert_eq!(state.projection().unwrap(), projection);
+        assert_eq!(fs::read(f.path(&store)).unwrap(), saved);
+        assert_eq!(f.intents(&store), 2);
+        assert!(!format!("{state:?} {b:?}").contains("private"));
+    }
+}
+
+#[test]
+fn studio_store_reopens_frame_pointing_to_real_promoted_pix_bytes() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    // Exercise the existing vault blob namespace, not an in-memory placeholder. These are
+    // 192x144 canonical pixels; production publication/retention coordination is a later layer.
+    let mut pix = crate::creative::tests::golden()[..23].to_vec();
+    pix[4] = 191;
+    pix[5] = 143;
+    pix.extend((0..108).flat_map(|_| [255, 0]));
+    crate::creative::validate_pix(&pix).unwrap();
+    let cid = {
+        let mut blobs = store.blob_store("studio-test").unwrap();
+        assert!(blobs.is_persistent());
+        let cid = blobs.put_staged(&pix).unwrap();
+        assert!(blobs.get_bounded(&cid, pix.len()).unwrap().is_none());
+        blobs.promote_staged_bounded(&cid, pix.len()).unwrap();
+        cid
+    };
+    let op = f.domain(
+        FlipnoteOp::InsertFrame {
+            frame: [1; 16],
+            after: None,
+            cid: *cid.as_bytes(),
+            bytes: pix.len() as u64,
+        }
+        .encode()
+        .unwrap(),
+        1,
+    );
+    let mut b = budget(&mut store, &f);
+    f.edit(&mut store, &mut b, op);
+    drop(store);
+    let store = open(root.path());
+    let StudioProjection::Flipnote(p) = f.load(&store).unwrap().projection().unwrap() else {
+        panic!("wrong persisted type");
+    };
+    let frame = &p.frames[&[1; 16]].pixels.selected.value;
+    assert_eq!(frame.cid, *cid.as_bytes());
+    assert_eq!(frame.bytes, pix.len() as u64);
+    let blobs = store.blob_store("studio-test").unwrap();
+    assert_eq!(
+        blobs
+            .get_bounded(&cid, frame.bytes as usize)
+            .unwrap()
+            .unwrap(),
+        pix
+    );
+    assert!(blobs.get_bounded(&cid, pix.len() - 1).is_err());
+}
+
+#[test]
+fn studio_store_authenticated_scope_corruption_and_file_bounds_fail_closed() {
+    for mode in 0..4 {
+        let root = tempfile::tempdir().unwrap();
+        let f = Fixture::new(true);
+        let mut store = open(root.path());
+        let mut b = budget(&mut store, &f);
+        f.edit(&mut store, &mut b, f.insert());
+        let path = f.path(&store);
+        match mode {
+            0 => {
+                // Wrong vault ciphertext, not an empty/new document.
+                let mut bytes = fs::read(&path).unwrap();
+                *bytes.last_mut().unwrap() ^= 1;
+                fs::write(&path, bytes).unwrap();
+            }
+            1 => {
+                // Authenticated bytes copied to another canonical object path.
+                let other = StudioTarget::Flipnote {
+                    channel: [7; 16],
+                    object: [8; 16],
+                }
+                .document(&f.group.group_id())
+                .unwrap();
+                let other_path = store.studio_epoch_path(&scope_bytes(SERVER, &other).unwrap());
+                fs::copy(&path, other_path).unwrap();
+            }
+            2 => {
+                // Bound the filesystem length before opening/reading an attacker-sized file.
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_len(MAX_SEALED_BYTES as u64 + 1)
+                    .unwrap();
+            }
+            _ => {
+                // Unsupported authenticated version is not treated as missing.
+                let scope = scope_bytes(SERVER, &f.logical).unwrap();
+                let held = store.read_studio_record(&scope).unwrap().unwrap();
+                let (_, snapshot) = decode_record(&held.plain, &scope, &f.logical).unwrap();
+                let mut snapshot = snapshot.to_vec();
+                snapshot[0] = 255;
+                let mut e = Encoder::new();
+                e.put_bytes(&scope).unwrap();
+                e.put_bytes(&f.target.channel()).unwrap();
+                e.put_bytes(&snapshot).unwrap();
+                let sealed = seal(&store.keys.db_key().unwrap(), &e.finish(), &mut rng()).unwrap();
+                fs::write(&path, frame(&sealed)).unwrap();
+            }
+        }
+        let mut scan = store.scan_epoch_storage_with_studio().unwrap();
+        assert!((|| {
+            while !scan.step()?.complete {}
+            Ok::<_, AppError>(())
+        })()
+        .is_err());
+        drop(scan);
+        if mode != 1 {
+            assert!(store
+                .load_studio_epoch(SERVER, &f.group, f.target, &f.device)
+                .is_err());
+            assert!(store
+                .edit_studio_epoch(
+                    SERVER,
+                    &f.group,
+                    f.target,
+                    f.id,
+                    &f.device,
+                    f.title(),
+                    100,
+                    &mut rng(),
+                    &mut b
+                )
+                .is_err());
+            assert!(b.requires_reconciliation());
+        }
+        assert_eq!(f.intents(&store), 1);
+    }
+}
+
+#[test]
+fn studio_store_temporary_copies_are_charged_and_only_explicit_cleanup_removes_them() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let mut b = budget(&mut store, &f);
+    f.edit(&mut store, &mut b, f.insert());
+    let held = fs::read(f.path(&store)).unwrap();
+    let temp = staging_candidate_for_test(&f.path(&store), 100);
+    fs::write(&temp, b"partial copy").unwrap();
+    let inv = inventory(&mut store);
+    assert_eq!(inv.orphans().len(), 1);
+    let current = store.studio_storage_budget(SERVER, &f.group, &inv).unwrap();
+    assert_eq!(current.usage().content, b.usage().content + 12);
+    assert_eq!(current.usage().settlement, 0);
+    let mut narrow = store.cleanup_epoch_storage_staging_with_registry().unwrap();
+    while !narrow.step().unwrap().complete {}
+    drop(narrow);
+    assert!(
+        temp.exists(),
+        "legacy four-family cleanup must not silently expand"
+    );
+    let mut cleanup = store.cleanup_epoch_storage_staging_with_studio().unwrap();
+    while !cleanup.step().unwrap().complete {}
+    let mut scan = cleanup.into_inventory().unwrap();
+    while !scan.step().unwrap().complete {}
+    let inv = scan.finish().unwrap();
+    assert_eq!(inv.orphans().len(), 0);
+    assert_eq!(fs::read(f.path(&store)).unwrap(), held);
+    assert!(!temp.exists());
+    let current = store.studio_storage_budget(SERVER, &f.group, &inv).unwrap();
+    assert_eq!(current.usage(), b.usage());
+    // An unpublished first write has no authenticated scope from which to charge its bytes.
+    let unowned = store
+        .dir
+        .join("servers")
+        .join(format!("{}.studio-epoch", "ab".repeat(32)));
+    fs::write(staging_candidate_for_test(&unowned, 101), []).unwrap();
+    let inv = inventory(&mut store);
+    assert_eq!(inv.unresolved_orphans(), 1);
+    assert!(store.studio_storage_budget(SERVER, &f.group, &inv).is_err());
+}
+
+#[test]
+fn studio_store_invalid_receipt_is_rejected_before_disk_or_inventory_mutation() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let mut b = budget(&mut store, &f);
+    let (_, state) = f.edit(&mut store, &mut b, f.insert());
+    let mut receipt = f.receipt(&state, 7);
+    receipt.signature[0] ^= 1;
+    let generation = store.studio_generation.clone();
+    // If receipt authentication is delayed until core sealing, this lost source will poison
+    // the budget first. A forged receipt must never reach that expensive I/O path.
+    fs::remove_file(f.path(&store)).unwrap();
+    let err = store
+        .seal_studio_epoch(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            receipt,
+            0,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap_err();
+    assert!(!err.to_string().contains("source missing"));
+    assert!(!b.requires_reconciliation());
+    assert!(Arc::ptr_eq(&generation, &store.studio_generation));
+    assert_eq!(f.intents(&store), 1);
+}
+
+#[test]
+fn reference_scan_keeps_an_overwritten_checkpoint_register_after_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let mut blobs = store.blob_store(&hex::encode(f.group.group_id())).unwrap();
+    let a = blobs.put(b"birth pixels").unwrap();
+    let b = blobs.put(b"seed replacement").unwrap();
+    let c = blobs.put(b"successor replacement").unwrap();
+    let mut unit = StudioEpoch::new(&f.group, f.target, f.device.device_id()).unwrap();
+    for (n, body) in [
+        FlipnoteOp::InsertFrame {
+            frame: [1; 16],
+            after: None,
+            cid: *a.as_bytes(),
+            bytes: 10,
+        },
+        FlipnoteOp::ReplaceFrame {
+            frame: [1; 16],
+            cid: *b.as_bytes(),
+            bytes: 10,
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        unit.edit_or_reseal(
+            &f.device,
+            &f.group,
+            &mut rng(),
+            &f.domain(body.encode().unwrap(), n as u8),
+            100,
+        )
+        .unwrap();
+    }
+    let source = EpochStudioState { unit, source: None };
+    let seed = source.projection().unwrap().checkpoint([7; 32]).unwrap();
+    let mut next = StudioEpoch::from_checkpoint(
+        &f.group,
+        f.target,
+        f.device.device_id(),
+        f.receipt(&source, 7),
+        0,
+        seed.bytes(),
+    )
+    .unwrap();
+    next.edit_or_reseal(
+        &f.device,
+        &f.group,
+        &mut rng(),
+        &f.domain(
+            FlipnoteOp::ReplaceFrame {
+                frame: [1; 16],
+                cid: *c.as_bytes(),
+                bytes: 10,
+            }
+            .encode()
+            .unwrap(),
+            3,
+        ),
+        101,
+    )
+    .unwrap();
+    // Test-only installed source: runtime checkpoint installation remains gate 4 work.
+    let mut budget = budget(&mut store, &f);
+    store
+        .save_studio_source(
+            SERVER,
+            next,
+            None,
+            &[],
+            WritePurpose::Ordinary,
+            &mut rng(),
+            &mut budget.storage,
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
+        )
+        .unwrap();
+    store.creative_pinned_cids().unwrap();
+    assert!(!blobs.delete(&b).unwrap());
+    drop(store);
+    let mut store = open(root.path());
+    let mut blobs = store.blob_store(&hex::encode(f.group.group_id())).unwrap();
+    assert_eq!(
+        store
+            .creative_pinned_cids()
+            .unwrap()
+            .for_group(&f.group.group_id())
+            .count(),
+        3
+    );
+    for cid in [a, b, c] {
+        assert!(!blobs.delete(&cid).unwrap());
+    }
+}
+
+#[test]
+fn studio_store_full_content_allows_exact_retry_and_receipt_but_not_new_intent() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let mut b = budget(&mut store, &f);
+    let (first, state) = f.edit(&mut store, &mut b, f.insert());
+    let original = fs::read(f.path(&store)).unwrap();
+    let inv = inventory(&mut store);
+    let mut records = inv.records_for_server(SERVER, &f.group.group_id()).unwrap();
+    // Private test-only ballast avoids allocating 2 GiB. The production wrapper can only be
+    // minted from the actual completed scan; the generic budget algorithm is unchanged.
+    records.push(StorageRecord {
+        id: [255; 32],
+        document: [255; 32],
+        footprint: Footprint {
+            content: super::super::epoch_budget::CONTENT_ALLOWANCE_BYTES - b.usage().content,
+            ..Footprint::default()
+        },
+    });
+    b.storage = EpochStorageBudget::from_inventory(b.scope.clone(), records).unwrap();
+    let (retry, _) = f.edit(&mut store, &mut b, f.insert());
+    assert_eq!(f.signed(&retry), f.signed(&first));
+    assert_eq!(fs::read(f.path(&store)).unwrap(), original);
+    assert!(store
+        .edit_studio_epoch(
+            SERVER,
+            &f.group,
+            f.target,
+            f.id,
+            &f.device,
+            f.title(),
+            100,
+            &mut rng(),
+            &mut b
+        )
+        .is_err());
+    assert!(
+        !b.requires_reconciliation(),
+        "known preflight refusal is not uncertain I/O"
+    );
+    assert_eq!(f.intents(&store), 1);
+    let (_, closing) = store
+        .seal_studio_epoch(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            f.receipt(&state, 7),
+            0,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    assert_eq!(closing.phase(), EpochPhase::Closing);
+    assert_eq!(
+        b.usage().content,
+        super::super::epoch_budget::CONTENT_ALLOWANCE_BYTES
+    );
+    assert!(b.usage().protocol > 0);
+    assert_eq!(
+        b.usage().settlement,
+        0,
+        "replacement temporary is retired after durability"
+    );
+    assert_eq!(
+        f.load(&store).unwrap().projection().unwrap(),
+        state.projection().unwrap()
+    );
+}
+
+#[test]
+fn studio_store_crash_matrix_has_intent_first_and_no_ciphertext_before_both_barriers() {
+    for stage in 0..2 {
+        for mode in 0..3 {
+            let root = tempfile::tempdir().unwrap();
+            let f = Fixture::new(true);
+            let mut store = open(root.path());
+            let mut b = budget(&mut store, &f);
+            // Which half of the transaction fails, and on which side of its own write.
+            let wanted = if stage == 0 {
+                WriteTag::Intents
+            } else {
+                WriteTag::Epoch
+            };
+            let intent_scope =
+                super::super::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap();
+            let intent_path = store
+                .dir
+                .join("servers")
+                .join(format!("{}.intents", blake3::hash(&intent_scope).to_hex()));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                store.edit_studio_with_io(
+                    SERVER,
+                    &f.group,
+                    f.target,
+                    f.id,
+                    &f.device,
+                    f.insert(),
+                    100,
+                    &mut rng(),
+                    &mut b,
+                    WriteStep::new(WriteTag::Intents),
+                    &mut WriteHooks::Hooked {
+                        before: Some(&mut |tag: WriteTag, _: &Path, _: &[u8]| {
+                            if tag == WriteTag::Epoch {
+                                assert!(intent_path.exists());
+                            }
+                            if tag != wanted || mode == 1 {
+                                return Intercept::Continue;
+                            }
+                            if mode == 2 {
+                                panic!("injected Studio writer panic");
+                            }
+                            Intercept::Fail(AppError::Io("injected persistence failure".into()))
+                        }),
+                        before_sync: None,
+                        before_unlink: None,
+                        after: Some(&mut |op: CompletedOperation, tag: WriteTag, _: &Path| {
+                            if op == CompletedOperation::Write && tag == wanted && mode == 1 {
+                                return AfterIntercept::Fail(AppError::Io(
+                                    "injected persistence failure".into(),
+                                ));
+                            }
+                            AfterIntercept::Continue
+                        }),
+                    },
+                )
+            }));
+            assert!(result.is_err() || result.unwrap().is_err());
+            assert!(b.requires_reconciliation());
+            assert_eq!(f.intents(&store), usize::from(stage == 1 || mode == 1));
+            assert_eq!(
+                f.load(&store).map_or(0, |s| s.op_count()),
+                usize::from(stage == 1 && mode == 1)
+            );
+            let pins = store.creative_pinned_cids().unwrap();
+            assert_eq!(
+                pins.for_group(&f.group.group_id())
+                    .any(|cid| cid.as_bytes() == &[3; 32]),
+                stage == 1 || mode == 1,
+                "a durable intent pins even if its epoch write failed"
+            );
+            drop(store);
+            let mut store = open(root.path());
+            assert_eq!(
+                store
+                    .creative_pinned_cids()
+                    .unwrap()
+                    .for_group(&f.group.group_id())
+                    .count(),
+                usize::from(stage == 1 || mode == 1),
+                "same intent/source holds after restart"
+            );
+            let mut b = budget(&mut store, &f);
+            let (_, state) = f.edit(&mut store, &mut b, f.insert());
+            assert_eq!(state.op_count(), 1);
+            assert_eq!(f.intents(&store), 1);
+        }
+    }
+}
+
+#[test]
+fn studio_store_duplicate_flush_failure_preserves_bytes_and_requires_rescan() {
+    for stage in 0..2 {
+        let root = tempfile::tempdir().unwrap();
+        let f = Fixture::new(true);
+        let mut store = open(root.path());
+        let mut b = budget(&mut store, &f);
+        let (first, _) = f.edit(&mut store, &mut b, f.insert());
+        let saved = fs::read(f.path(&store)).unwrap();
+        let result = store.edit_studio_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            f.id,
+            &f.device,
+            f.insert(),
+            100,
+            &mut rng(),
+            &mut b,
+            WriteStep::new(WriteTag::Intents),
+            // A duplicate rewrites neither record; the selected half's flush fails.
+            &mut WriteHooks::Hooked {
+                before: Some(&mut |tag: WriteTag, _: &Path, _: &[u8]| {
+                    panic!("duplicate {tag:?} rewrote")
+                }),
+                before_sync: Some(&mut |tag: WriteTag, _: &Path, _: u64| {
+                    let wanted = if stage == 0 {
+                        WriteTag::Intents
+                    } else {
+                        WriteTag::Epoch
+                    };
+                    if tag == wanted {
+                        return AfterIntercept::Fail(AppError::Io("flush failed".into()));
+                    }
+                    AfterIntercept::Continue
+                }),
+                before_unlink: None,
+                after: None,
+            },
+        );
+        assert!(result.is_err());
+        assert!(b.requires_reconciliation());
+        assert_eq!(fs::read(f.path(&store)).unwrap(), saved);
+        let mut b = budget(&mut store, &f);
+        let (retry, _) = f.edit(&mut store, &mut b, f.insert());
+        assert_eq!(f.signed(&first), f.signed(&retry));
+    }
+}
+
+#[test]
+fn studio_store_refuses_bad_targets_scope_and_lost_indexed_source_before_intents() {
+    for frame in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let f = Fixture::new(frame);
+        let mut store = open(root.path());
+        let mut b = budget(&mut store, &f);
+        let bad = f.domain(
+            if frame {
+                FlipnoteOp::InsertFrame {
+                    frame: [1; 16],
+                    after: Some([2; 16]),
+                    cid: [3; 32],
+                    bytes: 10,
+                }
+                .encode()
+                .unwrap()
+            } else {
+                IndexOp::SetTitle {
+                    object: [1; 16],
+                    title: "unknown".into(),
+                }
+                .encode()
+                .unwrap()
+            },
+            1,
+        );
+        assert!(store
+            .edit_studio_epoch(
+                SERVER,
+                &f.group,
+                f.target,
+                f.id,
+                &f.device,
+                bad,
+                100,
+                &mut rng(),
+                &mut b
+            )
+            .is_err());
+        assert_eq!(f.intents(&store), 0);
+        assert!(f.load(&store).is_none());
+        f.edit(&mut store, &mut b, f.insert());
+        let mut conflict = f.title();
+        conflict.nonce = [1; 16];
+        assert!(store
+            .edit_studio_epoch(
+                SERVER,
+                &f.group,
+                f.target,
+                f.id,
+                &f.device,
+                conflict,
+                100,
+                &mut rng(),
+                &mut b
+            )
+            .is_err());
+        assert_eq!(f.intents(&store), 1);
+        assert!(store
+            .edit_studio_epoch(
+                SERVER,
+                &f.group,
+                f.target,
+                f.id + 1,
+                &f.device,
+                f.title(),
+                100,
+                &mut rng(),
+                &mut b
+            )
+            .is_err());
+        if frame {
+            assert!(store
+                .load_studio_epoch(
+                    SERVER,
+                    &f.group,
+                    StudioTarget::Flipnote {
+                        channel: [8; 16],
+                        object: [9; 16]
+                    },
+                    &f.device
+                )
+                .is_err());
+        }
+        // Simulated external disk loss is confined to this test's temporary vault.
+        fs::remove_file(f.path(&store)).unwrap();
+        assert!(store
+            .edit_studio_epoch(
+                SERVER,
+                &f.group,
+                f.target,
+                f.id,
+                &f.device,
+                f.title(),
+                100,
+                &mut rng(),
+                &mut b
+            )
+            .is_err());
+        assert_eq!(f.intents(&store), 1);
+        assert!(b.requires_reconciliation());
+    }
+}
+
+#[test]
+fn studio_store_coverage_generation_ingress_and_cleanup_bound_accounting() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let mut scan = store.scan_epoch_storage_with_registry().unwrap();
+    while !scan.step().unwrap().complete {}
+    let narrow = scan.finish().unwrap();
+    assert!(store
+        .studio_storage_budget(SERVER, &f.group, &narrow)
+        .is_err());
+    let inv = inventory(&mut store);
+    let mut first = store.studio_storage_budget(SERVER, &f.group, &inv).unwrap();
+    assert!(
+        store.studio_storage_budget(SERVER, &f.group, &inv).is_err(),
+        "one mint per captured inventory"
+    );
+    let stale = inventory(&mut store);
+    let mut source = StudioEpoch::new(&f.group, f.target, f.device.device_id()).unwrap();
+    let op = source
+        .edit_or_reseal(&f.device, &f.group, &mut rng(), &f.insert(), 100)
+        .unwrap();
+    store
+        .ingest_studio_epoch(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &op,
+            &mut rng(),
+            &mut first,
+        )
+        .unwrap();
+    assert!(
+        store
+            .studio_storage_budget(SERVER, &f.group, &stale)
+            .is_err(),
+        "source-only ingress invalidates old scans"
+    );
+    assert_eq!(f.intents(&store), 0);
+    let inv = inventory(&mut store);
+    assert_eq!(
+        inv.records()
+            .filter(|e| e.kind == EpochRecordKind::Studio)
+            .count(),
+        1
+    );
+    let mut next = store.studio_storage_budget(SERVER, &f.group, &inv).unwrap();
+    assert!(store
+        .ingest_studio_epoch(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &op,
+            &mut rng(),
+            &mut first
+        )
+        .is_err());
+    assert_eq!(
+        store
+            .ingest_studio_epoch(
+                SERVER,
+                &f.group,
+                f.target,
+                &f.device,
+                &op,
+                &mut rng(),
+                &mut next
+            )
+            .unwrap()
+            .0,
+        Admission::Duplicate
+    );
+    let captured = inventory(&mut store);
+    let mut cleanup = store.cleanup_epoch_storage_staging_with_studio().unwrap();
+    while !cleanup.step().unwrap().complete {}
+    drop(cleanup);
+    assert!(store
+        .studio_storage_budget(SERVER, &f.group, &captured)
+        .is_err());
+    assert!(store
+        .ingest_studio_epoch(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &op,
+            &mut rng(),
+            &mut next
+        )
+        .is_err());
+}
+
+#[test]
+fn studio_store_fault_persists_before_reporting_and_failed_fault_save_can_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let mut b = budget(&mut store, &f);
+    let (_, state) = f.edit(&mut store, &mut b, f.insert());
+    let first = f.receipt(&state, 7);
+    let conflict = f.receipt(&state, 8);
+    let (_, state) = store
+        .seal_studio_epoch(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            first,
+            0,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    assert_eq!(state.phase(), EpochPhase::Closing);
+    assert_eq!(state.op_count(), 1);
+    assert!(store
+        .edit_studio_epoch(
+            SERVER,
+            &f.group,
+            f.target,
+            f.id,
+            &f.device,
+            f.title(),
+            100,
+            &mut rng(),
+            &mut b
+        )
+        .is_err());
+    assert_eq!(f.intents(&store), 1);
+    assert!(store
+        .seal_studio_with_io(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            conflict.clone(),
+            0,
+            &mut rng(),
+            &mut b,
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::fail_before_write(FailError::Io("fault write failed"))
+        )
+        .is_err());
+    assert!(b.requires_reconciliation());
+    assert_eq!(f.load(&store).unwrap().phase(), EpochPhase::Closing);
+    let mut b = budget(&mut store, &f);
+    let (_, state) = store
+        .seal_studio_epoch(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            conflict,
+            0,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    assert_eq!(state.phase(), EpochPhase::Fault);
+    let projection = state.projection().unwrap();
+    drop(store);
+    let store = open(root.path());
+    let restored = f.load(&store).unwrap();
+    assert_eq!(restored.phase(), EpochPhase::Fault);
+    assert_eq!(restored.projection().unwrap(), projection);
+    assert_eq!(f.intents(&store), 1);
+}
+
+/// The Studio consumer of `WriteStep::flush_only`.
+///
+/// Handoff resolution relies on this leaf refusing a replacement: a Complete evidence arm must
+/// flush the held source unchanged, never rewrite it. That caller never reaches a replacement,
+/// so it does not cover the refusal. See the Intents counterpart for why both controls exist.
+#[test]
+fn a_flush_only_step_refuses_a_studio_source_replacement_but_still_reaches_the_flush() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+
+    // A saved source to replace.
+    let mut unit = StudioEpoch::new(&f.group, f.target, f.device.device_id()).unwrap();
+    let op = unit
+        .edit_or_reseal(&f.device, &f.group, &mut rng(), &f.insert(), 100)
+        .unwrap();
+    let mut b = budget(&mut store, &f);
+    store
+        .ingest_studio_epoch(
+            SERVER,
+            &f.group,
+            f.target,
+            &f.device,
+            &op,
+            &mut rng(),
+            &mut b,
+        )
+        .unwrap();
+    let held = fs::read(f.path(&store)).unwrap();
+
+    // An otherwise-valid replacement: the saved unit with one more accepted edit.
+    let advanced = |store: &ServerStore| {
+        let mut state = f.load(store).unwrap();
+        let observed = state
+            .source
+            .as_ref()
+            .map(super::source::SourceVersion::record);
+        let before = state.unit.snapshot().unwrap();
+        let mut advanced = state.unit;
+        advanced
+            .edit_or_reseal(&f.device, &f.group, &mut rng(), &f.title(), 101)
+            .unwrap();
+        (advanced, observed, before)
+    };
+
+    let (unit, observed, before) = advanced(&store);
+    let mut b = budget(&mut store, &f);
+    let reached = std::cell::Cell::new(false);
+    let refused = store.save_studio_source(
+        SERVER,
+        unit,
+        observed,
+        &before,
+        WritePurpose::Ordinary,
+        &mut rng(),
+        &mut b.storage,
+        WriteStep::flush_only(WriteTag::Source, "this path requires an unchanged source"),
+        &mut WriteHooks::Hooked {
+            before: Some(&mut |_: WriteTag, _: &Path, _: &[u8]| {
+                reached.set(true);
+                Intercept::Continue
+            }),
+            before_sync: None,
+            before_unlink: None,
+            after: None,
+        },
+    );
+    assert!(
+        refused
+            .unwrap_err()
+            .to_string()
+            .contains("this path requires an unchanged source"),
+        "the flush-only step did not refuse the replacement"
+    );
+    assert!(
+        !reached.get(),
+        "the transaction reached its replacement despite a flush-only step"
+    );
+    assert_eq!(
+        fs::read(f.path(&store)).unwrap(),
+        held,
+        "the source changed"
+    );
+
+    // Control one: the same replacement is accepted under an ordinary step.
+    let (unit, observed, before) = advanced(&store);
+    let mut b = budget(&mut store, &f);
+    store
+        .save_studio_source(
+            SERVER,
+            unit,
+            observed,
+            &before,
+            WritePurpose::Ordinary,
+            &mut rng(),
+            &mut b.storage,
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
+        )
+        .expect("an ordinary step must accept the same replacement");
+    assert_ne!(
+        fs::read(f.path(&store)).unwrap(),
+        held,
+        "the control did not actually replace anything"
+    );
+
+    // Control two: an unchanged source under the same flush-only step reaches its sync.
+    let mut state = f.load(&store).unwrap();
+    let observed = state
+        .source
+        .as_ref()
+        .map(super::source::SourceVersion::record);
+    let before = state.unit.snapshot().unwrap();
+    let mut b = budget(&mut store, &f);
+    let synced = std::cell::Cell::new(false);
+    store
+        .save_studio_source(
+            SERVER,
+            state.unit,
+            observed,
+            &before,
+            WritePurpose::Ordinary,
+            &mut rng(),
+            &mut b.storage,
+            WriteStep::flush_only(WriteTag::Source, "this path requires an unchanged source"),
+            &mut WriteHooks::Hooked {
+                before: None,
+                before_sync: Some(&mut |_: WriteTag, _: &Path, _: u64| {
+                    synced.set(true);
+                    AfterIntercept::Continue
+                }),
+                before_unlink: None,
+                after: None,
+            },
+        )
+        .expect("a flush-only step must still permit the flush");
+    assert!(
+        synced.get(),
+        "the flush-only step returned success without reaching a sync"
+    );
+}
+
+/// N17, Studio source family.
+///
+/// The Studio negative case is the one that decided the design: `studio_generation` rotates on
+/// every budget entry, so reusing it would have made a parked cursor die whenever anything
+/// touched Studio at all. `inventory_generation` must move for a source *write* and stay put for
+/// a budget mint or entry, and both halves are asserted here against the real paths.
+#[test]
+fn a_cursor_parked_across_a_studio_source_write_refuses_but_survives_a_budget_mint() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+    let mut b = budget(&mut store, &f);
+    f.edit(&mut store, &mut b, f.insert());
+
+    let mut cursor = store
+        .begin_epoch_storage_scan(
+            EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+        )
+        .unwrap();
+    let progress = store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
+    assert!(
+        !progress.complete,
+        "the fixture must span more than one step"
+    );
+
+    // A budget mint and entry: the exact activity that would kill this cursor if the token were
+    // `studio_generation`. It must survive both.
+    let minted = budget(&mut store, &f);
+    drop(minted);
+    store.step_epoch_storage_scan(&mut cursor, 1, None).expect(
+        "a Studio budget mint invalidated a parked cursor, which is the self-invalidation \
+                 hazard that ruled out reusing studio_generation",
+    );
+
+    // Now a real Studio source write.
+    let before = store.inventory_generation();
+    let mut b = budget(&mut store, &f);
+    f.edit(&mut store, &mut b, f.title());
+    assert!(
+        !std::sync::Arc::ptr_eq(&before, &store.inventory_generation()),
+        "the Studio source writer did not rotate the inventory generation"
+    );
+    assert!(
+        store.step_epoch_storage_scan(&mut cursor, 1, None).is_err(),
+        "a cursor parked across a Studio source write resumed anyway"
+    );
+    assert!(
+        store.finish_epoch_storage_scan(cursor).is_err(),
+        "a cursor parked across a Studio source write still issued an inventory"
+    );
+}
+
+/// Reference collection survives the detached path with the same result.
+///
+/// The other equivalence test is Recovery-only, so it says nothing about the one thing a
+/// reference scan produces: the CID set. That set is collected *inside* the validation that
+/// parking moves out of the visit, and it is merged at install rather than where it was
+/// computed - which is exactly the seam a refactor could drop a family's references at, while
+/// every record, footprint and orphan comparison stayed identical.
+///
+/// This also covers the cache exclusion: a reference scan must never take a cached record,
+/// because the cache holds validation metadata and not the CIDs.
+#[test]
+fn a_budgeted_reference_scan_collects_the_same_cids_as_an_unbudgeted_one() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let mut b = budget(&mut store, &f);
+    f.edit(&mut store, &mut b, f.insert());
+
+    // The pixel this fixture's inserted frame names. Asserted absolutely rather than only
+    // against the unbudgeted run, because both runs share `install_body`: a mutation in that
+    // shared merge empties *both* sets, and an equivalence comparison would still hold. The
+    // equality check below catches divergence between the paths; this catches the shared defect.
+    let known = catcoms_storage::Cid::from_bytes([3; 32]);
+
+    // Warm the validation cache first, so a budgeted reference scan that wrongly consulted it
+    // would find entries waiting rather than an empty cache that hides the mistake.
+    let warmed = store.creative_pinned_cids().unwrap();
+    let expected: Vec<_> = warmed.for_group(&f.group.group_id()).copied().collect();
+    assert!(
+        expected.contains(&known),
+        "the fixture's own pixel is not protected, so the comparison below would compare two \
+         empty sets"
+    );
+    drop(warmed);
+
+    let clock = catcoms_rt::ManualClock::new(0);
+    // Mark protection unknown, as `creative_pinned_cids` does, so the budgeted scan installs
+    // its own set rather than being refused as a duplicate install.
+    store.creative_protection.lock().unwrap().unknown_for_test();
+    let mut cursor = store
+        .begin_epoch_storage_scan(
+            EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+        )
+        .unwrap();
+    store
+        .collect_cursor_creative_references(&mut cursor)
+        .unwrap();
+    let mut parked_bodies = 0;
+    loop {
+        let progress = store
+            .step_epoch_storage_scan(&mut cursor, 64, Some((&clock, 250)))
+            .unwrap();
+        if let Some(parked) = store.take_parked_record(&mut cursor) {
+            parked_bodies += 1;
+            let validated = parked.validate().unwrap();
+            store
+                .install_validated_record(&mut cursor, validated)
+                .unwrap();
+            continue;
+        }
+        if progress.complete {
+            break;
+        }
+    }
+    assert!(
+        parked_bodies > 0,
+        "nothing was parked, so the detached path was not exercised"
+    );
+    let collected = store.finish_cursor_creative_references(cursor).unwrap();
+    let mut got: Vec<_> = collected.for_group(&f.group.group_id()).copied().collect();
+    assert!(
+        got.contains(&known),
+        "a budgeted reference scan lost the fixture's own pixel, so parking dropped references \
+         the unbudgeted path also would have: {got:?}"
+    );
+    let mut want = expected.clone();
+    got.sort();
+    want.sort();
+    assert_eq!(
+        got, want,
+        "a budgeted reference scan collected a different CID set from an unbudgeted one"
+    );
+}
+
+/// I-4 audit M-2, on a reference scan. A traversal that missed a record on disk (what a directory
+/// stream unstable under unrelated churn would produce) must not install protection: the missed
+/// record's references would be left unprotected, which is worse than an undercounted budget.
+#[test]
+fn a_reference_scan_that_missed_a_record_installs_no_protection() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let mut b = budget(&mut store, &f);
+    f.edit(&mut store, &mut b, f.insert());
+    let scan = |store: &mut ServerStore, forget: bool| {
+        store.creative_protection.lock().unwrap().unknown_for_test();
+        let mut cursor = store
+            .begin_epoch_storage_scan(
+                EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+            )
+            .unwrap();
+        store
+            .collect_cursor_creative_references(&mut cursor)
+            .unwrap();
+        while !store
+            .step_epoch_storage_scan(&mut cursor, 64, None)
+            .unwrap()
+            .complete
+        {}
+        if forget {
+            cursor.forget_a_record_for_test();
+        }
+        store.finish_cursor_creative_references(cursor)
+    };
+    // The precondition: the same scan, untouched, installs.
+    scan(&mut store, false).unwrap();
+    let Err(error) = scan(&mut store, true) else {
+        panic!("protection was installed from a traversal that missed a record");
+    };
+    assert!(
+        error.to_string().contains("listing changed"),
+        "refused for the wrong reason: {error}"
+    );
+}
+
+/// C-3 runtime design S-2. An inventory finished before a five-family write cannot mint after it.
+///
+/// The write here is the mutation guard alone, which every five-family writer takes before its
+/// first possible I/O and which touches neither the Studio nor the Intents generation. Before the
+/// inventory carried the generation it was finished under, the two older checks both passed in
+/// this case, so the stale inventory minted a budget for a vault that had since changed. Within
+/// one visit finish and mint are adjacent; this is what makes splitting them across visits safe.
+#[test]
+fn an_inventory_finished_before_a_five_family_write_cannot_mint_after_it() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+    let mut b = budget(&mut store, &f);
+    f.edit(&mut store, &mut b, f.insert());
+    drop(b);
+    let finished = |store: &mut ServerStore| {
+        let mut scan = store.scan_epoch_storage_with_studio().unwrap();
+        while !scan.step().unwrap().complete {}
+        scan.finish().unwrap()
+    };
+
+    let control = finished(&mut store);
+    assert!(
+        store
+            .studio_storage_budget(SERVER, &f.group, &control)
+            .is_ok(),
+        "control: a finish followed directly by a mint is fresh"
+    );
+
+    let stale = finished(&mut store);
+    store.epoch_mutation_guard();
+    let refused = store
+        .studio_storage_budget(SERVER, &f.group, &stale)
+        .unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("fresh five-family inventory required"),
+        "an inventory finished before a write minted after it: {refused}"
+    );
+}
+
+/// The surviving cursor must also be *usable*, not merely un-refused.
+///
+/// `studio_generation` rotates on a budget mint and on budget entry - bookkeeping that touches no
+/// record, and so correctly does not rotate `inventory_generation`. A cursor stamped at begin
+/// would pass every invalidation check and then hand back an inventory the budget consumer
+/// rejects as stale: the negative property inverted, where harmless activity does not kill the
+/// cursor but still wastes it.
+///
+/// The earlier test stops at "the next step succeeded". This one continues through the actual
+/// consumer, which is the only place the defect was visible.
+///
+/// Scope, precisely: the surviving-cursor leg below exercises **mints only**. Budget *entry* is
+/// not independently reachable - `enter_studio_epoch_budget` is internal and always runs inside
+/// `edit_studio_epoch`, which writes a record and so legitimately invalidates the cursor. Entry
+/// therefore appears here only in the control leg, where it is inseparable from that write. The
+/// claim this test establishes is that mint-only bookkeeping neither kills a cursor nor wastes
+/// it; the entry rotation is covered by the control's *refusal*, not by a survival case.
+#[test]
+fn a_cursor_that_spans_budget_bookkeeping_still_mints_a_budget_from_its_inventory() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(false);
+    let mut store = open(root.path());
+    let mut b = budget(&mut store, &f);
+    f.edit(&mut store, &mut b, f.insert());
+
+    let mut cursor = store
+        .begin_epoch_storage_scan(
+            EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+        )
+        .unwrap();
+    store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
+
+    // Control: bookkeeping *plus* a real write while the cursor is parked. The mint and the
+    // entry both rotate `studio_generation`, and the edit that carries the entry also rewrites
+    // the record - so this leg must refuse, and it establishes that the fixture can invalidate
+    // at all. Only the second leg is the mint-only case.
+    let mut other = budget(&mut store, &f);
+    store
+        .load_studio_epoch(SERVER, &f.group, f.target, &f.device)
+        .unwrap();
+    let _ = other.storage.usage();
+    f.edit(&mut store, &mut other, f.title());
+    // That edit *is* a write, so take a fresh cursor for the no-write case below and use this
+    // one only to confirm a write still refuses.
+    assert!(
+        store.step_epoch_storage_scan(&mut cursor, 1, None).is_err(),
+        "control is broken: the intervening edit did not invalidate, so the case below would \
+         prove nothing about budget-only activity"
+    );
+    drop(store.finish_epoch_storage_scan(cursor));
+
+    // Now the real case: no record mutation at all between begin and finish, only mints.
+    let mut cursor = store
+        .begin_epoch_storage_scan(
+            EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
+        )
+        .unwrap();
+    store.step_epoch_storage_scan(&mut cursor, 1, None).unwrap();
+    let minted = budget(&mut store, &f);
+    drop(minted);
+    let minted_again = budget(&mut store, &f);
+    drop(minted_again);
+    while !store
+        .step_epoch_storage_scan(&mut cursor, 64, None)
+        .unwrap()
+        .complete
+    {}
+    let inventory = store
+        .finish_epoch_storage_scan(cursor)
+        .expect("budget bookkeeping alone must not invalidate a cursor");
+
+    let mut minted = store
+        .studio_storage_budget(SERVER, &f.group, &inventory)
+        .expect(
+            "a cursor that survived budget bookkeeping issued an inventory its own budget \
+             consumer refuses, so surviving bought nothing",
+        );
+    // And the minted budget is entered, which is the second rotation point.
+    f.edit(&mut store, &mut minted, f.domain(f.title().body, 9));
+}

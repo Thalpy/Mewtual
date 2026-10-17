@@ -335,3 +335,69 @@ export function transitionMismatch(t: UnreadTransition): string {
   if (t.decision.decision === "seen" && t.after.unread) return "badge_not_cleared";
   return "";
 }
+
+/**
+ * History that arrived late: messages that landed BEHIND this device's read position.
+ *
+ * Rows are ordered by their senders' timestamps, and a P2P mesh delivers whenever two members
+ * finally meet, so a message written at ten in the morning can arrive at six in the evening and
+ * sort into a part of the log this person scrolled past hours ago. Unread state is measured
+ * forward from the read cursor (`unreadFromHeads`, `unread_summary` natively), so such a message
+ * raises no badge and sits above the "new messages" line: not "seen late" but never seen at all.
+ * This is the set of those messages, per conversation, kept until each row has actually been in
+ * front of the person. Ids, not positions or timestamps: the list reorders under both.
+ */
+export type LatePast = string[];
+
+/** How many late ids one conversation keeps. Past this the oldest are forgotten, which is the
+ * honest bound: a person is not going to review two hundred individually flagged rows. */
+export const MAX_LATE_PAST = 200;
+
+/**
+ * Which of an update's arrivals landed in this person's past.
+ *
+ * `rows` are the arrived rows themselves (fetched by id; they need not be on screen), `mark` the
+ * conversation's read mark and `ceiling` the newest plausible timestamp in it (`readCeiling`), so
+ * an arrival stamped by a broken clock is clamped the same way read state clamps it.
+ *
+ * The rule is positional in the one order the log actually renders: a row is late when it sorts
+ * at or before the read mark. Three things are never late, and each is a report of its own:
+ * own messages (this person wrote them), rows in a conversation that has never been read (its
+ * first open pulls the whole history "into the past", none of which was missed), and rows that
+ * sort after the mark (those are ordinary unread, and the badge already speaks for them).
+ */
+export function lateArrivals(
+  rows: { id: string; author: string; ts: number }[],
+  mark: ReadMark,
+  me: string,
+  ceiling: number,
+): string[] {
+  if (mark.ts <= 0 && !mark.id) return [];
+  const out: string[] = [];
+  for (const row of rows) {
+    if (!row.id || row.author === me || row.id === mark.id) continue;
+    if (effectiveTs(row.ts, ceiling) <= mark.ts) out.push(row.id);
+  }
+  return out;
+}
+
+/** Add late ids to a conversation's set: deduplicated, newest last, bounded oldest-first. */
+export function addLatePast(current: LatePast, ids: string[], max = MAX_LATE_PAST): LatePast {
+  if (!ids.length) return current;
+  const seen = new Set(current);
+  const out = current.slice();
+  for (const id of ids) {
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out.length > max ? out.slice(out.length - max) : out;
+}
+
+/** Forget the ids that have now been in front of the person. Returns `current` when nothing was. */
+export function clearLatePast(current: LatePast, seen: Iterable<string>): LatePast {
+  const gone = new Set(seen);
+  if (!gone.size) return current;
+  const out = current.filter((id) => !gone.has(id));
+  return out.length === current.length ? current : out;
+}

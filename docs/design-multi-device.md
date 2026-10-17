@@ -1,5 +1,18 @@
 # Multi-device identity; design (v2.2)
 
+## Role policy amendment (2026-10-13)
+
+Current moderation-record roles also use the verified full signing-device identity.
+Legacy origin labels supply attribution only, without inheriting an origin's admin
+or owner authority. Historical-role proof and append-only audit completeness remain open.
+
+Admin authority is per exact `DeviceId`, overriding the origin-keyed role statements
+in the original design below. A companion gains ordinary membership through its
+certificate but requires a separate explicit owner grant to invite independent members.
+Profiles, badges and message attribution retain their existing legacy representation;
+none of those labels supplies authority to the owner admission gate.
+
+
 Status: **M1–M6 implemented (M2 & M3 adversarially reviewed, BLOCKING findings fixed).**
 M1 primitives (`f6b7386`); M2 ceremony (`fe618d3`); M3 admission + M4 UI (`ba8a8d1`); M6
 QR/audio carry channels (`bcd5e17`); M5 device revocation lands with this doc update.

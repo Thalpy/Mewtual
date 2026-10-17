@@ -1,0 +1,2087 @@
+//! Bounded work selection for the existing native receiver. Disk barriers use its sole lease;
+//! expensive vault verification and network waits leave the actor free to serve the other peer.
+use super::*;
+use crate::registry_catchup::{
+    ServerPreparedRegistryPageSource, ServerRegistryPagePreparation, ServerRegistryPageProvider,
+};
+use crate::registry_head::ServerOwnerSnapshot;
+use crate::store::{
+    PreparedStudioSource, StudioHandoffCapture, StudioHandoffCommit, StudioHandoffPlan,
+    StudioOverlayCapture, StudioOverlayPlan, StudioOverlayStamp, StudioSourceCapture,
+};
+use crate::studio::overlay::{OverlayAdmission, OverlayOwnership};
+use crate::studio_exchange::discovery::{
+    CheckpointDiscoveryAttempt, CheckpointDiscoveryCompletion, ServerCheckpointFetch,
+};
+use crate::studio_exchange::{
+    ServerStudioPageProvider, ServerStudioReceive, StudioPageAttempt, StudioPageCompletion,
+    StudioReceiveState,
+};
+use catcoms_rt::{PeerId, RequestCancellation};
+use catcoms_sync::checkpoint_exchange::CheckpointTarget;
+use catcoms_sync::epoch_service::{EpochServiceInterest, EpochServiceKind};
+use catcoms_sync::registry_seed::{CompletedCheckpointSeed, PendingCheckpointSeed};
+use tokio::sync::OwnedSemaphorePermit;
+mod discovery;
+mod preview;
+#[cfg(test)]
+pub(crate) use preview::PreviewHarness;
+use preview::{PreviewCompletion, PreviewJob, PreviewRuntime};
+mod registry;
+mod registry_runtime;
+mod repair;
+mod repair_job;
+mod rotation;
+use discovery::DiscoveryPlan;
+use repair_job::{RepairClaims, RepairCompletion, RepairJob, RepairOwnership, RepairRebuild};
+
+/// Keep failure classification across detached work. A peer's bad service key must never
+/// turn into the local receiver's explicit-access-only storage pause when its worker fails.
+#[derive(Clone)]
+pub(crate) struct PreparationContext {
+    target: StudioTarget,
+    service: Option<Arc<()>>,
+}
+struct ServiceWork {
+    interest: EpochServiceInterest,
+    mount: Arc<()>,
+    server: u64,
+    generation: Arc<()>,
+    captured: bool,
+}
+type PreparedStudioResult = Result<(Box<PreparedStudioSource>, OwnedSemaphorePermit), AppError>;
+type PreparedRegistryResult = Result<Box<ServerPreparedRegistryPageSource>, AppError>;
+
+/// What the held Registry-page step did this visit. A deferred page must stay ahead of new client
+/// work, but it must not make the service step unreachable: reserving an inbound request while the
+/// shared pool is full removes it from H3's yield predicate and breaks that priority inversion.
+enum RegistryPageVisit {
+    None,
+    Consumed,
+    Deferred,
+}
+/// A plan that can still be committed, and the ownership that must outlive it.
+///
+/// RT-001: an error carries **no** ownership. A refused plan can never be committed and its media
+/// hold has already died with the capture, so keeping admission and a slot from the four-slot
+/// process-wide pool parked against it would occupy both until some later Save for the same target
+/// happened to collect them, or forever if none ever came.
+type OverlayPlanResult = Result<(Box<StudioOverlayPlan>, OverlayOwnership), AppError>;
+
+/// How long a committable Save plan may stay parked waiting for the Save visit that commits it.
+///
+/// The same bound as a retained Registry source, for the same reason: both hold a process-wide
+/// preparation permit that only a custody visit releases. A caller retrying promptly, as the Save
+/// contract asks, commits well inside it. One that comes back later re-captures and re-plans.
+pub(super) const OVERLAY_PARK_MS: u64 = 30_000;
+
+/// Which overlay job a detached plan belongs to. Carries no plaintext, no key and no permit; it is
+/// only enough to route a completion back to the target that asked for it.
+pub(crate) struct OverlayContext {
+    target: StudioTarget,
+    /// Flow S only: the authority material the eventual custody visit must use to commit this
+    /// exact plan. A plan is actor-global, so a visit for another target may have to finish it;
+    /// using that visit's Closing record (or assuming an Unconfirmed mint) would cross the two
+    /// authoring domains. Flow H leaves this absent.
+    commit: Option<OverlayCommit>,
+    /// Flow H only: the `HandoffJob::token` this work was detached for, so a completion can be
+    /// matched against the job that asked for it rather than against its target. Flow S leaves it
+    /// zero: a parked Save capture is user-initiated and there is only ever one.
+    token: u64,
+    /// Flow S only, on a returning S2 plan: the stamp of the capture it was planned from. The plan
+    /// consumes its capture, so a refusal would otherwise come back with nothing to say which
+    /// record it described, and could not be parked against it (MAP K12). `None` elsewhere. Boxed:
+    /// the stamp is several hundred bytes, and every background result would otherwise carry its
+    /// size (clippy's `large_enum_variant`).
+    stamp: Option<Box<StudioOverlayStamp>>,
+    /// Test-only barrier, in the shape `PreviewJob::pause_for_test` established: the blocking
+    /// worker signals once it has entered and then blocks until released. It is taken out of the
+    /// context before the closure is built, so the pause happens **after** `OverlayOwnership` has
+    /// moved inside the worker, which is the state N14(a) is about.
+    #[cfg(test)]
+    pause: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    )>,
+}
+
+impl OverlayContext {
+    fn new(target: StudioTarget) -> Self {
+        Self {
+            target,
+            commit: None,
+            token: 0,
+            stamp: None,
+            #[cfg(test)]
+            pause: None,
+        }
+    }
+
+    fn handoff(target: StudioTarget, token: u64) -> Self {
+        Self {
+            target,
+            commit: None,
+            token,
+            stamp: None,
+            #[cfg(test)]
+            pause: None,
+        }
+    }
+
+    fn save(target: StudioTarget, commit: OverlayCommit) -> Self {
+        Self {
+            target,
+            commit: Some(commit),
+            ..Self::new(target)
+        }
+    }
+
+    pub(super) fn into_save(self) -> (StudioTarget, OverlayCommit) {
+        (
+            self.target,
+            self.commit
+                .expect("an overlay plan completion always belongs to Flow S"),
+        )
+    }
+}
+
+/// The two Flow S commit authorities. The Closing record is public signed material, but it is
+/// still request-specific: retaining it here prevents a different Save visit from substituting
+/// its own close when it drains the actor-global parked-plan slot.
+pub(super) enum OverlayCommit {
+    Closing(Box<catcoms_replication::CloseRecord>),
+    Unconfirmed,
+}
+
+/// A detached plan's refusal, kept so the identical retry is answered from it (MAP K12).
+///
+/// **Why.** A refused plan parks nothing (RT-001) and its request is forgotten, so without this its
+/// retry reached S1b again, captured again and was told `Scheduled` again, for ever. Each lap paid
+/// an inventory scan, media admission (a PIX promotion for a frame), a pool permit and a detached
+/// decode, and the caller never heard why.
+///
+/// **Why it may be answered.** The plan is a pure function of what the capture's stamp pins (the
+/// intent record's plaintext digest and size, the mount, the actor and key, the owner and the MLS
+/// epoch) and of the request, which the fingerprint pins (target, basis, branch and the full
+/// envelope). So while the stamp is current, the same request would be refused the same way. It is
+/// answered only under the numeric server it was kept under, which the fingerprint does not name
+/// and the stamp check does not compare (review of K12, LOW-1).
+/// Only `Invalid` is parked: that is how every plan refusal is built, so anything else is not
+/// known to be one of them.
+///
+/// **What it does not pin.** The live preview and the 8.3 rails' budget are not in the stamp. Either
+/// can change while this is kept, so the retry may hear this refusal where S1b would now give
+/// another, such as "no live preview". Both are refusals of the same request, and the deadline
+/// bounds how long this one is preferred.
+pub(super) struct ParkedOverlayRefusal {
+    request: [u8; 32],
+    stamp: Box<StudioOverlayStamp>,
+    reason: catcoms_replication::studio::StudioOverlaySaveRefusal,
+    message: String,
+    /// Monotonic. Checked lazily, by the retry that would answer from it.
+    until: u64,
+}
+
+impl ParkedOverlayRefusal {
+    pub(super) fn stamp(&self) -> &StudioOverlayStamp {
+        &self.stamp
+    }
+
+    pub(super) fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub(super) fn reason(&self) -> catcoms_replication::studio::StudioOverlaySaveRefusal {
+        self.reason
+    }
+}
+
+/// One tracked network attempt and preparation waiter per actor. Cancellation may leave a
+/// blocking worker running: it retains its shared process permit until actual completion.
+/// Thus all running, queued and result-holding preparations together still occupy at most
+/// four slots process-wide. A ready result retains its permit until native custody.
+pub(crate) enum StudioBackgroundJob<T: MeshTransport> {
+    Preview(Arc<()>, PreviewJob),
+    RegistryPage(crate::registry_catchup::RegistryPageAttempt<T>),
+    Page(StudioPageAttempt<T>),
+    Head(CheckpointDiscoveryAttempt<T>),
+    Seed(PendingCheckpointSeed<T>),
+    Prepare(
+        StudioSourceCapture,
+        OwnedSemaphorePermit,
+        PreparationContext,
+    ),
+    /// Test-only form of `Prepare` with a barrier after the blocking worker takes ownership.
+    /// This lets scheduling regressions observe an actually running captured request without
+    /// adding an artificial delay to production preparation.
+    #[cfg(test)]
+    PausedPrepare(
+        StudioSourceCapture,
+        OwnedSemaphorePermit,
+        PreparationContext,
+        tokio::sync::oneshot::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    ),
+    PrepareRegistry(ServerRegistryPagePreparation, Option<Arc<()>>),
+    /// Flow S, stage S2. The capture moves in whole: nothing here decomposes it or rebuilds its
+    /// contents, which is the condition attached to A-001's combined authoring value.
+    OverlayPlan(Box<StudioOverlayCapture>, OverlayOwnership, OverlayContext),
+    /// Flow H, stage H2: full `decode_vault`, private successor restore, change set.
+    HandoffPrepare(Box<StudioHandoffCapture>, OverlayOwnership, OverlayContext),
+    /// Flow H, stage H4: `finish`, `complete`, snapshot and the record encodings.
+    HandoffAssemble(Box<StudioHandoffPlan>, OverlayOwnership, OverlayContext),
+    /// Flow R, stage R2 (design 6.4.2): restore an interrupted Prepared handoff's source from
+    /// captured bytes, classify its evidence and compute the next state and the source's
+    /// inventory validation, all off custody.
+    HandoffResolve(
+        Box<crate::store::StudioResolveCapture>,
+        OverlayOwnership,
+        OverlayContext,
+    ),
+    /// Repair job, stage S2: the detached source rebuild, tagged with the job's token. The
+    /// ownership (a pool slot and the target's live claim) moves into the worker with it.
+    RepairRebuild(u64, RepairRebuild, RepairOwnership),
+    /// C-3: the shared inventory job's parked record body, validated off custody. The permit
+    /// moves into the blocking closure, so a cancelled waiter cannot release it early.
+    InventoryValidate(super::inventory::InventoryDetach),
+}
+
+/// A finished Flow H detached stage, tagged with the `HandoffJob::token` it was detached for.
+///
+/// Every arm is routed on that token, never on the target. A worker outlives the job that spawned
+/// it whenever authority moves mid-detachment, and after the target's backoff expires the actor
+/// may legitimately hold a *different* job for the *same* target; matching on target alone would
+/// hand the new job the dead worker's result.
+type HandoffAssembleResult = Result<
+    (Box<StudioHandoffCommit>, OverlayOwnership),
+    (crate::store::StudioHandoffStamp, Box<AppError>),
+>;
+
+pub(crate) enum HandoffCompletion {
+    Prepared(
+        u64,
+        Result<
+            (Box<StudioHandoffPlan>, OverlayOwnership),
+            Box<crate::store::StudioHandoffPrepareFailure>,
+        >,
+    ),
+    Assembled(u64, Box<HandoffAssembleResult>),
+    /// Flow R's R2 came back, routed on the job token like the others.
+    Resolved(
+        u64,
+        Result<(Box<crate::store::StudioResolvePlan>, OverlayOwnership), AppError>,
+    ),
+    /// The waiter was cancelled, or the worker died. Either way the bundle went with it.
+    Cancelled(u64),
+}
+pub(crate) enum StudioBackgroundResult {
+    Preview(Arc<()>, PreviewCompletion),
+    RegistryPage(Box<crate::registry_catchup::RegistryPageCompletion>),
+    Page(Box<StudioPageCompletion>),
+    Head(Box<CheckpointDiscoveryCompletion>),
+    Seed(Box<CompletedCheckpointSeed>),
+    Prepared(PreparationContext, PreparedStudioResult),
+    PreparedRegistry(Option<Arc<()>>, PreparedRegistryResult),
+    OverlayPlanned(OverlayContext, OverlayPlanResult),
+    Handoff(HandoffCompletion),
+    Repair(RepairCompletion),
+    /// A cancelled overlay waiter carries **no** ownership, deliberately. The blocking closure
+    /// still owns the bundle and is still running, so admission and the shared slot must stay
+    /// occupied until it finishes. This variant exists to clear the actor's waiter bookkeeping
+    /// only; there is nothing to release here. That is I-2, and 7.1's first bullet.
+    CancelledOverlay,
+    CancelledRegistry(Option<Arc<()>>),
+    /// The shared inventory job's validation result, routed by its token.
+    InventoryValidated(
+        u64,
+        Box<Result<crate::store::ValidatedEpochRecord, AppError>>,
+    ),
+    /// That validation's waiter was cancelled. Its own variant, so it cannot fall into the
+    /// default arm, which would tear down an unrelated catch-up pass (C-3 review H3).
+    InventoryCancelled(u64),
+    Cancelled {
+        preparation: Option<PreparationContext>,
+    },
+}
+impl<T: MeshTransport> StudioBackgroundJob<T> {
+    pub(super) fn handoff_prepare(
+        capture: Box<StudioHandoffCapture>,
+        ownership: OverlayOwnership,
+        target: StudioTarget,
+        token: u64,
+    ) -> Self {
+        Self::HandoffPrepare(capture, ownership, OverlayContext::handoff(target, token))
+    }
+    pub(super) fn handoff_assemble(
+        plan: Box<StudioHandoffPlan>,
+        ownership: OverlayOwnership,
+        target: StudioTarget,
+        token: u64,
+    ) -> Self {
+        Self::HandoffAssemble(plan, ownership, OverlayContext::handoff(target, token))
+    }
+    pub(super) fn handoff_resolve(
+        capture: Box<crate::store::StudioResolveCapture>,
+        ownership: OverlayOwnership,
+        target: StudioTarget,
+        token: u64,
+    ) -> Self {
+        Self::HandoffResolve(capture, ownership, OverlayContext::handoff(target, token))
+    }
+}
+
+impl<T: MeshTransport + 'static> StudioBackgroundJob<T> {
+    /// Arm a Studio source-preparation barrier. The returned receiver resolves only after the
+    /// blocking worker owns the capture and pool permit; releasing it lets reconstruction run.
+    #[cfg(test)]
+    pub(crate) fn pause_preparation_for_test(
+        self,
+    ) -> (
+        Self,
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let Self::Prepare(capture, permit, context) = self else {
+            panic!("Studio preparation job");
+        };
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        (
+            Self::PausedPrepare(capture, permit, context, entered, released),
+            entry,
+            release,
+        )
+    }
+
+    /// Arm the overlay worker's barrier. Returns the job, a receiver that resolves once the
+    /// blocking closure has entered while owning the bundle, and the sender that releases it.
+    #[cfg(test)]
+    pub(crate) fn pause_overlay_for_test(
+        mut self,
+    ) -> (
+        Self,
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let Self::OverlayPlan(_, _, context) = &mut self else {
+            panic!("overlay plan job");
+        };
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        assert!(context.pause.is_none());
+        context.pause = Some((entered, released));
+        (self, entry, release)
+    }
+
+    /// Which detached stage this job is, for tests that must prove a stage genuinely detached
+    /// rather than infer it from a transient field.
+    #[cfg(test)]
+    pub(crate) fn kind_for_test(&self) -> &'static str {
+        match self {
+            Self::Preview(..) => "preview",
+            Self::RegistryPage(..) => "registry-page",
+            Self::Page(..) => "page",
+            Self::Head(..) => "head",
+            Self::Seed(..) => "seed",
+            Self::Prepare(..) => "prepare",
+            #[cfg(test)]
+            Self::PausedPrepare(..) => "prepare",
+            Self::PrepareRegistry(..) => "prepare-registry",
+            Self::OverlayPlan(..) => "overlay-plan",
+            Self::HandoffPrepare(..) => "handoff-prepare",
+            Self::HandoffAssemble(..) => "handoff-assemble",
+            Self::HandoffResolve(..) => "handoff-resolve",
+            Self::RepairRebuild(..) => "repair-rebuild",
+            Self::InventoryValidate(..) => "inventory-validate",
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_preparation_for_test(&self) -> bool {
+        matches!(
+            self,
+            Self::Prepare(..) | Self::PausedPrepare(..) | Self::PrepareRegistry(..)
+        ) || matches!(self, Self::Preview(_, job) if job.is_preparation())
+    }
+    pub(crate) async fn run(
+        self,
+        mut cancellation: Option<RequestCancellation>,
+    ) -> StudioBackgroundResult {
+        let cancelled = match &self {
+            Self::Preview(generation, job) => StudioBackgroundResult::Preview(
+                generation.clone(),
+                PreviewCompletion::Cancelled {
+                    preparation: job.is_preparation(),
+                },
+            ),
+            Self::Prepare(_, _, context) => StudioBackgroundResult::Cancelled {
+                preparation: Some(context.clone()),
+            },
+            #[cfg(test)]
+            Self::PausedPrepare(_, _, context, _, _) => StudioBackgroundResult::Cancelled {
+                preparation: Some(context.clone()),
+            },
+            Self::PrepareRegistry(_, generation) => {
+                StudioBackgroundResult::CancelledRegistry(generation.clone())
+            }
+            Self::OverlayPlan(..) => StudioBackgroundResult::CancelledOverlay,
+            // Same rule as the overlay plan: the worker owns the bundle and keeps it.
+            Self::HandoffPrepare(_, _, context)
+            | Self::HandoffAssemble(_, _, context)
+            | Self::HandoffResolve(_, _, context) => {
+                StudioBackgroundResult::Handoff(HandoffCompletion::Cancelled(context.token))
+            }
+            // Same rule again: a cancelled waiter carries nothing, the worker keeps the bundle.
+            Self::RepairRebuild(token, ..) => {
+                StudioBackgroundResult::Repair(RepairCompletion::Cancelled(*token))
+            }
+            Self::InventoryValidate(detach) => {
+                StudioBackgroundResult::InventoryCancelled(detach.token)
+            }
+            _ => StudioBackgroundResult::Cancelled { preparation: None },
+        };
+        let work = async move {
+            match self {
+                Self::Preview(generation, job) => {
+                    StudioBackgroundResult::Preview(generation, job.run().await)
+                }
+                Self::RegistryPage(attempt) => {
+                    StudioBackgroundResult::RegistryPage(Box::new(attempt.fetch().await))
+                }
+                Self::PrepareRegistry(job, generation) => {
+                    let result = job.rebuild().await.map(Box::new);
+                    StudioBackgroundResult::PreparedRegistry(generation, result)
+                }
+                Self::Head(attempt) => {
+                    StudioBackgroundResult::Head(Box::new(attempt.fetch().await))
+                }
+                Self::Seed(attempt) => {
+                    StudioBackgroundResult::Seed(Box::new(attempt.fetch().await))
+                }
+                Self::Page(attempt) => {
+                    StudioBackgroundResult::Page(Box::new(attempt.fetch().await))
+                }
+                Self::InventoryValidate(super::inventory::InventoryDetach {
+                    body,
+                    permit,
+                    token,
+                }) => {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let validated = (*body).validate();
+                        drop(permit);
+                        validated
+                    })
+                    .await;
+                    StudioBackgroundResult::InventoryValidated(
+                        token,
+                        Box::new(result.unwrap_or_else(|_| {
+                            Err(invalid("Studio inventory validation worker failed"))
+                        })),
+                    )
+                }
+                Self::Prepare(capture, permit, context) => {
+                    let result = tokio::task::spawn_blocking(move || {
+                        capture.rebuild().map(|p| (Box::new(p), permit))
+                    })
+                    .await;
+                    StudioBackgroundResult::Prepared(
+                        context,
+                        result.unwrap_or_else(|_| Err(invalid("Studio preparation worker failed"))),
+                    )
+                }
+                #[cfg(test)]
+                Self::PausedPrepare(capture, permit, context, entered, release) => {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let _ = entered.send(());
+                        let _ = release.recv();
+                        capture.rebuild().map(|p| (Box::new(p), permit))
+                    })
+                    .await;
+                    StudioBackgroundResult::Prepared(
+                        context,
+                        result.unwrap_or_else(|_| Err(invalid("Studio preparation worker failed"))),
+                    )
+                }
+                // S2. The expensive stage: a full `decode_vault` of any retained branch and an
+                // `append` that replays it again. It owns authenticated plaintext, the private
+                // basis and the ownership bundle, and no store, Server, device key or writer.
+                //
+                // Ownership is moved into the closure, so a cancelled waiter cannot take it back:
+                // the worker runs to completion still holding admission and the shared permit,
+                // with the capture holding the job-owned reference hold alongside them. Those are
+                // two owners, not one, and they do not always end together: see the failure arm.
+                Self::OverlayPlan(capture, ownership, context) => {
+                    let mut context = context;
+                    #[cfg(test)]
+                    let pause = context.pause.take();
+                    // Copied before the worker consumes the capture, so a refusal comes back with
+                    // the record it describes (MAP K12). Public context only: no plaintext.
+                    let stamp = Box::new(capture.stamp().clone());
+                    let result = tokio::task::spawn_blocking(move || {
+                        // Ownership and the capture are already inside this closure.
+                        #[cfg(test)]
+                        if let Some((entered, release)) = pause {
+                            let _ = entered.send(());
+                            let _ = release.recv();
+                        }
+                        match capture.plan() {
+                            Ok(plan) => Ok((Box::new(plan), ownership)),
+                            // RT-001. Release here, in the worker, the moment the plan becomes
+                            // impossible. The capture has already been dropped with its media
+                            // hold, so holding admission and a shared slot any longer protects
+                            // nothing and waits on a visit that may never come.
+                            Err(error) => {
+                                drop(ownership);
+                                Err(error)
+                            }
+                        }
+                    })
+                    .await;
+                    match result {
+                        Ok(result) => {
+                            context.stamp = Some(stamp);
+                            StudioBackgroundResult::OverlayPlanned(context, result)
+                        }
+                        // The worker itself died, taking both the bundle and the capture with it.
+                        // Unwinding released them, so there is nothing to hand back.
+                        Err(_) => StudioBackgroundResult::CancelledOverlay,
+                    }
+                }
+                // H2. Owns authenticated plaintext and captured public context; no store, Server,
+                // device key, MLS secret or writer. The ownership moves in with it, so a
+                // cancelled waiter cannot reclaim admission from a worker that is still running.
+                Self::HandoffPrepare(capture, ownership, context) => {
+                    let token = context.token;
+                    let result = tokio::task::spawn_blocking(move || match capture.prepare() {
+                        Ok(plan) => Ok((Box::new(plan), ownership)),
+                        // RT-001's rule: a plan that can never exist releases both immediately.
+                        Err(error) => {
+                            drop(ownership);
+                            Err(error)
+                        }
+                    })
+                    .await;
+                    StudioBackgroundResult::Handoff(match result {
+                        Ok(result) => HandoffCompletion::Prepared(token, result),
+                        Err(_) => HandoffCompletion::Cancelled(token),
+                    })
+                }
+                // H4. Same ownership discipline.
+                Self::HandoffAssemble(plan, ownership, context) => {
+                    let token = context.token;
+                    let result = tokio::task::spawn_blocking(move || {
+                        let stamp = plan.stamp().clone();
+                        match plan.assemble() {
+                            Ok(commit) => Ok((Box::new(commit), ownership)),
+                            Err(error) => {
+                                drop(ownership);
+                                Err((stamp, Box::new(error)))
+                            }
+                        }
+                    })
+                    .await;
+                    StudioBackgroundResult::Handoff(match result {
+                        Ok(result) => HandoffCompletion::Assembled(token, Box::new(result)),
+                        Err(_) => HandoffCompletion::Cancelled(token),
+                    })
+                }
+                // R2. Same ownership discipline as H2: authenticated plaintext and public context
+                // in, no store, Server, key or writer; a refusal releases the bundle at once.
+                Self::HandoffResolve(capture, ownership, context) => {
+                    let token = context.token;
+                    let result = tokio::task::spawn_blocking(move || match capture.resolve() {
+                        Ok(plan) => Ok((Box::new(plan), ownership)),
+                        Err(error) => {
+                            drop(ownership);
+                            Err(error)
+                        }
+                    })
+                    .await;
+                    StudioBackgroundResult::Handoff(match result {
+                        Ok(result) => HandoffCompletion::Resolved(token, result),
+                        Err(_) => HandoffCompletion::Cancelled(token),
+                    })
+                }
+                // S2 of a repair job: authenticated plaintext and public context only. A failed
+                // rebuild releases its slot and claim inside the worker (RT-001).
+                Self::RepairRebuild(token, rebuild, ownership) => {
+                    let result = tokio::task::spawn_blocking(move || rebuild.run(ownership)).await;
+                    StudioBackgroundResult::Repair(match result {
+                        Ok(result) => RepairCompletion::Rebuilt(token, result),
+                        Err(_) => RepairCompletion::Cancelled(token),
+                    })
+                }
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = async { match cancellation.as_mut() { Some(c) => c.cancelled().await, None => std::future::pending::<()>().await } } => cancelled,
+            result = work => result,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct CatchupRuntime {
+    pub(super) preview: PreviewRuntime,
+    #[cfg(test)]
+    pub(super) hint_observer: Option<
+        tokio::sync::watch::Sender<
+            Option<crate::studio_exchange::discovery::StudioHintObservation>,
+        >,
+    >,
+    pub(super) settlement: SettlementNotices,
+    provider: Option<ServerStudioPageProvider>,
+    pass: Option<ServerStudioReceive>,
+    target: Option<StudioTarget>,
+    preparation: Option<(
+        StudioSourceCapture,
+        OwnedSemaphorePermit,
+        PreparationContext,
+    )>,
+    prepared: Option<(PreparationContext, PreparedStudioResult)>,
+    /// One overlay job per actor (I-2), in its own slot rather than sharing `preparing` with
+    /// source preparation: a local Save must not be blocked behind catch-up reconstruction for
+    /// the lifetime of an actor, nor the reverse. The shared four-slot pool is what bounds total
+    /// process-wide work; this slot bounds per-actor concurrency only.
+    overlay: Option<(Box<StudioOverlayCapture>, OverlayOwnership, OverlayContext)>,
+    /// Only a committable plan is parked. A refusal parks no plan, because it owns nothing (RT-001).
+    /// For an Unconfirmed Save only its answer is kept, in `overlay_refused` (MAP K12).
+    overlay_planned: Option<(OverlayContext, Box<StudioOverlayPlan>, OverlayOwnership)>,
+    /// When a parked plan is dropped if no Save has come back for it ([`OVERLAY_PARK_MS`]). The
+    /// plan holds this actor's admission and one of four process-wide preparation permits, and
+    /// only a Save visit consumes it, so without a bound a caller who never returns would hold
+    /// both for as long as no other Save runs here.
+    overlay_planned_until: u64,
+    /// True from the moment the job is handed to the runtime until its result or cancellation
+    /// comes back. It is waiter bookkeeping, never the admission record: admission lives in
+    /// `overlay_admission` and is proved by a live `Arc`, so a cancelled waiter clearing this
+    /// flag does not make a second job admissible.
+    overlay_detached: bool,
+    /// Set by a UI lock that found a job detached: that job's plan is dropped when it returns
+    /// instead of parked ([`release_overlay_for_lock`](Self::release_overlay_for_lock)).
+    overlay_drop_returning: bool,
+    /// The last Unconfirmed Save whose detached plan was refused, and why (MAP K12). Holds no
+    /// admission, permit, hold or plaintext, so unlike a parked plan it needs no wake to bound it.
+    overlay_refused: Option<ParkedOverlayRefusal>,
+    overlay_admission: OverlayAdmission,
+    /// Test-only simulated process pool. All preparation classes in that process share it;
+    /// unrelated fixtures must not consume capacity against independent simulated clocks.
+    #[cfg(test)]
+    overlay_pool: Option<Arc<tokio::sync::Semaphore>>,
+    in_flight: bool,
+    preparing: bool,
+    next_at: u64,
+    selection: usize,
+    peers: Vec<PeerId>,
+    client_turn: bool,
+    service: Option<ServiceWork>,
+    owner_snapshot: Option<ServerOwnerSnapshot>,
+    lifecycle: Option<(Arc<()>, u64, u64)>,
+    lifecycle_retry_at: u64,
+    discovery_needed: Option<StudioTarget>,
+    discovery_plan: Option<DiscoveryPlan>,
+    after_registry: Option<DiscoveryPlan>,
+    head_result: Option<Box<CheckpointDiscoveryCompletion>>,
+    checkpoint: Option<ServerCheckpointFetch>,
+    checkpoint_peer: Option<PeerId>,
+    checkpoint_sealed: bool,
+    checkpoint_retry: u64,
+    binding: Option<(StudioTarget, u128)>,
+    discovery_watch: Option<catcoms_sync::StudioWatch>,
+    registry_provider: Option<ServerRegistryPageProvider>,
+    registry_retained_until: u64,
+    registry_preparation: Option<(ServerRegistryPagePreparation, Option<Arc<()>>)>,
+    registry_prepared: Option<(Option<Arc<()>>, PreparedRegistryResult)>,
+    owner_next_at: u64,
+    owner_selection: usize,
+    owner_target: Option<StudioTarget>,
+    // Bounded one-at-a-time failure state, surfaced by the settlement view/event adapter.
+    owner_failure: Option<(StudioTarget, String)>,
+    registry_watch: Option<crate::registry_ingress::ServerRegistryWatch>,
+    registry_watch_id: Option<u128>,
+    registry_pass: Option<crate::registry_catchup::ServerRegistryReceive>,
+    registry_target: Option<StudioTarget>,
+    registry_next_at: u64,
+    registry_selection: usize,
+    // The repair step's own 5 s cadence and round-robin, so a held fault cannot starve rotation,
+    // and the per-target visit deferrals (Studio targets and Registry buckets alike) that keep one
+    // held target from delaying any other's resume, growing while its outcome repeats. Bounded:
+    // a deferral quiet for a whole maximum window is dropped.
+    repair_next_at: u64,
+    repair_selection: usize,
+    // Per target: when its next visit may come, and how many times in a row it was deferred.
+    repair_visits: std::collections::BTreeMap<CheckpointTarget, (u64, u32)>,
+    // Rotates which peer a repaired seed is requested from.
+    repair_seed_peer: usize,
+    // Targets whose owed repair hit a persistent hold (recovery warning, storage refusal, held
+    // decision, unobserved tenure): no repaired seed is fetched for them again until this time.
+    repair_backoff: std::collections::BTreeMap<CheckpointTarget, u64>,
+    // The Studio target a minted repaired pass reports to; a bucket pass may have no other.
+    repair_failure_target: Option<StudioTarget>,
+    // The one detached repair job per actor (design 10.3), its target claims, the next job token,
+    // the flat full-pool retry, and the bounded memory of terminal repairs and last attempts.
+    repair_job: Option<RepairJob>,
+    repair_claims: RepairClaims,
+    repair_next_token: u64,
+    repair_capacity_at: u64,
+    repair_reports: std::collections::BTreeMap<CheckpointTarget, crate::studio::StudioRepairReport>,
+    repairs_seen: std::collections::BTreeSet<(CheckpointTarget, [u8; 32])>,
+    // Offered repairs held per repair (never per target) until the given time: one this device
+    // could not assemble evidence for, one whose transaction held it (a replayed older sequence,
+    // say), or one whose S3 failed. A bad or premature offer cannot stall other repair work.
+    repair_unverifiable: std::collections::BTreeMap<(CheckpointTarget, [u8; 32]), u64>,
+}
+impl CatchupRuntime {
+    /// Whether `target`'s overlay handoff is Prepared right now, from a structural read of its
+    /// intent record. A read that fails answers `false`, so a fault still reaches the caller's
+    /// ordinary path and surfaces there.
+    ///
+    /// **Every background rail that would read or write a watched target through a path that
+    /// refuses a Prepared destination must skip it while this holds** (design 6.4.5; Flow R's
+    /// implementation review, HIGH-1, and its re-review, MEDIUM-1). Such a refusal is an error,
+    /// and an error escaping `run` pauses all of receive. The record is already being resolved:
+    /// by Flow R, or by H1's synchronous path. Flow R keeps it Prepared from R1 to R3, a window
+    /// of several turns, so without the skip a warm source and a turn of catch-up were enough to
+    /// pause receive and abandon the job, again and again. The rails:
+    /// - owner rotation, the client pass and Registry maintenance read through the service path
+    ///   (`with_studio_checkpoint_source`, `with_prepared_studio_source`);
+    /// - replay re-applies own intents, and an ordinary Apply is refused while Prepared.
+    ///
+    /// Page and seed service already ignore their own errors. A record stuck on Hold is never
+    /// resolved by any path, so these rails stay suspended for that document indefinitely; the
+    /// eligibility view reports it as `PreparedStuck`.
+    pub(super) fn handoff_prepared<T: MeshTransport, R: CryptoRngCore>(
+        server: &Server<T, R>,
+        store: &ServerStore,
+        id: u64,
+        target: StudioTarget,
+    ) -> bool {
+        target
+            .document(&server.group_id())
+            .ok()
+            .and_then(|logical| store.load_epoch_intents_structural(id, &logical).ok())
+            .is_some_and(|state| state.handoff_prepared())
+    }
+    /// Never evict the source of a ready/active page or checkpoint just to start replay.
+    /// A detached result is waiting for a custody visit to consume it. 7.3 makes that a reason for
+    /// a signing slice to yield: the parked result is holding a shared slot.
+    pub(super) fn result_parked(&self) -> bool {
+        self.prepared.is_some()
+            || self.registry_prepared.is_some()
+            || self.overlay_planned.is_some()
+            || self.repair_parked()
+    }
+    /// A member's epoch-service request this runtime has reserved and not yet answered, while the
+    /// request is still current. Once reserved it is no longer queued interest, and once its
+    /// source preparation is installed no result is parked either, yet it is still owed an answer.
+    /// `pending` counts it as work. The signing yield uses the narrower
+    /// [`captured_service_owed`](Self::captured_service_owed).
+    pub(super) fn service_owed<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+        server: &Server<T, R>,
+    ) -> bool {
+        self.service
+            .as_ref()
+            .is_some_and(|s| server.sync.epoch_service_interest_is_current(&s.interest))
+    }
+    #[cfg(test)]
+    pub(super) fn service_capture_for_test(&self) -> Option<bool> {
+        self.service.as_ref().map(|work| work.captured)
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_page_for_test(&self) -> bool {
+        self.pass.is_some()
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_client_turn_for_test(&mut self, client_turn: bool) {
+        self.client_turn = client_turn;
+    }
+    /// [`service_owed`](Self::service_owed), restricted to a request whose source preparation has
+    /// started (`captured`): one that can be answered without taking another pool permit.
+    ///
+    /// This is the term a signing slice yields to (design 18.3 review, F2, found by that test). A
+    /// slice that signs ends its turn before catch-up, so without it signing ran every turn until
+    /// the branch was done, and H5's commit then evicted the source the request had captured,
+    /// which drops a captured request unanswered.
+    ///
+    /// **Why only once captured** (F2's review, MEDIUM-1). A request that has not captured may be
+    /// waiting for a permit from the shared pool, and the signing job holds one of those permits
+    /// until H5. Yielding to it would be a priority inversion: H3 would wait for a request that
+    /// waits for H3, until the interest expires unanswered, and indefinitely under a clock that
+    /// does not move. Uncaptured, it is signed past, as before F2. Once H5 releases the permit it
+    /// can capture and be served, if it is still current then and wins that permit. Otherwise it
+    /// expires unanswered and the requester retries.
+    pub(super) fn captured_service_owed<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+        server: &Server<T, R>,
+    ) -> bool {
+        self.service.as_ref().is_some_and(|s| {
+            s.captured && server.sync.epoch_service_interest_is_current(&s.interest)
+        })
+    }
+    pub(super) fn replay_ready(&self) -> bool {
+        !self.in_flight
+            && !self.preparing
+            && self.preparation.is_none()
+            && self.prepared.is_none()
+            && self.registry_preparation.is_none()
+            && self.registry_prepared.is_none()
+            && self.checkpoint.is_none()
+            && self.discovery_plan.is_none()
+            && self.pass.is_none()
+            && self.registry_pass.is_none()
+    }
+    #[cfg(test)]
+    pub(in crate::studio::receiver) fn hold_registry_page_for_test(
+        &mut self,
+        target: StudioTarget,
+        pass: crate::registry_catchup::ServerRegistryReceive,
+    ) {
+        assert_eq!(
+            pass.state(),
+            crate::registry_catchup::RegistryReceiveState::PageReady
+        );
+        self.registry_target = Some(target);
+        self.registry_pass = Some(pass);
+    }
+    #[cfg(test)]
+    pub(in crate::studio::receiver) fn has_registry_page_for_test(&self) -> bool {
+        self.registry_pass.is_some()
+    }
+    #[cfg(test)]
+    pub(in crate::studio::receiver) fn hold_page_for_test(
+        &mut self,
+        target: StudioTarget,
+        pass: ServerStudioReceive,
+    ) {
+        assert_eq!(pass.state(), StudioReceiveState::PageReady);
+        self.target = Some(target);
+        self.pass = Some(pass);
+    }
+    fn drop_service_preparation(&mut self, context: &PreparationContext) {
+        if self.service.as_ref().is_some_and(|work| {
+            context
+                .service
+                .as_ref()
+                .is_some_and(|g| Arc::ptr_eq(g, &work.generation))
+        }) {
+            self.service = None;
+        }
+    }
+    /// Native's existing idle pass runs even without UI watches. Save owner/MLS evidence once
+    /// per local mount/epoch observation, BEFORE enabling remote interests; never serialize
+    /// whole-server state once per query. A failed lifecycle save yields hints only.
+    pub(super) fn lifecycle<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &ServerStore,
+        id: u64,
+    ) {
+        self.expire_registry_source(server.runtime_clock().monotonic_ms());
+        self.lifecycle_with(server, store, id, |server, store, id| {
+            server.prepare_owner_head_snapshot(store, id)
+        });
+    }
+    fn lifecycle_with<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &ServerStore,
+        id: u64,
+        prepare: impl FnOnce(
+            &mut Server<T, R>,
+            &ServerStore,
+            u64,
+        ) -> Result<ServerOwnerSnapshot, AppError>,
+    ) {
+        let epoch = server.sync.with_registry_context(|g, _, _, _| g.epoch());
+        let mount = store.registry_mount();
+        let same = self
+            .lifecycle
+            .as_ref()
+            .is_some_and(|(m, s, e)| Arc::ptr_eq(m, &mount) && *s == id && *e == epoch);
+        let now = server.runtime_clock().monotonic_ms();
+        if same && (self.owner_snapshot.is_some() || now < self.lifecycle_retry_at) {
+            return;
+        }
+        if !same {
+            server.sync.disable_epoch_service();
+            self.service = None;
+            self.owner_snapshot = None;
+        }
+        let owner = server
+            .sync
+            .with_registry_context(|g, d, _, _| g.designated_committer() == Some(d.device_id()));
+        if owner {
+            self.owner_snapshot = prepare(server, store, id).ok();
+        }
+        // A transient failed flush must recover on local idle cadence. Query frequency cannot
+        // accelerate this retry or mint proof before a real successful save.
+        self.lifecycle_retry_at = if owner {
+            now.saturating_add(30_000)
+        } else {
+            u64::MAX
+        };
+        self.lifecycle = Some((mount, id, epoch));
+        server.sync.enable_epoch_service();
+    }
+    /// Metadata is selected/charged by sync before a disk lookup. Service errors are refusal,
+    /// not corruption of a local edit; they cannot globally pause unrelated watched receive.
+    fn serve<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+    ) -> bool {
+        let work = self.service.take().or_else(|| {
+            server
+                .sync
+                .reserve_epoch_service_interest()
+                .map(|interest| ServiceWork {
+                    interest,
+                    mount: store.registry_mount(),
+                    server: id,
+                    generation: Arc::new(()),
+                    captured: false,
+                })
+        });
+        let Some(mut work) = work else {
+            return false;
+        };
+        if work.server != id
+            || !Arc::ptr_eq(&work.mount, &store.registry_mount())
+            || !server
+                .sync
+                .epoch_service_interest_is_current(&work.interest)
+        {
+            return true;
+        }
+        let CheckpointTarget::Studio(target) = work.interest.target() else {
+            self.serve_registry(server, store, id, work);
+            return true;
+        };
+        if !server
+            .channels()
+            .iter()
+            .any(|c| c.id == u128::from_be_bytes(target.channel()))
+        {
+            return true;
+        }
+        let warm = server
+            .sync
+            .with_registry_context(|g, d, _, _| store.studio_source_is_warm(id, g, target, d));
+        if work.captured
+            && !warm
+            && !self.preparing
+            && self.preparation.is_none()
+            && self.prepared.is_none()
+        {
+            return true;
+        }
+        match self.prepare_for(
+            server,
+            store,
+            id,
+            PreparationContext {
+                target,
+                service: Some(work.generation.clone()),
+            },
+        ) {
+            Ok(false) => {
+                if self.preparation.as_ref().is_some_and(|(_, _, c)| {
+                    c.service
+                        .as_ref()
+                        .is_some_and(|g| Arc::ptr_eq(g, &work.generation))
+                }) {
+                    work.captured = true;
+                }
+                self.service = Some(work);
+                return true;
+            }
+            Err(_) => return true,
+            Ok(true) => {}
+        }
+        // Source preparation may have consumed the request lifetime. Its checked warm cache
+        // can survive, but this old request cannot sign a response for a later same-key query.
+        if !server
+            .sync
+            .epoch_service_interest_is_current(&work.interest)
+        {
+            return true;
+        }
+        if work.interest.kind() == EpochServiceKind::Page {
+            if self
+                .provider
+                .as_ref()
+                .is_none_or(|p| !server.studio_page_provider_is_current(store, id, p))
+            {
+                self.provider = Some(server.studio_page_provider(store, id));
+            }
+            let _ = server.serve_studio_page_interest(
+                store,
+                id,
+                self.provider.as_mut().expect("provider"),
+                &work.interest,
+            );
+        } else if let Ok(mut budget) = Self::inventory_budget(server, store, id) {
+            if self
+                .owner_snapshot
+                .as_ref()
+                .is_some_and(|s| !server.owner_head_snapshot_is_current(store, id, s))
+            {
+                self.owner_snapshot = None;
+            }
+            let _ = server.serve_studio_checkpoint_interest(
+                store,
+                id,
+                &work.interest,
+                self.owner_snapshot.as_ref(),
+                &mut budget,
+            );
+        }
+        true
+    }
+    pub(super) fn explicit_retry(&mut self, now: u64) {
+        if !self.in_flight {
+            if let Some(pass) = &mut self.pass {
+                pass.retry();
+            }
+        }
+        self.next_at = now;
+        // Registry publication is paced idle maintenance, not part of the Read/Save result.
+        // Do not turn the first local watch into immediate work on every quiet native pass.
+        if self.registry_next_at == 0 {
+            self.registry_next_at = now.saturating_add(5_000);
+        }
+    }
+    pub(super) fn pending<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+        server: &Server<T, R>,
+        watches: &VecDeque<(ServerStudioWatch, u128)>,
+    ) -> bool {
+        if self.preview.pending(server.runtime_clock().monotonic_ms())
+            && !self.in_flight
+            && !self.preparing
+        {
+            return true;
+        }
+        if self.prepared.is_some() || self.registry_prepared.is_some() {
+            return true;
+        }
+        // A repair job waiting to detach or to commit owns a pool slot; give it its turn.
+        if self.repair_pending() {
+            return true;
+        }
+        if self.head_result.is_some() {
+            return true;
+        }
+        if server.sync.has_epoch_service_interest() || self.service_owed(server) {
+            return true;
+        }
+        if !watches
+            .iter()
+            .any(|(w, _)| server.sync.studio_watch_is_current(&w.inner))
+        {
+            return false;
+        }
+        if self.in_flight || self.preparing || self.preparation.is_some() {
+            return false;
+        }
+        let now = server.runtime_clock().monotonic_ms();
+        if self.checkpoint.is_some() || self.discovery_plan.is_some() {
+            return now >= self.checkpoint_retry;
+        }
+        if let Some(pass) = &self.pass {
+            return now >= pass.retry_at_ms();
+        }
+        if let Some(pass) = &self.registry_pass {
+            return now >= pass.retry_at_ms();
+        }
+        if (self.owner_snapshot.is_some() && now >= self.owner_next_at)
+            || now >= self.registry_next_at
+        {
+            return true;
+        }
+        let peers = server.sync.studio_page_peers();
+        !peers.is_empty() && (now >= self.next_at || peers != self.peers)
+    }
+    /// Local capture only, never history replay. The scheduler coalesces one target at a time.
+    pub(super) fn prepare<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        target: StudioTarget,
+    ) -> Result<bool, AppError> {
+        self.prepare_for(
+            server,
+            store,
+            id,
+            PreparationContext {
+                target,
+                service: None,
+            },
+        )
+    }
+    /// 7.2. Reserve admission and a shared slot **before** the first bounded read, and release
+    /// both immediately if there is nothing to schedule. Returns the ownership a caller must move
+    /// into the capture it builds; dropping it instead is a complete release, with no bookkeeping
+    /// to unwind, which is the whole point of 7.1's weak-handle admission.
+    ///
+    /// The job-owned reference hold is not taken here: A-001 makes it part of the capture's
+    /// `AdmittedOverlayMedia`, minted with the frame facts it protects.
+    pub(super) fn reserve_overlay(&mut self) -> Option<OverlayOwnership> {
+        if self.overlay.is_some() || self.overlay_detached || self.overlay_planned.is_some() {
+            return None;
+        }
+        let admission = self.overlay_admission.admit()?;
+        let permit = self.overlay_pool().try_acquire_owned().ok()?;
+        Some(OverlayOwnership::new(admission, permit))
+    }
+
+    /// No overlay-only pool: an overlay job competes for the same four process-wide slots as
+    /// source and registry preparation, so a full pool refuses the reservation and the caller
+    /// retries. `overlay_reservation_shares_the_one_preparation_pool` asserts this identity.
+    pub(super) fn overlay_pool(&self) -> Arc<tokio::sync::Semaphore> {
+        self.preparation_pool()
+    }
+
+    pub(super) fn preparation_pool(&self) -> Arc<tokio::sync::Semaphore> {
+        #[cfg(test)]
+        if let Some(pool) = &self.overlay_pool {
+            return pool.clone();
+        }
+        crate::registry_catchup::preparation_pool().clone()
+    }
+
+    /// Park a capture for the next background turn. The ownership moves with it, so from here the
+    /// job is live in the sense 7.1 means: at least one real `Arc` exists.
+    pub(super) fn schedule_overlay(
+        &mut self,
+        capture: StudioOverlayCapture,
+        ownership: OverlayOwnership,
+        target: StudioTarget,
+        commit: OverlayCommit,
+    ) {
+        self.overlay = Some((
+            Box::new(capture),
+            ownership,
+            OverlayContext::save(target, commit),
+        ));
+    }
+
+    /// Whether a plan is parked, for a caller that must prepare before it takes one.
+    pub(super) fn has_planned_overlay(&self) -> bool {
+        self.overlay_planned.is_some()
+    }
+
+    /// How long a parked plan still has, or `Some(0)` once it is due; `None` with nothing parked.
+    ///
+    /// One definition for three consumers, exactly as `registry_retention`: the expiry that drops
+    /// the plan, `pending` reporting the visit that does it, and `wake_in` publishing the deadline
+    /// so a quiet actor schedules that visit at all. An expiry without the wake is no bound.
+    pub(super) fn overlay_park_retention(&self, now: u64) -> Option<u64> {
+        self.overlay_planned
+            .is_some()
+            .then(|| self.overlay_planned_until.saturating_sub(now))
+    }
+
+    /// A visit is owed: a parked plan is past its deadline and only a pass can drop it.
+    pub(in crate::studio::receiver) fn overlay_park_expiry_due(&self, now: u64) -> bool {
+        self.overlay_park_retention(now) == Some(0)
+    }
+
+    /// Milliseconds until that visit is owed, for the actor's injected-clock wake.
+    pub(in crate::studio::receiver) fn overlay_park_wake_in(&self, now: u64) -> Option<u64> {
+        self.overlay_park_retention(now)
+            .filter(|remaining| *remaining > 0)
+    }
+
+    /// Drop a parked plan past its deadline, releasing admission and the permit with it. Returns
+    /// whether one was dropped, so the receiver can forget the request that scheduled it.
+    ///
+    /// Safe for the reason RT-001 gives for a refused plan: nothing durable was written, the media
+    /// hold dies with the plan, and the request reclassifies from durable state on its next visit.
+    /// A caller who comes back late re-captures and re-plans. For a Flipnote frame operation it may
+    /// also have to republish the frame's PIX: the plan's media hold was the only thing keeping a
+    /// promoted PIX from reclamation, and it is not durable protection. That is the cost RT-001
+    /// already accepts for a refused plan.
+    pub(in crate::studio::receiver) fn expire_parked_overlay(&mut self, now: u64) -> bool {
+        if self.overlay_park_retention(now) == Some(0) {
+            self.overlay_planned = None;
+            return true;
+        }
+        false
+    }
+
+    /// Take whatever plan is parked, for any target, with the target it was planned for.
+    ///
+    /// The slot holds one plan for the whole actor, and `reserve_overlay` refuses every target
+    /// while it is parked. So a Save on another target that could only take its own target's plan
+    /// would wait for as long as the plan's caller stayed away, which can be for ever. The
+    /// Unconfirmed Save takes it with this instead, finishes it, and reports nothing of it as its
+    /// own (design 8.7; review of `b35e23d2`, HIGH-1).
+    pub(super) fn take_any_planned_overlay(
+        &mut self,
+    ) -> Option<(OverlayContext, Box<StudioOverlayPlan>, OverlayOwnership)> {
+        self.overlay_planned.take()
+    }
+
+    /// Drop a capture queued for its detached plan but not yet handed out, releasing admission, its
+    /// pool permit and its transient media hold with it. Returns whether one was dropped.
+    ///
+    /// For `pause` (design 18.3 review, F4). A paused receiver hands out no work, and only an
+    /// unrelated explicit access clears the pause, so a queued capture would strand all three for
+    /// the whole pause. Safe for RT-001's reason: nothing durable was written, and the caller's
+    /// identical retry plans afresh. A capture already detached is the worker's: it completes,
+    /// parks, and the park deadline drops it, because that expiry runs outside the pause gate.
+    pub(super) fn release_queued_overlay(&mut self) -> bool {
+        self.overlay.take().is_some()
+    }
+
+    /// For a UI lock: release whatever the overlay slot holds.
+    ///
+    /// The slot holds at most one of three things, and each holds draft plaintext, admission, a
+    /// pool permit and a media hold:
+    /// - a queued capture, dropped now;
+    /// - a parked plan, dropped now;
+    /// - a detached job, whose plan is dropped when it comes back.
+    ///
+    /// No visit runs while locked, so neither the pause release nor the park deadline would reach
+    /// any of them, and the lock rule (the inventory job's, C-3 runtime design 4) is that no
+    /// plaintext stays resident. Safe for RT-001's reason: nothing durable was written, and the
+    /// request reclassifies from durable state on its retry. Returns whether a request's work was
+    /// released, so the caller can forget which request scheduled it.
+    ///
+    /// **Only for a caller after which no visit runs**, which today means the lock reset. It drops a
+    /// committable plan, which a visit would otherwise have committed on the request's retry. Any
+    /// other caller must accept that cost on purpose.
+    pub(super) fn release_overlay_for_lock(&mut self) -> bool {
+        let queued = self.overlay.take().is_some();
+        let parked = self.overlay_planned.take().is_some();
+        if self.overlay_detached {
+            self.overlay_drop_returning = true;
+        }
+        // A refusal holds nothing a lock must release, and is not counted as released work. It is
+        // dropped anyway, so the first Save after an unlock is decided afresh.
+        self.overlay_refused = None;
+        queued || parked || self.overlay_detached
+    }
+
+    /// Keep a refused plan's answer for its request's retry (MAP K12), replacing any other. One per
+    /// actor, as the slot is: only the latest refusal can still have a caller retrying.
+    pub(super) fn park_overlay_refusal(
+        &mut self,
+        request: [u8; 32],
+        stamp: Box<StudioOverlayStamp>,
+        reason: catcoms_replication::studio::StudioOverlaySaveRefusal,
+        message: String,
+        now: u64,
+    ) {
+        self.overlay_refused = Some(ParkedOverlayRefusal {
+            request,
+            stamp,
+            reason,
+            message,
+            until: now.saturating_add(OVERLAY_PARK_MS),
+        });
+    }
+
+    /// The refusal kept for `request`, if it is not yet past its deadline. A refusal past it is
+    /// dropped here, which is the only place the deadline is enforced: it holds nothing, so nothing
+    /// is lost by keeping it until a retry looks, and it feeds neither `pending` nor `wake_in`.
+    ///
+    /// Not an answer by itself: the caller must also prove the stamp current under custody, and
+    /// [`forget_overlay_refusal`](Self::forget_overlay_refusal) when it is not.
+    pub(super) fn overlay_refusal_for(
+        &mut self,
+        request: [u8; 32],
+        now: u64,
+    ) -> Option<&ParkedOverlayRefusal> {
+        if self
+            .overlay_refused
+            .as_ref()
+            .is_some_and(|r| now >= r.until)
+        {
+            self.overlay_refused = None;
+        }
+        self.overlay_refused
+            .as_ref()
+            .filter(|refusal| refusal.request == request)
+    }
+
+    /// Drop the kept refusal: its record moved on, so the request is decided afresh.
+    pub(super) fn forget_overlay_refusal(&mut self) {
+        self.overlay_refused = None;
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_overlay_refusal_for_test(&self) -> bool {
+        self.overlay_refused.is_some()
+    }
+
+    #[cfg(test)]
+    pub(super) fn overlay_admission_available_for_test(&mut self) -> bool {
+        self.overlay_admission.can_admit()
+    }
+
+    /// Give this actor a private preparation pool, so permit arithmetic is deterministic instead
+    /// of contending with every other test in the process on the one global semaphore.
+    #[cfg(test)]
+    pub(super) fn inject_overlay_pool_for_test(
+        &mut self,
+        permits: usize,
+    ) -> Arc<tokio::sync::Semaphore> {
+        let pool = Arc::new(tokio::sync::Semaphore::new(permits));
+        self.overlay_pool = Some(pool.clone());
+        pool
+    }
+
+    /// Mark a network pass in flight without one, for a test of `detach`'s ordering against the
+    /// flag (C-3 step 2: a parked inventory body must not wait behind it).
+    #[cfg(test)]
+    pub(super) fn set_in_flight_for_test(&mut self, in_flight: bool) {
+        self.in_flight = in_flight;
+    }
+    #[cfg(test)]
+    pub(super) fn in_flight_for_test(&self) -> bool {
+        self.in_flight
+    }
+
+    /// Exactly what `complete` does for a cancelled overlay waiter, without needing a Server.
+    #[cfg(test)]
+    fn note_cancelled_overlay_for_test(&mut self) {
+        self.overlay_detached = false;
+    }
+
+    /// Queue a real capture for scheduling-order tests. The capture comes from the production
+    /// Flow S path via `studio_closing_capture_fixture`; nothing here fabricates one.
+    #[cfg(test)]
+    pub(super) fn queue_overlay_for_test(
+        &mut self,
+        capture: StudioOverlayCapture,
+        ownership: OverlayOwnership,
+        target: StudioTarget,
+    ) {
+        self.overlay = Some((
+            Box::new(capture),
+            ownership,
+            OverlayContext::save(target, OverlayCommit::Unconfirmed),
+        ));
+    }
+
+    fn prepare_for<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        context: PreparationContext,
+    ) -> Result<bool, AppError> {
+        let target = context.target;
+        if self.repair_claimed(CheckpointTarget::Studio(target)) {
+            // The repair job captured this source and evicted its warm copy. A rival rebuild in
+            // a second slot would cost a full reconstruction for nothing the job does not redo.
+            return Ok(false);
+        }
+        let warm = server
+            .sync
+            .with_registry_context(|g, d, _, _| store.studio_source_is_warm(id, g, target, d));
+        if warm {
+            return Ok(true);
+        }
+        if self.preparing
+            || self.preparation.is_some()
+            || self.prepared.is_some()
+            || self.registry_preparation.is_some()
+            || self.registry_prepared.is_some()
+        {
+            return Ok(false);
+        }
+        let pool = self.preparation_pool();
+        let permit = match pool.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                // A retained Registry graph must not permanently occupy this actor's preparation
+                // capacity while a foreground/receive Studio graph needs the shared worker pool.
+                // Retry before returning: dropping the provider can release this actor's slot,
+                // and a later service step must not race the waiting page for that exact capacity.
+                self.registry_provider = None;
+                let Ok(permit) = pool.try_acquire_owned() else {
+                    return Ok(false);
+                };
+                permit
+            }
+        };
+        let capture = server
+            .sync
+            .with_registry_context(|g, d, _, _| store.capture_studio_source(id, g, target, d))?;
+        if let Some(capture) = capture {
+            self.preparation = Some((capture, permit, context));
+            return Ok(false);
+        }
+        // Actual absence needs no reconstruction. The normal inventory gate still decides
+        // whether it is legal to receive into absent epoch zero, never an Index pointer alone.
+        Ok(true)
+    }
+    fn budget<T: MeshTransport, R: CryptoRngCore>(
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+    ) -> Result<crate::store::EpochStudioBudget, AppError> {
+        let snapshot = server.snapshot()?;
+        server
+            .sync
+            .with_registry_context(|_, _, _, rng| store.save_server(id, &snapshot, rng))?;
+        Self::inventory_budget(server, store, id)
+    }
+    fn inventory_budget<T: MeshTransport, R: CryptoRngCore>(
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+    ) -> Result<crate::store::EpochStudioBudget, AppError> {
+        let mut scan = store.scan_studio_receive_inventory()?;
+        while !scan.step()?.complete {}
+        let inventory = scan.finish()?;
+        server
+            .sync
+            .with_registry_context(|g, _, _, _| store.studio_storage_budget(id, g, &inventory))
+    }
+    fn schedule_preview_if_idle<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &ServerStore,
+        id: u64,
+    ) {
+        if !self.in_flight
+            && !self.preparing
+            && self.preparation.is_none()
+            && self.registry_preparation.is_none()
+            && self.pass.is_none()
+            && self.registry_pass.is_none()
+            && self.discovery_plan.is_none()
+            && self.checkpoint.is_none()
+        {
+            self.preview.schedule(server, store, id);
+        }
+    }
+    pub(super) fn run<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        watches: &VecDeque<(ServerStudioWatch, u128)>,
+    ) -> Result<Option<StudioTarget>, AppError> {
+        let now = server.runtime_clock().monotonic_ms();
+        if let Some(generation) = self.complete_registry_preparation(server, store)? {
+            // The prepared Registry source belongs to this exact reserved request. Serve it in the
+            // installation turn before a held page for another bucket can replace the sole
+            // provider. A later turn is too late: that replacement would drop the request after it
+            // already paid for detached preparation.
+            let exact = self
+                .service
+                .as_ref()
+                .is_some_and(|work| Arc::ptr_eq(&work.generation, &generation));
+            if exact && self.serve(server, store, id) {
+                return Ok(None);
+            }
+        }
+        // A repair job's S3 is never parked behind catch-up for its own target: that catch-up
+        // is deferred until the job ends, so waiting on it would wait on itself (design 10.3).
+        self.repair_check_authority(server);
+        if let Some(updated) = self.repair_commit(server, store, id)? {
+            return Ok(Some(updated));
+        }
+        if let Some((context, prepared)) = self.prepared.take() {
+            let service_generation = context.service.clone();
+            let result = prepared.and_then(|(source, _permit)| {
+                server.sync.with_registry_context(|g, d, _, _| {
+                    store.install_prepared_studio_source(g, d, *source)
+                })
+            });
+            let installed = match result {
+                Ok(installed) => installed,
+                Err(_) if context.service.is_some() => {
+                    self.drop_service_preparation(&context);
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            };
+            if !installed {
+                self.drop_service_preparation(&context);
+                // A concurrent healthy edit/MLS transition is not a storage fault. Discard the
+                // old result and its process permit; future bounded selection captures anew.
+                self.next_at = now.saturating_add(5_000);
+                return Ok(None);
+            }
+            // As for Registry above, answer the exact request immediately after its detached
+            // source becomes current. H5 or replay must not get a turn to evict that source before
+            // the response is signed, and held-page early returns must not make it unreachable.
+            let exact_service = service_generation.as_ref().is_some_and(|generation| {
+                self.service
+                    .as_ref()
+                    .is_some_and(|work| Arc::ptr_eq(&work.generation, generation))
+            });
+            if exact_service && self.serve(server, store, id) {
+                return Ok(None);
+            }
+        }
+        if let Some(updated) = self.advance_checkpoint(server, store, id)? {
+            return Ok(Some(updated));
+        }
+        // A held page wins its next native pass over further source requests. Otherwise a
+        // steady stream of page requests could continuously evict the very graph it needs.
+        if self
+            .pass
+            .as_ref()
+            .is_some_and(|p| p.state() == StudioReceiveState::PageReady)
+        {
+            let target = self.target.expect("pass target");
+            if self.repair_claimed(CheckpointTarget::Studio(target)) {
+                // A repair job owns this source. The page is dropped, never saved under it;
+                // a later pass fetches again once the job has ended.
+                self.pass = None;
+                self.next_at = now.saturating_add(5_000);
+                return Ok(None);
+            }
+            if !self.prepare(server, store, id, target)? {
+                // The page keeps priority over new client work, but a service request must still be
+                // reserved. If the same full pool blocks it, `serve` retains it as uncaptured and
+                // H3 may sign past it until capacity returns instead of yielding to unreachable
+                // work forever.
+                self.serve(server, store, id);
+                return Ok(None);
+            }
+            let mut budget = Self::budget(server, store, id)?;
+            let pass = self.pass.as_mut().expect("page pass");
+            let before = pass.progress().accepted;
+            if let Err(error) = server.persist_studio_receive_step(store, pass, &mut budget) {
+                if matches!(
+                    pass.state(),
+                    StudioReceiveState::RestartRequired | StudioReceiveState::Stopped
+                ) {
+                    // The adapter discarded a page whose authority/context expired. Nothing
+                    // was saved; bounded retry, not an explicit-access-only storage pause, is
+                    // the correct response to normal membership or subscription churn.
+                    self.pass = None;
+                    self.next_at = now.saturating_add(5_000);
+                    return Ok(None);
+                }
+                return Err(error);
+            }
+            return Ok((pass.progress().accepted > before)
+                .then_some(self.target)
+                .flatten());
+        }
+        match self.persist_registry_page(server, store, id)? {
+            RegistryPageVisit::None => {}
+            RegistryPageVisit::Consumed => {
+                // A Registry hint is not a Studio edit. Only a subsequent actual source update
+                // may emit StudioUpdated; otherwise timeline/acceptance observers see false work.
+                return Ok(None);
+            }
+            RegistryPageVisit::Deferred => {
+                // As for a cold held Studio page above: do not start new client work, but do let
+                // service reserve its request so the signing gate sees its true captured state.
+                self.serve(server, store, id);
+                return Ok(None);
+            }
+        }
+        // Owner work also uses the sole prepared source. It must never displace a fetched
+        // page before that page has crossed its save-before-cursor barrier.
+        if !self.in_flight
+            && !self.preparing
+            && self.checkpoint.is_none()
+            && self.discovery_plan.is_none()
+        {
+            if let Some(updated) = self.rotate_owner(server, store, id, watches)? {
+                return Ok(Some(updated));
+            }
+            if let Some(updated) = self.repair_owner(server, store, id, watches)? {
+                return Ok(Some(updated));
+            }
+        }
+        // Answer requests even during our own detached fetch; symmetric reconnect must not
+        // wait for one side's client pass to finish before serving its counterpart.
+        let serve_now = self.in_flight
+            || self.preparing
+            || watches.is_empty()
+            || !self.pending(server, watches)
+            || !self.client_turn;
+        self.client_turn = !self.client_turn;
+        if serve_now && self.serve(server, store, id) {
+            return Ok(None);
+        }
+        if self.in_flight || self.preparing || self.preparation.is_some() {
+            return Ok(None);
+        }
+        if self.checkpoint.is_some() || self.discovery_plan.is_some() {
+            return Ok(None);
+        }
+        if let Some(pass) = &mut self.pass {
+            match pass.state() {
+                StudioReceiveState::Ready => return Ok(None),
+                // Network errors use a paced fresh pass. Storage failure returns above and
+                // leaves the SAME pending page Paused until an explicit successful access.
+                state => {
+                    if matches!(
+                        state,
+                        StudioReceiveState::CheckpointRequired
+                            | StudioReceiveState::RestartRequired
+                    ) {
+                        self.discovery_needed = self.target;
+                    }
+                    self.pass = None;
+                    self.next_at = now.saturating_add(5_000);
+                }
+            }
+        }
+        let peers = server.sync.studio_page_peers();
+        if watches.is_empty() || peers.is_empty() || (now < self.next_at && peers == self.peers) {
+            // Registry maintenance uses the intentional gap between Studio page passes.
+            // It cannot consume the client turn promised by the existing service alternation.
+            self.work_registry(server, store, id, watches)?;
+            self.schedule_preview_if_idle(server, store, id);
+            return Ok(None);
+        }
+        self.peers = peers;
+        if let Some(target) = self.discovery_needed.take() {
+            if let Some((watch, _)) = watches.iter().find(|(w, _)| w.target == target) {
+                self.schedule_discovery(store, id, watch, self.peers[0]);
+                return Ok(None);
+            }
+        }
+        let index = self.selection % watches.len();
+        let peer = self.peers[(self.selection / watches.len()) % self.peers.len()];
+        let watch = &watches[index].0;
+        if self.preview.defers(watch.target, now) {
+            self.selection = self.selection.wrapping_add(1);
+            self.next_at = now.saturating_add(1_000);
+            self.work_registry(server, store, id, watches)?;
+            self.schedule_preview_if_idle(server, store, id);
+            return Ok(None);
+        }
+        if watch.server != id || !Arc::ptr_eq(&watch.mount, &store.registry_mount()) {
+            return Err(invalid("catch-up mount changed"));
+        }
+        if self.repair_claimed(CheckpointTarget::Studio(watch.target)) {
+            // The repair job owns this source; move on rather than prepare a rival copy of it.
+            self.selection = self.selection.wrapping_add(1);
+            self.next_at = now.saturating_add(1_000);
+            self.work_registry(server, store, id, watches)?;
+            return Ok(None);
+        }
+        // Its status read below would refuse a Prepared destination with an error that pauses
+        // all of receive; its resolution is already scheduled (see `handoff_prepared`).
+        if Self::handoff_prepared(server, store, id, watch.target) {
+            self.selection = self.selection.wrapping_add(1);
+            self.next_at = now.saturating_add(1_000);
+            return Ok(None);
+        }
+        if !self.prepare(server, store, id, watch.target)? {
+            return Ok(None);
+        }
+        self.selection = self.selection.wrapping_add(1);
+        self.target = Some(watch.target);
+        // The first page itself needs all-family accounting. Warm the associated saved
+        // Registry footprint before that scan, not only after a later checkpoint response.
+        // Other unrelated cold records still obey the existing inventory work rail.
+        let logical = watch.target.document(&server.group_id()).map_err(invalid)?;
+        let bucket =
+            catcoms_replication::registry::PointerKey::new(logical.doc_type, logical.logical_key)
+                .map_err(invalid)?
+                .bucket();
+        if !store.registry_receive_source_fits(id, &server.group_id(), bucket)?
+            && !self.prepare_registry_inventory(server, store, id, bucket)?
+        {
+            return Ok(None);
+        }
+        let mut budget = Self::budget(server, store, id)?;
+        let status = server.sync.with_registry_context(|g, d, _, _| {
+            store.prepared_studio_status(id, g, watch.target, d, &mut budget)
+        })?;
+        if let Some((doc_id, phase)) = status {
+            if doc_id != watches[index].1 {
+                self.binding = Some((watch.target, doc_id));
+                return Ok(Some(watch.target));
+            }
+            if phase != catcoms_replication::EpochPhase::Open {
+                // A persisted Closing epoch survives expiry/restart. It needs a fresh private
+                // head selection, not an Open-only page pass that globally pauses the receiver.
+                // A Fault needs one too: the owner's answer is the only thing that can carry a
+                // repair, and the query is how this peer reports its frozen pair (W-1).
+                if matches!(
+                    phase,
+                    catcoms_replication::EpochPhase::Closing
+                        | catcoms_replication::EpochPhase::Fault
+                ) {
+                    let peer = self.peers[0];
+                    self.schedule_reporting_discovery(server, store, id, watch, peer);
+                }
+                self.next_at = now.saturating_add(5_000);
+                return Ok(None);
+            }
+        }
+        self.pass = Some(server.begin_studio_receive(store, watch, peer, &mut budget)?);
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests;
+impl StudioReceiver {
+    /// Detached CPU work a deterministic fixture waits out without advancing its clock: source
+    /// and Registry preparation, and a repair job's S2 rebuild (which keeps its own stage rather
+    /// than the `preparing` flag). Network jobs are excluded so both actors keep serving.
+    #[cfg(test)]
+    pub(crate) fn preparing_for_test(&self) -> bool {
+        self.catchup.preparing || self.catchup.repair_detached_for_test()
+    }
+
+    /// Called under the successful native custody window, then run after releasing that lease.
+    pub(crate) fn detach<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+    ) -> Option<StudioBackgroundJob<T>> {
+        if self.paused {
+            return None;
+        }
+        // RT-002. S2 is a heavy stage, so 7.3's placement rule applies to it: it runs only when
+        // `replay_ready()` holds, behind authoritative source and registry preparation, network
+        // passes and discovery. The design accepts that overlay work may starve under sustained
+        // catch-up (L7); it does not accept catch-up starving under sustained local Saves, and an
+        // earlier revision of this selection had exactly that backwards.
+        //
+        // The gate is here rather than in `reserve_overlay` deliberately. Reserving before the
+        // first bounded read is 7.2, and classification is cheap: gating the reservation would
+        // also defer the terminal S1a acknowledgement, which reads no source, mints no basis and
+        // is not a heavy stage. Only the detached reconstruction yields to catch-up.
+        let work = if let Some((capture, permit, context)) = self.catchup.preparation.take() {
+            Some(StudioBackgroundJob::Prepare(capture, permit, context))
+        } else if let Some((job, generation)) = self.catchup.registry_preparation.take() {
+            Some(StudioBackgroundJob::PrepareRegistry(job, generation))
+        } else if let Some(job) = self.catchup.repair_detach() {
+            // Above the discovery gate deliberately: catch-up for the claimed target defers until
+            // this job ends, so a pending discovery must never park its S2 (design 10.3, HIGH-1).
+            // It is already bounded by its own reserved slot.
+            Some(job)
+        } else if let Some(detach) = self.inventory.take_detach() {
+            // C-3 runtime design 4: after source and Registry preparation and before the
+            // `in_flight` check, so a network pass in flight cannot strand a parked body (which
+            // holds a pool permit and authenticated plaintext) behind it. A captured repair job
+            // detaches first; each already holds its own permit, so neither waits on the other
+            // for more than one selection.
+            Some(StudioBackgroundJob::InventoryValidate(detach))
+        } else if self.catchup.in_flight
+            || (self.catchup.discovery_plan.is_some()
+                && server.runtime_clock().monotonic_ms() < self.catchup.checkpoint_retry)
+        {
+            None
+        } else if let Some(plan) = self.catchup.discovery_plan.take() {
+            match server.prepare_checkpoint_discovery_at_mount(
+                plan.mount,
+                plan.server,
+                plan.peer,
+                plan.target,
+                plan.fault_report.as_ref(),
+            ) {
+                Ok(attempt) => Some(StudioBackgroundJob::Head(attempt)),
+                Err(_) => {
+                    self.catchup
+                        .retry_discovery(server.runtime_clock().monotonic_ms());
+                    None
+                }
+            }
+        } else if let Some(pass) = &mut self.catchup.checkpoint {
+            if !self.catchup.checkpoint_sealed
+                || server.runtime_clock().monotonic_ms() < self.catchup.checkpoint_retry
+            {
+                None
+            } else {
+                match server.prepare_checkpoint_seed_fetch(
+                    pass,
+                    self.catchup.checkpoint_peer.expect("checkpoint peer"),
+                ) {
+                    Ok(Some(attempt)) => {
+                        self.catchup.checkpoint_retry =
+                            server.runtime_clock().monotonic_ms().saturating_add(1_000);
+                        Some(StudioBackgroundJob::Seed(attempt))
+                    }
+                    Ok(None) => None,
+                    Err(_) => {
+                        self.catchup
+                            .retry_discovery(server.runtime_clock().monotonic_ms());
+                        None
+                    }
+                }
+            }
+        } else if self.catchup.registry_pass.as_ref().is_some_and(|p| {
+            p.state() == crate::registry_catchup::RegistryReceiveState::Ready
+                && server.runtime_clock().monotonic_ms() >= p.retry_at_ms()
+        }) {
+            let pass = self
+                .catchup
+                .registry_pass
+                .as_mut()
+                .expect("ready Registry pass");
+            match server.prepare_registry_receive_step(pass) {
+                Ok(Some(attempt)) => Some(StudioBackgroundJob::RegistryPage(attempt)),
+                Ok(None) => None,
+                Err(_) => {
+                    self.catchup.registry_pass = None;
+                    self.catchup.registry_next_at =
+                        server.runtime_clock().monotonic_ms().saturating_add(5_000);
+                    None
+                }
+            }
+        } else if let Some(pass) = &mut self.catchup.pass {
+            match server.prepare_studio_receive_step(pass) {
+                Ok(Some(attempt)) => Some(StudioBackgroundJob::Page(attempt)),
+                Ok(None) => None,
+                Err(_) => {
+                    self.catchup.pass = None;
+                    self.catchup.next_at =
+                        server.runtime_clock().monotonic_ms().saturating_add(5_000);
+                    None
+                }
+            }
+        } else if self.catchup.replay_ready() && self.catchup.overlay.is_some() {
+            let (capture, ownership, context) =
+                self.catchup.overlay.take().expect("checked just above");
+            Some(StudioBackgroundJob::OverlayPlan(
+                capture, ownership, context,
+            ))
+        } else if let Some(job) = self
+            .catchup
+            .replay_ready()
+            .then(|| self.handoff_detach())
+            .flatten()
+        {
+            // H2 and H4 are heavy stages, so 7.3's placement gate applies to them exactly as it
+            // does to Flow S's plan: behind source and registry preparation, network passes and
+            // discovery. An earlier revision put them first on the argument that their permit was
+            // already reserved; that is the RT-002 inversion again, and reserving capacity is not
+            // a licence to preempt authoritative work.
+            Some(job)
+        } else {
+            let generation = self.catchup.preview.generation();
+            self.catchup
+                .preview
+                .job
+                .take()
+                .map(|job| StudioBackgroundJob::Preview(generation, job))
+        };
+        match &work {
+            Some(StudioBackgroundJob::Preview(_, job)) => {
+                if job.is_preparation() {
+                    self.catchup.preparing = true;
+                } else {
+                    self.catchup.in_flight = true;
+                }
+            }
+            Some(StudioBackgroundJob::Prepare(..)) => self.catchup.preparing = true,
+            #[cfg(test)]
+            Some(StudioBackgroundJob::PausedPrepare(..)) => self.catchup.preparing = true,
+            Some(StudioBackgroundJob::PrepareRegistry(..)) => self.catchup.preparing = true,
+            Some(StudioBackgroundJob::OverlayPlan(..)) => self.catchup.overlay_detached = true,
+            // The handoff runtime moved its own stage to `Detached` when it produced this job;
+            // the catch-up flags are not its bookkeeping.
+            Some(
+                StudioBackgroundJob::HandoffPrepare(..)
+                | StudioBackgroundJob::HandoffAssemble(..)
+                | StudioBackgroundJob::HandoffResolve(..),
+            ) => {}
+            // Likewise: the repair job moved its own stage to `Detached`.
+            Some(StudioBackgroundJob::RepairRebuild(..)) => {}
+            // The inventory runtime moved itself to `Validating` when it produced this job.
+            Some(StudioBackgroundJob::InventoryValidate(..)) => {}
+            Some(StudioBackgroundJob::Page(..) | StudioBackgroundJob::RegistryPage(..)) => {
+                self.catchup.in_flight = true
+            }
+            Some(StudioBackgroundJob::Head(..) | StudioBackgroundJob::Seed(..)) => {
+                self.catchup.in_flight = true
+            }
+            None => {}
+        }
+        work
+    }
+    pub(crate) fn complete<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        result: StudioBackgroundResult,
+    ) {
+        match result {
+            StudioBackgroundResult::InventoryValidated(token, result) => {
+                self.inventory.complete(token, result)
+            }
+            StudioBackgroundResult::InventoryCancelled(token) => self.inventory.cancelled(token),
+            StudioBackgroundResult::Preview(generation, completed) => {
+                if matches!(
+                    completed,
+                    PreviewCompletion::Prepared(_)
+                        | PreviewCompletion::Cancelled { preparation: true }
+                ) {
+                    self.catchup.preparing = false;
+                } else {
+                    self.catchup.in_flight = false;
+                }
+                self.catchup.preview.complete(generation, completed);
+            }
+            StudioBackgroundResult::RegistryPage(completed) => {
+                self.catchup.in_flight = false;
+                if let Some(pass) = &mut self.catchup.registry_pass {
+                    if server
+                        .complete_registry_receive_step(pass, *completed)
+                        .is_err()
+                    {
+                        self.catchup.registry_pass = None;
+                        self.catchup.registry_next_at =
+                            server.runtime_clock().monotonic_ms().saturating_add(5_000);
+                    }
+                }
+            }
+            StudioBackgroundResult::PreparedRegistry(generation, result) => {
+                self.catchup.preparing = false;
+                self.catchup.registry_prepared = Some((generation, result));
+            }
+            StudioBackgroundResult::CancelledRegistry(generation) => {
+                self.catchup.preparing = false;
+                if let Some(generation) = generation {
+                    self.catchup.drop_registry_service(&generation);
+                } else {
+                    self.catchup
+                        .retry_discovery(server.runtime_clock().monotonic_ms());
+                }
+            }
+            StudioBackgroundResult::Head(completed) => {
+                self.catchup.in_flight = false;
+                self.catchup.head_result = Some(completed);
+            }
+            StudioBackgroundResult::Seed(completed) => {
+                self.catchup.in_flight = false;
+                if let Some(pass) = &mut self.catchup.checkpoint {
+                    if server
+                        .complete_checkpoint_seed_fetch(pass, *completed)
+                        .is_err()
+                    {
+                        self.catchup
+                            .retry_discovery(server.runtime_clock().monotonic_ms());
+                    }
+                }
+            }
+            StudioBackgroundResult::Prepared(context, result) => {
+                self.catchup.preparing = false;
+                self.catchup.prepared = Some((context, result));
+            }
+            StudioBackgroundResult::OverlayPlanned(context, result) => {
+                self.catchup.overlay_detached = false;
+                // The parked plan still owns the bundle, so admission stays unavailable until a
+                // custody visit consumes it. That is deliberate: a plan waiting to commit is a
+                // live job, and its pixels are still protected only by its transient hold.
+                //
+                // RT-001. A refusal parks no plan: the worker released admission and the shared
+                // slot when planning failed, and the capture took its media hold with it. The
+                // request stays retryable. Either Save provenance is answered from the kept
+                // refusal while its stamped record remains unchanged.
+                // A UI lock released the slot while this job was detached, so its plan is dropped
+                // as it returns rather than parked: nothing may hold draft plaintext through a
+                // lock, and no visit runs while locked to expire it.
+                let dropped_for_lock = std::mem::take(&mut self.catchup.overlay_drop_returning);
+                match (result, dropped_for_lock) {
+                    (Ok((plan, ownership)), false) => {
+                        self.catchup.overlay_planned = Some((context, plan, ownership));
+                        self.catchup.overlay_planned_until = server
+                            .runtime_clock()
+                            .monotonic_ms()
+                            .saturating_add(OVERLAY_PARK_MS);
+                    }
+                    (result, _) => {
+                        // MAP K12: either Save provenance keeps its refusal against the stamp of
+                        // the record it was planned from, so the identical retry hears it instead
+                        // of capturing and planning again. The provenance retained in the context
+                        // selects the corresponding request slot; the fingerprint itself remains
+                        // domain-separated, so neither Save kind can claim the other's refusal.
+                        //
+                        // Not across a lock. Today a lock that finds a job detached also forgets
+                        // its request, so `unconfirmed_scheduled` is already `None` here and the
+                        // `dropped_for_lock` term is redundant: no test can tell it apart, and its
+                        // mutant survives. It stays so the rule holds where it is applied, should
+                        // the lock ever stop forgetting the request.
+                        let request = match context.commit.as_ref() {
+                            Some(OverlayCommit::Closing(_)) => self.closing_scheduled,
+                            Some(OverlayCommit::Unconfirmed) => self.unconfirmed_scheduled,
+                            None => None,
+                        };
+                        if let (
+                            Err(AppError::StudioRefused { reason, message }),
+                            false,
+                            Some(request),
+                            Some(stamp),
+                        ) = (result, dropped_for_lock, request, context.stamp)
+                        {
+                            let now = server.runtime_clock().monotonic_ms();
+                            self.catchup
+                                .park_overlay_refusal(request, stamp, reason, message, now);
+                        }
+                        // Nothing was parked, so neither provenance has scheduled work any more. A
+                        // stale fingerprint would answer a retry "pending" while nothing is in
+                        // flight.
+                        self.closing_scheduled = None;
+                        self.unconfirmed_scheduled = None;
+                    }
+                }
+            }
+            StudioBackgroundResult::CancelledOverlay => {
+                // Clears the waiter only. The worker still owns the bundle and is still running,
+                // so admission and the shared slot remain occupied until it ends by itself. What
+                // it produces is never parked, so the remembered request is cleared as above.
+                self.catchup.overlay_detached = false;
+                self.catchup.overlay_drop_returning = false;
+                self.closing_scheduled = None;
+                self.unconfirmed_scheduled = None;
+            }
+            StudioBackgroundResult::Handoff(completion) => {
+                let now = server.runtime_clock().monotonic_ms();
+                self.handoff_complete(completion, now);
+            }
+            StudioBackgroundResult::Repair(completion) => {
+                let now = server.runtime_clock().monotonic_ms();
+                self.catchup.repair_complete(completion, now);
+                // A paused receiver never reaches the commit visit, and nothing wakes it while
+                // paused, so a result arriving now would hold its pool slot and target claim until
+                // a person reopened something. Release it here, as `handoff_complete` does.
+                if self.paused {
+                    self.catchup.repair_release_for_pause();
+                }
+            }
+            StudioBackgroundResult::Page(completed) => {
+                self.catchup.in_flight = false;
+                if let Some(pass) = &mut self.catchup.pass {
+                    if server
+                        .complete_studio_receive_step(pass, *completed)
+                        .is_err()
+                    {
+                        // This is a network/context failure, not permission to clear storage pause.
+                        self.catchup.pass = None;
+                        self.catchup.next_at =
+                            server.runtime_clock().monotonic_ms().saturating_add(5_000);
+                    }
+                }
+            }
+            StudioBackgroundResult::Cancelled { preparation } => {
+                if let Some(context) = preparation {
+                    self.catchup.preparing = false;
+                    self.catchup.drop_service_preparation(&context);
+                } else {
+                    self.catchup.in_flight = false;
+                    self.catchup.pass = None;
+                    self.catchup.registry_pass = None;
+                    self.catchup
+                        .retry_discovery(server.runtime_clock().monotonic_ms());
+                }
+                self.catchup.next_at = server.runtime_clock().monotonic_ms().saturating_add(5_000);
+            }
+        }
+    }
+}

@@ -71,8 +71,10 @@ function validMs(value: number): boolean {
   return Number.isInteger(value) && value >= 0 && value <= TAKE_MAX_DURATION_MS;
 }
 
-function validNonce(value: string): boolean {
-  return new RegExp(`^[0-9a-f]{${JAM_SESSION_NONCE_HEX_CHARS}}$`).test(value);
+function validNonce(value: unknown): value is string {
+  // RegExp.test coerces its argument. Imported JSON numbers/arrays must not cross this shared
+  // recorder/import boundary as a supposedly validated string or acquire a different lane key.
+  return typeof value === "string" && new RegExp(`^[0-9a-f]{${JAM_SESSION_NONCE_HEX_CHARS}}$`).test(value);
 }
 
 function validWave(value: string): value is LegacyWave {

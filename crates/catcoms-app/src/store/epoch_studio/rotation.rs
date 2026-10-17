@@ -1,0 +1,402 @@
+//! One Studio source and one exclusive store borrow across owner journaling and settlement.
+//! P1's existing owner/recovery/intent writers retain their own accounting and crash barriers.
+use super::*;
+use catcoms_replication::studio::StudioRecovery;
+use catcoms_replication::CloseRecord;
+use catcoms_rt::Clock;
+
+#[cfg(test)]
+pub(crate) mod interruption;
+
+/// Local state only. Publication requires the existing current-owner proof handoff, not a
+/// successful disk transaction. Pending recovery keeps the complete source sealed on disk.
+pub use crate::store::RegistryOwnerRotationOutcome as StudioRotationOutcome;
+
+impl ServerStore {
+    /// Local scheduling metadata only: the actual transaction rechecks every source and owner
+    /// boundary. Do not repeatedly construct/sign large ineligible closures on idle ticks.
+    pub(crate) fn studio_owner_rotation_needed(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<bool, AppError> {
+        if group.designated_committer() != Some(device.device_id()) {
+            return Ok(false);
+        }
+        // Repair state owns publication; rotating would only flush and then refuse each turn.
+        let document = target.document(&group.group_id()).map_err(invalid)?;
+        if !self.epoch_owner_is_ordinary(server, &document)? {
+            return Ok(false);
+        }
+        let status =
+            self.with_studio_checkpoint_source(server, group, target, device, budget, |state| {
+                Ok((state.phase(), state.unit.close_candidate_ready()))
+            })?;
+        let Some((phase, ready)) = status else {
+            return Ok(false);
+        };
+        if phase == EpochPhase::Fault {
+            return Ok(false);
+        };
+        if ready || phase == EpochPhase::Closing {
+            return Ok(true);
+        }
+        self.epoch_owner_rotation_pending(server, &document)
+    }
+    /// Trusted current durable-owner-snapshot callback only. A UI-supplied tenure is not
+    /// authority. A large source must already have passed the existing detached preparation.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn rotate_studio_owner(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        tenure: u64,
+        clock: &dyn Clock,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(StudioRotationOutcome, EpochStudioState), AppError> {
+        #[cfg(test)]
+        let interruption = self.studio_rotation_interruption.clone();
+        #[cfg(test)]
+        let mut interrupt_before = |step: WriteTag, _: &Path, _: &[u8]| {
+            interruption
+                .as_ref()
+                .map_or(Intercept::Continue, |i| i.before(target, step))
+        };
+        #[cfg(test)]
+        let mut interrupt_after = |op: CompletedOperation, step: WriteTag, _: &Path| {
+            // Only after a replacement: the interruption models a record that is durable but
+            // unaccounted, and this transaction flushes some records before replacing them.
+            if op != CompletedOperation::Write {
+                return AfterIntercept::Continue;
+            }
+            interruption
+                .as_ref()
+                .map_or(AfterIntercept::Continue, |i| i.after(target, step))
+        };
+        #[cfg(test)]
+        let mut hooks = WriteHooks::Hooked {
+            before: Some(&mut interrupt_before),
+            before_sync: None,
+            before_unlink: None,
+            after: Some(&mut interrupt_after),
+        };
+        #[cfg(not(test))]
+        let mut hooks = WriteHooks::None;
+        self.rotate_studio_owner_with_io(
+            server, group, target, device, tenure, clock, rng, budget, &mut hooks,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn rotate_studio_owner_with_io(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        tenure: u64,
+        clock: &dyn Clock,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<(StudioRotationOutcome, EpochStudioState), AppError> {
+        if group.designated_committer() != Some(device.device_id()) || tenure > group.epoch() {
+            return Err(invalid(
+                "rotation requires current owner and observed tenure",
+            ));
+        }
+        self.resolve_studio_handoff(server, group, target, device, rng, budget)?;
+        let source::CheckedReceiveSource {
+            unit,
+            observed,
+            before,
+            version,
+        } = self.checked_studio_receive_source(server, group, target, device, budget)?;
+        if observed.is_none() {
+            return Err(invalid("rotation source missing"));
+        }
+        // Flush the actual unchanged source before an irrevocable decision can escape. Keep
+        // its actual physical version: normalized restart bytes are not an inventory stamp.
+        let mut state = self.save_studio_source_reusing(
+            server,
+            unit,
+            observed,
+            &before,
+            WritePurpose::Settlement,
+            rng,
+            &mut budget.storage,
+            WriteStep::new(WriteTag::Source),
+            hooks,
+            version,
+        )?;
+        let document = target.document(&group.group_id()).map_err(invalid)?;
+        let checked = (|| {
+            let journal = self.load_epoch_owner_receipts(server, &document)?;
+            let observed = self.epoch_owner_receipt_inventory_record(server, &document)?;
+            let scope = super::super::epoch_owner::scope_bytes(server, &document)?;
+            budget
+                .storage
+                .verify_record(
+                    &StorageScope::new(server, &document.server_id).map_err(invalid)?,
+                    *blake3::hash(&scope).as_bytes(),
+                    observed,
+                )
+                .map_err(invalid)?;
+            Ok::<_, AppError>(journal)
+        })();
+        let journal = checked.inspect_err(|_| budget.storage.invalidate())?;
+        if state.phase() == EpochPhase::Fault {
+            return Ok((StudioRotationOutcome::Fault, state));
+        }
+        let previous = journal.pending().or_else(|| journal.published());
+        let resume = previous.filter(|r| {
+            r.tenure_start_group_epoch == tenure
+                && (journal.pending().is_some() || !state.unit.opened_by(r))
+        });
+        let (decision, adoption_seed) = if state.unit.owner_rotation_needs_adoption(tenure) {
+            if resume.is_some_and(|receipt| journal.close_for(receipt).is_none()) {
+                return Ok((StudioRotationOutcome::DecisionNeedsClose, state));
+            }
+            let (decision, seed) = state
+                .unit
+                .frozen_owner_decision(
+                    group,
+                    device,
+                    tenure,
+                    previous,
+                    previous.and_then(|r| journal.close_for(r)),
+                )
+                .map_err(invalid)?;
+            (decision, Some(seed))
+        } else if let Some(receipt) = resume {
+            let Some(close) = journal.close_for(receipt) else {
+                return Ok((StudioRotationOutcome::DecisionNeedsClose, state));
+            };
+            (
+                state
+                    .unit
+                    .resume_owner_decision(group, device, tenure, receipt, close)
+                    .map_err(invalid)?,
+                None,
+            )
+        } else {
+            (
+                state
+                    .unit
+                    .new_owner_decision(group, device, tenure, previous)
+                    .map_err(invalid)?,
+                None,
+            )
+        };
+        let saved = self.prepare_studio_owner_decision_with_writer(
+            server,
+            &decision,
+            group,
+            tenure,
+            rng,
+            &mut budget.storage,
+            hooks,
+        )?;
+        let pending = saved.pending().is_some();
+        // The exact decision is durable before sealing. Installed retries must preserve newer
+        // content and must not retire any newer successor intents under the predecessor close.
+        if state.unit.opened_by(decision.receipt()) {
+            return Ok((
+                StudioRotationOutcome::AlreadyInstalled {
+                    publication_pending: pending,
+                },
+                state,
+            ));
+        }
+        let record = state
+            .source
+            .as_ref()
+            .map(source::SourceVersion::record)
+            .or(observed);
+        let before = Zeroizing::new(state.unit.snapshot().map_err(invalid)?);
+        let outcome = if adoption_seed.is_some() {
+            state
+                .unit
+                .begin_checkpoint_adoption(decision.receipt().clone(), group, tenure)
+        } else {
+            state.unit.seal(decision.receipt().clone(), group, tenure)
+        }
+        .map_err(invalid)?;
+        state = self.save_studio_source(
+            server,
+            state.unit,
+            record,
+            &before,
+            WritePurpose::Settlement,
+            rng,
+            &mut budget.storage,
+            WriteStep::new(WriteTag::Source),
+            hooks,
+        )?;
+        if outcome == ReceiptIngest::Fault {
+            return Ok((StudioRotationOutcome::Fault, state));
+        }
+        if let Some(seed) = adoption_seed {
+            let (outcome, state) = self.finish_studio_checkpoint_adoption_with_io(
+                server,
+                group,
+                target,
+                decision.receipt(),
+                seed.bytes(),
+                tenure,
+                clock,
+                rng,
+                budget,
+                state,
+                record,
+                // These were two identity maps between per-transaction tag enums, complete with
+                // an `unreachable!` for tags the other enum lacked. One store-wide tag removes
+                // the translation and the unreachable arm with it.
+                hooks,
+            )?;
+            // This shared install half can only install or hold a recovery warning. An
+            // unexpected future outcome must not be reported as successful rotation.
+            return match outcome {
+                StudioAdoptionOutcome::Installed => Ok((
+                    StudioRotationOutcome::Installed {
+                        publication_pending: pending,
+                    },
+                    state,
+                )),
+                StudioAdoptionOutcome::RecoveryPending => {
+                    Ok((StudioRotationOutcome::RecoveryPending, state))
+                }
+                _ => Err(invalid("unexpected frozen Studio adoption outcome")),
+            };
+        }
+        self.settle_studio_source(
+            server,
+            group,
+            target,
+            record,
+            tenure,
+            decision.close(),
+            pending,
+            state,
+            clock,
+            rng,
+            budget,
+            hooks,
+        )
+    }
+
+    // Caller retains sole source/store custody. The checkpoint plan verifies receipt, source
+    // version and closure; no caller-supplied projection or seed is trusted here.
+    #[allow(clippy::too_many_arguments)]
+    fn settle_studio_source(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        observed: Option<StorageRecord>,
+        tenure: u64,
+        close: &CloseRecord,
+        pending: bool,
+        mut state: EpochStudioState,
+        clock: &dyn Clock,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<(StudioRotationOutcome, EpochStudioState), AppError> {
+        let plan = state
+            .unit
+            .prepare_settlement(close, group, tenure)
+            .map_err(invalid)?;
+        let document = target.document(&group.group_id()).map_err(invalid)?;
+        // Even no new snapshot cannot bypass an older pending warning or corrupt typed state.
+        let checked = (|| {
+            let old = self.load_epoch_recovery(server, &document)?;
+            for held in old.retained().chain(old.staged()) {
+                StudioRecovery::from_snapshot(held, &document, target.channel())
+                    .map_err(invalid)?;
+            }
+            let observed = self.epoch_recovery_inventory_record(server, &document)?;
+            let scope = super::super::epoch_recovery::scope_bytes(server, &document)?;
+            budget
+                .storage
+                .verify_record(
+                    &StorageScope::new(server, &document.server_id).map_err(invalid)?,
+                    *blake3::hash(&scope).as_bytes(),
+                    observed,
+                )
+                .map_err(invalid)?;
+            old.eviction_pending()
+        })();
+        // A warning past its deadline is promoted here rather than held forever for an
+        // acknowledgement that may never come.
+        if self
+            .advance_due_epoch_recovery_with_writer(
+                server,
+                &document,
+                checked.inspect_err(|_| budget.storage.invalidate())?,
+                clock,
+                rng,
+                &mut budget.storage,
+                hooks,
+            )?
+            .is_some()
+        {
+            return Ok((StudioRotationOutcome::RecoveryPending, state));
+        }
+        if let Some(snapshot) = plan.recovery_snapshot() {
+            let saved = self.update_epoch_recovery_accounted_with_writer(
+                server,
+                &document,
+                EpochRecoveryAction::Stage(snapshot.clone()),
+                clock,
+                rng,
+                &mut budget.storage,
+                hooks,
+            )?;
+            if saved.state.eviction_pending()?.is_some() {
+                return Ok((StudioRotationOutcome::RecoveryPending, state));
+            }
+        }
+        self.retire_studio_intents_with_io(
+            server,
+            &plan,
+            rng,
+            &mut budget.storage,
+            &mut budget.intents,
+            hooks,
+        )?;
+        let record = state
+            .source
+            .as_ref()
+            .map(source::SourceVersion::record)
+            .or(observed);
+        let before = Zeroizing::new(state.unit.snapshot().map_err(invalid)?);
+        let successor = state
+            .unit
+            .checkpoint_successor(&plan, group, tenure)
+            .map_err(invalid)?;
+        let saved = self.save_studio_source(
+            server,
+            successor,
+            record,
+            &before,
+            WritePurpose::Settlement,
+            rng,
+            &mut budget.storage,
+            WriteStep::new(WriteTag::Successor),
+            hooks,
+        )?;
+        Ok((
+            StudioRotationOutcome::Installed {
+                publication_pending: pending,
+            },
+            saved,
+        ))
+    }
+}
