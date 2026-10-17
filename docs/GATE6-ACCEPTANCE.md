@@ -19,6 +19,13 @@ evidence is the hosted CI run on the final PR #44 head.
 | Combined-review findings 1–4 | `fde014ca815478a885a0dfc4f16398c2c52a4e4a`: a resolved non-budget dispatch refusal stops archival playback without EOF; GIF `.part` staging/sync runs outside the UI-session guard and server registry, with only the rename fenced and reveal after it; take suppression keeps both the outgoing and the adopted deck CID; SFX/export id reuse after checkpoint compaction is specified and pinned as an accepted limitation ([GATE6-FRAME-SOUND](GATE6-FRAME-SOUND.md)) | Re-review at `fde014ca`: three resolved, one accepted limitation |
 | Score loop keeps its authored grid | The commit after `fde014ca` (its SHA is in the PR #44 description): `ScorePlayback.gridMs` travels beside the unchanged jam-take:v1 export, and Studio completion is max(grid end, last release end), so trailing rests and empty bars loop. Regressions cover a first-step note then rests, trailing empty bars and a final release crossing the grid. This ledger update is in the same commit | Re-review pending |
 
+Hosted CI at `7cada377` failed only the main workflow: `cargo fmt --check` on Linux/Windows (two
+`assert!` layouts in the compaction regression; Clippy and tests never ran) and `cargo-deny`
+advisories. The advisory failure began at `41fa5b19` with unchanged code: RUSTSEC-2026-0346,
+-0347, -0348 and -0349 were published against the transitive `rustls` 0.23.45 (via libp2p QUIC/TLS).
+The next commit applies rustfmt 1.89.0 to both workspaces and moves both `Cargo.lock` files to
+`rustls` 0.23.46, the patched version in all four advisories; no other locked package changes.
+
 Earlier evidence stays attached to its own SHA: the local PASS below is for `818e7116` (equal
 code at `41fa5b19`), not for the combined head.
 

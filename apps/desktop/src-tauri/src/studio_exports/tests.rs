@@ -101,7 +101,11 @@ fn studio_gif_safe_download_never_overwrites_and_reports_reveal_failure() {
     let gif = encode_gif(&golden(), GIF_MAX_BYTES, || false).unwrap();
     let abandoned = stage_gif(dir.path(), &gif, || false, || {}).unwrap();
     assert_eq!(std::fs::read(&abandoned.staging).unwrap(), gif);
-    assert_eq!(std::fs::read(&abandoned.path).unwrap(), b"", "the reserved name holds no bytes");
+    assert_eq!(
+        std::fs::read(&abandoned.path).unwrap(),
+        b"",
+        "the reserved name holds no bytes"
+    );
     drop(abandoned);
     let mut staged = stage_gif(dir.path(), &gif, || false, || {}).unwrap();
     staged.publish().unwrap();
@@ -273,7 +277,13 @@ async fn studio_gif_stale_session_and_missing_server_never_write_or_reveal() {
 fn staging_files(dir: &Path) -> usize {
     std::fs::read_dir(dir)
         .unwrap()
-        .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().ends_with(".part"))
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".part")
+        })
         .count()
 }
 
@@ -321,7 +331,11 @@ async fn studio_gif_stalled_staging_holds_no_lock_and_cancels_cleanly() {
         let probe = async {
             stalled.await.unwrap();
             let unrelated = timeout(Duration::from_secs(10), async {
-                drop(require_ui_session_generation(&state, generation).await.unwrap());
+                drop(
+                    require_ui_session_generation(&state, generation)
+                        .await
+                        .unwrap(),
+                );
                 drop(state.servers.lock().await);
             })
             .await;
@@ -346,7 +360,10 @@ async fn studio_gif_stalled_staging_holds_no_lock_and_cancels_cleanly() {
         } else {
             let saved = result.unwrap();
             assert!(saved.displayed);
-            assert!(revealed_unlocked.get(), "reveal runs after the critical section");
+            assert!(
+                revealed_unlocked.get(),
+                "reveal runs after the critical section"
+            );
             assert_eq!(std::fs::read(&saved.path).unwrap(), gif);
             assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         }

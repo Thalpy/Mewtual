@@ -520,8 +520,14 @@ fn frame_sound_compacted_removals_stop_fencing_their_ids_after_the_seed() {
     next.apply_changes([Change::from_bytes(seed.bytes().to_vec()).unwrap()])
         .unwrap();
     let seeded = FlipnoteFrameProjection::read(&logical(), CHANNEL, 1, &next).unwrap();
-    assert!(!seeded.sound.known(&id(1), false), "the seed keeps no SFX tombstone");
-    assert!(!seeded.sound.known(&id(8), true), "the seed keeps no export birth");
+    assert!(
+        !seeded.sound.known(&id(1), false),
+        "the seed keeps no SFX tombstone"
+    );
+    assert!(
+        !seeded.sound.known(&id(8), true),
+        "the seed keeps no export birth"
+    );
 
     for (who, op, nonce) in [(1, set_sound(1, 600_000), 10), (2, export(9), 11)] {
         let projected = FlipnoteFrameProjection::read(&logical(), CHANNEL, 1, &next).unwrap();
