@@ -1,6 +1,14 @@
 # Mewtual; Interfaces & Hooks Schema
 
-## Current Gate 6 caller status (2026-10-14)
+## Gate 7 current caller contract (2026-10-17)
+
+Gate 6 is owner-accepted and merged at `82631a81`. [GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md)
+maps every current canonical Studio surface to its production command/event, bounds and
+recovery/retry behavior. Explicit Score family binding and all nine settlement states apply.
+No new native repair or direct Closing Save command is exposed. Dated records below remain
+checkpoint evidence; [GATE7-ACCEPTANCE](GATE7-ACCEPTANCE.md) records the new verification.
+
+## Gate 6 caller checkpoint (2026-10-14)
 
 Score/Sound/linked Music/PIXA/GIF production callers and the existing `.jamtake` archival consumer
 are connected in the candidate. The leaf codec contracts below remain pure APIs, not a claim
