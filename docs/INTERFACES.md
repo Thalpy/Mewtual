@@ -1,5 +1,35 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Gate 7 UI completion candidate (2026-10-17)
+
+The current [UI handoff](GATE7-UI-HANDOFF.md) supersedes historical absence claims for PIXA
+deck/global viewing, explicit repair and direct Closing local-draft Save. New main-window commands:
+
+- `studio_fault_read({server,channel,object?,objectKind?,scope:"source"|"registry"})` returns the
+  actual source/derived Registry bucket, source phase, two candidate receipt hashes and their
+  close/seed/epoch labels, current `mayDecide/blockedBy`, held repair and last local attempt.
+- `studio_fault_repair({...target,scope,decision:{receiptA,receiptB,selected}})` accepts no receipt
+  bytes, tenure, sequence, author or seed. The existing actor/store derives these and rechecks the
+  current durable owner and candidate pair. `{kind:"faultRepairStarted",start:"scheduled"|"busy",
+  refreshRequired:true}` is scheduling evidence only. Withheld scheduled/dropped replies are uncertain.
+- `studio_closing_overlay_save_begin({...target})` returns `closingOverlaySaveTicket` with exact
+  basis/branch and `provenance:"closing"`, or a typed `closingOverlaySave` refusal.
+- `studio_closing_overlay_save({...target,save:{basis,branch,nonce,body}})` retains existing Flow-S
+  saved/pending/busy/paused/refused/disposed/handedOff vocabulary, with a distinct Closing envelope
+  and saved provenance. Saved means localOnly/provisional, never a shared Apply or receipt. Exact
+  accepted/terminal retries precede current close/source/tenure admission. Fresh work requires the
+  actual signed close held in this vault's owner journal; ordinary peers generally lack it.
+
+`download_file` now accepts optional `maxBytes`, which can only tighten its native 16-MiB cap.
+The authenticated manifest plan is checked before allocation/fetch. PIXA callers request9MiB,
+check listing/encoded/decoded lengths and use the complete existing PIXA parser. Shared deck PIXA
+reuses existing queue/CID/offset/pause/DJ transport; old builds cannot render the new media kind.
+No wire or persistence format is added. File details exposes the global viewer from Files and
+chat/wiki references; Play uses the same archival engine and authored music/SFX horizon.
+
+Verification remains in [GATE7-ACCEPTANCE](GATE7-ACCEPTANCE.md); these contracts alone do not
+establish audible hardware or two-desktop release evidence.
+
 ## Gate 7 current caller contract (2026-10-17)
 
 Gate 6 is owner-accepted and merged at `82631a81`. [GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md)

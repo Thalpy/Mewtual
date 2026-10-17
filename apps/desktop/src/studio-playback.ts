@@ -113,7 +113,12 @@ export class StudioPlaybackController {
   async startPixa(bytes: Uint8Array, offsetMs = 0): Promise<boolean> {
     let packageValue;
     try { packageValue = decodePixa(bytes); } catch { return false; }
-    return this.start(packageValue.take, { fps: packageValue.fps, frameCount: packageValue.frames.length, sfx: packageValue.sfx }, offsetMs, 0);
+    return this.startAnimation(packageValue.take, { fps: packageValue.fps, frameCount: packageValue.frames.length, sfx: packageValue.sfx }, offsetMs);
+  }
+
+  /** The same validated archival schedule for a decoded package; this grants no media consent. */
+  async startAnimation(take: JamTake, animation: JamArchivalAnimation, offsetMs = 0): Promise<boolean> {
+    return this.start(take, animation, offsetMs, 0);
   }
 
   private async start(take: unknown, animation: JamArchivalAnimation | undefined, offsetMs: number, horizonMs: number): Promise<boolean> {

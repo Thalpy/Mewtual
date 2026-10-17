@@ -7,8 +7,9 @@ use super::overlay_capture::{
 use super::*;
 use crate::studio::StudioOwnerTenure;
 use catcoms_replication::studio::{
-    StudioClosingOverlayBasis, StudioOverlayAdmission, StudioOverlayBasis, StudioOverlayProvenance,
-    StudioOverlayRequestClass, StudioOverlaySave, StudioOverlaySaveRefusal, StudioOverlayState,
+    StudioClosingOverlayBasis, StudioOverlayAdmission, StudioOverlayBasis,
+    StudioOverlayManualReason, StudioOverlayProvenance, StudioOverlayRequestClass,
+    StudioOverlaySave, StudioOverlaySaveRefusal, StudioOverlayState,
 };
 use catcoms_replication::{CloseRecord, LocalIntent, ReplError};
 
@@ -38,6 +39,36 @@ fn classify_save_error(error: ReplError) -> AppError {
 }
 
 impl ServerStore {
+    /// Read signed close material from this vault's owner journal, never from the renderer.
+    /// The source/tenure/signature/epoch relationship is checked by the existing Closing mint.
+    /// Callers saving under an old ticket carry this Result until terminal retry classification;
+    /// absence here must never erase a durable acceptance or disposal acknowledgement.
+    pub(crate) fn saved_studio_closing_record(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+    ) -> Result<CloseRecord, AppError> {
+        let document = target.document(&group.group_id()).map_err(invalid)?;
+        if !self.epoch_owner_is_ordinary(server, &document)? {
+            return Err(studio_refused(
+                StudioOverlaySaveRefusal::Durable(StudioOverlayManualReason::ReceiptChanged),
+                "signed close is held by repair state",
+            ));
+        }
+        let journal = self.load_epoch_owner_receipts(server, &document)?;
+        journal
+            .pending()
+            .or_else(|| journal.published())
+            .and_then(|receipt| journal.close_for(receipt))
+            .cloned()
+            .ok_or_else(|| {
+                studio_refused(
+                    StudioOverlaySaveRefusal::Durable(StudioOverlayManualReason::ReceiptChanged),
+                    "no saved signed close is available for this document",
+                )
+            })
+    }
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn save_studio_closing_overlay(
         &mut self,
@@ -72,6 +103,7 @@ impl ServerStore {
     }
 
     /// Ordinary durable IO for the scheduled runtime's first custody visit.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn start_studio_closing_overlay(
         &mut self,

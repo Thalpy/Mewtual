@@ -1,5 +1,44 @@
 # Gate 7 acceptance and evidence ledger
 
+## UI completion candidate — Gate OPEN pending final verification (2026-10-17)
+
+After `f3596ac8` the owner asked to close the remaining UI gaps. This candidate implements
+shared-deck PIXA recognition/picker/canvas/focus, a global file viewer from file details, explicit
+source/Registry owner fault repair, and separate ticketed Closing local-draft Save. The owner
+still explicitly defers two desktops; native audible hardware/platform evidence stays separate.
+The current contract and authority limits are in [GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md).
+
+Focused implementation checks are coherent. Complete suites are now running sequentially,
+with `CARGO_BUILD_JOBS=2` and limited test concurrency. Current evidence includes real detached
+Closing save/retry, actual rendered repair/Closing buttons and headless Edge global viewer /
+shared-deck playback. Final full-suite and build/lint results are not yet claimed.
+
+The read-only actual-diff review found no authority bypass. Its three medium UI findings were
+fixed: stale pending fault reads now invalidate, Index/failed-object repair remains reachable,
+and separate panels have separate radio names. Bounded failed/held repair details are retained.
+The browser boot flow independently caught invalid optional-parameter emission despite passing
+Svelte static checks; the declaration was corrected. The focused Edge flow passes with trusted
+test clicks and normal audio activation policy. Both the frame labels and independently known
+pixels must advance; pause must hold the displayed frame, and fetch caps/permit retirement are
+asserted. Interactive browser tooling was unavailable;
+headless Edge fixture evidence cannot substitute for a native window or audible hardware test.
+
+The final actual-diff review has no remaining blocker/high/medium finding. Its last low finding
+(pixel results returned but omitted from the flow's expected keys) was fixed and the focused
+flow passed again. The previous PR review correction ledger below retains its own scope and
+execution checkpoint.
+
+### UI completion focused evidence
+
+| Check / log under `target/` | Result |
+|---|---|
+| Root `closing_control_` (`gate7-ui-closing-focused.log`) | PASS, 1/1: real detached local Save, actual sealed-journal removal, exact accepted retry and refusal of fresh authority |
+| Native `studio::` (`gate7-ui-native-focused.log`) | PASS, 70/70 before the final additional Closing delivery-classification regression; that regression is included in the final suite |
+| Frontend reader/transport/fault/rendered controls/security/fixture (`gate7-ui-final-focused.log`) | PASS, 59/59 |
+| Session/native/surface/fault/reader (`gate7-ui-session-focused.log`) | PASS, 70/70 at the earlier implementation checkpoint; final relevant changes also covered by the row above and final suite |
+| `FLOW_SCENARIO=gate7 npm --prefix apps/desktop run test:flows` (`gate7-ui-browser-flow.log`) | PASS: viewer pixels, shared deck/focus pixels, pause, 9 MiB native caps and retired permits; screenshot `gate7-pixa-focus.png` |
+| Frontend `check` / `build` (`gate7-ui-{check,build}.log`) | PASS: 0 static errors/warnings; production build with existing large-chunk advisory |
+
 ## Gate remains OPEN — PR #46 review corrections (2026-10-17)
 
 The external review of `5a15ba1e` identifies three medium acceptance weaknesses and one low
@@ -126,11 +165,11 @@ features, internal native seams, acceptance coverage and the documented event-pa
   media archive. Copy is not proof that every losing alternative/branch was preserved.
 - SFX/export id reuse after a compact seed remains the Gate 6 accepted ordinary-authoring
   limitation. Retained negative recovery evidence still forbids resurrection through Restore/Copy.
-- Direct Closing Save and explicit native repair commands remain unavailable; runtime
-  `repairing`/`storageRefused` events are real notifications, not command availability.
-- Shared-deck PIXA consensus/media-kind, standalone global viewer and shared verified emoji
-  catalog/chat clicks remain unimplemented. Earlier Gate 6 records carry shared-deck/global
-  viewing forward as Gate 7/UI follow-ups; this bounded backend acceptance does not close them.
+- Direct Closing Save, explicit source/Registry repair and shared-deck/global PIXA viewing
+  are implemented by the current UI completion candidate above, with the authority and
+  availability limits in the UI handoff. This supersedes their absence at earlier checkpoints.
+- A shared verified emoji catalog/chat-click feature remains outside this UI completion
+  scope; bounded local emoji JSON import is not that feature.
 - Audible native hardware, two desktop UI sessions, macOS old/new stream-8 behavior and
   WebKitGTK WebRTC capability need separate platform release observations. Neither the TCP
   test nor fake IPC/engines establishes them. This ledger does not claim those observations.

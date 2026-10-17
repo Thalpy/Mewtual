@@ -50,6 +50,7 @@
   import { frameClaimState, type ClaimView, type StudioClaimActions, type StudioClaimSnapshot } from "./draw-claims.ts";
   import ScoreEditor from "./ScoreEditor.svelte";
   import StudioSound from "./StudioSound.svelte";
+  import StudioFaultControls from "./StudioFaultControls.svelte";
   import type { JamPatch, JamTake } from "./jam-contract.ts";
   import { jamPatchId, validateJamPatch } from "./jam-patch.ts";
   import type { StudioAudioActions, StudioAudioState } from "./studio-audio.ts";
@@ -109,6 +110,7 @@
   const isScore = $derived(doc?.objectKind === "score" || (!doc && entry?.kind === "score"));
   const score = $derived.by(() => { void studio.rev; return session.doc?.object === objectId ? session.doc.score : null; });
   const sourceGeneration = $derived.by(() => { void studio.rev; return session.mediaGeneration; });
+  const faultRevision = $derived.by(() => { void studio.rev; return session.faultGeneration; });
   $effect(() => {
     void objectId; void view; void model; void score; void sourceGeneration;
     untrack(() => { audioActions?.stop(); });
@@ -1013,12 +1015,13 @@
     {/if}
 {/snippet}
 {#snippet historyRail()}
+            <StudioFaultControls {session} object={objectId || null} revision={faultRevision} />
             <div class="st-sec nxt">history</div>
             {#if view}
               <p class="st-hist"><i class={view.awaitingTenureReceipt ? "warn" : view.phase === "settled" ? "ok" : view.phase === "fault" ? "danger" : view.phase === "closing" ? "warn" : "info"}></i>
                 {#if view.awaitingTenureReceipt}awaiting the owner's tenure receipt · epoch {view.epoch}{:else}{view.phase} · epoch {view.epoch} · saved locally, provisional{/if}
               </p>
-              <p class="micro wrap">{view.awaitingTenureReceipt ? "the base is unconfirmed; edits stay in a bounded local-only draft until the history is installed or you dispose of it" : view.phase === "closing" ? "rotating: durable edits resume when the owner settles this rotation" : view.phase === "fault" ? "history fault: conflicting owner receipts" : view.phase === "settled" ? "the owner settled this epoch; later edits are provisional until the next receipt" : "an owner receipt settles these edits later"}</p>
+              <p class="micro wrap">{view.awaitingTenureReceipt ? "the base is unconfirmed; edits stay in a bounded local-only draft until the history is installed or you dispose of it" : view.phase === "closing" ? "rotating: Save keeps edits in a local-only draft when this device holds the signed close; shared history changes only after handoff" : view.phase === "fault" ? "history fault: conflicting owner receipts" : view.phase === "settled" ? "the owner settled this epoch; later edits are provisional until the next receipt" : "an owner receipt settles these edits later"}</p>
             {/if}
             {#if overlay?.loading}
               <p class="micro wrap">checking this device for a retained local draft…</p>
@@ -1177,6 +1180,7 @@
 <div class="studio" bind:this={rootEl} role="application" aria-label="Studio editor" tabindex="0">
   {#if !objectId || (!model && !doc)}
     <div class="studio-empty">
+      {#if hasScope && objectId}<StudioFaultControls {session} object={objectId} revision={faultRevision} />{/if}
       {#if !hasScope}
         <p class="muted">Open a channel to see its studio.</p>
       {:else}
@@ -1200,6 +1204,7 @@
     </div>
   {:else if !model}
     <div class="studio-empty">
+      <StudioFaultControls {session} object={objectId} revision={faultRevision} />
       {#if doc?.error}
         <div class="st-banner danger">could not read this flipnote: {doc.error} <button type="button" class="st-btn" onclick={() => session.open(objectId)}>retry</button></div>
       {:else if doc?.absent && !pending.length}

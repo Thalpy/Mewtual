@@ -222,6 +222,34 @@ fn every_destructive_or_copy_success_is_classified_before_a_final_fence() {
     );
 }
 
+#[test]
+fn scheduled_repair_is_uncertain_when_a_final_session_fence_withholds_its_reply() {
+    use app::studio::{StudioControlResponse as R, StudioFaultScope, StudioRepairStart};
+    for (start, expected) in [
+        (StudioRepairStart::Scheduled, Some(WithheldWrite::Repair)),
+        (StudioRepairStart::Busy, None),
+    ] {
+        assert_eq!(
+            withheld_write(&InvokeResponse::Control(R::RepairStarted {
+                target: StudioTarget::Index { channel: [7; 16] },
+                scope: StudioFaultScope::Source,
+                start
+            })),
+            expected
+        );
+    }
+}
+
+#[test]
+fn closing_scheduled_save_uses_the_same_uncertain_delivery_classification() {
+    let response =
+        InvokeResponse::Control(app::studio::StudioControlResponse::ClosingOverlaySaved {
+            target: StudioTarget::Index { channel: [7; 16] },
+            outcome: app::studio::StudioUnconfirmedSaveOutcome::Scheduled,
+        });
+    assert_eq!(withheld_write(&response), Some(WithheldWrite::Save));
+}
+
 #[tokio::test]
 async fn native_studio_superseded_view_is_rejected_after_conversion() {
     let (_root, state, actor, task, drain) = fixture().await;

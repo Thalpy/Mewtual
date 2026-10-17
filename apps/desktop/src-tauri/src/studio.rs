@@ -6,7 +6,8 @@ use catcoms_app::studio::{
 };
 use serde_json::{json, Value};
 // Overlay lifecycle and copy commands are registered atomically with their reviewed policy,
-// capability, frontend-contract and session-gate rows. Signed-repair controls remain absent.
+// capability, frontend-contract and session-gate rows. Explicit repair delegates to the actor's
+// current durable-owner authority; Closing edits use a separate vault-derived local draft ticket.
 pub(crate) mod copy;
 pub(crate) mod fault;
 pub(crate) mod inspection;
@@ -35,6 +36,7 @@ enum WithheldWrite {
     Release,
     Dispose,
     Copy,
+    Repair,
 }
 
 /// Classify the response before conversion or any final UI-session fence can withhold it. This is
@@ -47,11 +49,13 @@ fn withheld_write(response: &InvokeResponse) -> Option<WithheldWrite> {
         InvokeResponse::Control(R::OverlayArchiveReleased) => Some(WithheldWrite::Release),
         InvokeResponse::Control(R::OverlayDisposed(_)) => Some(WithheldWrite::Dispose),
         InvokeResponse::Control(R::OverlayCopyApplied { .. }) => Some(WithheldWrite::Copy),
-        InvokeResponse::Control(R::UnconfirmedOverlaySaved { outcome, .. })
-            if outcome.may_have_durable_effect() =>
-        {
-            Some(WithheldWrite::Save)
-        }
+        InvokeResponse::Control(R::RepairStarted {
+            start: catcoms_app::studio::StudioRepairStart::Scheduled,
+            ..
+        }) => Some(WithheldWrite::Repair),
+        InvokeResponse::Control(
+            R::UnconfirmedOverlaySaved { outcome, .. } | R::ClosingOverlaySaved { outcome, .. },
+        ) if outcome.may_have_durable_effect() => Some(WithheldWrite::Save),
         _ => None,
     }
 }
@@ -285,6 +289,7 @@ async fn invoke_with_context<V>(
             WithheldWrite::Release => UNDELIVERED_RELEASE,
             WithheldWrite::Dispose => UNDELIVERED_DISPOSE,
             WithheldWrite::Copy => UNDELIVERED_COPY,
+            WithheldWrite::Repair => "outcome=uncertain; repair was scheduled and may still commit; refresh the actual fault status before making another decision",
         };
         return delivered.map_err(|error| format!("{message} ({error})"));
     }

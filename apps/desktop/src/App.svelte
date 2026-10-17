@@ -249,6 +249,10 @@
   import { JamEngine, jamSequenceAccepted, type JamArchivalPlayback } from "./jam-engine";
   import { JamTakeTransport } from "./jam-take-transport.ts";
   import { JamTakeSuppression } from "./jam-take-suppression.ts";
+  import PixaCanvas from "./PixaCanvas.svelte";
+  import { decodePixaBase64, mayFetchPixa, PixaMediaCache, PixaFileReader, PIXA_MIME } from "./pixa-media.ts";
+  import { encodePixa, PIXA_MAX_BYTES, type Pixa } from "./pixa.ts";
+  import { planJamArchivalPlayback, archivalReleaseTailMs } from "./jam-archival-plan.ts";
   import { JamPeerBudget } from "./jam-budget";
   import { JamFrameDecoder, toggleJamPeerMute, type JamFrameDecode } from "./jam-wire";
   import {
@@ -11583,6 +11587,40 @@
   // band). Never gates anything; driven by 'eclipse-changed'. Reset when switching servers.
   let eclipseCaution = $state(false);
 
+  // One global animation viewer works from Files and any chat/wiki file reference. Opening
+  // requests bytes explicitly; playback needs its own gesture and uses Studio's existing synth.
+  let pixaViewer = $state.raw<{ generation: number; server: number; file: UiFile; pixa: Pixa | null; error: string } | null>(null);
+  let pixaViewerGeneration = 0;
+  const pixaFileReader = new PixaFileReader(invoke, jamNonce());
+  function closePixaViewer() {
+    pixaViewerGeneration++; pixaFileReader.cancel(); pixaViewer = null; stopStudioAudio();
+  }
+  async function openPixaViewer(file: UiFile) {
+    const server = activeServerId;
+    if (locked || server === null) return;
+    closePixaViewer(); closeFileInfo();
+    const generation = pixaViewerGeneration;
+    pixaViewer = { generation, server, file, pixa: null, error: "" };
+    const current = () => !locked && activeServerId === server && pixaViewer?.generation === generation;
+    try {
+      const pixa = await pixaFileReader.read(server, file.cid, file.size, current);
+      if (current() && pixa) pixaViewer = { generation, server, file, pixa, error: "" };
+    } catch (e) { if (current()) pixaViewer = { generation, server, file, pixa: null, error: String(e) }; }
+  }
+  function playPixaViewer() {
+    const value = pixaViewer?.pixa;
+    if (!value) return;
+    void studioAudioActions.start("flipnote", async () => encodePixa(value), false)
+      .then(started => { if (!started && pixaViewer?.pixa === value) toast("Playback is unavailable; check Deafen and press Play to try again", "info"); })
+      .catch(e => toast(String(e), "err"));
+  }
+  $effect(() => {
+    // Closing on both directions of these lifecycle edges prevents an old async read or
+    // playback from gaining currency when navigation, membership or Deafen returns to its value.
+    void locked; void activeServerId; void view; void cur?.active; void studioMembership; void callDeafened; void inCall; void callServer; void callChannel;
+    untrack(() => { if (pixaViewer) closePixaViewer(); });
+  });
+
   async function openFileInfo(f: UiFile) {
     if (activeServerId === null) return;
     cancelKeptTransfer();
@@ -13072,7 +13110,7 @@
     studioAudioState = { state: "stopped", elapsedMs: 0 };
   }
   function studioAudioScope() {
-    return !locked && view === "studio" && activeServerId !== null && cur?.active
+    return !locked && (view === "studio" || pixaViewer !== null) && activeServerId !== null && cur?.active
       ? { generation: studioAudioGeneration, server: activeServerId, channel: cur.active, membership: studioMembership } : null;
   }
   const studioAudioActions: StudioAudioActions = {
@@ -13098,17 +13136,17 @@
   async function shareStudioPixa(bytes: Uint8Array, server: number): Promise<void> {
     if (locked || activeServerId !== server || view !== "studio") throw new Error("the animation share target changed");
     const name = "Mewtual-flipnote.pixa";
-    await addSharedFile(new File([new Uint8Array(bytes)], name, { type: "application/octet-stream" }), "", name, "application/octet-stream");
-    toast("Animation package saved to this server's share; shared-deck PIXA playback is not available yet", "ok", 6000);
+    await addSharedFile(new File([new Uint8Array(bytes)], name, { type: PIXA_MIME }), "", name, PIXA_MIME);
+    toast("Animation saved to this server's share; open it locally or queue it in the jukebox", "ok", 6000);
   }
   $effect(() => {
     // Reading these values makes every navigation/session/call ABA edge observable; no frame
     // tick or unrelated Studio redraw is itself a new playback scope.
-    void locked; void view; void activeServerId; void cur?.active; void inCall; void callServer; void callChannel; void callDeafened; void studioMembership;
+    void locked; void view; void activeServerId; void cur?.active; void inCall; void callServer; void callChannel; void callDeafened; void studioMembership; void pixaViewer?.generation;
     untrack(() => { stopStudioAudio(); studioAudio?.setScope(studioAudioScope(), callDeafened); });
   });
   $effect(() => {
-    if (view !== "studio") return;
+    if (view !== "studio" && !pixaViewer) return;
     let cancelled = false, timer: ReturnType<typeof setTimeout> | null = null;
     const tick = async () => {
       if (cancelled) return;
@@ -13745,9 +13783,11 @@
     // The adopted CID exists before approval/download/hash/transport seating. Capturing any
     // current file CID is conservative: only the archival take path consults this local gate.
     jamTakeSuppression.suppress(jamDeckPlaybackCid(), jukeNow?.cid || null);
+    jukeTakeLoads.invalidate();
+    jukeFetch = null;
     jamStopPlayback();
   }
-  async function jamStartTakePlayback(take: JamTake, offsetMs: number, localId: number | null, deckCid: string | null) {
+  async function jamStartTakePlayback(take: JamTake, offsetMs: number, localId: number | null, deckCid: string | null, pixa: Pixa | undefined = undefined) {
     if (deckCid && !jamTakeSuppression.allows(deckCid)) return;
     if (!inCall || callServer === null || !callChannel || callDeafened) return;
     if (!deckCid) suppressCurrentTake();
@@ -13760,8 +13800,9 @@
       callChannel === channel && !callDeafened && (!deckCid || (!!jukeNow && jukeNow.cid === deckCid && !jukeNow.paused && !jukeStale));
     const transport = new JamTakeTransport(engine, jamPlaybackPreparationQueue);
     transport.setLevel(deckCid ? jukeVol : 1);
-    const started = await transport.start(take, Math.max(0, offsetMs),
-      { generation: gen, server, channel, membership: studioMembership }, takePlaybackIsRemote(deckCid), current);
+    const scope = { generation: gen, server, channel, membership: studioMembership };
+    const started = pixa ? await transport.startPixa(pixa, Math.max(0, offsetMs), scope, takePlaybackIsRemote(deckCid), current)
+      : await transport.start(take, Math.max(0, offsetMs), scope, takePlaybackIsRemote(deckCid), current);
     if (!current() || !started) { transport.stop(); if (jamPendingPlay?.gen === gen) jamPendingPlay = null; return; }
     // A slider may move across hashing; this exact capability gets the latest receiver level,
     // including lazy lanes that have not constructed their first source bus yet.
@@ -15884,7 +15925,7 @@
     // linked video is the same shape of problem for a different reason: its clock lives in
     // another document and arrives late, so the projection is the base answer and the player's
     // own reading refines it when there is a fresh one.
-    const takeOnDeck = jukeKind === "take";
+    const takeOnDeck = jukeKind === "take" || jukeKind === "pixa";
     const videoOnDeck = jukeKind === "linked-video" || jukeKind === "linked-audio";
     const projected = deckPosition({
       isDj: takeOnDeck || videoOnDeck ? false : jukeIsDj(),
@@ -16092,6 +16133,7 @@
     if (!same) {
       jukeLocalFail = "";
       jukeTrustBlocked = "";
+      jukePixa = null;
     }
     jukeNow = entry || cid || link
       ? { entry, cid, src, link, name, paused, dj: fromFp === callSelfId ? "" : fromFp }
@@ -16129,9 +16171,10 @@
     const file = callFiles.find((candidate) => candidate.cid === cid);
     // A .jamtake is our own validated event-log format, replayed through the jam synth rather
     // than any platform media decoder; it passes the same availability and trust gates first.
-    const isTake = mediaKind(now.name, file?.mime ?? "") === "take";
+    const kind = mediaKind(now.name, file?.mime ?? "");
+    const isTake = kind === "take" || kind === "pixa";
     const mime = file ? safeMime(file.mime) : "";
-    if (!file || (isTake && !mayFetchJamTake(file.size)) || (!isTake && !(mime.startsWith("audio/") || mime.startsWith("video/")))) {
+    if (!file || (isTake && !(kind === "pixa" ? mayFetchPixa(file.size) : mayFetchJamTake(file.size))) || (!isTake && !(mime.startsWith("audio/") || mime.startsWith("video/")))) {
       jukeTrustBlocked = "unavailable";
       parkJukeboxMedia();
       if (jamDeckPlaybackCid()) jamStopPlayback();
@@ -16209,6 +16252,8 @@
   // The take deck: fetch the whole (bounded) file once, validate it with the one take validator,
   // then drive the jam playback scheduler from the room's transport. No element, no decoder.
   const jukeTakeCache = new JamTakeCache();
+  const jukePixaCache = new PixaMediaCache();
+  let jukePixa = $state.raw<Pixa | null>(null);
   const jukeTakeLoads = new JamTakeLoadCoordinator<void>();
   const jukeTakeCancellationNonce = jamNonce();
   let jukeTakeProgressLease: JamTakeProgressLease | null = null;
@@ -16219,7 +16264,8 @@
     const file = callFiles.find((candidate) => candidate.cid === cid);
     if (
       !now || now.cid !== cid || !file ||
-      mediaKind(now.name, file.mime) !== "take" || !mayFetchJamTake(file.size)
+      !["take", "pixa"].includes(mediaKind(now.name, file.mime)) ||
+      !(mediaKind(now.name, file.mime) === "pixa" ? mayFetchPixa(file.size) : mayFetchJamTake(file.size))
     ) return "unavailable";
     return mayLoadJukeboxFile(
       fileTrustFor(server), file.author_identity, file.author_verified,
@@ -16228,7 +16274,7 @@
   }
 
   function jukeTakeLeaseIsCurrent(lease: JamTakePlaybackLease, coordinatorCurrent: () => boolean): boolean {
-    return coordinatorCurrent() && callLifecycleSession.isCurrent(lease.callLease) &&
+    return !locked && !callDeafened && jamTakeSuppression.allows(lease.cid) && coordinatorCurrent() && callLifecycleSession.isCurrent(lease.callLease) &&
       jamTakePlaybackLeaseCurrent(lease, {
         inCall,
         callLease: activeCallLease,
@@ -16242,7 +16288,7 @@
     const server = callServer;
     const channel = callChannel;
     const callLease = activeCallLease;
-    if (!inCall || server === null || !channel || !callLifecycleSession.isCurrent(callLease)) return;
+    if (locked || callDeafened || !jamTakeSuppression.allows(cid) || !inCall || server === null || !channel || !callLifecycleSession.isCurrent(callLease)) return;
     parkJukeboxMedia(); // the media element never holds a take
     const lease = { callLease, server, channel, cid };
     jukeTakeCancellationSeq = (jukeTakeCancellationSeq % 1_000_000_000) + 1;
@@ -16286,7 +16332,9 @@
       jukeTrustBlocked = initialAdmission;
       return;
     }
-    let take = jukeTakeCache.get(cid);
+    const isPixa = mediaKind(jukeNow?.name ?? "", callFiles.find(f => f.cid === cid)?.mime ?? "") === "pixa";
+    let pixa = isPixa ? jukePixaCache.get(cid) : undefined;
+    let take = isPixa ? pixa?.take : jukeTakeCache.get(cid);
     if (!take) {
       const progressLease = { callLease: lease.callLease, server, cid, cancellation };
       jukeTakeProgressLease = progressLease;
@@ -16304,7 +16352,7 @@
         // operation that does not exist yet. If the deck changed during registration, `finally`
         // retires the permit without beginning a read.
         if (!jukeTakeLeaseIsCurrent(lease, coordinatorCurrent)) return;
-        ({ value: base64 } = await invokeDebugged<string>("download_file", { server, cid, cancellation }));
+        ({ value: base64 } = await invokeDebugged<string>("download_file", { server, cid, cancellation, maxBytes: isPixa ? PIXA_MAX_BYTES : 512 * 1024 }));
       } catch (e) {
         if (!jukeTakeLeaseIsCurrent(lease, coordinatorCurrent)) return;
         diagRecord({ section: "channels", code: "JUKEBOX.TAKE.FETCH_FAILED", level: "warn", fields: { failure: classifyInvokeFailure(e) } });
@@ -16329,6 +16377,10 @@
         jukeTrustBlocked = finalAdmission;
         return;
       }
+      if (isPixa) {
+        try { pixa = decodePixaBase64(base64); take = pixa.take; jukePixaCache.set(cid, pixa); }
+        catch { jukeFetch = null; jukeFail(cid); return; }
+      } else {
       const text = decodeJamTakeBase64(base64);
       if (text === null) {
         jukeFetch = null;
@@ -16345,13 +16397,16 @@
       }
       take = parsed.take;
       jukeTakeCache.set(cid, take);
+      }
     } else {
       // A cache hit owns no native operation, so invalidation can retire the coordinator slot now.
       markCancellationReady();
     }
     if (!jukeTakeLeaseIsCurrent(lease, coordinatorCurrent) || jukeTakeAdmission(server, cid) !== "ok") return;
+    jukePixa = pixa ?? null;
     jukeFetch = null;
-    jukeDur = Math.max(1, Math.ceil(takeEndMs(take) / 1000));
+    const plan = pixa ? planJamArchivalPlayback(take, { fps: pixa.fps, frameCount: pixa.frames.length, sfx: pixa.sfx }) : null;
+    jukeDur = Math.max(1, Math.ceil((plan ? plan.endMs + archivalReleaseTailMs(plan) : takeEndMs(take)) / 1000));
     const live = jukeNow;
     if (!live || live.cid !== cid) return;
     if (live.paused || jukeStale) {
@@ -16369,7 +16424,7 @@
       level: "debug",
       fields: { events: take.events.length, offset_ms: Math.round(targetMs), first_event_ms: take.events[0]?.ms ?? -1 },
     });
-    void jamStartTakePlayback(take, targetMs, null, cid);
+    void jamStartTakePlayback(take, targetMs, null, cid, pixa);
     // No media element means the "webview will not start audio" chip has nothing to watch; the
     // suspended-synth case is surfaced here instead, and every deck press tries a resume.
     if (jamEngine && jamEngine.context.state === "suspended") jukeBlocked = true;
@@ -16380,6 +16435,7 @@
     // covers a linked video too. It is the only way a linked video ever plays: nothing about one
     // is attested, so no trust mode can imply this click.
     jukeExplicitApprovals.add(scopedMediaKey(callServer, jukeDeckAddress(jukeNow)));
+    jukeWakeSynth();
     jukeTrustBlocked = "";
     void jukeApply(false);
   }
@@ -16408,7 +16464,12 @@
   }
   /** The user's click, which is the one thing an autoplay policy is waiting for. */
   function jukeUnblock() {
-    jukeWakeSynth(); // a blocked take deck is a suspended synth, not a refusing element
+    if (jukeKind === "take" || jukeKind === "pixa") {
+      const cid = jukeNow?.cid, lease = activeCallLease;
+      void jukeWakeSynth(true).then(() => { if (activeCallLease === lease && jukeNow?.cid === cid && !locked && !callDeafened) void jukeApply(true); });
+      return;
+    }
+    void jukeWakeSynth();
     // A blocked video deck is a frame the webview would not let start. The click IS the gesture
     // it was waiting for, so the command can go straight out; the player answers with its state
     // and the chip clears itself.
@@ -16665,17 +16726,25 @@
     }
   }
 
-  function jukeHost(node: HTMLElement) {
+  function jukeHost(node: HTMLElement, kind: MediaKind) {
     // Whichever player is holding the current track: the one media element, or the video frame.
-    const el = jukeNow?.link ? jukeLinkEl(jukeNow.src, jukeNow.link, 0) : jukeEl();
-    node.appendChild(el);
+    let el: HTMLVideoElement | HTMLIFrameElement | null = null;
+    const mount = (next: MediaKind) => {
+      if (el?.parentElement === node) document.body.appendChild(el);
+      // PIXA owns a canvas, never a second empty media element underneath it. Updating the
+      // action also handles video → PIXA → video without remounting the shared call surface.
+      el = next === "pixa" ? null : jukeNow?.link ? jukeLinkEl(jukeNow.src, jukeNow.link, 0) : jukeEl();
+      if (el) node.appendChild(el);
+    };
+    mount(kind);
     return {
+      update: mount,
       destroy() {
         // Only if this node still holds it. Handing the film from the dock to the focus view (or
         // back) mounts the new host before the old one tears down, and a teardown that re-homed
         // unconditionally would snatch the element straight back out of the surface that had just
         // adopted it, leaving a black box behind.
-        if ((jukeAudio === el || jukeLinkFrame === el) && el.parentElement === node) {
+        if (el && (jukeAudio === el || jukeLinkFrame === el) && el.parentElement === node) {
           document.body.appendChild(el);
         }
       },
@@ -16715,6 +16784,7 @@
     else void jukeStart(el);
   }
   function jukeStop() {
+    jukePixa = null;
     jukeBlocked = false; // nothing is loaded: there is no playback being held back
     jukeLocalFail = "";
     // An invalidated native take fetch returns without touching current UI state. Clear its old
@@ -16732,16 +16802,19 @@
   // is what makes me the DJ.
   // Takes replay through the jam engine, whose AudioContext may still be suspended; presses are
   // user gestures, so they are exactly when a resume is allowed to succeed.
-  function jukeWakeSynth() {
+  function jukeWakeSynth(archival = jukeKind === "take" || jukeKind === "pixa"): Promise<void> {
     jamTakeSuppression.localGesture(); // a fresh local deck control, not a remote heartbeat
-    if (jamEngine && jamEngine.context.state === "suspended") {
-      void jamEngine.context.resume().then(() => { jukeBlocked = false; }).catch(() => { /* next press */ });
+    if (callDeafened) return Promise.resolve();
+    const engine = archival ? ensureJamEngine() : jamEngine;
+    if (engine && engine.context.state === "suspended") {
+      return engine.context.resume().then(() => { jukeBlocked = false; }).catch(() => { /* next press */ });
     }
+    return Promise.resolve();
   }
   function jukePlayEntry(id: string) {
     const e = jukeQueue.find((x) => x.id === id);
     if (!e) return;
-    jukeWakeSynth();
+    void jukeWakeSynth(["take", "pixa"].includes(mediaKind(e.name, callFiles.find(f => f.cid === e.cid)?.mime ?? "")));
     jukeFailed.delete(entryAddress(e)); // an explicit press is also a retry of a track that would not fetch
     jukeSend(e.id, e.cid, e.source ?? "", e.link ?? "", e.name, 0, false);
   }
@@ -16847,6 +16920,7 @@
     jukeStop();
     jukeTakeLoads.invalidate(); // queued/running whole-file continuations belong to the old call
     jukeTakeCache.clear(); // validated takes belong to the room's share, not the next room's
+    jukePixaCache.clear(); jukePixa = null;
     jukeAudio?.remove();
     jukeAudio = null;
     jukeFailed.clear();
@@ -16879,7 +16953,7 @@
   let jukePaint = $state(0);
   $effect(() => {
     if (!inCall || !jukeNow || jukeNow.paused || jukeStale) return;
-    const t = setInterval(() => (jukePaint = performance.now()), 500);
+    const t = setInterval(() => (jukePaint = performance.now()), jukeKind === "pixa" ? 40 : 500);
     return () => clearInterval(t);
   });
   // The queue as the DJ will actually play it, minus whatever is already on the deck.
@@ -16898,6 +16972,7 @@
     { key: "all", label: "ALL" },
     { key: "audio", label: "AUDIO" },
     { key: "video", label: "VIDEO" },
+    { key: "pixa", label: "FLIPNOTES" },
     { key: "take", label: "TAKES" },
     { key: "youtube", label: "LINK" },
   ];
@@ -16912,6 +16987,7 @@
     audio: mediaChoices(files, "audio").length,
     video: mediaChoices(files, "video").length,
     take: mediaChoices(files, "take").length,
+    pixa: mediaChoices(files, "pixa").length,
   });
   // `files` is the ACTIVE server's share, while the room is on callServer: they are the same list
   // only while you are looking at the server you are called into. Every share-derived chip (gone,
@@ -20390,7 +20466,7 @@
             cancellation: e.payload.cancellation,
           }, activeCallLease);
         const currentMediaRead = e.payload.cancellation == null
-          && inCall && e.payload.server === callServer && jukeKind !== "take";
+          && inCall && e.payload.server === callServer && jukeKind !== "take" && jukeKind !== "pixa";
         if (jukeNow?.cid === e.payload.cid && (tokenizedTake || currentMediaRead)) {
           jukeFetch = fetchPhase(e.payload);
         }
@@ -20712,6 +20788,7 @@
         else if (showLinkDevice) closeLinkDevice();
         else if (verifyFor) verifyFor = null;
         else if (lightbox && fileInfo) closeFileInfo(); // Properties opened over the viewer
+        else if (pixaViewer) closePixaViewer();
         else if (lightbox) closeLightbox();
         else if (reactionPickerFor) reactionPickerFor = "";
         else if (replyingTo) replyingTo = "";
@@ -23581,7 +23658,8 @@
       transported, and it hands the element back to the focus view the moment that opens.
     -->
     {#if jukeScreen === "dock"}
-      <div class="juke-screen" use:jukeHost>
+      <div class="juke-screen" use:jukeHost={jukeKind}>
+        {#if jukeKind === "pixa" && jukePixa}<PixaCanvas pixa={jukePixa} elapsedMs={jukePaint >= 0 ? jukePos() * 1000 : 0} label={jukeNow?.name ?? "Flipnote"} />{/if}
         <button
           class="ghost juke-expand"
           title="Watch it full size: the call takes the window"
@@ -23683,6 +23761,7 @@
             {#if jukeFetch && jukeNow?.cid === e.cid}
               <span class="juke-chip info">{jukeFetch.percent}%</span>
             {/if}
+            {#if mediaKind(e.name) === "pixa"}<span class="juke-kind" title="Flipnote animation with authored music and sound">PIXA</span>{/if}
             {#if mediaKind(e.name) === "video"}
               <span class="juke-kind" title="A video: it plays on the deck's screen, and full size in the focus view">VID</span>
             {/if}
@@ -27477,7 +27556,8 @@
         <!-- The shared screen: a video the room is watching together gets the top band, and the
              faces drop to a filmstrip underneath rather than competing with it. -->
         {#if jukeScreen === "focus"}
-          <div class="focus-deck" use:jukeHost>
+          <div class="focus-deck" use:jukeHost={jukeKind}>
+            {#if jukeKind === "pixa" && jukePixa}<PixaCanvas pixa={jukePixa} elapsedMs={jukePaint >= 0 ? jukePos() * 1000 : 0} label={jukeNow?.name ?? "Flipnote"} />{/if}
             {#if jukeFetch}
               <div class="focus-deck-load">
                 <span class="stage-label">
@@ -30062,6 +30142,24 @@
       </div>
     {/if}
 
+    {#if pixaViewer}
+      <div class="overlay" role="presentation" use:dismissOnBackdrop={closePixaViewer}>
+        <div class="overlay-card" role="dialog" aria-modal="true" aria-label="Flipnote viewer" tabindex="-1">
+          <header class="overlay-head"><h2>{pixaViewer.file.name}</h2><button class="ghost" aria-label="Close flipnote viewer" onclick={closePixaViewer}>✕</button></header>
+          <div class="overlay-body">
+            {#if pixaViewer.error}<p role="alert">{pixaViewer.error}</p>
+            {:else if pixaViewer.pixa}
+              <div style="aspect-ratio:4/3;max-height:55vh"><PixaCanvas pixa={pixaViewer.pixa} elapsedMs={studioAudioState.elapsedMs} label={pixaViewer.file.name} /></div>
+              <p class="muted small">{pixaViewer.pixa.frames.length} frames · {pixaViewer.pixa.fps} FPS · music and sound play through Mewtual</p>
+              <button class="primary" disabled={studioAudioState.state === "preparing" || callDeafened} onclick={playPixaViewer}>{studioAudioState.state === "preparing" ? "Preparing…" : "Play from start"}</button>
+              <button class="ghost" disabled={studioAudioState.state === "stopped"} onclick={stopStudioAudio}>Stop</button>
+              {#if callDeafened}<p class="muted small">Turn off Deafen before playing.</p>{/if}
+            {:else}<p role="status">Loading and validating animation…</p>{/if}
+          </div>
+        </div>
+      </div>
+    {/if}
+
     {#if fileInfo}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
       <div class="overlay" role="presentation" use:dismissOnBackdrop={closeFileInfo}>
@@ -30229,6 +30327,9 @@
               </label>
             {/if}
             <div class="file-info-actions">
+              {#if mediaKind(fileInfo.name, fileInfo.mime) === "pixa"}
+                <button class="primary" disabled={!mayFetchPixa(fileInfo.size)} onclick={() => fileInfo && openPixaViewer(fileInfo)}>Open flipnote</button>
+              {/if}
               <button class="primary" onclick={() => fileInfo && downloadFile(fileInfo)}>↓ Download</button>
               {#if canSetExpiry}
                 <button class="ghost" disabled={fileInfoExpiryBusy} onclick={toggleKeepForever}>

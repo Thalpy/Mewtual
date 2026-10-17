@@ -6,6 +6,8 @@ import { planJamArchivalPlayback } from "./jam-archival-plan.ts";
 import type { JamArchivalPlayback, JamPlayResult } from "./jam-engine.ts";
 import type { JamTake } from "./jam-contract.ts";
 import { deferred } from "./studio-testkit.ts";
+import { readFileSync } from "node:fs";
+import { decodePixa } from "./pixa.ts";
 const take: JamTake = { v: 1, group: "group", call: "call", met: { bpm: 120, bpb: 4 }, parts: ["author"], lanes: [{ src: 0, sn: "a".repeat(16) }], patches: [], events: [{ ms: 0, lane: 0, n: 60, on: 1, w: "sine", q: 0 }, { ms: 95_000, lane: 0, n: 60, on: 0, q: 1 }] };
 const scope = { generation: 1, server: 1, channel: "channel", membership: 1 };
 function harness() {
@@ -65,4 +67,20 @@ test("volume changes are capability-scoped and malformed values cannot reach the
   assert.equal(h.transport.setLevel(.2), true); for (const bad of [-1, 2, NaN, Infinity]) assert.equal(h.transport.setLevel(bad), false);
   assert.deepEqual(h.levels, [1, .2]);
   h.retire(); assert.equal(h.transport.setLevel(.8), false); assert.deepEqual(h.levels, [1, .2], "retired App lease cannot control old owned gains before the next tick");
+});
+
+test("shared PIXA preserves visual horizon/SFX seek age, remote resume gate and retirement", async () => {
+  const vector = JSON.parse(readFileSync(new URL("../../../crates/catcoms-replication/tests/fixtures/studio-export-v1.json", import.meta.url), "utf8"));
+  const p = decodePixa(Buffer.from(vector.pixaHex, "hex"));
+  const animation = { ...p, fps: 2, frames: [p.frames[0], p.frames[0]], take: { ...p.take, patches: [vector.patch] }, sfx: [{ frame: 1, patch: 0, note: 72, durationMs: 1000 }] };
+  const h = harness(); h.context.state = "suspended";
+  assert.equal(await h.transport.startPixa(animation, 750, scope, true, h.current), false); assert.equal(h.resumes(), 0);
+  h.context.state = "running";
+  assert.equal(await h.transport.startPixa(animation, 750, scope, true, h.current), true);
+  await h.transport.tick(); assert.equal(h.events[0].age, 250, "late join reconstructs authored held SFX, not a fresh attack");
+  h.now(250); await h.transport.tick(); assert.equal(h.transport.state, "playing", "visual EOF cannot truncate longer sound");
+  h.retire(); await h.transport.tick(); assert.equal(h.transport.state, "stopped"); assert.equal(h.transport.completed, false);
+  const silent = harness(); await silent.transport.startPixa(p, 0, scope, true, silent.current);
+  assert.equal(silent.transport.state, "playing", "empty music still owns the animation horizon");
+  silent.now(100); await silent.transport.tick(); assert.equal(silent.transport.completed, true);
 });

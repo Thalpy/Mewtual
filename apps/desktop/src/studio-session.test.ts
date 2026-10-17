@@ -128,6 +128,51 @@ test("an awaiting-tenure edit stays local and retries the exact ticket, nonce an
   assert.equal(h.session.overlay?.inspection?.kind, "local-draft");
 });
 
+test("Closing edits use a distinct local ticket and freeze identity across pending and source replacement", async () => {
+  const h = await harness(); let phase = "closing", visits = 0;
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => docView([], { phase }));
+  h.ipc.on("studio_closing_overlay_save_begin", a => ({ v: 1, kind: "closingOverlaySaveTicket", channel: a.channel, object: a.object, basis: id64(1), branch: id64(2), provenance: "closing" }));
+  h.ipc.on("studio_closing_overlay_save", a => ++visits === 1
+    ? { v: 1, kind: "closingOverlaySave", channel: a.channel, object: a.object, state: "pending", retry: "sameRequest" }
+    : { v: 1, kind: "closingOverlaySave", channel: a.channel, object: a.object, state: "saved", basis: id64(1), accepted: 1, localOnly: true, provisional: true, provenance: "closing" });
+  h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.open(OBJ); await h.sync();
+  assert.equal(h.session.canEdit(OBJ), true); assert.ok("refused" in h.session.editableEpoch(OBJ), "Closing never supplies ordinary Apply authority");
+  h.session.setTitle(OBJ, "local while rotating"); await h.sync();
+  const first = h.calls("studio_closing_overlay_save")[0].args;
+  assert.equal(h.session.saves[0].status, "uncertain"); assert.equal(h.session.canReauthor(h.session.saves[0].id), false);
+  phase = "open"; await h.session.refreshDoc(OBJ);
+  h.session.retry(h.session.saves[0].id); await h.sync();
+  assert.deepEqual(h.calls("studio_closing_overlay_save")[1].args, first);
+  assert.equal(h.calls("studio_closing_overlay_save_begin").length, 1);
+  assert.equal(h.calls("studio_unconfirmed_overlay_save").length, 0); assert.equal(h.calls("studio_apply").length, 0);
+  assert.equal(h.session.saves.length, 0);
+});
+
+test("a missing signed close is a typed no-write refusal retaining unsaved Closing pixels", async () => {
+  const h = await harness(), pix = pixBytes(2);
+  h.ipc.on("studio_list", () => ordinaryView(indexContent())); h.ipc.on("studio_read", () => docView([], { phase: "closing" }));
+  h.ipc.on("publish_pix", () => ({ cid: id64(2), bytes: pix.length }));
+  h.ipc.on("studio_closing_overlay_save_begin", a => ({ v: 1, kind: "closingOverlaySave", channel: a.channel, object: a.object, state: "refused", reason: "receiptChanged", retry: "newTicket" }));
+  h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.open(OBJ); await h.sync();
+  h.session.saveFrame(OBJ, F1, pix); await h.sync();
+  assert.equal(h.session.saves[0].status, "blocked"); assert.equal(h.session.saves[0].mayHaveCommitted, false);
+  assert.deepEqual(h.session.unsavedPix(OBJ, F1), pix); assert.equal(h.calls("studio_closing_overlay_save").length, 0);
+});
+
+test("pending fault observations retire on matching object and Index invalidations", async () => {
+  const h = await harness(); h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.session.setScope({ server: SERVER, channel: CHANNEL }); await h.sync();
+  for (const object of [OBJ, null]) {
+    const gate = deferred<unknown>(); h.ipc.on("studio_fault_read", () => gate.promise);
+    const pending = h.session.readFault(object, "source"), before = h.session.faultGeneration;
+    h.ipc.emit("settlement-changed", { server: SERVER, channel: CHANNEL, object, docType: object ? 16 : 15, logicalKey: object ?? id32(7), state: "repairing" });
+    assert.equal(h.session.faultGeneration, before + 1);
+    gate.resolve({ v: 1, kind: "fault", channel: CHANNEL, object, scope: { kind: "source" }, source: { phase: "open" }, candidates: null, repair: null, lastAttempt: null, mayDecide: false, blockedBy: "noFault", waiting: 0, preservedOperations: 0 });
+    assert.equal(await pending, null, "notification invalidates a read even before it has an observation");
+  }
+});
+
 test("an awaiting-tenure Index edit is read back from its local overlay for the sidebar", async () => {
   const h = await harness();
   let saved = false;

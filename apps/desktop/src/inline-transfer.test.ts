@@ -93,13 +93,16 @@ test("only whole-file READERS pull a shared file into the window", () => {
   //     synth is built from them; a patch is capped at JAM_PATCH_FILE_MAX_BYTES (4 KiB) by its
   //     own format, checked against the listed size before the fetch and against the decoded
   //     length after it, so this is the tightest-bounded of the three.
-  // Three, named, and a fourth has to be argued for here rather than slipped past a pattern.
+  //   - the explicit global PIXA viewer: one active/one replacement cancellable read, capped
+  //     natively at the requested 9 MiB and in JS before base64 decode; only one raster expands.
+  //     The existing deck reader now also admits PIXA under the same call/trust/cancellation gates.
+  // Four, named; new readers require their own boundedness argument and regression tests.
   const sites = invokeSites("download_file");
   const total = sites.reduce((n, [, count]) => n + count, 0);
   assert.equal(
     total,
-    3,
-    `download_file should have exactly three callers (text reader, take deck, patch loader), found: ${JSON.stringify(sites)}`,
+    4,
+    `download_file should have exactly four callers (text reader, archival deck, patch loader, PIXA viewer), found: ${JSON.stringify(sites)}`,
   );
 });
 

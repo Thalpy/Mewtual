@@ -1,5 +1,11 @@
 # Flipnote UI hook guide
 
+**Gate 7 UI completion candidate (2026-10-17).** The current handoff now includes shared-deck
+PIXA/global file viewing, `studio_fault_read/repair`, and `studio_closing_overlay_save_begin/save`.
+See [GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md) and the current [INTERFACES](INTERFACES.md) section
+for exact scopes, truthful scheduling/local-only outcomes, retries, and signed-close availability.
+Older statements below that those commands are absent describe their dated checkpoints.
+
 **Gate 7 handoff (2026-10-17).** The owner accepted Gate 6 and PR #44 is merged at
 `82631a81`. The dated candidate paragraphs below are historical checkpoints.
 [GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md) maps the complete current surface to production

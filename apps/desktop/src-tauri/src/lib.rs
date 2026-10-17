@@ -747,6 +747,20 @@ fn inline_download_allowed(size: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// A renderer may request a stricter format cap, but can never enlarge the native ceiling.
+/// Check the authenticated manifest plan before allocating the reassembly buffer or fetching.
+fn inline_download_allowed_with_limit(size: u64, requested: Option<u64>) -> Result<(), String> {
+    inline_download_allowed(size)?;
+    if size
+        > requested
+            .unwrap_or(MAX_INLINE_DOWNLOAD_BYTES)
+            .min(MAX_INLINE_DOWNLOAD_BYTES)
+    {
+        return Err("this file exceeds the requested inline format limit".into());
+    }
+    Ok(())
+}
+
 /// How many [`CHUNK_BYTES`] chunks a file of `size` bytes is split into. An empty file is still
 /// one (empty) chunk, so a manifest always has at least one.
 fn upload_chunk_count(size: u64) -> usize {
@@ -9278,6 +9292,7 @@ async fn download_file(
     cid: String,
     trace: Option<String>,
     cancellation: Option<String>,
+    max_bytes: Option<u64>,
 ) -> Result<String, AppError> {
     let op = Operation::start(
         trace,
@@ -9317,7 +9332,8 @@ async fn download_file(
             "this file can't be downloaded; it isn't listed, or its reference is invalid",
         )
     })?;
-    inline_download_allowed(size).map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
+    inline_download_allowed_with_limit(size, max_bytes)
+        .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
     ensure_inline_download_not_cancelled(cancellation.as_ref())
         .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
     require_unlocked_session(&state)
@@ -16484,10 +16500,14 @@ pub fn run() {
             studio::lifecycle::studio_overlay_dispose,
             studio::lifecycle::studio_unconfirmed_overlay_save_begin,
             studio::lifecycle::studio_unconfirmed_overlay_save,
+            studio::lifecycle::studio_closing_overlay_save_begin,
+            studio::lifecycle::studio_closing_overlay_save,
             studio::studio_create,
             studio::studio_apply,
             studio::studio_apply_index,
             studio::recovery::studio_recovery_list,
+            studio::fault::studio_fault_read,
+            studio::fault::studio_fault_repair,
             studio::recovery::studio_recovery_preview,
             studio::recovery::studio_recovery_apply,
             studio::recovery::studio_recovery_restore_pointer,
@@ -17668,6 +17688,19 @@ mod tests {
         // a ~341 MB JS string built on the webview's main thread, reachable by scrolling past an
         // embedded file rather than by any deliberate action.
         assert!(inline_download_allowed(MAX_FILE_BYTES as u64).is_err());
+    }
+
+    #[test]
+    fn format_inline_limit_only_tightens_the_authenticated_plan_bound() {
+        let pixa = 9 * 1024 * 1024;
+        assert!(inline_download_allowed_with_limit(pixa, Some(pixa)).is_ok());
+        assert!(inline_download_allowed_with_limit(pixa + 1, Some(pixa)).is_err());
+        assert!(inline_download_allowed_with_limit(MAX_INLINE_DOWNLOAD_BYTES, None).is_ok());
+        assert!(
+            inline_download_allowed_with_limit(MAX_INLINE_DOWNLOAD_BYTES + 1, Some(u64::MAX))
+                .is_err()
+        );
+        assert!(inline_download_allowed_with_limit(1, Some(0)).is_err());
     }
 
     #[test]

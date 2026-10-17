@@ -31,6 +31,7 @@ import type { ScorePlayback } from "./studio-export.ts";
 import { exportStudioGif, publishStudioPixa, type StudioGifSaved } from "./studio-media.ts";
 import { decodePixa, encodePixa, PIXA_MAX_BYTES } from "./pixa.ts";
 import { historicalSoundOperation, soundRecoveryChoices } from "./studio-sound-recovery.ts";
+import { readStudioFault, repairStudioFault, type FaultScope, type FaultView } from "./studio-fault.ts";
 import { canonicalJson, randomElementId, type FlipnoteOp, type IndexOp, type ScoreOp, type ScoreCell } from "./studio-contract.ts";
 import {
   DEFAULT_FPS,
@@ -71,6 +72,9 @@ import {
   studioRead,
   unconfirmedOverlaySave,
   unconfirmedOverlaySaveBegin,
+  closingOverlaySave,
+  closingOverlaySaveBegin,
+  type ClosingOverlaySave,
   type ApplyIndexRequest,
   type ApplyRequest,
   type CreateRequest,
@@ -137,10 +141,10 @@ type SaveBase = {
 export type SaveRecord = SaveBase &
   (
     | { kind: "create"; request: CreateRequest<StudioObjectKind>; object: Hex32 }
-    | { kind: "frame"; object: Hex32; frame: Hex32; op: "insert" | "replace"; after: Hex32 | null; pix: Uint8Array; published: PixPublication | null; route: "ordinary" | "unconfirmed"; apply: ApplyRequest | null; overlay: UnconfirmedOverlaySaveInput | null; overlayRetry: OverlaySaveRetry | null; force?: boolean }
+    | { kind: "frame"; object: Hex32; frame: Hex32; op: "insert" | "replace"; after: Hex32 | null; pix: Uint8Array; published: PixPublication | null; route: "ordinary" | "unconfirmed" | "closing"; apply: ApplyRequest | null; overlay: UnconfirmedOverlaySaveInput | null; overlayRetry: OverlaySaveRetry | null; force?: boolean }
     | { kind: "apply"; object: Hex32; request: ApplyRequest<StudioObjectKind>; op: FlipnoteOp | ScoreOp }
     | { kind: "applyIndex"; request: ApplyIndexRequest; op: IndexOp; object: Hex32 }
-    | { kind: "overlayApply"; object: Hex32 | null; objectKind?: StudioObjectKind; request: UnconfirmedOverlaySaveInput | null; overlayRetry: OverlaySaveRetry | null; op: FlipnoteOp | IndexOp | ScoreOp }
+    | { kind: "overlayApply"; object: Hex32 | null; objectKind?: StudioObjectKind; route?: "unconfirmed" | "closing"; request: UnconfirmedOverlaySaveInput | null; overlayRetry: OverlaySaveRetry | null; op: FlipnoteOp | IndexOp | ScoreOp }
     | { kind: "recoveryApply"; object: Hex32 | null; objectKind?: StudioObjectKind; edit: RecoveryApplyEdit; applied: RecoveryApplied | null }
   );
 /// The queue's own mutable entry, with the callback of whoever awaits its first outcome.
@@ -327,6 +331,9 @@ export class StudioSession {
   private mediaTask: Promise<unknown> | null = null;
   private mediaWrite = false;
   private mediaEpoch = 0;
+  private faultEpoch = 0;
+  /** Observation invalidations include Index/Registry notices, without treating loading as news. */
+  get faultGeneration(): number { return this.faultEpoch; }
   /** Immediate invalidation edge used to revoke an already prepared UI playback snapshot. */
   get mediaGeneration(): number { return this.mediaEpoch; }
 
@@ -494,7 +501,8 @@ export class StudioSession {
   // --- Coalesced refresh ---------------------------------------------------------------------
 
   invalidate(what: { index?: boolean; objects?: Hex32[]; recovery?: boolean }): void {
-    if (what.objects?.length) { this.mediaEpoch++; this.notify(); }
+    if (what.objects?.length) this.mediaEpoch++;
+    if (what.index || what.objects?.length || what.recovery) { this.faultEpoch++; this.notify(); }
     if (what.index) this.pendingIndex = true;
     for (const o of what.objects ?? []) this.pendingObjects.add(o);
     if (what.recovery) this.pendingRecovery = true;
@@ -994,12 +1002,12 @@ export class StudioSession {
     return "refused" in route ? route.refused : "";
   }
 
-  private editRoute(object: Hex32 | null): { kind: "ordinary"; epochId: Hex32 } | { kind: "unconfirmed" } | { refused: string } {
+  private editRoute(object: Hex32 | null): { kind: "ordinary"; epochId: Hex32 } | { kind: "unconfirmed" | "closing" } | { refused: string } {
     const view = object === null ? this.index : this.doc?.object === object ? this.doc.view : this.views.get(object)?.view ?? null;
     if (!view) return { refused: object === null ? "the channel index is not loaded" : "the flipnote is not loaded" };
     if (view.awaitingTenureReceipt) return { kind: "unconfirmed" };
     if (view.phase === "fault") return { refused: "history fault: conflicting owner receipts; this document is read-only" };
-    if (view.phase === "closing") return { refused: "rotating: durable edits resume when the owner settles this rotation" };
+    if (view.phase === "closing") return { kind: "closing" };
     return { kind: "ordinary", epochId: view.epochId };
   }
 
@@ -1324,7 +1332,7 @@ export class StudioSession {
       return this.enqueue({ kind: "apply", object, op, label, request: { object, epochId: route.epochId, nonce: this.newId(), body,
         ...(this.objectKind(object) === "score" ? { objectKind: "score" as const } : {}) } });
     } else {
-      return this.enqueue({ kind: "overlayApply", object, ...(this.objectKind(object) === "score" ? { objectKind: "score" as const } : {}), op, label, request: null, overlayRetry: null });
+      return this.enqueue({ kind: "overlayApply", object, route: route.kind, ...(this.objectKind(object) === "score" ? { objectKind: "score" as const } : {}), op, label, request: null, overlayRetry: null });
     }
   }
   private applyIndexOp(op: IndexOp, object: Hex32, label: string): void {
@@ -1333,7 +1341,7 @@ export class StudioSession {
     if (route.kind === "ordinary") {
       this.enqueue({ kind: "applyIndex", object, op, label, request: { epochId: route.epochId, nonce: this.newId(), body: canonicalJson(op) } });
     } else {
-      this.enqueue({ kind: "overlayApply", object: null, op, label, request: null, overlayRetry: null });
+      this.enqueue({ kind: "overlayApply", object: null, route: route.kind, op, label, request: null, overlayRetry: null });
     }
   }
 
@@ -1387,11 +1395,11 @@ export class StudioSession {
       // retained pixels even when the new route is ordinary; identical valid bytes are
       // content-addressed, and no stale receipt crosses the route transition.
       next = { kind: "frame", object: s.object, frame: s.frame, op: s.op, after: s.after,
-        pix: s.pix, published: s.route === "unconfirmed" ? null : s.published,
+        pix: s.pix, published: s.route !== "ordinary" ? null : s.published,
         route: route.kind, apply: null, overlay: null, overlayRetry: null,
         ...(s.force === undefined ? {} : { force: s.force }), label: s.label };
-    } else if (route.kind === "unconfirmed") {
-      next = { kind: "overlayApply", object, ...(object && this.objectKind(object) === "score" ? { objectKind: "score" as const } : {}), op: s.op, label: s.label, request: null, overlayRetry: null };
+    } else if (route.kind !== "ordinary") {
+      next = { kind: "overlayApply", object, route: route.kind, ...(object && this.objectKind(object) === "score" ? { objectKind: "score" as const } : {}), op: s.op, label: s.label, request: null, overlayRetry: null };
     } else if (object === null) {
       const op = s.op as IndexOp;
       next = { kind: "applyIndex", object: op.object, op, label: s.label,
@@ -1491,7 +1499,7 @@ export class StudioSession {
         const op: FlipnoteOp = s.op === "insert"
           ? { op: "insert_frame", frame: s.frame, after: s.after, cid: s.published.cid, bytes: s.published.bytes }
           : { op: "replace_frame", frame: s.frame, cid: s.published.cid, bytes: s.published.bytes };
-        if (s.route === "unconfirmed") {
+        if (s.route !== "ordinary") {
           await this.runUnconfirmed(s, s.object, canonicalJson(op), gen);
           if (!this.current(gen)) return;
           await this.refreshDoc(s.object);
@@ -1556,7 +1564,8 @@ export class StudioSession {
     object: Hex32 | null,
     body: string,
     gen: number,
-  ): Promise<UnconfirmedOverlaySave> {
+  ): Promise<UnconfirmedOverlaySave | ClosingOverlaySave> {
+    const closing = s.route === "closing";
     const target: RecoveryTargetArgs = { ...this.target(), object,
       ...(s.kind === "overlayApply" && s.objectKind === "score" ? { objectKind: "score" as const } : {}) };
     if (!this.current(gen)) throw new StudioNativeError("Studio session changed before the local draft Save");
@@ -1573,9 +1582,9 @@ export class StudioSession {
       }
     }
     if (!request) {
-      const begun = await unconfirmedOverlaySaveBegin(this.ipc, target);
+      const begun = closing ? await closingOverlaySaveBegin(this.ipc, target) : await unconfirmedOverlaySaveBegin(this.ipc, target);
       if (!this.current(gen)) throw new StudioNativeError("Studio session changed while obtaining a local draft ticket");
-      if (begun.kind === "unconfirmedOverlaySave") {
+      if (begun.kind === "unconfirmedOverlaySave" || begun.kind === "closingOverlaySave") {
         s.overlayRetry = begun.retry;
         throw new OverlayNoWrite(`local draft refused (${overlayRefusalText(begun.reason)}); retry=${begun.retry}`);
       }
@@ -1586,7 +1595,7 @@ export class StudioSession {
       this.notify();
     }
     if (!this.current(gen)) throw new StudioNativeError("Studio session changed before the local draft Save");
-    const result = await unconfirmedOverlaySave(this.ipc, target, request);
+    const result = closing ? await closingOverlaySave(this.ipc, target, request) : await unconfirmedOverlaySave(this.ipc, target, request);
     if (result.state === "saved" || result.state === "disposed" || result.state === "handedOff") {
       s.overlayRetry = null;
       return result;
@@ -1805,6 +1814,19 @@ export class StudioSession {
   }
 
   // --- Recovery ------------------------------------------------------------------------------
+
+  async readFault(object: Hex32 | null, scope: FaultScope): Promise<FaultView | null> {
+    const gen = this.generation, observation = this.faultEpoch, target = this.objectTarget(object);
+    const value = await readStudioFault(this.ipc, target, scope);
+    return this.current(gen) && observation === this.faultEpoch && this.objectTarget(object).objectKind === target.objectKind ? value : null;
+  }
+  async repairFault(object: Hex32 | null, scope: FaultScope, view: FaultView, selected: string): Promise<"scheduled" | "busy" | null> {
+    const gen = this.generation, target = this.objectTarget(object);
+    const result = await repairStudioFault(this.ipc, target, scope, view, selected);
+    if (!this.current(gen) || this.objectTarget(object).objectKind !== target.objectKind) return null;
+    this.invalidate({ index: object === null, objects: object ? [object] : [], recovery: true });
+    return result;
+  }
 
   /// Point the rail at a document (null = the Index). The same target is a no-op; the listing
   /// is read on a change of target, on an invalidation, or through an explicit refresh.

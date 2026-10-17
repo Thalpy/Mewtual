@@ -1,5 +1,33 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Gate 7 UI completion candidate boundary (2026-10-17)
+
+Main-window repair commands now expose only the existing actor/store owner decision. The
+renderer echoes two actual candidate receipt hashes and one selection; it cannot supply tenure,
+receipt bytes, sequence or signing authority. The backend rederives the pair under custody and
+requires current verified/durable owner authority. Scheduling is not completed repair. UI reads
+and choices invalidate across source and Index/Registry notifications, including in-flight reads;
+failed discovery never hides the scoped repair controls. Native reply loss after scheduling is
+uncertain, not proof of no write. Restore/Copy remain ordinary content Saves, not fault clearing.
+
+Closing Save is a distinct local draft route with exact basis/branch/nonce/body. The actual signed
+close comes only from the local sealed owner journal and is rechecked against current source and
+Known tenure for new authoring. Lookup failure is carried as data through terminal classification;
+it cannot authorize a new capture and cannot strand an accepted retry. Captured plans retain only
+that verified close and still recheck membership, tenure, source version, basis, target and media
+possession at S3. Missing/legacy/repair-bearing close state refuses fresh work. Ordinary peers
+usually lack that journal; UI availability is not universal. Local draft Save grants no receipt,
+shared publication or new network authority; automatic reviewed handoff remains separate.
+
+PIXA deck/global playback validates complete bounded packages and reuses the archival synth and
+remote provenance. Declared MIME/filename and package labels are decoder hints, never membership
+or author authority. Listing≤9MiB, native requested cap against authenticated plan, encoded and
+decoded caps, complete codec checks, four native cancellation debts, one active/one replacement
+read and at most two encoded packages bound the path. Only the current raster expands. Explicit
+local gestures may resume audio; remote heartbeats cannot. Call/session/lock/membership/Deafen
+and local suppression retire pending reads and playback; returning to a previous value does not
+restore currency. The global viewer cancels on close/navigation and never auto-plays incoming files.
+
 ## Gate 7 evidence boundary (2026-10-17)
 
 Gate 6 is owner-accepted and merged at `82631a81`. Gate 7 composes existing enforcement paths;

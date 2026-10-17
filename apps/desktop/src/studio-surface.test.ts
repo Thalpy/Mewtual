@@ -35,6 +35,7 @@ w.HTMLCanvasElement.prototype.getContext = (() => null) as unknown as typeof w.H
 const state = await import("./studio-state.svelte.ts");
 const { default: Studio } = await import("./Studio.svelte");
 const { default: StudioNav } = await import("./StudioNav.svelte");
+const { default: StudioFaultControls } = await import("./StudioFaultControls.svelte");
 const { mount, unmount, flushSync } = await import("svelte");
 
 function mountStudio(ipc: FakeIpc, extra: Partial<{ audioActions: import("./studio-audio.ts").StudioAudioActions; patchLibrary: readonly { name: string; patch: import("./jam-contract.ts").JamPatch }[] }> = {}) {
@@ -84,7 +85,82 @@ async function settled(ms = 200) {
   flushSync();
 }
 
+test("G7-UI: actual repair controls require a selected observed receipt and never call scheduled repaired", async () => {
+  const ipc = fakeIpc(), a = id64(1), b = id64(2);
+  ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ title: "faulted art" }) } })));
+  ipc.on("studio_read", () => ordinaryView(flipnoteContent({ frames: [] }), { phase: "fault" }));
+  ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ }));
+  ipc.on("studio_fault_read", args => ({ v: 1, kind: "fault", channel: CHANNEL, object: OBJ, scope: args.scope === "registry" ? { kind: "registryBucket", bucket: 3 } : { kind: "source" }, source: { phase: "fault" },
+    candidates: [a, b].map(receipt => ({ receipt, closedEpoch: "3", closeRecord: id64(3), seedChange: id64(4), inheritedEpoch: null, locallyInstalled: receipt === a })), mayDecide: true, blockedBy: null, waiting: 0, preservedOperations: 2, repair: null, lastAttempt: null }));
+  ipc.on("studio_fault_repair", () => ({ v: 1, kind: "faultRepairStarted", channel: CHANNEL, scope: { kind: "source" }, start: "scheduled", refreshRequired: true }));
+  const m = mountStudio(ipc);
+  try {
+    state.studio.selected = OBJ; flushSync(); await settled(350);
+    m.click("button.st-itab", "music"); await settled();
+    m.click("button", "Refresh repair status"); await settled();
+    const repair = [...m.target.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "Repair using selected receipt")!;
+    assert.equal(repair.disabled, true);
+    const radios = m.target.querySelectorAll<HTMLInputElement>('.fault-controls input[type="radio"]'); assert.equal(radios.length, 2);
+    radios[1].click(); flushSync(); assert.equal(repair.disabled, false);
+    repair.click(); flushSync(); await settled();
+    assert.equal(m.count("studio_fault_repair"), 1);
+    assert.deepEqual(ipc.calls.find(c => c.cmd === "studio_fault_repair")!.args.decision, { receiptA: a, receiptB: b, selected: b });
+    assert.match(m.text(), /Repair scheduled; refresh to see its actual outcome/);
+    assert.equal(m.target.querySelectorAll('.fault-controls input[type="radio"]').length, 0, "an old choice cannot be reused after scheduling");
+  } finally { m.done(); }
+});
+
 const pix = pixBytes(1);
+
+test("G7-UI: Closing FPS controls save locally and retain their exact request on retry", async () => {
+  const ipc = fakeIpc(); let visits = 0;
+  ipc.on("studio_list", () => ordinaryView(indexContent()));
+  ipc.on("studio_read", () => ordinaryView(flipnoteContent({ frames: [] }), { phase: "closing" }));
+  ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ }));
+  ipc.on("studio_closing_overlay_save_begin", a => ({ v: 1, kind: "closingOverlaySaveTicket", channel: a.channel, object: a.object, basis: id64(1), branch: id64(2), provenance: "closing" }));
+  ipc.on("studio_closing_overlay_save", a => ++visits === 1 ? { v: 1, kind: "closingOverlaySave", channel: a.channel, object: a.object, state: "busy", retry: "sameRequest" }
+    : { v: 1, kind: "closingOverlaySave", channel: a.channel, object: a.object, state: "saved", basis: id64(1), accepted: 1, localOnly: true, provisional: true, provenance: "closing" });
+  const m = mountStudio(ipc);
+  try {
+    state.studio.selected = OBJ; flushSync(); await settled(350);
+    const fps = m.target.querySelector<HTMLInputElement>('label.st-chip input[type="number"]');
+    assert.ok(fps && !fps.disabled); fps.value = "17"; fps.dispatchEvent(new Event("change", { bubbles: true })); await settled();
+    assert.equal(m.count("studio_closing_overlay_save"), 1); assert.match(m.text(), /local save not written/);
+    const first = ipc.calls.find(c => c.cmd === "studio_closing_overlay_save")!.args;
+    m.click("button.st-btn", "retry same request"); await settled();
+    assert.deepEqual(ipc.calls.filter(c => c.cmd === "studio_closing_overlay_save")[1].args, first);
+    assert.equal(m.count("studio_closing_overlay_save_begin"), 1); assert.equal(m.count("studio_apply"), 0); assert.equal(m.count("studio_unconfirmed_overlay_save"), 0);
+    m.click("button.st-itab", "music"); await settled(); assert.match(m.text(), /Save keeps edits in a local-only draft when this device holds the signed close/);
+  } finally { m.done(); }
+});
+
+test("G7-UI: Index and unavailable object repair stay reachable when ordinary reads fail", async () => {
+  const ipc = fakeIpc(); ipc.on("studio_list", () => { throw new Error("Index Registry fault"); });
+  ipc.on("studio_read", () => { throw new Error("object Registry fault"); });
+  const calls: unknown[] = [];
+  ipc.on("studio_fault_read", a => { calls.push(a.object); return { v: 1, kind: "fault", channel: CHANNEL, object: a.object, scope: { kind: "source" }, source: { phase: "open" }, candidates: null, repair: null, lastAttempt: null, mayDecide: false, blockedBy: "noFault", waiting: 0, preservedOperations: 0 }; });
+  const nav = mountStudioNav(ipc);
+  try { await settled(); nav.click("Refresh repair status"); await settled(); assert.deepEqual(calls, [null]); }
+  finally { nav.done(); }
+  const m = mountStudio(ipc);
+  try { state.studio.selected = OBJ; flushSync(); await settled(); m.click("button", "Refresh repair status"); await settled(); assert.deepEqual(calls, [null, OBJ]); }
+  finally { m.done(); }
+});
+
+test("G7-UI: simultaneous Index/document repair selections stay independent and diagnostics escape", async () => {
+  const a = id64(1), b = id64(2);
+  const session = { readFault: async () => ({ scope: { kind: "source" }, phase: "fault", candidates: [a, b].map(receipt => ({ receipt, closedEpoch: "3", closeRecord: id64(3), seedChange: id64(4), inheritedEpoch: null, locallyInstalled: false })), mayDecide: true, blockedBy: null, waiting: 0, preservedOperations: 1, repairing: false, lastOutcome: "failed", lastDetail: "<script>storage refused</script>" }) } as unknown as import("./studio-session.ts").StudioSession;
+  const targets = [document.createElement("div"), document.createElement("div")];
+  targets.forEach(t => document.body.appendChild(t));
+  const components = targets.map((target, index) => mount(StudioFaultControls, { target, props: { session, object: index ? OBJ : null, revision: 0 } }));
+  try {
+    flushSync(); targets.forEach(t => t.querySelector<HTMLButtonElement>("button")!.click()); await settled();
+    const radios = targets.map(t => t.querySelectorAll<HTMLInputElement>('input[type="radio"]'));
+    radios[0][0].click(); flushSync(); radios[1][1].click(); flushSync();
+    assert.equal(radios[0][0].checked, true); assert.equal(radios[1][1].checked, true); assert.notEqual(radios[0][0].name, radios[1][1].name);
+    for (const target of targets) { assert.match(target.textContent ?? "", /<script>storage refused<\/script>/); assert.equal(target.querySelector("script"), null); assert.equal([...target.querySelectorAll("button")].find(b => b.textContent?.startsWith("Repair using"))!.disabled, false); }
+  } finally { components.forEach(c => unmount(c)); targets.forEach(t => t.remove()); }
+});
 const frameView = (bytes = pix.length, cid = id64(1)) => ordinaryView(flipnoteContent({ frames: [{ id: F1, cid, bytes }] }));
 
 test("UI-001: selecting a flipnote reads it and lists its recovery once, then the surface settles", async () => {

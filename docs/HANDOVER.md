@@ -1,5 +1,24 @@
 # Mewtual; Handover
 
+## Gate 7 UI completion candidate — verification in progress (2026-10-17)
+
+The current worktree connects PIXA file recognition/picker, shared Jukebox canvas/focus playback
+and an explicit global file viewer to the existing archival JamEngine. It adds main-window
+document/Registry owner repair controls with current candidate-pair checks and uncertain scheduling
+classification, plus a separate ticketed Closing local-draft Save using the actual vault-held signed
+close. Fresh Closing authoring is normally available only on the journal-holding device. Exact
+accepted/terminal retries precede current authority lookup. No wire/persistence format changes.
+
+Focused codec/transport/reader/security/fixture/session and rendered repair/Closing controls pass.
+The root Closing regression saves real detached work and pins accepted retry without a close;
+native Studio checks and browser flows are in progress. Adversarial review fixes include pending
+fault-read invalidation, reachable Index/failed-object repair controls and independent radio groups.
+The browser boot flow caught and corrected invalid optional-parameter emission missed by static
+Svelte checking; final browser evidence is not yet a pass. Full suites remain deferred until the
+implementation and focused verification are coherent, then run sequentially with limited jobs.
+Gate remains OPEN. The owner defers two desktops; no audible hardware evidence is invented.
+The ledger owns current exact checks; the following review-correction checkpoint is historical.
+
 ## Gate 7 OPEN: PR #46 review corrections and interrupted verification (2026-10-17)
 
 External review of `5a15ba1e` correctly identifies missing actual composition export, a

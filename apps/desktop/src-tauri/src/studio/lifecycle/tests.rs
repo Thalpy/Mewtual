@@ -16,6 +16,35 @@ async fn state(f: &InspectionFixture) -> AppState {
 const HEX: &str = "aa00000000000000000000000000000000000000000000000000000000000011";
 
 #[test]
+fn closing_save_preserves_distinct_provenance_and_local_only_claims() {
+    let target = StudioTarget::Score {
+        channel: [7; 16],
+        object: [9; 16],
+    };
+    let ticket = response_value(Response::ClosingOverlaySaveTicket {
+        target,
+        basis: [1; 32],
+        branch: [2; 32],
+    })
+    .unwrap();
+    assert_eq!(ticket["kind"], "closingOverlaySaveTicket");
+    assert_eq!(ticket["provenance"], "closing");
+    let saved = response_value(Response::ClosingOverlaySaved {
+        target,
+        outcome: StudioUnconfirmedSaveOutcome::Saved {
+            basis: [1; 32],
+            accepted: 2,
+        },
+    })
+    .unwrap();
+    assert_eq!(saved["kind"], "closingOverlaySave");
+    assert_eq!(saved["provenance"], "closing");
+    assert_eq!(saved["localOnly"], true);
+    assert_eq!(saved["provisional"], true);
+    assert!(saved.get("content").is_none());
+}
+
+#[test]
 fn a_stale_copy_crosses_as_a_typed_proven_no_write_result() {
     let value = response_value(Response::OverlayCopyRefused {
         destination: StudioTarget::Flipnote {

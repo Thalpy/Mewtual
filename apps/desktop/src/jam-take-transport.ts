@@ -1,4 +1,5 @@
 import type { JamTake } from "./jam-contract.ts";
+import type { Pixa } from "./pixa.ts";
 import type { JamArchivalPlayback } from "./jam-engine.ts";
 import { JamLatestTaskQueue } from "./jam-publication.ts";
 import { StudioPlaybackController, type StudioPlaybackEngine, type StudioPlaybackScope } from "./studio-playback.ts";
@@ -48,6 +49,13 @@ export class JamTakeTransport {
     if (!isCurrent() || (remote && this.engine.context.state !== "running")) return false;
     this.controller.setScope(scope, false);
     return this.controller.startTake(take, offsetMs);
+  }
+  /** PIXA carries authored animation/SFX into the SAME capability, remote gates and seek owner. */
+  async startPixa(pixa: Pixa, offsetMs: number, scope: StudioPlaybackScope, remote: boolean, isCurrent: () => boolean): Promise<boolean> {
+    this.stop(); this.remote = remote; this.current = isCurrent;
+    if (!isCurrent() || (remote && this.engine.context.state !== "running")) return false;
+    this.controller.setScope(scope, false);
+    return this.controller.startAnimation(pixa.take, { fps: pixa.fps, frameCount: pixa.frames.length, sfx: pixa.sfx }, offsetMs);
   }
   setLevel(level: number): boolean {
     if (!Number.isFinite(level) || level < 0 || level > 1) return false;

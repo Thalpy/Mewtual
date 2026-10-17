@@ -135,6 +135,10 @@ export function visualStudioFixtureResponse(command: string, args: Record<string
     case "studio_overlay_read": return { handled: true, value: { v: 1, kind: "absent", channel: VISUAL_STUDIO_CHANNEL, ...target } };
     case "studio_overlay_lifecycle": return { handled: true, value: { v: 1, kind: "overlayLifecycle", channel: VISUAL_STUDIO_CHANNEL, ...target, branch: null, prepared: false, eligibility: null, manualReason: null, handoffAttempt: null, unconfirmedState: null, archive: null, disposed: null, transferred: false } };
     case "studio_recovery_list": return { handled: true, value: { v: 1, kind: "recoveryList", channel: VISUAL_STUDIO_CHANNEL, ...target, source: { epochId, epoch: "3", phase: "open", provisional: true }, versions: [], evictionPending: null, pendingIntents: 0 } };
+    case "studio_fault_read": {
+      if (args.scope !== "source" && args.scope !== "registry") throw new Error("Visual Studio fixture refuses unknown repair scope.");
+      return { handled: true, value: { v: 1, kind: "fault", channel: VISUAL_STUDIO_CHANNEL, ...target, scope: args.scope === "source" ? { kind: "source" } : { kind: "registryBucket", bucket: 0 }, source: { epochId, epoch: "3", phase: "open" }, candidates: null, repair: null, mayDecide: false, blockedBy: "noFault", lastAttempt: null, waiting: 0, preservedOperations: 0 } };
+    }
     default: throw new Error(`Read-only visual Studio fixture does not implement Tauri command: ${command}`);
   }
 }

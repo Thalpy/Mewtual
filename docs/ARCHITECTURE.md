@@ -1,5 +1,20 @@
 # Mewtual; Architecture
 
+## Gate 7 UI completion candidate (2026-10-17)
+
+PIXA now extends the existing Jukebox archival branch and global file details viewer, using the
+same JamEngine, call/DJ transport, authenticated file fetch, cancellation debt and local consent.
+Encoded package caches retain at most two per call; a canvas expands only the current frame.
+The global viewer owns one package, a separate cancellable read generation and explicit Play.
+
+Explicit document/Registry fault repair delegates to the existing detached durable-owner path.
+Separate Closing local-draft commands derive the saved signed close from the local sealed owner
+journal. Their failed lookup is carried to new-authoring admission, after accepted/terminal retry
+classification. A captured plan retains the exact verified close for the unchanged S3 rechecks.
+Fresh Closing authoring is generally available only on the journal-holding device; it remains
+local-only pending automatic handoff. No second synth, document owner, network protocol or
+persistence format is introduced. Current contracts are in [GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md).
+
 ## Gate 7 baseline (2026-10-17)
 
 The owner accepted Gate 6; PR #44 merged at `82631a81`. Gate 7 adds composed lifecycle

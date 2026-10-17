@@ -139,6 +139,8 @@ export const TAURI_COMMAND_GROUPS = {
       // holds; none reaches the network, and the export bytes stay private until the same final
       // session-and-instance recheck every read here passes.
       "studio_recovery_list", "studio_recovery_read", "studio_recovery_export",
+      "studio_fault_read",
+      "studio_closing_overlay_save_begin",
       // Preview belongs with the reads because it is one: it recomputes a restore plan from saved
       // typed content and emits no settlement notice. It also hands back the canonical body the
       // caller would echo to `studio_recovery_apply`, which is not authority to save it. The actor
@@ -224,6 +226,12 @@ export const TAURI_COMMAND_GROUPS = {
       // nonce, so an exact retry is idempotent while a rewritten body is not a way to publish
       // history under someone else's authorship.
       "studio_recovery_apply",
+      // Owner-only decision over the actual current receipt pair. Actor/store derive tenure,
+      // signing and recovery under custody; scheduling never acknowledges completed repair.
+      "studio_fault_repair",
+      // Closing local-only draft Save derives the actual saved signed close under custody;
+      // exact terminal retries precede current source/tenure/media admission. No shared Apply.
+      "studio_closing_overlay_save",
       // The discoverability half of a restore, separately retryable because the save above can
       // land while this does not. It moves this device's Studio registry checkpoint pointer and
       // accepts no epoch from the webview: the actor chooses it, and refuses to rewind a pointer
