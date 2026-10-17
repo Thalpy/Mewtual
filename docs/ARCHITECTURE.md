@@ -1,6 +1,14 @@
 # Mewtual; Architecture
 
-## Current Gate 6 composition (2026-10-14; candidate, not final acceptance)
+## Gate 7 baseline (2026-10-17)
+
+The owner accepted Gate 6; PR #44 merged at `82631a81`. Gate 7 adds composed lifecycle
+acceptance and the [production UI handoff](GATE7-UI-HANDOFF.md), reusing the same actor, vault,
+receiver, transport and JamEngine. No wire, persistence or authorization contract changes.
+[GATE7-ACCEPTANCE](GATE7-ACCEPTANCE.md) separates adapter/TCP evidence from desktop/audio
+release observations. Dated Gate 6 checkpoints below remain historical.
+
+## Gate 6 composition checkpoint (2026-10-14; candidate at that date)
 
 The existing Studio/P1/vault/native/renderer stack now composes typed Score and complete Flipnote
 sound state with production Score/Sound/Music controls, actual-byte PIXA publication/readback,

@@ -1,6 +1,16 @@
 # Threat model; client integrity & enforcement boundaries
 
-## Current Gate 6 enforcement status (2026-10-14; candidate, not final acceptance)
+## Gate 7 evidence boundary (2026-10-17)
+
+Gate 6 is owner-accepted and merged at `82631a81`. Gate 7 composes existing enforcement paths;
+it adds no wire/persistence authority. [GATE7-ACCEPTANCE](GATE7-ACCEPTANCE.md) distinguishes
+actor/vault, real TCP, native conversion and mocked frontend coverage. The composed rotation
+test requires actual recovery-before-replacement, retains deleted SFX/export rejection even
+under Copy, and exercises ordinary recipe recovery with exact retries and stale-preview refusal.
+It does not convert backups into PIXA, publication into peer custody, or test engines into
+audible hardware/platform evidence. Current UI obligations are in [GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md).
+
+## Gate 6 enforcement checkpoint (2026-10-14; candidate at that date)
 
 The candidate connects typed Score and complete Flipnote sound state to the existing causal/P1,
 vault, native and UI paths. Parsing alone still grants no authority: explicit document-family

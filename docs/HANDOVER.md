@@ -1,5 +1,18 @@
 # Mewtual; Handover
 
+## Gate 7 acceptance work (2026-10-17)
+
+The owner accepts Gate 6; PR #44 is merged at `82631a81` on `Create-suite-2`. Gate 7 now
+composes the existing actor/vault lifecycle, real TCP cold joining and media readback, and
+native art/Score/sound/export restart. It injects no acceptance receipt/recovery snapshot;
+only a signed quota workload prepares rotation eligibility. Deleted SFX/export recovery stays
+refused, while recipe Copy uses current fingerprints and ordinary exact-retry Save.
+[GATE7-ACCEPTANCE](GATE7-ACCEPTANCE.md) owns the verification results and remaining evidence;
+[GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md) is the command/event/limit/recovery surface map.
+The hook guide's stale art-only materializer and seven-state notification claims are corrected.
+No production protocol, persistence, native command or visual layout changes are introduced.
+Older dated candidate statements below retain their historical scope.
+
 ## Current Gate 6 integration candidate (2026-10-14; local verification passed, CI pending)
 
 Gate 5 is owner-accepted at `7cbe8cbe131e1be8e672d04341c31a1d2b52a98d` (PR #43).
