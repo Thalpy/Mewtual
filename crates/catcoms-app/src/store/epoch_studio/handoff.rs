@@ -82,7 +82,7 @@ impl ServerStore {
     /// H1's form, which full-loads each object. H5 runs the same property again, header-only, as
     /// [`Self::check_index_objects_at_commit`]. Both are needed: a scheduled H1 to H5 spans many
     /// background turns, and the stamp covers only the Index document's own intent and source
-    /// records, so the referenced Flipnote's source can be evicted, retired or cleaned up in
+    /// records, so the referenced object's source can be evicted, retired or cleaned up in
     /// between without invalidating anything. Committing then would leave a durable Index entry
     /// pointing at a source that no longer exists.
     fn check_index_object_sources(
@@ -103,11 +103,11 @@ impl ServerStore {
                     Ok(operation) => operation,
                     Err(_) => return Ok(Some(IndexHandoffHold::NotReplayable)),
                 };
-            if let IndexOp::PutObject { object, .. } = operation {
+            if let IndexOp::PutObject { object, kind, .. } = operation {
                 let referenced = match self.load_studio_epoch(
                     server,
                     group,
-                    StudioTarget::Flipnote { channel, object },
+                    crate::studio::object_target(channel, object, kind),
                     device,
                 ) {
                     Ok(referenced) => referenced,
@@ -129,7 +129,7 @@ impl ServerStore {
 
     /// H5's form of the Index object check, without a restore (design 9.1.1, amendment A1).
     ///
-    /// For each Flipnote the branch's PutObjects name, once each, it requires what H1's full load
+    /// For each family/object the branch's PutObjects name, once each, it requires what H1's full load
     /// established: a record in this channel that holds work (the header-only rule
     /// `studio_object_holds_work` applies), and a valid intent link. Both are checked here on one
     /// authenticated read, rather than by calling that helper and reading again for the link. The
@@ -155,24 +155,28 @@ impl ServerStore {
         };
         let mut objects = std::collections::BTreeSet::new();
         for (_, intent) in state.pending().filter(|(id, _)| state.is_overlay(id)) {
-            if let IndexOp::PutObject { object, .. } =
+            if let IndexOp::PutObject { object, kind, .. } =
                 IndexOp::decode_domain(document, &intent.operation, &intent.author)
                     .map_err(invalid)?
             {
-                objects.insert(object);
+                objects.insert(crate::studio::object_target(channel, object, kind));
             }
         }
-        let unavailable = || invalid("overlay references an unavailable Flipnote");
         for object in objects {
-            let flipnote = StudioTarget::Flipnote { channel, object };
-            let logical = flipnote.document(&group.group_id()).map_err(invalid)?;
+            let unavailable = || {
+                invalid(match object {
+                    StudioTarget::Score { .. } => "overlay references an unavailable Score",
+                    _ => "overlay references an unavailable Flipnote",
+                })
+            };
+            let logical = object.document(&group.group_id()).map_err(invalid)?;
             let scope = scope_bytes(server, &logical)?;
             let record = self.read_studio_record(&scope)?.ok_or_else(unavailable)?;
             // A record stored under another channel's label answers for this object id but
             // names nothing in this channel, exactly as `studio_object_holds_work` treats it.
             let (stored, snapshot) = decode_record(&record.plain, &scope, &logical)?;
-            let holds_work = stored == flipnote
-                && StudioEpoch::vault_holds_work(snapshot, flipnote).map_err(invalid)?;
+            let holds_work = stored == object
+                && StudioEpoch::vault_holds_work(snapshot, object).map_err(invalid)?;
             if !holds_work {
                 return Err(unavailable());
             }

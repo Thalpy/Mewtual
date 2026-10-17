@@ -119,6 +119,9 @@ impl Fixture {
                 StudioProjection::Flipnote(p) => {
                     frames::prepare(&p, &op, &self.owner.device_id(), 100).unwrap()
                 }
+                StudioProjection::Score(p) => {
+                    score::prepare(&p, &op, &self.owner.device_id()).unwrap()
+                }
             };
             edit.write(&mut writer).unwrap();
             writer
@@ -531,6 +534,7 @@ fn studio_owner_settlement_supports_checkpoints_beyond_registry_epoch_limit() {
         match &mut projection {
             StudioProjection::Index(p) => p.epoch = 4095,
             StudioProjection::Flipnote(p) => p.epoch = 4095,
+            StudioProjection::Score(p) => p.epoch = 4095,
         }
         let seed = projection.checkpoint([4; 32]).unwrap();
         let opening = Receipt::sign(
@@ -610,6 +614,7 @@ fn studio_owner_settlement_keeps_fifth_conflicting_value_without_excluded_operat
                 StudioProjection::Flipnote(p) => {
                     frames::prepare(&p, &op, &member.device_id(), 100).unwrap()
                 }
+                StudioProjection::Score(p) => score::prepare(&p, &op, &member.device_id()).unwrap(),
             };
             edit.write(&mut writer).unwrap();
             writer

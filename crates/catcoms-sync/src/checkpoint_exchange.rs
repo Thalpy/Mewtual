@@ -3,9 +3,32 @@
 use super::*;
 use catcoms_replication::{
     registry::{registry_document, RegistryProjection},
-    studio::{FlipnoteFrameProjection, StudioIndexProjection, StudioTarget},
+    studio::{FlipnoteFrameProjection, ScoreProjection, StudioIndexProjection, StudioTarget},
     LogicalDocument, VerifiedCheckpoint, VerifiedReceipt,
 };
+
+/// A Studio query's scope selector, NOT a wire DocType or a key-derivation input. The high-bit
+/// score selector makes old peers refuse instead of interpreting a score request as art. The
+/// existing signed request/response transcript binds this exact field, with no downgrade retry.
+pub(crate) fn studio_scope_tag(target: StudioTarget) -> u16 {
+    match target {
+        StudioTarget::Index { .. } => 15,
+        StudioTarget::Flipnote { .. } => 16,
+        StudioTarget::Score { .. } => 0x8010,
+    }
+}
+pub(crate) fn studio_scope_from_tag(
+    tag: u16,
+    channel: [u8; 16],
+    object: [u8; 16],
+) -> Result<StudioTarget, SyncError> {
+    match tag {
+        15 if object == [0; 16] => Ok(StudioTarget::Index { channel }),
+        16 => Ok(StudioTarget::Flipnote { channel, object }),
+        0x8010 => Ok(StudioTarget::Score { channel, object }),
+        _ => Err(SyncError::Malformed),
+    }
+}
 
 /// Trusted local choice, not a proof that the document exists or belongs to this channel.
 /// The source and the expected-hash seed's typed projection independently check that binding.
@@ -25,7 +48,9 @@ impl CheckpointTarget {
         match self {
             Self::Registry(_) => DocType::DocRegistry,
             Self::Studio(StudioTarget::Index { .. }) => DocType::StudioIndex,
-            Self::Studio(StudioTarget::Flipnote { .. }) => DocType::StudioObject,
+            Self::Studio(StudioTarget::Flipnote { .. } | StudioTarget::Score { .. }) => {
+                DocType::StudioObject
+            }
         }
     }
     pub(super) fn bucket(self) -> Result<u8, SyncError> {
@@ -70,6 +95,9 @@ impl CheckpointTarget {
             }
             Self::Studio(StudioTarget::Flipnote { channel, .. }) => {
                 FlipnoteFrameProjection::verify_checkpoint(receipt, channel, raw)?
+            }
+            Self::Studio(StudioTarget::Score { channel, .. }) => {
+                ScoreProjection::verify_checkpoint(receipt, channel, raw)?
             }
         })
     }

@@ -14,6 +14,7 @@ mod disposal;
 mod eligibility;
 mod handoff;
 mod source_version;
+mod typed_object;
 
 fn local(saved: catcoms_replication::studio::StudioOverlaySave) -> StudioLocalDraft {
     match saved {

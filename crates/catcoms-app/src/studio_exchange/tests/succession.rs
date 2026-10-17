@@ -306,6 +306,7 @@ async fn successor_with_interruption(
     match &mut expected {
         StudioProjection::Flipnote(art) => art.epoch = successor_epoch,
         StudioProjection::Index(index) => index.epoch = successor_epoch,
+        StudioProjection::Score(score) => score.epoch = successor_epoch,
     }
     let pointer = PointerKey::new(logical.doc_type, logical.logical_key.clone()).unwrap();
     let interrupted_decision = if let Some(interruption) = interruption {
@@ -606,6 +607,11 @@ fn source(p: &mut Pair, target: StudioTarget) -> EpochStudioState {
 
 fn edit(target: StudioTarget, nonce: u8, text: &str) -> DomainOp {
     let body = match target {
+        StudioTarget::Score { .. } => catcoms_replication::studio::ScoreOp::SetHeader(
+            catcoms_replication::studio::ScoreHeader::Title(text.into()),
+        )
+        .encode()
+        .unwrap(),
         StudioTarget::Flipnote { .. } => title(nonce, text).body,
         StudioTarget::Index { .. } => IndexOp::SetTitle {
             object: [7; 16],
@@ -624,6 +630,15 @@ fn assert_title(
     text: &str,
 ) {
     let (value, found_author, nonce, op_id) = match projection {
+        StudioProjection::Score(score) => {
+            let selected = &score.title.as_ref().expect("title must exist").selected;
+            (
+                selected.value.as_str(),
+                selected.source.author,
+                selected.source.nonce,
+                selected.source.op_id,
+            )
+        }
         StudioProjection::Flipnote(art) => {
             let selected = &art.title.as_ref().expect("title must exist").selected;
             (

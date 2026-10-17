@@ -159,6 +159,9 @@ impl StudioEpoch {
             StudioTarget::Flipnote { channel, .. } => {
                 FlipnoteFrameProjection::verify_checkpoint(&verified, channel, seed)
             }
+            StudioTarget::Score { channel, .. } => {
+                ScoreProjection::verify_checkpoint(&verified, channel, seed)
+            }
         }?;
         let doc = EncryptedDoc::from_checkpoint(&seed, &actor)?;
         let seed_blob_cids = super::references::projection_cids(&target.read(
@@ -262,7 +265,8 @@ impl StudioEpoch {
         let mut out = super::references::projection_cids(&self.projection()?);
         out.extend(self.seed_blob_cids.iter().copied());
         for op in self.doc.signed_log() {
-            out.extend(operation_blob_cid(
+            out.extend(self.target.operation_blob_cid(
+                &self.logical,
                 &op.parsed_domain_op()?.ok_or(ReplError::Malformed)?,
             )?);
         }
@@ -334,6 +338,9 @@ impl StudioEpoch {
             StudioTarget::Flipnote { .. } => {
                 FlipnoteOp::decode_domain(&self.logical, domain)?;
             }
+            StudioTarget::Score { .. } => {
+                ScoreOp::decode_domain(&self.logical, domain)?;
+            }
         }
         if self.held(self.actor, domain)?.is_some() {
             return Ok(());
@@ -345,6 +352,7 @@ impl StudioEpoch {
                 index::prepare(&self.logical, self.epoch(), domain, &self.actor)?
             }
             StudioProjection::Flipnote(p) => frames::prepare(p, domain, &self.actor, ts)?,
+            StudioProjection::Score(p) => score::prepare(p, domain, &self.actor)?,
         };
         let mut draft = self
             .doc
@@ -466,6 +474,12 @@ impl StudioEpoch {
             e.put_bytes(&op.encode())
                 .map_err(|_| ReplError::EpochBound)?;
         }
+        // Scores share StudioObject's logical namespace, including pristine empty graphs.
+        // Bind their trusted family explicitly; all existing Index/art snapshot bytes stay
+        // unchanged and older readers refuse the new trailing tag instead of treating it as art.
+        if matches!(self.target, StudioTarget::Score { .. }) {
+            e.put_u8(score::SCORE_PAYLOAD);
+        }
         let bytes = e.finish();
         if bytes.len() > MAX_STUDIO_EPOCH_SNAPSHOT_BYTES {
             return Err(ReplError::EpochBound);
@@ -570,7 +584,7 @@ impl StudioEpoch {
             }
             operations.push(SignedOp::decode(bytes)?);
         }
-        d.finish().map_err(|_| ReplError::Malformed)?;
+        finish_vault_frame(d, target)?;
         let mut result = if opening.is_empty() {
             if !seed.is_empty() {
                 return Err(ReplError::Malformed);
@@ -641,6 +655,19 @@ fn field<'a>(d: &mut Decoder<'a>, max: usize) -> Result<&'a [u8], ReplError> {
         return Err(ReplError::EpochBound);
     }
     Ok(bytes)
+}
+
+/// Finish the complete vault frame according to the independently selected family. Score uses
+/// StudioObject's namespace even when pristine, so its mandatory trailer must be checked by
+/// structural handoff/preservation readers too, not only full restore. Legacy art/Index have NO
+/// trailer; a missing, substituted or extra family byte must never acquire a second meaning.
+fn finish_vault_frame(mut d: Decoder<'_>, target: StudioTarget) -> Result<(), ReplError> {
+    if matches!(target, StudioTarget::Score { .. })
+        && d.get_u8().map_err(|_| ReplError::Malformed)? != score::SCORE_PAYLOAD
+    {
+        return Err(ReplError::EpochScope);
+    }
+    d.finish().map_err(|_| ReplError::Malformed)
 }
 
 #[cfg(test)]

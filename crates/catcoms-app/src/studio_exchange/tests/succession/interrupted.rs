@@ -195,6 +195,7 @@ impl Interruption {
         match &mut expected {
             StudioProjection::Flipnote(art) => art.epoch = epoch,
             StudioProjection::Index(index) => index.epoch = epoch,
+            StudioProjection::Score(score) => score.epoch = epoch,
         }
         assert_eq!(read.projection, expected);
         if self.successor_written() {

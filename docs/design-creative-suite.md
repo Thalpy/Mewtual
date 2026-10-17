@@ -1,11 +1,17 @@
 # Design: the creative suite (draw, doodle, flipnote, emoji sound, play, knock)
 
-**Current Gate 4 update (2026-10-12).** PR #41 assembles the rotation/recovery candidate through
+**Current status (2026-10-14).** The owner accepted the Gate 4 and Gate 5 merges. PR #43 merged
+into `Create-suite-2` at `7cbe8cbe131e1be8e672d04341c31a1d2b52a98d`. Gate 6 starts from that
+base on `gate6-sound-export`; `GATE6-DESIGN.md` records the pure export foundation and the
+remaining persistent sound, playback and UI work. Older dated candidate statements below
+retain their historical scope; they do not reopen Gate 4 or Gate 5.
+
+**Gate 4 checkpoint (2026-10-12).** PR #41 assembles the rotation/recovery candidate through
 the real actor, native and Studio UI paths. It exposes only the reviewed lifecycle family and
 ticketed Unconfirmed Save; direct Closing Save and native repair controls remain unavailable.
 Acceptance evidence is maintained in `GATE4-ACCEPTANCE.md`.
 
-**Gate 5 (2026-10-12): implementation candidate on `gate5-frame-claims`, not accepted.** It
+**Gate 5 design checkpoint (2026-10-12; since merged in PR #43).** It
 implements 2.18 (C0d full identity), the 2.3 admission extraction (C0b), and the 2.7/2.10
 claim frame on the `draw` channel. Two choices go beyond the text above:
 
@@ -426,7 +432,7 @@ steps at sixteenth-note resolution. A scale is an editor view.
 ```
 { v:1, kind:"score", id, channel, epoch, title, bpm:40..240, bpb:1..8, steps:1..256,
   patches: { <patch id>: <jam-patch:v1 descriptor> },        at most 64 entries
-  cells:   { "<step>:<row>": {k:"n", p:<patch id>} | {k:"d", pad:0..9} } }
+  cells:   { "<step>:<row>": {k:"n", p:<patch id>, len?:<sixteenth steps>} | {k:"d", pad:0..9} } }
 ```
 
 Caps: 64 patches and 4096 filled cells (the review measured 473,903 bytes for the maximal export
@@ -434,13 +440,21 @@ and the validator accepted it). Over-cap merges keep cells in ascending `(step, 
 to 4096 and the 64 smallest patch ids, flagging the rest. The cell union is exact: protocol
 metadata never lives inside a cell value.
 
+Authored duration amendment (2026-10-14, before the first sound/export implementation ships):
+note `len` is an integer from 1 through `steps - step`; omission preserves the original draft's
+one-step note. Same-row notes may be adjacent but overlapping holds must be shown as a conflict,
+not silently shortened or merged. A resolved export refuses such overlap. Drums remain the
+receiver-owned one-shot recipes. Persistent admission/projection support is still Gate 6 work.
+
 Export. Let `T = 15000`. Header: `group` = the stable group id the jam recorder uses; `call` =
 hex of `H("catcoms-score-export:v1", score id)`; `met` = `{bpm, bpb}`; `parts` = `[exporter
 identity]`; `lanes` = `[{src:0, sn}]` with `sn` = the first 16 hex of
 `H("catcoms-score-lane:v1", score id)`, last character `1` if all zeros; `patches` in ascending
-id order. Timing: `on = floor(s * T / bpm)`, `off = floor((s + 1) * T / bpm) - 1`, integer by
+id order. Timing: `on = floor(s * T / bpm)`, `off = floor((s + len) * T / bpm) - 1`, integer by
 construction, `off > on` for every valid bpm. Events sorted by `(ms, off_before_on, row, kind)`
-then `q` assigned from 0. Canonical JSON.
+then `q` assigned from 0. A note-on's required legacy `w` is the waveform named by
+`PATCH_OSC_WAVES[descriptor.o[0].w]`; its `p` still names the full recipe in the take's patch
+table. Canonical JSON.
 
 Invariant, tested: **every accepted score exports to a take that `validateJamTake` accepts**,
 and the exporter runs the validator before sharing.
@@ -477,7 +491,7 @@ generic rules; these refine them):
 | Type | Operations | Element ids | Restore refinement |
 |---|---|---|---|
 | score | `set_cell(step,row,value)`, `clear_cell(step,row)`, `set_patch(patch id, descriptor)`, `remove_patch(patch id)`, `set_header(field, value)` for `title`, `bpm`, `bpb`, `steps` | cells are keyed by `(step,row)`, which is stable by construction; patches by descriptor hash | a cell is restored only if empty in the target, else shown as a conflict; a patch is restored if absent and the 64 cap allows, else flagged; a cleared cell on the fork is shown as "cleared on the fork" with a Clear action; headers are conflicts, never restored automatically |
-| flipnote | `insert_frame(frame id, after frame id or none, cid, bytes)`, `remove_frame(frame id)`, `replace_frame(frame id, cid, bytes)`, `set_sfx(sfx id, frame id, patch id, note)`, `remove_sfx(sfx id)`, `set_patch`, `remove_patch`, `set_export(export id, ...)`, `remove_export(export id)`, `set_header(field, value)` for `title`, `fps`, `score` | frames, sfx and exports by random 32-hex id | a frame absent in the target is inserted after its recorded predecessor if present, else at the end; concurrent inserts into the same resolved gap order by ascending `op_id`, subject to the placement rule below; a frame present in both with a different `cid` is a conflict shown with both authors; a removed frame on the fork is shown with a Delete action; sfx and exports restore by id if absent; the patch union rule (2.10) applies after restore and can flag |
+| flipnote | `insert_frame(frame id, after frame id or none, cid, bytes)`, `remove_frame(frame id)`, `replace_frame(frame id, cid, bytes)`, `set_sfx(sfx id, frame id, patch id, note, duration_ms)`, `remove_sfx(sfx id)`, `set_patch`, `remove_patch`, `set_export(export id, ...)`, `remove_export(export id)`, `set_header(field, value)` for `title`, `fps`, `score` | frames, sfx and exports by random 32-hex id | a frame absent in the target is inserted after its recorded predecessor if present, else at the end; concurrent inserts into the same resolved gap order by ascending `op_id`, subject to the placement rule below; a frame present in both with a different `cid` is a conflict shown with both authors; a removed frame on the fork is shown with a Delete action; sfx and exports restore by id if absent; the patch union rule (2.10) applies after restore and can flag |
 | index | `put_object(object id, kind, title, created_by, ts, expiry)`, `tombstone_object(object id)`, `set_title(object id, title)`, `set_expiry(object id, expiry)` | objects by random 32-hex id | objects restore by id if absent and the 64 cap allows; a tombstone on the fork shows a Delete action; titles and expiry are conflicts |
 | replies | `put_reply(reply id, author, cid, bytes, ts, expiry)`, `tombstone_reply(reply id)` | replies by random 32-hex id | replies restore by id if absent and the per-post and per-author caps allow |
 | registry | `put_pointer(key, epoch)`, `tombstone_pointer(key)` | by logical key | owned by P1: a pointer is re-put on Restore if its target document exists |
@@ -486,6 +500,13 @@ Generic rules from P1 apply everywhere: a collection projects as an ordered set 
 a tombstone wins over any insertion of the same id, scalars project by Automerge's
 concurrent-put rule with other values shown as conflicts, and delivery order never changes a
 projection. Restore adds and never overwrites; conflicts are shown, not resolved silently.
+
+Reusable musical slots are an explicit exception to permanent element tombstones: score cell
+coordinates and content-hash recipe slots use a remove-wins register. Clear/remove wins among
+live concurrent alternatives, while a later Set that observes those alternatives may replace
+their exact same-property predecessors. This permits erase/retype and remove/readd without losing
+concurrent removal evidence. Score defaults, causal checks, compaction and recovery requirements
+are specified in `GATE6-STATE-DESIGN.md`; body decoding alone does not implement this state.
 
 **Rust index representation (gate 1, read-only so far).** The logical root above is a view,
 not nested Automerge map allocation. Physical root headers are `v`, `kind`, `channel` (the
@@ -691,7 +712,7 @@ view; gate-2 integration must adapt it explicitly before claiming production Sav
   frames: <ordered set of frame ids>,
   frame: { <frame id>: { cid, bytes, author, ts } },
   score?: <score object id>,
-  sfx: { <sfx id>: { fr:<frame id>, p:<patch id>, n:0..127 } },     at most 4096
+  sfx: { <sfx id>: { fr:<frame id>, p:<patch id>, n:0..127, duration_ms:1..600000 } }, at most 4096
   patches: { <patch id>: descriptor },
   exports: { ... } }
 ```
@@ -701,6 +722,11 @@ materialization keeps score patches first then sfx patches, each ascending by id
 whose patch fell outside, and export refuses while any is flagged. The promise is 8 MiB of
 frames summed over declared `bytes` in list order; 999 is the list cap; over-cap frames grey out
 and editing is refused while any exist.
+
+Frame SFX preserves the creator's hold duration, including an emoji sound's validated `len`.
+It does not derive duration from animation FPS or impose a global 120-ms hold. The patch's
+release envelope follows that authored hold. The earlier `set_sfx` body/root draft omitted
+duration; stateful Gate 6 support must add `duration_ms` before accepting that operation family.
 
 **Claims are ephemeral**, on the `draw` channel: `{t:"c", sn, q, obj, fr, on:1}`, `on:0`,
 `ask:1`; live 90 s from the receiver's last receipt, re-sent every 30 s; sticky notification
@@ -925,7 +951,7 @@ frames    count x ( len u32 LE, pix:v1 bytes )
 take_len  u32 LE
 take      canonical jam-take:v1 JSON; patch array = the materialized union (2.10)
 sfx_n     u16 LE   0..4096
-sfx       sfx_n x ( frame u16 LE, patch u8, note u8 )
+sfx       sfx_n x ( frame u16 LE, patch u8, note u8, duration_ms u32 LE )
 ```
 
 The no-score take: `group` = the stable group id; `call` = hex of
@@ -933,10 +959,19 @@ The no-score take: `group` = the stable group id; `call` = hex of
 `[exporter identity]`; `lanes` = `[{src:0, sn}]` with `sn` derived from
 `H("catcoms-flipnote-lane:v1", flipnote id)` as in 2.8; `patches` = the union; `events` = `[]`.
 With a score, the take is the 2.8 export with its patch array replaced by the union. Sfx are
-emitted in ascending sfx id order. Caps: frames 8 MiB, take 512 KiB, sfx 16 KiB, whole export
+emitted in ascending sfx id order, with authored duration in 1..600000 ms.
+Caps: frames 8 MiB, take 512 KiB, sfx 32 KiB, whole export
 9 MiB. Decoding validates every length before allocating and re-runs `validateJamTake`. Tests:
 a byte-exact no-score golden vector; a 64-patch score plus one disjoint sfx patch refused; a
 63-patch score plus one sfx patch round-trips.
+
+The duration field amends the unreleased four-byte SFX draft before its first production
+implementation; strict framing refuses that older draft when it contains SFX. Empty-SFX
+packages have unchanged meaning/bytes. No deployed export or existing jam-take format changes.
+All maximal components plus framing fit in 8,949,673 bytes, below the 9-MiB whole ceiling.
+Preserving longer holds in content is not yet a playback guarantee: the current jam engine's
+30-second watchdog also applies to archival notes. Gate 6 playback integration must provide a
+bounded archival-note path while keeping the live lost-note-off watchdog intact.
 
 ### 2.17 GB cam is a filter on the video track and a visual effect, not anonymization
 

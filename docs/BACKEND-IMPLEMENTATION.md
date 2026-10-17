@@ -9,7 +9,19 @@ Frontend integration is tracked separately in [FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HO
 native commands/events, retry rules and explicitly unavailable controls. Update it alongside
 every bridge-facing slice; UI layout and rendering remain user-owned.
 
-Current follow-up (2026-09-15): the user passes `aa0a81f...0b28f06` profiling and detached
+Current Gate 6 work (2026-10-14): Gate 5 is owner-accepted and merged in PR #43 at
+`7cbe8cbe131e1be8e672d04341c31a1d2b52a98d`. Export foundations/nonce correction are PR #44
+(`0fe17691fa353cee9b37dc85d4ea4149a5aa8ec5`); stacked PR #45 is an implemented integration
+candidate at verified code checkpoint `818e711641bc8193af5cde3be8e56d4817c475f9`. Typed Score/SFX/recipes/links/exports,
+causal/preflight/vault support, native publication/GIF, production Sound/Music controls and the
+existing take consumer's archival playback and explicit backend SoundRecord recovery are connected
+and cumulatively reviewed. Complete local root/native/frontend suites, strict lint/build/startup
+and the affected mutation/control checks pass. Hosted/Linux CI remains pending, so this is not
+final Gate 6 acceptance. [GATE6-ACCEPTANCE](GATE6-ACCEPTANCE.md) records exact stack, evidence and remaining work;
+[GATE6-DESIGN](GATE6-DESIGN.md) remains the design/reuse history. Dated implementation records
+below keep their original scope instead of being silently rewritten as present-time claims.
+
+Historical follow-up (2026-09-15; superseded by the merges above): the user passes `aa0a81f...0b28f06` profiling and detached
 inspection design without findings. Code/test checkpoint `d5ca2ff` adds read-only
 `studio_overlay_read`, implementing capture,
 detached reconstruction, full intent-wrapper currency and native delivery under one original
@@ -53,19 +65,19 @@ These are ordered integration milestones, not equal-sized percentages. Index/art
 through Gate 3 are implemented; wider sound/export coverage still belongs to Gate 6.
 The first user-observable target is gate 2: **create, save, restart, reopen** through real backend
 commands. Its Index/art native-path and reference-protection tests now pass; that art milestone
-is implemented and the next active work is gate 4. Wider sound/export families remain gate 6
+is implemented; Gates 4 and 5 have since merged, and the active work is Gate 6. Wider sound/export families remain Gate 6
 work, so this does not close every family in the seven full gates. Gate 1 begins with typed Studio
 operations; it does not wait for P1 support
 for unrelated document types. Tests and review accompany each slice, not only gate 7.
 
 | Gate | Remaining work | Completion evidence |
 |---|---|---|
-| 1. Typed Flipnote documents | Rust StudioIndex/Flipnote domain-op validation, deterministic projection, conflict/Restore data and exact checkpoint preflight; frame, byte, sfx and patch caps. Unsupported linked-score behavior stays unavailable until gate 6, never silently accepted. | Tests exercise valid edits, malformed/cross-document operations, both concurrent delivery orders and cap boundaries through the real P1 gate. |
-| 2. Durable one-device Save/Load | **Index/art milestone implemented:** accounted vault/lifecycle ownership, native commands, real PIX CIDs, sealed intents, conservative source/seed/recovery reference protection and three-state expiry. Extend these same seams to actual sound/export records in gate 6. No UI edits. | Actor/native create/edit/restart/reopen uses real CIDs. Failure cases preserve durable state. Fileshare unlisting/upload cleanup cannot delete referenced pixels; full scans/restart include superseded seed/history, pending intents and retained/staged recovery. Open edits remain provisional. |
-| 3. Two-member collaboration and joining | **Index/art milestone implemented:** live sharing, automatic same-epoch repair, unopened saved-key service, keyed Registry/Studio checkpoint discovery and recovery-first Studio adoption through the existing actor/native worker. | Actual actors join after the fixture receipt, install Registry plus Index/art checkpoints, persist the Studio open tail and reopen. Provider restart needs no UI watch. Closing survives expired selection and restart; ordinary Read reestablishes the volatile watch, then no further action is needed. Existing cancellation/authority/durability tests and 70-op paging remain. The 8-MiB input/inventory and 256-KiB unrelated-cold rails remain; this is not arbitrary-size latency qualification. |
-| 4. Rotation and recovery in the running app | **Completion candidate assembled in PR #41:** accounted settlement/rotation, Registry maintenance, recovery lifecycle, repeated-owner tenure, detached signed fault repair, structured refusal mapping and ticketed awaiting-tenure Save are connected through actor, native and Studio UI. Direct Closing Save and native repair controls remain unavailable. | Focused crash/restart, rotation, paging, native recovery, lifecycle/copy, repeated-tenure and signed-repair regressions pass, together with the complete local suites and PR #41's hosted check set. Final integration review/checkpoint status is recorded in `GATE4-ACCEPTANCE.md`. No pruning before receipt and durable recovery; manual recovery is not settlement. Backup Export is not `.pixa` (gate 6). |
-| 5. Collaborative frame claims | **Implementation candidate, PR #43 on `gate5-frame-claims` (updated 2026-10-13), not accepted.** It covers full-identity call signalling (C0d) through sync, actor, bridge and frontend; shared `rt-admission` (C0b); and the ordered `draw` channel with the exact capability/session-bound `t:"c"` Claim/Ask/Pass frame, receiver-observed 90 s expiry, 30 s refresh and the Studio countdown/Ask/Pass surface. [GATE5-DESIGN](GATE5-DESIGN.md) is the gate record. <br><br>PR #43 review (request changes) is addressed: <ul><li>per-edge delivery retries a failed Ask or Pass;</li><li>an unreachable peer is hidden and its deliveries held until recovery;</li><li>the wiring is shared with a real-WebRTC check.</li></ul>Remaining: <ul><li>the two-desktop acceptance run and the owner's sign-off;</li><li>a green check set on the exact head. The only failures so far are a pre-existing Gate 4 Studio-exchange flake.</li></ul>Decided by the owner on 2026-10-13: <ul><li>D1 (untargeted Pass) is confirmed;</li><li>macOS (WKWebView) is stated as unverified for stream-8 compatibility;</li><li>WebKitGTK as tested exposes no WebRTC at all.</li></ul>Separately: <ul><li>the out-of-scope fingerprint-keyed inviter finding (THREAT-MODEL item 7).</li></ul>No game/avatar path or standalone drawing feature. | Two members observe advisory claim/Ask/Pass/expiry; collision, replay and disconnect tests pass. Claims never become edit locks. Evidence: <ul><li>`draw-claims.test.ts`, `draw-wiring.test.ts`, `call-identity.test.ts`, `call-wiring.test.ts`, the Studio claim-UI tests and the Rust call-signal identity tests;</li><li>`scripts/claims-webrtc-check.mjs`: real Chromium WebRTC between separate processes, including a genuine disconnect and recovery, and the old-build stream-8 case (GATE5-DESIGN 9.3).</li></ul>|
-| 6. Sound and export | Linked-score typed operations/preflight/recovery, sfx/emoji patch sources, 64-patch union, deterministic valid-take export and byte-exact `.pixa` publication with durable export records. Cover the specified local GIF export contract without taking over UI design. | No-score and linked-score golden vectors, maximal accepted exports and malformed/over-cap rejection pass; exported bytes can be read back and validated. Playback-facing contracts preserve Deafen and membership teardown. |
+| 1. Typed Flipnote documents | Index/art milestone implemented; Gate 6 candidate extends the same closed domain grammar, causal projections, conflicts/deletions, exact checkpoint/recovery and caps to Score/SFX/recipes/links/exports. | Existing baseline evidence remains; final combined sound/Score evidence after the reviewed SoundRecord recovery correction are tracked in `GATE6-ACCEPTANCE.md`. Unsupported future families still refuse. |
+| 2. Durable one-device Save/Load | Index/art milestone implemented; Gate 6 candidate extends accounted P1/vault/native create/read/apply and conservative source/seed/intent/recovery holds to Score/sound/export. Local SetExport requires actual held validated PIXA before a durable reference. | Actor/native tests cover real CIDs, retries and restart/reopen; final post-SoundRecord root/native verification is pending. Open edits remain provisional; reference publication is separate from blob custody or a receipt. |
+| 3. Two-member collaboration and joining | Index/art milestone implemented; Gate 6 candidate adds typed Score/Flipnote sound to the existing authenticated page/seed/tail, dependency, unopened-key and handoff paths rather than another transport. | Real actor typed Score joining/catch-up/reopen regressions supplement the earlier Index/art evidence. Final combined suites are pending; production two-real-client release acceptance remains Gate 7. Existing byte/work/cold-reconstruction rails remain, not arbitrary-size latency qualification. |
+| 4. Rotation and recovery in the running app | **Merged and owner-accepted Gate 4 baseline.** Accounted settlement/rotation, Registry maintenance, repeated tenure, signed repair and registered local-draft lifecycle/ticketed Unconfirmed Save remain in use. P5 was promoted only for that bounded reviewed lifecycle. Direct Closing Save and native unfinished repair commands remain unavailable. | `GATE4-ACCEPTANCE.md` retains exact integration/review evidence. Gate 6 reuses this boundary, does not reopen or broaden it. Unconfirmed is local/non-transferable; backup export is not PIXA, and manual recovery is not settlement. |
+| 5. Collaborative frame claims | **Merged and owner-accepted in PR #43**, baseline `7cbe8cbe131e1be8e672d04341c31a1d2b52a98d` (2026-10-13). Full-device call identity, shared RT admission, ordered draw Claim/Ask/Pass, delivery retries, disconnect handling and receiver-observed countdowns are connected. D1 untargeted Pass is owner-confirmed. | `GATE5-DESIGN.md` preserves focused identity/replay/collision/UI and separate-process real-WebRTC evidence. Claims remain advisory, never edit locks. macOS old/new-build stream-8 behavior remains stated as unverified; WebKitGTK as tested had no WebRTC. Do not erase these compatibility/release residuals or infer a new two-real-client acceptance run. |
+| 6. Sound and export | **Implemented integration candidate, NOT yet accepted.** Typed/persisted linked Scores, frame SFX/recipes, 64-patch union, authored playback, deterministic takes, exact PIXA publication/readback/export records, Sound/Music UI and local visual-only GIF are connected. Local emoji JSON import is bounded; shared emoji catalog/chat clicks are not included. Backend SoundRecord explicit recovery is implemented and bounded-reviewed. | Golden/maximal/malformed/ownership and focused integration tests plus bounded reviews are recorded in `GATE6-ACCEPTANCE.md`. Frontend 1555/1555/check/build and host nine-flow evidence exist at the ledger's stated checkpoints. Cumulative code review is clear; fresh root/native/startup and exact-head hosted/Linux CI evidence remain PENDING. |
 | 7. Flipnote backend acceptance and UI handoff | Run the complete create/save/restart/share/join/rotate/recover/export flow through production adapters, including failure paths. Publish Markdown for the real commands, events, limits and recovery behavior. | Backend acceptance tests and mandatory suites pass, adversarial blocker/high findings are resolved, and every canonical UI dependency maps to a working command/event or explicitly user-owned rendering work. |
 
 Runtime ownership and storage admission are prerequisites within gates 2-4, not optional polish
@@ -74,7 +86,11 @@ Gate 3 can test discovery against an explicitly prepared receipted fixture; auto
 production closes only at gate 4. Gate 5 supplies the reviewed identity/channel prerequisites
 before collaborative claims ship; art persistence need not wait for the whole C4 Draw product.
 
-Gate 1 substeps (not extra product gates):
+Historical Gate 1 substeps (not extra product gates; original Index/art checkpoint):
+
+These early unchecked wider-family items are historical, not the current Gate 6 inventory.
+Their implementations now exist in the candidate; final acceptance remains governed by the
+current gate table and `GATE6-ACCEPTANCE.md`.
 
 - [x] Static IndexOp/FlipnoteOp body codec, complete-envelope checks and shared frontend vectors.
 - [ ] Deterministic Studio projections with stable ids, ordering, conflict and deletion evidence.
@@ -638,9 +654,13 @@ the matching row; keep the outstanding boundary explicit. Record relevant `fix`,
 and non-conventional commits too when they change that boundary, not just `feat`/`perf` titles.
 If work supersedes an earlier approach, mark which implementation replaces it instead of leaving
 two apparently active solutions. Use the full diff for file history; do not duplicate INTERFACES
-or infer percentages from commit counts. **Gate 4 is active, reusing the completed Gate 3 paths.**
+or infer percentages from commit counts. The current gate board above governs; Gate 4's merged
+paths are reused by the Gate 6 candidate rather than treated as an unfinished parallel stack.
 
-## Current evidence
+## Historical evidence (original Index/art checkpoints)
+
+The dated/commit-pinned entries below describe earlier slices. Current wider-family availability
+and pending acceptance evidence are recorded in the gate board and `GATE6-ACCEPTANCE.md`.
 
 Gate 1 now has the static Rust `studio::IndexOp`/`FlipnoteOp` codec: the closed operation set,
 complete-envelope bounds/scope, full-identity creator binding and validated jam patch hashes.

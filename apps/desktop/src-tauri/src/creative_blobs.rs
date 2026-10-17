@@ -53,7 +53,7 @@ fn parse_bounded_request(cid: &str, max_bytes: usize) -> Result<Cid, String> {
 
 /// Suppress stale success/bytes after lock-unlock or removing and reopening the same server id.
 /// Hold both gates through conversion; do not cache plaintext for a later session.
-async fn finish_response<T>(
+pub(super) async fn finish_response<T>(
     state: &AppState,
     server: u64,
     instance: u64,

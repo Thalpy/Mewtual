@@ -107,6 +107,11 @@ fn fixture_after(
         let mut op = f.title();
         op.nonce = (n as u128 + 100).to_be_bytes();
         op.body = match f.target {
+            StudioTarget::Score { .. } => catcoms_replication::studio::ScoreOp::SetHeader(
+                catcoms_replication::studio::ScoreHeader::Title(format!("overlay measurement {n}")),
+            )
+            .encode()
+            .unwrap(),
             StudioTarget::Index { .. } => IndexOp::SetTitle {
                 object: [1; 16],
                 title: format!("overlay measurement {n}"),
@@ -148,6 +153,14 @@ fn fixture_after(
     let mut last = f.title();
     last.nonce = (count as u128 + 99).to_be_bytes();
     last.body = match f.target {
+        StudioTarget::Score { .. } => catcoms_replication::studio::ScoreOp::SetHeader(
+            catcoms_replication::studio::ScoreHeader::Title(format!(
+                "overlay measurement {}",
+                count - 1
+            )),
+        )
+        .encode()
+        .unwrap(),
         StudioTarget::Index { .. } => IndexOp::SetTitle {
             object: [1; 16],
             title: format!("overlay measurement {}", count - 1),

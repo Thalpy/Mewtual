@@ -163,17 +163,20 @@ test("a finished take cannot leave a stale timer that stops its replacement", ()
   const end = source.indexOf("function jamStopPlayback()", start);
   assert.ok(start >= 0 && end > start);
   const body = source.slice(start, end);
-  assert.match(body, /if \(pl\.draining\) return;/, "overlapping timer ticks must not race the async drain");
-  assert.match(body, /await engine\.drum\(/, "dense take playback must backpressure async drum hashing");
-  assert.match(body, /event\.ms <= pl\.dropAttacksThroughMs/,
-    "attacks due during a completed Deafen interval must remain suppressed after reopen");
-  const release = body.indexOf("engine.releaseChannelHeld(chan)");
-  const arm = body.indexOf("pl.endTimer = setTimeout(() => {");
+  // The transport migration intentionally moves seek/drum/tail scheduling into the tested
+  // archival controller. Pin the new enforcement path, not the retired raw-channel spelling.
+  assert.match(body, /if \(pl\.draining \|\| pl\.done\) return;/, "overlapping timer ticks must not race the async drain");
+  assert.match(body, /await pl\.transport\.tick\(\)/, "the App awaits bounded archival dispatch, including drum seed hashing");
+  assert.match(body, /if \(!pl\.transport\.completed\) \{ suppressCurrentTake\(\); return; \}/,
+    "failed/revoked ownership must never advance the DJ as natural completion");
+  const completed = body.indexOf("if (pl.transport.state === \"stopped\")");
+  const retireTimer = body.indexOf("pl.done = true; clearInterval(pl.timer)");
   const advance = body.indexOf("jukeAdvance(true)");
-  assert.ok(release >= 0 && release < arm, "unmatched held notes must enter release before tail cleanup is armed");
-  assert.ok(arm >= 0 && advance > arm, "tail cleanup must be armed before a cached next take can start");
+  assert.ok(completed >= 0 && retireTimer > completed && advance > retireTimer, "complete authored tail and timer retirement precede advancing a cached next take");
   assert.match(body, /if \(jamPlay !== pl\) return;/);
-  assert.match(body, /else \{\s*jamStopPlayback\(\);/);
+  assert.match(body, /else jamStopPlayback\(\);/);
+  const stop = source.slice(end, source.indexOf("function pad2(", end));
+  assert.match(stop, /jamPlayGen\+\+/); assert.match(stop, /clearTimeout\(pl\.catchupTimer\); pl\.transport\.stop\(\)/);
 });
 
 test("local note and drum echoes share one causal render lane", () => {
@@ -190,14 +193,18 @@ test("local note and drum echoes share one causal render lane", () => {
     "each local gesture must capture its room gate epoch before patch publication can await");
 });
 
-test("Deafen advances the App gate epoch and marks the take interval on both toggle edges", () => {
+test("Deafen advances the App gate epoch and retires take ownership on both toggle edges", () => {
   const source = readFileSync(fileURLToPath(new URL("./App.svelte", import.meta.url)), "utf8");
   const start = source.indexOf("function toggleDeafen()");
   const end = source.indexOf("// Flood control moved", start);
   assert.ok(start >= 0 && end > start);
   const body = source.slice(start, end);
   assert.match(body, /callDeafened = !callDeafened;[\s\S]*?jamRoomRenderGeneration \+= 1;/);
-  assert.match(body, /jamPlay\.dropAttacksThroughMs = Math\.max\(jamPlay\.dropAttacksThroughMs, jamPlayElapsed\(\)\)/);
+  assert.match(body, /stopStudioAudio\(\);\s*suppressCurrentTake\(\);\s*callDeafened = !callDeafened;/,
+    "both edges retire pending/live archival playback before changing the master gate");
+  const suppress = source.slice(source.indexOf("function suppressCurrentTake()"), source.indexOf("async function jamStartTakePlayback("));
+  assert.match(suppress, /jamTakeSuppression\.suppress\(jamDeckPlaybackCid\(\), jukeNow\?\.cid \|\| null\)/);
+  assert.match(suppress, /jamStopPlayback\(\)/, "a heartbeat cannot renew retired take ownership after reopen");
 });
 
 test("source mute advances the App admission epoch on both gate edges", () => {
@@ -352,7 +359,7 @@ test("an unterminated note is revived by a seek past it, because the take never 
   assert.deepEqual(plan.sounding, [{ index: 0, ageMs: 60_000 }]);
 });
 
-test("App starts a seeked take by opening what it landed inside, before the first scheduled event", () => {
+test("App delegates seek reconstruction and its first bounded dispatch to the owned archival transport", () => {
   const source = readFileSync(fileURLToPath(new URL("./App.svelte", import.meta.url)), "utf8");
   const start = source.indexOf("async function jamStartTakePlayback(");
   const end = source.indexOf("function jamPlayTake(", start);
@@ -360,22 +367,17 @@ test("App starts a seeked take by opening what it landed inside, before the firs
   const body = source.slice(start, end);
   assert.doesNotMatch(body, /take\.events\.findIndex/,
     "a seek is held state plus a schedule, never just the first event at or after the offset");
-  assert.match(body, /const plan = planTakeSeek\(take, baseMs\);/);
-  assert.match(body, /next: plan\.next,/);
-  const revive = body.indexOf("jamOpenSeekVoices(jamPlay, engine, plan.sounding)");
-  // The last one: the earlier match is the interval callback being armed, which is a closure and
-  // cannot run before this synchronous run finishes. What matters is the first actual dispatch.
+  assert.match(body, /const transport = new JamTakeTransport\(engine, jamPlaybackPreparationQueue\)/);
+  assert.match(body, /takePlaybackIsRemote\(deckCid\), current\)/);
+  assert.doesNotMatch(body, /engine\.noteOn\(/, "imported holds cannot enter the raw live 30-second watchdog API");
+  const revive = body.indexOf("await transport.start(take, Math.max(0, offsetMs)");
   const firstTick = body.lastIndexOf("void jamPlayTick()");
   assert.ok(revive >= 0 && firstTick > revive,
-    "revived note-ons must reach the engine before the scheduler dispatches this lane's next event");
-
-  const opener = source.indexOf("function jamOpenSeekVoices(");
-  assert.ok(opener > 0);
-  const openerBody = source.slice(opener, source.indexOf("function jamPlayElapsed(", opener));
-  assert.match(openerBody, /shouldDispatchTakeEvent\(event, callDeafened\)/,
-    "a revived attack is still an attack: Deafen must drop it exactly as it drops a scheduled one");
-  assert.match(openerBody, /ageMs: voice\.ageMs/,
-    "a revived voice starts at the age it has reached, not at the start of its attack");
+    "a frozen seek/capability must be prepared before the first App dispatch");
+  const controller = readFileSync(fileURLToPath(new URL("./studio-playback.ts", import.meta.url)), "utf8");
+  assert.match(controller, /planJamArchivalSeek\(admitted, offsetMs\)/);
+  assert.match(controller, /active\.seekNext < active\.seek\.length/);
+  assert.match(controller, /elapsed - event\.ms/, "seek voices pass their remaining authored age rather than fresh attack time");
 });
 
 test("validated take cache is a bounded LRU", () => {

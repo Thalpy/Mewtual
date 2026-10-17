@@ -15,6 +15,11 @@ pub(super) fn prepared_checkpoint(
 ) -> (Receipt, CheckpointSeed, u128) {
     let logical = selected_target.document(&p.alice.group_id()).unwrap();
     let body = match selected_target {
+        StudioTarget::Score { .. } => catcoms_replication::studio::ScoreOp::SetHeader(
+            catcoms_replication::studio::ScoreHeader::Title("checkpoint title".into()),
+        )
+        .encode()
+        .unwrap(),
         StudioTarget::Flipnote { .. } => title(1, "checkpoint title").body,
         StudioTarget::Index { .. } => IndexOp::PutObject {
             object: [7; 16],
@@ -52,6 +57,7 @@ pub(super) fn prepared_checkpoint(
         match &mut projection {
             StudioProjection::Flipnote(art) => art.epoch = 0,
             StudioProjection::Index(index) => index.epoch = 0,
+            StudioProjection::Score(score) => score.epoch = 0,
         };
         let seed = projection.checkpoint([6; 32]).unwrap();
         let receipt = Receipt::sign(

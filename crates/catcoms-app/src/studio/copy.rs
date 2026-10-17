@@ -141,7 +141,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         })
     }
 
-    /// An `Object` put must name a Flipnote that actually exists, and only custody can tell.
+    /// An `Object` put must name an object of its exact family that exists; only custody can tell.
     ///
     /// Recovery already refuses exactly this: an index entry proves nothing about its object, so a
     /// dangling or differently scoped historical object must not be republished however well formed
@@ -155,25 +155,47 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// object can disappear between the two.
     ///
     /// Answered from the object record's header (`studio_object_holds_work`), with the same
-    /// predicate a full load would apply and no restore of a whole Flipnote on the actor. An
+    /// predicate a full load would apply and no restore of a whole object on the actor. An
     /// object stored under another channel's label is missing in this channel, not an error that
     /// fails the preview (the review's wrong-object-channel Low).
     fn probe_copy_object(
-        store: &ServerStore,
+        store: &mut ServerStore,
         server: u64,
         group: &catcoms_mls::ServerGroup,
+        device: &catcoms_mls::MlsDevice,
         plan: &StudioOverlayCopyPlan,
     ) -> Result<bool, AppError> {
+        if plan.disposition() == StudioRecoveryDisposition::Ready
+            && matches!(plan.choice().item, StudioRecoveryItem::SoundRecord { .. })
+        {
+            return super::sound_link_exists(
+                store,
+                server,
+                group,
+                device,
+                plan.destination_target(),
+                plan.body()
+                    .ok_or_else(|| invalid("ready sound copy has no operation"))?,
+            );
+        }
         let StudioRecoveryItem::Object { id } = plan.choice().item else {
             return Ok(true);
         };
         if plan.disposition() != StudioRecoveryDisposition::Ready {
             return Ok(true);
         }
-        let object = StudioTarget::Flipnote {
-            channel: plan.destination_target().channel(),
-            object: id,
+        let IndexOp::PutObject { object, kind, .. } = IndexOp::decode(
+            plan.body()
+                .ok_or_else(|| invalid("ready object copy has no operation"))?,
+        )
+        .map_err(invalid)?
+        else {
+            return Err(invalid("object copy is not a PutObject"));
         };
+        if object != id {
+            return Err(invalid("object copy target differs from its operation"));
+        }
+        let object = super::object_target(plan.destination_target().channel(), object, kind);
         store.studio_object_holds_work(server, group, object)
     }
 
@@ -231,13 +253,16 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
         Ok(match (source, destination) {
             _ if source == destination => PlanScope::SameDocument,
-            (StudioTarget::Flipnote { .. }, StudioTarget::Flipnote { .. }) => {
-                PlanScope::CrossDocument
-            }
+            (StudioTarget::Flipnote { .. }, StudioTarget::Flipnote { .. })
+            | (StudioTarget::Score { .. }, StudioTarget::Score { .. }) => PlanScope::CrossDocument,
             // The Index is one document per channel, so "another Index" does not exist, and an
-            // Index/Flipnote pair is a document-type change that the planner refuses anyway. Saying
+            // Index/object or art/Score pair changes the family the planner validates. Saying
             // so here gives the caller the real reason.
-            _ => return Err(invalid("Index copies are same-document only")),
+            _ => {
+                return Err(invalid(
+                    "copies must keep their object family; Index copies are same-document only",
+                ))
+            }
         })
     }
 
@@ -329,8 +354,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         if plan.phase() != EpochPhase::Open {
             return Err(invalid("Studio copy requires an Open destination epoch"));
         }
-        if !self.sync.with_registry_context(|group, _, _, _| {
-            Self::probe_copy_object(store, server, group, &plan)
+        if !self.sync.with_registry_context(|group, device, _, _| {
+            Self::probe_copy_object(store, server, group, device, &plan)
         })? {
             plan.hold(StudioRecoveryDisposition::MissingTarget);
         }
@@ -424,7 +449,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         let capture = self.sync.with_registry_context(|group, device, _, _| {
             store.capture_studio_overlay_copy(server, group, source, apply.destination, device)
         })?;
-        self.sync.with_registry_context(|group, _device, _, _| {
+        self.sync.with_registry_context(|group, device, _, _| {
             let plan = capture.plan(choice, scope)?;
             if plan.epoch_id() != apply.epoch_id || plan.fingerprint() != apply.expected_projection
             {
@@ -444,7 +469,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             // Refused rather than downgraded here: at C4 there is nothing left to offer the user,
             // and an object that vanished between the preview and the apply is exactly the race
             // this probe exists for.
-            if !Self::probe_copy_object(store, server, group, &plan)? {
+            if !Self::probe_copy_object(store, server, group, device, &plan)? {
                 return Err(AppError::StudioCopyRefused {
                     reason: StudioOverlayCopyRefusal::StalePreview,
                     message:

@@ -62,6 +62,7 @@
   { "command": "get_file_usage", "risk": "account-read", "surfaces": ["main"] },
   { "command": "get_wiki_pinned_cids", "risk": "account-read", "surfaces": ["main"] },
   { "command": "publish_pix", "risk": "account-write", "surfaces": ["main"] },
+  { "command": "publish_pixa", "risk": "account-write", "surfaces": ["main"] },
   { "command": "request_blob_bounded", "risk": "media-local", "surfaces": ["main"] },
   { "command": "studio_list", "risk": "account-read", "surfaces": ["main"] },
   { "command": "studio_read", "risk": "account-read", "surfaces": ["main"] },
@@ -180,5 +181,6 @@
   { "command": "save_and_open_space_guide", "risk": "os-facing", "surfaces": ["main"] },
   { "command": "save_space_layout", "risk": "os-facing", "surfaces": ["main"] },
   { "command": "save_jam_sheet", "risk": "os-facing", "surfaces": ["main"] },
+  { "command": "export_studio_gif", "risk": "os-facing", "surfaces": ["main"] },
   { "command": "save_group_file", "risk": "os-facing", "surfaces": ["main"] }
 ]

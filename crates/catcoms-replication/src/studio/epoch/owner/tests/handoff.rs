@@ -225,6 +225,52 @@ fn studio_handoff_completes_into_a_repair_bound_successor() {
     }
 }
 
+#[test]
+fn score_prepared_handoff_vault_evidence_survives_restart_with_exact_family() {
+    let mut f = Fixture::new(true);
+    f.source = StudioEpoch::new(
+        &f.group,
+        StudioTarget::Score {
+            channel: [7; 16],
+            object: [9; 16],
+        },
+        f.owner.device_id(),
+    )
+    .unwrap();
+    f.edit(
+        ScoreOp::SetHeader(ScoreHeader::Title("score handoff".into()))
+            .encode()
+            .unwrap(),
+    );
+    let (metadata, ledger, _) = branch(&mut f, 2);
+    let mut batch = signing(&mut f, &metadata, &ledger);
+    while batch.sign_next(&f.owner, &f.group, 0).unwrap() {}
+    let (mut candidate, prepared) = batch.finish().unwrap().into_parts();
+    let bytes = candidate.snapshot().unwrap();
+    assert_eq!(
+        prepared.evidence_in_vault(&bytes, &ledger).unwrap(),
+        StudioHandoffEvidence::Complete
+    );
+    let restored =
+        StudioEpoch::restore(&bytes, &f.group, candidate.target, f.owner.device_id()).unwrap();
+    let reopened =
+        StudioOverlayState::decode_vault(&prepared.encode_vault(&ledger).unwrap(), &ledger)
+            .unwrap();
+    assert_eq!(
+        reopened.evidence(&restored, &ledger).unwrap(),
+        StudioHandoffEvidence::Complete
+    );
+    assert_eq!(
+        reopened.evidence_in_vault(&bytes, &ledger).unwrap(),
+        StudioHandoffEvidence::Complete
+    );
+    for tail in [&[][..], &[1][..], &[2, 2][..]] {
+        let mut malformed = bytes[..bytes.len() - 1].to_vec();
+        malformed.extend_from_slice(tail);
+        assert!(reopened.evidence_in_vault(&malformed, &ledger).is_err());
+    }
+}
+
 /// `check_handoff_authority_after_resolution` answers for the active branch a resolution returns
 /// to, and only when the caller holds the evidence that says it will return there.
 ///
@@ -1056,14 +1102,15 @@ fn studio_overlay_structural_decode_accepts_a_branch_the_full_decoder_cannot_rep
     // A supported operation, used only to obtain one canonical accepted entry.
     let supported = f.domain(f.title_body("a replayable title"));
     let supported_id = ledger.prepare(f.owner.device_id(), supported).unwrap();
-    // An operation the typed writer does not support. It decodes as a FlipnoteOp, so it reaches
-    // the writer, and the writer refuses it.
+    // A statically valid sound whose recipe does not exist at the sender frontier. Sound
+    // operations now have typed support, but this retained draft still requires manual recovery.
     let unsupported = f.domain(
         FlipnoteOp::SetSfx {
             sfx: [0xc3; 16],
             frame: [1; 16],
             patch: [0xc3; 32],
             note: 7,
+            duration_ms: 500,
         }
         .encode()
         .unwrap(),

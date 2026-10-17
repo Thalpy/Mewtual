@@ -63,6 +63,7 @@ mod leaving;
 mod media_decode;
 mod media_worker;
 mod member_reconnect;
+mod studio_exports;
 // This broker model has no registered command consumers yet. Retain its contract tests without
 // presenting the unwired implementation as a production pairing boundary.
 #[cfg(test)]
@@ -16466,6 +16467,8 @@ pub fn run() {
             get_file_usage,
             get_wiki_pinned_cids,
             creative_blobs::publish_pix,
+            studio_exports::publish_pixa,
+            studio_exports::export_studio_gif,
             creative_blobs::request_blob_bounded,
             studio::studio_list,
             studio::studio_read,

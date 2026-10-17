@@ -24,6 +24,7 @@ Object.assign(globalThis, {
   KeyboardEvent: w.KeyboardEvent,
   MouseEvent: w.MouseEvent,
   CustomEvent: w.CustomEvent,
+  MutationObserver: w.MutationObserver,
   Event: w.Event,
   requestAnimationFrame: (fn: (t: number) => void) => setTimeout(() => fn(Date.now()), 0),
   cancelAnimationFrame: clearTimeout,
@@ -36,14 +37,14 @@ const { default: Studio } = await import("./Studio.svelte");
 const { default: StudioNav } = await import("./StudioNav.svelte");
 const { mount, unmount, flushSync } = await import("svelte");
 
-function mountStudio(ipc: FakeIpc) {
+function mountStudio(ipc: FakeIpc, extra: Partial<{ audioActions: import("./studio-audio.ts").StudioAudioActions; patchLibrary: readonly { name: string; patch: import("./jam-contract.ts").JamPatch }[] }> = {}) {
   state.useStudioIpc(ipc);
   const notices: string[] = [];
   const target = document.createElement("div");
   document.body.appendChild(target);
   const app = mount(Studio, {
     target,
-    props: { me: ME, server: SERVER, channel: CHANNEL, nameOf: (id: string) => id.slice(0, 4), colorOf: () => "#000000", onnotice: (t: string) => notices.push(t) },
+    props: { me: ME, server: SERVER, channel: CHANNEL, nameOf: (id: string) => id.slice(0, 4), colorOf: () => "#000000", onnotice: (t: string) => notices.push(t), ...extra },
   });
   flushSync();
   const count = (cmd: string) => ipc.calls.filter((c) => c.cmd === cmd).length;
@@ -809,4 +810,60 @@ test("CLAIM-UI-003: outside a call the surface explains claims and offers no cla
   } finally {
     m.done();
   }
+});
+
+test("G6-UI-001: native Score composer routes real drum edits and retains exact retry/recovery controls", async () => {
+  const ipc = fakeIpc();
+  const score = { kind: "score", title: null, bpm: null, bpb: null, steps: null, cells: {}, patches: {}, readiness: { cells: {}, patches: {}, headerConflicts: false } };
+  ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ kind: "score", title: "native music" }) } })));
+  ipc.on("studio_read", () => ({ ...ordinaryView(score), group: "deadbeef" }));
+  ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ, versions: [version(1)] }));
+  ipc.on("studio_apply", () => { throw new Error("ACK lost"); });
+  const m = mountStudio(ipc);
+  try {
+    await settled(); state.studio.selected = OBJ; flushSync(); await settled(400);
+    assert.ok(m.target.querySelector('[aria-label="Score composer"]'));
+    m.click("button", "copy");
+    assert.match(m.text(), /Score copy may replace same-coordinate cells and recipes, title, BPM, beats per bar and Steps/);
+    assert.match(m.text(), /not an atomic restore/);
+    assert.doesNotMatch(m.text(), /copy replaces the current title and fps/);
+    assert.equal(ipc.calls.find(c => c.cmd === "studio_read")?.args.objectKind, "score");
+    m.click("button", "drum"); m.target.querySelector<HTMLButtonElement>('[data-score-cell="0:0"]')!.click(); flushSync(); await settled(300);
+    const first = ipc.calls.find(c => c.cmd === "studio_apply")!.args;
+    assert.equal(first.objectKind, "score"); assert.equal(JSON.parse(String(first.body)).op, "set_cell");
+    assert.match(m.text(), /save uncertain/); m.click("button", "retry same request"); await settled(300);
+    assert.deepEqual(ipc.calls.filter(c => c.cmd === "studio_apply")[1].args, first);
+    assert.match(m.text(), /Saved history, local drafts and recovery/); assert.equal(m.count("studio_recovery_list"), 1);
+    assert.equal(m.count("publish_pix"), 0);
+  } finally { m.done(); }
+});
+
+test("G6-UI-002: Play calls preparation in the gesture adapter and source invalidation immediately stops ownership", async () => {
+  const ipc = openFlipnoteIpc(); let stops = 0, starts = 0;
+  const m = mountStudio(ipc, { audioActions: { stop: () => { stops++; }, start: async (kind, prepare) => { starts++; assert.equal(kind, "flipnote"); await assert.rejects(prepare(), /stable native group/); return false; } } });
+  try {
+    await settled(); state.studio.selected = OBJ; flushSync(); await settled(400);
+    m.click("button", "play"); await settled(100); assert.equal(starts, 1);
+    const before = stops; state.ensureStudio(ME).invalidate({ objects: [OBJ] }); flushSync(); await settled(30);
+    assert.ok(stops > before, "stop reacts to the immediate source generation, not only a later refreshed projection");
+  } finally { m.done(); }
+});
+
+test("G6-UI-003: Score loop has an explicit labelled checkbox and forwards only the local choice", async () => {
+  const ipc = fakeIpc();
+  const score = { kind: "score", title: null, bpm: null, bpb: null, steps: null, cells: {}, patches: {}, readiness: { cells: {}, patches: {}, headerConflicts: false } };
+  ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ kind: "score", title: "music" }) } })));
+  ipc.on("studio_read", () => ({ ...ordinaryView(score), group: "deadbeef" }));
+  ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ }));
+  const loops: boolean[] = [];
+  const m = mountStudio(ipc, { audioActions: { stop: () => {}, start: async (_kind, _prepare, loop) => { loops.push(loop); return true; } } });
+  try {
+    await settled(); state.studio.selected = OBJ; flushSync(); await settled(400);
+    const checkbox = m.target.querySelector<HTMLInputElement>('input[aria-label="Loop whole authored score"]');
+    assert.ok(checkbox); assert.equal(checkbox.type, "checkbox"); assert.equal(checkbox.checked, false);
+    assert.match(checkbox.closest("label.st-score-loop")?.textContent ?? "", /loop whole authored score/);
+    m.click("button", "play locally"); await settled(50); assert.deepEqual(loops, [false]);
+    checkbox.checked = true; checkbox.dispatchEvent(new Event("change", { bubbles: true })); flushSync();
+    m.click("button", "play locally"); await settled(50); assert.deepEqual(loops, [false, true]);
+  } finally { m.done(); }
 });

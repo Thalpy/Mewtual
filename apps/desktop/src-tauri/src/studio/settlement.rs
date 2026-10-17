@@ -7,15 +7,21 @@ pub(crate) fn payload(server: u64, target: StudioTarget, state: S) -> Value {
     let (tag, key, object) = match target {
         StudioTarget::Index { channel } => (15, channel, None),
         StudioTarget::Flipnote { object, .. } => (16, object, Some(hex::encode(object))),
+        StudioTarget::Score { object, .. } => (16, object, Some(hex::encode(object))),
     };
-    json!({"server":server,"docType":tag,"logicalKey":hex::encode(key),
+    let mut value = json!({"server":server,"docType":tag,"logicalKey":hex::encode(key),
     "channel":u128::from_be_bytes(target.channel()).to_string(),"object":object,
     "state":match state {
         S::Open=>"open", S::Closing=>"closing", S::Settled=>"settled", S::Fault=>"fault",
         S::RecoveryAvailable=>"recoveryAvailable", S::RecoveryEvictionPending=>"recoveryEvictionPending",
         S::RefreshRequired=>"refreshRequired", S::Repairing=>"repairing",
         S::StorageRefused=>"storageRefused",
-    }})
+    }});
+    // Additive only for the new family; old art/Index invalidations keep their existing shape.
+    if matches!(target, StudioTarget::Score { .. }) {
+        value["objectKind"] = "score".into();
+    }
+    value
 }
 
 #[cfg(test)]

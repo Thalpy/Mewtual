@@ -114,8 +114,8 @@ export const STUDIO_INDEX_MAX_OBJECTS = 64;
 export const ELEMENT_ID_HEX = 32;
 
 export type FrameRecord = { cid: string; bytes: number; author: string; ts: number };
-export type SfxRecord = { fr: string; p: string; n: number };
-export type ExportRecord = { cid: string; bytes: number; author: string; ts: number; expiry: number; deleted?: boolean };
+export type SfxRecord = { fr: string; p: string; n: number; duration_ms: number };
+export type ExportRecord = { cid: string; bytes: number; author: string; ts: number; expiry?: number | null; deleted?: boolean };
 export type FlipnoteRoot = {
   v: 1;
   kind: "flipnote";
@@ -156,13 +156,30 @@ export type FlipnoteOp =
   | { op: "insert_frame"; frame: string; after: string | null; cid: string; bytes: number }
   | { op: "remove_frame"; frame: string }
   | { op: "replace_frame"; frame: string; cid: string; bytes: number }
-  | { op: "set_sfx"; sfx: string; frame: string; patch: string; note: number }
+  | { op: "set_sfx"; sfx: string; frame: string; patch: string; note: number; duration_ms: number }
   | { op: "remove_sfx"; sfx: string }
   | { op: "set_patch"; patch: string; descriptor: unknown }
   | { op: "remove_patch"; patch: string }
-  | { op: "set_export"; export: string; cid: string; bytes: number; expiry: number }
+  | { op: "set_export"; export: string; cid: string; bytes: number; expiry?: number | null }
   | { op: "remove_export"; export: string }
   | { op: "set_header"; field: "title" | "fps" | "score"; value: string | number | null };
+
+// --- score:v1 grammar (2.8/2.9; static contract, not a callable native writer) ------------------
+export const SCORE_MAX_STEPS = 256;
+export const SCORE_ROWS = 25;
+export const SCORE_MAX_CELLS = 4096;
+export const SCORE_MAX_PATCHES = 64;
+
+/** Authored sixteenth-step length; absence preserves the original one-step draft bytes. */
+export type ScoreCell = { k: "n"; p: string; len?: number } | { k: "d"; pad: number };
+/** Body schema mirrored by Rust ScoreOp. Backend admission and causal validation remain required. */
+export type ScoreOp =
+  | { op: "set_cell"; step: number; row: number; value: ScoreCell }
+  | { op: "clear_cell"; step: number; row: number }
+  | { op: "set_patch"; patch: string; descriptor: unknown }
+  | { op: "remove_patch"; patch: string }
+  | { op: "set_header"; field: "title"; value: string }
+  | { op: "set_header"; field: "bpm" | "bpb" | "steps"; value: number };
 
 export type IndexOp =
   | { op: "put_object"; object: string; kind: "flipnote" | "score"; title: string; created_by: string; ts: number; expiry: number }

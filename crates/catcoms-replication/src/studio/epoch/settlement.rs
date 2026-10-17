@@ -91,6 +91,9 @@ impl StudioEpoch {
             StudioTarget::Flipnote { channel, .. } => {
                 FlipnoteFrameProjection::verify_checkpoint(&verified, channel, seed.bytes())
             }
+            StudioTarget::Score { channel, .. } => {
+                ScoreProjection::verify_checkpoint(&verified, channel, seed.bytes())
+            }
         }?;
         let ids = closure.domain_operation_ids()?;
         let (included, excluded): (BTreeMap<_, _>, BTreeMap<_, _>) =
@@ -103,6 +106,7 @@ impl StudioEpoch {
         let omits_evidence = match &projection {
             StudioProjection::Index(p) => p.checkpoint_omits_evidence()?,
             StudioProjection::Flipnote(p) => p.checkpoint_omits_evidence()?,
+            StudioProjection::Score(p) => p.checkpoint_omits_evidence()?,
         };
         let recovery = if excluded.is_empty() && !omits_evidence {
             None

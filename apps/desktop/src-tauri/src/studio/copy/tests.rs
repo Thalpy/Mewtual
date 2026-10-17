@@ -22,7 +22,7 @@ fn destination(target: StudioTarget) -> Value {
     json!({"channel":u128::from_be_bytes(target.channel()).to_string(),
     "object":match target {
         StudioTarget::Index{..} => Value::Null,
-        StudioTarget::Flipnote{object,..} => hex::encode(object).into(),
+        StudioTarget::Flipnote{object,..} | StudioTarget::Score{object,..} => hex::encode(object).into(),
     }})
 }
 
@@ -228,21 +228,9 @@ async fn an_apply_with_a_stale_echo_is_refused_and_writes_nothing() {
     // The epoch is caught by the preflight that establishes the destination is the Open epoch this
     // proposal was built for, before the plan is even re-derived.
     for (reason, field, wrong) in [
-        (
-            "another epoch",
-            "epochId",
-            json!(HEX[..32].to_string()),
-        ),
-        (
-            "another projection",
-            "expectedProjection",
-            json!(HEX),
-        ),
-        (
-            "another body",
-            "body",
-            Value::from(other.clone()),
-        ),
+        ("another epoch", "epochId", json!(HEX[..32].to_string())),
+        ("another projection", "expectedProjection", json!(HEX)),
+        ("another body", "body", Value::from(other.clone())),
     ] {
         let mut payload = json!({
             "destination": destination(into),

@@ -44,12 +44,21 @@ async fn check_preview_conversion(expire_after_conversion: bool) {
                 assert_eq!(value["epochId"], format!("{:032x}", f.epoch_id));
                 assert_eq!(value["epoch"], "1");
                 assert_eq!(value["channel"], channel());
+                assert_eq!(value["group"], hex::encode(&f.group));
                 assert!(value.get("phase").is_none());
                 assert!(value.get("publication").is_none());
                 // Compare the entire existing conflict-preserving representation, then require
                 // concrete seed and signed-tail data so an empty fixture cannot satisfy it.
-                assert_eq!(value["content"], projection_content(&f.expected));
+                assert_eq!(value["content"], projection_content(&f.expected).unwrap());
                 if art {
+                    let sound = &value["content"]["sound"];
+                    assert!(sound["records"]["h/score"]["selected"]["value"]["value"].is_null());
+                    assert!(sound["records"]
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .any(|k| k.starts_with("x/")));
+                    assert_eq!(sound["readiness"]["conflicts"], false);
                     assert_eq!(
                         value["content"]["title"]["selected"]["value"],
                         fixture::TITLE
