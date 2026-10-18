@@ -666,6 +666,11 @@ try {
   } else {
 
   await cdp.waitReady();
+  const qr = await cdp.eval(`(async () => {
+    const { verifyQrInterop } = await import("/scripts/qr-browser-check.mjs");
+    return verifyQrInterop();
+  })()`);
+  failed |= !assertEqual("browser QR encoder/decoder interop", qr, { png: true, decoded: "Mewtual" });
   const send = await cdp.eval(SEND_SCENARIO);
   failed |= !assertEqual("send flow", send, {
     composerFound: true,

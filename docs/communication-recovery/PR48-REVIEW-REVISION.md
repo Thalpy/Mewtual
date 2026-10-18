@@ -1,6 +1,7 @@
 # PR 48 review revision
 
-Status: implementation in progress, not accepted. Baseline: communication branch commit
+Status: six review corrections implemented; full local verification is finishing. The wider
+communication programme is not accepted. Baseline: communication branch commit
 `2dfc0357ff39ad37edaf44662c04b05e7b5f0f2b`. The review concerns the communication programme,
 not accepted Gate 7. The main checkout now contains independent Studio work on Gate7; revision
 work uses the isolated `target/communication-review-worktree` checkout of the communication branch.
@@ -15,7 +16,7 @@ are unfinished. Do not mark the wider programme complete from these corrections.
 | Application actor waits for driver while driver waits for event consumption | Real TCP regression reproduced and passes after bounded driver dispatch. Automatic cached/reciprocal/probe/outbox submissions are detached with exact authority and shared custody. Six Root regressions and the real TCP notification-custody check pass; short adversarial re-review is clear. |
 | Replacement peer misses a pending router mapping | Shared acquisition promise and exact call/peer/slot/local ICE generation checks pass 24 focused checks; short adversarial re-review is clear. |
 | Sole file holder excluded by first four candidates | Four-peer search batches rotate with a per-chunk/round tried set capped at 320 peers. Ten sync and 14 worker tests pass, including every sole-holder position, proof reorder, a still-busy first provider, and exact wrapped-key fallback across network retries. Short adversarial re-review is clear. |
-| Legal 32 KiB Offer/Answer cannot fit combined 256 KiB native budget | Canonical ceiling is 8 KiB. The narrow native contract prepays 224 KiB, work lanes, continuation slots and endpoint/helper origin records before admission. Maximum native packets/replies and declared engine/result capacity fit under unrelated pressure. Affine ACK retries preserve custody. Final re-review is clear for this contract; full checks are pending. General SDP action/IPC/browser integration remains disabled. |
+| Legal 32 KiB Offer/Answer cannot fit combined 256 KiB native budget | Canonical ceiling is 8 KiB. The narrow native contract prepays 224 KiB, work lanes, continuation slots and endpoint/helper origin records before admission. Maximum native packets/replies and declared engine/result capacity fit under unrelated pressure. Affine ACK retries preserve custody. Final re-review is clear for this contract; verification is recorded below. General SDP action/IPC/browser integration remains disabled. |
 | Announcement reads the issue/expiry clock twice | Reproduced with advancing injected Clock. One sample and checked expiry pass four focused checks; short adversarial re-review is clear. |
 | Native warning policy rejects unused action registry | Unfinished native action registry now compiles only for contract tests. Production warning policy is unchanged; native check passes without warnings. |
 
@@ -292,6 +293,42 @@ and proves N returns dirty and editable. All 90 focused Studio checks pass and r
 (`pr48-gate7-latest-merge-focused-final.log`). The existing low-priority Index recovery-row grouping
 limitation remains documented in HANDOVER; its native Index target must remain null.
 
+The latest merged frontend passes all 1,829 tests, with zero Svelte diagnostics and a successful
+production build (`pr48-full-frontend-latest-gate7.log`, `pr48-frontend-check-latest-gate7.log`,
+`pr48-frontend-build-latest-gate7.log`). The actual native rebuild/startup also pass
+(`pr48-native-build-latest-gate7.log`, `pr48-native-startup-latest-gate7.log`).
+
+Later browser repeats exposed pending Vite entry-module requests, not a captured application
+exception. The default dependency scan includes old generated native release HTML as live entries
+(`pr48-vite-cold-scan-control.log`). Entry scoping and cache isolation alone did not establish a
+passing run; diagnostic controls with short deadlines are not proof that either was the sole cause.
+Development now prebundles the declared browser dependencies explicitly, retaining the Svelte
+plugin's runtime additions and CommonJS support for qrcode/jsqr. It uses a worktree-local cache
+outside junctioned node_modules. Future CommonJS subpath imports require explicit inclusion.
+Production Rollup input, fixture restrictions and authorization are unchanged. All nine original
+browser flows pass with this configuration and unchanged deadlines on fresh ports
+(`pr48-browser-flows-explicit-deps-fresh.log`). A fixed-image real browser QR encode/decode/PNG
+smoke check additionally covers those lazy CommonJS dependencies. All ten final browser checks pass
+(`pr48-browser-flows-qr-final.log`). The final full frontend suite again passes all 1,829 tests,
+with zero Svelte diagnostics and a passing production build
+(`pr48-full-frontend-accepted.log`, `pr48-frontend-check-accepted.log`,
+`pr48-frontend-build-accepted.log`).
+Read-only configuration/harness review is clear. All temporary diagnostic configuration is removed.
+
+The unfiltered root repeat passes the application library (1,143 plus 22 existing ignored) and
+process recovery, then exposes a healthy-group eclipse fixture race. It advanced injected time
+before detached discovery established the stated healthy precondition. Ordinary discovery now
+warms up at the unchanged clock until Alice's exact three-member online set exists; consumed
+events still assert no CAUTION, and the original ten-minute plus five-minute offline loops stay
+unchanged. All 14 product integration tests pass after this correction
+(`pr48-product-healthy-precondition-verified.log`); re-review is clear. A final short-read guard
+keeps draining possible if that warm-up sink fills. All 14 final product tests and strict root
+Clippy pass (`pr48-product-healthy-precondition-final.log`, `pr48-root-clippy-final.log`).
+The full workspace run continues through all
+remaining targets with no fail-fast; its original failure remains recorded, not relabelled as a
+passing unfiltered run. The redundant partial other-crate check was stopped during its long cost
+fixture (`pr48-remaining-root-packages.log`); the unfiltered run still executes that fixture.
+
 Root full verification is running, with no fail-fast so every target reports a result. Native WebView/forced relay/audio acceptance,
 historical result recovery, file durable migration/resume and final combined rollout remain
 outstanding.
@@ -305,17 +342,17 @@ aborted attempts above remain distinct from the final evidence.
 
 | Check | Result | Log under original `target/` |
 | --- | --- | --- |
-| `cargo test --all --all-features --no-fail-fast -j 2` | Running final repeat; previous failed runs remain distinct above | `pr48-full-root-test-accepted.log` |
+| `cargo test --all --all-features --no-fail-fast -j 2` | Remaining targets running; eclipse fixture failure corrected and all 14 product cases pass in the focused rerun | `pr48-full-root-test-accepted.log`, `pr48-product-healthy-precondition-final.log` |
 | `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml -j 2` | PASS: 404 passed, zero failed/ignored | `pr48-full-native-test-final.log` |
-| `npm --prefix apps/desktop test` | PASS: 1,822 passed, zero failed/skipped | `pr48-full-frontend-verified.log` |
+| `npm --prefix apps/desktop test` | PASS: 1,829 passed, zero failed/skipped | `pr48-full-frontend-accepted.log` |
 | `cargo fmt --all -- --check` and `cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check` | PASS | Tool output, no diagnostics |
-| `cargo clippy --all-targets --all-features -j 2 -- -D warnings` | PASS after final integration fixture corrections | `pr48-root-clippy-accepted.log` |
+| `cargo clippy --all-targets --all-features -j 2 -- -D warnings` | PASS after final integration fixture corrections | `pr48-root-clippy-final.log` |
 | `cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features -j 2 -- -D warnings` | PASS | `pr48-final-native-clippy.log` |
 | `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml` | PASS, no warnings | `pr48-final-native-check.log` |
 | `cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml -j 2` | PASS after application was closed | `pr48-native-build-unlocked.log` |
-| `npm --prefix apps/desktop run check` | PASS: zero errors/warnings | `pr48-frontend-check-verified.log` |
-| `npm --prefix apps/desktop run build` | PASS, existing bundle-size warning | `pr48-frontend-build-verified.log` |
-| `npm --prefix apps/desktop run test:flows` | PASS: all nine standard Edge flows | `pr48-browser-flows-verified.log` |
+| `npm --prefix apps/desktop run check` | PASS: zero errors/warnings | `pr48-frontend-check-accepted.log` |
+| `npm --prefix apps/desktop run build` | PASS, existing bundle-size warning | `pr48-frontend-build-accepted.log` |
+| `npm --prefix apps/desktop run test:flows` | PASS: all ten Edge checks, including real QR interop | `pr48-browser-flows-qr-final.log` |
 | `npm --prefix apps/desktop run test:startup` | PASS: actual native setup marker | `pr48-native-startup-unlocked.log` |
 | `bash scripts/check-no-ambient.sh` | PASS | `pr48-final-no-ambient.log` |
 | `bash scripts/check-store-raw-fs.sh` | PASS | `pr48-final-store-raw-fs.log` |

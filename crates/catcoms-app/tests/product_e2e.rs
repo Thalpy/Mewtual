@@ -770,6 +770,41 @@ async fn the_eclipse_advisory_stays_quiet_for_a_healthy_group() {
     }
     assert_eq!(alice.actor.member_count().await, 4);
 
+    // "Healthy" is a precondition, not something to discover after fast-forwarding ten minutes.
+    // Detached discovery may still be learning records after its command barrier; advancing the
+    // clock then can correctly raise the low-reach advisory before this fixture is connected.
+    let mut everyone: Vec<String> = others.iter().map(|m| m.fp.clone()).collect();
+    everyone.sort();
+    alice.discovery_pass().await;
+    for m in &others {
+        m.discovery_pass().await;
+    }
+    let online = timeout(WAIT, async {
+        loop {
+            if let Ok(mut online) =
+                timeout(Duration::from_millis(50), alice.actor.online_members()).await
+            {
+                online.sort();
+                if online == everyone {
+                    break online;
+                }
+            }
+            if let Ok(Some(ev)) = timeout(Duration::from_millis(20), alice.events.recv()).await {
+                assert_ne!(
+                    ev.event,
+                    AppEvent::EclipseChanged { caution: true },
+                    "the frozen-clock warm-up must not already report isolation"
+                );
+            }
+        }
+    })
+    .await;
+    assert_eq!(
+        online.expect("the advisory's healthy group becomes online"),
+        everyone
+    );
+    assert_eq!(catcoms_rt::Clock::now_ms(&clock), 1_700_000_000_000);
+
     // Ten app-minutes of ordinary discovery ticks, well past the 30s grace window the old bug
     // fired at and past the 5-minute source-collapse sustain window.
     for _ in 0..10 {
@@ -786,8 +821,6 @@ async fn the_eclipse_advisory_stays_quiet_for_a_healthy_group() {
             );
         }
     }
-    let mut everyone: Vec<String> = others.iter().map(|m| m.fp.clone()).collect();
-    everyone.sort();
     assert_eq!(
         alice.settle_online(&clock, &everyone).await,
         everyone,

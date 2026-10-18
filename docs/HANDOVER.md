@@ -33,6 +33,12 @@ by an outgoing page read; a regression reopens the original page and restores th
 All 90 focused Studio checks pass and read-only re-review is clear. Final full results are recorded
 in the revision ledger; the wider communication programme remains open.
 
+Development dependency preparation also uses a worktree-local Vite cache and explicit browser
+dependency prebundles: old generated Tauri HTML is not a second application entry, and shared
+node_modules must not mix worktree optimizer state. CommonJS QR dependencies remain optimized;
+future CommonJS subpath imports need an explicit include. A browser QR round-trip smoke check
+joins the original flow checks. Production bundling and fixture authorization are unchanged.
+
 Gate7 commit `4d321fef17514c5080f96d98f01be3e86c375333` is pushed to `origin/Gate7`.
 `chat-update-implementation` was created from that checkpoint and pushed with its upstream.
 The separate [communication ledger](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md) tracks
