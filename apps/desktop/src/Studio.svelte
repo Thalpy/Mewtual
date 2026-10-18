@@ -895,6 +895,12 @@
   function retrySave(s: SaveRecord) { guard(() => session.retry(s.id)); }
   function reauthorSave(s: SaveRecord) { guard(() => session.reauthor(s.id)); }
   function overlayRetryOf(s: SaveRecord) { return s.kind === "frame" || s.kind === "overlayApply" ? s.overlayRetry : null; }
+  // Reauthor routes an edit through its own target's route now: an Index record (the listing half
+  // of a rename, shown in this document's editor) through the Index's, not this document's.
+  function refusalFor(s: SaveRecord): string {
+    void studio.rev;
+    return s.kind === "applyIndex" || s.object === null ? session.editRefusal(null) : readOnlyWhy;
+  }
   // Armed for one record in one state. A record whose status changes since (a held edit that Save
   // has since sent and left uncertain, say) needs a fresh confirmation: the first click armed the
   // discard of something that may now have committed.
@@ -1139,7 +1145,7 @@
             <button type="button" class="st-btn primary" onclick={() => retrySave(attention[0])}>{overlayRetryOf(attention[0]) === "afterExplicitAccess" ? "access, then retry same request" : "retry same request"}</button>
           {/if}
           {#if attention[0].kind === "frame" || attention[0].kind === "apply" || attention[0].kind === "applyIndex" || attention[0].kind === "overlayApply"}
-            <button type="button" class="st-btn" title="available only after the backend proved the old attempt wrote nothing" disabled={!!readOnlyWhy || overlayRetryOf(attention[0]) === "none" || !session.canReauthor(attention[0].id)} onclick={() => reauthorSave(attention[0])}>save again as a new edit</button>
+            <button type="button" class="st-btn" title="available only after the backend proved the old attempt wrote nothing" disabled={!!refusalFor(attention[0]) || overlayRetryOf(attention[0]) === "none" || !session.canReauthor(attention[0].id)} onclick={() => reauthorSave(attention[0])}>save again as a new edit</button>
           {/if}
           <button type="button" class="st-btn ghost" onclick={() => discardSave(attention[0])}>{discardArmed === armKey(attention[0]) ? "discard for real" : "discard"}</button>
         </span>{/if}

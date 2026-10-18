@@ -195,14 +195,23 @@ test("every awaited Studio route checks live ownership again before its continua
   assert.equal(/await releaseStudio\(\)/.test(source), false, "awaiting callers retain their route for a mutation-time check");
 });
 
+/** The source of App's 2-space function `name`: its parameter list and body matched by bracket
+ * depth, so one-line helpers and multi-line functions both come out whole. */
+function functionText(name: string): string {
+  const start = source.search(new RegExp(String.raw`\n {2}(?:async )?function ${name}\(`)) + 1;
+  assert.ok(start > 0, `${name} not found in App.svelte`);
+  const match = (open: string, close: string, from: number) => {
+    let depth = 0;
+    for (let i = from; i < source.length; i++) { if (source[i] === open) depth++; else if (source[i] === close && --depth === 0) return i; }
+    assert.fail(`${name}: unbalanced ${open}${close}`);
+  };
+  const paramsEnd = match("(", ")", source.indexOf("(", start));
+  return source.slice(start, match("{", "}", source.indexOf("{", paramsEnd)) + 1);
+}
+
 /** The production text of `names`, types stripped, evaluated with `state` as its scope. */
 function production<T>(names: string[], state: object): T {
-  const parts = names.map(name => {
-    const start = source.search(new RegExp(String.raw`\n {2}(?:async )?function ${name}\(`)) + 1;
-    assert.ok(start > 0, `${name} not found in App.svelte`);
-    const text = stripTypeScriptTypes(source.slice(start, source.indexOf("\n  }\n", start) + 4), { mode: "strip" });
-    return `const ${name} = (${text.trim()});`;
-  });
+  const parts = names.map(name => `const ${name} = (${stripTypeScriptTypes(functionText(name), { mode: "strip" }).trim()});`);
   return new Function("state", `with (state) { ${parts.join("\n")} return { ${names.join(", ")} }; }`)(state) as T;
 }
 
@@ -228,7 +237,7 @@ test("a delayed wiki rename never relabels a replacement page or session", async
     let refreshes = 0;
     const state = {
       viewGeneration: 1, activeServerId: 7, locked: false, windowCloseInFlight: false,
-      activeWikiPage: "Home", wikiPageGeneration: 1, wikiBody: "original body", wikiRenameTo: "Renamed", wikiRenaming: true,
+      activeWikiPage: "Home", wikiPaneSerial: 1, wikiBody: "original body", wikiRenameTo: "Renamed", wikiRenaming: true,
       studioExit: createStudioExit({ onStudio: () => false, hasWork: () => false, closing: () => state.windowCloseInFlight,
         claim: () => () => false, save: async () => true }),
       unlockedViewCurrent: (gen: number, server: number) => !state.locked && gen === state.viewGeneration && server === state.activeServerId,
@@ -242,7 +251,7 @@ test("a delayed wiki rename never relabels a replacement page or session", async
     const renaming = app.commitWikiRename();
     if (replacement === "server") { state.activeServerId = 8; state.viewGeneration++; }
     if (replacement === "unlock") state.viewGeneration += 2; // lock and authenticated reopen of the same server
-    if (replacement === "page") state.wikiPageGeneration++; // same server/name opened again
+    if (replacement === "page") state.wikiPaneSerial++; // same server/name opened again
     if (replacement === "close") state.windowCloseInFlight = true;
     state.wikiBody = "replacement body";
     renamed.resolve(); await renaming;
@@ -255,7 +264,7 @@ test("a delayed wiki rename never relabels a replacement page or session", async
 test("a completed rename still updates its exact original displayed page after route retirement", async () => {
   const state = {
     viewGeneration: 1, activeServerId: 7, locked: false, windowCloseInFlight: false,
-    activeWikiPage: "Home", wikiPageGeneration: 1, wikiBody: "kept local body", wikiRenameTo: "Renamed", wikiRenaming: true,
+    activeWikiPage: "Home", wikiPaneSerial: 1, wikiBody: "kept local body", wikiRenameTo: "Renamed", wikiRenaming: true,
     studioExit: createStudioExit({ onStudio: () => false, hasWork: () => false, closing: () => false,
       claim: () => () => false, save: async () => true }),
     unlockedViewCurrent: (gen: number, server: number) => !state.locked && gen === state.viewGeneration && server === state.activeServerId,
@@ -264,7 +273,7 @@ test("a completed rename still updates its exact original displayed page after r
   const app = production<{ commitWikiRename: () => Promise<void> }>(["commitWikiRename"], state);
   await app.commitWikiRename();
   assert.equal(state.activeWikiPage, "Renamed"); assert.equal(state.wikiBody, "kept local body");
-  assert.equal(state.wikiPageGeneration, 2, "reconciliation retires the old displayed-page identity");
+  assert.equal(state.wikiPaneSerial, 2, "reconciliation retires the old displayed-page identity");
 });
 
 test("wiki rename rechecks its original page after refresh and after the attempted open", async () => {
@@ -273,7 +282,7 @@ test("wiki rename rechecks its original page after refresh and after the attempt
     let entered = false;
     const state = {
       viewGeneration: 1, activeServerId: 7, locked: false, windowCloseInFlight: false,
-      activeWikiPage: "Home", wikiPageGeneration: 1, wikiBody: "old", wikiRenameTo: "Renamed", wikiRenaming: true,
+      activeWikiPage: "Home", wikiPaneSerial: 1, wikiBody: "old", wikiRenameTo: "Renamed", wikiRenaming: true,
       studioExit: createStudioExit({ onStudio: () => false, hasWork: () => false, closing: () => false,
         claim: () => () => false, save: async () => true }),
       unlockedViewCurrent: (gen: number, server: number) => !state.locked && gen === state.viewGeneration && server === state.activeServerId,
@@ -283,7 +292,7 @@ test("wiki rename rechecks its original page after refresh and after the attempt
     };
     const app = production<{ commitWikiRename: () => Promise<void> }>(["commitWikiRename"], state);
     const renaming = app.commitWikiRename(); await flush(); assert.equal(entered, true);
-    state.wikiPageGeneration++; state.wikiBody = "reopened Home";
+    state.wikiPaneSerial++; state.wikiBody = "reopened Home";
     waiting.resolve(); await renaming;
     assert.equal(state.activeWikiPage, "Home", phase); assert.equal(state.wikiBody, "reopened Home", phase);
   }
@@ -400,6 +409,149 @@ test("a wiki open retired by a newer action reports it, so Delete cannot arm on 
   assert.match(source, /if \(\(await openWikiPage\(name, \{\}, route\)\) && activeWikiPage === name\) wikiEdit = true;/);
 });
 
+// Re-review of 22e4ed77, finding 1: a rename on server A that completed after the member switched to
+// server B (and opened B's own "Shared") retargeted B's pane to "Renamed" by name alone, so B's next
+// Save wrote B's "Shared" body over B's "Renamed". This runs the production commitWikiRename.
+function productionRename(listing: Promise<void> = Promise.resolve()) {
+  const renamed = deferred<void>();
+  const studio = scriptedStudio(() => false);
+  const state = {
+    wikiRenameTo: "Renamed", wikiRenaming: true, activeWikiPage: "Shared", activeServerId: 1 as number | null, viewGeneration: 1, wikiPaneSerial: 0, refreshes: 0, windowCloseInFlight: false,
+    viewCurrent: (gen: number, server: number | null) => gen === state.viewGeneration && server === state.activeServerId,
+    unlockedViewCurrent: (gen: number, server: number | null): boolean => state.viewCurrent(gen, server),
+    invoke: async (cmd: string) => { assert.equal(cmd, "rename_wiki_page"); await renamed.promise; },
+    refreshWiki: async () => { state.refreshes++; await listing; },
+    // openWikiPage's contract: true only when it opened the page (which bumps the pane serial), and
+    // a retired route never does.
+    openWikiPage: async (name: string, _opts: unknown, route: { current: () => boolean }) => { if (!route.current()) return false; state.activeWikiPage = name; state.wikiPaneSerial++; return true; },
+    toast: () => {}, studioExit: studio.exit,
+  };
+  const app = production<{ commitWikiRename: () => Promise<void> }>(["wikiPane", "wikiPaneCurrent", "commitWikiRename"], state);
+  return { state, studio, commit: app.commitWikiRename, land: async () => { renamed.resolve(); await flush(); } };
+}
+
+test("a wiki rename that lands after a server switch never retargets the other server's page", async () => {
+  const across = productionRename();
+  const renaming = across.commit(); await flush();
+  // Switch to server B (switchServer claims and moves the generation) and open B's own "Shared".
+  across.studio.exit.begin(); across.state.activeServerId = 2; across.state.viewGeneration++; across.state.activeWikiPage = "Shared";
+  await across.land(); await renaming;
+  assert.equal(across.state.activeWikiPage, "Shared", "B's page keeps its identity, so B's Save keeps its target");
+  assert.equal(across.state.refreshes, 0, "A's page list is not reloaded into B's pane");
+
+  // Same server, but a newer action retired the open: the pane still shows A's renamed page, under
+  // the new name (the intended fallback).
+  const retired = productionRename();
+  const pending = retired.commit(); await flush();
+  retired.studio.exit.begin();
+  await retired.land(); await pending;
+  assert.equal(retired.state.activeWikiPage, "Renamed");
+
+  // Same server and still current: the renamed page opens.
+  const plain = productionRename();
+  const done = plain.commit(); await plain.land(); await done;
+  assert.equal(plain.state.activeWikiPage, "Renamed"); assert.equal(plain.state.refreshes, 1);
+
+  // Adversarial review: while the page list reloads, the member opens "Shared" again (still in the
+  // tree). Reads run in order, so that pane holds the post-rename, empty "Shared". The rename's
+  // fallback must not rename that pane to "Renamed", whose next Save would empty the real page.
+  const list = deferred<void>(), reopened = productionRename(list.promise);
+  const committing = reopened.commit(); await reopened.land();
+  reopened.studio.exit.begin(); reopened.state.activeWikiPage = "Shared"; reopened.state.wikiPaneSerial++; // the newer open
+  list.resolve(); await flush(); await committing;
+  assert.equal(reopened.state.activeWikiPage, "Shared", "the newer pane keeps its own identity");
+});
+
+// Adversarial review: the older wiki actions wrote to whatever pane or server was current when they
+// resumed. These run their production text across a pane change and a server switch.
+function productionWikiActions() {
+  const pending = deferred<boolean>(), history = deferred<unknown[]>();
+  const calls: { cmd: string; args: Record<string, unknown> }[] = [];
+  const state = {
+    activeServerId: 1 as number | null, viewGeneration: 1, wikiPaneSerial: 0, locked: false,
+    activeWikiPage: "X", wikiBody: "sent text", wikiDirty: true, wikiEdit: true, wikiDrafts: new Map<string, string>(),
+    wikiPages: ["X"], wikiMeta: {} as Record<string, string>, wikiFormat: "md", wikiReviewDays: 3, wikiDeleteArmed: true, wikiRedirectedFrom: "",
+    wikiHistory: [] as unknown[], wikiHistorySel: "", showWikiHistory: false,
+    viewCurrent: (gen: number, server: number | null) => gen === state.viewGeneration && server === state.activeServerId,
+    unlockedViewCurrent: (gen: number, server: number | null) => !state.locked && gen === state.viewGeneration && server === state.activeServerId,
+    invokeDebugged: async (cmd: string, args: Record<string, unknown>) => { calls.push({ cmd, args }); return { value: await pending.promise }; },
+    invoke: async (cmd: string, args: Record<string, unknown>) => { calls.push({ cmd, args }); if (cmd === "get_wiki_history") return history.promise; await pending.promise; },
+    refreshWiki: async () => {}, toast: () => {},
+  };
+  const app = production<{ saveWikiPage: () => Promise<void>; deleteWikiPage: (name: string) => Promise<void>; setWikiPageFormat: (fmt: string) => Promise<void>; openWikiHistory: () => Promise<void> }>(
+    ["wikiPane", "wikiPaneCurrent", "saveWikiPage", "deleteWikiPage", "setWikiPageFormat", "openWikiHistory"], state);
+  const openPage = (page: string, body: string) => { state.activeWikiPage = page; state.wikiPaneSerial++; state.wikiBody = body; state.wikiDirty = true; };
+  const switchServer = (id: number) => { state.activeServerId = id; state.viewGeneration++; };
+  return { state, app, calls, openPage, switchServer, answer: async (ok: boolean) => { pending.resolve(ok); await flush(); }, history };
+}
+
+test("a wiki Save receipt keeps newer typing stashed by a page open that is still reading", async () => {
+  const saved = deferred<boolean>(), readY = deferred<string>();
+  const state = {
+    view: "wiki", activeServerId: 1 as number | null, viewGeneration: 1, wikiPaneSerial: 0, windowCloseInFlight: false, error: "",
+    activeWikiPage: "X", wikiBody: "saved C", wikiDirty: true, wikiEdit: true, wikiDrafts: new Map<string, string>(), wikiPages: ["X", "Y"],
+    wikiRenaming: false, wikiDeleteArmed: false, wikiRedirectedFrom: "", wikiReviewOpen: false, wikiHistorySel: "", showWikiHistory: false, wikiReviewDays: 3,
+    showInsert: false, insertTarget: "", closeInsert: () => {}, parseRedirect: () => null, revealWikiPage: () => {},
+    viewCurrent: (gen: number, server: number | null): boolean => gen === state.viewGeneration && server === state.activeServerId,
+    invokeDebugged: async () => ({ value: await saved.promise }),
+    invoke: async (_cmd: string, args: { name: string }) => args.name === "Y" ? readY.promise : "saved C",
+    refreshWiki: async () => {}, toast: () => {}, studioExit: scriptedStudio(() => false).exit,
+  };
+  const app = production<{ saveWikiPage: () => Promise<void>; openWikiPage: (name: string) => Promise<boolean> }>(
+    ["wikiPane", "wikiPaneCurrent", "saveWikiPage", "openWikiPage"], state);
+  const saving = app.saveWikiPage();
+  state.wikiBody = "newer N";
+  const openingY = app.openWikiPage("Y"); await flush();
+  assert.equal(state.wikiDrafts.get("X"), "newer N", "opening Y stashes the newer text while its read waits");
+  saved.resolve(false); await saving;
+  assert.equal(state.wikiDirty, true);
+  assert.equal(state.wikiDrafts.get("X"), "newer N", "saving C cannot delete the already stashed N");
+  readY.resolve("Y body"); assert.equal(await openingY, true);
+  assert.equal(await app.openWikiPage("X"), true);
+  assert.equal(state.wikiBody, "newer N"); assert.equal(state.wikiDirty, true); assert.equal(state.wikiEdit, true);
+});
+
+test("wiki save, delete, format and history act only on the page and server they began on", async () => {
+  // Save X, then open Y and type before the receipt: Y stays dirty (its text was never sent).
+  const save = productionWikiActions(); const saving = save.app.saveWikiPage();
+  save.openPage("Y", "unsent text for Y"); await save.answer(false); await saving;
+  assert.equal(save.state.wikiDirty, true, "Y's unsent text stays unsaved");
+  // More typing in X itself during the save also keeps X dirty.
+  const typed = productionWikiActions(); const savingX = typed.app.saveWikiPage();
+  typed.state.wikiBody = "sent text, then more"; await typed.answer(false); await savingX;
+  assert.equal(typed.state.wikiDirty, true);
+  // X was restored from an older stash and edited further: saving the pane retires that stash, or
+  // reopening X would bring the older draft back over the saved text.
+  const stale = productionWikiActions(); stale.state.wikiDrafts.set("X", "older draft");
+  const savingStale = stale.app.saveWikiPage(); await stale.answer(false); await savingStale;
+  assert.equal(stale.state.wikiDrafts.has("X"), false); assert.equal(stale.state.wikiDirty, false);
+
+  // Delete A's "X", switch to B and open B's own "X" meanwhile: B's pane keeps its unsaved text.
+  const del = productionWikiActions(); const deleting = del.app.deleteWikiPage("X");
+  del.switchServer(2); del.openPage("X", "B's unsaved X");
+  await del.answer(true); await deleting;
+  assert.equal(del.state.activeWikiPage, "X"); assert.equal(del.state.wikiBody, "B's unsaved X"); assert.equal(del.state.wikiDirty, true);
+  assert.equal(del.calls[0].args.server, 1);
+
+  // Format chosen for A's new page "N" (unsaved, so it saves first); a switch to B during that save
+  // must not set the shared format on B's "N".
+  const fmt = productionWikiActions(); fmt.state.activeWikiPage = "N"; fmt.state.wikiPages = [];
+  const formatting = fmt.app.setWikiPageFormat("wiki"); await flush();
+  fmt.switchServer(2); fmt.state.activeWikiPage = "N"; fmt.state.wikiPaneSerial++;
+  await fmt.answer(false); await formatting;
+  const set = fmt.calls.find(c => c.cmd === "set_wiki_format")!;
+  assert.deepEqual([set.args.server, set.args.name], [1, "N"]); assert.deepEqual(fmt.state.wikiMeta, {}, "B's page metadata is untouched");
+
+  // History read for X lands nowhere once the pane moved on, or behind a lock.
+  for (const move of ["page", "lock"] as const) {
+    const h = productionWikiActions(); const opening = h.app.openWikiHistory();
+    if (move === "page") h.openPage("Y", "y"); else h.state.locked = true;
+    h.history.resolve([{ id: "r1", body: "X's old body" }]); await flush(); await opening;
+    assert.deepEqual(h.state.wikiHistory, [], `${move}: revisions never reach another pane or the lock screen`);
+    assert.equal(h.state.showWikiHistory, false);
+  }
+});
+
 // Review of 149e7321, finding 3, and its re-review: "Server settings" on server B, while the Studio
 // saved first, opened and seeded the dialog from server A (whose Rename then renamed A); and then an
 // older B request that was still waiting replaced a NEWER settings dialog for A. This runs the
@@ -472,7 +624,7 @@ function productionOpenWikiPage() {
   const read = deferred<string>();
   const state = {
     view: "chat", viewGeneration: 1, activeServerId: 7 as number | null, error: "", windowCloseInFlight: false,
-    wikiDirty: false, activeWikiPage: "", wikiPageGeneration: 0, wikiDrafts: new Map<string, string>(), wikiBody: "studio was here", wikiPages: ["Page"],
+    wikiDirty: false, activeWikiPage: "", wikiPaneSerial: 0, wikiDrafts: new Map<string, string>(), wikiBody: "studio was here", wikiPages: ["Page"],
     showInsert: false, insertTarget: "", closeInsert: () => {}, parseRedirect: () => null, revealWikiPage: () => {},
     wikiRedirectedFrom: "", wikiRenaming: false, wikiDeleteArmed: false, showWikiHistory: false, wikiReviewOpen: false, wikiHistorySel: "", wikiEdit: false,
     viewCurrent: (gen: number, server: number | null) => gen === state.viewGeneration && server === state.activeServerId,
@@ -507,7 +659,7 @@ test("a wiki response that arrives after the member went back to the Studio neve
   const plain = productionOpenWikiPage();
   const opened = plain.open("Page"); await plain.respond(); await opened;
   assert.equal(plain.state.view, "wiki"); assert.equal(plain.state.wikiBody, "# Page");
-  assert.equal(plain.state.wikiPageGeneration, 1, "each actual page open owns a fresh identity");
+  assert.equal(plain.state.wikiPaneSerial, 1, "each actual page open owns a fresh identity");
 });
 
 test("a wiki open loses permission if a newer action or close lands after its final Save decision", async () => {
@@ -521,6 +673,6 @@ test("a wiki open loses permission if a newer action or close lands after its fi
     const opened = f.open("Page"); await f.respond();
     assert.equal(await opened, false, interrupt);
     assert.equal(f.state.view, "chat"); assert.equal(f.state.wikiBody, "studio was here");
-    assert.equal(f.state.activeWikiPage, ""); assert.equal(f.state.wikiPageGeneration, 0);
+    assert.equal(f.state.activeWikiPage, ""); assert.equal(f.state.wikiPaneSerial, 0);
   }
 });

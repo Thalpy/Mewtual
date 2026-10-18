@@ -206,7 +206,8 @@ Roles on non-owner devices still have the existing published-roster freshness li
 in that document's lane must reach a definite receipt or the open is vetoed. With no document open
 nothing is left, so nothing is saved first. Records held for any other document keep their state,
 so opening a restored document never requires its own held work to save. Restored work is sent
-only by explicit Save or retry, or by leaving its own document (that document's departure Save).
+only by explicit Save or retry, or by leaving its own document. That document's departure Save
+awaits its own lane and releases, without awaiting, its records in the shared Index lane.
 A partial departure Save leaves the shared five-second deadline running for uncovered records.
 `saveBeforeLeaving()` (leaving the Studio, a channel, a server or the window) still covers every
 record. Before a first delivery, admission reads a record's document when no view of it is held
@@ -261,10 +262,18 @@ Studio's editor renders a document's retained requests whatever its read state: 
 beside the read error. Restored queued records awaiting an explicit Save
 (`StudioSession.awaitsExplicitSave(id)`) show a Save and armed discard in every editor state. A
 Save inside a document's editor is `StudioSession.saveDocument(id)`: it releases and awaits only
-that document's records (its Index records included), so other documents' restored work stays
-held and another document's failure cannot refuse it. The exception is the shared Index lane: one
-of its Index records can wait behind another document's unresolved Index record, and that Save
-then times out as still saving. A discard confirmation is armed for one
+that document's records, so other documents' restored work stays held and another document's
+failure cannot refuse it. "That document's records" is `affectedObject(s) === id`, which also
+drives `pendingFor(id)` and the sidebar's held rows. An ordinary Index record names the entry as
+`object`. A Closing or Unconfirmed Index record keeps the channel Index as its native target
+(`object: null`, unchanged) and names the entry in `op.object`. Both halves of a rename are
+therefore one document's work on every route. The Index lane is shared, so one of these Index
+records can sit behind another document's failed, uncertain or restored-held Index record. The
+Save then refuses at once and names that record ("waits behind an unsaved edit (…)"); what could
+run was released and still runs. Leaving a document also releases, without awaiting, its records
+in the Index lane, so the departure never waits on that shared lane. Playback and export treat a
+document as a draft only for its own content records; Index records about it never put media on
+the draft path, though their failures still refuse it. A discard confirmation is armed for one
 record in one state and lapses when that record's status changes.
 
 ## Studio local working state and Save boundaries (2026-10-18)

@@ -274,7 +274,25 @@ blocked. Read-only re-review finds no blocker/high/medium in these four test-fil
 root Clippy and both formatting checks pass (`pr48-root-clippy-accepted.log`). The full workspace
 repeat remains pending.
 
-Root full verification is still pending. Native WebView/forced relay/audio acceptance,
+The final remote refresh found newly committed Gate7 review fix `5bc43d2c`. It is integrated
+without changing Rust source. Merge resolution retains both handover sections, every regression,
+the latest Index-half Save/affected-document behavior and the stronger mutation-time route guards.
+One `wikiPaneSerial` now serves both displayed-page identity paths; the rename keeps its original
+unlocked scope and checks before and after refresh/open. The first focused merge checks failed
+four source audits because the resolution script introduced CRLF; restoring the original LF
+format fixes those harness failures without changing the audits. One attempted normalization ran
+from the wrong directory and made no edits; its repeated failures are not passing evidence.
+
+Read-only integration review found one medium wiki draft-loss race in the imported Save path:
+Save C can complete while another page's read has already stashed newer text N, deleting N before
+that read replaces the pane. The new actual Save/open regression reproduces the loss
+(`pr48-wiki-save-pending-open-red.log`). A same-pane Save now clears the stash only when its bytes
+still match; otherwise it preserves the current text there. The test reopens the original page
+and proves N returns dirty and editable. All 90 focused Studio checks pass and re-review is clear
+(`pr48-gate7-latest-merge-focused-final.log`). The existing low-priority Index recovery-row grouping
+limitation remains documented in HANDOVER; its native Index target must remain null.
+
+Root full verification is running, with no fail-fast so every target reports a result. Native WebView/forced relay/audio acceptance,
 historical result recovery, file durable migration/resume and final combined rollout remain
 outstanding.
 
@@ -287,7 +305,7 @@ aborted attempts above remain distinct from the final evidence.
 
 | Check | Result | Log under original `target/` |
 | --- | --- | --- |
-| `cargo test --all --all-features -j 2` | Pending final repeat; previous run fails after passing application library | `pr48-full-root-test-complete.log` |
+| `cargo test --all --all-features --no-fail-fast -j 2` | Running final repeat; previous failed runs remain distinct above | `pr48-full-root-test-accepted.log` |
 | `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml -j 2` | PASS: 404 passed, zero failed/ignored | `pr48-full-native-test-final.log` |
 | `npm --prefix apps/desktop test` | PASS: 1,822 passed, zero failed/skipped | `pr48-full-frontend-verified.log` |
 | `cargo fmt --all -- --check` and `cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check` | PASS | Tool output, no diagnostics |
