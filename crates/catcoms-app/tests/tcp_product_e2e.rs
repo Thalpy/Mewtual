@@ -166,7 +166,7 @@ async fn presence_follows_a_real_connection_and_goes_dark_when_the_peer_closes_i
     // snapshot; post-restart messaging uses the separate `reconnect` document so restoring that
     // exact snapshot cannot reuse an Automerge actor sequence.
     bob.send_message(general, "presence proof").await;
-    let saw_bob_online_event = timeout(WAIT, async {
+    let mut saw_bob_online_event = timeout(WAIT, async {
         let mut saw_online = false;
         loop {
             if alice
@@ -198,12 +198,31 @@ async fn presence_follows_a_real_connection_and_goes_dark_when_the_peer_closes_i
     discovery_pass(&bob).await;
     discovery_pass(&alice).await;
 
+    // The command barriers above only admit detached work. Wait for both exact projections,
+    // retaining any real UI presence event consumed while letting the bounded sink progress.
+    let (alice_online, bob_online) = timeout(WAIT, async {
+        loop {
+            let alice_online = alice.online_members().await;
+            let bob_online = bob.online_members().await;
+            if alice_online == [bob_fp.clone()] && bob_online == [alice_fp.clone()] {
+                return (alice_online, bob_online);
+            }
+            if let Ok(Some(event)) = timeout(Duration::from_millis(20), alice_events.recv()).await {
+                saw_bob_online_event |= matches!(
+                    &event.event,
+                    AppEvent::ConnectivityChanged { online } if online.contains(&bob_fp)
+                );
+            }
+        }
+    })
+    .await
+    .expect("both real TCP presence projections never converged");
     assert_eq!(
-        alice.online_members().await,
+        alice_online,
         vec![bob_fp.clone()],
         "the founder's roster lights the joiner's dot"
     );
-    assert_eq!(bob.online_members().await, vec![alice_fp.clone()]);
+    assert_eq!(bob_online, vec![alice_fp.clone()]);
 
     let reconnect_routes: Vec<_> = b_handle
         .authenticated_dial_routes()

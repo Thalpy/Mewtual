@@ -23,10 +23,9 @@
 //!   non-winning futures mid-tick, so a node never reaches the point where it processes the
 //!   gossip it should have received and the test hangs while the implementation is fine. The
 //!   actors each own their own task; the test sequences them with awaited queries.
-//! - Two actors must not run a PEX pass *at the same time*: each blocks its own loop on the
-//!   request it issued, so neither is in `sync_once` to answer the other and both wait out the
-//!   3s per-request deadline. `discovery_pass` below serialises them the way one node's timer
-//!   tick does in the real app.
+//! - Discovery queues detached maintenance. A later command reply proves command acceptance,
+//!   not peer-response completion. Presence waits observe the actual online set and let queued
+//!   exchanges settle before advancing the shared clock for another discovery tick.
 //! - No ambient time or RNG: every clock is a shared `ManualClock` and every RNG a seeded
 //!   `ChaCha20Rng`, so `scripts/check-no-ambient.sh` stays satisfied and reruns are identical.
 //! - Test logic never keys on byte patterns of generated identities (a real device id is a
@@ -127,10 +126,8 @@ impl Node {
 
     /// Run one discovery tick: what the bridge's per-server timer sends every minute.
     ///
-    /// The trailing query is the point. `drive_discovery` is fire-and-forget, so without it the
-    /// test would race the pass it just asked for; commands are FIFO on one channel, so a reply
-    /// to *any* later query proves the PEX pass finished. That is also what keeps two nodes from
-    /// PEX-ing each other simultaneously and deadlocking until their request deadlines expire.
+    /// The trailing query proves the actor accepted the queued command. It does not prove the
+    /// detached exchanges finished; callers must observe their specific result separately.
     async fn discovery_pass(&self) {
         let _ = self.actor.drive_discovery().await;
         let _ = self.actor.member_count().await;
@@ -139,44 +136,51 @@ impl Node {
     /// Tick discovery until this node's roster reports exactly `expected` online, and answer
     /// with what it last saw either way.
     ///
-    /// One pass is not the promise. A pass ends when the actor has handled the drive command,
-    /// which is neither when the connections it opened have been observed (the transport's
-    /// connect edge arrives on another arm of the actor's select loop) nor when a peer that was
-    /// not reachable during it becomes reachable. What the product promises is that the tick its
-    /// timer sends every minute converges, and that is what this asserts. Asserting after
-    /// exactly one pass instead was a scheduling assumption that held on an idle machine and
-    /// lost on a loaded one, leaving the founder's roster a member short.
+    /// Preserve twelve discovery ticks and the common sixty-second wait budget. Each tick gets
+    /// time to produce its observable result before the next six-minute injected-clock step.
+    /// Advancing that clock after only a command barrier can expire still-running signed work,
+    /// making a healthy exchange fail according to thread scheduling. Between unsuccessful
+    /// ticks the step still clears the existing five-minute PEX failure backoff.
     ///
-    /// Advancing `clock` between attempts is what makes those later ticks mean anything, and is
-    /// the half this helper was missing when it still let the Linux runner fail. A PEX request is
-    /// bounded by a **real-time** deadline, but a peer that misses it is backed off on the
-    /// **injected** clock, for five minutes of it. On a loaded machine the deadline is missed;
-    /// with a `ManualClock` nobody advances, the backoff then never expires, `take_pex_targets`
-    /// stops offering that peer, and every further tick is a no-op against a roster that can
-    /// never fill. That is why waiting did not recover it and only more ticks did not either. In
-    /// the product a minute of real time passes between ticks and the backoff simply expires; the
-    /// tests have to say so out loud.
-    ///
-    /// The drain between attempts is load-bearing rather than tidiness: the actor's event
-    /// channel is bounded, so a test that only ever queries can fill it and stall the very actor
-    /// it is waiting on.
+    /// Events are consumed while waiting so the bounded UI event sink cannot strand the actor.
+    /// A caller asserting a specific UI event must consume that event before using this helper.
     async fn settle_online(&mut self, clock: &ManualClock, expected: &[String]) -> Vec<String> {
         let mut want = expected.to_vec();
         want.sort();
         let mut online = Vec::new();
-        for attempt in 0..SETTLE_TICKS {
-            if attempt > 0 {
-                let _ = drain(&mut self.events).await;
-                // Past any PEX backoff a missed deadline may have set.
-                clock.advance_ms(PEX_BACKOFF_STEP_MS);
-                self.discovery_pass().await;
+        let _ = timeout(WAIT, async {
+            for attempt in 0..SETTLE_TICKS {
+                if attempt > 0 {
+                    let _ = drain(&mut self.events).await;
+                    // Past any PEX backoff a missed deadline may have set. The outer bound
+                    // includes this command barrier, even if the actor cannot answer it.
+                    clock.advance_ms(PEX_BACKOFF_STEP_MS);
+                    self.discovery_pass().await;
+                }
+                let settled = timeout(WAIT / SETTLE_TICKS as u32, async {
+                    loop {
+                        // A full UI sink can block the actor before it answers this read.
+                        // Cancelling a read is harmless; still consume an event on timeout so
+                        // the actor can progress, without expiring its detached peer work.
+                        if let Ok(current) =
+                            timeout(Duration::from_millis(50), self.actor.online_members()).await
+                        {
+                            online = current;
+                            online.sort();
+                            if online == want {
+                                return;
+                            }
+                        }
+                        let _ = timeout(Duration::from_millis(20), self.events.recv()).await;
+                    }
+                })
+                .await;
+                if settled.is_ok() {
+                    break;
+                }
             }
-            online = self.actor.online_members().await;
-            online.sort();
-            if online == want {
-                break;
-            }
-        }
+        })
+        .await;
         online
     }
 
@@ -426,6 +430,61 @@ async fn drain(events: &mut Receiver<TracedEvent>) -> Vec<AppEvent> {
     out
 }
 
+/// The settling fixture must drain real event backpressure even when its first read cannot
+/// complete. Otherwise a timeout merely advances the clock and wedges on the next command.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn presence_settling_drains_a_full_actor_event_sink_before_advancing_time() {
+    let hub = Hub::new();
+    let clock = ManualClock::new(1_700_000_000_000);
+    let mut alice = found_node(&hub, &clock, test_transport_peer(1), "alice", 1).await;
+    timeout(WAIT, async {
+        'fill: while alice.events.len() < alice.events.max_capacity() {
+            // The previous send may fill the sink after replying. Keep only one next send
+            // alive and observe saturation even if that command can no longer get an ACK.
+            let send = alice.actor.send_message(general(), "fill UI event sink");
+            tokio::pin!(send);
+            loop {
+                if alice.events.len() == alice.events.max_capacity() {
+                    break 'fill;
+                }
+                if timeout(Duration::from_millis(20), &mut send).await.is_ok() {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .expect("fill the actual actor event sink");
+    assert_eq!(alice.events.len(), alice.events.max_capacity());
+    // Full capacity alone can leave the actor idle and able to answer read-only commands.
+    // Queue one further real edit before the read so its required event must block first.
+    let _ = timeout(
+        Duration::from_millis(50),
+        alice
+            .actor
+            .send_message(general(), "one event beyond capacity"),
+    )
+    .await;
+    assert!(
+        timeout(Duration::from_millis(50), alice.actor.member_count())
+            .await
+            .is_err(),
+        "the full sink actually blocks actor queries"
+    );
+
+    let online = timeout(WAIT / SETTLE_TICKS as u32, alice.settle_online(&clock, &[]))
+        .await
+        .expect("presence settling drains the sink during the first tick");
+    assert!(online.is_empty());
+    assert_eq!(catcoms_rt::Clock::now_ms(&clock), 1_700_000_000_000);
+    // A final queued send can refill the slot just drained by settling. Drain before shutdown
+    // too: this fixture intentionally stops reading a sink that a normal host drains forever.
+    let _ = drain(&mut alice.events).await;
+    timeout(WAIT / SETTLE_TICKS as u32, alice.shutdown())
+        .await
+        .expect("saturated fixture shuts down after draining");
+}
+
 // ---------------------------------------------------------------------------------------------
 // 1. Found, invite, join, talk.
 // ---------------------------------------------------------------------------------------------
@@ -575,9 +634,21 @@ async fn presence_lights_up_across_the_roster_and_goes_dark_when_a_member_leaves
     alice.publish_record(advertised(1)).await;
     bob.publish_record(advertised(2)).await;
 
-    // One discovery tick each, serialised (see the module note on simultaneous PEX passes).
+    // Queue one discovery tick each. Detached peer work can proceed concurrently.
     alice.discovery_pass().await;
     bob.discovery_pass().await;
+
+    // The UI renders ConnectivityChanged, not an online_members poll. Assert that actual signal
+    // before a state-settling helper can consume it; an earlier empty event is not evidence.
+    let ev = wait_event(
+        &mut alice.events,
+        |e| matches!(e, AppEvent::ConnectivityChanged { online } if online.contains(&bob.fp)),
+    )
+    .await;
+    match ev {
+        AppEvent::ConnectivityChanged { online } => assert!(online.contains(&bob.fp)),
+        other => panic!("expected ConnectivityChanged, got {other:?}"),
+    }
 
     assert_eq!(
         alice.settle_online(&clock, &[bob.fp.clone()]).await,
@@ -588,17 +659,6 @@ async fn presence_lights_up_across_the_roster_and_goes_dark_when_a_member_leaves
         bob.settle_online(&clock, &[alice.fp.clone()]).await,
         vec![alice.fp.clone()]
     );
-
-    // The UI does not poll `online_members`; it renders whatever `ConnectivityChanged` carries.
-    // A build that filled the map but never emitted the event would still ship dark dots.
-    let ev = wait_event(&mut alice.events, |e| {
-        matches!(e, AppEvent::ConnectivityChanged { .. })
-    })
-    .await;
-    match ev {
-        AppEvent::ConnectivityChanged { online } => assert!(online.contains(&bob.fp)),
-        other => panic!("expected ConnectivityChanged, got {other:?}"),
-    }
 
     // --- a third member joins ---
     clock.advance_ms(60_000); // the next discovery tick, an app-minute later

@@ -204,7 +204,9 @@ boxing experiments are removed, and every original assertion remains. All 160 St
 cases complete on the default stack: 158 passed, two existing ignored
 (`pr48-studio-exchange-boxed-setup.log`). Read-only re-review is clear. The final unfiltered root
 repeat uses sixteen test workers, two compiler jobs and no `RUST_MIN_STACK` override
-(`pr48-full-root-test-complete.log`). No full-suite filters or extra ignores were introduced.
+(`pr48-full-root-test-complete.log`). Its application library passes all 1,143 tests, with 22
+existing ignored; the following process-recovery integration fails, so this is not a passing
+complete workspace run. No full-suite filters or extra ignores were introduced.
 Native strict all-target/all-feature Clippy also passes
 after the fixture corrections (`pr48-final-native-clippy.log`).
 
@@ -239,6 +241,69 @@ native rebuild was initially blocked by a reopened application holding the execu
 owner closed it, the final native build and actual startup check both pass
 (`pr48-native-build-unlocked.log`, `pr48-native-startup-unlocked.log`).
 
-Root full verification is still running. Native WebView/forced relay/audio acceptance,
+The process-recovery diagnostic repeat preserves Alice's earlier log alongside Bob's timeout.
+It confirms Alice rejected a recovery code before Bob's restart because detached PEX had not
+yet learned Bob's signed device-to-transport record (`pr48-process-recovery-diagnostic-red.log`).
+The fixture now waits for the full canonical roster identity's exact published transport peer
+before releasing Bob. Authentication and the original timeout remain unchanged. The integration
+file then passes two tests with one existing child-process ignore
+(`pr48-process-recovery-observed-record-rerun.log`). An initial compile attempt incorrectly treated
+the canonical parser's Option as Result; it is not passing test evidence.
+
+Subsequent integration checks expose stale presence-fixture command barriers in both memory and
+TCP tests (`pr48-remaining-app-integration-tests.log`, `pr48-other-app-integration-tests.log`).
+Queries acknowledge queued discovery; they do not prove detached completion. Both fixtures now
+wait for exact online projections while preserving actual ConnectivityChanged evidence. The
+memory helper keeps twelve ticks and the sixty-second overall bound, lets each tick settle before
+advancing its injected clock, and consumes events even when a short read probe times out. A new
+regression fills the actual 256-event sink, proves queries block, and requires settling within
+the first tick without advancing time. It fails against the old helper
+(`pr48-presence-saturated-fixture-red.log`). Review corrected a fill/ACK setup race and bounded
+teardown; the first attempt was deliberately terminated after its new fixture hung during cleanup
+(`pr48-app-recovery-presence-bridge-final.log`), not counted as a passing run.
+
+The TCP presence repeat passes before exposing a separate default-stack overflow in the retained
+temporal-bridge fixture (`pr48-tcp-presence-temporal-final.log`). That test's lazy scenario setup
+now returns a boxed future; every original message, sealed-checkpoint, crash and forbidden-edge
+assertion remains unchanged. No production allocation or test-thread stack setting changes.
+All four combined recovery/presence/temporal integration files pass: 18 tests, zero failures and
+one existing child-process ignore (`pr48-app-recovery-presence-bridge-accepted.log`). The first
+combined repeat exposed a missing saturation precondition: a full but idle sink still permits
+read-only queries. The final regression queues one further real edit before proving its read is
+blocked. Read-only re-review finds no blocker/high/medium in these four test-file changes; strict
+root Clippy and both formatting checks pass (`pr48-root-clippy-accepted.log`). The full workspace
+repeat remains pending.
+
+Root full verification is still pending. Native WebView/forced relay/audio acceptance,
 historical result recovery, file durable migration/resume and final combined rollout remain
 outstanding.
+
+## Final local check record
+
+Commands below ran from the isolated communication worktree on Windows. Root and native artifacts
+use the original checkout's corresponding target directories; compilation is limited to two jobs.
+The final root tests use sixteen workers and the normal test-thread stack. Earlier failures and
+aborted attempts above remain distinct from the final evidence.
+
+| Check | Result | Log under original `target/` |
+| --- | --- | --- |
+| `cargo test --all --all-features -j 2` | Pending final repeat; previous run fails after passing application library | `pr48-full-root-test-complete.log` |
+| `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml -j 2` | PASS: 404 passed, zero failed/ignored | `pr48-full-native-test-final.log` |
+| `npm --prefix apps/desktop test` | PASS: 1,822 passed, zero failed/skipped | `pr48-full-frontend-verified.log` |
+| `cargo fmt --all -- --check` and `cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check` | PASS | Tool output, no diagnostics |
+| `cargo clippy --all-targets --all-features -j 2 -- -D warnings` | PASS after final integration fixture corrections | `pr48-root-clippy-accepted.log` |
+| `cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features -j 2 -- -D warnings` | PASS | `pr48-final-native-clippy.log` |
+| `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml` | PASS, no warnings | `pr48-final-native-check.log` |
+| `cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml -j 2` | PASS after application was closed | `pr48-native-build-unlocked.log` |
+| `npm --prefix apps/desktop run check` | PASS: zero errors/warnings | `pr48-frontend-check-verified.log` |
+| `npm --prefix apps/desktop run build` | PASS, existing bundle-size warning | `pr48-frontend-build-verified.log` |
+| `npm --prefix apps/desktop run test:flows` | PASS: all nine standard Edge flows | `pr48-browser-flows-verified.log` |
+| `npm --prefix apps/desktop run test:startup` | PASS: actual native setup marker | `pr48-native-startup-unlocked.log` |
+| `bash scripts/check-no-ambient.sh` | PASS | `pr48-final-no-ambient.log` |
+| `bash scripts/check-store-raw-fs.sh` | PASS | `pr48-final-store-raw-fs.log` |
+| `cargo deny check` | PASS: advisories, bans, licences and sources; existing duplicate warnings | `pr48-final-cargo-deny.log` |
+| `git diff --check` | PASS | Tool output, no diagnostics |
+| Read-only adversarial re-reviews | No remaining blocker/high/medium in the reviewed corrections | Findings and corrections recorded above |
+
+These checks establish local revision evidence. The programme's native media/forced-relay,
+blocked-topology V2, durable resume and combined acceptance gates remain open.
