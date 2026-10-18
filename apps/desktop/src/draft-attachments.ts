@@ -12,9 +12,11 @@
 
 export type DraftAttachment = Readonly<{ label: string; cid: string; start: number; end: number }>;
 
-// Same label grammar as the renderer: no `[`, `]` or newline inside the label, and a CID of up to
-// 64 hex characters (the renderer accepts shorter ones; the fileshare only ever mints 64).
-const MARKER_RE = /!\[([^\]\n]*)\]\(cid:([0-9a-fA-F]{1,64})\)/g;
+// The renderer's own label grammar (`EMBED_RE` in wikitext.ts): anything but `]` inside the label,
+// newlines included, and a CID of up to 64 hex characters (the renderer accepts shorter ones; the
+// fileshare only ever mints 64). Diverging from it would show a chip for a marker that does not
+// embed, or no chip for one that does.
+const MARKER_RE = /!\[([^\]]*)\]\(cid:([0-9a-fA-F]{1,64})\)/g;
 
 /** Every embed marker in the draft, in document order, with its exact character span. */
 export function draftAttachments(draft: string): DraftAttachment[] {

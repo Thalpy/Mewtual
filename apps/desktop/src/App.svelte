@@ -11684,7 +11684,10 @@
       // viewer for another server's share.
       open: (file, target) => {
         const current = pixaPreviewScope(), listed = filesByCid.get(file.cid);
-        if (!current || current.server !== target.server || current.channel !== target.channel || !listed) return;
+        // The whole scope, not only the place: a card that outlived a lock/unlock or a
+        // membership change is a stale request even when the channel on screen is the same.
+        if (!current || current.server !== target.server || current.channel !== target.channel ||
+          current.generation !== target.generation || current.membership !== target.membership || !listed) return;
         void openPixaViewer(listed);
       },
       expiryText: file => { const listed = filesByCid.get(file.cid); return listed ? fileExpiryText(listed) : ""; },

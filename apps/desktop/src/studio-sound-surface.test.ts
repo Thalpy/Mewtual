@@ -350,6 +350,36 @@ test("evidence mode lists usage per recipe, offers remove only for unused ones, 
   }
 });
 
+test("two share recipes with the same display name are two tiles, and picking one lights only that one", async () => {
+  // jamPatchFileName truncates to 12 characters, so `bass-line-v1` and `bass-line-v2` arrive
+  // under one name; keying the shelf on the name alone collapsed them (Svelte: each_key_duplicate).
+  const other = legacyJamPatch("sawtooth");
+  const { target, done } = mounted(StudioSoundHarness, props({ library: [
+    { name: "BASS-LINE-V", patch: square, shelf: "share" }, { name: "BASS-LINE-V", patch: other, shelf: "share" },
+  ] }));
+  try {
+    const tiles = [...target.querySelectorAll<HTMLButtonElement>('[data-lib-patch="BASS-LINE-V"]')];
+    assert.equal(tiles.length, 2, "same name, different recipe: both tiles render");
+    tiles[1].click(); flushSync();
+    assert.equal(tiles[0].getAttribute("aria-pressed"), "false"); assert.equal(tiles[1].getAttribute("aria-pressed"), "true");
+    tiles[0].click(); flushSync();
+    assert.equal(tiles[0].getAttribute("aria-pressed"), "true"); assert.equal(tiles[1].getAttribute("aria-pressed"), "false");
+  } finally { await done(); }
+});
+
+test("a document re-read while onpatch is pending does not drop the marker; only a frame change does", async () => {
+  // The model reference changes on every remote edit. Refusing the marker then would leave the
+  // recipe written (a spent slot) without the sound the press asked for.
+  const ops: Sfx[] = []; const gate = deferred<string>();
+  const { target, app, done } = mounted(StudioSoundHarness, props({ library: [{ name: "meow", patch: square, shelf: "mine" }], onpatch: () => gate.promise, onsfx: (v: Sfx) => ops.push(v) }));
+  try {
+    libTile(target, "meow").click(); flushSync(); byText(target, "add to frame 2")!.click(); flushSync();
+    (app as unknown as { setModel: (m: StudioSoundModel) => void }).setModel(model()); flushSync();
+    gate.resolve(id64(7)); await settle();
+    assert.deepEqual(ops, [{ patch: id64(7), note: 60, durationMs: 250 }]);
+  } finally { await done(); }
+});
+
 test("evidence cleanup lists only orphaned/overflow/dangling markers, reachable without a selected frame", async () => {
   const removed: string[] = []; const m = model(); const bad = id32(9), good = id32(10), gone = id64(5);
   m.sfx = [marker(bad, { patch: gone }), marker(good)]; m.records[`p/${gone}`] = reg({ op: "remove_patch", patch: gone }, fsource(4));

@@ -991,6 +991,42 @@ test("G6-UI-002: Play calls preparation in the gesture adapter and source invali
   } finally { m.done(); }
 });
 
+test("G7-UI: document Play after a sounding audition lowers the audition flag, so the transport reads stop", async () => {
+  // An audition (the popup's piano) and document playback share one audio session. When Play
+  // replaces a still-sounding note the session goes "playing" -> "preparing" -> "playing" without
+  // the UI ever observing "stopped"; the flag that marks an audition must not survive that.
+  const ipc = openFlipnoteIpc();
+  ipc.on("studio_read", () => ({ ...frameView(), group: "deadbeef" }));
+  const { default: Harness } = await import("../scripts/fixtures/StudioPlaybackHarness.svelte");
+  const { legacyJamPatch } = await import("./jam-patch.ts");
+  const w = (globalThis as unknown as { window: Window & typeof globalThis }).window;
+  state.useStudioIpc(ipc);
+  const kinds: string[] = [];
+  const target = document.createElement("div"); document.body.appendChild(target);
+  let harness: { updateAudio: (s: { state: "stopped" | "playing"; elapsedMs: number }) => void } | null = null;
+  const audioActions = {
+    start: async (kind: "score" | "flipnote") => { kinds.push(kind); harness?.updateAudio({ state: "playing", elapsedMs: 0 }); return true; },
+    stop: () => { harness?.updateAudio({ state: "stopped", elapsedMs: 0 }); },
+  };
+  const app = mount(Harness, { target, props: { props: { me: ME, server: SERVER, channel: CHANNEL, nameOf: (id: string) => id.slice(0, 4), colorOf: () => "#000000", onnotice: () => {}, audioActions, patchLibrary: [{ name: "LANDING", patch: legacyJamPatch("sine") }] } } });
+  harness = app as unknown as typeof harness; flushSync();
+  const button = (label: RegExp) => [...target.querySelectorAll<HTMLButtonElement>("button")].find((b) => label.test(b.textContent?.trim() ?? ""));
+  try {
+    await settled(); state.studio.selected = OBJ; flushSync(); await settled(400);
+    button(/^sound$/)!.click(); flushSync();
+    button(/new…/)!.click(); flushSync(); await settled(50);
+    const key = target.querySelector<HTMLButtonElement>('[aria-label="Play C4"]');
+    assert.ok(key, "the soundfont popup is open with its audition keyboard");
+    key.dispatchEvent(new w.PointerEvent("pointerdown", { bubbles: true, cancelable: true, pointerId: 1 })); flushSync(); await settled(50);
+    assert.deepEqual(kinds, ["score"], "an audition is a score-kind start of a one-note take");
+    assert.ok(target.querySelector('[title="play [space]"]'), "a sounding audition is not document playback");
+    button(/^cancel$/)!.click(); flushSync();
+    target.querySelector<HTMLButtonElement>('[title="play [space]"]')!.click(); flushSync(); await settled(100);
+    assert.deepEqual(kinds, ["score", "flipnote"]);
+    assert.ok(target.querySelector('[title="stop [space]"]'), "document playback after an audition must read stop");
+  } finally { unmount(app); target.remove(); state.disposeStudio(); }
+});
+
 test("G6-UI-003: Score loop has an explicit labelled checkbox and forwards only the local choice", async () => {
   const ipc = fakeIpc();
   const score = { kind: "score", title: null, bpm: null, bpb: null, steps: null, cells: {}, patches: {}, readiness: { cells: {}, patches: {}, headerConflicts: false } };
