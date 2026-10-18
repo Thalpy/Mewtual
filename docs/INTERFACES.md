@@ -11,6 +11,33 @@ for existing network/restart state; this optional read does not grant or revoke 
 Explicit `mint_invite_fresh` remains owner/admin gated, and join-time authorization is unchanged.
 Roles on non-owner devices still have the existing published-roster freshness limitations.
 
+## Studio departure scope, restored-work reach and App exit routes (2026-10-18)
+
+`StudioSession.navigate(action)` (sidebar and Music) saves only the document being left: records
+in that document's lane must reach a definite receipt or the open is vetoed. With no document open
+nothing is left, so nothing is saved first. Records held for any other document keep their state,
+so opening a restored document never requires its own held work to save. Restored work is sent
+only by explicit Save or retry, or by leaving its own document (that document's departure Save).
+A partial departure Save leaves the shared five-second deadline running for uncovered records.
+`saveBeforeLeaving()` (leaving the Studio, a channel, a server or the window) still covers every
+record. Before a first delivery, admission reads a record's document when no view of it is held
+(restored or evicted) and compares the authoring binding with that fresh view. That read runs
+while the record is still `queued` and uncounted, so a lock during it restores the record as
+unsent. An unreadable document ("could not read"), a read overtaken by a newer one ("still
+reading"), an unread channel Index and a changed server group are all refused as no-write
+without counting an attempt, so a retry is admitted afresh.
+
+`studio-exit.ts` `createStudioExit(host)` is the gate for App routes that change the main pane
+directly (`view`, the inbox, DM home): `release()` resolves whether leaving is allowed now and
+`leaveThen(go)` runs `go` synchronously when nothing needs saving, else only after Save succeeds
+and the route is still the newest claim. The add-server and vault-change screens, which replace
+the whole layout, are entered through it too. In App, `switchServer(id, committed?)` and
+`switchTo(id)` resolve `Promise<boolean>`: false when the switch never happened (window closing,
+Studio Save refused or superseded). `switchServer` resolves after the new server's batch read;
+its optional `committed` callback runs in the turn the switch commits. Composite routes use
+`arriveAtServer(id)`; `openServerSettings` opens in that committed turn for the requested server
+and never on the server being left. No IPC, wire or persistence format changes.
+
 ## Studio local working state and Save boundaries (2026-10-18)
 
 `StudioSession` production `autosaveMs=5000` stages ordinary edits locally. `workingModel`,

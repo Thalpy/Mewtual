@@ -277,11 +277,21 @@ export class StudioSession {
     const request = ++this.navigationSerial, generation = this.generation;
     return () => request === this.navigationSerial && generation === this.generation;
   }
-  /** Sidebar and Music share one navigation owner; a newer action wins across both surfaces. */
+  /** Sidebar and Music share one navigation owner; a newer action wins across both surfaces.
+   *
+   * The departure Save covers only the document being left. Records queued for any other document
+   * (a lock/unlock restore leaves them offscreen, as does deleting a document from the Index while
+   * its edits are still queued; neither passes through a departure) stay exactly as they are:
+   * their Retry, reauthor and discard controls live in that document's own editor, so requiring
+   * them to save first would make the one route to those controls depend on the controls. With no
+   * document open nothing is being left, so nothing is saved and restored work stays held until
+   * an explicit Save or retry. Leaving the Studio, a channel or the window still saves everything
+   * through `saveBeforeLeaving`. */
   async navigate(action: () => void): Promise<void> {
     if (this.closeHeld) throw new StudioNativeError("The window is closing. Wait for saving to finish.");
     const current = this.claimNavigation();
-    await this.saveBeforeLeaving();
+    const leaving = this.doc?.object ?? null;
+    if (leaving !== null) await this.saveUntilClear(s => laneOf(s) === leaving);
     if (!current()) return;
     action();
   }
@@ -1570,10 +1580,10 @@ export class StudioSession {
     }, this.autosaveMs);
   }
 
-  private releaseQueued(explicit = false): void {
+  private releaseQueued(explicit = false, covers: (s: SaveRecord) => boolean = () => true): void {
     // Snapshot identities now. Later edits, including a new revision of an in-flight frame, get
     // their own deadline; a worker's finally must not drain them as part of this Save.
-    for (const s of this.records) if (s.status === "queued" && (explicit || !this.restoredHeld.has(s.id))) { this.eligible.add(s.id); this.restoredHeld.delete(s.id); }
+    for (const s of this.records) if (covers(s) && s.status === "queued" && (explicit || !this.restoredHeld.has(s.id))) { this.eligible.add(s.id); this.restoredHeld.delete(s.id); }
     this.pump();
   }
 
@@ -1610,11 +1620,17 @@ export class StudioSession {
   }
 
   /** Save a fixed revision and await definite receipts. Failure/timeout keeps the editor intact. */
-  async save(): Promise<void> {
+  async save(): Promise<void> { await this.saveCovered(() => true); }
+
+  /** `save()` restricted to the records `covers` selects; the rest keep their queue state. */
+  private async saveCovered(covers: (s: SaveRecord) => boolean): Promise<void> {
     this.stageDrawing();
-    this.cancelAutosave?.(); this.cancelAutosave = null;
-    const generation = this.generation, ids = new Set(this.records.map(s => s.id));
-    this.releaseQueued(true);
+    const generation = this.generation, ids = new Set(this.records.filter(covers).map(s => s.id));
+    // The shared deadline is cancelled only when every record is being released now. A partial
+    // (departure) Save leaves it running for the uncovered records, such as an Index rename made
+    // with the title, which would otherwise wait for an unrelated later edit to schedule them.
+    if (ids.size === this.records.length) { this.cancelAutosave?.(); this.cancelAutosave = null; }
+    this.releaseQueued(true, covers);
     if (!ids.size) return;
     await new Promise<void>((resolve, reject) => {
       let detach = () => {}, cancel = () => {};
@@ -1634,15 +1650,18 @@ export class StudioSession {
     });
   }
 
-  async saveBeforeLeaving(): Promise<void> {
+  /** Leaving the Studio, a channel or the window: every retained edit must reach a definite receipt. */
+  async saveBeforeLeaving(): Promise<void> { await this.saveUntilClear(() => true); }
+
+  private async saveUntilClear(covers: (s: SaveRecord) => boolean): Promise<void> {
     this.prepareDocumentClose();
     const started = this.now(), generation = this.generation;
     do {
-      await this.save();
+      await this.saveCovered(covers);
       if (generation !== this.generation) throw new StudioNativeError("Studio changed while saving.");
       this.stageDrawing(); // capture a stroke made while the previous revision awaited its ACK
-      if (this.now() - started > 10_000 && this.records.length) throw new StudioNativeError("Studio is still saving. Please wait before leaving.");
-    } while (this.records.length);
+      if (this.now() - started > 10_000 && this.records.some(covers)) throw new StudioNativeError("Studio is still saving. Please wait before leaving.");
+    } while (this.records.some(covers));
   }
 
   private checkDraftBudget(next: SaveRecord, replacing?: SaveRecord): void {
@@ -1797,15 +1816,50 @@ export class StudioSession {
   private async run(s: SaveEntry): Promise<void> {
     const gen = this.generation;
     const target = this.target();
-    // Native preserves a durable Save receipt even if a refresh overtakes its projection.
-    // Separate acknowledgement from display currency: a read begun after this Save may carry
-    // newer remote/rotation state, so an older ACK must resolve the queue without rolling it back.
-    const docRead = this.docReadSerial.get(s.object ?? "") ?? 0, indexRead = this.indexReadSerial;
+    // Admission compares the record's authoring binding with the CURRENT view of its document. A
+    // record restored after lock, or one whose view left the bounded cache, can reach the lane
+    // before this session has read that document; read it now rather than refusing on the absence,
+    // which would misreport "shared history changed" and force a needless reauthor.
+    // The read runs while the record is still `queued` and before `attempts` counts it: nothing
+    // has been sent, so a lock snapshot taken meanwhile must not restore it as an interrupted
+    // delivery that "may have committed" (which would also disable reauthor), and Discard must
+    // stay available. This worker holds the lane, so nothing else can start the record.
+    const unread = this.admissionRead(s);
+    if (unread !== null) {
+      const read = (this.docReq.get(unread) ?? 0) + 1;
+      await this.refreshDoc(unread).catch(() => {});
+      if (!this.current(gen) || !this.records.includes(s) || s.status !== "queued") return;
+      if (!this.heldView(unread)) {
+        // Still nothing to compare against, so nothing is sent and nothing counts as an attempt:
+        // a retry reads and compares again instead of skipping admission as a repeat delivery.
+        // "Still reading" only while a newer read of the open document is actually still out.
+        const stillReading = (this.docReq.get(unread) ?? 0) !== read && this.doc?.object === unread && this.doc.loading;
+        this.settleFailure(s, new OverlayNoWrite(stillReading
+          ? "Studio was still reading this document, so nothing was sent. Retry in a moment."
+          : "Studio could not read this document before saving, so nothing was sent. Open it and retry."));
+        return;
+      }
+    }
+    // The channel-level preconditions are checked before the attempt counts, for the same reason.
+    // Without the Index (not read yet after unlock, or its read failed) neither the server group nor
+    // an Index record's binding can be compared, so nothing is sent; claiming the server changed
+    // would be untrue, and counting the attempt would let a later retry skip admission.
+    const indexUnread = this.autosaveMs && !this.index && (!!this.draftGroup || (!!s.binding && (s.kind === "applyIndex" || s.object === null)));
+    if (indexUnread || (this.autosaveMs && this.draftGroup && this.index && this.index.group !== this.draftGroup)) {
+      this.settleFailure(s, new OverlayNoWrite(indexUnread
+        ? "Studio has not read this channel's index yet, so nothing was sent. Retry once it has loaded."
+        : "The server for these saved edits changed. They were not sent."));
+      return;
+    }
     s.status = "inflight";
     s.attempts++;
     this.notify();
+    // Native preserves a durable Save receipt even if a refresh overtakes its projection.
+    // Separate acknowledgement from display currency: a read begun after this Save may carry
+    // newer remote/rotation state, so an older ACK must resolve the queue without rolling it back.
+    // Captured after the admission read above, which is older than this Save's acknowledgement.
+    const docRead = this.docReadSerial.get(s.object ?? "") ?? 0, indexRead = this.indexReadSerial;
     try {
-      if (this.autosaveMs && this.draftGroup && this.index?.group !== this.draftGroup) throw new OverlayNoWrite("The server for these saved edits changed. They were not sent.");
       if (s.attempts === 1 || s.kind === "frame" && !s.apply && !s.overlay || s.kind === "overlayApply" && !s.request) this.assertAdmission(s);
       if (s.kind === "create") {
         const view = await studioCreate(this.ipc, target, s.request);
@@ -1870,25 +1924,49 @@ export class StudioSession {
       this.finish(s);
     } catch (e) {
       if (!this.current(gen)) return;
-      // Typed Flow-S refusals and pre-Apply epoch refusals prove this attempt did not write. Native
-      // errors remain uncertain because they may have crossed a final delivery fence after commit.
-      const noWrite = e instanceof OverlayNoWrite;
-      const earlierAttemptWasUncertain = s.mayHaveCommitted;
-      if (!noWrite) s.mayHaveCommitted = true;
-      s.status = s.mayHaveCommitted ? "uncertain" : "blocked";
-      s.error = (noWrite && earlierAttemptWasUncertain
-        ? `${reason(e)}; an earlier attempt may already have committed, so the exact request remains uncertain`
-        : reason(e)).slice(0, 512);
-      this.settleRecord(s, s.mayHaveCommitted ? "uncertain" : "notWritten");
-      this.notify();
+      this.settleFailure(s, e);
     }
+  }
+
+  private settleFailure(s: SaveEntry, e: unknown): void {
+    // Typed Flow-S refusals and pre-Apply epoch refusals prove this attempt did not write. Native
+    // errors remain uncertain because they may have crossed a final delivery fence after commit.
+    const noWrite = e instanceof OverlayNoWrite;
+    const earlierAttemptWasUncertain = s.mayHaveCommitted;
+    if (!noWrite) s.mayHaveCommitted = true;
+    s.status = s.mayHaveCommitted ? "uncertain" : "blocked";
+    s.error = (noWrite && earlierAttemptWasUncertain
+      ? `${reason(e)}; an earlier attempt may already have committed, so the exact request remains uncertain`
+      : reason(e)).slice(0, 512);
+    this.settleRecord(s, s.mayHaveCommitted ? "uncertain" : "notWritten");
+    this.notify();
+  }
+
+  private heldView(object: Hex32): StudioObjectView | null {
+    return (this.doc?.object === object ? this.doc.view : this.views.get(object)?.view) ?? null;
+  }
+
+  /** The document `run` must read before admitting `s`, or null when admission needs no read:
+   * no binding to check, an Index record (the Index is read with the scope), or a view in hand.
+   * Called before `run` counts the attempt, so a first delivery has `attempts === 0` here. */
+  private admissionRead(s: SaveEntry): Hex32 | null {
+    if (!this.autosaveMs || !s.binding || s.kind === "applyIndex" || s.object === null) return null;
+    // Mirrors the conditions under which run() and runUnconfirmed() call assertAdmission.
+    const admits = s.attempts === 0 || (s.kind === "frame" && !s.apply && !s.overlay) || (s.kind === "overlayApply" && !s.request);
+    if (!admits) return null;
+    return this.heldView(s.object) ? null : s.object;
   }
 
   private assertAdmission(s: SaveEntry): void {
     if (!this.autosaveMs || !s.binding) return;
     const object = s.kind === "applyIndex" ? null : s.object;
     const view = object === null ? this.index : this.doc?.object === object ? this.doc.view : this.views.get(object)?.view;
-    if (!view || view.epochId !== s.binding.epochId || view.awaitingTenureReceipt !== s.binding.awaiting || view.phase !== s.binding.phase) {
+    // Still no view after run()'s admission read: the document could not be read (or is absent
+    // on this device). Say so; "history changed" would send the member to reauthor for nothing.
+    if (!view) throw new OverlayNoWrite(object === null
+      ? "Studio could not read the channel index before saving, so nothing was sent. Retry once it has loaded."
+      : "Studio could not read this document before saving, so nothing was sent. Open it and retry.");
+    if (view.epochId !== s.binding.epochId || view.awaitingTenureReceipt !== s.binding.awaiting || view.phase !== s.binding.phase) {
       throw new OverlayNoWrite("Shared history changed before this edit was saved. Review it and save it as a new edit.");
     }
   }

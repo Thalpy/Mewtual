@@ -146,6 +146,24 @@ test("a refused sound start remains retryable and a successful retry clears the 
   } finally { h.destroy(); }
 });
 
+// Review of 149e7321, finding 4. Only a sole card shows it: a second running card keeps the shared
+// timer alive and hides the missing arm().
+test("Play sound on the only card, paused until its repaint timer lapsed, moves the pictures again", async () => {
+  let audioMs = 0, owner: object | null = null;
+  const h = harness({ startAudio: async token => { owner = token; return true; },
+    stopAudio: token => { if (owner === token) owner = null; },
+    audioState: token => owner === token ? { state: "playing", elapsedMs: audioMs } : null });
+  const host = h.create(), canvas = host.querySelector("canvas")!, frame = host.querySelector(".pixa-frame")!;
+  try {
+    h.visible(host); await wait(() => canvas.dataset.pixaFrame === "0");
+    button(host, "Pause").click(); await sleep(120); // no running card: the timer stops re-arming
+    button(host, "Play sound").click();
+    assert.ok(button(host, "Pause"), "the card reads as running"); assert.ok(owner, "the sound started in the gesture");
+    audioMs = 150; await wait(() => canvas.dataset.pixaFrame === "1");
+    assert.equal(frame.textContent, "2 / 3");
+  } finally { h.destroy(); }
+});
+
 // The transport strip. Its buttons carry their names in a visually hidden span, so the same
 // `button(host, "Pause")` lookups above keep working; these tests pin the readouts around them.
 test("the strip's frame counter, progress and elapsed readouts follow the clock and hold with Pause", async () => {
