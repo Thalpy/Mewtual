@@ -186,9 +186,16 @@ checks were not changed. All three focused reruns pass and read-only re-review i
 retained as `pr48-full-native-test.log`; the final full repeat is pending.
 
 The initial two-worker root full run was deliberately stopped during storage fixtures to improve
-test throughput on the 24-thread host. It is an aborted run, not passing evidence. The complete
-rerun uses eight test workers and two compiler jobs (`pr48-full-root-test-final.log`); no test
-filters or extra ignores were introduced. Native strict all-target/all-feature Clippy also passes
+test throughput on the 24-thread host. It is an aborted run, not passing evidence. The eight-worker
+repeat (`pr48-full-root-test-final.log`) later aborts after 880 passes on a default-stack overflow
+in the Studio unconfirmed-branch restart fixture. A single-case run reproduces it immediately
+(`pr48-root-stack-focused-red.log`; an earlier `--exact` attempt selected zero tests and is not
+evidence). Boxing that test's two large fixture/preview child futures preserves every assertion
+and restart/drop boundary; the same single case then passes on the default stack
+(`pr48-root-stack-focused-boxed.log`). Read-only review is clear. The final unfiltered root repeat
+uses sixteen test workers now that the native suite has finished, two compiler jobs and no
+`RUST_MIN_STACK` override (`pr48-full-root-test-verified.log`). No test filters or extra ignores
+were introduced. Native strict all-target/all-feature Clippy also passes
 after the fixture corrections (`pr48-final-native-clippy.log`).
 
 The complete native repeat passes all 404 tests (399 unit plus five command ACL checks), with
@@ -213,6 +220,12 @@ holds the native settlement RPC and proves the original active/byte charge remai
 settles. No broker invariant was weakened and production crypto code is unchanged. Read-only
 review is clear. An intermediate full repeat passes 1,820 tests; final checks after the last
 continuation guards are pending.
+
+The final frontend suite passes all 1,822 tests with zero skipped; Svelte check reports zero
+errors/warnings and the production build passes (`pr48-full-frontend-verified.log`,
+`pr48-frontend-check-verified.log`, `pr48-frontend-build-verified.log`). Its existing bundle-size
+warning remains. A repeat native rebuild is temporarily blocked by a reopened application holding
+the executable; the prior native build/startup passed against unchanged native production code.
 
 Root full verification is still running. Native WebView/forced relay/audio acceptance,
 historical result recovery, file durable migration/resume and final combined rollout remain

@@ -1573,7 +1573,11 @@ async fn studio_actor_unconfirmed_branch_reconciles_superseded_then_unreadable()
 #[tokio::test]
 async fn studio_actor_unconfirmed_branch_resumes_after_a_restart_from_what_it_persisted() {
     use catcoms_replication::studio::StudioOverlayUnconfirmedState as U;
-    let (mut p, mut receiver, target, basis, branch) = ready_receiver().await;
+    // Both builders contain large fixture/preview async state. Keep their suspended state
+    // off this test's current-thread runtime stack, as in the lock cases above: the restart
+    // retains the first fixture while constructing the second. The default 2 MiB test stack
+    // must suffice without hiding regressions behind RUST_MIN_STACK.
+    let (mut p, mut receiver, target, basis, branch) = Box::pin(ready_receiver()).await;
     let landed = new_entry(&mut p, (basis, branch), 101, [8; 16]);
     assert!(matches!(
         save(&mut receiver, &mut p, target, &landed).unwrap(),
@@ -1609,7 +1613,7 @@ async fn studio_actor_unconfirmed_branch_resumes_after_a_restart_from_what_it_pe
         .bob
         .watch_studio_epoch(&p.b_store, SERVER, target)
         .unwrap();
-    let mut receiver = previewing_receiver(&mut p, target).await;
+    let mut receiver = Box::pin(previewing_receiver(&mut p, target)).await;
 
     assert_eq!(
         recorded_provenance(&mut p, target),
