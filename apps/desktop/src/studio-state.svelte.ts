@@ -10,12 +10,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { StudioSession } from "./studio-session.ts";
 import type { Hex32, StudioIpc } from "./studio-native.ts";
+import { decodeStudioDraft, encodeStudioDraft, type StudioDraft } from "./studio-draft.ts";
 
 const tauriIpc: StudioIpc = {
   invoke,
   listen: (name, handler) => listen(name, handler),
 };
 let ipcOverride: StudioIpc | null = null;
+let testAutosaveMs = 0;
 
 export const studio = $state({
   selected: "" as Hex32 | "",
@@ -25,6 +27,7 @@ export const studio = $state({
 let session: StudioSession | null = null;
 let detach: (() => void) | null = null;
 let bumpQueued = false;
+let restoredDraft: StudioDraft | null = null;
 
 function scheduleBump(): void {
   if (bumpQueued) return;
@@ -42,8 +45,9 @@ export function ensureStudio(me: string): StudioSession {
     session.me = me;
     return session;
   }
-  session = new StudioSession({ ipc: ipcOverride ?? tauriIpc, me });
+  session = new StudioSession({ ipc: ipcOverride ?? tauriIpc, me, autosaveMs: ipcOverride ? testAutosaveMs : 5000 });
   session.onChange(scheduleBump);
+  if (restoredDraft) { session.restoreDraft(restoredDraft); restoredDraft = null; }
   void session.attach().then((d) => { detach = d; });
   return session;
 }
@@ -63,8 +67,28 @@ export function setStudioScope(server: number | null, channel: string): void {
 /// Lock or session end: forget everything held in the webview, including unsaved pixels.
 export function resetStudio(): void {
   session?.reset();
+  restoredDraft = null;
   studio.selected = "";
   studio.rev++;
+}
+
+/** Ordinary navigation/close waits for the currently mounted drawing and definite Save receipts. */
+export async function saveStudio(): Promise<void> { await session?.saveBeforeLeaving(); }
+export function claimStudioNavigation(): () => boolean { return session?.claimNavigation() ?? (() => true); }
+export function beginStudioClose(): void { session?.beginClose(); }
+export function endStudioClose(): void { session?.endClose(); }
+export function studioHasPending(): boolean {
+  try { session?.stageDrawing(); return !!session?.saves.length; }
+  catch { return true; } // the awaited Save path reports the refusal without starting navigation
+}
+export function studioDraftSnapshot(): string | null {
+  session?.stageDrawing();
+  return session?.draftSnapshot() ?? (restoredDraft ? encodeStudioDraft(restoredDraft) : null);
+}
+export function restoreStudioDraft(json: string | null): void {
+  if (!json) return;
+  const draft = decodeStudioDraft(json);
+  if (session) session.restoreDraft(draft); else restoredDraft = draft;
 }
 
 export function detachStudio(): void {
@@ -74,9 +98,10 @@ export function detachStudio(): void {
 
 /// Test seam: the bridge the next session is built on. Disposes the current session so the
 /// surfaces build a fresh one against it.
-export function useStudioIpc(ipc: StudioIpc | null): void {
+export function useStudioIpc(ipc: StudioIpc | null, autosaveMs = 0): void {
   disposeStudio();
   ipcOverride = ipc;
+  testAutosaveMs = autosaveMs;
 }
 
 export function disposeStudio(): void {

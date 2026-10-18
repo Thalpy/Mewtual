@@ -1,5 +1,46 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Optional desktop invite refresh (2026-10-18)
+
+`get_invite(server)` returns `null` when there is no stored invite or this exact current device
+has the member role. Background network refreshes therefore withdraw any retained code without
+raising an invite-permission error. The native bridge checks the full device identity's role
+before refresh and again after it completes, including failures during demotion. Missing role
+state and operational failures for a permitted device remain errors. The stored code is retained
+for existing network/restart state; this optional read does not grant or revoke admission.
+Explicit `mint_invite_fresh` remains owner/admin gated, and join-time authorization is unchanged.
+Roles on non-owner devices still have the existing published-roster freshness limitations.
+
+## Studio local working state and Save boundaries (2026-10-18)
+
+`StudioSession` production `autosaveMs=5000` stages ordinary edits locally. `workingModel`,
+`workingScore` and `workingIndex` are display/preview projections, distinct from authenticated
+`doc.view` and raw registers. `save()` stages the current raster and awaits a fixed revision;
+`saveBeforeLeaving()` additionally captures edits made while awaiting ACKs and vetoes navigation
+on failure or timeout. `beforeSave` stages interrupted strokes without ending playback. Default
+zero-delay constructor/injected-IPC seams retain immediate behavior for existing unit tests;
+buffer regressions explicitly use the production delay. No protocol/batch command is added.
+
+Optional UI continuity `studioDraft` is a versioned JSON string containing original scope/group,
+owned base64 PIX and complete queue/retry requests. Decode is closed and bounded; invalid data
+rejects loading rather than silently deleting one retry. Queue restoration never supplies native
+authority or automatically dispatches. The native envelope retains a 1 MiB non-Studio budget,
+adds a 12 MiB Studio sub-budget and a 16 MiB combined physical/plaintext cap. Older envelopes
+without the field remain valid; older binaries with a 1 MiB cap may refuse a larger new envelope.
+
+## Studio Save delivery and editor switching (2026-10-18)
+
+Document Read and Create/Apply use separate native latest-request lanes. A Save supersedes older
+document projections and Save responses; a later refresh supersedes projections only. Both retain
+UI-session, actor-incarnation and cancellation checks. This changes no IPC payload or wire format.
+Frontend read-admission serials distinguish receipt completion from projection currency. A later
+read prevents an older ACK from replacing its view; awaited reconciliation runs before dependent
+Saves. Opening a newly created document with `read:false` does not advance those serials.
+`StudioSession.beforeDocumentClose` flushes the mounted editor before a different document replaces
+it; a synchronous refusal vetoes switching. Enqueued saves keep their original pixels and retry
+identity after navigation. The sidebar's Open indicator describes the one current editor, not the
+protocol's persistent Open epoch phase.
+
 ## Studio sync observation event (2026-10-18)
 
 `studio-sync-state` carries

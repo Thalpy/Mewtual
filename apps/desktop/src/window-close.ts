@@ -73,3 +73,9 @@ export class NativeVaultLockCoordinator {
     this.capturedSnapshot = undefined;
   }
 }
+
+/** Snapshot failure must never stop Ctrl+L before native authority and private UI are revoked. */
+export function captureLockContinuity(capture: () => string | null): { json: string | null; error: string } {
+  try { return { json: capture(), error: "" }; }
+  catch (e) { return { json: null, error: `Locked, but the latest Studio edits could not be saved: ${String(e)}` }; }
+}

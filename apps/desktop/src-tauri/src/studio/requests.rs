@@ -84,7 +84,10 @@ mod tests {
         let save = ViewRequest::begin_save(&state, 7, target);
         assert!(!old_read.is_current());
         let refresh = ViewRequest::begin(&state, 7, target);
-        assert!(save.is_current(), "background reads cannot hide a durable Save receipt");
+        assert!(
+            save.is_current(),
+            "background reads cannot hide a durable Save receipt"
+        );
         let next_save = ViewRequest::begin_save(&state, 7, target);
         assert!(!save.is_current());
         assert!(!refresh.is_current());

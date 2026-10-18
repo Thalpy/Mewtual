@@ -8,6 +8,15 @@ Verification is recorded separately in [GATE7-ACCEPTANCE](GATE7-ACCEPTANCE.md).
 
 ## Studio workflow (2026-10-18)
 
+- **Saving** keeps ordinary edits local and responsive, then writes on Save, ordinary close or
+  navigation, or five seconds after the first change. An in-progress Save owns a fixed revision;
+  newer edits wait for the next save. Failed saves retain their exact requests and pixels.
+  Sidebar, Music and app navigation share one latest-action claim and wait for definite receipts.
+  Lock immediately clears private UI after capturing bounded encrypted continuity; restored
+  edits wait for explicit Save/retry. This does not claim hard-crash write-ahead recovery.
+- **Editor playback** starts at frame one on every Play. Unsaved complete working compositions
+  can play/export without forcing a save; a Save ACK for the same content does not stop playback.
+
 - **Art** contains drawing tools, white-to-black swatches, colours (including a fixed purple),
   layers and call-only frame collaboration. New files use the revised default palette; opening
   an old file preserves its authored palette and pixel indices. The canvas starts in Fit mode;

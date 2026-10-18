@@ -13,6 +13,11 @@ export function archivalDjPosition(pressedSeconds: number, transport: Pick<JamTa
   return transport?.state === "playing" ? transport.elapsedMs / 1000 : pressedSeconds;
 }
 
+/** Heartbeats update a listener's post-preparation seek; they must not restart its pending work. */
+export function archivalPlaybackNeedsStart(pending: boolean, active: { elapsedMs: number; done: boolean } | null, targetMs: number): boolean {
+  return !pending && (!active || (!active.done && Math.abs(active.elapsedMs - targetMs) > 2000));
+}
+
 /**
  * Shared/local take adapter to the same archival renderer used by Studio. The shared deck keeps
  * its existing authenticated call/transport lease outside this class; imported metadata grants

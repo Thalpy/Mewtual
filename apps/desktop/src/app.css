@@ -1943,13 +1943,19 @@ img.emoji {
   white-space: nowrap;
 }
 
-/* The file name keeps its real case (it is peer-chosen) and may wrap anywhere. */
+/* The file name keeps its real case (it is peer-chosen) and may wrap anywhere. It takes its
+   own line, so the counts below never start mid-line behind a long name, and the fact that
+   follows it carries no separator dot (there is nothing beside it to separate from). */
 .pixa-name {
+  flex-basis: 100%;
   min-width: 0;
   font-family: var(--mono);
   font-size: 0.66rem;
   color: var(--text-2);
   overflow-wrap: anywhere;
+}
+.pixa-facts > .pixa-name + *::before {
+  content: none;
 }
 
 .pixa-facts .pixa-sounds {

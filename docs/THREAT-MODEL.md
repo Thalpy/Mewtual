@@ -1,5 +1,54 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Volatile Studio edits and orderly lock recovery (2026-10-18)
+
+Working editor projections are unconfirmed local intentions. They never replace authenticated
+native views, causal registers, recovery evidence, group binding or authorization. Delayed first
+delivery checks its original epoch/trust binding again after asynchronous preparation; exact
+retries cannot silently adopt a new epoch or ticket. Only never-submitted entries coalesce.
+Submitted identities and ambiguous outcomes remain immutable until ACK or explicit discard.
+
+The encrypted UI continuity record may contain a bounded owned Studio queue for orderly lock
+recovery: 512 records, 8 MiB of PIX file bytes, 12 MiB serialized Studio data, 16 MiB total envelope and
+the original independent 1 MiB non-Studio allowance. Admission includes UTF-8, outer escaping and
+future request/diagnostic reserve. Disk reads check physical size/regularity and use a bounded
+read before authentication. Restore validates typed requests and original scope/group, holds
+them until an explicit action, and never restores a native view as authority. No plaintext
+browser fallback exists. Lock proceeds immediately even if raster staging/serialization fails;
+the failure is disclosed and previous sealed continuity is preserved. A hard crash between a
+native commit and continuity capture can still lose the latest receipt: this is not a write-ahead
+log or crash-atomic Studio transaction. The existing lock coordinator retains its immutable
+continuity argument until unlock for exact racing-close/retry ownership; clearing the editor is
+not a RAM-zeroization claim. Older clients may reject envelopes over their old cap.
+
+Local media previews validate the complete working composition and actual native group/channel;
+failed/uncertain Save state is checked both before and after asynchronous preparation. An ACK of
+the same pixels/music does not revoke playback; changed effective content, actual overlay binding,
+settlement, membership and lock do. Data-only update notices re-read before semantic comparison.
+
+## Closing retry and receive cardinality correction (2026-10-18)
+
+An accepted Closing retry can bypass global inventory only to authenticate the actual scoped
+intent file, match current local membership/author, typed envelope, basis and retained branch
+evidence, then flush that same file and its parent unchanged. Terminal disposal also checks its
+own historic provenance. No new acceptance, source mutation, ciphertext replacement or partial
+budget is allowed on this path. Failed flushes return no acknowledgement and rotate both intent
+and inventory freshness before I/O. New authoring and commits still require complete inventory.
+
+Preserving a native Save receipt must not restore its older projection over a later Read. Frontend
+actual-read serials fence that display update independently of acknowledgement, and reconciliation
+is awaited before dependent first-frame work. Navigation-only fences are excluded from those
+serials. A pre-Apply epoch refusal is known not written; an earlier ambiguous attempt remains
+uncertain. Shared sound-file reads separately enforce a native 4 KiB cap, sixteen current recipes,
+serial registration-aware cancellation and post-await scope/trust/listing/session checks.
+
+The receive inventory's cumulative record ceiling is now 1,024, matching its existing directory
+ceiling; 64 was incorrectly treated as sufficient for a vault containing several records per
+document and multiple local servers. The 8 MiB authenticated-read and 256 KiB cold-validation
+limits, restart accounting, per-cursor-step bound and detached worker pool remain. Existing
+synchronous complete-scan callers may authenticate more small warm records in one custody visit;
+they have no 250 ms guarantee. Resumable InventoryRuntime visits retain their existing deadline.
+
 ## Studio inline media and sync diagnostics (2026-10-18)
 
 The existing Media preference now admits PIXA to its bounded application-owned decoder; filename
@@ -575,7 +624,7 @@ table with the commit that closed it.
   Studio accounting traversals spent about 0-8 ms in release profiling, and a real foreign writer
   overtaking a cold shared job leaves enough memo progress for the restarted job to mint on its
   next turn. These are host measurements, not an `INVENTORY_SLICE_MS` guarantee. A remount makes
-  the memo cold: receive/catch-up retain their 1024-entry, 64-record, 8 MiB and 256 KiB-cold
+  the memo cold: receive/catch-up retain their 1024-entry, 1024-record, 8 MiB and 256 KiB-cold
   fail-closed rails, while full-profile H1 and repair commits can still hold one custody visit for
   cold validation. Replay is the only production owner that keeps an inventory cursor across
   visits; a future latency gate must give H1/repair embedded ownership-aware jobs rather than
@@ -1197,7 +1246,7 @@ table with the commit that closed it.
   one paced worker per exact native incarnation avoid per-packet tasks or event-consumer cycles.
   Current channel/mount/member/MLS checks precede disk work. A delayed old-actor update cannot be
   emitted under a replacement numeric server id; the UI/incarnation fence lasts through emission.
-  Automatic inventory uses LOCAL limits of 1024 visited entries, 64 records, 8 MiB aggregate
+  Automatic inventory uses LOCAL limits of 1024 visited entries, 1024 records, 8 MiB aggregate
   authenticated reads and 256 KiB aggregate cold validation bytes, including unrelated saved P1
   sources. Its mount-local LRU stores every family's context-free accounting validation
   (C-3 runtime 15.2, M1). Every hit still authenticates the actual file and binds its scope/filename,
@@ -1224,7 +1273,7 @@ table with the commit that closed it.
   the bound, resident for the mount's life, UI lock included. **The bound is the only
   unconditional limit**, and it holds whatever puts an entry. Pruning keeps it near the vault's
   record count only as often as a covering scan completes, and some do not complete: receive's
-  scan refuses any vault over 64 records. Until one does, entries stay for records deleted since
+  scan refuses any vault over 1024 records. Until one does, entries stay for records deleted since
   the last, including any a peer caused this device to store and then remove.
   New/staged files still count; reference scans cannot skip CID enumeration. Remount clears reuse.
   A large cold record refuses before read; a changed candidate above the cold rail refuses before

@@ -75,7 +75,10 @@
   /**
    * Set when this viewer asked the host to start audio, cleared when it stops it or the host
    * reports a stop. Gating on it means host audio this viewer did not start (nothing should be
-   * playing when the host opens the viewer, but the state is shared) can never show as "playing".
+   * playing when the host opens the viewer, but the state is shared) cannot show as "playing"
+   * while the viewer is idle. During the viewer's own pending start the host's "playing" is taken
+   * as the answer to that start; the focus trap and the scrim are what keep another surface from
+   * starting audio in that window.
    */
   let soundArmed = $state(false);
   /** Between pressing Play and `onplay` resolving; the status chip says "preparing". */
@@ -96,7 +99,16 @@
   /** The last frame the sound source showed; what the picture holds when the host stops it. */
   let lastSoundFrame = 0;
   let soundWasRunning = false;
+  /** Whether the current sound run ever followed the host clock; a refused start never did. */
+  let soundFollowed = false;
   let seenPixa: Pixa | null = null;
+  /** Where the mouse button went down, so a drag that ends on the scrim is not a scrim click. */
+  let pressTarget: EventTarget | null = null;
+  /**
+   * The element that had focus when the viewer opened, restored on close. Captured at init,
+   * before this component's DOM exists, so it can only ever be something behind the dialog.
+   */
+  const previousFocus = typeof document === "undefined" ? null : document.activeElement as HTMLElement | null;
 
   // --- Derived view ---------------------------------------------------------------------------------
   const frameCount = $derived(pixa?.frames.length ?? 0);
@@ -174,15 +186,15 @@
         // The host reporting "playing" is proof the start succeeded, so the promise's answer is
         // redundant from here: a host stop that lands before `onplay` resolves (a very short
         // track) must end the run and hold the audio's last frame, not wait on the promise.
-        if (following) soundPending = false;
+        if (following) { soundFollowed = true; soundPending = false; }
         return;
       }
       if (!soundWasRunning) return;
       soundWasRunning = false; soundArmed = false; soundPending = false; playGeneration++;
       heldFrame = lastSoundFrame;
-      // A host that reached the last frame without looping is a natural end; any other stop
-      // (engine, scope) keeps the held frame as the resume point.
-      ended = !loop && lastSoundFrame === frameCount - 1;
+      // A host that reached the last frame without looping is a natural end; a refused start or
+      // any other stop (engine, scope) keeps the held frame as the resume point.
+      ended = soundFollowed && !loop && lastSoundFrame === frameCount - 1;
       // Leaving the sound source while the host still plays (Deafen flipped under a run, or a
       // package swap) must silence it, or the UI would say "paused" over audible playback.
       if (audioState.state !== "stopped") onstop();
@@ -192,6 +204,9 @@
     // The host stops its audio when it closes the viewer; this only drops the local timer and
     // disowns any `onplay` still in flight so its late answer cannot touch a dead component.
     stopVisual(); playGeneration++;
+    // Give focus back to where the user was (a file row, a chat card) if it still exists; after
+    // a navigation-driven close it may be gone, and then the host's own focus rules apply.
+    if (previousFocus && previousFocus.isConnected && typeof previousFocus.focus === "function") previousFocus.focus();
   });
 
   // --- Playback control -----------------------------------------------------------------------------
@@ -220,16 +235,18 @@
   }
   async function playSound(value: Pixa) {
     const generation = ++playGeneration;
-    soundArmed = true; soundPending = true;
+    soundArmed = true; soundPending = true; soundFollowed = false;
     let started = false;
     try { started = await onplay(frameOffsetMs(clampFrame(heldFrame, value.frames.length), value.fps), loop); }
     catch { started = false; }
-    // A pause, step, close or package change while the host was preparing already settled the
-    // picture; the late answer belongs to a run that no longer exists.
+    // A pause, step, close, package change or host-reported stop while the host was preparing
+    // already settled the picture; the late answer belongs to a run that no longer exists.
     if (generation !== playGeneration) return;
     soundPending = false;
     if (!started) {
-      soundWasRunning = false; soundArmed = false;
+      // Disarm and let the transition effect settle the picture: it holds the frame that was
+      // actually on screen and, should the host still claim to be playing, silences it.
+      soundArmed = false;
       soundNotice = "Sound could not start. Press Play to try again.";
     }
   }
@@ -271,6 +288,7 @@
       target.tagName === "TEXTAREA" || !!target.isContentEditable);
     switch (e.key) {
       case "Escape": e.preventDefault(); e.stopPropagation(); onclose(); return;
+      case "Tab": trapTab(e); return;
       case "ArrowLeft": step(-1); break;
       case "ArrowRight": step(1); break;
       case "Home": first(); break;
@@ -284,6 +302,30 @@
     }
     // Handled keys stay inside the dialog: the app's own shortcuts must not also see them.
     e.preventDefault(); e.stopPropagation();
+  }
+  /**
+   * Keep Tab inside the dialog. `aria-modal` promises assistive tech that nothing behind the card
+   * is reachable; without a trap a keyboard user could Tab into a chat card behind the scrim and
+   * start its audio while this viewer's own start is pending. Only the wrap-around edges are
+   * handled; in between, the browser's natural order already stays inside the card.
+   */
+  function trapTab(e: KeyboardEvent) {
+    e.stopPropagation();
+    if (!card) return;
+    const focusable = [...card.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+    if (!focusable.length) { e.preventDefault(); return; }
+    const index = focusable.indexOf(document.activeElement as HTMLElement);
+    let next: HTMLElement | null = null;
+    if (e.shiftKey) { if (index <= 0) next = focusable[focusable.length - 1]; }
+    else if (index === -1 || index === focusable.length - 1) next = focusable[0];
+    if (next) { e.preventDefault(); next.focus(); }
+  }
+  /** Close on a click that both started and ended on the scrim; a drag out of the card is not one. */
+  function onScrimClick(e: MouseEvent) {
+    const pressedScrim = pressTarget === null || pressTarget === e.currentTarget;
+    pressTarget = null;
+    if (e.target === e.currentTarget && pressedScrim) onclose();
   }
 
   // --- Thumbnails -----------------------------------------------------------------------------------
@@ -315,7 +357,7 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
-<div class="pixa-viewer" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) onclose(); }} onkeydown={onKey}>
+<div class="pixa-viewer" role="presentation" onmousedown={(e) => { pressTarget = e.target; }} onclick={onScrimClick} onkeydown={onKey}>
   <div class="card" role="dialog" aria-modal="true" aria-label="Flipnote viewer" tabindex="-1" bind:this={card}>
     <header class="head">
       <svg class="film" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="3" width="13" height="10" rx="1"></rect><path d="M4.5 3v10M11.5 3v10M1.5 6.5h3M11.5 6.5h3M1.5 9.5h3M11.5 9.5h3"></path></svg>
@@ -362,7 +404,7 @@
     {/if}
 
     {#if thumbs.length}
-      <div class="strip" aria-label="Frames">
+      <div class="strip" role="group" aria-label="Frames">
         {#each thumbs as frame, i (i)}
           <button type="button" class="thumb" class:cur={i === displayedFrame} aria-label={`Frame ${i + 1}`} aria-current={i === displayedFrame ? "true" : undefined} title={`Frame ${i + 1}`} onclick={() => holdAt(i)}>
             <canvas width="64" height="48" use:thumb={frame}></canvas>
@@ -381,7 +423,9 @@
 </div>
 
 <style>
-  /* Overlay and card. z-index 60 sits above the app's ordinary overlays (50) and below toasts. */
+  /* Overlay and card. z-index 60 sits above the app's ordinary overlays (50) and below the focus
+     layer (70) and toasts; it ties with the call bar and incoming-call prompt (also 60), which then
+     stack by DOM order. Raising it above those would hide an incoming call behind a flipnote. */
   .pixa-viewer { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; padding: 16px; background: color-mix(in oklab, var(--bg-0) 55%, transparent); color: var(--text); font-family: var(--ui); font-size: 0.84rem; }
   .card { display: flex; flex-direction: column; width: min(680px, 100%); height: min(600px, 100%); background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); box-shadow: 0 18px 44px color-mix(in oklab, var(--bg-0) 60%, transparent); overflow: hidden; outline: none; }
   .card:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }

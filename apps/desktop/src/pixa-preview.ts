@@ -281,7 +281,7 @@ export class PixaPreviewManager {
   private describe(card: Card, value: Pixa): void {
     card.facts.textContent = `${value.frames.length} frames · ${value.fps} fps · ${formatSize(card.file.size)}`;
     const parts: string[] = [];
-    if (value.sfx.length) parts.push(`♪ ${value.sfx.length} sounds`);
+    if (value.sfx.length) parts.push(`♪ ${value.sfx.length} ${value.sfx.length === 1 ? "sound" : "sounds"}`);
     if (value.take.events.length) parts.push("♫ music");
     card.sounds.textContent = parts.join(" · "); card.sounds.hidden = !parts.length;
   }

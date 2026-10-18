@@ -4,6 +4,54 @@
 //! interruption and substitution helpers: a handoff stopped before its Source write, after it, and
 //! after a partial one.
 use super::*;
+
+#[test]
+fn closing_retry_ack_transfer_rejects_an_altered_basis_without_rewriting_the_record() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(true);
+    let mut store = open(root.path());
+    let (_, basis, _) = prepare(&f, &mut store);
+    let branch = store
+        .load_epoch_intents(SERVER, &f.logical)
+        .unwrap()
+        .handoff_metadata()
+        .unwrap()
+        .branch_id()
+        .unwrap();
+    transfer(&f, &mut store, basis);
+    let scope = crate::store::epoch_intents::scope_bytes(SERVER, &f.logical).unwrap();
+    let path = store.epoch_intent_path(&scope);
+    let before = fs::read(&path).unwrap();
+    assert!(matches!(
+        store
+            .acknowledge_studio_closing_retry(
+                SERVER,
+                &f.group,
+                f.target,
+                &f.device,
+                basis,
+                branch,
+                &f.title(),
+            )
+            .unwrap(),
+        Some(StudioOverlaySave::HandedOff(_))
+    ));
+    refusal(
+        store
+            .acknowledge_studio_closing_retry(
+                SERVER,
+                &f.group,
+                f.target,
+                &f.device,
+                [0x95; 32],
+                branch,
+                &f.title(),
+            )
+            .unwrap_err(),
+        StudioOverlaySaveRefusal::NonceConflict,
+    );
+    assert_eq!(fs::read(path).unwrap(), before);
+}
 use crate::studio::StudioOwnerTenure;
 use catcoms_replication::studio::{
     StudioHandoffEvidence as Evidence, StudioOverlayEligibility as E,

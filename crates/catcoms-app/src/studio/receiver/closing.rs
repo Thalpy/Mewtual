@@ -208,15 +208,33 @@ mod tests {
             })
         ));
         crate::store::corrupt_studio_closing_journal_fixture(&store, 7, &server.group_id(), target);
-        assert!(matches!(
-            receiver.control(&mut server, &mut store, 7, request()).unwrap().2,
-            Some(StudioControlResponse::ClosingOverlaySaved {
-                outcome: StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. }, ..
-            })
-        ), "a present corrupt auxiliary journal cannot hide an authenticated accepted Save");
-        assert!(receiver.control(&mut server, &mut store, 7, StudioControlRequest {
-            target, action: StudioControlAction::BeginClosingOverlaySave,
-        }).is_err(), "corrupt inventory still blocks new authoring");
+        assert!(
+            matches!(
+                receiver
+                    .control(&mut server, &mut store, 7, request())
+                    .unwrap()
+                    .2,
+                Some(StudioControlResponse::ClosingOverlaySaved {
+                    outcome: StudioUnconfirmedSaveOutcome::Saved { accepted: 1, .. },
+                    ..
+                })
+            ),
+            "a present corrupt auxiliary journal cannot hide an authenticated accepted Save"
+        );
+        assert!(
+            receiver
+                .control(
+                    &mut server,
+                    &mut store,
+                    7,
+                    StudioControlRequest {
+                        target,
+                        action: StudioControlAction::BeginClosingOverlaySave,
+                    }
+                )
+                .is_err(),
+            "corrupt inventory still blocks new authoring"
+        );
         crate::store::remove_studio_closing_journal_fixture(&store, 7, &server.group_id(), target);
         assert!(
             matches!(

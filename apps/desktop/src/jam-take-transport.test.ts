@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { archivalDjPosition, JamTakeTransport, type JamTakeTransportEngine } from "./jam-take-transport.ts";
+import { archivalDjPosition, archivalPlaybackNeedsStart, JamTakeTransport, type JamTakeTransportEngine } from "./jam-take-transport.ts";
 import { pixaFrameAt } from "./pixa-media.ts";
 import { JamLatestTaskQueue } from "./jam-publication.ts";
 import { planJamArchivalPlayback } from "./jam-archival-plan.ts";
@@ -38,6 +38,24 @@ test("a listener samples its seek after preparation and reconstructs the actual 
   await h.transport.tick();
   assert.equal(h.transport.elapsedMs, 3500); assert.equal(h.events[0].age, 3500);
   assert.equal(h.resumes(), 0);
+});
+
+test("heartbeats preserve slow preparation and a fresh press can replace it", async () => {
+  const h = harness(), gate = deferred<void>(); h.digest(gate.promise);
+  let roomMs = 0;
+  const pending = h.transport.start(take, 0, scope, true, h.current, () => roomMs);
+  for (const at of [5000, 10000, 15000]) {
+    roomMs = at; h.now(at);
+    assert.equal(archivalPlaybackNeedsStart(true, null, roomMs), false);
+    assert.equal(h.transport.state, "preparing"); assert.equal(h.revoked(), 0);
+  }
+  gate.resolve(); assert.equal(await pending, true); await h.transport.tick();
+  assert.equal(h.events[0].age, 15000);
+  assert.equal(archivalPlaybackNeedsStart(false, { elapsedMs: h.transport.elapsedMs, done: false }, roomMs), false);
+  h.transport.stop(); // App retires ownership on a fresh sequence, including a same-CID seek.
+  assert.equal(archivalPlaybackNeedsStart(false, null, 500), true);
+  assert.equal(await h.transport.start(take, 500, scope, true, h.current), true);
+  assert.equal(h.transport.elapsedMs, 500);
 });
 function harness() {
   let now = 0, resumes = 0, live = true, revoked = 0;

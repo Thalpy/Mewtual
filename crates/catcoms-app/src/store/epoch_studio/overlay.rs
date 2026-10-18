@@ -13,6 +13,27 @@ use catcoms_replication::studio::{
 };
 use catcoms_replication::{CloseRecord, LocalIntent, ReplError};
 
+/// A retained disposal may predate the current branch and have a different provenance.
+/// Check its own evidence, never borrow the new branch's Closing label for historic work.
+pub(in crate::store) fn check_closing_disposal_retry(
+    manifest: &catcoms_replication::studio::StudioOverlayDisposal,
+    basis: [u8; 32],
+) -> Result<(), AppError> {
+    if !matches!(manifest.provenance, StudioOverlayProvenance::Closing) {
+        return Err(studio_refused(
+            StudioOverlaySaveRefusal::OtherKindDraft,
+            "disposed draft was not Closing work",
+        ));
+    }
+    if manifest.basis != basis {
+        return Err(studio_refused(
+            StudioOverlaySaveRefusal::NonceConflict,
+            "disposed draft retry has a different basis",
+        ));
+    }
+    Ok(())
+}
+
 impl ServerStore {
     /// Acknowledge only an already accepted Closing request, without opening auxiliary journals
     /// or admitting any new storage. The authenticated intent file is flushed unchanged before
@@ -30,7 +51,14 @@ impl ServerStore {
         operation: &DomainOp,
     ) -> Result<Option<StudioOverlaySave>, AppError> {
         self.acknowledge_studio_closing_retry_with_io(
-            server, group, target, device, basis, branch, operation, &mut WriteHooks::None,
+            server,
+            group,
+            target,
+            device,
+            basis,
+            branch,
+            operation,
+            &mut WriteHooks::None,
         )
     }
 
@@ -49,33 +77,68 @@ impl ServerStore {
         current_save_member(group, device)?;
         let logical = target.document(&group.group_id()).map_err(invalid)?;
         match target {
-            StudioTarget::Index { .. } => { IndexOp::decode_domain(&logical, operation, &device.device_id()).map_err(invalid)?; }
-            StudioTarget::Flipnote { .. } => { FlipnoteOp::decode_domain(&logical, operation).map_err(invalid)?; }
-            StudioTarget::Score { .. } => { ScoreOp::decode_domain(&logical, operation).map_err(invalid)?; }
+            StudioTarget::Index { .. } => {
+                IndexOp::decode_domain(&logical, operation, &device.device_id())
+                    .map_err(invalid)?;
+            }
+            StudioTarget::Flipnote { .. } => {
+                FlipnoteOp::decode_domain(&logical, operation).map_err(invalid)?;
+            }
+            StudioTarget::Score { .. } => {
+                ScoreOp::decode_domain(&logical, operation).map_err(invalid)?;
+            }
         }
         let scope = super::super::epoch_intents::scope_bytes(server, &logical)?;
         let (state, bytes) = self.read_epoch_intent_record_structural(&scope, &logical)?;
-        let Some(metadata) = state.handoff_metadata() else { return Ok(None); };
-        let intent = LocalIntent { author: device.device_id(), operation: operation.clone() };
-        let acknowledged = match metadata.classify_request(target, branch, &intent).map_err(classify_save_error)? {
-            StudioOverlayRequestClass::Transferred(outcome) if outcome.basis == basis => Some(StudioOverlaySave::HandedOff(outcome)),
-            StudioOverlayRequestClass::Disposed(manifest) if manifest.basis == basis && matches!(manifest.provenance, StudioOverlayProvenance::Closing) => Some(StudioOverlaySave::Disposed(manifest)),
-            StudioOverlayRequestClass::Transferred(_) => return Err(studio_refused(StudioOverlaySaveRefusal::NonceConflict, "accepted transfer retry has a different basis")),
-            StudioOverlayRequestClass::Disposed(manifest) => return Err(studio_refused(
-                if matches!(manifest.provenance, StudioOverlayProvenance::Closing) { StudioOverlaySaveRefusal::NonceConflict } else { StudioOverlaySaveRefusal::OtherKindDraft },
-                "disposed draft retry has a different basis or draft kind",
-            )),
-            StudioOverlayRequestClass::Active => {
-                let overlay = state.overlay().ok_or_else(|| invalid("classified Active with no live branch"))?;
-                overlay.exact_retry(basis, &intent).map_err(classify_save_error)?
-                    .then(|| StudioOverlaySave::Acknowledged { basis, accepted: overlay.accepted() })
-            }
-            StudioOverlayRequestClass::Unmatched => metadata.completed_retry(target, basis, &intent)
-                .map_err(classify_save_error)?.map(StudioOverlaySave::HandedOff),
+        let Some(metadata) = state.handoff_metadata() else {
+            return Ok(None);
         };
-        if acknowledged.is_none() { return Ok(None); }
+        let intent = LocalIntent {
+            author: device.device_id(),
+            operation: operation.clone(),
+        };
+        let acknowledged = match metadata
+            .classify_request(target, branch, &intent)
+            .map_err(classify_save_error)?
+        {
+            StudioOverlayRequestClass::Transferred(outcome) if outcome.basis == basis => {
+                Some(StudioOverlaySave::HandedOff(outcome))
+            }
+            StudioOverlayRequestClass::Disposed(manifest) => {
+                check_closing_disposal_retry(&manifest, basis)?;
+                Some(StudioOverlaySave::Disposed(manifest))
+            }
+            StudioOverlayRequestClass::Transferred(_) => {
+                return Err(studio_refused(
+                    StudioOverlaySaveRefusal::NonceConflict,
+                    "accepted transfer retry has a different basis",
+                ))
+            }
+            StudioOverlayRequestClass::Active => {
+                let overlay = state
+                    .overlay()
+                    .ok_or_else(|| invalid("classified Active with no live branch"))?;
+                overlay
+                    .exact_retry(basis, &intent)
+                    .map_err(classify_save_error)?
+                    .then(|| StudioOverlaySave::Acknowledged {
+                        basis,
+                        accepted: overlay.accepted(),
+                    })
+            }
+            StudioOverlayRequestClass::Unmatched => metadata
+                .completed_retry(target, basis, &intent)
+                .map_err(classify_save_error)?
+                .map(StudioOverlaySave::HandedOff),
+        };
+        if acknowledged.is_none() {
+            return Ok(None);
+        }
         if !matches!(metadata.provenance(), StudioOverlayProvenance::Closing) {
-            return Err(studio_refused(StudioOverlaySaveRefusal::OtherKindDraft, "accepted draft was not Closing work"));
+            return Err(studio_refused(
+                StudioOverlaySaveRefusal::OtherKindDraft,
+                "accepted draft was not Closing work",
+            ));
         }
         let bytes = bytes.ok_or_else(|| invalid("accepted Closing request has no intent file"))?;
         let path = self.epoch_intent_path(&scope);

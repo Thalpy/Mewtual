@@ -2,6 +2,7 @@ import { sanitizeStatusCursor, type StatusCursors } from "./statusread.ts";
 import { MAX_LATE_PAST, type LatePast, type ReadMark } from "./unread.ts";
 import { sanitizeFileTrustPolicies, type FileTrustPolicies } from "./file-trust.ts";
 import { sanitizePendingSends, type PendingSends } from "./pending-sends.ts";
+import { decodeStudioDraft } from "./studio-draft.ts";
 
 export type UiContinuity = {
   version: 1;
@@ -43,6 +44,8 @@ export type UiContinuity = {
    * window could flip it.
    */
   embedAutoLoad: boolean;
+  /** Orderly lock/close recovery; the decoder rejects the whole queue rather than dropping retries. */
+  studioDraft: string | null;
 };
 
 const MAX_ENTRIES = 2_000;
@@ -104,7 +107,10 @@ export function sanitizeUiContinuity(value: unknown): UiContinuity {
   const embedAutoLoad = root.embedAutoLoad === true;
   const pendingSends = sanitizePendingSends(root.pendingSends);
   const recoveredSendDrafts = sanitizePendingSends(root.recoveredSendDrafts);
-  return { version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad, pendingSends, recoveredSendDrafts };
+  if (root.studioDraft !== undefined && root.studioDraft !== null && typeof root.studioDraft !== "string") throw new Error("Saved Studio edits have an invalid format. The sealed copy has been kept.");
+  const studioDraft = typeof root.studioDraft === "string" ? root.studioDraft : null;
+  if (studioDraft !== null) decodeStudioDraft(studioDraft);
+  return { version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad, pendingSends, recoveredSendDrafts, studioDraft };
 }
 
 /**
@@ -160,6 +166,7 @@ export function planLegacyReadMarkMigration(
       embedAutoLoad: current.embedAutoLoad,
       pendingSends: current.pendingSends,
       recoveredSendDrafts: current.recoveredSendDrafts,
+      studioDraft: current.studioDraft,
     });
     return { state: migrated, saveBeforeRemoval: true, removeLegacy: true };
   } catch {

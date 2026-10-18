@@ -37,6 +37,10 @@ export function pendingManagerApp(initial: unknown) {
     let pendingSends = {}, recoveredSendDrafts = {}, pendingSendErrors = {}, pendingSendResolution = null;
     let retryingPendingSends = false, pendingManagerOpen = false, sending = false;
     let windowCloseInFlight = false, unlocking = false, closeAfterContinuityError = false;
+    // These chat tests leave the lazy Studio chunk unmounted. Keep its real continuity
+    // fallback and close hooks in scope so the extracted App functions run unchanged.
+    let studioSnapshot = null, studioRestore = null, restoredStudioDraft = null;
+    const studioBeginClose = null, studioSave = null;
     let drafts = {}, readMarks = {}, statusCursors = {}, fileTrustPolicies = {}, latePast = {}, embedAutoLoad = false;
     let servers = [], cur = null, activeServerId = null, draft = "", replyingTo = "", draftRevisions = {};
     let pendingSendNonce = 0, mentionQuery = null, chatStickToBottom = false, tailLoaded = false;

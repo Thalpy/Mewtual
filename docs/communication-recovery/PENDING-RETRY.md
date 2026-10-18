@@ -77,8 +77,9 @@ Saved copies retain their original text, reply target and source identity. Copy 
 in an available conversation's draft, and remove are explicit actions. Using a copy retains
 the recovered original and clears the old conversation's reply reference in the composer.
 Text above the 32,768-character composer limit remains available to copy in full.
-The native continuity record still has its combined 1 MiB limit, shared with ordinary
-drafts and preferences. An envelope-size refusal is a failed save, not permission to evict
+Pending sends, ordinary drafts and preferences still share a 1 MiB non-Studio allowance.
+Studio has a separate bounded draft sub-budget within the sealed envelope (see ARCHITECTURE).
+An envelope-size refusal is a failed save, not permission to evict
 pending work or recovered text.
 
 The scheduler grants no network or backend authority and does not claim peer delivery.

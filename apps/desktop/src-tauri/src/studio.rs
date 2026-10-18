@@ -140,13 +140,19 @@ async fn invoke_custody<V>(
         request.validate().map_err(|e| e.to_string())?;
     }
     let target = match &request {
-        InvokeRequest::Document(request) => Some((request.target(), !matches!(request, StudioRequest::Read { .. }))),
+        InvokeRequest::Document(request) => Some((
+            request.target(),
+            !matches!(request, StudioRequest::Read { .. }),
+        )),
         _ => None,
     };
     let mut context = InvokeContext::new(state, server, None).await?;
     context.view_request = target.map(|(target, save)| {
-        if save { requests::ViewRequest::begin_save(state, server, target) }
-        else { requests::ViewRequest::begin(state, server, target) }
+        if save {
+            requests::ViewRequest::begin_save(state, server, target)
+        } else {
+            requests::ViewRequest::begin(state, server, target)
+        }
     });
     invoke_with_context(state, &context, request, convert).await
 }

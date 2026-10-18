@@ -37,6 +37,69 @@ async function harness(opts: { ipc?: FakeIpc } = {}) {
 
 const docView = (frames = [{ id: F1, cid: id64(1), bytes: pixBytes(1).length }], extra: { epochId?: string; phase?: string } = {}) => ordinaryView(flipnoteContent({ frames }), extra);
 
+test("a Save receipt resolves without rolling back a newer object or Index read", async () => {
+  for (const index of [false, true]) {
+    const h = await harness(), ack = deferred<unknown>();
+    const view = (title: string, epoch: number) => index
+      ? ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ title }) } }), { epochId: id32(epoch), epoch: String(epoch) })
+      : ordinaryView(flipnoteContent({ title, frames: [] }), { epochId: id32(epoch), epoch: String(epoch) });
+    h.ipc.on("studio_list", () => index ? view("initial", 1) : ordinaryView(indexContent()));
+    h.ipc.on("studio_read", () => view("initial", 1));
+    h.ipc.on(index ? "studio_apply_index" : "studio_apply", () => ack.promise);
+    h.session.setScope({ server: SERVER, channel: CHANNEL }); if (!index) h.session.open(OBJ); await h.sync();
+    if (index) h.session.renameEntry(OBJ, "saved earlier"); else h.session.setTitle(OBJ, "saved earlier");
+    h.ipc.on(index ? "studio_list" : "studio_read", () => view("newer remote value", 2));
+    if (index) await h.session.refreshIndex(); else await h.session.refreshDoc(OBJ);
+    ack.resolve(view("saved earlier", 1)); await settle(4);
+    assert.equal(index ? h.session.indexModel?.entries[0].title : h.session.doc?.model?.title, "newer remote value");
+    assert.equal(index ? h.session.index?.epochId : h.session.doc?.view?.epochId, id32(2));
+    assert.equal(h.session.saves.length, 0, "receipt remains a definite acknowledgement");
+    await h.sync();
+    assert.equal(index ? h.session.indexModel?.entries[0].title : h.session.doc?.model?.title, "newer remote value");
+  }
+});
+
+test("a Read already pending before Save cannot overwrite its acknowledged projection", async () => {
+  const h = await harness(), oldRead = deferred<unknown>();
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => docView([]));
+  h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.open(OBJ); await h.sync();
+  h.ipc.on("studio_read", () => oldRead.promise); const reading = h.session.refreshDoc(OBJ);
+  const saved = ordinaryView(flipnoteContent({ title: "saved newer", frames: [] }));
+  h.ipc.on("studio_apply", () => saved); h.session.setTitle(OBJ, "saved newer"); await settle(4);
+  oldRead.resolve(ordinaryView(flipnoteContent({ title: "old pending read", frames: [] }))); await reading;
+  assert.equal(h.session.doc?.model?.title, "saved newer"); assert.equal(h.session.saves.length, 0);
+});
+
+test("Create then open without reading saves its initial frame, including after an overlapping absence read", async () => {
+  for (const overlap of [false, true, "read-fails"] as const) {
+    const h = await harness(), created = deferred<unknown>(), pix = pixBytes();
+    h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+    h.ipc.on("studio_create", () => created.promise);
+    h.ipc.on("publish_pix", () => ({ cid: id64(5), bytes: pix.length }));
+    h.ipc.on("studio_apply", a => {
+      const op = JSON.parse(String(a.body));
+      return ordinaryView(flipnoteContent({ frames: [{ id: op.frame, cid: op.cid, bytes: op.bytes }] }));
+    });
+    h.session.setScope({ server: SERVER, channel: CHANNEL }); await h.sync();
+    const object = h.session.createFlipnote("new"); h.session.open(object, { read: false }); h.session.insertFrame(object, null, pix);
+    if (overlap) {
+      h.ipc.on("studio_read", () => null); await h.session.refreshDoc(object);
+      h.ipc.on("studio_read", () => { if (overlap === "read-fails") throw new Error("read unavailable"); return docView([]); });
+    }
+    created.resolve(docView([])); await h.sync();
+    if (overlap === "read-fails") {
+      assert.equal(h.calls("studio_apply").length, 0);
+      assert.equal(h.session.saves[0].status, "blocked", "no Apply was sent, so the first frame is known not written");
+      assert.equal(h.session.saves[0].mayHaveCommitted, false);
+    } else {
+      assert.equal(h.calls("studio_apply").length, 1); assert.equal(h.calls("studio_apply")[0].args.object, object);
+      assert.equal(h.session.saves.length, 0); assert.equal(h.session.doc?.model?.frames.length, 1);
+    }
+    if (!overlap) assert.equal(h.calls("studio_read").length, 0, "read:false navigation is not read admission");
+  }
+});
+
 test("switching commits the previous editor first and retains an uncertain Save offscreen", async () => {
   const h = await harness(), other = id32(0x0c), ack = deferred<unknown>(), pix = pixBytes(2);
   h.ipc.on("studio_list", () => ordinaryView(indexContent()));

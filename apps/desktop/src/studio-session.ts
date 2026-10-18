@@ -24,12 +24,14 @@
 //   reference whenever something changed.
 
 import { PixError, decodePix } from "./pix.ts";
+import { workingFlipnote, workingScore, workingIndex, workingSlot } from "./studio-working.ts";
+import { encodeStudioDraft, validateDraftOperation, type StudioDraft } from "./studio-draft.ts";
 import { validateJamPatch } from "./jam-patch.ts";
 import type { JamPatch, JamTake } from "./jam-contract.ts";
 import { flipnotePixaFromNative, preflightFlipnoteMedia, scorePlaybackFromNative } from "./studio-resolved-export.ts";
-import type { ScorePlayback } from "./studio-export.ts";
+import { exportScorePlayback, type ScorePlayback, type ScoreExportInput } from "./studio-export.ts";
 import { exportStudioGif, publishStudioPixa, type StudioGifSaved } from "./studio-media.ts";
-import { decodePixa, encodePixa, PIXA_MAX_BYTES } from "./pixa.ts";
+import { decodePixa, encodePixa, exportFlipnotePixa, PIXA_MAX_BYTES } from "./pixa.ts";
 import { historicalSoundOperation, soundRecoveryChoices } from "./studio-sound-recovery.ts";
 import { readStudioFault, repairStudioFault, type FaultScope, type FaultView } from "./studio-fault.ts";
 import { canonicalJson, randomElementId, type FlipnoteOp, type IndexOp, type ScoreOp, type ScoreCell } from "./studio-contract.ts";
@@ -138,6 +140,8 @@ type SaveBase = {
   /// Set when a later read of the same document carries a different epoch than the frozen
   /// request: the backend decides on retry; the member may instead re-author explicitly.
   epochChanged: boolean;
+  /** Admission evidence for delayed first delivery; never rebound by an autosave. */
+  binding?: { epochId: string; awaiting: boolean; phase: StudioPhase | null };
 };
 /// What a surface sees of a save: an immutable snapshot, replaced whenever the queue changes.
 export type SaveRecord = SaveBase &
@@ -231,6 +235,8 @@ export type SessionOptions = {
   schedule?: (fn: () => void, ms: number) => () => void;
   maxFetches?: number;
   blobCacheBytes?: number;
+  /** Production edits wait five seconds from the first change; zero is the immediate test seam. */
+  autosaveMs?: number;
 };
 
 const REFRESH_COALESCE_MS = 120;
@@ -250,7 +256,40 @@ type BlobJob = {
 };
 
 export class StudioSession {
+  // Unlike docReq/indexReq, these advance ONLY for actual read admission. Navigation without
+  // a read (especially Create→open→first frame) cannot supersede the Create receipt's view.
+  private readonly docReadSerial = new Map<Hex32, number>();
+  private indexReadSerial = 0;
   private readonly documentCloseHandlers = new Set<() => void>();
+  private navigationSerial = 0;
+  private closeHeld = false;
+  /** Stage before freezing input. Existing requests may drain while native close seals state;
+   * no new raster or navigation may escape that final snapshot. endClose releases a failed close. */
+  beginClose(): void {
+    this.cancelNavigation(); this.prepareDocumentClose(); this.stageDrawing();
+    this.closeHeld = true; this.notify();
+  }
+  endClose(): void { if (this.closeHeld) { this.closeHeld = false; this.notify(); } }
+  cancelNavigation(): void { this.navigationSerial++; }
+  /** App and both editor surfaces share this lease. Check it after the last await, immediately
+   * before mutation; checking only in an awaited helper leaves a microtask race. */
+  claimNavigation(): () => boolean {
+    const request = ++this.navigationSerial, generation = this.generation;
+    return () => request === this.navigationSerial && generation === this.generation;
+  }
+  /** Sidebar and Music share one navigation owner; a newer action wins across both surfaces. */
+  async navigate(action: () => void): Promise<void> {
+    if (this.closeHeld) throw new StudioNativeError("The window is closing. Wait for saving to finish.");
+    const current = this.claimNavigation();
+    await this.saveBeforeLeaving();
+    if (!current()) return;
+    action();
+  }
+  private readonly draftHandlers = new Set<() => void>();
+  beforeSave(handler: () => void): () => void {
+    this.draftHandlers.add(handler); return () => { this.draftHandlers.delete(handler); };
+  }
+  stageDrawing(): void { for (const handler of this.draftHandlers) handler(); }
 
   /** Flush the mounted editor before replacing its document. Throwing vetoes the change;
    * queued saves retain their original object, pixels and retry identity offscreen. */
@@ -302,6 +341,22 @@ export class StudioSession {
   /// may release it; a worker from a cleared scope finds a different token and stands down.
   private saving = 0;
   private workerSeq = 0;
+  private readonly autosaveMs: number;
+  get buffering(): boolean { return this.autosaveMs > 0; }
+  private cancelAutosave: (() => void) | null = null;
+  private readonly eligible = new Set<number>();
+  private readonly restoredHeld = new Set<number>();
+  private editorEpoch = 0;
+  private editorSnapshot: { key: string; frames: { id: string; cid: string; bytes: Uint8Array | undefined }[] } | null = null;
+  get editorMediaGeneration(): number { return this.editorEpoch; }
+  // Hold the original scope even if unlock initially selects another channel. New authoring
+  // cannot overwrite this sole retained queue before its original channel is selected.
+  private restoredDraft: StudioDraft | null = null;
+  private draftGroup: string | null = null;
+  private readonly draftCosts = new WeakMap<object, number>();
+  workingModel: FlipnoteModel | null = null;
+  workingScore: ScoreModel | null = null;
+  workingIndex: IndexModel | null = null;
 
   receivePaused = false;
   receivePauseDetail = "";
@@ -366,6 +421,7 @@ export class StudioSession {
     this.schedule = opts.schedule ?? ((fn, ms) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); });
     this.maxFetches = opts.maxFetches ?? 2;
     this.cacheBytesCap = opts.blobCacheBytes ?? BLOB_CACHE_BYTES;
+    this.autosaveMs = opts.autosaveMs ?? 0;
   }
 
   // --- Change signal -----------------------------------------------------------------------
@@ -378,16 +434,47 @@ export class StudioSession {
     // The queue entries are mutated in place (their identity is what a retry resends); the
     // surfaces get fresh copies so a keyed row or a `find` never holds a stale object.
     this.saves = this.records.map(({ settle: _settle, ...rest }) => rest as SaveRecord);
+    const pending = this.doc ? this.saves.filter(s => s.kind !== "applyIndex" && s.object === this.doc!.object) : [];
+    this.workingModel = this.doc?.model ? (pending.length ? workingFlipnote(this.doc.model, pending, this.me) : this.doc.model) : null;
+    this.workingScore = this.doc?.score ? (pending.length ? workingScore(this.doc.score, pending) : this.doc.score) : null;
+    this.workingIndex = this.indexModel ? (this.saves.length ? workingIndex(this.indexModel, this.saves) : this.indexModel) : null;
+    this.updateEditorMedia();
     for (const fn of this.listeners) fn();
+  }
+
+  private updateEditorMedia(): void {
+    const m = this.workingModel, score = this.workingScore, view = this.doc?.view;
+    const inspection = this.overlay?.inspection;
+    const snapshot = { key: canonicalJson({ object: this.doc?.object, trust: view ? [view.epochId, view.group, view.phase, view.awaitingTenureReceipt] : null,
+      overlay: inspection?.kind === "local-draft" ? [inspection.contentEpoch, inspection.group, inspection.branch, inspection.basis] : null,
+      flipnote: m ? [m.title, m.fps, m.titleConflicts, m.fpsConflicts, m.overCapCount, m.sound.patches, m.sound.score,
+        [...m.sound.sfx].sort((a, b) => a.id.localeCompare(b.id)).map(s => [s.id, s.frame, s.patch, s.note, s.durationMs, s.conflicts]), m.sound.readiness,
+        m.frames.map(f => [f.id, f.bytes, f.conflicts, f.insertions, f.overCap])] : null,
+      score: score ? [score.title, score.bpm, score.bpb, score.steps, score.cells, score.patches, score.readiness] : null }),
+      frames: (m?.frames ?? []).map(f => ({ id: f.id, cid: f.cid, bytes: this.doc ? this.unsavedPix(this.doc.object, f.id) ?? this.blobs.get(f.cid) : undefined })) };
+    const previous = this.editorSnapshot;
+    const changed = !previous || previous.key !== snapshot.key || snapshot.frames.some((f, i) => {
+      const old = previous.frames[i];
+      if (!old || old.id !== f.id) return true;
+      // A successful Save substitutes an immutable native CID for the same owned PIX bytes.
+      // Delivery status and that substitution must not restart/stop an already playing draft.
+      if (old.bytes && f.bytes) return old.bytes !== f.bytes && (old.bytes.length !== f.bytes.length || old.bytes.some((b, n) => b !== f.bytes![n]));
+      return old.cid !== f.cid;
+    });
+    this.editorSnapshot = snapshot;
+    if (changed) this.editorEpoch++;
   }
 
   // --- Scope -------------------------------------------------------------------------------
 
-  /// Point the session at a channel. Everything scoped to the previous one is dropped, including
-  /// pending saves: their identity belongs to that channel and a retry there needs its scope back.
+  /// Point the session at a channel. Production callers must await saveBeforeLeaving first;
+  /// retained work vetoes a scope replacement. Lock uses snapshot + reset instead. The immediate
+  /// test seam retains its original reset behavior for scope-fencing regressions.
   setScope(scope: StudioScope | null): void {
     if (this.scope && scope && this.scope.server === scope.server && this.scope.channel === scope.channel) return;
     if (!this.scope && !scope) return;
+    if (this.closeHeld) throw new StudioNativeError("The window is closing. Wait for saving to finish.");
+    if (this.autosaveMs && this.records.length) throw new StudioNativeError("Save your Studio changes before changing channels.");
     const sync = scope ? this.syncByServer.get(scope.server) ?? null : null;
     this.clearScoped();
     // Sync belongs to the server, not a channel or editor mount. Restore its ordering watermark
@@ -397,6 +484,7 @@ export class StudioSession {
     this.receivePauseDetail = sync?.detail ?? "";
     this.scope = scope;
     this.generation++;
+    this.installRestoredDraft();
     this.notify();
     if (scope) this.invalidate({ index: true });
   }
@@ -406,6 +494,7 @@ export class StudioSession {
     this.clearScoped();
     this.syncByServer.clear(); // pause details are private session state, cleared on lock
     this.scope = null;
+    this.restoredDraft = null;
     this.generation++;
     this.blobs.clear();
     this.cacheBytes = 0;
@@ -413,6 +502,11 @@ export class StudioSession {
   }
 
   private clearScoped(): void {
+    this.closeHeld = false;
+    this.cancelAutosave?.(); this.cancelAutosave = null; this.eligible.clear();
+    this.restoredHeld.clear(); this.editorSnapshot = null;
+    this.draftGroup = null;
+    this.docReadSerial.clear(); this.indexReadSerial = 0;
     this.mediaEpoch++;
     this.index = null;
     this.indexModel = null;
@@ -509,7 +603,10 @@ export class StudioSession {
     // Every event invalidates the Index; a named object additionally invalidates that object.
     // A blob that was unavailable or failed may have arrived with it: let the next request try.
     if (ev.object) this.releaseTransientFor(ev.object);
-    this.invalidate({ index: true, objects: ev.object ? [ev.object] : [] });
+    // Data notices may echo our just-acknowledged Save. Re-read them, then compare effective
+    // content before stopping local playback. Settlement/membership invalidations still revoke
+    // immediately; an unchanged delivery echo is not a new animation source.
+    this.invalidate({ index: true, objects: ev.object ? [ev.object] : [], dataNotice: true });
   }
   onReceivePaused(payload: unknown): void {
     let ev;
@@ -547,8 +644,8 @@ export class StudioSession {
 
   // --- Coalesced refresh ---------------------------------------------------------------------
 
-  invalidate(what: { index?: boolean; objects?: Hex32[]; recovery?: boolean }): void {
-    if (what.objects?.length) this.mediaEpoch++;
+  invalidate(what: { index?: boolean; objects?: Hex32[]; recovery?: boolean; dataNotice?: boolean }): void {
+    if (what.objects?.length) { this.mediaEpoch++; if (!what.dataNotice) this.editorEpoch++; }
     if (what.index || what.objects?.length || what.recovery) { this.faultEpoch++; this.notify(); }
     if (what.index) this.pendingIndex = true;
     for (const o of what.objects ?? []) this.pendingObjects.add(o);
@@ -570,6 +667,7 @@ export class StudioSession {
   }
 
   async refreshIndex(): Promise<void> {
+    this.indexReadSerial++;
     const gen = this.generation;
     const req = ++this.indexReq;
     const target = this.target();
@@ -632,6 +730,8 @@ export class StudioSession {
   /// Open (or re-read) a flipnote. Opening a different object drops the previous document but
   /// keeps its pending saves: they are addressed by object and finish or fail on their own.
   open(object: Hex32 | null, opts: { read?: boolean; objectKind?: StudioObjectKind } = {}): void {
+    if (this.closeHeld && this.doc?.object !== object) throw new StudioNativeError("The window is closing. Wait for saving to finish.");
+    if (this.doc?.object !== object) this.cancelNavigation();
     if (this.doc && this.doc.object !== object) this.prepareDocumentClose();
     if (this.doc?.object !== object) this.mediaEpoch++;
     if (object === null) {
@@ -668,6 +768,7 @@ export class StudioSession {
   }
 
   async refreshDoc(object: Hex32): Promise<void> {
+    this.docReadSerial.set(object, (this.docReadSerial.get(object) ?? 0) + 1);
     const gen = this.generation;
     const req = (this.docReq.get(object) ?? 0) + 1;
     this.docReq.set(object, req);
@@ -1039,13 +1140,14 @@ export class StudioSession {
   }
 
   canEdit(object: Hex32 | null): boolean {
-    return !("refused" in this.editRoute(object));
+    return !this.closeHeld && !("refused" in this.editRoute(object));
   }
 
   /// Why the editor must be locked. Awaiting-tenure content is intentionally not a refusal now:
   /// edits are saved into a bounded local-only branch through the ticketed route, while the
   /// preview itself remains non-authoritative and cannot supply an ordinary epoch.
   editRefusal(object: Hex32 | null): string {
+    if (this.closeHeld) return "Saving before closing…";
     const route = this.editRoute(object);
     return "refused" in route ? route.refused : "";
   }
@@ -1080,6 +1182,7 @@ export class StudioSession {
   }
 
   saveFrame(object: Hex32, frame: Hex32, pix: Uint8Array): void {
+    if (this.closeHeld) throw new StudioNativeError("The window is closing. Wait for saving to finish.");
     if (this.objectKind(object) !== "flipnote") throw new StudioNativeError("pixels require a Flipnote target");
     const route = this.editRoute(object);
     const routeKind = "refused" in route && this.records.some((s) => s.kind === "create" && s.object === object && (s.request.objectKind ?? "flipnote") === "flipnote")
@@ -1093,14 +1196,16 @@ export class StudioSession {
     let tail: SaveEntry | undefined;
     for (const s of this.records) if (laneOf(s) === object) tail = s;
     // A forced record is an explicit conflict choice: never fold new strokes into it.
-    const prior = tail && tail.kind === "frame" && tail.frame === frame && tail.route === routeKind && !tail.force && tail.status !== "inflight" && tail.apply === null && tail.overlay === null ? tail : undefined;
+    const prior = tail && tail.kind === "frame" && tail.frame === frame && tail.route === routeKind && !tail.force && tail.status === "queued" && tail.attempts === 0 && !this.eligible.has(tail.id) && !this.restoredHeld.has(tail.id) && tail.apply === null && tail.overlay === null ? tail : undefined;
     if (prior && prior.kind === "frame") {
-      prior.pix = pix;
+      this.checkDraftBudget({ ...prior, pix }, prior);
+      prior.pix = pix.slice();
+      this.mediaEpoch++;
       prior.published = null;
       prior.error = "";
       prior.status = "queued";
       this.notify();
-      this.pump();
+      this.markDirty();
       return;
     }
     this.enqueue({ kind: "frame", object, frame, op: "replace", after: null, pix, published: null, route: routeKind, apply: null, overlay: null, overlayRetry: null, label: "frame pixels" });
@@ -1192,9 +1297,11 @@ export class StudioSession {
 
   /** Capture the displayed projection, not a silently substituted ordinary base beneath a draft. */
   private mediaSource(object: Hex32, kind: StudioObjectKind): { view: StudioObjectView; server: number; assertCurrent: () => void } {
-    const doc = this.doc, scope = this.target(), gen = this.generation, epoch = this.mediaEpoch;
+    const doc = this.doc, scope = this.target(), gen = this.generation, epoch = this.mediaEpoch, editor = this.editorEpoch;
+    const draft = this.pendingFor(object).length > 0;
+    if (draft && !this.autosaveMs) throw new StudioNativeError("finish or reconcile this document's pending saves before playback/export");
     if (!doc || doc.object !== object || doc.objectKind !== kind || !doc.view || doc.loading || this.overlay?.loading) throw new StudioNativeError("wait for this document to finish loading");
-    if (this.pendingFor(object).length) throw new StudioNativeError("finish or reconcile this document's pending saves before playback/export");
+    if (this.pendingFor(object).some(s => s.status === "blocked" || s.status === "uncertain" || s.mayHaveCommitted)) throw new StudioNativeError("resolve this document's failed save before playback/export");
     const base = doc.view, model = doc.model, score = doc.score, inspection = this.overlay?.inspection;
     let view = base;
     if (inspection?.kind === "local-draft") {
@@ -1204,9 +1311,9 @@ export class StudioSession {
       view = { ...base, epoch: inspection.contentEpoch, group: inspection.group, content: inspection.content } as StudioObjectView;
     }
     const assertCurrent = () => {
-      if (!this.current(gen) || this.scope?.server !== scope.server || this.scope?.channel !== scope.channel || epoch !== this.mediaEpoch ||
-          this.doc?.object !== object || this.doc.objectKind !== kind || this.doc.view !== base || this.doc.model !== model || this.doc.score !== score ||
-          this.overlay?.inspection !== inspection || this.doc.loading || this.overlay?.loading || this.pendingFor(object).length) {
+      if (!this.current(gen) || this.scope?.server !== scope.server || this.scope?.channel !== scope.channel || editor !== this.editorEpoch ||
+          this.doc?.object !== object || this.doc.objectKind !== kind || this.pendingFor(object).some(s => s.status === "blocked" || s.status === "uncertain" || s.mayHaveCommitted) || (!draft && (epoch !== this.mediaEpoch || this.doc.view !== base || this.doc.model !== model || this.doc.score !== score ||
+          this.overlay?.inspection !== inspection || this.doc.loading || this.overlay?.loading))) {
         throw new StudioNativeError("the displayed source changed; start playback/export again");
       }
     };
@@ -1258,7 +1365,9 @@ export class StudioSession {
   prepareScorePlayback(object: Hex32): Promise<ScorePlayback> {
     return this.oneMedia(async () => {
       const source = this.mediaSource(object, "score");
-      const playback = await scorePlaybackFromNative(object, source.view as ScoreView, this.me);
+      const playback = this.pendingFor(object).length && this.workingScore
+        ? await exportScorePlayback(this.scoreInput(object, this.workingScore), this.mediaContext(source.view))
+        : await scorePlaybackFromNative(object, source.view as ScoreView, this.me);
       source.assertCurrent();
       return playback;
     });
@@ -1266,27 +1375,47 @@ export class StudioSession {
 
   private async preparePixa(object: Hex32): Promise<{ bytes: Uint8Array; server: number; assertCurrent: () => void }> {
     const source = this.mediaSource(object, "flipnote"), view = source.view as FlipnoteView;
-    const model = flipnoteModel(view.content);
-    preflightFlipnoteMedia(view);
+    const draft = this.pendingFor(object).length > 0;
+    const model = draft ? this.workingModel! : flipnoteModel(view.content);
+    if (!draft || view.content.timeline.length) preflightFlipnoteMedia(view);
+    else if (Object.keys(view.content.frames).length) throw new StudioNativeError("The animation timeline is incomplete.");
+    if (!model || model.overCapCount || model.titleConflicts.length || model.fpsConflicts.length || !model.sound.ready ||
+        model.frames.some(f => f.conflicts.length || f.insertions > 1)) throw new StudioNativeError("Resolve animation conflicts before playing or exporting.");
     let linked: { object: string; view: ScoreView } | undefined;
     if (model.sound.score) {
+      if (this.pendingFor(model.sound.score).length) throw new StudioNativeError("Save your music changes before playing this flipnote.");
       const score = await studioRead(this.ipc, this.target(), model.sound.score, "score");
       source.assertCurrent();
       if (!score) throw new StudioNativeError("the linked Score is not held locally; no shorter silent export was made");
+      if (score.channel !== view.channel || !score.group || score.group !== view.group) throw new StudioNativeError("The linked music belongs to a different server or channel.");
       linked = { object: model.sound.score, view: score };
     }
     const held = new Map<string, Uint8Array>();
     for (const frame of model.frames) {
       const key = contentKey(frame.cid, frame.bytes);
       if (held.has(key)) continue;
-      const bytes = await this.fetchNow(frame.cid, frame.bytes);
+      const bytes = this.unsavedPix(object, frame.id) ?? await this.fetchNow(frame.cid, frame.bytes);
       source.assertCurrent();
       if (!bytes) throw new StudioNativeError("an animation frame is unavailable; no partial export was made");
       held.set(key, bytes);
     }
-    const bytes = await flipnotePixaFromNative(object, view, held, this.me, linked);
+    const bytes = draft ? await exportFlipnotePixa({ id: object, epoch: BigInt(view.epoch), fps: model.fps,
+      frames: model.frames.map(f => ({ id: f.id, bytes: held.get(contentKey(f.cid, f.bytes))! })),
+      patches: model.sound.patches, ...(linked ? { score: this.scoreInput(linked.object, scoreModel(linked.view.content)) } : {}),
+      sfx: model.sound.sfx.map(s => ({ id: s.id, frame: s.frame, patch: s.patch, note: s.note, durationMs: s.durationMs })) }, this.mediaContext(view))
+      : await flipnotePixaFromNative(object, view, held, this.me, linked);
     source.assertCurrent();
     return { bytes, server: source.server, assertCurrent: source.assertCurrent };
+  }
+
+  private mediaContext(view: StudioObjectView): { group: string; exporter: string } {
+    if (!view.group) throw new StudioNativeError("Reopen this document before playing or exporting.");
+    return { group: view.group, exporter: this.me };
+  }
+  private scoreInput(object: string, model: ScoreModel): ScoreExportInput {
+    if (!model.ready || Object.values(model.cellSlots).some(s => !s.removed && s.register.conflicts.length) ||
+        Object.values(model.patchSlots).some(s => !s.removed && s.register.conflicts.length)) throw new StudioNativeError("Resolve music conflicts before playing or exporting.");
+    return { id: object, bpm: model.bpm, bpb: model.bpb, steps: model.steps, cells: model.cells, patches: model.patches };
   }
 
   prepareFlipnotePixa(object: Hex32): Promise<Uint8Array> {
@@ -1394,12 +1523,151 @@ export class StudioSession {
   }
 
   private enqueue(rec: NewSave): SaveEntry {
+    if (this.closeHeld) throw new StudioNativeError("The window is closing. Wait for saving to finish.");
+    if (this.restoredDraft) throw new StudioNativeError("Open the channel with your restored Studio edits before making more changes.");
     this.mediaEpoch++;
-    const record = { ...rec, id: ++this.saveSeq, status: "queued", attempts: 0, error: "", epochChanged: false, mayHaveCommitted: false } as SaveEntry;
-    this.records.push(record);
+    const record = { ...rec, label: rec.label.slice(0, 256), id: ++this.saveSeq, status: "queued", attempts: 0, error: "", epochChanged: false, mayHaveCommitted: false } as SaveEntry;
+    if (record.kind === "apply" || record.kind === "applyIndex" || record.kind === "overlayApply") {
+      const family = record.kind === "applyIndex" || record.object === null ? "index" : this.objectKind(record.object);
+      validateDraftOperation(record.op, family);
+      if (new TextEncoder().encode(canonicalJson(record.op)).length > 65536) throw new StudioNativeError("This edit is too large to save.");
+    }
+    const object = rec.kind === "applyIndex" ? null : rec.object;
+    const base = object === null ? this.index : this.doc?.object === object ? this.doc.view : this.views.get(object)?.view;
+    if (base) record.binding = { epochId: base.epochId, awaiting: base.awaitingTenureReceipt, phase: base.phase };
+    this.draftGroup ??= base?.group ?? this.index?.group ?? null;
+    if (record.kind === "frame") record.pix = record.pix.slice();
+    const tail = this.records.filter(s => laneOf(s) === laneOf(record)).at(-1);
+    if (this.autosaveMs && tail && tail.status === "queued" && tail.attempts === 0 && !this.eligible.has(tail.id) && !this.restoredHeld.has(tail.id) &&
+        workingSlot(record) !== null && workingSlot(record) === workingSlot(tail) && tail.kind === record.kind) {
+      this.checkDraftBudget(record, tail);
+      this.records.splice(this.records.indexOf(tail), 1, record); this.settleRecord(tail, "discarded");
+    } else {
+      this.checkDraftBudget(record);
+      this.records.push(record);
+    }
     this.notify();
+    // Creating a document and explicitly recovering history are save actions themselves. Ordinary
+    // canvas, sound, music, header and Index edits use the same delayed queue afterward.
+    if (!this.autosaveMs || record.kind === "create" || record.kind === "recoveryApply") this.eligible.add(record.id);
+    else this.markDirty();
     this.pump();
     return record;
+  }
+
+  /** Begin a fixed first-change deadline, including a stroke which has not had pointer-up yet. */
+  markDirty(): void {
+    if (!this.autosaveMs) { this.pump(); return; }
+    if (this.cancelAutosave) return;
+    const generation = this.generation;
+    this.cancelAutosave = this.schedule(() => {
+      this.cancelAutosave = null;
+      if (!this.current(generation)) return;
+      try { this.stageDrawing(); this.releaseQueued(); } catch (e) { this.indexError = reason(e); this.notify(); }
+      // Staging an interrupted stroke may enqueue its first raster. It belongs to this deadline,
+      // and must not leave an empty timer behind or postpone a subsequent edit's deadline.
+      this.cancelAutosaveTimer();
+    }, this.autosaveMs);
+  }
+
+  private releaseQueued(explicit = false): void {
+    // Snapshot identities now. Later edits, including a new revision of an in-flight frame, get
+    // their own deadline; a worker's finally must not drain them as part of this Save.
+    for (const s of this.records) if (s.status === "queued" && (explicit || !this.restoredHeld.has(s.id))) { this.eligible.add(s.id); this.restoredHeld.delete(s.id); }
+    this.pump();
+  }
+
+  private cancelAutosaveTimer(): void { this.cancelAutosave?.(); this.cancelAutosave = null; }
+
+  /** The immutable argument captured before native lock revokes the current UI generation. */
+  draftSnapshot(): string | null {
+    if (this.restoredDraft) return encodeStudioDraft(this.restoredDraft);
+    if (!this.scope || !this.records.length) return null;
+    const group = this.draftGroup ?? this.index?.group ?? this.doc?.view?.group;
+    if (!group) throw new StudioNativeError("Studio could not identify the server for these unsaved edits.");
+    return encodeStudioDraft({ version: 1, scope: { ...this.scope }, group, records: this.records });
+  }
+
+  restoreDraft(draft: StudioDraft): void {
+    if (this.records.length || this.restoredDraft) throw new StudioNativeError("Studio already has unsaved edits.");
+    this.restoredDraft = draft;
+    this.installRestoredDraft(); this.notify();
+  }
+
+  private installRestoredDraft(): void {
+    const draft = this.restoredDraft;
+    if (!draft || this.scope?.server !== draft.scope.server || this.scope.channel !== draft.scope.channel) return;
+    this.restoredDraft = null; this.draftGroup = draft.group;
+    for (const record of draft.records) {
+      // An interrupted delivery may have committed. Never automatically turn it into a new edit.
+      const interrupted = record.status === "inflight" || record.mayHaveCommitted;
+      const restored = { ...record, status: interrupted ? "uncertain" as const : record.status,
+        mayHaveCommitted: interrupted || record.mayHaveCommitted };
+      this.records.push(restored); this.saveSeq = Math.max(this.saveSeq, record.id);
+      this.restoredHeld.add(record.id);
+    }
+    // No timer, eligible identity or worker is installed: only Save/retry can submit restored work.
+  }
+
+  /** Save a fixed revision and await definite receipts. Failure/timeout keeps the editor intact. */
+  async save(): Promise<void> {
+    this.stageDrawing();
+    this.cancelAutosave?.(); this.cancelAutosave = null;
+    const generation = this.generation, ids = new Set(this.records.map(s => s.id));
+    this.releaseQueued(true);
+    if (!ids.size) return;
+    await new Promise<void>((resolve, reject) => {
+      let detach = () => {}, cancel = () => {};
+      const check = () => {
+        const remaining = this.records.filter(s => ids.has(s.id));
+        const failure = remaining.find(s => s.status === "blocked" || s.status === "uncertain");
+        if (generation !== this.generation || failure || !remaining.length) {
+          detach(); cancel();
+          if (generation !== this.generation) reject(new StudioNativeError("Studio changed before saving finished"));
+          else if (failure) reject(new StudioNativeError("Could not confirm the save. Your edits are still here; retry before leaving."));
+          else resolve();
+        }
+      };
+      detach = this.onChange(check);
+      cancel = this.schedule(() => { detach(); reject(new StudioNativeError("Studio is still saving. Your edits are still here; wait and try again.")); }, 10_000);
+      check();
+    });
+  }
+
+  async saveBeforeLeaving(): Promise<void> {
+    this.prepareDocumentClose();
+    const started = this.now(), generation = this.generation;
+    do {
+      await this.save();
+      if (generation !== this.generation) throw new StudioNativeError("Studio changed while saving.");
+      this.stageDrawing(); // capture a stroke made while the previous revision awaited its ACK
+      if (this.now() - started > 10_000 && this.records.length) throw new StudioNativeError("Studio is still saving. Please wait before leaving.");
+    } while (this.records.length);
+  }
+
+  private checkDraftBudget(next: SaveRecord, replacing?: SaveRecord): void {
+    const entries = [...this.records.filter(s => s !== replacing), next];
+    if (entries.length > 512) throw new StudioNativeError("Too many unsaved edits. Save before continuing.");
+    if (next.kind === "frame") decodePix(next.pix);
+    let pixels = 0, encoded = 2048; // version/scope/group, separators and JSON wrapper
+    for (const s of entries) {
+      if (s.kind === "frame") { pixels += s.pix.length; encoded += Math.ceil(s.pix.length / 3) * 4 + 9; }
+      // Reserve future frozen frame/ticket fields and bounded diagnostics before accepting an edit.
+      // Count UTF-8 rather than UTF-16 so Unicode titles cannot make a later lock snapshot overflow.
+      let cost = this.draftCosts.get(s);
+      if (cost === undefined) {
+        // Account for the outer UI envelope's string escaping too. Cached per owned entry: large
+        // PIX bodies are never base64-encoded/decoded again for each subsequent editor action.
+        // A local-only ticket freezes a second copy of the operation body, which may itself
+        // approach the 64 KiB domain cap. Reserve that exact shape, not merely a small nonce.
+        const budgetRecord = s.kind === "overlayApply" && s.request === null
+          ? { ...s, request: { basis: "0".repeat(64), branch: "0".repeat(64), nonce: "0".repeat(32), body: canonicalJson(s.op) } } : s;
+        cost = new TextEncoder().encode(JSON.stringify(JSON.stringify(budgetRecord, (key, value) => key === "pix" || key === "settle" ? undefined : value))).length + 4096;
+        this.draftCosts.set(s, cost);
+      }
+      encoded += cost;
+    }
+    if (pixels > 8 * 1024 * 1024 || encoded > 12 * 1024 * 1024) throw new StudioNativeError("Unsaved edits are full. Save before continuing.");
   }
 
   /// Resend the same complete request.
@@ -1410,6 +1678,7 @@ export class StudioSession {
     if (retry === "newTicket" || retry === "none") return;
     s.status = "queued";
     s.error = "";
+    this.eligible.add(s.id); this.restoredHeld.delete(s.id);
     this.notify();
     this.pump();
   }
@@ -1459,7 +1728,11 @@ export class StudioSession {
     }
     const replacement = { ...next, id: ++this.saveSeq, status: "queued", attempts: 0,
       error: "", epochChanged: false, mayHaveCommitted: false } as SaveEntry;
+    const base = object === null ? this.index : this.doc?.object === object ? this.doc.view : this.views.get(object)?.view;
+    if (base) replacement.binding = { epochId: base.epochId, awaiting: base.awaitingTenureReceipt, phase: base.phase };
     this.records[at] = replacement;
+    this.eligible.delete(s.id); this.restoredHeld.delete(s.id);
+    this.eligible.add(replacement.id);
     this.settleRecord(s, "discarded");
     this.notify();
     this.pump();
@@ -1471,6 +1744,7 @@ export class StudioSession {
     const at = this.records.findIndex((r) => r.id === id && r.status !== "inflight");
     if (at < 0) return;
     const [s] = this.records.splice(at, 1);
+    this.eligible.delete(s.id); this.restoredHeld.delete(s.id);
     this.settleRecord(s, "discarded");
     this.notify();
     this.pump();
@@ -1507,7 +1781,7 @@ export class StudioSession {
     for (const s of this.records) {
       const lane = laneOf(s);
       if (blocked.has(lane)) continue;
-      if (s.status === "queued") { next = s; break; }
+      if (s.status === "queued" && (!this.autosaveMs || this.eligible.has(s.id))) { next = s; break; }
       blocked.add(lane); // blocked/uncertain (or, defensively, inflight): nothing later runs
     }
     if (!next) return;
@@ -1523,14 +1797,20 @@ export class StudioSession {
   private async run(s: SaveEntry): Promise<void> {
     const gen = this.generation;
     const target = this.target();
+    // Native preserves a durable Save receipt even if a refresh overtakes its projection.
+    // Separate acknowledgement from display currency: a read begun after this Save may carry
+    // newer remote/rotation state, so an older ACK must resolve the queue without rolling it back.
+    const docRead = this.docReadSerial.get(s.object ?? "") ?? 0, indexRead = this.indexReadSerial;
     s.status = "inflight";
     s.attempts++;
     this.notify();
     try {
+      if (this.autosaveMs && this.draftGroup && this.index?.group !== this.draftGroup) throw new OverlayNoWrite("The server for these saved edits changed. They were not sent.");
+      if (s.attempts === 1 || s.kind === "frame" && !s.apply && !s.overlay || s.kind === "overlayApply" && !s.request) this.assertAdmission(s);
       if (s.kind === "create") {
         const view = await studioCreate(this.ipc, target, s.request);
         if (!this.current(gen)) return;
-        this.landed(s.object, view);
+        await this.landed(s.object, view, docRead);
         this.invalidate({ index: true });
       } else if (s.kind === "frame") {
         if (!s.published) {
@@ -1554,22 +1834,23 @@ export class StudioSession {
           if (!this.current(gen)) return;
         } else {
           if (!s.apply) {
+            this.assertAdmission(s);
             const ep = this.editableEpoch(s.object);
-            if (!("epochId" in ep)) throw new StudioNativeError(ep.refused);
+            if (!("epochId" in ep)) throw new OverlayNoWrite(ep.refused);
             s.apply = { object: s.object, epochId: ep.epochId, nonce: this.newId(), body: canonicalJson(op) };
           }
           const view = await studioApply(this.ipc, target, s.apply);
           if (!this.current(gen)) return;
-          this.landed(s.object, view);
+          await this.landed(s.object, view, docRead);
         }
       } else if (s.kind === "apply") {
         const view = await studioApply(this.ipc, target, s.request);
         if (!this.current(gen)) return;
-        this.landed(s.object, view);
+        await this.landed(s.object, view, docRead);
       } else if (s.kind === "applyIndex") {
         const view = await studioApplyIndex(this.ipc, target, s.request);
         if (!this.current(gen)) return;
-        this.landedIndex(view);
+        await this.landedIndex(view, indexRead);
       } else if (s.kind === "overlayApply") {
         await this.runUnconfirmed(s, s.object, canonicalJson(s.op), gen);
         if (!this.current(gen)) return;
@@ -1584,21 +1865,31 @@ export class StudioSession {
         if (s.object) this.invalidate({ objects: [s.object] });
         else this.invalidate({ index: true });
       }
+      if (!this.current(gen)) return;
       if (!this.syncObservation) this.receivePaused = false;
       this.finish(s);
     } catch (e) {
       if (!this.current(gen)) return;
-      // Typed Flow-S refusals and scheduling replies prove that this attempt did not write. Native
+      // Typed Flow-S refusals and pre-Apply epoch refusals prove this attempt did not write. Native
       // errors remain uncertain because they may have crossed a final delivery fence after commit.
       const noWrite = e instanceof OverlayNoWrite;
       const earlierAttemptWasUncertain = s.mayHaveCommitted;
       if (!noWrite) s.mayHaveCommitted = true;
       s.status = s.mayHaveCommitted ? "uncertain" : "blocked";
-      s.error = noWrite && earlierAttemptWasUncertain
+      s.error = (noWrite && earlierAttemptWasUncertain
         ? `${reason(e)}; an earlier attempt may already have committed, so the exact request remains uncertain`
-        : reason(e);
+        : reason(e)).slice(0, 512);
       this.settleRecord(s, s.mayHaveCommitted ? "uncertain" : "notWritten");
       this.notify();
+    }
+  }
+
+  private assertAdmission(s: SaveEntry): void {
+    if (!this.autosaveMs || !s.binding) return;
+    const object = s.kind === "applyIndex" ? null : s.object;
+    const view = object === null ? this.index : this.doc?.object === object ? this.doc.view : this.views.get(object)?.view;
+    if (!view || view.epochId !== s.binding.epochId || view.awaitingTenureReceipt !== s.binding.awaiting || view.phase !== s.binding.phase) {
+      throw new OverlayNoWrite("Shared history changed before this edit was saved. Review it and save it as a new edit.");
     }
   }
 
@@ -1630,8 +1921,10 @@ export class StudioSession {
       }
     }
     if (!request) {
+      this.assertAdmission(s);
       const begun = closing ? await closingOverlaySaveBegin(this.ipc, target) : await unconfirmedOverlaySaveBegin(this.ipc, target);
       if (!this.current(gen)) throw new StudioNativeError("Studio session changed while obtaining a local draft ticket");
+      this.assertAdmission(s);
       if (begun.kind === "unconfirmedOverlaySave" || begun.kind === "closingOverlaySave") {
         s.overlayRetry = begun.retry;
         throw new OverlayNoWrite(`local draft refused (${overlayRefusalText(begun.reason)}); retry=${begun.retry}`);
@@ -1661,11 +1954,17 @@ export class StudioSession {
     throw new StudioNativeError("local draft Save pending and may still complete; retry the same request exactly");
   }
 
-  private landed(object: Hex32, view: StudioObjectView): void {
+  private async landed(object: Hex32, view: StudioObjectView, readAtSave: number): Promise<void> {
+    if ((this.docReadSerial.get(object) ?? 0) !== readAtSave) {
+      // Reconcile before the queue runs dependent work, such as Create's first frame. A
+      // pre-Create absence read must not leave that frame without an authenticated epoch.
+      await this.refreshDoc(object);
+      return;
+    }
     // Offscreen exact requests can complete, but a same-id different-family surface owns its
     // newer read fence. Never let an older ACK supersede that read or patch mismatched content.
     const familyMismatch = this.doc?.object === object && this.doc.objectKind !== view.content.kind;
-    // A read issued before this save answered is older than this view: supersede it.
+    // Reads already in flight when the Save began are older than its acknowledged projection.
     if (!familyMismatch) {
       this.docReq.set(object, (this.docReq.get(object) ?? 0) + 1);
       this.known.set(object, { awaiting: view.awaitingTenureReceipt, phase: view.phase, epoch: view.epoch });
@@ -1676,7 +1975,8 @@ export class StudioSession {
     if (!familyMismatch) this.patchDoc(object, { view, model, score, absent: false, error: "", loading: false });
   }
   /// The Index equivalent: a landed write is newer than any list still in flight.
-  private landedIndex(view: IndexView): void {
+  private async landedIndex(view: IndexView, readAtSave: number): Promise<void> {
+    if (this.indexReadSerial !== readAtSave) { await this.refreshIndex(); return; }
     this.indexReq++;
     this.index = view;
     this.indexModel = indexModel(view.content);
@@ -1689,6 +1989,7 @@ export class StudioSession {
     while (this.views.size > RECENT_VIEWS) this.views.delete(this.views.keys().next().value as Hex32);
   }
   private finish(s: SaveEntry): void {
+    this.eligible.delete(s.id); this.restoredHeld.delete(s.id);
     const at = this.records.indexOf(s);
     if (at >= 0) this.records.splice(at, 1);
     this.settleRecord(s, "landed");
@@ -1705,6 +2006,11 @@ export class StudioSession {
   /// Held bytes for a cid, only when they are the size the caller's record declares. A record
   /// whose declaration disagrees with what this cid actually holds is not shown as that record.
   blob(cid: Hex64, bytes?: number): Uint8Array | undefined {
+    if (cid.startsWith("draft:")) {
+      const [, object, frame] = cid.split(":");
+      const held = this.unsavedPix(object, frame);
+      return held && (bytes === undefined || held.length === bytes) ? held : undefined;
+    }
     const b = this.blobs.get(cid);
     if (!b) return undefined;
     if (bytes !== undefined && b.length !== bytes) return undefined;

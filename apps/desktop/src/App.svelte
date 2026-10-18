@@ -191,7 +191,7 @@
   } from "./moderation";
   import { MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity";
   import {
-    NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
+    captureLockContinuity, NativeVaultLockCoordinator, type NativeVaultCloseOutcome, type NativeVaultLockOutcome,
   } from "./window-close";
   import {
     DEFAULT_FILE_TRUST_POLICY, authorOverride, fileTrustPolicyFor, mayAutoLoadFile, mayAutoLoadRemoteUrl,
@@ -247,7 +247,8 @@
     shouldSignalHostCandidate, type MappedPort,
   } from "./callroutes";
   import { JamEngine, jamSequenceAccepted, type JamArchivalPlayback } from "./jam-engine";
-  import { archivalDjPosition, JamTakeTransport } from "./jam-take-transport.ts";
+  import { archivalDjPosition, archivalPlaybackNeedsStart, JamTakeTransport } from "./jam-take-transport.ts";
+  import { StudioSharedPatches, STUDIO_SHARED_PATCH_LIMIT } from "./studio-shared-patches.ts";
   import { JamTakeSuppression } from "./jam-take-suppression.ts";
   import PixaCanvas from "./PixaCanvas.svelte";
   import PixaViewer from "./PixaViewer.svelte";
@@ -3530,7 +3531,8 @@
     }
   }
   function continuityJson(): string {
-    return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad, pendingSends, recoveredSendDrafts });
+    return JSON.stringify({ version: 1, drafts, readMarks, statusCursors, fileTrustPolicies, latePast, embedAutoLoad, pendingSends, recoveredSendDrafts,
+      studioDraft: studioSnapshot?.() ?? restoredStudioDraft });
   }
   /**
    * Seal the current continuity snapshot without the ordinary typing/read-position debounce.
@@ -3595,6 +3597,8 @@
       fileTrustPolicies = next.fileTrustPolicies;
       latePast = next.latePast;
       embedAutoLoad = next.embedAutoLoad;
+      restoredStudioDraft = next.studioDraft;
+      if (restoredStudioDraft && studioRestore) { studioRestore(restoredStudioDraft); restoredStudioDraft = null; }
       loaded = true;
     } catch (e) {
       if (generation !== uiStateLoadGeneration || locked) return;
@@ -6388,7 +6392,9 @@
     clearTimeout(newsAggregateTimer); // a pending re-aggregation must not read feeds behind the lock
     if (inboxIdle !== undefined && "cancelIdleCallback" in window) window.cancelIdleCallback(inboxIdle);
     inboxIdle = undefined;
-    const finalContinuityJson = uiStateReady ? continuityJson() : null;
+    // A malformed/full draft must never prevent privacy revocation. Keep the previous sealed
+    // record on capture failure and disclose that the latest work could not be retained.
+    const { json: finalContinuityJson, error: studioCaptureError } = captureLockContinuity(() => uiStateReady ? continuityJson() : null);
     try { sessionStorage.setItem("catcoms.explicit-lock", "1"); } catch { /* best effort */ }
     if (inCall) leaveVoice(); // never leave a hot mic behind a lock screen
     // Reply/recovery codes carry current listener routes. Clear them synchronously and ignore any
@@ -6437,6 +6443,8 @@
     tickerReceipts = new Set(); // receipts can include wiki/page ids; do not retain them behind lock
     stopStudioAudio();
     studioReset?.(); // and the studio's views, held pixels and unsaved strokes
+    restoredStudioDraft = null;
+    if (studioCaptureError) error = studioCaptureError;
     servers = [];
     beginViewSwitch(); // a read still in flight must not land behind the lock
     activeServerId = null;
@@ -7001,6 +7009,14 @@
   }
 
   async function switchServer(id: number) {
+    if (windowCloseInFlight) return;
+    const studioRequest = ++studioNavigation;
+    const studioGeneration = uiStateLoadGeneration;
+    const studioCurrent = studioClaimNavigation?.() ?? (() => true);
+    if (studioHasWork?.()) {
+      if (!(await saveStudioForNavigation(studioRequest))) return;
+      if (studioRequest !== studioNavigation || studioGeneration !== uiStateLoadGeneration || locked || !studioCurrent()) return;
+    }
     saveDraftFor(chanKey()); // stash the current channel's draft before switching servers
     const gen = beginViewSwitch(); // everything still in flight for the old group is now stale
     activeServerId = id;
@@ -7189,7 +7205,15 @@
   // `keepSearch` is set when the search itself is driving the move (jumping to a hit in another
   // channel): everything else closes the search bar, as before.
   async function switchTo(id: string, keepSearch = false) {
+    if (windowCloseInFlight) return;
     if (!cur) return;
+    const studioRequest = ++studioNavigation;
+    const studioGeneration = uiStateLoadGeneration;
+    const studioCurrent = studioClaimNavigation?.() ?? (() => true);
+    if (studioHasWork?.()) {
+      if (!(await saveStudioForNavigation(studioRequest))) return;
+      if (studioRequest !== studioNavigation || studioGeneration !== uiStateLoadGeneration || locked || !studioCurrent()) return;
+    }
     saveDraftFor(chanKey()); // stash the current channel's draft before leaving it
     // Channel-scoped content, dropped before the move rather than when the read returns: the
     // group's own state (roster, files, branding) is unchanged by a channel hop and stays put.
@@ -8381,6 +8405,20 @@
   // Lock must clear the studio's in-memory session (views, held pixels, unsaved work) the same
   // instant it clears everything else; the chunk owns the reset, this keeps a handle to it.
   let studioReset: (() => void) | null = null;
+  let studioSnapshot: (() => string | null) | null = null;
+  let studioRestore: ((json: string | null) => void) | null = null;
+  let studioSave: (() => Promise<void>) | null = null;
+  let studioHasWork: (() => boolean) | null = null;
+  let studioClaimNavigation: (() => () => boolean) | null = null;
+  let studioBeginClose: (() => void) | null = null;
+  let studioEndClose: (() => void) | null = null;
+  let restoredStudioDraft: string | null = null;
+  let studioNavigation = 0;
+  async function saveStudioForNavigation(request = ++studioNavigation): Promise<boolean> {
+    const generation = uiStateLoadGeneration;
+    try { await studioSave?.(); return request === studioNavigation && generation === uiStateLoadGeneration && !locked; }
+    catch (e) { if (!locked) toast(String(e), "err", 6000); return false; }
+  }
   async function loadStudio() {
     if ((StudioSurface && StudioNav) || studioLoading) return;
     studioLoading = true;
@@ -8389,6 +8427,11 @@
       StudioSurface = s.default;
       StudioNav = n.default;
       studioReset = st.resetStudio;
+      studioSnapshot = st.studioDraftSnapshot; studioRestore = st.restoreStudioDraft;
+      studioSave = st.saveStudio; studioHasWork = st.studioHasPending;
+      studioClaimNavigation = st.claimStudioNavigation;
+      studioBeginClose = st.beginStudioClose; studioEndClose = st.endStudioClose;
+      if (restoredStudioDraft) { studioRestore(restoredStudioDraft); restoredStudioDraft = null; }
     } catch (cause) {
       toast(`The studio failed to load: ${String(cause)}`, "err");
     } finally {
@@ -8403,6 +8446,13 @@
   }
 
   function switchView(v: Tab) {
+    if (windowCloseInFlight) return;
+    const studioRequest = ++studioNavigation;
+    const studioGeneration = uiStateLoadGeneration;
+    const studioCurrent = studioClaimNavigation?.() ?? (() => true);
+    if (view === "studio" && v !== "studio" && studioHasWork?.()) {
+      void saveStudioForNavigation(studioRequest).then(saved => { if (saved && studioRequest === studioNavigation && studioGeneration === uiStateLoadGeneration && !locked && studioCurrent()) switchView(v); }); return;
+    }
     menu = null;
     if (v === "moderation" && !canModerate) {
       toast("Moderation is available to this server's owner and admins", "info", 3500);
@@ -13226,7 +13276,8 @@
   });
   async function postStudioPixa(bytes: Uint8Array, server: number): Promise<void> {
     const channel = cur?.active, generation = postStudioGeneration;
-    const current = () => !locked && uiStateReady && !windowCloseInFlight && generation === postStudioGeneration && activeServerId === server && cur?.active === channel && view === "studio";
+    const studioCurrent = studioClaimNavigation?.() ?? (() => true);
+    const current = () => !locked && uiStateReady && !windowCloseInFlight && studioCurrent() && generation === postStudioGeneration && activeServerId === server && cur?.active === channel && view === "studio";
     if (!channel || !current()) throw new Error("Open the flipnote’s channel before posting.");
     const name = "Mewtual-flipnote.pixa";
     // A fileshare CID differs from the Studio blob CID. Keep the existing draft and let Send
@@ -13234,6 +13285,10 @@
     const cid = await addSharedFile(new File([new Uint8Array(bytes)], name, { type: PIXA_MIME }), myEmbedFolder, name, PIXA_MIME);
     if (!current()) throw new Error("Flipnote saved in Files. Open it there to share.");
     await refreshFiles();
+    if (!current()) throw new Error("Flipnote saved in Files. Open it there to share.");
+    // appendToDraft opens Chat directly. Treat that transition like ordinary Studio navigation:
+    // preserve every working edit first, and recheck the shared navigation claim after the await.
+    await studioSave?.();
     if (!current()) throw new Error("Flipnote saved in Files. Open it there to share.");
     await appendToDraft(fileMarker(name, cid, true));
     toast("Flipnote attached. Press Send to post it.", "ok", 5000);
@@ -13587,47 +13642,24 @@
   // `.jampatch` files of the active server's share, read while the Studio surface is open so a
   // flipnote can audition and use a recipe a friend sealed into the share. Bounded on purpose:
   // only files the share's trust rule already allows to auto-load (the same gate as media
-  // embeds), only patch-sized files (the 4 KiB cap), at most a dozen or so per listing, one
-  // read at a time, validated through the one patch validator. Keyed by cid; a server switch
-  // drops the shelf, and a late read for a server that is no longer active is discarded.
-  const STUDIO_SHARED_PATCH_LIMIT = 16;
+  // embeds), only patch-sized files (native-enforced 4 KiB cap), sixteen current candidates,
+  // one cancellable read at a time. Listing, trust and scope changes retire old continuations.
   let studioSharedPatches = $state.raw<Map<string, { name: string; patch: JamPatch }>>(new Map());
-  let studioSharedServer = -1;
-  let studioSharedReading = false;
-  const studioSharedPending = new Set<string>();
+  const studioSharedShelf = new StudioSharedPatches(invoke, jamNonce(),
+    values => { studioSharedPatches = new Map(values); },
+    (server, candidate, scope) => !locked && uiStateReady && !windowCloseInFlight && view === "studio" && activeServerId === server &&
+      scope === `${server}:${cur?.active}:${studioMembership}` && files.some(f => f.cid === candidate.cid && f.name === candidate.name &&
+        JSON.stringify([f.size, f.mime, f.author_identity, f.author_verified]) === candidate.binding &&
+        isJamPatchFile(f.name, f.mime) && mayFetchJamPatch(f.size) && mayAutoLoadSharedFile(f, server)));
+  onDestroy(() => studioSharedShelf.update(null, null, []));
   $effect(() => {
-    const server = activeServerId, open = view === "studio";
+    const server = activeServerId;
+    const scope = !locked && uiStateReady && !windowCloseInFlight && view === "studio" && server !== null
+      ? `${server}:${cur?.active}:${studioMembership}` : null;
     const candidates = files.filter((f) => isJamPatchFile(f.name, f.mime) && mayFetchJamPatch(f.size) && mayAutoLoadSharedFile(f, server)).slice(0, STUDIO_SHARED_PATCH_LIMIT);
-    untrack(() => {
-      if (server === null) return;
-      if (studioSharedServer !== server) { studioSharedServer = server; studioSharedPatches = new Map(); studioSharedPending.clear(); }
-      if (!open) return;
-      for (const f of candidates) if (!studioSharedPatches.has(f.cid)) studioSharedPending.add(f.cid);
-      void drainStudioSharedPatches(server, candidates);
-    });
+    untrack(() => studioSharedShelf.update(scope, server, candidates.map(f => ({ cid: f.cid, name: f.name,
+      binding: JSON.stringify([f.size, f.mime, f.author_identity, f.author_verified]) }))));
   });
-  async function drainStudioSharedPatches(server: number, candidates: UiFile[]) {
-    if (studioSharedReading) return;
-    studioSharedReading = true;
-    try {
-      for (const f of candidates) {
-        if (!studioSharedPending.has(f.cid) || studioSharedPatches.has(f.cid)) continue;
-        if (activeServerId !== server || studioSharedServer !== server || view !== "studio") return;
-        try {
-          const { value: base64 } = await invokeDebugged<string>("download_file", { server, cid: f.cid });
-          if (activeServerId !== server || studioSharedServer !== server) return;
-          const text = decodeJamPatchBase64(base64);
-          const checked = text === null ? null : parseJamPatchJson(text);
-          if (checked?.ok) {
-            const next = new Map(studioSharedPatches);
-            next.set(f.cid, { name: jamPatchFileName(f.name), patch: checked.patch });
-            studioSharedPatches = next;
-          }
-        } catch { /* a share file this build cannot read is simply not on the shelf */ }
-        finally { studioSharedPending.delete(f.cid); }
-      }
-    } finally { studioSharedReading = false; }
-  }
   const studioPatchShelves = $derived([
     ...JAM_PRESETS.map((p) => ({ name: p.name, patch: p.patch, shelf: "preset" as const })),
     ...jamSaved.map((p) => ({ name: p.name, patch: p.patch, shelf: "mine" as const })),
@@ -16118,6 +16150,7 @@
   // offset by however long its own load took, or it starts behind the room.
   function jukeTarget(): number {
     if (!jukeAdopted) return 0;
+    if (jukeKind === "take" || jukeKind === "pixa") return jukePos();
     return jukeIsDj() ? jukeAdopted.off : jukePos();
   }
   // Queue order (added_ms, id as the tiebreak so every machine agrees), minus the unfetchable.
@@ -16302,7 +16335,13 @@
     const sameDeckLease = same && jukeAdopted?.seq === seq && jukeAdopted.fromFp === fromFp;
     // A pause/resume, replacement DJ or different track owns a new continuation epoch. The load
     // coordinator cancels the old native chunk operation before releasing its active slot.
-    if (!sameDeckLease) jukeTakeLoads.invalidate();
+    if (!sameDeckLease) {
+      jukeTakeLoads.invalidate();
+      // A new press owns the seek even for the same CID. Retiring the old synth also means
+      // jukePos holds the new pressed offset while its replacement prepares. Heartbeats keep
+      // their sequence and must not interrupt the currently seated audio clock.
+      if (jamDeckPlaybackCid()) jamStopPlayback();
+    }
     jukeAdopted = { seq, fromFp, off, at: performance.now() };
     jukeHeard = jukeAdopted.at;
     jukeStale = false;
@@ -16591,10 +16630,8 @@
       return;
     }
     const targetMs = Math.max(0, jukeTarget() * 1000);
-    if (jamPlay?.deckCid === cid) {
-      if (jamPlay.done) return; // release tail / waiting for the DJ's next transport frame
-      if (Math.abs(jamPlayElapsed() - targetMs) <= 2000) return; // in step; a ping needs no restart
-    }
+    if (!archivalPlaybackNeedsStart(jamPendingPlay?.deckCid === cid,
+      jamPlay?.deckCid === cid ? { elapsedMs: jamPlayElapsed(), done: jamPlay.done } : null, targetMs)) return;
     diagRecord({
       section: "channels",
       code: "JUKEBOX.TAKE.STARTED",
@@ -20146,6 +20183,7 @@
   );
   let winMaximized = $state(false);
   let windowCloseInFlight = $state(false);
+  $effect(() => { if (!windowCloseInFlight) studioEndClose?.(); });
   // The first continuity failure leaves a confirmed-locked window open with a warning. Repeating
   // close is the user's explicit acknowledgement that exiting without that latest snapshot is OK.
   let closeAfterContinuityError = false;
@@ -20388,6 +20426,10 @@
           return;
         }
         windowCloseInFlight = true;
+        if (!locked) {
+          try { studioBeginClose?.(); await studioSave?.(); }
+          catch (e) { windowCloseInFlight = false; if (!locked) error = String(e); return; }
+        }
         pendingSendRetry.cancel();
         const closingGeneration = uiStateLoadGeneration;
         callLifecycleSession.invalidate();

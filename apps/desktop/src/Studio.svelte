@@ -119,17 +119,17 @@
   // on every change, but nothing downstream should hinge on that reference changing.
   const doc = $derived.by(() => { void studio.rev; return session.doc?.object === objectId ? session.doc : null; });
   const view = $derived.by(() => { void studio.rev; const d = session.doc; return d?.object === objectId ? d.view : null; });
-  const model = $derived.by(() => { void studio.rev; const d = session.doc; return d?.object === objectId ? d.model : null; });
+  const model = $derived.by(() => { void studio.rev; return session.doc?.object === objectId ? session.buffering ? session.workingModel : session.doc.model : null; });
   const entry = $derived.by(() => {
     void studio.rev;
     const m = session.indexModel;
     return m ? [...m.entries, ...m.overflow].find((e) => e.id === objectId) ?? null : null;
   });
   const isScore = $derived(doc?.objectKind === "score" || (!doc && entry?.kind === "score"));
-  const score = $derived.by(() => { void studio.rev; return session.doc?.object === objectId ? session.doc.score : null; });
-  const sourceGeneration = $derived.by(() => { void studio.rev; return session.mediaGeneration; });
+  const score = $derived.by(() => { void studio.rev; return session.doc?.object === objectId ? session.buffering ? session.workingScore : session.doc.score : null; });
+  const sourceGeneration = $derived.by(() => { void studio.rev; return session.editorMediaGeneration; });
   $effect(() => {
-    void objectId; void view; void model; void score; void sourceGeneration;
+    void objectId; void sourceGeneration;
     untrack(() => { audioActions?.stop(); });
   });
   $effect(() => { void objectId; untrack(() => { mediaReceipt = ""; savedPreview = null; }); });
@@ -138,7 +138,7 @@
   const attention = $derived(pending.filter((s) => s.mayHaveCommitted || s.status === "uncertain" || s.status === "blocked"));
   const inflight = $derived(pending.some((s) => s.status === "queued" || s.status === "inflight"));
   const blockedCount = $derived.by(() => { void studio.rev; return attention.length ? session.blockedBehind(attention[0].id) : 0; });
-  const pendingInserts = $derived(pending.filter((s): s is Extract<SaveRecord, { kind: "frame" }> => s.kind === "frame" && s.op === "insert"));
+  const pendingInserts = $derived(pending.filter((s): s is Extract<SaveRecord, { kind: "frame" }> => s.kind === "frame" && s.op === "insert" && !model?.frames.some(f => f.id === s.frame)));
   const receivePaused = $derived.by(() => { void studio.rev; return session.receivePaused; });
   const receivePauseDetail = $derived.by(() => { void studio.rev; return session.receivePauseDetail; });
 
@@ -322,10 +322,14 @@
     stroking = false; last = null; anchor = null; previewCells = [];
     audioActions?.stop();
   });
+  const removeSaveHandler = session.beforeSave(() => {
+    if (!commit()) throw new Error("Could not keep this drawing. Your changes are still on the canvas.");
+  });
 
   function edited(changedCells: number) {
     if (!changedCells) return;
     dirty = true;
+    session.markDirty();
     paintRev++;
     // Painting says "I am drawing this frame" to the call (advisory; it gates nothing). The session
     // ignores it outside a call and after this device Passed the frame away. Every pointer sample
@@ -671,7 +675,7 @@
 
   function addFrameAfter(copy: boolean) {
     if (!model || !objectId) return;
-    commit();
+    if (!commit()) return;
     guard(() => {
       const bytes = copy && raster ? raster.encode() : blankPix();
       const id = session.insertFrame(objectId, frameIndex >= 0 ? frameId : null, bytes);
@@ -683,14 +687,15 @@
   function deleteFrame() {
     if (!model || !frameId || !objectId) return;
     if (pendingHere) { onnotice("this frame is still being saved; wait for it or discard the save below", "info"); return; }
+    if (!commit()) return;
     const idx = frameIndex;
     const gone = frameId;
-    guard(() => session.removeFrame(objectId, gone));
-    const next = frameIds.filter((f) => f !== gone)[Math.max(0, Math.min(idx, frameIds.length - 2))];
-    frameId = "";
-    raster = null;
-    rasterRef = "";
-    if (next) openFrame(next);
+    guard(() => {
+      session.removeFrame(objectId, gone);
+      const next = frameIds.filter((f) => f !== gone)[Math.max(0, Math.min(idx, frameIds.length - 2))];
+      frameId = ""; raster = null; rasterRef = "";
+      if (next) openFrame(next);
+    });
   }
 
   function step(delta: number) {
@@ -713,12 +718,14 @@
   function toggleStudioPlay() {
     if (playing) { audioActions?.stop(); return; }
     if (!audioActions || !objectId) { onnotice("audio playback is unavailable on this surface", "warn"); return; }
-    commit();
+    if (!commit()) return;
     savedPreview = null;
     const object = objectId, kind = isScore ? "score" : "flipnote";
     const prepare = () => kind === "score" ? session.prepareScorePlayback(object) : session.prepareFlipnotePixa(object);
     // The App adapter resumes its existing context immediately, before prepare fetches/hashes.
-    void audioActions.start(kind, prepare, loop, kind === "flipnote" ? Math.max(0, frameIndex) * 1000 / (model?.fps ?? 12) : 0)
+    // Editor Play is the whole composition. Stop leaves a frame selected for editing, which
+    // must not turn the next Play into an implicit seek that skips the first sound marker.
+    void audioActions.start(kind, prepare, loop, 0)
       .then((started: boolean) => { if (!started) onnotice("playback was cancelled or audio is unavailable; press Play to try again", "warn"); })
       .catch((e: unknown) => onnotice(reason(e), "warn"));
   }
@@ -788,7 +795,8 @@
   }
   async function exportMedia(kind: "pixa" | "gif") {
     if (mediaBusy || !objectId) return;
-    commit(); const object = objectId, gen = session.generation; mediaBusy = true; mediaReceipt = "";
+    if (!commit()) return;
+    const object = objectId, gen = session.generation; mediaBusy = true; mediaReceipt = "";
     try {
       if (kind === "pixa") {
         const result = await session.publishFlipnotePixa(object);
@@ -811,7 +819,8 @@
   }
   async function downloadMedia(share = false) {
     if (mediaBusy || !objectId) return;
-    commit(); const object = objectId, gen = session.generation, target = session.scope; mediaBusy = true;
+    if (!commit()) return;
+    const object = objectId, gen = session.generation, target = session.scope; mediaBusy = true;
     try {
       if (isScore) {
         const take = await session.prepareScoreTake(object);
@@ -863,7 +872,7 @@
   // --- Conflicts: every live value of a frame's pixels, each usable on purpose -----------------
   async function useVersion(alt: FrameConflictValue, how: "replace" | "insertAfter") {
     if (!objectId || !frameId) return;
-    commit();
+    if (!commit()) return;
     try { await session.useVersion(objectId, frameId, alt, how); } catch (e) { onnotice(reason(e), "warn"); }
   }
 
@@ -889,7 +898,7 @@
   let deleteArmed = $state("");
   function deleteFlipnote() {
     if (!objectId || deleteArmed !== deleteKey) return;
-    commit();
+    if (!commit()) return;
     guard(() => { session.deleteEntry(objectId); deleteArmed = ""; studio.selected = ""; });
   }
   function expiryDate(e: NativeExpiry): string {
@@ -1004,8 +1013,8 @@
   async function startRecovery(v: RecoveryVersion, mode: RecoveryMode) {
     if (mode === "copy" && copyConfirm !== v.snapshot) { copyConfirm = v.snapshot; return; }
     copyConfirm = "";
-    commit();
-    try { await session.runRecovery(v.snapshot, mode); } catch (e) { onnotice(reason(e), "warn"); }
+    if (!commit()) return;
+    try { await session.save(); await session.runRecovery(v.snapshot, mode); } catch (e) { onnotice(reason(e), "warn"); }
   }
   async function exportVersion(v: RecoveryVersion) {
     try { await session.exportVersion(v.snapshot); onnotice("backup ready below · p1-recovery-v1, not a .pixa", "info"); } catch (e) { onnotice(reason(e), "warn"); }
@@ -1053,7 +1062,7 @@
     const t = setInterval(() => { tick++; }, 1000);
     return () => clearInterval(t);
   });
-  onDestroy(() => { removeCloseHandler(); audioActions?.stop(); commit(); claimActions?.release(); claimActions?.cancelAsk(); });
+  onDestroy(() => { removeCloseHandler(); removeSaveHandler(); audioActions?.stop(); commit(); claimActions?.release(); claimActions?.cancelAsk(); });
 
   // --- Keys --------------------------------------------------------------------------------------
   function onKey(e: KeyboardEvent) {
@@ -1339,7 +1348,8 @@
         <span class="micro">fps</span>
       </label>
       <span class="st-chip {settlementChip().tone}" title={settlementChip().title}><i></i><span class="micro">{settlementChip().text}</span></span>
-      {#if inflight}<span class="st-chip" title="a save is in flight; unsaved pixels stay here until it lands"><i class="pulse"></i><span class="micro">saving…</span></span>{/if}
+      {#if inflight}<span class="st-chip"><span class="micro">{pending.some(s => s.status === "inflight") ? "Saving…" : "Unsaved changes"}</span></span>{/if}
+      <button type="button" class="st-btn" onclick={() => void session.save().catch(e => onnotice(reason(e), "warn"))}>Save</button>
       <span class="grow"></span>
       <button type="button" class="st-btn" disabled={!audioActions} onclick={toggleStudioPlay}>{playing ? "stop" : "play"}</button>
       <button type="button" class="st-btn" title="Attach this flipnote to a chat message" disabled={mediaBusy || playing || !onpostPixa} onclick={() => downloadMedia(true)}>
@@ -1571,8 +1581,8 @@
             <StudioMusic model={model.sound} frameCount={frames.length} fps={model.fps} tracks={musicTracks} {patchLibrary} {who} {tint}
               readonlyReason={playing ? "Stop playback before editing" : readOnlyWhy}
               onlink={(id) => guard(() => session.linkScore(objectId, id))}
-              onopen={(id) => guard(() => { session.open(id); studio.selected = id; })}
-              oncreate={() => guard(() => { session.prepareDocumentClose(); const id = session.createScore("New music track"); session.open(id, { read: false }); studio.selected = id; })} />
+              onopen={(id) => { void session.navigate(() => { session.open(id); studio.selected = id; }).catch(e => onnotice(reason(e), "warn")); }}
+              oncreate={() => { void session.navigate(() => { const id = session.createScore("New music track"); session.open(id, { read: false }); studio.selected = id; }).catch(e => onnotice(reason(e), "warn")); }} />
           {:else}
             <!-- History reads top to bottom as one story: what this flipnote is, the immutable
                  versions it has been saved as, the retained edits recovery can bring back, the
@@ -1752,8 +1762,6 @@
   .st-title:disabled { color: var(--text-2); }
   .st-chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px; white-space: nowrap; }
   .st-chip i { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); }
-  .st-chip i.pulse { background: var(--accent); animation: st-pulse 1s ease-in-out infinite alternate; }
-  @keyframes st-pulse { from { opacity: 0.3; } to { opacity: 1; } }
   .st-chip.ok { border-color: var(--ok-brd); background: var(--ok-dim); } .st-chip.ok .micro, .st-chip.ok i { color: var(--ok); background: var(--ok); }
   .st-chip.ok .micro { background: none; }
   .st-chip.warn { border-color: var(--warn-brd); background: var(--warn-dim); } .st-chip.warn .micro { color: var(--warn); } .st-chip.warn i { background: var(--warn); }

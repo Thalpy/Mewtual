@@ -2170,11 +2170,11 @@ pub struct EpochInventoryJob {
 /// record warm, so the attempt's validation work is kept, not lost (15.8, MEDIUM-3). Each such
 /// restart warms at least one record not credited before, so this ceiling is reached only by a
 /// vault with more cold records than it, under writes between turns. Past it, restarts are charged
-/// against [`MAX_INVENTORY_RESTARTS`] as before, and the job backs off. 64 is the receive profile's
-/// record limit, so a background job, which scans under that profile, can warm its whole vault
-/// without being charged. It is not a general full-profile allowance: any full-vault owner that
-/// adopts this rule must choose and review its own ceiling rather than assuming 64 covers 65,536
-/// records (review LOW-2).
+/// against [`MAX_INVENTORY_RESTARTS`] as before, and the job backs off. This remains a 64-progress
+/// ceiling even though the cumulative receive inventory now admits 1024 records: sustained
+/// overtaking must not enlarge a worker's restart allowance with the vault's cardinality. A
+/// larger vault may back off before warming every record. Full-vault owners must review their
+/// own ceiling rather than assuming this covers 65,536 records (review LOW-2).
 pub(crate) const MAX_PROGRESS_RESTARTS: usize = 64;
 
 impl EpochInventoryJob {
@@ -3414,8 +3414,13 @@ mod tests {
         }
         let mut scan = store.scan_studio_receive_inventory().unwrap();
         let mut visits = 0;
-        while !scan.step().unwrap().complete { visits += 1; }
-        assert!(visits >= 70, "each cursor step remains limited to one record");
+        while !scan.step().unwrap().complete {
+            visits += 1;
+        }
+        assert!(
+            visits >= 70,
+            "each cursor step remains limited to one record"
+        );
         let inventory = scan.finish().unwrap();
         assert_eq!(inventory.records().len(), 70);
         assert_eq!(inventory.records_for_server(7, b"group").unwrap().len(), 35);
@@ -4748,22 +4753,26 @@ mod tests {
 
     /// C-3 runtime design S-1. A job scans under the profile it began with, restarts included.
     ///
-    /// The receive profile allows 64 records. Before profiles, every job path and every restart
+    /// A test-only profile allows 64 records. Before profiles, every job path and every restart
     /// re-began at the vault-wide defaults, so a background owner converted to the job API would
     /// silently have widened to 65,536 records. Here the vault holds 65, and the job is overtaken
     /// once before it reaches them: the restarted cursor must still refuse at the 65th. The
     /// full-profile job over the same vault is the control that the 65 records are otherwise fine.
+    /// Keep this boundary small and independent of production's cumulative 1024-record ceiling;
+    /// the receive-vault regression separately checks ordinary vaults with more than 64 records.
     #[test]
     fn an_inventory_job_keeps_its_profile_across_a_restart() {
+        let profile = EpochInventoryProfile {
+            record_limit: 64,
+            ..EpochInventoryProfile::receive()
+        };
         let root = tempfile::tempdir().unwrap();
         let mut store = open(root.path());
         for n in 0..65u8 {
             stage(&mut store, 7, &document(b"group", &[b'p', n]), 1);
         }
 
-        let mut job = store
-            .begin_epoch_inventory_job_with(EpochInventoryProfile::receive())
-            .unwrap();
+        let mut job = store.begin_epoch_inventory_job_with(profile).unwrap();
         store.step_epoch_inventory_job(&mut job, 1, None).unwrap();
         store.epoch_mutation_guard();
         assert!(
@@ -4795,9 +4804,7 @@ mod tests {
         for n in 0..64u8 {
             stage(&mut store64, 7, &document(b"group", &[b'q', n]), 1);
         }
-        let mut job = store64
-            .begin_epoch_inventory_job_with(EpochInventoryProfile::receive())
-            .unwrap();
+        let mut job = store64.begin_epoch_inventory_job_with(profile).unwrap();
         while !matches!(
             store64.step_epoch_inventory_job(&mut job, ENTRIES_PER_STEP, None).unwrap(),
             EpochInventoryStep::Stepped(progress) if progress.complete

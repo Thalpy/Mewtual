@@ -2,8 +2,21 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   NativeVaultLockCoordinator,
+  captureLockContinuity,
   type NativeVaultLockOutcome,
 } from "./window-close.ts";
+
+test("Studio staging or serialization failure cannot prevent native lock and private UI clearing", async () => {
+  for (const failure of ["drawing admission failed", "draft encoding failed"]) {
+    const captured = captureLockContinuity(() => { throw new Error(failure); });
+    assert.equal(captured.json, null); assert.match(captured.error, /latest Studio edits could not be saved/);
+    let privateUi = "drawing", nativeLocked = false;
+    const coordinator = new NativeVaultLockCoordinator(async json => { assert.equal(json, null); nativeLocked = true; return { continuity_error: null }; });
+    const locking = coordinator.begin(captured.json);
+    privateUi = "";
+    assert.equal(privateUi, ""); assert.equal(nativeLocked, true); await locking;
+  }
+});
 
 test("Ctrl+L retains the exact final snapshot for a racing native-owned close", async () => {
   let finishLock!: (outcome: NativeVaultLockOutcome) => void;

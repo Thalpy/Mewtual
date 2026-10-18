@@ -70,12 +70,15 @@ test("failed continuity hydration cannot replace the sealed pending identities w
   const body = transpile("  function queueUiStateSave(", "  function chanKey(");
   const intent = { token: "1".repeat(32), server: 1, channel: "1", expectedContext: "2".repeat(64),
     text: "a committed message whose acknowledgement was lost", replyTo: "" };
-  const initial = sanitizeUiContinuity({ pendingSends: { [intent.token]: intent }, drafts: { room: intent.text } });
+  const studioDraft = JSON.stringify({ version: 1, scope: { server: 1, channel: "1" }, group: "a".repeat(64), records: [] });
+  const initial = sanitizeUiContinuity({ pendingSends: { [intent.token]: intent }, drafts: { room: intent.text }, studioDraft });
   const app = new Function("initial", "sanitizeUiContinuity", "planLegacyReadMarkMigration", "console", `
     let locked = false, uiStateLoadGeneration = 7, uiStateReady = false, uiStateSaveTimer;
     let uiStateSaveChain = Promise.resolve(), uiStateSaveFailed = false, uiStateFailureToast = 0;
     let pendingSends = structuredClone(initial.pendingSends), drafts = structuredClone(initial.drafts);
     let recoveredSendDrafts = {};
+    // The Studio chunk is unmounted, so actual App continuity must preserve the sealed fallback.
+    let studioSnapshot = null, studioRestore = null, restoredStudioDraft = null;
     let windowCloseInFlight = false;
     let readMarks = {}, statusCursors = {}, fileTrustPolicies = {}, latePast = {}, embedAutoLoad = false, error = "";
     let sealed = JSON.stringify(initial), failLoad = true, writes = 0, flushed = 0;
@@ -113,4 +116,5 @@ test("failed continuity hydration cannot replace the sealed pending identities w
   assert.equal(app.state().flushed, 1);
   assert.equal(await app.save(), true);
   assert.deepEqual(JSON.parse(app.state().sealed).pendingSends, initial.pendingSends);
+  assert.equal(JSON.parse(app.state().sealed).studioDraft, studioDraft);
 });

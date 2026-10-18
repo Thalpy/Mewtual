@@ -1,5 +1,112 @@
 # Gate 7 acceptance and evidence ledger
 
+## Final Gate 7 implementation and local acceptance (2026-10-18)
+
+Gate 7's implementation and required local acceptance checks are complete. Studio edits update
+locally, Save/ordinary close/navigation flush changes, and changed work autosaves five seconds
+after its first edit. Every editor Play starts at frame one, identical Save acknowledgements do
+not restart playback, and only the active editor is shown as open. The storage/retry, receipt
+ordering, navigation, attachment and production UI corrections below are incorporated.
+
+| Final check | Result | Local log under `target/` |
+| --- | --- | --- |
+| `cargo test --offline --all --all-features -- --test-threads=4` | 2462 passed, zero failed; 24 existing ignored tests | `gate7-final-root-suite-rerun.log` |
+| `cargo test --offline --manifest-path apps/desktop/src-tauri/Cargo.toml -- --test-threads=2` | 363 passed, zero failed; both six-client scenarios passed | `gate7-final-native-suite-rerun.log` |
+| `npm --prefix apps/desktop test -- --test-concurrency=1` | 1705 passed, zero failed or skipped | `gate7-final-frontend-suite-rerun2.log` |
+| Root and native `cargo fmt ... -- --check` | Passed | Final terminal checks |
+| Root `cargo clippy --offline --all-targets --all-features -- -D warnings` | Passed | `gate7-final-root-clippy.log` |
+| Native `cargo clippy --offline --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --tests -- -D warnings` | Passed | `gate7-final-native-clippy.log` |
+| Native `cargo check` and `cargo build`, with the same manifest and `--offline` | Passed | `gate7-final-native-check.log`, `gate7-final-native-build.log` |
+| Ambient-dependency and store raw-filesystem gates | Passed | `gate7-final-ambient.log`, `gate7-final-raw-fs.log` |
+| `cargo deny check` | Advisories, bans, licenses and sources passed | `gate7-final-deny.log` |
+| Frontend `npm run check` / `npm run build` | Zero errors/warnings in check; build passed with existing large-chunk warning | `gate7-final-frontend-check4.log`, `gate7-final-frontend-build3.log` |
+| `npm --prefix apps/desktop run test:flows` | All nine standard Edge flows passed | `gate7-final-flows.log` |
+| Same flow command with `FLOW_SCENARIO=gate7` | All 25 attachment, pixel/loop, Post/Send, deck and close-hold assertions passed | `gate7-final-gate7-flows-rerun.log` |
+| `npm --prefix apps/desktop run test:startup` | Freshly built native application reached setup completion | `gate7-final-startup.log` |
+| Actual-diff adversarial review and final re-reviews | No remaining blocker/high/medium findings | Review dispositions below and final checkpoint notes |
+
+Compilation used two jobs and full suites ran sequentially. The old 64-record test profile was
+made explicit before the passing root rerun. Native lint's equivalent shape-guard simplification
+received boundary tests and a complete native rerun. The initial frontend failures were repaired
+without changing product behavior: extracted-App fixtures now declare the lazy Studio handles,
+the transport guard checks the added seek callback, and mounted playback waits for actual audio
+preparation with a bounded timeout instead of a fixed number of event-loop turns. All sound,
+frame, Save and pending-identity assertions remain. The final close browser test now checks the
+intentional navigation hold; remaining in Studio proves the synchronous composer append did not
+run. These test corrections received read-only re-review. A sandboxed Edge startup timeout occurred
+before scenarios; the run with normal child-process permissions passed. Earlier failed/interrupted
+logs remain historical evidence, not passing results.
+
+The 900 × 640 fixture screenshots were inspected, including `gate7-art.png` and `gate7-chat.png`;
+the chat screenshot shows the inline animation. Logs and screenshots are local generated artifacts,
+not hosted-CI evidence. The owner explicitly defers the unavailable two-desktop observation.
+Native audible hardware, other-platform release observations and arbitrary-size legacy synchronous
+scan latency remain unqualified. Five-second working drafts and orderly encrypted lock continuity
+are not a hard-crash write-ahead guarantee. These limits do not become acceptance claims through
+this checkpoint. `CHAT-FILES-VOICE-PLAN.md` is a separate subsequent programme.
+
+The dated checkpoints below are retained as implementation/review history and are superseded by
+the final results above where they describe pending checks or coordination blocks.
+
+## Five-second save and replay correction checkpoint (2026-10-18)
+
+The owner confirmed the parallel UI session finished, closed the desktop executable, and
+authorized Cargo checks. New requested behavior is implemented: local working edits, explicit
+Save/close plus changed-only five-second autosave, fixed Save revisions, safe original-target
+navigation and frame-one restart on every editor Play. Orderly lock retains bounded encrypted
+edits; restored requests do not auto replay. A native ACK of unchanged content keeps playback
+running. Canonical architecture/interface/threat-model sections describe bounds and crash limits.
+
+Current focused checkpoints: **15 buffer regressions passed**
+(`gate7-buffer-budget-final2.log`), **two mounted navigation/playback regressions passed**
+(`gate7-buffer-delete-final.log`), **48 affected frontend regressions passed** including
+actual mounted playback/navigation (`gate7-buffer-focused6.log`), **two storage tests passed**
+(`gate7-buffer-root.log`), and **one native continuity test passed**
+(`gate7-buffer-native.log`). Static review corrections include privacy on snapshot failure,
+first-delivery rebinding, held restoration, Unicode/u128/pad compatibility, complete draft media,
+save-during-playback, after-ACK drawing, shared navigation ownership, close holds and admission of
+complete future ticket bodies. Final actual-diff reviews report no remaining blocker/high/medium
+findings. An old restart test still assumed the previous 64-record receive ceiling; it now uses
+an explicit test-only 64-record profile and its focused rerun passed. The first full run was
+stopped after that stale expectation failed; the corrected full rerun is in progress and the
+interrupted run is not a pass. Full verification follows this implementation checkpoint;
+earlier evidence below is historical and does not by itself sign off the current source.
+
+## Functional corrections in progress (2026-10-18)
+
+The supplied review of `b2f26d0b` and newly reported opening/playback/switching failures reopened
+functional verification. Corrections now cover the cumulative receive metadata cap, accepted
+Closing retries past corrupt auxiliary journals, read/Save delivery lanes, original-raster custody
+on document switching, looping pictures through long sound tails, and delayed archival deck clocks.
+The Fault/Closing publication tests are split, including successful Closing reference Save; the
+Server settings Index repair scope has a mounted channel-switch and delayed-error regression.
+
+Latest focused verification: **92 frontend tests passed** (`gate7-functional-focused-final.log`),
+including actual mounted Studio/Nav drawing and refusal, Create/open/first-frame with overlapping
+reads, object/Index ACK ordering, delayed DJ/listener audio clocks, long-sound picture loops,
+Closing publication success/refusal, Index repair channel isolation and bounded shared-sound reads.
+**Five backend tests passed** (`gate7-functional-root.log`): present corrupt Closing journal,
+unchanged accepted retry/flush failure/disposal provenance, transfer basis, >64 authenticated vault
+records and cold-cap refusal. **Three native bridge tests passed** with `--lib`
+(`gate7-functional-native.log`): Create receipt survives refresh, read/Save lane replacement and
+superseded Read refusal. Root Clippy, both formatting checks, ambient/raw-filesystem gates and
+focused strict TypeScript checking passed. These are focused checkpoints, not full acceptance.
+
+The earlier root suite was interrupted for these new fixes. Its apparent exit code must not be
+treated as a pass: its owned process was terminated and its log ends during TCP acceptance. A
+separate session's `cargo test --all --all-features --no-fail-fast` then held the app-test executable
+open, causing an initial focused link failure with LNK1104. That duplicate older suite was stopped;
+the focused Rust checks above then passed. Native's default test command also could not replace
+the running `mewtual-desktop.exe`; the narrower library tests passed without closing that app.
+At that checkpoint no new full suite had been started. The owner has since confirmed UI edits
+finished and the desktop closed; the later five-second-buffer checkpoint above supersedes that
+coordination block. Previous full/frontend/browser results below predate these corrections.
+
+Read-only adversarial re-reviews found and resolved a projection rollback and a navigation-only
+counter regression during implementation. The final backend/session and playback/navigation/shelf
+reviews report no remaining blocker/high/medium findings. The receive ceiling remains a bounded
+interim correction; synchronous complete-scan latency is explicitly unqualified.
+
 ## UX corrections and final verification (2026-10-18)
 
 Concurrent Studio edits arrived after the frontend suite/static/build checkpoint below and

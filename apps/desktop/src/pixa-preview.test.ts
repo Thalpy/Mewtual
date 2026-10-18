@@ -205,7 +205,7 @@ test("the facts line names the file and its size up front and adds frames, fps, 
     assert.match(facts(), /4\.9 kib/); assert.doesNotMatch(facts(), /frames/); assert.match(facts(), /expires 30d \(loop\.pixa\)/);
     assert.equal(host.querySelector<HTMLElement>(".pixa-sounds")!.hidden, true);
     h.visible(host); await wait(() => !host.querySelector("canvas")!.hidden);
-    assert.match(facts(), /3 frames · 10 fps · 4\.9 kib/); assert.match(facts(), /♪ 1 sounds/);
+    assert.match(facts(), /3 frames · 10 fps · 4\.9 kib/); assert.match(facts(), /♪ 1 sound(?!s)/, "one marker is one sound, not one sounds");
     assert.equal(facts().includes("♫ music"), value.take.events.length > 0, "music is claimed only when the take carries events");
     assert.equal(host.querySelector<HTMLElement>(".pixa-sounds")!.hidden, false);
     // Content behind a cid is immutable, so the facts survive the package's release.

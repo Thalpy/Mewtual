@@ -148,8 +148,13 @@ export function gate7FlowExpression(golden) {
     releaseUpload(); await wait(() => uploaded.length === 3, 'upload completed after close');
     await wait(() => button('.st-btn', 'Post to chat') && !button('.st-btn', 'Post to chat').disabled, 'closed post settled');
     const stayedInStudio = !!document.querySelector('.st-canvas-wrap');
-    button('.surface-bar button', 'chat').click(); await wait(() => document.querySelector('.composer textarea'), 'draft after close');
-    out.closePostRevoked = stayedInStudio && document.querySelector('.composer textarea').value === 'Keep this draft' && closingSnapshot.includes('Keep this draft') && !closingSnapshot.includes(uploaded[2]);
+    // appendToDraft changes the view to Chat synchronously, so retaining Studio after the
+    // upload settles proves that it did not run. Close now holds all navigation until native
+    // completion; trying to open Chat to inspect its textarea would violate that contract.
+    out.closePostRevoked = stayedInStudio && JSON.parse(closingSnapshot).drafts['1:1'] === 'Keep this draft' && !closingSnapshot.includes(uploaded[2]);
+    button('.surface-bar button', 'chat').click();
+    await new Promise(resolve => setTimeout(resolve, 0)); // let any Svelte view mutation flush
+    out.closeNavigationHeld = !!document.querySelector('.st-canvas-wrap') && !document.querySelector('.composer textarea');
     return out;
   })()`;
 }

@@ -27,7 +27,7 @@
     untrack(() => setStudioScope(s, c));
   });
 
-  const model = $derived.by(() => { void studio.rev; return session.indexModel; });
+  const model = $derived.by(() => { void studio.rev; return session.workingIndex; });
   const indexView = $derived.by(() => { void studio.rev; return session.index; });
   const indexError = $derived.by(() => { void studio.rev; return session.indexError; });
   const indexOverlay = $derived.by(() => { void studio.rev; return session.indexOverlay; });
@@ -155,19 +155,17 @@
     return { text: "", tone: "" };
   }
 
-  function open(id: string) {
+  async function open(id: string) {
     try {
-      session.open(id);
-      studio.selected = id;
-      onopen();
+      await session.navigate(() => { session.open(id); studio.selected = id; onopen(); });
     } catch (e) { onnotice?.(reason(e), "warn"); }
   }
 
-  function newFlipnote() {
+  async function newFlipnote() {
     if (!session.scope) return;
     if (indexView?.awaitingTenureReceipt) { onnotice?.("read-only preview: the current owner has not confirmed this channel's history yet", "warn"); return; }
     try {
-      session.prepareDocumentClose();
+      await session.navigate(() => {
       const n = (model?.entries.length ?? 0) + (model?.overflow.length ?? 0) + 1;
       const id = session.createFlipnote(`flipnote ${n}`);
       session.open(id, { read: false });
@@ -176,6 +174,7 @@
       session.insertFrame(id, null, new PixRaster(FLIPNOTE_W, FLIPNOTE_H, DEFAULT_PALETTE.map((e) => ({ ...e }))).encode());
       studio.selected = id;
       onopen();
+      });
     } catch (e) {
       onnotice?.(reason(e), "warn");
     }
@@ -187,9 +186,9 @@
     const d = Math.ceil((e.ms - Date.now()) / 86_400_000);
     return d <= 0 ? "expired" : `expires ${d}d`;
   }
-  function newScore() {
+  async function newScore() {
     if (!session.scope) return;
-    try { session.prepareDocumentClose(); const id = session.createScore(`score ${(model?.entries.filter((e) => e.kind === "score").length ?? 0) + 1}`); session.open(id, { read: false }); studio.selected = id; onopen(); }
+    try { await session.navigate(() => { const id = session.createScore(`score ${(model?.entries.filter((e) => e.kind === "score").length ?? 0) + 1}`); session.open(id, { read: false }); studio.selected = id; onopen(); }); }
     catch (e) { onnotice?.(reason(e), "warn"); }
   }
 </script>

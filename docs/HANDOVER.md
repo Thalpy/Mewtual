@@ -1,5 +1,67 @@
 # Mewtual; Handover
 
+## Gate 7 complete; communication programme next (2026-10-18)
+
+Gate 7 implementation and local acceptance are complete. Studio uses immediate working edits,
+explicit Save/close/navigation and changed-only five-second autosave; repeat Play starts at frame
+one, saving unchanged content preserves playback, and navigation retains original raster custody.
+Storage/retry and native read/Save races are corrected, with bounded encrypted orderly-lock
+continuity and explicit restored retry. Production attachments, inline looping, Post to Chat,
+Sound/Music/history and server repair controls are connected.
+
+Final checks passed: root suite 2462 tests (24 existing ignored), native suite 363 tests including
+both six-client scenarios, frontend suite 1705 tests, both formatting and strict lint checks,
+native check/build, ambient/raw-filesystem gates, dependency audit, frontend check/build, nine
+standard Edge flows, all 25 expanded Gate 7 assertions and actual native startup. Final read-only
+reviews have no remaining blocker/high/medium findings. `GATE7-ACCEPTANCE.md` records exact commands,
+logs, test-harness corrections and limitations; local screenshots include the inline chat card.
+The owner defers two desktops. Hardware/platform observations and legacy full-scan latency remain
+unqualified; orderly continuity is not crash-atomic authoring.
+
+The owner requests pushing this Gate7 checkpoint, then a new `chat-update-implementation` branch
+for `communication-recovery/CHAT-FILES-VOICE-PLAN.md`. That programme has separate acceptance,
+starting with bridged-room reproduction and narrow demonstrated fixes. Historical checkpoints
+below do not reinstate the earlier wait-for-UI/app-close blocks or pending final checks.
+
+## Studio local edits and final-check checkpoint (2026-10-18)
+
+The owner has finished the parallel UI edits and closed the desktop. Studio now updates working
+edits immediately, saves on Save/ordinary close/navigation and autosaves five seconds after the
+first change. Later edits do not hitchhike on an already-running Save. Failed requests and owned
+PIX remain retained; rotation cannot silently rebind them. Local playback/export uses complete
+validated working inputs, and saving identical content keeps playback running. Every editor Play
+starts at frame one. Normal navigation waits for all dirty strokes, including strokes made while
+the previous revision was saving. Orderly lock uses bounded encrypted continuity; restoration
+requires explicit Save/retry. See current ARCHITECTURE/INTERFACES/THREAT-MODEL sections for exact
+limits, older-client envelope compatibility and the explicit hard-crash/write-ahead limitation.
+
+Focused checks passed: 15 buffer regressions, two mounted playback/navigation checks,
+48 affected frontend checks, two storage checks and
+one native continuity check. Read-only review corrections are incorporated; full final suites
+and production/browser/startup checks are next. Historical checkpoint notes below remain evidence
+of earlier states, not an outstanding request to close the desktop or wait for the other session.
+
+## Studio functional correction checkpoint (2026-10-18)
+
+The current functional correction series addresses the supplied `b2f26d0b` review and the owner's
+new opening/playback/switching reports. See `GATE7-ACCEPTANCE.md` for exact verification state.
+The receive inventory now permits 1024 cumulative records with unchanged byte/cold rails; legacy
+synchronous complete-scan latency remains unqualified. Closing exact retries authenticate and
+flush accepted intent ciphertext unchanged before global inventory. Native Save delivery no
+longer races background Read delivery. Navigation flushes original raster custody before changing
+the editor, and looped pictures continue through long sound tails. Shared archival playback uses
+the actual DJ clock and seats listener seek after preparation.
+
+Focused verification passed: 92 frontend tests, five backend tests and three native library tests.
+Root Clippy, both formatting checks, ambient/raw-filesystem gates and focused strict TypeScript
+checking passed. Actual read serials preserve newer projections without breaking Create→first-frame;
+shared sound-file reads now enforce native 4 KiB limits, sixteen current entries and continuation
+fences. Final read-only re-reviews report no blocker/high/medium findings in these corrected paths.
+The earlier full root run and a duplicate older run were stopped; neither is a current pass.
+The running desktop prevents the default native test command from replacing its executable, so
+only its focused library tests have run. Final complete suites/browser/static/build checks still
+require stable UI files and closure of the running desktop. No Gate 7 sign-off is claimed here.
+
 ## Studio sound/music/history tabs, soundfont popup, chat flipnote card and viewer (2026-10-18)
 
 Built from the owner-approved mockup canvas (Flipnote Sound & Chat). Frontend only; no wire,

@@ -7184,7 +7184,7 @@ fn invite_addresses_changed(minted: &[String], current: &[String]) -> bool {
         || current.iter().any(|a| !minted.contains(a))
 }
 
-/// The single-use invite to share (founder only); `None` for a joiner.
+/// The stored single-use invite to share; `None` when absent or this device is a regular member.
 ///
 /// Re-mints first if reachability improved since the stored invite was made. This exists because
 /// of a real ordering trap: founding mints the invite immediately, but UPnP takes seconds to
@@ -7197,29 +7197,57 @@ fn invite_addresses_changed(minted: &[String], current: &[String]) -> bool {
 /// token whose signed address set matches the current route set.
 #[tauri::command]
 async fn get_invite(state: State<'_, AppState>, server: u64) -> Result<Option<String>, String> {
-    require_unlocked_session(&state).await?;
-    let has_invite = {
+    get_available_invite(&state, server).await
+}
+
+/// Optional reads run on network events as well as display/copy. A retained invite is not
+/// evidence of current permission: joined or demoted devices must quietly withdraw it from the
+/// UI, rather than turn an automatic refresh into an unrelated-looking global permission error.
+async fn get_available_invite(state: &AppState, server: u64) -> Result<Option<String>, String> {
+    require_unlocked_session(state).await?;
+    let (actor, device_id) = {
         let servers = state.servers.lock().await;
         match servers.get(&server) {
-            Some(e) => e.invite.is_some(),
-            None => return Ok(None),
+            Some(e) if e.invite.is_some() => (e.actor.clone(), e.device_id),
+            _ => return Ok(None),
         }
     };
-    if !has_invite {
-        return Ok(None); // a joiner mints nothing
+    if !current_device_can_share_invite(&actor, device_id).await? {
+        return Ok(None);
     }
     // A standing offer is intentionally short-lived and can disappear without changing our own
     // bootstrap. Re-wrap the same still-valid inner token on every display/copy, changing only
     // its signed helper plan. A new nonce is minted only when the inner token expired or its own
     // direct/rendezvous routes changed; otherwise opening this panel would create bearer invites
     // and rendezvous registrations without an explicit human action.
-    match refresh_or_mint_invite(&state, server, false).await {
+    let refreshed = refresh_or_mint_invite(state, server, false).await;
+    // The actor can observe a demotion while refresh awaits minting or helper wrapping. Re-read
+    // even on failure so that race also withdraws the code without a permission warning. Explicit
+    // Generate still uses mint_invite_fresh and retains its backend authorization/error contract.
+    if !current_device_can_share_invite(&actor, device_id).await? {
+        return Ok(None);
+    }
+    match refreshed {
         Ok(fresh) => Ok(Some(fresh)),
         Err(e) => {
             tracing::warn!(target: "catcoms_app", error = %e, "JOIN.INVITE.REMINT_FAILED");
-            Err(format!("the live invite could not be refreshed: {e}"))
+            Err(format!("Could not update this server's invite code: {e}"))
         }
     }
+}
+
+/// Use the full signing-device identity, never the display fingerprint. Missing state is an
+/// error, not a member role: roles() returns an empty map if its actor has stopped, and genuine
+/// failures for an owner/admin must not be mistaken for an ordinary unavailable invitation.
+async fn current_device_can_share_invite(
+    actor: &ServerActor,
+    device_id: DeviceId,
+) -> Result<bool, String> {
+    let roles = actor.roles().await;
+    let role = roles
+        .get(&device_id.to_string())
+        .ok_or_else(|| "Could not read your role in this server".to_string())?;
+    Ok(matches!(role.as_str(), "owner" | "admin"))
 }
 
 /// Mint a **fresh** single-use invite on demand (owner/admin only; gated in `Server::mint_invite`),
@@ -10968,10 +10996,10 @@ fn validate_ui_state_json(json: &str) -> Result<(), String> {
     if json.len() > MAX_UI_STATE_BYTES {
         return Err("UI continuity state is too large".into());
     }
-    let value: serde_json::Value =
+    let mut value: serde_json::Value =
         serde_json::from_str(json).map_err(|_| "UI continuity state is not valid JSON")?;
     let object = value
-        .as_object()
+        .as_object_mut()
         .ok_or_else(|| "UI continuity state must be an object".to_string())?;
     if object.get("version").and_then(serde_json::Value::as_u64) != Some(1)
         || !object
@@ -10982,6 +11010,35 @@ fn validate_ui_state_json(json: &str) -> Result<(), String> {
             .is_some_and(serde_json::Value::is_object)
     {
         return Err("unsupported UI continuity state shape".into());
+    }
+    // Studio's owned PIX drafts need a larger envelope, not a larger allowance for unrelated
+    // chat/read/trust state. Validate each independent budget before the atomic sealed write.
+    if let Some(studio) = object.remove("studioDraft") {
+        if !studio.is_null() {
+            let draft = studio
+                .as_str()
+                .ok_or("Studio continuity must be a string")?;
+            if draft.len() > 12 * 1024 * 1024 {
+                return Err("Studio continuity is too large".into());
+            }
+            let draft: serde_json::Value =
+                serde_json::from_str(draft).map_err(|_| "Studio continuity is not JSON")?;
+            if draft.get("version").and_then(serde_json::Value::as_u64) != Some(1)
+                || draft
+                    .get("records")
+                    .and_then(serde_json::Value::as_array)
+                    .is_none_or(|records| records.len() > 512)
+            {
+                return Err("unsupported Studio continuity shape".into());
+            }
+        }
+    }
+    if serde_json::to_vec(&value)
+        .map_err(|_| "UI continuity cannot be encoded")?
+        .len()
+        > 1024 * 1024
+    {
+        return Err("non-Studio UI continuity state is too large".into());
     }
     Ok(())
 }
@@ -21535,6 +21592,170 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn optional_invite_refresh_withdraws_member_codes_but_explicit_mint_still_rejects() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await =
+            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let (owner, member, _, _) = admitted_reply_pair(Vec::new()).await;
+        assert_eq!(member.my_role(), catcoms_app::Role::Member);
+        let stored = hex::encode(
+            owner
+                .mint_invite([0x73; 16], u64::MAX, vec![])
+                .unwrap()
+                .encode(),
+        );
+        let device = member.device_id();
+        let group = member.group_id();
+        let (actor, events, task) = spawn(member);
+        let mut entry = snapshot_test_entry(1, actor.clone(), group, device);
+        entry.invite = Some(stored.clone());
+        state.servers.lock().await.insert(1, entry);
+
+        // Even a reusable token must disappear for a current ordinary member. Previously this
+        // either exposed a retained code or tried to refresh it and raised a global error.
+        assert_eq!(get_available_invite(&state, 1).await.unwrap(), None);
+        assert_eq!(state.servers.lock().await[&1].invite, Some(stored));
+        state.servers.lock().await.get_mut(&1).unwrap().invite = Some("stale code".into());
+        assert_eq!(get_available_invite(&state, 1).await.unwrap(), None);
+        assert!(mint_and_store_invite(&state, 1)
+            .await
+            .unwrap_err()
+            .contains("only the owner or an admin"));
+        state.servers.lock().await.get_mut(&1).unwrap().invite = None;
+        assert_eq!(get_available_invite(&state, 1).await.unwrap(), None);
+        assert_eq!(get_available_invite(&state, 99).await.unwrap(), None);
+        state.session_lock_requested.store(true, Ordering::Release);
+        assert_eq!(
+            get_available_invite(&state, 1).await.unwrap_err(),
+            "the vault is locked"
+        );
+        actor.shutdown().await;
+        task.await.unwrap();
+        drop(events);
+    }
+
+    #[tokio::test]
+    async fn optional_invite_refresh_follows_owner_admin_and_demotion_roles() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await =
+            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let (owner, member, owner_peer, _) = admitted_reply_pair(Vec::new()).await;
+        let owner_device = owner.device_id();
+        let member_device = member.device_id();
+        let group = owner.group_id();
+        let owner_invite = hex::encode(
+            owner
+                .mint_invite([0x74; 16], u64::MAX, vec![])
+                .unwrap()
+                .encode(),
+        );
+        let (owner, owner_events, owner_task) = spawn(owner);
+        let (member, member_events, member_task) = spawn(member);
+        let mut owner_entry = snapshot_test_entry(1, owner.clone(), group.clone(), owner_device);
+        owner_entry.invite = Some(owner_invite);
+        state.servers.lock().await.insert(1, owner_entry);
+        assert!(get_available_invite(&state, 1).await.unwrap().is_some());
+
+        owner.set_admin(member_device, true).await.unwrap();
+        member.catch_up_roles(owner_peer).await;
+        timeout(Duration::from_secs(5), async {
+            while member
+                .roles()
+                .await
+                .get(&member_device.to_string())
+                .map(String::as_str)
+                != Some("admin")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let admin_invite = hex::encode(
+            member
+                .mint_invite([0x75; 16], u64::MAX, vec![])
+                .await
+                .unwrap(),
+        );
+        let mut member_entry = snapshot_test_entry(2, member.clone(), group, member_device);
+        member_entry.invite = Some(admin_invite.clone());
+        state.servers.lock().await.insert(2, member_entry);
+        assert!(get_available_invite(&state, 2).await.unwrap().is_some());
+
+        for cached in [admin_invite, "stale code".into()] {
+            owner.set_admin(member_device, true).await.unwrap();
+            member.catch_up_roles(owner_peer).await;
+            timeout(Duration::from_secs(5), async {
+                while !current_device_can_share_invite(&member, member_device)
+                    .await
+                    .unwrap()
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            state.servers.lock().await.get_mut(&2).unwrap().invite = Some(cached);
+
+            // Pause refresh at the mint mutex AFTER its permitted-role preflight. One poll
+            // sends the role query; the actor query barrier ensures its reply is ready for the
+            // next poll, which parks on this held mutex. No scheduling sleeps or test hooks.
+            let mint_guard = state.invite_mint.lock().await;
+            let refresh = get_available_invite(&state, 2);
+            tokio::pin!(refresh);
+            std::future::poll_fn(|cx| {
+                assert!(refresh.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            member.roles().await;
+            std::future::poll_fn(|cx| {
+                assert!(refresh.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+
+            owner.set_admin(member_device, false).await.unwrap();
+            member.catch_up_roles(owner_peer).await;
+            timeout(Duration::from_secs(5), async {
+                while current_device_can_share_invite(&member, member_device)
+                    .await
+                    .unwrap()
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            drop(mint_guard);
+            // Reusable cache wrapping succeeds; stale-cache re-minting fails its role gate.
+            // Both must yield absence after the demotion, never a code or a global error.
+            assert_eq!(refresh.await.unwrap(), None);
+        }
+
+        // Do not hide a genuine failure behind 'no invite': an unavailable actor has no current
+        // role projection, while a permitted owner's malformed cache still self-heals by minting.
+        state.servers.lock().await.get_mut(&1).unwrap().invite = Some("stale code".into());
+        assert!(get_available_invite(&state, 1).await.unwrap().is_some());
+        owner.shutdown().await;
+        owner_task.await.unwrap();
+        assert_eq!(
+            get_available_invite(&state, 1).await.unwrap_err(),
+            "Could not read your role in this server"
+        );
+        member.shutdown().await;
+        member_task.await.unwrap();
+        drop((owner_events, member_events));
+    }
+
     /// Settings promises the user "this session's file is X". The name now comes from the sink
     /// that opened it, not from whichever `debug_log_*` in the folder was touched most recently.
     ///
@@ -22902,6 +23123,34 @@ mod tests {
         assert!(validate_ui_state_json(r#"{"version":1,"drafts":[],"readMarks":{}}"#).is_err());
         assert!(validate_ui_state_json("not json").is_err());
         assert!(validate_ui_state_json(&"x".repeat(MAX_UI_STATE_BYTES + 1)).is_err());
+        // The native shape gate independently rejects missing/mistyped records and excess
+        // rows, even before the frontend's stricter draft decoder sees this envelope.
+        for draft in [
+            serde_json::json!({ "version": 1 }),
+            serde_json::json!({ "version": 1, "records": {} }),
+            serde_json::json!({ "version": 1, "records": vec![serde_json::Value::Null; 513] }),
+        ] {
+            let state = serde_json::json!({ "version": 1, "drafts": {}, "readMarks": {}, "studioDraft": draft.to_string() });
+            assert!(validate_ui_state_json(&state.to_string()).is_err());
+        }
+        let boundary =
+            serde_json::json!({ "version": 1, "records": vec![serde_json::Value::Null; 512] });
+        let state = serde_json::json!({ "version": 1, "drafts": {}, "readMarks": {}, "studioDraft": boundary.to_string() });
+        assert!(validate_ui_state_json(&state.to_string()).is_ok());
+        let studio = serde_json::json!({ "version": 1, "records": [], "padding": "x".repeat(2 * 1024 * 1024) }).to_string();
+        let state = serde_json::json!({ "version": 1, "drafts": {}, "readMarks": {}, "studioDraft": studio });
+        assert!(validate_ui_state_json(&state.to_string()).is_ok());
+        let mut oversized_chat = state.clone();
+        oversized_chat["drafts"] = serde_json::json!({ "1:2": "x".repeat(1024 * 1024) });
+        assert!(validate_ui_state_json(&oversized_chat.to_string())
+            .unwrap_err()
+            .contains("non-Studio"));
+        let mut oversized_studio = state;
+        oversized_studio["studioDraft"] =
+            serde_json::Value::String("x".repeat(12 * 1024 * 1024 + 1));
+        assert!(validate_ui_state_json(&oversized_studio.to_string())
+            .unwrap_err()
+            .contains("Studio continuity is too large"));
     }
 
     #[test]

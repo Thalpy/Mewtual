@@ -1,5 +1,64 @@
 # Mewtual; Architecture
 
+## Studio working edits and five-second saves (2026-10-18)
+
+Production Studio edits update a separate volatile working projection immediately. Native views
+and raw registers remain the sole authority/evidence; local frame handles and display sources
+never become native CIDs, recovery choices or authoring authority. Ordinary pixels, timeline,
+sound, Score, header and Index operations wait for Save, normal close/navigation, or a fixed
+five-second deadline measured from the first change. Document creation and explicit historical
+recovery are themselves Save actions. Only never-submitted tail edits coalesce. A released Save
+contains a fixed set of queue identities; later edits wait for their own deadline. Failed and
+uncertain records remain visible and never automatically retry. First delivery preserves its
+admitted epoch/trust route across publication/ticket awaits; only explicit reauthor changes it.
+
+Normal document, channel, server, surface and window changes await definite Save receipts,
+including a new interrupted stroke drawn while the first revision was saving. Refusal or timeout
+keeps the old editor. Playback/export may use complete validated owned working inputs without
+writing; exact native group/channel/epoch and linked-Score checks still apply. Semantic media
+generation ignores delivery status and an ACK of identical content, so autosave does not stop
+playback. Data notices are re-read before content comparison; settlement, explicit invalidation,
+membership and lock still revoke playback ownership. A new editor Play begins at frame one.
+
+Orderly lock captures the owned queue in the existing atomic encrypted UI continuity envelope,
+then immediately revokes native authority and clears editor models, buffers and rasters. The
+existing lock coordinator retains the immutable continuity argument until unlock so a racing
+close/retry can reuse its exact bytes; this is not a RAM-zeroization guarantee. Capture failure cannot
+prevent lock and is disclosed; the previous sealed record remains intact. Restored work is held
+until explicit Save/retry in its original server/channel/group, never automatically replayed by
+a new edit. Limits are 512 queued records, 8 MiB of PIX file bytes and 12 MiB serialized Studio data;
+admission reserves frozen-request/diagnostic overhead and counts UTF-8 plus outer JSON escaping.
+The sealed envelope is capped at 16 MiB with the existing independent 1 MiB allowance for all
+non-Studio continuity. Physical reads are bounded before decryption. This is orderly lock/close
+recovery, not a write-ahead log or a claim of receipt recovery after a hard process/OS crash.
+
+## Studio Save, navigation and playback corrections (2026-10-18)
+
+Native document refreshes and Saves use separate latest-request lanes. A Save revokes older
+projection/Save results; a later read cannot hide its durable receipt. Session lock, cancellation
+and actor-incarnation checks still apply at delivery. Actual read-admission counters separately
+fence an ACK's projection: an overlapping later read preserves its newer state, and reconciliation
+finishes before dependent queued work runs. Navigation without a read never suppresses Create's
+initial projection. Editor selection flushes the original
+object/frame's dirty raster before replacing the document; a synchronous enqueue refusal vetoes
+the switch. Pending exact Saves retain their pixels and identity offscreen. Protocol Open phase
+and bounded maintenance watches are independent of the one currently open editor.
+
+Looping pictures wrap through long authored sound/release tails without shortening sound. Shared
+archival decks render and announce the DJ's actual synth clock after preparation; listeners sample
+their room seek after preparation as well as download.
+
+The shared sound shelf retains only sixteen currently eligible recipes. Native reads enforce the
+4 KiB patch cap, serialize replacement work and cancel after registration. Scope/listing generations
+and direct post-await trust, lock, readiness, close and membership checks reject stale results.
+
+Accepted Closing retries authenticate their scoped intent record and flush its existing ciphertext
+before acknowledging it. They neither rewrite metadata nor require an auxiliary owner journal.
+Fresh authoring and commits retain complete inventory/admission. Automatic receive supports up to
+1,024 cumulative metadata records, matching its directory ceiling, with the existing 8 MiB read and
+256 KiB cold-validation rails. Resumable inventory turns retain their deadline; legacy synchronous
+complete scans still have no measured custody-latency guarantee.
+
 ## Studio UX and ordered sync observations (2026-10-18)
 
 Studio keeps Art, Sound, Music and History separate. Server settings owns fault inspection and
@@ -306,7 +365,7 @@ per paced pass gets the same Ready/lease/off-executor custody as Save. Current w
 and membership/MLS are rechecked before disk work; snapshot persistence precedes typed ingest.
 Only newly Accepted durable edits emit remote StudioUpdated; events recheck native incarnation.
 Automatic inventory uses the existing scanner with local limits (1024 directory entries,
-64 records, 8 MiB authenticated bytes and 256 KiB cold validation bytes). The mount-local
+1024 records, 8 MiB authenticated bytes and 256 KiB cold validation bytes). The mount-local
 LRU retains every family's pure accounting validation (and an Intents record's inventory facts),
 never a document, inventory or write permit. Every hit requires fresh authenticated file bytes, scope/filename binding and
 the exact complete-wrapper digest/size. Ordinary complete scans warm it; remount starts cold.

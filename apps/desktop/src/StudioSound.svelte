@@ -89,7 +89,7 @@
   const locked = $derived(!!readonlyReason);
   const duration = $derived<number | "">(lengthText.trim() === "" ? "" : (soundLengthMs(Number(lengthText)) ?? ""));
   const here = $derived<SfxView[]>(model.sfx.filter((sfx: SfxView) => sfx.frame === frame));
-  const docTiles = $derived<SoundPatchView[]>(model.patchSlots.filter((slot: SoundPatchView) => !slot.removed));
+  const docTiles = $derived<{ id: string; descriptor: JamPatch }[]>(Object.entries<JamPatch>(model.patches).map(([id, descriptor]) => ({ id, descriptor })));
   const shelves = $derived(groupShelves(library));
   const overPatch = $derived(new Set<string>(model.readiness.patchOverflow));
   const overSfx = $derived(new Set<string>(model.readiness.sfxOverflow));
@@ -123,7 +123,7 @@
   const docMatch = $derived.by<string | null>(() => {
     const picked = selection; // narrowed once; the closure below cannot see a narrowed `$state`
     if (picked?.kind !== "lib") return null;
-    return docTiles.find((slot: SoundPatchView) => slot.descriptor !== null && samePatch(slot.descriptor, picked.patch))?.id ?? null;
+    return docTiles.find(slot => samePatch(slot.descriptor, picked.patch))?.id ?? null;
   });
   const isDoc = (id: string) => selection?.kind === "doc" ? selection.id === id : docMatch === id;
   const isLib = (item: { name: string; patch: JamPatch }) => selection?.kind === "lib" && selection.name === item.name && samePatch(selection.patch, item.patch);
