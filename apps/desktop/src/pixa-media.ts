@@ -17,7 +17,7 @@ export function decodePixaBase64(encoded: unknown): Pixa {
   return decodePixa(Uint8Array.from(binary, char => char.charCodeAt(0)));
 }
 
-/** Hold the last picture during authored sound/release tails; animation never silently loops. */
+/** Hold the last picture through authored sound/release tails. The caller owns loop timing. */
 export function pixaFrameAt(pixa: Pixa, elapsedMs: number): number {
   return Math.min(pixa.frames.length - 1, Math.floor(Math.max(0, Number.isFinite(elapsedMs) ? elapsedMs : 0) * pixa.fps / 1000));
 }

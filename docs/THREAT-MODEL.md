@@ -1,5 +1,32 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Studio inline media and sync diagnostics (2026-10-18)
+
+The existing Media preference now admits PIXA to its bounded application-owned decoder; filename
+and MIME are screening hints, never proof of content, author or membership. Native authenticated
+manifest caps, 9 MiB input limits and complete PIXA/PIX/take validation precede rendering or synth
+admission. On-demand and author blocks remain effective. One inline manager serializes native
+reads, retains two packages and 128 observed hosts, expands current rasters only and owns one
+repaint timer. Silent visual loops do not resume audio. Sound requires a local gesture through
+the existing StudioAudioSession. Token-owned teardown cannot stop a newer card's audio; failed
+starts do not claim playing state. Late IO/audio results cannot repopulate revoked scopes.
+
+Post to chat preserves draft text and normal durable Send identity. It uses the returned fileshare
+CID, never a Studio blob address, after streamed upload. Navigation including ABA, membership,
+lock, readiness and close intent fence every asynchronous composer mutation. A late upload can
+remain a file without becoming a new unsaved draft after continuity has already been captured.
+
+Sync pause reasons are bounded local diagnostics, cleared on resume and lock, and never authorize
+repair or claim corruption/settlement. Whole explicit access must succeed before resume; old Read
+ACKs cannot clear newer authoritative pauses. Lossless actor sequence/native incarnation order a
+bounded cache of 128 locally selected server observations across navigation. Reset or eviction
+forgets the watermark and requires a fresh successful Index read to reconcile current state;
+the diagnostic UI does not claim replay protection beyond that cache/session boundary.
+
+Owner repair remains an explicit decision between actual receipt candidates in Server settings.
+Normal maintenance and already selected repair work resume automatically; neither the UI nor a
+timer invents a winning receipt. Missing owner tenure history cannot be fixed by elapsed time.
+
 ## Gate 7 UI completion candidate boundary (2026-10-17)
 
 Main-window repair commands now expose only the existing actor/store owner decision. The

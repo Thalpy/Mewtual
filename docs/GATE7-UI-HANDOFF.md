@@ -6,6 +6,41 @@ The detailed envelopes/examples remain in [FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HOOKS.
 [INTERFACES](INTERFACES.md) and [design-creative-suite](design-creative-suite.md).
 Verification is recorded separately in [GATE7-ACCEPTANCE](GATE7-ACCEPTANCE.md).
 
+## Studio workflow (2026-10-18)
+
+- **Art** contains drawing tools, white-to-black swatches, colours (including a fixed purple),
+  layers and call-only frame collaboration. New files use the revised default palette; opening
+  an old file preserves its authored palette and pixel indices. The canvas starts in Fit mode;
+  zooming still permits panning. Studio uses the member-list width for the drawing controls.
+- **Sound** chooses a named instrument, pitch and length in seconds for the selected frame.
+  A new marker visibly defaults to 0.25 seconds. Existing/imported holds remain exact integer
+  milliseconds, including long sounds. Choosing another instrument or editing another marker
+  clears unrelated import restrictions. Import is a local sound file, not a shared verified catalog.
+- **Music** selects the linked track, opens its composer or creates a new track. A missing linked
+  track stays visible as unavailable rather than being silently cleared.
+- **History** contains saved playable versions, entry settings, previous edits/recovery and
+  bounded sound/instrument cleanup. Pending/uncertain saves remain reachable outside the tabs.
+- **Post to chat** exports the displayed composition and uploads a `.pixa` with its correct MIME
+  through the ordinary streamed file path. It appends the actual returned fileshare CID to the
+  existing draft, opens chat and leaves Send to the user. A scope, membership, lock or window-close
+  edge revokes attachment permission; a completed upload may still be found in Files.
+- Chat/wiki and file details render a PIXA canvas directly. Under **Media**, pictures loop
+  silently by default; **On demand** and author blocks still require a click. **Play sound** is
+  an explicit local gesture using the existing archival engine. No remote event resumes audio.
+  Inline previews retain at most two packages, serialize reads, observe at most 128 hosts and
+  expand only current frames. Offscreen/removed/hidden/revoked cards release packages and audio.
+  A fresh explicit Play can renew a retained host in the same server/channel after membership
+  changes; it cannot reuse an old completion or redirect to another server's file.
+- Normal history maintenance runs automatically. Actual conflicting owner receipts require an
+  explicit choice in **Server settings → Studio**; no arbitrary local/first candidate is selected.
+  That settings wrapper does not reset the editor's session or its pending work. Missing owner
+  tenure history is a stable verification limit; waiting alone does not grant repair authority.
+- A real receiver pause shows **Studio sync is paused**, Retry and optional actual failure
+  details. A healthy single-member server does not default to paused. Retry is ordinary explicit
+  access; only its complete success resumes the receiver. Navigation cannot make a retained
+  older pause newer than an observed resume. Reset/cache eviction needs fresh reconciliation,
+  as documented in the ordered event contract below.
+
 The current UI completion candidate adds shared-deck PIXA and a global file viewer, explicit
 source/Registry repair controls, and a separate ticketed Closing local-draft Save. These are
 new command/UI contracts. Dated checkpoints in other documents that call them unavailable
@@ -26,7 +61,7 @@ are historical; final verification is recorded separately from implementation.
 | Local visual GIF | `export_studio_gif` | Native owns the safe filename/path and final save fence. `displayed:false` with a path still acknowledges saved output; reveal failure must not invite duplicate export. GIF is visual-only. |
 | Collaborator frame claims / Ask / Pass | Existing call data channel, `StudioClaimSnapshot` and `claimActions` | Advisory only; no native edit lock or Save authority. Preserve full device identity, receiver-observed countdowns and refused-send retries. |
 | Background join / missed edits / rotation | Existing actor Studio receiver, authenticated pages/head/seed, native idle worker | UI listens and re-reads; it must not implement another catch-up scheduler, source cache or receipt owner. Watches and provider service remain bounded. |
-| Phase / recovery / receive warnings | `studio-updated`, `settlement-changed`, `studio-receive-paused` | Invalidate matching observations, coalesce reads and fence old navigation/session results. Events are neither projections nor receipts. |
+| Phase / recovery / receive warnings | `studio-updated`, `settlement-changed`, `studio-sync-state`; legacy `studio-receive-paused` | Invalidate matching document observations and coalesce reads. Order current sync state separately by native incarnation/sequence; an old Read ACK/legacy pause cannot replace it. Events are neither projections nor receipts. |
 | Retained version inspect / backup | `studio_recovery_list/read/export/acknowledge` | Display historical versions separately. Export is `p1-recovery-v1`, not PIXA, fetched-media backup or an implemented import format. Acknowledge only the actual persisted warning pair. |
 | Per-item Restore / Copy / pointer restore | `studio_recovery_preview/apply/restore_pointer` | Preview again before each item; Apply echoes the exact fingerprint, epoch, choice, nonce and canonical body. Restore is additive; Copy explicitly permits its supported replacement/removal. Content recovery is ordinary provisional Save. Pointer restoration is separate. |
 | Local draft inspect / export / preserve / copy / dispose | `studio_overlay_read/lifecycle/export/archive/archive_read/archive_export/archive_release/dispose`, `studio_overlay_copy_preview/apply` | Use actual branch/content generations and typed eligibility. Copy never proves branch preservation; only an archive acknowledgement does. Destructive operations require their exact confirmation literals. |
@@ -60,10 +95,15 @@ are historical; final verification is recorded separately from implementation.
 `studio-updated` carries `{server,channel,object,objectKind?}`. `settlement-changed` adds
 `{docType,logicalKey,state}`; Score carries `objectKind:"score"`. Its complete state vocabulary
 is `open`, `closing`, `settled`, `fault`, `recoveryAvailable`, `recoveryEvictionPending`,
-`refreshRequired`, `repairing`, `storageRefused`. `studio-receive-paused` carries `{server}`.
+`refreshRequired`, `repairing`, `storageRefused`. Legacy `studio-receive-paused` carries `{server}`.
+`studio-sync-state` carries `{server,instance,sequence,paused,cause,detail}`; instance/sequence are
+lossless decimal u64 strings. Cause is background/incoming/null and actual detail is bounded to
+512 characters at origin. Resumed state clears both. See [INTERFACES](INTERFACES.md) for ordering,
+legacy fallback and the bounded 128-server cache/reset/cold-reconciliation limits.
 Phase and recovery notices are independent; always re-read the actual relevant state.
-An explicit successful access resumes a paused receiver; read/list calls do not emit an
-invalidation loop. Dispose listeners on session/component teardown.
+Only a completely successful explicit access resumes a paused receiver and emits current state;
+failed reads and read-only fault controls do not. Read/list calls do not emit an invalidation
+loop. Dispose listeners on session/component teardown.
 
 ## Enforced limits and honest recovery boundaries
 

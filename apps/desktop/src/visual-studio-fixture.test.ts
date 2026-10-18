@@ -30,6 +30,10 @@ test("Studio opt-in remaps channels without changing the default chat fixture or
   assert.deepEqual(response("get_channels"), studio[0].channels);
   assert.deepEqual(response("get_messages"), visualFixtureResponse("get_messages", { server: 1, channel: "general" }));
   assert.deepEqual(response("get_messages", { channel: "2" }), visualFixtureResponse("get_messages", { server: 1, channel: "design" }));
+  const members = response("get_members") as {identity: string; you: boolean}[];
+  assert.ok(members.every(member => /^[0-9a-f]{64}$/.test(member.identity)));
+  assert.equal(members.find(member => member.you)?.identity, VISUAL_STUDIO_ME);
+  assert.equal((response("get_roles") as Record<string, string>)[VISUAL_STUDIO_ME], "owner");
   assert.throws(() => visualFixtureResponse("studio_list", target), /does not implement/);
 });
 

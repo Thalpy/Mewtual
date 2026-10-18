@@ -41,6 +41,7 @@ mod replay;
 /// Crate-visible because copy's detached planner lives in the store and calls `plan` directly.
 pub(crate) mod restore;
 mod settlement;
+mod sync_state;
 pub use control::{
     StudioArchiveReleaseRequest, StudioControlAction, StudioControlReady, StudioControlRequest,
     StudioControlResponse, StudioHandoffAttempt, StudioHandoffAttemptReason,
@@ -55,6 +56,7 @@ pub use restore::{
 };
 use settlement::SettlementNotices;
 pub use settlement::StudioSettlementState;
+pub use sync_state::{StudioSyncObservation, StudioSyncPauseCause};
 
 /// A linked id/Index hint is not evidence of an existing Score in this group and channel. The
 /// header probe classifies absent/wrong-family sources as missing; the full typed load then

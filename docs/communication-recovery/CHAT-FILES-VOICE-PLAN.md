@@ -1,7 +1,9 @@
 # Chat file sharing and voice reliability plan
 
-Prepared 17 October 2026. Status: proposed work; no runtime changes or acceptance results.
-Source baseline: `f3596ac859293293701b0e5d2dd0339bd7b1f5fe`, with pre-existing uncommitted
+Prepared 17 October 2026; amended 18 October 2026 following external design review.
+Status: proposed work; no runtime changes or acceptance results.
+Initial source baseline: `f3596ac859293293701b0e5d2dd0339bd7b1f5fe`. Amendments checked against
+`b2f26d0b208ca67952032cf44cbcbcc509b49033` and the current worktree, which contains unrelated
 Studio, native and frontend changes. Preserve those changes and record the actual implementation
 baseline before starting each package.
 
@@ -16,6 +18,11 @@ Use its invariants and [status ledger](STATUS.md), the canonical [message trace]
 [file contract](../design-file-reliability.md) and [voice contract](../design-voice.md).
 Older descriptions contain superseded behavior; check production call paths before treating
 a documented gap as an unfixed defect.
+
+Keep this programme's acceptance ledger separate from [Gate 7 acceptance](../GATE7-ACCEPTANCE.md).
+That gate covers the creative-suite create/save/restart/share/join/rotate/recover/export flow
+and production command/event/recovery handoff. Sharing a branch does not expand its completion
+criteria to this communication programme.
 
 ## Intended behavior
 
@@ -59,6 +66,7 @@ Source observations below identify inspection targets, not reproduced root cause
 
 Relevant implementation seams include `catcoms-discovery/src/reconnect.rs`, native
 `member_reconnect.rs`, `six_client_recovery.rs`, the app actor, sync catch-up/blob service,
+`catcoms-storage/src/kept.rs` and `catcoms-mls/src/channel.rs`,
 `voice-signaling.ts`, `call-identity.ts`, `callroutes.ts` and the call lifecycle in `App.svelte`.
 The current worktree already modifies `App.svelte`; coordinate surgical changes with that work.
 
@@ -96,6 +104,11 @@ keep chat obligations, file custody and ephemeral call sessions as distinct type
 Each package delivers a small reviewable change with focused regressions and an updated evidence
 ledger. Existing programme items CR02-CR08 and CR10 remain useful dependency labels; this plan
 does not mark them complete.
+
+Start with Package 0, narrow Package 1 fixes supported by reproductions, and Package 2's
+room/session investigation. Run Package 5A's existing TURN feasibility experiment alongside
+that early work; it need not wait for broader chat or file changes. Follow with Package 3 and
+Package 4, then Package 5B implementation and Package 6 rollout after their design gates pass.
 
 ### Package 0 Reproduce failures and pin the baseline
 
@@ -149,6 +162,15 @@ Audit the existing signal's recipient and replay binding explicitly: `KIND_CALL_
 currently outside `kind_binds_requester_peer`. Reusing its signature alone cannot establish the
 new forwarding envelope's recipient, call-incarnation or duplicate-rejection guarantees.
 
+Distinguish stable room identity, each participant's fresh join incarnation, and negotiation
+generation within that join. Authenticate and pin the signalling protocol mode for the exact
+endpoint session. A session established under the upgraded protocol must never be mutated by
+legacy `bye`, heartbeat, offer, answer or ICE ingress. Supporting legacy direct peers requires
+explicitly separate state/admission rules; it cannot supply a fallback writer into protected state.
+Bridge changes, failed transport or missing/stripped capability fields cannot lower that protection.
+A restart ends the old call session and requires fresh authenticated negotiation; it cannot
+restore the old session with weaker checks or silently discard a retained protocol requirement.
+
 Use fresh expiring self-announcements and challenge/session evidence where current liveness is
 claimed. A forwarded old heartbeat cannot renew presence merely because it arrived recently.
 Bound duplicate suppression and forwarding, prevent loops and storm amplification, and retain
@@ -158,6 +180,15 @@ duplicate and reordered offers/answers/ICE with negotiation and call-generation 
 Leave, lock, group removal, room switch and actor replacement revoke pending effects. An old
 bye cannot dismiss a newer join. A peer's own signed state cannot authorize another member's
 presence, microphone, playback or recording consent. Update native mocks and UI tests as needed.
+
+Fence queued RTC callbacks and asynchronous continuations by the exact peer object and call/join/
+negotiation generation, not just the peer identity. Queue `ontrack`, connection-state and ICE
+callbacks and work suspended in `setRemoteDescription`; replace the peer or call before releasing
+them. They must not attach audio, send obsolete SDP or remove the replacement peer.
+
+Compatibility regressions must deliver each legacy signal type through the old handler into an
+upgraded session, including a different recipient, helper B replaced by D, same-channel leave/
+rejoin and missing capability fields. None may renew protected presence or mutate negotiation.
 
 Exit: A and C discover the same room through B, negotiate through B with A-C transport blocked,
 and recover through D without phantom participants, stale audio, duplicate peer objects or
@@ -191,11 +222,42 @@ provider. The latter needs end-to-end response binding, connected-only forwardin
 budgets, loop prevention and no arbitrary address/URL fetches. An advertised holder is a candidate;
 verify bytes and treat expiry as loss of evidence, not authority to delete a local copy.
 
-For explicitly requested Keep/download work, persist a versioned transfer intent and verified
-progress through existing sealed storage/reservations. Resume only after current membership,
-scope, exact manifest and disk state are revalidated. Preserve total attempt/deadline bounds;
-partial pages and provider swaps cannot reset them indefinitely. Add bounded whole-variant
-fallback without mixing encrypted variants into a fictitious retained manifest.
+Durable resume requires a reviewed retained-store state transition and migration first.
+`KeptBlobStore::load` currently deletes `pending` under its exclusive lease. `begin_keep` puts
+incomplete transfers there; `abort_keep` deletes them; `forget_kept` renames a released copy
+there before cleanup. A journal above this store cannot preserve bytes that startup deletes,
+and preserving all legacy `pending` directories would risk resurrecting a deliberate release.
+The actor's `ReadJob::fail` path also aborts Keep work, including admission when permits are busy.
+Separate transient suspension from an explicit durable cancellation before retaining partial work.
+
+The storage owner must reconcile versioned state and journal/reservation ownership under the
+exclusive lease, before admission or serving. Specify atomic ordering and crash recovery for:
+
+| Durable state | Permitted recovery |
+| --- | --- |
+| Resumable transfer | Revalidate authority, exact manifest and durable bytes; obtain fresh runtime ownership before resuming. |
+| Completed copy | Verify the committed result and retire stale transfer intent idempotently. |
+| Cancelled or deleting copy | Continue bounded cleanup; never resume fetching or restore serving eligibility. |
+| Damaged or inconsistent metadata | Retain conservative quota charges and expose blocked/manual recovery; do not infer ownership from a path. |
+
+Treat legacy `pending` as cleanup-only because it cannot distinguish an interrupted fetch from
+a release. Define new-format readers, migration barriers and old-client/downgrade behavior before
+writing resumable state; unsupported readers must not destructively reinterpret that state.
+An upper layer must not race mount cleanup. Incomplete bytes remain non-serving, and cleanup
+failure cannot refund surviving storage or multiply reservations after restart.
+
+For explicitly requested Keep/download work, persist the transfer intent, verified progress and
+execution-budget state through that revised sealed storage contract. Resume only after current
+membership, scope, exact manifest and disk state are revalidated. Distinguish the durable user
+request from a bounded execution window: the proposed default on budget exhaustion is a durable
+paused state requiring explicit user retry to grant a new bounded window. Restart, newly available
+providers and route changes cannot replenish an exhausted budget. Persist the retry grant and
+remaining budget conservatively before issuing work; interruption must not erase charged work.
+Specify nonpersistable runtime-deadline handling so reopen cannot silently extend the allowance.
+Transient capacity pressure may suspend unfinished work without discarding partial bytes, while
+explicit cancellation/release takes the cleanup path. Partial pages and provider swaps cannot
+reset execution bounds indefinitely. Add bounded whole-variant fallback without mixing encrypted
+variants into a fictitious retained manifest.
 Resuming an external download also revalidates its destination, current local write authority
 and no-overwrite policy; a saved path is not permission to replace a newly created file.
 
@@ -210,13 +272,30 @@ restart; corrupt/removed providers, manifest replacement, full disk and cancella
 Bulk work cannot monopolize chat/control/call setup. UI distinguishes metadata, partial bytes,
 verified local copy, remote custody evidence and no currently usable provider.
 
-### Package 5 Decide and implement voice media bridging
+Required crash/lifecycle regressions: reservation created before intent, intent committed before
+reservation, chunk durable before progress, completed-copy rename before journal retirement,
+and release rename before cleanup. Also exhaust the budget then restart with a healthy provider;
+release old worker results after cancellation, release, remount or a replacement transfer for
+the same file; and fail cleanup or corrupt metadata without gaining free quota. Test permit
+exhaustion preserves a resumable reservation without admitting uncharged network work.
+
+### Package 5A Establish voice media feasibility early
 
 Room/signalling fixes do not complete this package. First prove the existing personal/server TURN
 path under forced relay ICE and validate credentials, expiry, candidate selection and reconnect
 in the native webview. TURN provides an ICE relay mechanism; it does not supply room discovery.
 See [RFC 8656](https://www.rfc-editor.org/rfc/rfc8656.html) and
 the [WebRTC specification](https://www.w3.org/TR/webrtc/).
+
+Run this spike alongside Packages 0 and 2 using the existing TURN configuration, without adding
+a new relay service or encryption claim. Record the shipping WebView2 version, selected relay
+candidates, audible results, reconnect behavior and unavailable-path diagnostics. A failure is
+evidence for the architecture decision, not permission to relax endpoint authentication.
+
+Exit: the existing path's feasibility and limits are recorded separately from new protocol,
+storage and relay acceptance. No automatic member-hosted relay is enabled by this experiment.
+
+### Package 5B Decide and implement member media bridging
 
 Write an architecture decision comparing a reachable consented member-hosted TURN service with
 an encrypted media/datagram overlay over existing member links. Test feasibility on WebView2,
@@ -225,20 +304,47 @@ a TURN allocation; a loopback relay address is not remotely reachable. Account f
 delay if evaluating media on reliable mesh streams. Do not select a new dependency before its
 licence/advisory/build review and a latency/loss prototype.
 
-Prefer end-to-end DTLS-SRTP relay semantics for the first media experiment. Any design that
-terminates peer encryption or forwards decoded audio requires a separately implemented and
-reviewed frame-encryption design before claiming member-opaque media. MLS-derived key exposure
-alone is insufficient. Specify membership revocation for already-open calls and call/epoch changes.
+Define server membership, active call participation and relay authorization as separate roles,
+then trace which role can obtain or derive every key. The intended confidentiality boundary
+excludes a relay-only server member from media keys. Prefer end-to-end DTLS-SRTP with transparent
+relay semantics. Forwarded signalling must bind the original authenticated endpoint to its SDP
+and DTLS certificate fingerprint; an authenticated helper cannot substitute its own certificate.
+
+`ServerGroup::media_secret` derives the same key for all server members. That exporter key cannot
+exclude a relay-only member, even if frames are encrypted. Any architecture terminating endpoint
+encryption requires a separately implemented and reviewed participant-scoped frame-encryption
+and key-distribution mechanism that excludes nonparticipating relays before making this claim.
+Plaintext forwarding cannot satisfy it. MLS-derived key exposure alone is insufficient.
+Specify future-media access after call leave separately from server removal: a room departure
+need not advance the server's MLS epoch. Include participant removal, relay replacement and
+rejoin; do not claim revocation of plaintext or keys already disclosed to a prior participant.
 
 Bind relay authorization to the group, exact endpoints and live call; require explicit hosting
 consent, bounded allocations/bandwidth and expiring credentials. Prevent an open proxy, private
 network scanning and cross-group credential reuse. Specify relay health, failover, stop/leave
 cleanup and an honest failure state if no usable relay exists. Do not record or persist audio.
 
-Exit: real clients on forced non-direct paths can hear each other; a third member carries only
-encrypted media under the selected design. Relay loss triggers bounded recovery through an
-eligible alternative. Measure end-to-end latency, loss/jitter, bandwidth and resource ceilings.
-Keep this gated until physical-network and audible-device evidence exists.
+Name the server-side enforcement point for application scope. Standard TURN permissions concern
+IP addresses within allocations and ignore the CreatePermission port; they do not establish
+group/device/call authorization. Credential naming alone cannot implement this policy
+([RFC 8656 sections 9 and 10](https://www.rfc-editor.org/rfc/rfc8656.html#section-9)). Test a
+valid authorized credential against unrelated destinations, cross-group use, allocation refresh
+after call end and continued use after learned revocation. Existing third-party TURN support
+does not establish these stronger guarantees for a new member-hosted service.
+
+Define what each alternative route carries besides audio: the current peer connection also
+supports authenticated instrument/jam and drawing channels. Specify supported companion traffic,
+what remains unavailable and the UI behavior. An audio-only prototype cannot count as acceptance
+for a regression in those channels, consent or their authenticated capabilities.
+
+Exit: real clients on forced non-direct paths can hear each other. Give relay-only B its complete
+legitimate server MLS state, relay credentials and all relay-visible traffic, but no active call
+participation. The architecture/key-ownership trace must establish why these inputs do not yield
+endpoint media keys; observing ciphertext alone is insufficient. Test call leave, participant
+removal, relay replacement and rejoin against the specified future-media access policy. Relay
+loss triggers bounded recovery through an eligible alternative. Measure end-to-end latency,
+loss/jitter, bandwidth and resource ceilings. Keep this gated until physical-network and
+audible-device evidence exists.
 
 ### Package 6 Combined acceptance and rollout
 
@@ -252,6 +358,21 @@ Add versioned wire/storage fixtures and mixed-version refusal/fallback behavior 
 new envelopes, receipts or transfer journals. Roll out independently: connection fixes, room
 discovery/signalling, chat/file enhancements, then media relay. Disabling new recovery must retain
 accepted work; it must not disable existing authorization or downgrade authenticated group mode.
+Pin upgraded signalling mode at the endpoint-session boundary throughout rollout and rollback;
+an enabled legacy handler cannot mutate that session when new routing is disabled.
+
+Name these combined scenarios and exact oracles in the communication-recovery ledger:
+
+| Scenario | Required oracle |
+| --- | --- |
+| A-B-C with A-C forbidden | The harness rejects forbidden connections and records that recovery used only allowed edges. |
+| B relays without joining the room | A and C discover each other; B gains no participant tile, microphone or recording authority. |
+| Independent joins by A and C | Stable room discovery converges while participant join incarnations remain distinct. |
+| B disappears and D survives | Original identities and replay accounting survive; obsolete B routes retire without weakening authentication. |
+| History/blob saturation | Control, current chat, call setup and another group meet agreed progress/latency limits. |
+| A gives history to B, then both stop | C recovers from B's reopened durable state without a hidden live snapshot or test-only save. |
+| Provider returns after transfer exhaustion and restart | The durable paused/manual-retry policy holds; restart supplies no new budget. |
+| No usable media relay | Presence, signalling progress and unavailable audio remain distinct in native state and UI. |
 
 Provide redacted diagnostics for route class, recovery stage, outstanding obligation age, retries,
 provider failure, queue delay and media candidate class. Exclude message/file contents, keys,
@@ -288,3 +409,13 @@ evidence and real native clients for WebView/media behavior.
 Update architecture, interfaces, threat model, handover and per-feature evidence when their
 contracts change. This planning-only addition does not require runtime suites; implementation
 acceptance remains outstanding for every package above.
+
+## Design review amendments
+
+The 18 October external review identified three medium-priority plan amendments: retained-store
+resume migration, media-key audience, and isolation of upgraded sessions from legacy ingress.
+They are incorporated above as prerequisites and explicit regression criteria. The review also
+supplied TURN authority, queued RTC effects, companion-channel and combined-topology acceptance
+details, and separated early media feasibility from gated implementation. Package 0 and narrow
+reproduction-backed fixes remain the starting point. These dispositions accept planning changes;
+they do not close implementation, security review or native acceptance obligations.

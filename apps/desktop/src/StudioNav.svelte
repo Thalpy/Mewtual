@@ -9,7 +9,6 @@
   import { FLIPNOTE_H, FLIPNOTE_W } from "./studio-contract.ts";
   import { reason, type KnownView, type SaveRecord } from "./studio-session.ts";
   import { base64ToBytes, type NativeExpiry } from "./studio-native.ts";
-  import StudioFaultControls from "./StudioFaultControls.svelte";
 
   let { me, server, channel, onopen, onnotice } = $props<{
     me: string;
@@ -30,7 +29,6 @@
 
   const model = $derived.by(() => { void studio.rev; return session.indexModel; });
   const indexView = $derived.by(() => { void studio.rev; return session.index; });
-  const faultRevision = $derived.by(() => { void studio.rev; return session.faultGeneration; });
   const indexError = $derived.by(() => { void studio.rev; return session.indexError; });
   const indexOverlay = $derived.by(() => { void studio.rev; return session.indexOverlay; });
   const loading = $derived.by(() => { void studio.rev; return session.indexLoading && !session.index; });
@@ -338,7 +336,6 @@
     <li><p class="muted small">Nothing here yet.</p></li>
   {/if}
 </ul>
-{#if hasScope}<StudioFaultControls {session} object={null} revision={faultRevision} />{/if}
 {#if model?.overflow.length}
   <h3><span>Beyond the 64 shown</span></h3>
   <ul class="channel-list studio-nav">
@@ -357,7 +354,6 @@
 {/if}
 <button type="button" class="ghost small ctx-action studio-new" disabled={!indexView || !hasScope} onclick={newFlipnote}>+ new flipnote</button>
 <button type="button" class="ghost small ctx-action studio-new" disabled={!indexView || !hasScope} onclick={newScore}>+ new score</button>
-<p class="muted small">Any member can edit. The owner settles history.</p>
 
 <style>
   .studio-nav .studio-obj {

@@ -2302,6 +2302,7 @@ fn forward_events(
                 AppEvent::SnapshotNeeded => {}
                 event @ (AppEvent::StudioUpdated { .. }
                 | AppEvent::StudioReceivePaused
+                | AppEvent::StudioSyncState(_)
                 | AppEvent::SettlementChanged { .. }) => {
                     let state = app.state::<AppState>();
                     studio::forward_if_current(&state, server, instance, || match event {
@@ -2313,6 +2314,7 @@ fn forward_events(
                             serde_json::json!({"server": server, "channel": channel.to_string(), "object": object.map(hex::encode)}), trace,
                         ),
                         AppEvent::StudioReceivePaused => emit_tracked(&app, "studio-receive-paused", ServerEvt { server }, trace),
+                        AppEvent::StudioSyncState(observation) => emit_tracked(&app, "studio-sync-state", studio::sync_state_payload(server, instance, observation), trace),
                         _ => unreachable!(),
                     }).await;
                 }

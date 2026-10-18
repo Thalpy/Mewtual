@@ -1,5 +1,28 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Studio sync observation event (2026-10-18)
+
+`studio-sync-state` carries
+`{server,instance,sequence,paused,cause,detail}`. `instance` and `sequence` are canonical decimal
+u64 strings, never JavaScript numbers. The native server incarnation orders replaced actors;
+sequence orders states within one actor. `cause` is `"background"|"incoming"|null`; detail is
+the actual local failure bounded to 512 characters at origin (the frontend accepts at most 2048).
+Resumed observations have null cause/detail. These fields are private local diagnostics, not
+settlement evidence, peer identity or authoring authority.
+
+Actor emits the new state before the retained legacy `studio-receive-paused` event. Whole-run
+successful explicit access emits current state, including the initial healthy sequence-zero state;
+failed access and read-only fault/lifecycle inspection do not imply resume. The frontend ignores
+older incarnations/sequences and duplicate events, and uses legacy Read/Save inference only until
+an authoritative observation exists. Up to 128 recent locally selected server observations survive
+channel/server navigation; reset/lock clears all private details. Cold/evicted scopes immediately
+read Index to reconcile current state; their previous ordering watermark is unavailable until
+fresh state arrives. No receiver event creates an invalidation/read feedback loop.
+
+PIXA inline previews and Studio Post to chat reuse the contracts described in
+[GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md): streamed fileshare upload returns the attachment CID;
+publication of a separate Studio reference remains a different action.
+
 ## Gate 7 UI completion candidate (2026-10-17)
 
 The current [UI handoff](GATE7-UI-HANDOFF.md) supersedes historical absence claims for PIXA
@@ -1224,7 +1247,8 @@ explicit Studio access; new traffic cannot restart it. Pre-drain failure retains
 an ingest error may already have consumed it. `studio-receive-paused` carries `{server}` once on
 that transition; UI should warn and offer explicit reopen/retry, not call it a settlement fault
 or proof of local corruption. Authenticated missing-dependency/causal-invalid input can also pause.
-This warning event still needs the user-owned UI listener; it is not a persistent UI status query.
+The retained legacy warning is supplemented by the ordered `studio-sync-state` contract above;
+the UI no longer infers a current pause from a stale legacy event after observing that contract.
 The mounted store now retains at most one verified owned Studio source of at most 8 MiB encoded
 input. `with_studio_source` reuses it for explicit views; an independent Index/list refresh preserves
 opened art while warming only the Index footprint. `receive_studio_step_reusing` takes the unit
@@ -4090,7 +4114,8 @@ Authored durations now reach the same engine through engine-minted archival even
 including the existing local/shared `.jamtake` consumer; raw live notes keep the 30s lost-off
 watchdog. Combined events/seek reconstruction are bounded per tick, suspended remote playback
 cannot resume the context and pending download cancellation survives Deafen/navigation edges.
-Shared-deck PIXA media-kind/consensus and a standalone global viewer remain later Gate 7/UI work.
+Shared-deck PIXA, a global viewer and bounded silent inline previews are implemented through the
+existing transport/file-reader/StudioAudioSession paths; see the current Gate 7 handoff above.
 
 The static Rust `ScoreOp` codec and frontend types are reused by the implemented typed Score
 target/native/session path. Shared canonical vectors and exact bounds remain documented in

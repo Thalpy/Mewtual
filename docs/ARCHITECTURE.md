@@ -1,5 +1,33 @@
 # Mewtual; Architecture
 
+## Studio UX and ordered sync observations (2026-10-18)
+
+Studio keeps Art, Sound, Music and History separate. Server settings owns fault inspection and
+explicit owner decisions through an independent typed target wrapper; it never resets the editor's
+shared session or manufactures a winning receipt. Normal owner maintenance and already chosen
+repair work continue automatically through the existing actor.
+
+Chat/wiki and file details share one App-owned inline PIXA manager: one serial native read,
+two retained encoded packages, 128 observed hosts, one repaint timer and only current rasters.
+Pictures loop silently under the existing file trust preference; sound requires a local click and
+uses the existing StudioAudioSession/JamEngine with token-owned cleanup. Membership, navigation,
+lock, visibility and trust edges retire reads/packages/consent. A retained same-channel host may
+renew its scope only on a fresh explicit Play. Package arrival uses the existing chat media-load
+capture listener; individual frame paints do not trigger scroll work.
+
+Post to chat exports the displayed composition, streams it through ordinary fileshare upload,
+then appends its returned file CID to the existing draft and opens chat. Ordinary Send retains
+durable retry ownership. Navigation (including A → B → A), membership, lock and window-close
+intent revoke the upload's permission to edit the composer, although a completed file may remain
+in Files. This does not create a Studio history reference or claim remote custody.
+
+Receiver pause/resume observations now carry actor-local sequence, bounded actual failure detail
+and native server incarnation. Successful whole explicit access emits current state; a failed
+access and read-only fault controls cannot resume receiving. StudioSession orders these lossless
+u64 labels and caches 128 recent local server observations across navigation, clearing them on
+lock/session reset. A cold/evicted scope refreshes Index to obtain current native state. This is
+diagnostic state only; no wire, persistence, authoring or settlement authority changes.
+
 ## Gate 7 UI completion candidate (2026-10-17)
 
 PIXA now extends the existing Jukebox archival branch and global file details viewer, using the

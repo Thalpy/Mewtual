@@ -482,6 +482,20 @@ pub(crate) async fn forward_if_current(
     true
 }
 
+/// Preserve lossless ordering and actor incarnation through the renderer boundary. The detail
+/// is private display data; it cannot select a repair or change any persistence decision.
+pub(crate) fn sync_state_payload(
+    server: u64,
+    instance: u64,
+    observation: catcoms_app::studio::StudioSyncObservation,
+) -> Value {
+    use catcoms_app::studio::StudioSyncPauseCause;
+    serde_json::json!({ "server": server, "instance": instance.to_string(), "sequence": observation.sequence.to_string(),
+        "paused": observation.paused, "cause": observation.cause.map(|cause| match cause {
+            StudioSyncPauseCause::Background => "background", StudioSyncPauseCause::Incoming => "incoming"
+        }), "detail": observation.detail })
+}
+
 #[tauri::command]
 pub(crate) async fn studio_list(
     state: State<'_, AppState>,

@@ -37,6 +37,7 @@ import {
   DEFAULT_FPS,
   SETTLEMENT_CHANGED_EVENT,
   STUDIO_RECEIVE_PAUSED_EVENT,
+  STUDIO_SYNC_STATE_EVENT,
   STUDIO_UPDATED_EVENT,
   StudioNativeError,
   expiryForBody,
@@ -54,6 +55,7 @@ import {
   overlayLifecycle,
   overlayRead,
   parseReceivePaused,
+  parseStudioSyncState,
   parseSettlementChanged,
   parseStudioUpdated,
   publishPix,
@@ -289,6 +291,12 @@ export class StudioSession {
   private workerSeq = 0;
 
   receivePaused = false;
+  receivePauseDetail = "";
+  private syncObservation: ReturnType<typeof parseStudioSyncState> | null = null;
+  // Navigation must not make an older server event new again. These are locally selected
+  // server ids, with a bounded recent-server cache; a cold/evicted scope refreshes its Index
+  // immediately and the backend emits its current observation on that successful read.
+  private readonly syncByServer = new Map<number, ReturnType<typeof parseStudioSyncState>>();
   readonly listeners = new Set<() => void>();
 
   // Blobs
@@ -367,7 +375,13 @@ export class StudioSession {
   setScope(scope: StudioScope | null): void {
     if (this.scope && scope && this.scope.server === scope.server && this.scope.channel === scope.channel) return;
     if (!this.scope && !scope) return;
+    const sync = scope ? this.syncByServer.get(scope.server) ?? null : null;
     this.clearScoped();
+    // Sync belongs to the server, not a channel or editor mount. Restore its ordering watermark
+    // across both channel navigation and A → B → A server navigation.
+    this.syncObservation = sync;
+    this.receivePaused = sync?.paused ?? false;
+    this.receivePauseDetail = sync?.detail ?? "";
     this.scope = scope;
     this.generation++;
     this.notify();
@@ -377,6 +391,7 @@ export class StudioSession {
   /// Lock or session change: forget everything, including cached pixels and unsaved work.
   reset(): void {
     this.clearScoped();
+    this.syncByServer.clear(); // pause details are private session state, cleared on lock
     this.scope = null;
     this.generation++;
     this.blobs.clear();
@@ -400,6 +415,7 @@ export class StudioSession {
     this.records.length = 0;
     this.saving = 0;
     this.receivePaused = false;
+    this.receivePauseDetail = ""; this.syncObservation = null;
     // Queued jobs are dropped; started ones keep their slot until they actually finish.
     for (const [key, job] of this.jobs) {
       if (job.started) continue;
@@ -462,6 +478,7 @@ export class StudioSession {
     const handles = await Promise.all([
       this.ipc.listen<unknown>(STUDIO_UPDATED_EVENT, (e) => this.onStudioUpdated(e.payload)),
       this.ipc.listen<unknown>(STUDIO_RECEIVE_PAUSED_EVENT, (e) => this.onReceivePaused(e.payload)),
+      this.ipc.listen<unknown>(STUDIO_SYNC_STATE_EVENT, (e) => this.onStudioSyncState(e.payload)),
       this.ipc.listen<unknown>(SETTLEMENT_CHANGED_EVENT, (e) => this.onSettlementChanged(e.payload)),
     ]);
     this.unlisten.push(...handles);
@@ -484,8 +501,25 @@ export class StudioSession {
   onReceivePaused(payload: unknown): void {
     let ev;
     try { ev = parseReceivePaused(payload); } catch { return; }
-    if (!this.scope || ev.server !== this.scope.server) return;
+    if (!this.scope || ev.server !== this.scope.server || this.syncObservation) return;
     this.receivePaused = true;
+    this.notify();
+  }
+  onStudioSyncState(payload: unknown): void {
+    let event;
+    try { event = parseStudioSyncState(payload); } catch { return; }
+    if (!this.scope || event.server !== this.scope.server) return;
+    const previous = this.syncObservation;
+    // Incarnations are native monotonic ids; actor sequences restart only with a new actor.
+    // A delayed old pause or Read ACK must never overwrite the latest observed sync state.
+    if (previous && (BigInt(event.instance) < BigInt(previous.instance) ||
+      (event.instance === previous.instance && BigInt(event.sequence) <= BigInt(previous.sequence)))) return;
+    this.syncObservation = event;
+    this.syncByServer.delete(event.server);
+    this.syncByServer.set(event.server, event);
+    if (this.syncByServer.size > 128) this.syncByServer.delete(this.syncByServer.keys().next().value!);
+    this.receivePaused = event.paused;
+    this.receivePauseDetail = event.detail ?? "";
     this.notify();
   }
   onSettlementChanged(payload: unknown): void {
@@ -534,7 +568,7 @@ export class StudioSession {
       this.index = view;
       this.indexModel = indexModel(view.content);
       this.indexError = "";
-      this.receivePaused = false; // a successful explicit read resumes the receiver
+      if (!this.syncObservation) this.receivePaused = false; // legacy bridge only
       this.noteEpoch(null, view.epochId);
     } catch (e) {
       if (!this.current(gen) || req !== this.indexReq) return;
@@ -636,7 +670,7 @@ export class StudioSession {
         this.rememberView(object, view, model, score);
         this.noteEpoch(object, view.epochId);
       } else { this.known.delete(object); this.views.delete(object); }
-      this.receivePaused = false;
+      if (!this.syncObservation) this.receivePaused = false;
       this.patchDoc(object, { view, model, score, absent: view === null, error: "", loading: false });
     } catch (e) {
       if (!this.current(gen) || req !== this.docReq.get(object)) return;
@@ -1536,7 +1570,7 @@ export class StudioSession {
         if (s.object) this.invalidate({ objects: [s.object] });
         else this.invalidate({ index: true });
       }
-      this.receivePaused = false;
+      if (!this.syncObservation) this.receivePaused = false;
       this.finish(s);
     } catch (e) {
       if (!this.current(gen)) return;

@@ -1123,6 +1123,8 @@ pub enum AppEvent {
     /// dependencies). Explicit successful Studio access retries it; inbound traffic alone does
     /// not. Neither local corruption nor a receipt/settlement fault is implied.
     StudioReceivePaused,
+    /// Ordered local pause/resume observation. This carries no document or settlement result.
+    StudioSyncState(crate::studio::StudioSyncObservation),
     /// The shared channel directory changed; the UI should re-fetch it (`channels`).
     ChannelsUpdated,
     /// A channel's rendered content changed; the UI should re-fetch it (`messages`). Using
@@ -4540,6 +4542,9 @@ where
                             let object = match target { catcoms_replication::studio::StudioTarget::Index { .. } => None,
                                 catcoms_replication::studio::StudioTarget::Flipnote { object, .. } | catcoms_replication::studio::StudioTarget::Score { object, .. } => Some(object) };
                             let _ = event_tx.send(AppEvent::StudioUpdated { channel: u128::from_be_bytes(target.channel()), object }).await;
+                        }
+                        if let Some(observation) = studio_receiver.take_sync_notice() {
+                            let _ = event_tx.send(AppEvent::StudioSyncState(observation)).await;
                         }
                         if studio_receiver.take_pause_notice() {
                             let _ = event_tx.send(AppEvent::StudioReceivePaused).await;

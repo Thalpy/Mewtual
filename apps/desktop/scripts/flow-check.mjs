@@ -128,6 +128,17 @@ class Cdp {
   }
 
   #onMessage(msg) {
+    if (msg.method === "Runtime.bindingCalled" && msg.params.name === "gate7Capture") {
+      const name = msg.params.payload;
+      // Only known test artifacts can be written through this page-to-runner binding.
+      if (!["file-preview", "art", "sound", "music", "history", "chat"].includes(name)) return;
+      void (async () => {
+        const capture = await this.send("Page.captureScreenshot", { format: "png" });
+        if (capture.result?.data) writeFileSync(new URL(`../../../target/gate7-${name}.png`, import.meta.url), Buffer.from(capture.result.data, "base64"));
+        await this.send("Runtime.evaluate", { expression: "window.__gate7Captured?.()" });
+      })().catch(error => this.consoleErrors.push(String(error)));
+      return;
+    }
     if (msg.method === "Runtime.bindingCalled" && msg.params.name === "gate7Click") {
       // Test-only trusted mouse input at the freshly observed button centre. Keep browser audio
       // activation policy intact: programmatic HTMLElement.click() alone cannot qualify Play.
@@ -643,12 +654,13 @@ try {
 
   if (process.env.FLOW_SCENARIO === "gate7") {
     await cdp.send("Runtime.addBinding", { name: "gate7Click" });
+    await cdp.send("Runtime.addBinding", { name: "gate7Capture" });
     await cdp.send("Emulation.setDeviceMetricsOverride", { width: 900, height: 640, deviceScaleFactor: 1, mobile: false });
     await cdp.navigate(URL_UNDER_TEST + "&studio=1");
     await cdp.waitReady();
     const golden = JSON.parse(readFileSync(new URL("../../../crates/catcoms-replication/tests/fixtures/studio-export-v1.json", import.meta.url), "utf8"));
     const result = await cdp.eval(gate7FlowExpression(golden));
-    failed |= !assertEqual("Gate 7 global viewer and shared PIXA deck", result, { viewerFirstFrame: true, viewerHasPixels: true, viewerAdvances: true, viewerRepaints: true, viewerClosed: true, deckHasCanvas: true, noMediaElementForPixa: true, focusHasCanvas: true, deckAdvances: true, deckRepaints: true, pauseHoldsFrame: true, nativeCaps: true, permitsRetired: true });
+    failed |= !assertEqual("Gate 7 Studio attachments, inline playback and shared PIXA deck", result, { fileInlinePlays: true, fileInlineLoops: true, viewerFirstFrame: true, viewerHasPixels: true, viewerAdvances: true, viewerRepaints: true, viewerClosed: true, studioTabs: true, studioCanvasFits: true, postPreservesDraft: true, postUploadedPixa: true, postSendsNormally: true, chatInlinePlays: true, chatInlineLoops: true, stalePostRevoked: true, closePostRevoked: true, deckHasCanvas: true, noMediaElementForPixa: true, focusHasCanvas: true, deckAdvances: true, deckRepaints: true, pauseHoldsFrame: true, nativeCaps: true, permitsRetired: true });
     const capture = await cdp.send("Page.captureScreenshot", { format: "png" });
     if (capture.result?.data) writeFileSync(new URL("../../../target/gate7-pixa-focus.png", import.meta.url), Buffer.from(capture.result.data, "base64"));
   } else {

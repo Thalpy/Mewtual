@@ -1,5 +1,28 @@
 # Mewtual; Handover
 
+## Studio UX corrections — implementation complete, final checks running (2026-10-18)
+
+The owner's follow-up UI issues are implemented: Post to chat stages a real streamed PIXA
+attachment without replacing draft text; chat/wiki/file details play silent looping previews;
+Art/Sound/Music/History are separate; repair lives in Server settings; new palettes run white
+to black and include fixed purple. Existing encoded palettes/indices and authored sound holds
+are preserved. The canvas fits at the native window size and Studio reserves the member rail
+for drawing. Technical filler and misleading waiting/receipt/download prose were removed.
+
+Receiver diagnostics now use ordered native incarnation/actor sequence observations with the
+actual bounded cause. Healthy solo operation and real corrupt/restore pause/resume are tested.
+Read-only controls cannot resume receiving, stale reads/events cannot replace retained current
+state, and channel/server navigation retains 128 recent local server watermarks. Reset/eviction
+needs fresh Index reconciliation; this is private diagnostic state, not protocol authority.
+
+Focused regressions and the real App headless Edge flow pass, including distinct pixels,
+automatic inline loops, draft-preserving Send, ABA upload rejection and a late upload after
+window-close continuity capture. Read-only reviews found no blocker/high; their medium/low
+fixes have focused coverage. Final root/native/frontend suites and builds are being run
+sequentially with two Rust build jobs; the ledger records their exact results. The previous
+partial root run was stopped for these UI changes and is not a full-suite pass. Two desktops
+remain explicitly deferred; native audible/platform observations are not supplied by fixtures.
+
 ## Gate 7 UI completion candidate — verification in progress (2026-10-17)
 
 The current worktree connects PIXA file recognition/picker, shared Jukebox canvas/focus playback

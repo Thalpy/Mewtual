@@ -15,6 +15,7 @@ mod preview;
 mod receiver;
 mod recovery;
 mod recovery_restore;
+mod sync_state;
 
 #[test]
 fn score_diagnostics_distinguish_effective_removal_from_raw_winner() {

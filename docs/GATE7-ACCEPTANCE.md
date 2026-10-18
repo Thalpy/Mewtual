@@ -1,6 +1,48 @@
 # Gate 7 acceptance and evidence ledger
 
-## UI completion candidate — Gate OPEN pending final verification (2026-10-17)
+## UX corrections and final verification (2026-10-18)
+
+The owner requested working Post to chat, inline looping playback, simpler Sound/Music/history,
+repair in Server settings, removal of technical filler and a corrected default palette. These
+changes are implemented; [GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md) records the workflow and limits.
+Post stages the actual uploaded fileshare CID without replacing the draft or bypassing durable
+Send. New white-to-black/purple defaults do not rewrite existing encoded palettes or pixel indices.
+
+The solo-server pause investigation found a stale frontend boolean with no ordered resume state;
+the old debug log does not identify the user's particular failure cause. New actor/native events
+carry bounded actual reasons and lossless incarnation/sequence ordering. A healthy solo server
+and an actually corrupted/restored owned source have focused backend regressions. Successful
+whole access, not elapsed time/read-only inspection, resumes receiving. Reset/128-server cache
+eviction is an explicit diagnostic reconciliation boundary.
+
+The prior full root attempt (`gate7-final-root-tests.log`) was stopped when this UX work arrived;
+its partial passes are not complete-suite evidence. Final suites start only after implementation
+and focused regressions are coherent, run sequentially with `CARGO_BUILD_JOBS=2`, and are recorded
+below. The owner explicitly defers two desktops. Browser fixtures do not establish native audible
+hardware or other-platform release observations.
+
+Both read-only actual-diff reviews have no remaining BLOCKER/HIGH/MEDIUM findings. Fixes cover
+channel/server stale pause ordering, bounded private logs, inline membership renewal, exact
+instrument cleanup, import constraints, missing-tenure truthfulness, list ABA and close-time
+composer authority. Actual AudioContext failure lacks a direct App regression; focused manager
+tests pin cancelled pending starts and token cleanup, and the failed-owner branch was reviewed.
+
+| Check / log under `target/` | Current result |
+|---|---|
+| Root solo and damaged-source sync (`gate7-ux-sync-root.log`) | PASS, 2/2 |
+| Native lossless state conversion (`gate7-ux-sync-native.log`) | PASS, 1/1 |
+| Focused UI/fixture/sync/preview (`gate7-ux-regressions.log`) | PASS, 58/58 |
+| Final preview/Sound (`gate7-ux-preview-sound.log`) | PASS, 16/16 |
+| Expanded actual App Edge flow (`gate7-ux-browser-flow.log`) | PASS: Post/export/upload/Send, inline loops, fitted canvas, ABA/close rejection, global/deck/focus pixels, pause, native caps/cancellation |
+| Frontend static check (`gate7-ux-check.log`) | PASS, 0 errors/warnings |
+| Complete root workspace (`gate7-ux-final-root.log`) | RUNNING, sequential bounded jobs |
+| Complete native/frontend suites and final lint/build/startup | PENDING, after the root suite |
+
+Screenshots inspected at 900 × 640: `gate7-art.png`, `gate7-sound.png`, `gate7-music.png`,
+`gate7-history.png`, `gate7-chat.png`, `gate7-file-preview.png`. The optional global/focus view
+remains available; ordinary chat/file playback does not require opening it.
+
+## UI completion checkpoint — Gate OPEN at this date (2026-10-17)
 
 After `f3596ac8` the owner asked to close the remaining UI gaps. This candidate implements
 shared-deck PIXA recognition/picker/canvas/focus, a global file viewer from file details, explicit
@@ -8,8 +50,8 @@ source/Registry owner fault repair, and separate ticketed Closing local-draft Sa
 still explicitly defers two desktops; native audible hardware/platform evidence stays separate.
 The current contract and authority limits are in [GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md).
 
-Focused implementation checks are coherent. Complete suites are now running sequentially,
-with `CARGO_BUILD_JOBS=2` and limited test concurrency. Current evidence includes real detached
+Focused implementation checks were coherent at this checkpoint. A whole-suite attempt was later
+stopped for the owner's additional UX corrections; see the 2026-10-18 record above. Evidence here includes real detached
 Closing save/retry, actual rendered repair/Closing buttons and headless Edge global viewer /
 shared-deck playback. Final full-suite and build/lint results are not yet claimed.
 

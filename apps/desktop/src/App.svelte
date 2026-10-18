@@ -6,7 +6,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
-  import { onMount, tick, untrack } from "svelte";
+  import { onDestroy, onMount, tick, untrack } from "svelte";
   import { renderMessage, renderTextDocument, renderWiki, parseRedirect, tocDirective } from "./render";
   import {
     TEXT_PREVIEW_MAX_BYTES, decodeTextFile, lineCountLabel, textFileKind,
@@ -250,6 +250,8 @@
   import { JamTakeTransport } from "./jam-take-transport.ts";
   import { JamTakeSuppression } from "./jam-take-suppression.ts";
   import PixaCanvas from "./PixaCanvas.svelte";
+  import ServerStudioSettings from "./ServerStudioSettings.svelte";
+  import { PixaPreviewManager, type PixaPreviewScope } from "./pixa-preview.ts";
   import { decodePixaBase64, mayFetchPixa, PixaMediaCache, PixaFileReader, PIXA_MIME } from "./pixa-media.ts";
   import { encodePixa, PIXA_MAX_BYTES, type Pixa } from "./pixa.ts";
   import { planJamArchivalPlayback, archivalReleaseTailMs } from "./jam-archival-plan.ts";
@@ -572,6 +574,7 @@
     { id: "joinlog", label: "Join Log", cat: "People" },
     { id: "emoji", label: "Emoji & Stickers", cat: "Content" },
     { id: "filetrust", label: "File Trust", cat: "Content" },
+    { id: "studio", label: "Studio", cat: "Content" },
     { id: "calls", label: "Calls & Relay", cat: "Voice" },
     { id: "leave", label: "Leave Server", cat: "Danger", danger: true },
   ];
@@ -10609,11 +10612,10 @@
   }
 
   function mayAutoLoadSharedFile(file: UiFile, server: number | null = activeServerId): boolean {
-    // "Media" for the media-only mode is what the renderer would decode inline: a declared
-    // image, audio or video type the safe list admits. Anything else waits for a click. This is
-    // screening only; the native catcoms-media handler re-checks the declared type against the
-    // real container bytes and stays the authority on what gets a body.
-    const fileClass: PassiveFileClass = safeMime(file.mime) !== "" ? "validated-media" : "non-media";
+    // The media-only preference covers platform media and our bounded PIXA canvas decoder.
+    // This class is screening, not validation: the native media handler checks platform
+    // containers, while PixaFileReader applies the 9 MiB cap and strict PIXA/PIX/take validation.
+    const fileClass: PassiveFileClass = safeMime(file.mime) !== "" || mediaKind(file.name, file.mime) === "pixa" ? "validated-media" : "non-media";
     return server !== null && mayAutoLoadFile(fileTrustFor(server), file.author_identity, file.author_verified, fileClass);
   }
 
@@ -10645,6 +10647,7 @@
    * so it must be returned to an inert button/text placeholder here as well as clearing caches.
    */
   function revokePassiveMedia() {
+    pixaPreviews?.reset();
     mediaUrls = {};
     emojiUrls = {};
     if (typeof document === "undefined" || activeServerId === null) return;
@@ -10831,6 +10834,10 @@
       span.setAttribute("data-resolved", "1");
       const mime = safeMime(file.mime);
       const alt = span.getAttribute("data-alt") || file.name || "";
+      if (mediaKind(file.name, file.mime) === "pixa") {
+        span.replaceWith(makePixaPreview(file));
+        continue;
+      }
       if (!mime) {
         span.replaceWith(downloadChip(file));
         continue;
@@ -11587,6 +11594,48 @@
   // band). Never gates anything; driven by 'eclipse-changed'. Reset when switching servers.
   let eclipseCaution = $state(false);
 
+  let pixaPreviews: PixaPreviewManager | null = null;
+  function pixaPreviewScope(): PixaPreviewScope | null {
+    return activeServerId !== null && cur?.active ? { server: activeServerId, channel: cur.active,
+      generation: uiStateLoadGeneration, membership: studioMembership, surface: view } : null;
+  }
+  function makePixaPreview(file: UiFile, explicit = false): HTMLElement {
+    const scope = pixaPreviewScope();
+    if (!scope) return downloadChip(file);
+    if (!pixaPreviews) pixaPreviews = new PixaPreviewManager({
+      reader: new PixaFileReader(invoke, jamNonce()),
+      current: (target, expected) => {
+        const current = pixaPreviewScope(), listed = filesByCid.get(expected.cid);
+        return !locked && !!current && current.server === target.server && current.channel === target.channel &&
+          current.generation === target.generation && current.membership === target.membership && current.surface === target.surface &&
+          !!listed && listed.size === expected.size && mediaKind(listed.name, listed.mime) === "pixa";
+      },
+      autoLoad: (target, expected) => {
+        const listed = filesByCid.get(expected.cid);
+        return !!listed && mayAutoLoadSharedFile(listed, target.server);
+      },
+      renewScope: (previous, expected) => {
+        const current = pixaPreviewScope(), listed = filesByCid.get(expected.cid);
+        return !locked && current?.server === previous.server && current.channel === previous.channel &&
+          listed?.size === expected.size && mediaKind(listed.name, listed.mime) === "pixa" ? current : null;
+      },
+      startAudio: (token, value, target) => startStudioAudio("flipnote", async () => encodePixa(value), true, 0, { token, scope: target }),
+      stopAudio: token => { if (inlinePixaAudioOwner?.token === token) stopStudioAudio(); },
+      audioState: token => inlinePixaAudioOwner?.token === token && studioAudioState.state !== "stopped" ? studioAudioState : null,
+    });
+    return pixaPreviews.create(file, scope, explicit);
+  }
+  function filePixaPreview(node: HTMLElement, file: UiFile) {
+    let host = makePixaPreview(file, true); node.append(host);
+    return { update(next: UiFile) { host.remove(); host = makePixaPreview(next, true); node.append(host); }, destroy() { host.remove(); pixaPreviews?.reconcile(); } };
+  }
+  $effect(() => {
+    void locked; void activeServerId; void cur?.active; void view; void uiStateLoadGeneration; void studioMembership; void callDeafened;
+    untrack(() => pixaPreviews?.reset());
+  });
+  $effect(() => { void files; untrack(() => pixaPreviews?.reconcile()); });
+  onDestroy(() => pixaPreviews?.destroy());
+
   // One global animation viewer works from Files and any chat/wiki file reference. Opening
   // requests bytes explicitly; playback needs its own gesture and uses Studio's existing synth.
   let pixaViewer = $state.raw<{ generation: number; server: number; file: UiFile; pixa: Pixa | null; error: string } | null>(null);
@@ -11610,7 +11659,7 @@
   function playPixaViewer() {
     const value = pixaViewer?.pixa;
     if (!value) return;
-    void studioAudioActions.start("flipnote", async () => encodePixa(value), false)
+    void studioAudioActions.start("flipnote", async () => encodePixa(value), true)
       .then(started => { if (!started && pixaViewer?.pixa === value) toast("Playback is unavailable; check Deafen and press Play to try again", "info"); })
       .catch(e => toast(String(e), "err"));
   }
@@ -13104,25 +13153,31 @@
   let studioAudioState = $state<StudioAudioState>({ state: "stopped", elapsedMs: 0 });
   let studioAudioGeneration = 0;
   let studioMembership = $state(0);
+  let inlinePixaAudioOwner = $state.raw<{ token: object; scope: PixaPreviewScope } | null>(null);
   function stopStudioAudio() {
     studioAudioGeneration++;
     studioAudio?.stop();
     studioAudioState = { state: "stopped", elapsedMs: 0 };
+    inlinePixaAudioOwner = null;
   }
   function studioAudioScope() {
-    return !locked && (view === "studio" || pixaViewer !== null) && activeServerId !== null && cur?.active
+    return !locked && (view === "studio" || pixaViewer !== null || inlinePixaAudioOwner !== null) && activeServerId !== null && cur?.active
       ? { generation: studioAudioGeneration, server: activeServerId, channel: cur.active, membership: studioMembership } : null;
   }
-  const studioAudioActions: StudioAudioActions = {
-    start: async (kind, prepare, loop, offset) => {
+  async function startStudioAudio(kind: Parameters<StudioAudioActions["start"]>[0], prepare: Parameters<StudioAudioActions["start"]>[1], loop: boolean, offset = 0, owner: typeof inlinePixaAudioOwner = null): Promise<boolean> {
+      stopStudioAudio(); inlinePixaAudioOwner = owner;
       suppressCurrentTake();
       const engine = ensureJamEngine();
       if (studioAudioEngine !== engine) { studioAudio?.stop(); studioAudioEngine = engine; studioAudio = new StudioAudioSession(engine); }
       studioAudio!.setScope(studioAudioScope(), callDeafened);
       const pending = studioAudio!.start(kind, prepare, loop, offset);
       studioAudioState = studioAudio!.state;
-      const started = await pending; studioAudioState = studioAudio!.state; return started;
-    },
+      const started = await pending; studioAudioState = studioAudio!.state;
+      if (!started && inlinePixaAudioOwner === owner) inlinePixaAudioOwner = null;
+      return started;
+  }
+  const studioAudioActions: StudioAudioActions = {
+    start: (kind, prepare, loop, offset) => startStudioAudio(kind, prepare, loop, offset),
     stop: stopStudioAudio,
   };
   async function shareStudioScore(take: JamTake, server: number): Promise<void> {
@@ -13131,13 +13186,33 @@
     await addSharedFile(new File([JSON.stringify(take)], name, { type: JAM_TAKE_MIME }), "", name, JAM_TAKE_MIME);
     // Reuse the existing sealed file upload path and jukebox-compatible take, not another media
     // store. Upload custody is separate from any owner receipt for the original Score document.
-    toast("Score take saved to this server's share; the jukebox can queue it (normal expiry applies)", "ok", 6000);
+    toast("Music track added to Files.", "ok", 5000);
   }
   async function shareStudioPixa(bytes: Uint8Array, server: number): Promise<void> {
     if (locked || activeServerId !== server || view !== "studio") throw new Error("the animation share target changed");
     const name = "Mewtual-flipnote.pixa";
     await addSharedFile(new File([new Uint8Array(bytes)], name, { type: PIXA_MIME }), "", name, PIXA_MIME);
-    toast("Animation saved to this server's share; open it locally or queue it in the jukebox", "ok", 6000);
+    toast("Flipnote added to Files.", "ok", 5000);
+  }
+  let postStudioGeneration = 0;
+  $effect(() => {
+    void locked; void activeServerId; void cur?.active; void view; void uiStateLoadGeneration; void studioMembership; void windowCloseInFlight; void uiStateReady;
+    // A → B → A navigation must revoke an upload's right to edit the composer too.
+    untrack(() => { postStudioGeneration++; });
+  });
+  async function postStudioPixa(bytes: Uint8Array, server: number): Promise<void> {
+    const channel = cur?.active, generation = postStudioGeneration;
+    const current = () => !locked && uiStateReady && !windowCloseInFlight && generation === postStudioGeneration && activeServerId === server && cur?.active === channel && view === "studio";
+    if (!channel || !current()) throw new Error("Open the flipnote’s channel before posting.");
+    const name = "Mewtual-flipnote.pixa";
+    // A fileshare CID differs from the Studio blob CID. Keep the existing draft and let Send
+    // use its ordinary durable retry identity; this button never submits unrelated draft text.
+    const cid = await addSharedFile(new File([new Uint8Array(bytes)], name, { type: PIXA_MIME }), myEmbedFolder, name, PIXA_MIME);
+    if (!current()) throw new Error("Flipnote saved in Files. Open it there to share.");
+    await refreshFiles();
+    if (!current()) throw new Error("Flipnote saved in Files. Open it there to share.");
+    await appendToDraft(fileMarker(name, cid, true));
+    toast("Flipnote attached. Press Send to post it.", "ok", 5000);
   }
   $effect(() => {
     // Reading these values makes every navigation/session/call ABA edge observable; no frame
@@ -13146,7 +13221,7 @@
     untrack(() => { stopStudioAudio(); studioAudio?.setScope(studioAudioScope(), callDeafened); });
   });
   $effect(() => {
-    if (view !== "studio" && !pixaViewer) return;
+    if (view !== "studio" && !pixaViewer && !inlinePixaAudioOwner) return;
     let cancelled = false, timer: ReturnType<typeof setTimeout> | null = null;
     const tick = async () => {
       if (cancelled) return;
@@ -26946,7 +27021,7 @@
           </div>
         {:else if view === "studio"}
           {#if StudioSurface}
-            <StudioSurface me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} nameOf={nameOfIdentity} colorOf={colorOfIdentity} onnotice={studioNotice} claims={studioClaimScope ? drawClaimSnapshot : null} claimActions={studioClaimActions} patchLibrary={studioPatchLibrary} audioActions={studioAudioActions} audioState={studioAudioState} onshareScore={shareStudioScore} onsharePixa={shareStudioPixa} />
+            <StudioSurface me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} nameOf={nameOfIdentity} colorOf={colorOfIdentity} onnotice={studioNotice} claims={studioClaimScope ? drawClaimSnapshot : null} claimActions={studioClaimActions} patchLibrary={studioPatchLibrary} audioActions={studioAudioActions} audioState={studioAudioState} onshareScore={shareStudioScore} onsharePixa={shareStudioPixa} onpostPixa={postStudioPixa} />
           {:else}
             <h2>Studio</h2>
             <p class="muted">Loading the studio…</p>
@@ -27121,7 +27196,9 @@
         {/if}
       </section>
 
-      {#if !dmHome && cur && !cur.isDm && membersOpen}
+      <!-- Studio reserves this width for the drawing and its controls. The member-list
+           preference is preserved for chat; call frame claims remain in Studio's Art tab. -->
+      {#if !dmHome && cur && !cur.isDm && membersOpen && view !== "studio"}
         <aside class="members-col" aria-label="Members">
           <h3><span>Members · {onlineCount}/{members} claimed here</span></h3>
           {#if roster.length > 6}
@@ -29670,6 +29747,9 @@
                 </div>
               </div>
               </section>
+            {:else if serverSettingsPage === "studio"}
+              <h1>Studio</h1>
+              {#if activeServerId !== null && cur}{#key activeServerId}<ServerStudioSettings server={activeServerId} channels={cur.channels} initialChannel={cur.active} owner={myRole === "owner"} />{/key}{/if}
             {:else if serverSettingsPage === "filetrust"}
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // FILE TRUST</div>
               <h1>File Trust</h1>
@@ -30169,7 +30249,9 @@
             <button class="ghost" onclick={closeFileInfo}>✕</button>
           </header>
           <div class="overlay-body file-info">
-            {#if previewKind}
+            {#if mediaKind(fileInfo.name, fileInfo.mime) === "pixa"}
+              <div class="file-preview" use:filePixaPreview={fileInfo}></div>
+            {:else if previewKind}
               <div class="file-preview">
                 {#if fileInfoPreviewError}
                   <p class="muted small">Preview unavailable. The file may be missing, unreachable, unsupported, or unable to pass verification.</p>

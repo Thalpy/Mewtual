@@ -43,14 +43,14 @@
     PIX_ROLE_NAMES,
     type PixPaletteEntry,
   } from "./studio-contract.ts";
-  import { DEFAULT_PALETTE, PALETTE_LABELS } from "./studio-store.ts";
+  import { DEFAULT_PALETTE } from "./studio-store.ts";
+  import { paletteGroups, paletteColorLabel } from "./studio-palette.ts";
   import { base64ToBytes, type FrameConflictValue, type FrameView, type NativeExpiry, type RecoveryMode, type RecoveryVersion } from "./studio-native.ts";
   import { reason, type RecoveryItem, type SaveRecord } from "./studio-session.ts";
   import { ensureStudio, setStudioScope, studio } from "./studio-state.svelte.ts";
   import { frameClaimState, type ClaimView, type StudioClaimActions, type StudioClaimSnapshot } from "./draw-claims.ts";
   import ScoreEditor from "./ScoreEditor.svelte";
   import StudioSound from "./StudioSound.svelte";
-  import StudioFaultControls from "./StudioFaultControls.svelte";
   import type { JamPatch, JamTake } from "./jam-contract.ts";
   import { jamPatchId, validateJamPatch } from "./jam-patch.ts";
   import type { StudioAudioActions, StudioAudioState } from "./studio-audio.ts";
@@ -58,7 +58,7 @@
   import { JAM_TAKE_MIME } from "./jukebox.ts";
 
   let { me, server, channel, nameOf, colorOf, adapt = true, onnotice, claims = null, claimActions = null,
-    patchLibrary = [], audioActions = null, audioState = { state: "stopped", elapsedMs: 0 }, onshareScore, onsharePixa } = $props<{
+    patchLibrary = [], audioActions = null, audioState = { state: "stopped", elapsedMs: 0 }, onshareScore, onsharePixa, onpostPixa } = $props<{
     me: string;
     server: number | null;
     channel: string;
@@ -75,6 +75,7 @@
     audioState?: StudioAudioState;
     onshareScore?: (take: JamTake, server: number) => Promise<void>;
     onsharePixa?: (bytes: Uint8Array, server: number) => Promise<void>;
+    onpostPixa?: (bytes: Uint8Array, server: number) => Promise<void>;
   }>();
 
   // Built once per mount (state may be written during init, never inside a derived); the
@@ -110,7 +111,6 @@
   const isScore = $derived(doc?.objectKind === "score" || (!doc && entry?.kind === "score"));
   const score = $derived.by(() => { void studio.rev; return session.doc?.object === objectId ? session.doc.score : null; });
   const sourceGeneration = $derived.by(() => { void studio.rev; return session.mediaGeneration; });
-  const faultRevision = $derived.by(() => { void studio.rev; return session.faultGeneration; });
   $effect(() => {
     void objectId; void view; void model; void score; void sourceGeneration;
     untrack(() => { audioActions?.stop(); });
@@ -123,6 +123,7 @@
   const blockedCount = $derived.by(() => { void studio.rev; return attention.length ? session.blockedBehind(attention[0].id) : 0; });
   const pendingInserts = $derived(pending.filter((s): s is Extract<SaveRecord, { kind: "frame" }> => s.kind === "frame" && s.op === "insert"));
   const receivePaused = $derived.by(() => { void studio.rev; return session.receivePaused; });
+  const receivePauseDetail = $derived.by(() => { void studio.rev; return session.receivePauseDetail; });
 
   function who(id: string): string { return id === me ? "you" : nameOf(id); }
   function tint(id: string): string { return id === me ? "var(--accent)" : colorOf(id); }
@@ -153,16 +154,18 @@
   // The prop seeds the toggle; the surface then owns it (a per-viewer preference, 2.1).
   // svelte-ignore state_referenced_locally
   let adaptOn = $state(adapt);
-  let inspectorTab = $state<"art" | "sound" | "music">("art");
+  let inspectorTab = $state<"art" | "sound" | "music" | "history">("art");
   let stampIdx = $state(0);
   let textDraft = $state("nya~");
   const playing = $derived(audioState.state !== "stopped");
-  let loop = $state(false);
+  let loop = $state(true);
+  $effect(() => { void objectId; const score = isScore; untrack(() => { loop = !score; }); });
   let mediaBusy = $state(false), mediaReceipt = $state("");
   let savedPreview = $state.raw<Pixa | null>(null);
   const ZOOM_MIN = 1, ZOOM_MAX = 6;
   let zoom = $state(3);
-  function setZoom(z: number) { zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.round(z))); }
+  let fitCanvas = $state(true);
+  function setZoom(z: number) { fitCanvas = false; zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.round(z))); }
   let dirty = $state(false);
   let tick = $state(0); // 1 Hz for countdowns
   let paintRev = $state(0); // bumped after every raster edit so overlays repaint
@@ -174,6 +177,8 @@
   const pendingHere = $derived(pendingInserts.find((s) => s.frame === frameId) ?? null);
   const frameKnown = $derived(frameIndex >= 0 || pendingHere !== null);
   const totalBytes = $derived(model?.declaredFrameBytes ?? 0);
+  const displayedPalette = $derived(raster?.palette ?? DEFAULT_PALETTE);
+  const colorGroups = $derived(paletteGroups(displayedPalette));
   const overCapCount = $derived(model?.overCapCount ?? 0);
   const canEdit = $derived(!!raster && !!model && !isScore && !readOnlyWhy && overCapCount === 0 && !playing);
   const hasScope = $derived.by(() => { void studio.rev; return session.scope !== null; });
@@ -693,7 +698,9 @@
     try {
       if (kind === "pixa") {
         const result = await session.publishFlipnotePixa(object);
-        if (gen === session.generation && objectId === object) mediaReceipt = result.warning ?? `blob published ${result.publication.cid} · ${result.publication.bytes} bytes · Studio reference submitted as Save #${result.referenceSaveId}; an owner receipt settles it later`;
+        // Pending saves already show their live status below; a one-off success banner would
+        // remain stale after a delayed reference lands (or is refused).
+        if (gen === session.generation && objectId === object) mediaReceipt = result.warning ? "The file was created, but saving this version needs attention." : "";
       } else {
         const result = await session.exportFlipnoteGif(object);
         if (gen === session.generation && objectId === object) mediaReceipt = `GIF saved locally: ${result.path}${result.warning ? ` · ${result.warning}` : ""} · visual only, no audio`;
@@ -706,7 +713,7 @@
     setTimeout(() => URL.revokeObjectURL(url), 10_000);
     // A browser download request has no native custody acknowledgement. Do not claim a path or
     // successful OS save; the native GIF route above deliberately has a different result.
-    mediaReceipt = `${filename} handed to the browser download flow; this does not publish a Studio reference`;
+    mediaReceipt = `Download started: ${filename}`;
   }
   async function downloadMedia(share = false) {
     if (mediaBusy || !objectId) return;
@@ -719,8 +726,11 @@
         else browserDownload(new TextEncoder().encode(JSON.stringify(take)), "Mewtual-score.jamtake", JAM_TAKE_MIME);
       } else {
         const bytes = await session.prepareFlipnotePixa(object);
-        if (gen !== session.generation || objectId !== object) throw new Error("the export target changed");
-        browserDownload(bytes, "Mewtual-flipnote.pixa", "application/octet-stream");
+        if (gen !== session.generation || objectId !== object || !target) throw new Error("The flipnote changed. Try again.");
+        if (share) {
+          if (!onpostPixa) throw new Error("Chat attachments are unavailable.");
+          await onpostPixa(bytes, target.server);
+        } else browserDownload(bytes, "Mewtual-flipnote.pixa", "application/x-mewtual-pixa");
       }
     } catch (e) { onnotice(reason(e), "warn"); } finally { mediaBusy = false; }
   }
@@ -990,8 +1000,8 @@
     if (view.awaitingTenureReceipt) return { text: overlay?.inspection?.kind === "local-draft" ? "local-only draft" : "awaiting tenure", tone: "warn", title: "the base history is an unconfirmed preview; edits save only into a bounded local draft and grant no receipt, publication or authoring authority" };
     if (view.phase === "fault") return { text: "history fault", tone: "danger", title: "history fault: conflicting owner receipts" };
     if (view.phase === "closing") return { text: "rotating", tone: "warn", title: "rotating: durable edits resume when the owner settles this rotation" };
-    if (view.phase === "settled") return { text: `settled · epoch ${view.epoch}`, tone: "ok", title: "stored phase settled; a settled phase is not a receipt for every displayed edit" };
-    return { text: `open · epoch ${view.epoch}`, tone: "", title: "open: edits save locally and provisionally; an owner receipt settles them later" };
+    if (view.phase === "settled") return { text: "Saved locally", tone: "ok", title: "Saved on this device" };
+    return { text: "Saved locally", tone: "", title: "Saved on this device" };
   }
 </script>
 
@@ -1015,13 +1025,11 @@
     {/if}
 {/snippet}
 {#snippet historyRail()}
-            <StudioFaultControls {session} object={objectId || null} revision={faultRevision} />
-            <div class="st-sec nxt">history</div>
             {#if view}
-              <p class="st-hist"><i class={view.awaitingTenureReceipt ? "warn" : view.phase === "settled" ? "ok" : view.phase === "fault" ? "danger" : view.phase === "closing" ? "warn" : "info"}></i>
-                {#if view.awaitingTenureReceipt}awaiting the owner's tenure receipt · epoch {view.epoch}{:else}{view.phase} · epoch {view.epoch} · saved locally, provisional{/if}
+              <p class="st-hist"><i class={view.awaitingTenureReceipt || view.phase === "closing" ? "warn" : view.phase === "fault" ? "danger" : "ok"}></i>
+                {view.awaitingTenureReceipt ? "Local draft" : view.phase === "fault" ? "History needs repair" : view.phase === "closing" ? "Updating shared history" : "Saved on this device"}
               </p>
-              <p class="micro wrap">{view.awaitingTenureReceipt ? "the base is unconfirmed; edits stay in a bounded local-only draft until the history is installed or you dispose of it" : view.phase === "closing" ? "rotating: Save keeps edits in a local-only draft when this device holds the signed close; shared history changes only after handoff" : view.phase === "fault" ? "history fault: conflicting owner receipts" : view.phase === "settled" ? "the owner settled this epoch; later edits are provisional until the next receipt" : "an owner receipt settles these edits later"}</p>
+              {#if view.phase === "fault"}<p>Ask the owner to check Studio in Server settings.</p>{/if}
             {/if}
             {#if overlay?.loading}
               <p class="micro wrap">checking this device for a retained local draft…</p>
@@ -1114,7 +1122,6 @@
               </div>
             {/if}
             {#if listing}
-              {#if listing.pendingIntents}<p class="micro wrap">{listing.pendingIntents} of your saves await an owner receipt · not lost, not excluded</p>{/if}
               {#if listing.evictionPending}
                 <div class="st-card warn">
                   <span>a previous version will be removed {deadlineText(listing.evictionPending.deadlineMs)} unless exported</span>
@@ -1150,7 +1157,7 @@
                   {/if}
                 </div>
               {:else}
-                <p class="micro wrap">no previous versions retained for this document{#if listing.source === null} · no local source{/if}</p>
+                <p class="micro wrap">No previous versions.</p>
               {/each}
               {#if run && run.object === objectId}
                 <div class="st-card">
@@ -1180,7 +1187,6 @@
 <div class="studio" bind:this={rootEl} role="application" aria-label="Studio editor" tabindex="0">
   {#if !objectId || (!model && !doc)}
     <div class="studio-empty">
-      {#if hasScope && objectId}<StudioFaultControls {session} object={objectId} revision={faultRevision} />{/if}
       {#if !hasScope}
         <p class="muted">Open a channel to see its studio.</p>
       {:else}
@@ -1190,7 +1196,8 @@
   {:else if isScore}
     <div class="st-score">
       {@render pendingSaves()}
-      <p class="micro wrap">{settlementChip().text} · native Score · {audioState.state} · {Math.floor(audioState.elapsedMs)}ms</p>
+      <div class="st-itabs"><button class="st-itab" class:on={inspectorTab !== "history"} onclick={() => inspectorTab = "music"}>Music</button><button class="st-itab" class:on={inspectorTab === "history"} onclick={() => inspectorTab = "history"}>History</button></div>
+      {#if inspectorTab === "history"}{@render historyRail()}{:else}
       <label class="micro st-score-loop"><input type="checkbox" aria-label="Loop whole authored score" bind:checked={loop} disabled={playing} /><span>loop whole authored score</span></label>
       <span class="st-card-acts"><button class="st-btn" disabled={mediaBusy || playing} onclick={() => downloadMedia()}>download .jamtake</button><button class="st-btn" disabled={mediaBusy || playing || !onshareScore} onclick={() => downloadMedia(true)}>share .jamtake</button></span>
       {#if mediaReceipt}<div class="st-banner info wrap">{mediaReceipt}</div>{/if}
@@ -1200,11 +1207,10 @@
           onplay={audioActions ? toggleStudioPlay : undefined} onstop={() => audioActions?.stop()} {playing}
           onnotice={(text, kind) => onnotice(text, kind === "error" ? "error" : "info")} />
       {/key}
-      <details class="st-score-history"><summary>Saved history, local drafts and recovery</summary>{@render historyRail()}</details>
+      {/if}
     </div>
   {:else if !model}
     <div class="studio-empty">
-      <StudioFaultControls {session} object={objectId} revision={faultRevision} />
       {#if doc?.error}
         <div class="st-banner danger">could not read this flipnote: {doc.error} <button type="button" class="st-btn" onclick={() => session.open(objectId)}>retry</button></div>
       {:else if doc?.absent && !pending.length}
@@ -1237,13 +1243,11 @@
       <span class="st-chip {settlementChip().tone}" title={settlementChip().title}><i></i><span class="micro">{settlementChip().text}</span></span>
       {#if inflight}<span class="st-chip" title="a save is in flight; unsaved pixels stay here until it lands"><i class="pulse"></i><span class="micro">saving…</span></span>{/if}
       <span class="grow"></span>
-      <button type="button" class="st-tg" class:on={adaptOn} onclick={() => (adaptOn = !adaptOn)} title="Role colours follow your theme; literals never move"><i></i><span class="micro">adapt to my theme</span></button>
       <button type="button" class="st-btn" disabled={!audioActions} onclick={toggleStudioPlay}>{playing ? "stop" : "play"}</button>
-      <button type="button" class="st-btn" title="Posting a frame into the channel as a doodle is not connected yet" disabled>
+      <button type="button" class="st-btn" title="Attach this flipnote to a chat message" disabled={mediaBusy || playing || !onpostPixa} onclick={() => downloadMedia(true)}>
         <svg viewBox="0 0 16 16" style="width: 11px; height: 11px"><path d="M2 8l12-6-4 12-2.5-4.5z"></path></svg>
-        post to chat
+        Post to chat
       </button>
-      <button type="button" class="st-btn primary" disabled={mediaBusy || playing} onclick={() => exportMedia("pixa")}>publish .pixa</button>
       <button type="button" class="st-btn" disabled={mediaBusy || playing} onclick={() => downloadMedia()}>download .pixa</button>
       <button type="button" class="st-btn" disabled={mediaBusy || playing} onclick={() => exportMedia("gif")}>save GIF</button>
     </div>
@@ -1256,7 +1260,7 @@
       <div class="st-banner {view?.phase === 'fault' ? 'danger' : 'warn'}">{readOnlyWhy}</div>
     {/if}
     {#if receivePaused}
-      <div class="st-banner info">receiving is paused for this server after a storage or scan problem. Nothing local is lost and nothing is settled or unsettled by this; a successful read or save resumes it. <button type="button" class="st-btn" onclick={() => session.open(objectId)}>read again</button></div>
+      <div class="st-banner warn">Studio sync is paused. <button type="button" class="st-btn" onclick={() => { commit(); session.open(objectId); }}>Retry</button>{#if receivePauseDetail}<details><summary>Details</summary>{receivePauseDetail}</details>{/if}</div>
     {/if}
 
     <!-- Editor row -->
@@ -1284,7 +1288,7 @@
 
       <div class="st-canvas-card">
         <div class="st-canvas-scroll">
-        <div class="st-canvas-wrap" class:locked={!canEdit} style="width: {(raster?.w ?? FLIPNOTE_W) * zoom}px; aspect-ratio: {raster?.w ?? FLIPNOTE_W} / {raster?.h ?? FLIPNOTE_H}" onwheel={(e) => { if (e.ctrlKey) { e.preventDefault(); setZoom(zoom + (e.deltaY < 0 ? 1 : -1)); } }}>
+        <div class="st-canvas-wrap" class:locked={!canEdit} style="width: {fitCanvas ? '100%' : `${(raster?.w ?? FLIPNOTE_W) * zoom}px`}; aspect-ratio: {raster?.w ?? FLIPNOTE_W} / {raster?.h ?? FLIPNOTE_H}" onwheel={(e) => { if (e.ctrlKey) { e.preventDefault(); setZoom(zoom + (e.deltaY < 0 ? 1 : -1)); } }}>
           <canvas bind:this={canvasEl} class="st-canvas"></canvas>
           <canvas
             bind:this={overlayEl}
@@ -1307,16 +1311,16 @@
           {:else if pendingHere}
             <div class="st-veil soft"><span class="micro">{pendingHere.status === "uncertain" ? "this frame's save is uncertain · see the card above" : pendingHere.status === "blocked" ? "this frame was not written · see the card above" : "saving this frame…"}</span></div>
           {/if}
-          <span class="st-readout left">{zoom}× · {hover ? `${hover[0]},${hover[1]}` : "…"}{#if tool === "shape"} · {shape}{/if}</span>
+          <span class="st-readout left">{hover ? `${hover[0]},${hover[1]}` : ""}{#if tool === "shape"} · {shape}{/if}</span>
           <span class="st-readout right">layer · {LAYER_NAMES[layer]}{#if dirty} · unsaved{:else if rasterRef === "unsaved"} · saving{/if}</span>
         </div>
         </div>
         <div class="st-canvas-foot">
-          <span class="micro">{tool === "shape" ? "drag to place" : tool === "text" ? "click to place the text" : tool === "stamp" ? "click to place the stamp" : "drag paints · [ ] size · 1 to 0 colours"}</span>
           <span class="grow"></span>
           <span class="st-zoom">
-            <button type="button" class="st-tile txt" title="zoom out [-]" disabled={zoom <= ZOOM_MIN} onclick={() => setZoom(zoom - 1)}>-</button>
-            <span class="mono">{zoom}×</span>
+            <button type="button" class="st-tile txt" title="Fit the whole frame" class:on={fitCanvas} onclick={() => fitCanvas = true}>Fit</button>
+            <button type="button" class="st-tile txt" title="zoom out [-]" disabled={!fitCanvas && zoom <= ZOOM_MIN} onclick={() => setZoom(zoom - 1)}>-</button>
+            <span class="mono">{fitCanvas ? "" : `${zoom}×`}</span>
             <button type="button" class="st-tile txt" title="zoom in [+]" disabled={zoom >= ZOOM_MAX} onclick={() => setZoom(zoom + 1)}>+</button>
           </span>
         </div>
@@ -1325,7 +1329,7 @@
       <!-- Inspector -->
       <div class="st-inspector">
         <div class="st-itabs">
-          {#each ["art", "sound", "music"] as t}
+          {#each ["art", "sound", "music", "history"] as t}
             <button type="button" class="st-itab" class:on={inspectorTab === t} onclick={() => (inspectorTab = t as typeof inspectorTab)}>{t}</button>
           {/each}
         </div>
@@ -1365,7 +1369,7 @@
               <div class="st-opt">
                 <span class="lb">pen</span>
                 <button type="button" class="st-tile txt" class:on={pressureOn} onclick={() => (pressureOn = !pressureOn)} title="A pen's pressure sets the size, up to the chosen size. A mouse always paints the chosen size.">pressure</button>
-                <span class="micro">{penSeen ? "pen detected" : "no pen seen yet"}</span>
+                <span class="micro">{penSeen ? "pen detected" : "no pen detected"}</span>
               </div>
             {/if}
             <div class="st-opt"><span class="lb">size</span>
@@ -1381,14 +1385,17 @@
             </div>
 
             <div class="st-sec nxt">palette</div>
-            <div class="st-wells">
-              {#each raster?.palette ?? DEFAULT_PALETTE as e, i}
-                <button type="button" class="st-well" class:sel={color === i} style="background: {wellCss(e)}" title="{i}: {e.role ? PIX_ROLE_NAMES[e.role] + ' role, follows your theme' : 'literal'} #{e.r.toString(16).padStart(2, '0')}{e.g.toString(16).padStart(2, '0')}{e.b.toString(16).padStart(2, '0')}" onclick={() => (color = i)}>
-                  <span class="micro">{PALETTE_LABELS[i] ?? (e.role ? PIX_ROLE_NAMES[e.role] : i)}</span>
-                </button>
-              {/each}
-            </div>
-            <p class="micro wrap">server palette · roles recolour per viewer</p>
+            {#each [colorGroups.grayscale, colorGroups.colors] as indices}
+              <div class="st-wells" class:grays={indices === colorGroups.grayscale}>
+                {#each indices as i}{@const e = displayedPalette[i]}
+                  <button type="button" class="st-well" class:sel={color === i} style="background: {wellCss(e)}" title={paletteColorLabel(e)} aria-label={`Colour ${paletteColorLabel(e)}`} aria-pressed={color === i} onclick={() => (color = i)}></button>
+                {/each}
+              </div>
+            {/each}
+            {#if colorGroups.themed.length}<details class="st-theme-colors"><summary>Theme colours</summary>
+              <div class="st-wells grays">{#each colorGroups.themed as i}{@const e = displayedPalette[i]}<button type="button" class="st-well" class:sel={color === i} style="background: {wellCss(e)}" title={PIX_ROLE_NAMES[e.role]} aria-label={PIX_ROLE_NAMES[e.role]} onclick={() => (color = i)}></button>{/each}</div>
+              <label><input type="checkbox" bind:checked={adaptOn} /> Match my theme</label>
+            </details>{/if}
 
             <div class="st-sec nxt">layers</div>
             {#each [2, 1, 0] as l}
@@ -1404,11 +1411,10 @@
                     <path d="M8 1.5l6 3-6 3-6-3z" class:lit={l === 2}></path>
                   </svg>
                   <span class="nm">{LAYER_NAMES[l]}</span>
-                  <span class="what">{layer === l ? "drawing here" : l === 0 ? "sky · ground" : ""}</span>
+                  <span class="what">{layer === l ? "drawing here" : ""}</span>
                 </button>
               </div>
             {/each}
-            <p class="micro wrap">three local layers · flattened into one pix frame on save</p>
 
             <div class="st-sec nxt">frame {frameIndex >= 0 ? frameIndex + 1 : "·"}</div>
             {#if frameRec?.conflicts.length}
@@ -1429,9 +1435,7 @@
             {:else if frameRec}
               <p class="micro">by {who(frameRec.author)} · {rel(frameRec.ts)} · {fmtKib(frameRec.bytes)}{#if frameRec.insertions > 1} · inserted {frameRec.insertions}× concurrently{/if}{#if frameRec.overCap} · over cap{/if}</p>
             {/if}
-            {#if !claims}
-              <p class="micro wrap it">claims (who is drawing which frame) appear while you are in a call on this server · they never lock a frame</p>
-            {:else if frameId && objectId}
+            {#if claims && frameId && objectId}
               {#if frameClaims.contested}
                 <div class="st-card warn">
                   <span>more than one person is drawing this frame</span>
@@ -1458,19 +1462,26 @@
                   <button type="button" class="st-btn ghost" title="tell the call you are drawing this frame (painting does this too)" onclick={() => claimActions?.claim(objectId, frameId)}>claim this frame</button>
                 {/if}
               {/if}
-              <p class="micro wrap it">claims show who is drawing what during this call · they never lock a frame</p>
             {/if}
           {:else if inspectorTab === "sound"}
             {#key objectId}<StudioSound model={model.sound} frame={frameId} readonlyReason={playing ? "Stop playback before editing" : readOnlyWhy} {patchLibrary}
+              onhistory={() => inspectorTab = "history"}
               onpatch={addStudioPatch} onsfx={(sfx) => guard(() => session.setSfx(objectId, { ...sfx, id: sfx.id ?? session.newId(), frame: frameId }))}
               onremove={(id) => guard(() => session.removeSfx(objectId, id))} onremovepatch={(id) => guard(() => session.removeSoundPatch(objectId, id))} {onnotice} />{/key}
+          {:else if inspectorTab === "music"}
+            <h4>Music</h4>
+            <label class="st-field">Music track <select value={model.sound.score ?? ""} disabled={!!readOnlyWhy || playing} onchange={(e) => guard(() => session.linkScore(objectId, e.currentTarget.value || null))}><option value="">None</option>{#each session.indexModel?.entries.filter((e) => e.kind === "score") ?? [] as s}<option value={s.id}>{s.title || "Untitled track"}</option>{/each}{#if model.sound.score && !session.indexModel?.entries.some((e) => e.id === model.sound.score)}<option value={model.sound.score}>Unavailable track</option>{/if}</select></label>
+            {#if model.sound.scoreRegister?.conflicts.length}<p class="warn">Two music tracks were chosen. Select the one you want before playing.</p>{/if}
+            {#if model.sound.score}<button class="st-btn" disabled={playing} onclick={() => { commit(); const id = model?.sound.score; if (id) { session.open(id); studio.selected = id; } }}>Edit music</button>{/if}
+            <button class="st-btn" disabled={playing || !!readOnlyWhy} onclick={() => guard(() => { commit(); const id = session.createScore("New music track"); session.open(id, {read: false}); studio.selected = id; })}>New music track</button>
           {:else}
-            <div class="st-sec">soundtrack</div>
-            <label class="micro wrap">Linked Score <select value={model.sound.score ?? ""} disabled={!!readOnlyWhy || playing} onchange={(e) => guard(() => session.linkScore(objectId, e.currentTarget.value || null))}><option value="">no Score</option>{#each session.indexModel?.entries.filter((e) => e.kind === "score") ?? [] as s}<option value={s.id}>{s.title || s.id.slice(0, 8)}</option>{/each}{#if model.sound.score && !session.indexModel?.entries.some((e) => e.id === model.sound.score)}<option value={model.sound.score}>linked {model.sound.score.slice(0, 8)} (not in current Index)</option>{/if}</select></label>
-            <p class="micro wrap">patches {Object.keys(model.sound.patches).length} of {FLIPNOTE_MAX_PATCHES} · Score patches first, then SFX · linked Score is resolved in this same group/channel at export</p>
-            {#if model.sound.scoreRegister?.conflicts.length}<p class="micro wrap warn">Score link conflict: choose explicitly before playback/export.</p>{/if}
-            {#each model.sound.exports.slice(0, 8) as exported}<div class="st-card"><p class="micro wrap">published reference {exported.id.slice(0, 8)} · {exported.cid} · {fmtKib(exported.bytes)} · saved locally/provisional, not an owner receipt</p><span class="st-card-acts"><button class="st-btn" disabled={mediaBusy || playing || !audioActions} onclick={() => publishedMedia(exported.id, "play")}>play saved package</button><button class="st-btn" disabled={mediaBusy} onclick={() => publishedMedia(exported.id, "download")}>download saved package</button><button class="st-btn" disabled={mediaBusy || !onsharePixa} onclick={() => publishedMedia(exported.id, "share")}>share saved package</button><button class="st-btn" disabled={!!readOnlyWhy || playing} onclick={() => guard(() => session.removePublishedPixa(objectId, exported.id))}>remove reference</button></span></div>{/each}
+            <h4>History</h4>
+            <details class="st-history-section"><summary>Saved flipnotes ({model.sound.exports.length})</summary>
+            <button class="st-btn" disabled={mediaBusy || playing} onclick={() => exportMedia("pixa")}>Save a version</button>
+            {#each model.sound.exports.slice(0, 8) as exported, i}<div class="st-card"><p>Version {i + 1} · {fmtKib(exported.bytes)}</p><span class="st-card-acts"><button class="st-btn" disabled={mediaBusy || playing || !audioActions} onclick={() => publishedMedia(exported.id, "play")}>Play</button><button class="st-btn" disabled={mediaBusy} onclick={() => publishedMedia(exported.id, "download")}>Download</button><button class="st-btn" disabled={mediaBusy || !onsharePixa} onclick={() => publishedMedia(exported.id, "share")}>Share</button><button class="st-btn" disabled={!!readOnlyWhy || playing} onclick={() => guard(() => session.removePublishedPixa(objectId, exported.id))}>Remove</button></span><details><summary>File details</summary><code>{exported.cid}</code></details></div>{/each}
             {#if savedPreview}<div class="st-card"><p class="micro wrap">Saved export preview · actual immutable package frames, not the current edited timeline</p><canvas width={FLIPNOTE_W} height={FLIPNOTE_H} style="width:100%;image-rendering:pixelated" use:thumbBytes={{ bytes: savedPreview.frames[Math.min(savedPreview.frames.length - 1, Math.floor(audioState.elapsedMs * savedPreview.fps / 1000))], rev: 0 }}></canvas><button class="st-btn" onclick={() => { audioActions?.stop(); savedPreview = null; }}>close saved preview</button></div>{/if}
+            </details>
+            <details class="st-history-section"><summary>Flipnote settings</summary>
             <div class="st-sec nxt">size</div>
             <div class="st-bar"><i style="width: {Math.min(100, (totalBytes / FLIPNOTE_FRAME_BYTES_PROMISE) * 100)}%"></i></div>
             <p class="micro wrap">{fmtKib(totalBytes)} of 8 mib declared · {frames.length} of {FLIPNOTE_MAX_FRAMES} frames{#if model.deletedFrames.length} · {model.deletedFrames.length} deleted kept in history{/if}</p>
@@ -1491,12 +1502,14 @@
                   <button type="button" class="st-btn ghost" disabled={!!readOnlyWhy} onclick={() => (deleteArmed = deleteKey)}>delete…</button>
                 {/if}
               </div>
-              <p class="micro wrap">a deletion is a tombstone in the channel index: the entry leaves the list, its history stays in recovery</p>
+              <p class="micro wrap">This removes the flipnote from the channel list.</p>
             {:else}
               <p class="micro wrap">this flipnote has no entry in the channel index on this device{#if pending.some((s) => s.kind === "create")} · it appears when the create lands{/if}</p>
             {/if}
 
-            {@render historyRail()}
+            </details>
+            <details class="st-history-section" open><summary>Previous edits and recovery</summary>{@render historyRail()}</details>
+            <details class="st-history-section"><summary>Sound history</summary><StudioSound history model={model.sound} frame={frameId} readonlyReason={readOnlyWhy} {patchLibrary} onpatch={addStudioPatch} onsfx={() => {}} onremove={(id) => guard(() => session.removeSfx(objectId, id))} onremovepatch={(id) => guard(() => session.removeSoundPatch(objectId, id))} {onnotice} /></details>
           {/if}
         </div>
       </div>
@@ -1581,7 +1594,11 @@
   .st-score-loop { display: flex; align-items: center; gap: 6px; margin: 6px 0; white-space: normal; }
   .st-score-loop input { width: auto; flex: none; margin: 0; }
   .st-score-loop span { min-width: 0; }
-  .st-score-history { margin-top: 12px; display: block; }
+  .st-history-section { margin: 12px 0; }
+  .st-history-section > summary { cursor: pointer; padding: 6px 0; color: var(--text-2); }
+  .st-history-section code { overflow-wrap: anywhere; font-size: .7rem; }
+  .st-field { display: flex; flex-direction: column; gap: 6px; font-size: .8rem; margin: 12px 0; }
+  .st-field select { width: 100%; padding: 8px; font: inherit; }
   .studio { display: flex; flex-direction: column; flex: 1; min-height: 0; outline: none; gap: 0; }
   .studio-empty { padding: 2rem; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
   .micro { font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); white-space: nowrap; }
@@ -1640,7 +1657,7 @@
   .st-tool.play svg { width: 14px; height: 14px; }
   .st-tool.play.on { background: var(--accent-dim); color: var(--accent-hi); }
   .st-sep { height: 1px; background: var(--border-soft); margin: 4px 2px; }
-  .st-canvas-card { flex: 0 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 6px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 10px; max-width: 100%; }
+  .st-canvas-card { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 10px; max-width: 100%; }
   .st-canvas-scroll { overflow: auto; max-height: 100%; scrollbar-gutter: stable; }
   .st-canvas-wrap { position: relative; max-width: none; border: 1px solid var(--border); line-height: 0; cursor: crosshair; }
   .st-zoom { display: inline-flex; align-items: center; gap: 6px; }
@@ -1657,7 +1674,7 @@
   .st-canvas-foot { display: flex; align-items: center; gap: 10px; }
 
   /* Inspector */
-  .st-inspector { flex: 1; min-width: 240px; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); overflow: hidden; }
+  .st-inspector { flex: 0 0 260px; min-width: 240px; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); overflow: hidden; }
   .st-itabs { display: flex; border-bottom: 1px solid var(--border); }
   .st-itab { flex: 1; padding: 7px 0; border: none; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
   .st-itab.on { color: var(--text); border-bottom-color: var(--accent); }
@@ -1680,7 +1697,12 @@
   .st-wells { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 4px; }
   .st-well { height: 22px; border-radius: 3px; border: 1px solid color-mix(in oklab, var(--bg-0) 60%, transparent); padding: 0; position: relative; }
   .st-well .micro { position: absolute; left: 0; right: 0; top: 100%; font-size: 0.5rem; letter-spacing: 0.04em; text-align: center; }
-  .st-wells { margin-bottom: 14px; }
+  .st-wells { margin-bottom: 8px; }
+  .st-wells.grays { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .st-theme-colors { font-size: .72rem; color: var(--muted); }
+  .st-theme-colors summary { cursor: pointer; margin: 3px 0 7px; }
+  .st-theme-colors label { display: flex; align-items: center; gap: 6px; }
+  .st-theme-colors input { width: auto; }
   .st-well.sel { outline: 2px solid var(--accent); outline-offset: 2px; }
   .st-layer { display: flex; align-items: center; gap: 8px; padding: 3px 6px; border-radius: var(--r); border: 1px solid transparent; }
   .st-layer.on { background: var(--accent-dim); border-color: var(--accent); }

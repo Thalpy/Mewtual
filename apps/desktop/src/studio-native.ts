@@ -39,6 +39,7 @@ export type StudioIpc = {
 
 export const STUDIO_UPDATED_EVENT = "studio-updated";
 export const STUDIO_RECEIVE_PAUSED_EVENT = "studio-receive-paused";
+export const STUDIO_SYNC_STATE_EVENT = "studio-sync-state";
 export const SETTLEMENT_CHANGED_EVENT = "settlement-changed";
 
 // --- Read model --------------------------------------------------------------------------------
@@ -322,6 +323,7 @@ export type UnconfirmedOverlaySaveInput = { basis: Hex64; branch: Hex64; nonce: 
 
 export type StudioUpdatedEvent = { server: number; channel: Decimal; object: Hex32 | null; objectKind?: StudioObjectKind };
 export type StudioReceivePausedEvent = { server: number };
+export type StudioSyncStateEvent = { server: number; instance: Decimal; sequence: Decimal; paused: boolean; cause: "background" | "incoming" | null; detail: string | null };
 export type SettlementState = "open" | "closing" | "settled" | "fault" | "recoveryAvailable" | "recoveryEvictionPending" | "refreshRequired" | "repairing" | "storageRefused";
 export type SettlementChangedEvent = { server: number; docType: 15 | 16; logicalKey: Hex32; channel: Decimal; object: Hex32 | null; objectKind?: StudioObjectKind; state: SettlementState };
 
@@ -1106,6 +1108,20 @@ export function parseStudioUpdated(v: unknown): StudioUpdatedEvent {
 }
 export function parseReceivePaused(v: unknown): StudioReceivePausedEvent {
   return { server: count(record(v, "studio-receive-paused").server, "event.server") };
+}
+export function parseStudioSyncState(v: unknown): StudioSyncStateEvent {
+  const r = record(v, "studio-sync-state"), paused = flag(r.paused, "event.paused");
+  const sequence = (value: unknown, name: string): Decimal => {
+    if (typeof value !== "string" || value.length > 20) fail(`${name} is not a u64`);
+    const result = decimal(value, name);
+    if (BigInt(result) > (1n << 64n) - 1n) fail(`${name} is not a u64`);
+    return result;
+  };
+  if (r.cause !== null && r.cause !== "background" && r.cause !== "incoming") fail("event.cause is unknown");
+  if (r.detail !== null && (typeof r.detail !== "string" || r.detail.length > 2048)) fail("event.detail is invalid");
+  if (!paused && (r.cause !== null || r.detail !== null)) fail("a resumed event cannot retain a pause reason");
+  return { server: count(r.server, "event.server"), instance: sequence(r.instance, "event.instance"), sequence: sequence(r.sequence, "event.sequence"),
+    paused, cause: r.cause as StudioSyncStateEvent["cause"], detail: r.detail as string | null };
 }
 export function parseSettlementChanged(v: unknown): SettlementChangedEvent {
   const r = record(v, "settlement-changed");

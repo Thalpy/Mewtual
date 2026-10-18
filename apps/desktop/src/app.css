@@ -1706,6 +1706,12 @@ img.emoji {
   color: var(--accent);
 }
 
+.pixa-preview { margin: 8px 0; padding: 8px; max-width: 360px; border: 1px solid var(--border); border-radius: var(--r); background: var(--panel); }
+.pixa-preview canvas { display: block; width: 100%; aspect-ratio: 4 / 3; image-rendering: pixelated; background: var(--bg-0); }
+.pixa-preview [hidden] { display: none; }
+.pixa-preview figcaption { font-size: .75rem; overflow-wrap: anywhere; margin: 5px 0; }
+.pixa-preview-controls { display: flex; gap: 8px; flex-wrap: wrap; }
+.pixa-preview-status { font-size: .75rem; color: var(--muted); margin: 0; }
 .embed-media {
   display: block;
   max-width: 320px;

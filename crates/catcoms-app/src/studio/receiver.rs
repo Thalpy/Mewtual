@@ -14,6 +14,8 @@ mod closing;
 mod handoff;
 mod inventory;
 mod replay;
+#[cfg(test)]
+mod sync_tests;
 mod unconfirmed;
 use catchup::OverlayCommit;
 pub(crate) use catchup::{HandoffCompletion, StudioBackgroundJob, StudioBackgroundResult};
@@ -25,6 +27,10 @@ pub(crate) struct StudioReceiver {
     watches: VecDeque<(ServerStudioWatch, u128)>,
     paused: bool,
     pause_notice: bool,
+    sync_sequence: u64,
+    sync_notice: Option<StudioSyncObservation>,
+    pause_cause: Option<StudioSyncPauseCause>,
+    pause_detail: Option<String>,
     catchup: catchup::CatchupRuntime,
     gossip_runs: usize,
     settlement: SettlementNotices,
@@ -1007,8 +1013,12 @@ impl StudioReceiver {
     /// happened to open a Studio document successfully. `release_if_stalled` at the top of `run`
     /// is a backstop for a pause that arrived some other way, not the primary path.
     fn pause<T: MeshTransport, R: CryptoRngCore>(&mut self, server: &Server<T, R>) {
+        if !self.paused {
+            self.sync_sequence = self.sync_sequence.saturating_add(1);
+        }
         self.paused = true;
         self.pause_notice = true;
+        self.sync_notice = Some(self.sync_observation());
         self.handoff
             .release_if_stalled(server.runtime_clock().monotonic_ms());
         // The same reason for a repair job that is not detached: it holds a pool slot.
@@ -1027,6 +1037,40 @@ impl StudioReceiver {
     }
     pub(crate) fn take_pause_notice(&mut self) -> bool {
         std::mem::take(&mut self.pause_notice)
+    }
+    fn sync_observation(&self) -> StudioSyncObservation {
+        StudioSyncObservation {
+            sequence: self.sync_sequence,
+            paused: self.paused,
+            cause: self.pause_cause,
+            detail: self.pause_detail.clone(),
+        }
+    }
+    pub(crate) fn take_sync_notice(&mut self) -> Option<StudioSyncObservation> {
+        self.sync_notice.take()
+    }
+    fn pause_because<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &Server<T, R>,
+        cause: StudioSyncPauseCause,
+        error: &AppError,
+    ) {
+        self.pause_cause = Some(cause);
+        self.pause_detail = Some(error.to_string().chars().take(512).collect());
+        tracing::warn!(?cause, detail = ?self.pause_detail, "Studio sync paused");
+        self.pause(server);
+    }
+    fn resume_after_access(&mut self) {
+        if self.paused {
+            self.sync_sequence = self.sync_sequence.saturating_add(1);
+        }
+        self.paused = false;
+        self.pause_notice = false;
+        self.pause_cause = None;
+        self.pause_detail = None;
+        // Also publish current state on the first successful access after mounting a UI. The
+        // actor may have paused before that window/session subscribed to its notifications.
+        self.sync_notice = Some(self.sync_observation());
     }
 
     fn observe<T: MeshTransport, R: CryptoRngCore>(
@@ -1154,9 +1198,6 @@ impl StudioReceiver {
             let mut saved = result?;
             // Only explicit successful access retries a failed/over-budget background pass.
             // More inbound traffic cannot repeatedly restart expensive failed disk work.
-            self.paused = false;
-            self.catchup
-                .explicit_retry(server.runtime_clock().monotonic_ms());
             for &(target, epoch) in &saved.observed {
                 // A trusted cooperative caller can occupy the sync watch rail separately. A
                 // watch refusal must not misreport an already-durable Save as failed.
@@ -1183,6 +1224,9 @@ impl StudioReceiver {
                     }
                 }
             }
+            self.resume_after_access();
+            self.catchup
+                .explicit_retry(server.runtime_clock().monotonic_ms());
             return Ok((saved, updated));
         }
         let empty = || StudioSavedTransaction {
@@ -1229,7 +1273,7 @@ impl StudioReceiver {
             return match self.background_step(server, store, id) {
                 Ok(saved) => Ok(saved),
                 Err(error) => {
-                    self.pause(server);
+                    self.pause_because(server, StudioSyncPauseCause::Background, &error);
                     Err(error)
                 }
             };
@@ -1243,7 +1287,7 @@ impl StudioReceiver {
             return match result {
                 Ok(saved) => Ok(saved),
                 Err(error) => {
-                    self.pause(server);
+                    self.pause_because(server, StudioSyncPauseCause::Background, &error);
                     Err(error)
                 }
             };
@@ -1311,7 +1355,7 @@ impl StudioReceiver {
             Err(error) => {
                 // A pre-drain failure retains its packet; an admission failure may consume it.
                 // Neither is delivery. Hold BOTH cases instead of a peer-driven disk retry loop.
-                self.pause(server);
+                self.pause_because(server, StudioSyncPauseCause::Incoming, &error);
                 return Err(error);
             }
         };

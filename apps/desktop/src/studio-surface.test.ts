@@ -36,9 +36,10 @@ const state = await import("./studio-state.svelte.ts");
 const { default: Studio } = await import("./Studio.svelte");
 const { default: StudioNav } = await import("./StudioNav.svelte");
 const { default: StudioFaultControls } = await import("./StudioFaultControls.svelte");
+const { default: ServerStudioSettings } = await import("./ServerStudioSettings.svelte");
 const { mount, unmount, flushSync } = await import("svelte");
 
-function mountStudio(ipc: FakeIpc, extra: Partial<{ audioActions: import("./studio-audio.ts").StudioAudioActions; patchLibrary: readonly { name: string; patch: import("./jam-contract.ts").JamPatch }[] }> = {}) {
+function mountStudio(ipc: FakeIpc, extra: Partial<{ audioActions: import("./studio-audio.ts").StudioAudioActions; patchLibrary: readonly { name: string; patch: import("./jam-contract.ts").JamPatch }[]; onpostPixa: (bytes: Uint8Array, server: number) => Promise<void> }> = {}) {
   state.useStudioIpc(ipc);
   const notices: string[] = [];
   const target = document.createElement("div");
@@ -85,27 +86,40 @@ async function settled(ms = 200) {
   flushSync();
 }
 
+function mountHistorySettings(ipc: FakeIpc) {
+  const target = document.createElement("div"); document.body.append(target);
+  const app = mount(ServerStudioSettings, { target, props: { server: SERVER, channels: [{id: CHANNEL, name: "general"}], initialChannel: CHANNEL, owner: true, ipc } });
+  flushSync();
+  return { target, text: () => target.textContent ?? "", count: (cmd: string) => ipc.calls.filter(c => c.cmd === cmd).length,
+    click: (_selector: string, label: string) => { const button = [...target.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === label); assert.ok(button, `missing ${label}`); button.click(); flushSync(); },
+    chooseObject: async (manual = false) => {
+      const kind = target.querySelector<HTMLSelectElement>('[aria-label="History type"]')!; kind.value = "flipnote"; kind.dispatchEvent(new Event("change", {bubbles: true})); await settled();
+      const input = target.querySelector<HTMLInputElement | HTMLSelectElement>(manual ? '[aria-label="Document ID"]' : '[aria-label="History document"]')!;
+      input.value = OBJ; input.dispatchEvent(new Event(manual ? "input" : "change", {bubbles: true})); await settled();
+    }, done: () => { unmount(app); target.remove(); } };
+}
+
 test("G7-UI: actual repair controls require a selected observed receipt and never call scheduled repaired", async () => {
   const ipc = fakeIpc(), a = id64(1), b = id64(2);
   ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ title: "faulted art" }) } })));
   ipc.on("studio_read", () => ordinaryView(flipnoteContent({ frames: [] }), { phase: "fault" }));
   ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ }));
-  ipc.on("studio_fault_read", args => ({ v: 1, kind: "fault", channel: CHANNEL, object: OBJ, scope: args.scope === "registry" ? { kind: "registryBucket", bucket: 3 } : { kind: "source" }, source: { phase: "fault" },
+  ipc.on("studio_fault_read", args => ({ v: 1, kind: "fault", channel: CHANNEL, object: args.object, scope: args.scope === "registry" ? { kind: "registryBucket", bucket: 3 } : { kind: "source" }, source: { phase: "fault" },
     candidates: [a, b].map(receipt => ({ receipt, closedEpoch: "3", closeRecord: id64(3), seedChange: id64(4), inheritedEpoch: null, locallyInstalled: receipt === a })), mayDecide: true, blockedBy: null, waiting: 0, preservedOperations: 2, repair: null, lastAttempt: null }));
   ipc.on("studio_fault_repair", () => ({ v: 1, kind: "faultRepairStarted", channel: CHANNEL, scope: { kind: "source" }, start: "scheduled", refreshRequired: true }));
-  const m = mountStudio(ipc);
+  const m = mountHistorySettings(ipc);
   try {
-    state.studio.selected = OBJ; flushSync(); await settled(350);
-    m.click("button.st-itab", "music"); await settled();
-    m.click("button", "Refresh repair status"); await settled();
-    const repair = [...m.target.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "Repair using selected receipt")!;
+    await settled(); await m.chooseObject();
+    assert.equal(m.count("studio_fault_repair"), 0, "opening settings never issues a repair");
+    m.click("button", "Check history"); await settled();
+    const repair = [...m.target.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "Keep selected version")!;
     assert.equal(repair.disabled, true);
     const radios = m.target.querySelectorAll<HTMLInputElement>('.fault-controls input[type="radio"]'); assert.equal(radios.length, 2);
     radios[1].click(); flushSync(); assert.equal(repair.disabled, false);
     repair.click(); flushSync(); await settled();
     assert.equal(m.count("studio_fault_repair"), 1);
     assert.deepEqual(ipc.calls.find(c => c.cmd === "studio_fault_repair")!.args.decision, { receiptA: a, receiptB: b, selected: b });
-    assert.match(m.text(), /Repair scheduled; refresh to see its actual outcome/);
+    assert.match(m.text(), /Repair started. Check status for the result/);
     assert.equal(m.target.querySelectorAll('.fault-controls input[type="radio"]').length, 0, "an old choice cannot be reused after scheduling");
   } finally { m.done(); }
 });
@@ -130,7 +144,7 @@ test("G7-UI: Closing FPS controls save locally and retain their exact request on
     m.click("button.st-btn", "retry same request"); await settled();
     assert.deepEqual(ipc.calls.filter(c => c.cmd === "studio_closing_overlay_save")[1].args, first);
     assert.equal(m.count("studio_closing_overlay_save_begin"), 1); assert.equal(m.count("studio_apply"), 0); assert.equal(m.count("studio_unconfirmed_overlay_save"), 0);
-    m.click("button.st-itab", "music"); await settled(); assert.match(m.text(), /Save keeps edits in a local-only draft when this device holds the signed close/);
+    m.click("button.st-itab", "history"); await settled(); assert.match(m.text(), /Updating shared history/);
   } finally { m.done(); }
 });
 
@@ -139,11 +153,9 @@ test("G7-UI: Index and unavailable object repair stay reachable when ordinary re
   ipc.on("studio_read", () => { throw new Error("object Registry fault"); });
   const calls: unknown[] = [];
   ipc.on("studio_fault_read", a => { calls.push(a.object); return { v: 1, kind: "fault", channel: CHANNEL, object: a.object, scope: { kind: "source" }, source: { phase: "open" }, candidates: null, repair: null, lastAttempt: null, mayDecide: false, blockedBy: "noFault", waiting: 0, preservedOperations: 0 }; });
-  const nav = mountStudioNav(ipc);
-  try { await settled(); nav.click("Refresh repair status"); await settled(); assert.deepEqual(calls, [null]); }
-  finally { nav.done(); }
-  const m = mountStudio(ipc);
-  try { state.studio.selected = OBJ; flushSync(); await settled(); m.click("button", "Refresh repair status"); await settled(); assert.deepEqual(calls, [null, OBJ]); }
+  const m = mountHistorySettings(ipc);
+  try { await settled(); m.click("button", "Check history"); await settled(); assert.deepEqual(calls, [null]);
+    await m.chooseObject(true); m.click("button", "Check history"); await settled(); assert.deepEqual(calls, [null, OBJ]); }
   finally { m.done(); }
 });
 
@@ -158,10 +170,62 @@ test("G7-UI: simultaneous Index/document repair selections stay independent and 
     const radios = targets.map(t => t.querySelectorAll<HTMLInputElement>('input[type="radio"]'));
     radios[0][0].click(); flushSync(); radios[1][1].click(); flushSync();
     assert.equal(radios[0][0].checked, true); assert.equal(radios[1][1].checked, true); assert.notEqual(radios[0][0].name, radios[1][1].name);
-    for (const target of targets) { assert.match(target.textContent ?? "", /<script>storage refused<\/script>/); assert.equal(target.querySelector("script"), null); assert.equal([...target.querySelectorAll("button")].find(b => b.textContent?.startsWith("Repair using"))!.disabled, false); }
+    for (const target of targets) { assert.match(target.textContent ?? "", /<script>storage refused<\/script>/); assert.equal(target.querySelector("script"), null); assert.equal([...target.querySelectorAll("button")].find(b => b.textContent?.startsWith("Keep selected"))!.disabled, false); }
   } finally { components.forEach(c => unmount(c)); targets.forEach(t => t.remove()); }
 });
+test("server history list ignores stale success and failure after channel A → B → A", async () => {
+  for (const rejectOld of [false, true]) {
+    const ipc = fakeIpc(), reads = [deferred<unknown>(), deferred<unknown>(), deferred<unknown>()]; let calls = 0;
+    ipc.on("studio_list", () => reads[calls++].promise);
+    const target = document.createElement("div"); document.body.append(target);
+    const app = mount(ServerStudioSettings, {target, props: {server: SERVER, initialChannel: CHANNEL, channels: [{id: CHANNEL, name: "A"}, {id: "2", name: "B"}], owner: true, ipc}}); flushSync();
+    try {
+      const channel = target.querySelector<HTMLSelectElement>('[aria-label="History channel"]')!;
+      channel.value = "2"; channel.dispatchEvent(new Event("change", {bubbles: true})); flushSync();
+      channel.value = CHANNEL; channel.dispatchEvent(new Event("change", {bubbles: true})); flushSync();
+      assert.equal(calls, 3);
+      reads[2].resolve(ordinaryView(indexContent({objects: {[OBJ]: indexEntry({title: "Newest list"})}}))); await settled();
+      const kind = target.querySelector<HTMLSelectElement>('[aria-label="History type"]')!; kind.value = "flipnote"; kind.dispatchEvent(new Event("change", {bubbles: true})); flushSync();
+      if (rejectOld) reads[0].reject(new Error("superseded request")); else reads[0].resolve(ordinaryView(indexContent({objects: {[OBJ]: indexEntry({title: "Old list"})}})));
+      reads[1].reject(new Error("old B failure")); await settled();
+      assert.match(target.textContent!, /Newest list/); assert.doesNotMatch(target.textContent!, /Old list|Couldn’t read/);
+    } finally { await unmount(app); target.remove(); }
+  }
+});
+
 const frameView = (bytes = pix.length, cid = id64(1)) => ordinaryView(flipnoteContent({ frames: [{ id: F1, cid, bytes }] }));
+
+test("repair explains missing owner history without promising a timed identity check", async () => {
+  for (const blockedBy of ["tenureUnverified", "tenureUnobserved"]) {
+    const target = document.createElement("div"); document.body.append(target);
+    const session = {readFault: async () => ({phase: "fault", candidates: [], blockedBy, mayDecide: false, repairing: false})} as unknown as import("./studio-session.ts").StudioSession;
+    const app = mount(StudioFaultControls, {target, props: {session, object: OBJ, revision: 0}}); flushSync();
+    try { target.querySelector<HTMLButtonElement>("button")!.click(); await settled(); assert.match(target.textContent!, /missing the owner history/); assert.doesNotMatch(target.textContent!, /being checked|shortly/); }
+    finally { await unmount(app); target.remove(); }
+  }
+});
+
+test("Studio Post to chat exports once through its attachment callback and rejects a stale preparation", async () => {
+  const ipc = fakeIpc();
+  ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ title: "moon cat" }) } })));
+  ipc.on("studio_read", () => frameView());
+  ipc.on("request_blob_bounded", () => ({ bytes_b64: b64(pix), bytes: pix.length }));
+  const posted: { bytes: Uint8Array; server: number }[] = [], bytes = new Uint8Array([1, 2, 3]);
+  const m = mountStudio(ipc, { onpostPixa: async (bytes, server) => { posted.push({bytes, server}); } });
+  try {
+    state.studio.selected = OBJ; flushSync(); await settled();
+    const session = state.ensureStudio(ME);
+    session.prepareFlipnotePixa = async () => bytes;
+    const post = [...m.target.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === "Post to chat")!;
+    assert.equal(post.disabled, false); post.click(); await settled();
+    assert.deepEqual(posted, [{bytes, server: SERVER}]);
+    assert.equal(m.count("publish_pixa"), 0, "posting does not create a Studio history reference");
+    const delayed = deferred<Uint8Array>(); session.prepareFlipnotePixa = () => delayed.promise;
+    post.click(); flushSync(); state.studio.selected = id32(99); flushSync(); await settled();
+    delayed.resolve(bytes); await settled();
+    assert.equal(posted.length, 1); assert.match(m.notices.join(" "), /flipnote changed/i);
+  } finally { m.done(); }
+});
 
 test("UI-001: selecting a flipnote reads it and lists its recovery once, then the surface settles", async () => {
   const ipc = fakeIpc();
@@ -231,7 +295,7 @@ test("UI-002: a pending read becomes the editor, a landed save changes the shown
     assert.match(m.text(), /4\.2 kib/, "the returned view replaced the projection on screen");
     assert.doesNotMatch(m.text(), /0\.3 kib/);
     // (3) a recovery walk: the item's disposition reaches the rail.
-    m.click("button.st-itab", "music");
+    m.click("button.st-itab", "history");
     await settled();
     assert.match(m.text(), /previous version · epoch 2/);
     m.click("button.st-btn", "restore");
@@ -368,7 +432,7 @@ test("UI-004: an awaiting-tenure edit is visibly local-only and its retained dra
     await settled(500);
     assert.equal(m.count("studio_unconfirmed_overlay_save"), 2);
     assert.match(m.text(), /local-only draft/);
-    m.click("button.st-itab", "music");
+    m.click("button.st-itab", "history");
     await settled();
     assert.match(m.text(), /created while the owner's tenure was unconfirmed/);
     m.click("button.st-btn", "export");
@@ -525,7 +589,7 @@ test("UI-006: a Flipnote Copy keeps its exact retry control after the source is 
     disposed = true;
     await session.refreshOverlay(OBJ);
     flushSync();
-    m.click("button.st-itab", "music");
+    m.click("button.st-itab", "history");
     await settled();
     assert.match(m.text(), /retained copy title.*uncertain/s);
     assert.match(m.text(), /local draft disposed/);
@@ -636,7 +700,7 @@ test("UI-008: a cleanly refused Flipnote Copy has an explicit local-only cancel 
     assert.ok(choice);
     await session.copyOverlayChoice(OBJ, choice.choice, choice.label, "copy");
     flushSync();
-    m.click("button.st-itab", "music");
+    m.click("button.st-itab", "history");
     await settled();
     assert.match(m.text(), /retained copy title.*refused/s);
     assert.match(m.text(), /preview again as a new copy/);
@@ -872,14 +936,14 @@ test("CLAIM-UI-002: an ask on my frame is a sticky notice with a countdown and P
   }
 });
 
-test("CLAIM-UI-003: outside a call the surface explains claims and offers no claim controls", async () => {
+test("CLAIM-UI-003: outside a call the surface offers no claim controls or explanatory filler", async () => {
   const m = mountStudioWithClaims(openFlipnoteIpc(), null, null);
   try {
     await settled();
     state.studio.selected = OBJ;
     flushSync();
     await settled(400);
-    assert.match(m.text(), /appear while you are in a call on this server · they never lock a frame/);
+    assert.doesNotMatch(m.text(), /appear while you are in a call|never lock a frame/);
     assert.equal(m.button("claim this frame"), undefined);
     assert.equal(m.button("ask to draw it"), undefined);
     assert.equal(m.target.querySelector(".st-thumb .claim"), null);
@@ -899,17 +963,19 @@ test("G6-UI-001: native Score composer routes real drum edits and retains exact 
   try {
     await settled(); state.studio.selected = OBJ; flushSync(); await settled(400);
     assert.ok(m.target.querySelector('[aria-label="Score composer"]'));
+    m.click("button.st-itab", "History");
     m.click("button", "copy");
     assert.match(m.text(), /Score copy may replace same-coordinate cells and recipes, title, BPM, beats per bar and Steps/);
     assert.match(m.text(), /not an atomic restore/);
     assert.doesNotMatch(m.text(), /copy replaces the current title and fps/);
     assert.equal(ipc.calls.find(c => c.cmd === "studio_read")?.args.objectKind, "score");
+    m.click("button.st-itab", "Music");
     m.click("button", "drum"); m.target.querySelector<HTMLButtonElement>('[data-score-cell="0:0"]')!.click(); flushSync(); await settled(300);
     const first = ipc.calls.find(c => c.cmd === "studio_apply")!.args;
     assert.equal(first.objectKind, "score"); assert.equal(JSON.parse(String(first.body)).op, "set_cell");
     assert.match(m.text(), /save uncertain/); m.click("button", "retry same request"); await settled(300);
     assert.deepEqual(ipc.calls.filter(c => c.cmd === "studio_apply")[1].args, first);
-    assert.match(m.text(), /Saved history, local drafts and recovery/); assert.equal(m.count("studio_recovery_list"), 1);
+    assert.match(m.text(), /History/); assert.equal(m.count("studio_recovery_list"), 1);
     assert.equal(m.count("publish_pix"), 0);
   } finally { m.done(); }
 });
