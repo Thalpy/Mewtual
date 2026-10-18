@@ -665,8 +665,10 @@
   }
 
   // --- Timeline actions ------------------------------------------------------------------------
-  function guard(fn: () => void) {
-    try { fn(); } catch (e) { onnotice(reason(e), "warn"); }
+  /// Runs a session call and turns its refusal into a notice; the boolean lets a caller that
+  /// has a follow-up (the score composer auditions a note it just placed) skip it on refusal.
+  function guard(fn: () => void): boolean {
+    try { fn(); return true; } catch (e) { onnotice(reason(e), "warn"); return false; }
   }
 
   function blankPix(): Uint8Array {
@@ -1141,6 +1143,11 @@
               {#if view.phase === "fault"}<p>Ask the owner to check Studio in Server settings.</p>{/if}
             {/if}
 {/snippet}
+<!-- The score composer's history tab: the same status line and rail the flipnote inspector shows. -->
+{#snippet scoreHistory()}
+  {@render historyStatus()}
+  {@render historyRail()}
+{/snippet}
 <!-- Retained local drafts, retained versions and recovery walks: everything below the status. -->
 {#snippet historyRail()}
             {#if overlay?.loading}
@@ -1306,20 +1313,20 @@
       {/if}
     </div>
   {:else if isScore}
+    <!-- The score composer owns the whole surface below the surface strip: header, grid,
+         inspector (whose history tab renders this component's history rail) and transport.
+         Pending-save and media banners stay here because the session, not the composer, owns them. -->
     <div class="st-score">
       {@render pendingSaves()}
-      <div class="st-itabs"><button class="st-itab" class:on={inspectorTab !== "history"} onclick={() => inspectorTab = "music"}>Music</button><button class="st-itab" class:on={inspectorTab === "history"} onclick={() => inspectorTab = "history"}>History</button></div>
-      {#if inspectorTab === "history"}{@render historyStatus()}{@render historyRail()}{:else}
-      <label class="micro st-score-loop"><input type="checkbox" aria-label="Loop whole authored score" bind:checked={loop} disabled={playing} /><span>loop whole authored score</span></label>
-      <span class="st-card-acts"><button class="st-btn" disabled={mediaBusy || playing} onclick={() => downloadMedia()}>download .jamtake</button><button class="st-btn" disabled={mediaBusy || playing || !onshareScore} onclick={() => downloadMedia(true)}>share .jamtake</button></span>
       {#if mediaReceipt}<div class="st-banner info wrap">{mediaReceipt}</div>{/if}
       {#key objectId}
-        <ScoreEditor model={score} readonlyReason={playing ? "Stop playback before editing" : readOnlyWhy} loading={doc?.loading ?? false} error={doc?.error ?? ""} {patchLibrary}
+        <ScoreEditor model={score} readonlyReason={playing ? "Stop playback before editing" : readOnlyWhy} loading={doc?.loading ?? false} error={doc?.error ?? ""} {patchLibrary} library={patchShelves} {who} {tint}
           onop={(op) => guard(() => session.applyScoreOp(objectId, op))} onaddpatch={addStudioPatch}
-          onplay={audioActions ? toggleStudioPlay : undefined} onstop={() => audioActions?.stop()} {playing}
-          onnotice={(text, kind) => onnotice(text, kind === "error" ? "error" : "info")} />
+          onplay={audioActions ? toggleStudioPlay : undefined} onstop={() => audioActions?.stop()} {playing} positionMs={playing ? audioState.elapsedMs : null}
+          {loop} onloop={(next) => { loop = next; }} onaudition={audioActions ? auditionSound : undefined} onnew={openSoundfont}
+          onexport={() => downloadMedia()} onshare={onshareScore ? () => downloadMedia(true) : undefined} {mediaBusy}
+          history={scoreHistory} onnotice={(text, kind) => onnotice(text, kind === "error" ? "error" : "info")} />
       {/key}
-      {/if}
     </div>
   {:else if !model}
     <div class="studio-empty">
@@ -1734,12 +1741,9 @@
 </div>
 
 <style>
-  .st-score { flex: 1; overflow: auto; min-height: 0; padding: 10px; }
-  /* The application-wide input width is for text fields. A full-width checkbox pushed its
-     visible consent label outside the 900px desktop viewport, leaving an unexplained square. */
-  .st-score-loop { display: flex; align-items: center; gap: 6px; margin: 6px 0; white-space: normal; }
-  .st-score-loop input { width: auto; flex: none; margin: 0; }
-  .st-score-loop span { min-width: 0; }
+  /* The composer fills the column like the flipnote editor does; it scrolls as a whole when the
+     window is shorter than its 25 rows plus transport. */
+  .st-score { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   /* History folds: the summary IS the section rule, so a closed fold reads like a heading. */
   .st-fold > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 6px; }
   .st-fold > summary::-webkit-details-marker { display: none; }

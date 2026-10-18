@@ -39,7 +39,7 @@ const { default: StudioFaultControls } = await import("./StudioFaultControls.sve
 const { default: ServerStudioSettings } = await import("./ServerStudioSettings.svelte");
 const { mount, unmount, flushSync } = await import("svelte");
 
-function mountStudio(ipc: FakeIpc, extra: Partial<{ audioActions: import("./studio-audio.ts").StudioAudioActions; patchLibrary: readonly { name: string; patch: import("./jam-contract.ts").JamPatch }[]; onpostPixa: (bytes: Uint8Array, server: number) => Promise<void> }> = {}) {
+function mountStudio(ipc: FakeIpc, extra: Partial<{ audioActions: import("./studio-audio.ts").StudioAudioActions; patchLibrary: readonly { name: string; patch: import("./jam-contract.ts").JamPatch }[]; patchShelves: readonly { name: string; patch: import("./jam-contract.ts").JamPatch; shelf: "preset" | "mine" | "share" }[]; onpostPixa: (bytes: Uint8Array, server: number) => Promise<void> }> = {}) {
   state.useStudioIpc(ipc);
   const notices: string[] = [];
   const target = document.createElement("div");
@@ -963,19 +963,21 @@ test("G6-UI-001: native Score composer routes real drum edits and retains exact 
   try {
     await settled(); state.studio.selected = OBJ; flushSync(); await settled(400);
     assert.ok(m.target.querySelector('[aria-label="Score composer"]'));
-    m.click("button.st-itab", "History");
+    // The composer's inspector carries the shared history rail as its third tab.
+    m.click("button.st-itab", "history");
     m.click("button", "copy");
     assert.match(m.text(), /Score copy may replace same-coordinate cells and recipes, title, BPM, beats per bar and Steps/);
     assert.match(m.text(), /not an atomic restore/);
     assert.doesNotMatch(m.text(), /copy replaces the current title and fps/);
     assert.equal(ipc.calls.find(c => c.cmd === "studio_read")?.args.objectKind, "score");
-    m.click("button.st-itab", "Music");
-    m.click("button", "drum"); m.target.querySelector<HTMLButtonElement>('[data-score-cell="0:0"]')!.click(); flushSync(); await settled(300);
+    m.click("button.st-itab", "patches");
+    m.target.querySelector<HTMLButtonElement>('[data-score-mode="drum"]')!.click(); flushSync();
+    m.target.querySelector<HTMLButtonElement>('[data-score-cell="0:0"]')!.click(); flushSync(); await settled(300);
     const first = ipc.calls.find(c => c.cmd === "studio_apply")!.args;
     assert.equal(first.objectKind, "score"); assert.equal(JSON.parse(String(first.body)).op, "set_cell");
     assert.match(m.text(), /save uncertain/); m.click("button", "retry same request"); await settled(300);
     assert.deepEqual(ipc.calls.filter(c => c.cmd === "studio_apply")[1].args, first);
-    assert.match(m.text(), /History/); assert.equal(m.count("studio_recovery_list"), 1);
+    assert.match(m.text(), /history/); assert.equal(m.count("studio_recovery_list"), 1);
     assert.equal(m.count("publish_pix"), 0);
   } finally { m.done(); }
 });
@@ -1027,7 +1029,34 @@ test("G7-UI: document Play after a sounding audition lowers the audition flag, s
   } finally { unmount(app); target.remove(); state.disposeStudio(); }
 });
 
-test("G6-UI-003: Score loop has an explicit labelled checkbox and forwards only the local choice", async () => {
+test("G7-UI: a library tile adds a Score set_patch through the session and selects the recipe once the view holds it", async () => {
+  const ipc = fakeIpc();
+  const { legacyJamPatch, jamPatchId } = await import("./jam-patch.ts");
+  const patch = legacyJamPatch("sine"), id = await jamPatchId(patch);
+  let current: Record<string, unknown> = { kind: "score", title: null, bpm: null, bpb: null, steps: null, cells: {}, patches: {}, readiness: { cells: {}, patches: {}, headerConflicts: false } };
+  ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ kind: "score", title: "music" }) } })));
+  ipc.on("studio_read", () => ({ ...ordinaryView(current), group: "deadbeef" }));
+  ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ }));
+  ipc.on("studio_apply", (args) => {
+    const body = JSON.parse(String(args.body)) as { op: string; patch: string };
+    assert.equal(body.op, "set_patch"); assert.equal(body.patch, id);
+    current = { ...current, patches: { [id]: { removed: false, register: { selected: { value: patch, source: { opId: id64(0x51), author: ME, nonce: id32(0x51) } }, conflicts: [] } } } };
+    return { ...ordinaryView(current), group: "deadbeef" };
+  });
+  const m = mountStudio(ipc, { patchLibrary: [{ name: "LANDING", patch }], patchShelves: [{ name: "LANDING", patch, shelf: "preset" }] });
+  try {
+    await settled(); state.studio.selected = OBJ; flushSync(); await settled(400);
+    assert.equal(m.target.querySelector<HTMLButtonElement>('[data-score-cell="0:0"]')!.disabled, true, "no recipe, no note placement");
+    m.target.querySelector<HTMLButtonElement>('[data-lib-patch="LANDING"]')!.click(); flushSync(); await settled(400);
+    const apply = ipc.calls.find(c => c.cmd === "studio_apply")!.args;
+    assert.equal(apply.objectKind, "score");
+    assert.equal(m.target.querySelector(`[data-doc-patch="${id}"]`)?.getAttribute("aria-pressed"), "true", "the added recipe is the one notes are placed with");
+    assert.equal(m.target.querySelector<HTMLButtonElement>('[data-score-cell="0:0"]')!.disabled, false);
+    assert.match(m.target.querySelector(".sc-foot")!.textContent!, /LANDING/);
+  } finally { m.done(); }
+});
+
+test("G6-UI-003: Score loop is an explicit transport toggle, off by default, and forwards only the local choice", async () => {
   const ipc = fakeIpc();
   const score = { kind: "score", title: null, bpm: null, bpb: null, steps: null, cells: {}, patches: {}, readiness: { cells: {}, patches: {}, headerConflicts: false } };
   ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ kind: "score", title: "music" }) } })));
@@ -1037,11 +1066,11 @@ test("G6-UI-003: Score loop has an explicit labelled checkbox and forwards only 
   const m = mountStudio(ipc, { audioActions: { stop: () => {}, start: async (_kind, _prepare, loop) => { loops.push(loop); return true; } } });
   try {
     await settled(); state.studio.selected = OBJ; flushSync(); await settled(400);
-    const checkbox = m.target.querySelector<HTMLInputElement>('input[aria-label="Loop whole authored score"]');
-    assert.ok(checkbox); assert.equal(checkbox.type, "checkbox"); assert.equal(checkbox.checked, false);
-    assert.match(checkbox.closest("label.st-score-loop")?.textContent ?? "", /loop whole authored score/);
-    m.click("button", "play locally"); await settled(50); assert.deepEqual(loops, [false]);
-    checkbox.checked = true; checkbox.dispatchEvent(new Event("change", { bubbles: true })); flushSync();
-    m.click("button", "play locally"); await settled(50); assert.deepEqual(loops, [false, true]);
+    const toggle = m.target.querySelector<HTMLButtonElement>('button[aria-label="Loop playback"]');
+    assert.ok(toggle); assert.equal(toggle.getAttribute("aria-pressed"), "false");
+    const play = () => { m.target.querySelector<HTMLButtonElement>('[title="play [space]"]')!.click(); flushSync(); };
+    play(); await settled(50); assert.deepEqual(loops, [false]);
+    toggle.click(); flushSync(); assert.equal(toggle.getAttribute("aria-pressed"), "true");
+    play(); await settled(50); assert.deepEqual(loops, [false, true]);
   } finally { m.done(); }
 });
