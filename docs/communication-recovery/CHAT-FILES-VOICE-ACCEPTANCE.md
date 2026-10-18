@@ -9,7 +9,9 @@ outside this programme's changes.
 The [PR48 revision ledger](PR48-REVIEW-REVISION.md) records the subsequent transport congestion,
 detached automatic submissions, pending mapping, provider rotation, announcement clock, native
 build and narrow SDP resource corrections. Those fixes have focused evidence and clear read-only
-reviews; full revision validation is running. They do not enable live V2 or durable file resume.
+reviews. The revision ledger records final suite results, including the failed full root sweep
+and complete affected-target reruns after its two test corrections. Earlier pending/running notes
+below are chronological checkpoints. These corrections do not enable live V2 or durable file resume.
 
 | Package | Current state | Acceptance still required |
 | --- | --- | --- |

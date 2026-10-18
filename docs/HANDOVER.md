@@ -11,8 +11,10 @@ slice reviews. The narrow V2 capacity contract now prepays 224 KiB, work lanes, 
 and endpoint/helper origin records for one local/remote 8 KiB SDP exchange. Maximum native packet/
 reply and pressured declared engine/result composition regressions pass. General SDP crypto-action
 factories, historical receipts and browser/RTC custody remain unimplemented; live V2 stays disabled.
-Read-only re-review has no remaining blocker/high/medium. Full verification is running; the
-revision ledger records exact checks and limits.
+Read-only re-review has no remaining blocker/high/medium. The revision ledger records final
+verification: 404 native tests, 1,829 frontend tests, ten browser checks and native startup pass.
+The full root sweep completed with two test defects; both corrections and their complete
+affected-target reruns are recorded separately from that failed unfiltered command.
 The next native result-recovery slice has a read-only
 [design checkpoint](communication-recovery/VOICE-NATIVE-RESULTS-NEXT.md); it is planned work,
 including terminal receipts and the IPC/result copy handoff, not live V2 integration.
@@ -45,8 +47,9 @@ The separate [communication ledger](communication-recovery/CHAT-FILES-VOICE-ACCE
 subsequent unaccepted work. The live TCP baseline reproduces direct-only voice signalling through
 B and replacement D with A-C forbidden; local submission succeeds without C receipt. Initial
 changes fence stale RTC/call/mount work and introduce native optional router custody. Focused
-tests and adversarial corrections are in progress; this branch's full final suites and remaining
-room/chat/file/media packages are outstanding. Gate7's earlier full results are baseline evidence,
+tests and adversarial corrections followed that initial checkpoint; final branch verification is
+recorded in the revision ledger. The remaining room/chat/file/media packages are outstanding.
+Gate7's earlier full results are baseline evidence,
 not verification of these later changes. The pre-existing `joinlog.test.ts` edit remains separate.
 
 The demonstrated multi-second discovery stall is corrected with detached connected PEX/
@@ -110,8 +113,8 @@ peer waiters and checks the candidate's own current local ICE generation. Announ
 use one checked Clock sample. The unused desktop V2 action registry compiles only for contract
 tests until its result owner/IPC consumers are implemented; the general warnings policy remains
 intact. See [the revision ledger](communication-recovery/PR48-REVIEW-REVISION.md) for corrected
-actor/driver progress, provider rotation and the narrow native SDP resource contract. Final
-branch verification and the wider native/browser/file/media acceptance remain outstanding.
+actor/driver progress, provider rotation, the narrow native SDP resource contract and final branch
+verification. The wider native/browser/file/media acceptance remains outstanding.
 
 ## PR #46 third review: rename context and Index-half Save (2026-10-18)
 

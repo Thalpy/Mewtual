@@ -1,6 +1,6 @@
 # PR 48 review revision
 
-Status: six review corrections implemented; full local verification is finishing. The wider
+Status: six review corrections implemented. Final local results are recorded below. The wider
 communication programme is not accepted. Baseline: communication branch commit
 `2dfc0357ff39ad37edaf44662c04b05e7b5f0f2b`. The review concerns the communication programme,
 not accepted Gate 7. The main checkout now contains independent Studio work on Gate7; revision
@@ -74,7 +74,7 @@ their remote transport while expecting a queued request; their named fixture own
 that tested lifetime. The new Hub fixture also supplies explicit connection edges because Hub
 registration alone emits none. Short read-only re-review closes both medium findings.
 The original test harness failures and later corrected runs are
-retained in target logs. No full branch suites have run for this revision yet.
+retained in target logs. Full branch suites had not run at this checkpoint; final results are below.
 
 The current focused cross-crate pass also confirms the same-instant/foreign-policy late-refund
 regression, all ten blob checks, seven dispatcher checks, the real TCP full-sink case, and all
@@ -166,7 +166,7 @@ the original arithmetic defect is resolved for the declared narrow native contra
 helper selection between endpoints remains a coordinator enablement gate: the eventual native
 coordinator must establish compatible protected routes or refuse readiness/delivery honestly.
 This is additional to actual SDP factories, historical receipts, browser-copy/RTC custody and
-pressured initiator/responder/browser integration. Branch-wide validation is running.
+pressured initiator/responder/browser integration. Branch-wide validation results are below.
 
 The full frontend suite passes all 1,776 tests (`pr48-full-frontend-test.log`).
 
@@ -272,8 +272,8 @@ one existing child-process ignore (`pr48-app-recovery-presence-bridge-accepted.l
 combined repeat exposed a missing saturation precondition: a full but idle sink still permits
 read-only queries. The final regression queues one further real edit before proving its read is
 blocked. Read-only re-review finds no blocker/high/medium in these four test-file changes; strict
-root Clippy and both formatting checks pass (`pr48-root-clippy-accepted.log`). The full workspace
-repeat remains pending.
+root Clippy and both formatting checks pass (`pr48-root-clippy-accepted.log`). The subsequent full
+workspace repeat is recorded below.
 
 The final remote refresh found newly committed Gate7 review fix `5bc43d2c`. It is integrated
 without changing Rust source. Merge resolution retains both handover sections, every regression,
@@ -324,14 +324,25 @@ unchanged. All 14 product integration tests pass after this correction
 (`pr48-product-healthy-precondition-verified.log`); re-review is clear. A final short-read guard
 keeps draining possible if that warm-up sink fills. All 14 final product tests and strict root
 Clippy pass (`pr48-product-healthy-precondition-final.log`, `pr48-root-clippy-final.log`).
-The full workspace run continues through all
-remaining targets with no fail-fast; its original failure remains recorded, not relabelled as a
-passing unfiltered run. The redundant partial other-crate check was stopped during its long cost
-fixture (`pr48-remaining-root-packages.log`); the unfiltered run still executes that fixture.
+The full workspace run continued through all remaining targets with no fail-fast. The redundant
+partial other-crate check was stopped during its long cost fixture
+(`pr48-remaining-root-packages.log`); the unfiltered run completed that fixture.
 
-Root full verification is running, with no fail-fast so every target reports a result. Native WebView/forced relay/audio acceptance,
-historical result recovery, file durable migration/resume and final combined rollout remain
-outstanding.
+The completed unfiltered root sweep reports 2,738 passed, two failed and 24 existing ignored
+(`pr48-full-root-test-accepted.log`, exit 101). Both failures came from test defects: the eclipse setup
+above and the request-budget inventory missing the new disabled voice transport kind. The latter
+now declares the existing 512-byte receive ceiling. Each of the three signed ACK statuses encodes
+to 186 bytes; verification and detached forwarding independently reject replies above 512 bytes.
+No production limit, timeout, ignore or assertion is relaxed. All three focused budget audits pass
+(`pr48-response-budget-focused.log`). The complete corrected synchronization rerun passes all 629
+tests, including 589 unit tests, 38 integration tests and two doc tests
+(`pr48-full-sync-corrected.log`). The complete 14-case product rerun passes. Other workspace
+targets, including the 10,000-operation cost fixture and all doc tests, completed successfully in
+the unfiltered sweep. The sweep's failed
+exit remains recorded; affected-target reruns do not relabel it as a passing unfiltered command.
+
+Native WebView/forced relay/audio acceptance, historical result recovery, file durable
+migration/resume and final combined rollout remain outstanding.
 
 ## Final local check record
 
@@ -342,18 +353,20 @@ aborted attempts above remain distinct from the final evidence.
 
 | Check | Result | Log under original `target/` |
 | --- | --- | --- |
-| `cargo test --all --all-features --no-fail-fast -j 2` | Remaining targets running; eclipse fixture failure corrected and all 14 product cases pass in the focused rerun | `pr48-full-root-test-accepted.log`, `pr48-product-healthy-precondition-final.log` |
+| `cargo test --all --all-features --no-fail-fast -j 2` | Completed, exit 101: 2,738 passed, two failed, 24 existing ignored. Both test defects corrected; complete affected-target reruns below | `pr48-full-root-test-accepted.log` |
+| `cargo test --all-features -p catcoms-app --test product_e2e -j 2` | PASS: all 14 product cases after the eclipse setup correction | `pr48-product-healthy-precondition-final.log` |
+| `cargo test --all-features -p catcoms-sync -j 2` | PASS: 629 passed, zero failed/ignored, after the budget inventory correction | `pr48-full-sync-corrected.log` |
 | `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml -j 2` | PASS: 404 passed, zero failed/ignored | `pr48-full-native-test-final.log` |
 | `npm --prefix apps/desktop test` | PASS: 1,829 passed, zero failed/skipped | `pr48-full-frontend-accepted.log` |
 | `cargo fmt --all -- --check` and `cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check` | PASS | Tool output, no diagnostics |
-| `cargo clippy --all-targets --all-features -j 2 -- -D warnings` | PASS after final integration fixture corrections | `pr48-root-clippy-final.log` |
+| `cargo clippy --all-targets --all-features -j 2 -- -D warnings` | PASS after the final budget inventory correction | `pr48-root-clippy-budget-final.log` |
 | `cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features -j 2 -- -D warnings` | PASS | `pr48-final-native-clippy.log` |
 | `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml` | PASS, no warnings | `pr48-final-native-check.log` |
-| `cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml -j 2` | PASS after application was closed | `pr48-native-build-unlocked.log` |
+| `cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml -j 2` | PASS after application was closed | `pr48-native-build-accepted.log` |
 | `npm --prefix apps/desktop run check` | PASS: zero errors/warnings | `pr48-frontend-check-accepted.log` |
 | `npm --prefix apps/desktop run build` | PASS, existing bundle-size warning | `pr48-frontend-build-accepted.log` |
 | `npm --prefix apps/desktop run test:flows` | PASS: all ten Edge checks, including real QR interop | `pr48-browser-flows-qr-final.log` |
-| `npm --prefix apps/desktop run test:startup` | PASS: actual native setup marker | `pr48-native-startup-unlocked.log` |
+| `npm --prefix apps/desktop run test:startup` | PASS: actual native setup marker | `pr48-native-startup-accepted.log` |
 | `bash scripts/check-no-ambient.sh` | PASS | `pr48-final-no-ambient.log` |
 | `bash scripts/check-store-raw-fs.sh` | PASS | `pr48-final-store-raw-fs.log` |
 | `cargo deny check` | PASS: advisories, bans, licences and sources; existing duplicate warnings | `pr48-final-cargo-deny.log` |
