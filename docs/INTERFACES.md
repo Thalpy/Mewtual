@@ -1,5 +1,49 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Congested transport delivery and automatic repair submissions (PR 48 revision)
+
+The production driver dispatches application events without awaiting the application sink inside
+its swarm handler. A 64-payload queue and at most 640 last-announced/latest-actual lifecycle rows
+per driver reconcile connection generations. Payload, lifecycle and coalesced RecoveryNeeded
+wakes rotate fairly. Dropped/expired-carrier gossip requests ordinary reconciliation; this wake
+grants no membership, source, or missing-epoch authority. Never-announced transient connections
+may coalesce away. Announced disconnect/empty paths precede replacement connect/current paths;
+inbound requests remain bound to their original driver connection lease.
+
+Declared payload/response custody is capped at 64 MiB/driver and 128 MiB/process, with 1024 bytes
+metadata allowance per record, 320/1024 records, and 16/64 inbound requests plus two per peer.
+Actual Bytes clones, responders, completed response futures and lower response sends retain their
+credits until last ownership ends. A legal 16 MiB request and its response copies fit. Overload
+drops/refuses a request honestly; it never invents an empty or signed successful response. These
+caps exclude existing libp2p framing/socket allocations and independent application allocations.
+Command batches are limited to 32 per driver turn so queued commands cannot starve swarm events.
+
+Server's cached-dial, mesh-repair and reciprocal wrappers now admit bounded immutable jobs;
+they return local job counts and do not await driver ACKs. The sync selector rotates their
+completions with inbound events and catch-up. Jobs capture exact Root epoch/policy revision,
+current descriptor references, expiry and (for notifications) connected proof/driver lease.
+Synchronous authority observation and driver admission reject stale work; a stale completion
+does not change peer health. Pre-commit refunds bind to an opaque planning-window owner, even
+for same-instant zero-length windows. Committed/uncertain lower submissions stay charged.
+
+There are 32 submission owners/server and 64/process. This bounds queued dial submission/ACK
+work, not sockets, which keep their existing driver limits. Notification owners additionally
+remain charged through actual lower response/failure. notify_connected_cancellable returns a
+local driver ACK only; the driver discards response payloads instead of retaining application
+answers. Unsupported transports refuse this seam. Busy outbox entries wait for actual shared
+retirement; stale entries are discarded without blocking unrelated helpers. Standalone immediate
+sync methods remain available. Local reconnect and explicit manual redial retain their existing
+immediate ACK paths; they are not part of this detachment claim.
+
+Blob provider selection admits four peers per search batch, independent of the existing four
+server/eight process/one peer attempt permits. Each chunk/round retains a tried set capped at
+320 peers, rotating beyond absent or busy preferred peers. Busy candidates stay queued while
+unused batches are searched. Actual transport connectivity is checked independently of ranking;
+whole/page preparation still requires a known or current-member candidate, and authenticated
+responses still bind requester, provider when known, group, epoch, request, CID and exact page.
+An opening failure rejects the exact FileRef encoding, preserving alternatives with different
+wrapped keys to the same ciphertext. Existing deadlines, retry rounds and page bounds remain.
+
 ## Detached connected member maintenance (2026-10-18)
 
 `ChannelSync::prepare_member_maintenance(peer, kind)` returns an affine pending Commits, PEX,
@@ -43,6 +87,27 @@ EndpointAdmitted can come only from the original envelope's exact final endpoint
 are neither request dispatch nor WebView commands. Legacy kind8 is unchanged. See the V2 decision
 for buffer/work limits and the remaining scheduling/endpoint/browser integration requirements.
 
+`complete_voice_source` and `complete_voice_forward` return `VoiceCompletionFailure<T>` on
+failure. Capacity and RateLimited preserve the exact affine completion in `into_retry()`;
+retrying it does not submit another request or spend another Source attempt. Other failures are
+terminal. `into_error()` explicitly abandons retry custody. A retained native completion acquires
+its verification credit before rate debits, so a busy prepaid lane does not drain requester
+allowance. Fresh untrusted ingress still pays requester/process work before verification, and
+every retried completion repeats connection, Root, member, policy and packet authority checks.
+
+`LocalJoin::prepare_sdp_exchange` requires an established native pair, the actor's actual shared
+OriginLimits, and at most two fixed current helper identities. It prepays endpoint/helper records
+without spending or resetting traffic buckets, then reserves 224 KiB, one Crypto lane, two
+Forward lanes and two slots from the existing combined 32-action queue. Refusal precedes a local
+SDP nonce or incoming positive admission. The exchange permits one local and one remote SDP
+(8 KiB maximum each), one Source record and two actual lower holders. The first admitted Offer
+pins its OfferId and initiator/responder role; crossed Offers refuse before ACK or replay commit.
+Idle readiness lasts at most 30 seconds; the first SDP starts an immutable 20-second work window.
+Effect-bearing grants enforce those deadlines even if collection is delayed. Capacity loans and
+terminal records retain their actual bytes/slots after retirement. `Exchange` encryption/decryption
+budgets and its bounded native result owner confer capacity only; general SDP crypto-action
+factories, browser-copy custody, historical receipts and RTC dispatch remain unimplemented.
+
 Native Rust lifecycle seams now include `start_voice_watch(room, parent)`, `validate_voice_watch`,
 `start_voice_endpoint(Arc<CallGrant>, native_join, public_key)` and `voice_endpoint_changes`.
 They are not IPC commands. Watch grants are affine native custody; Root keeps no strong owner.
@@ -79,12 +144,14 @@ settlement. Temporary shared queue pressure returns busy and permits a later exa
 Trusted LocalJoin factories now issue opaque CryptoAction owners for proven-pair derivation and
 exact native confirmation encryption/decryption. Their combined 32-record queue includes terminal
 identities and rotating non-dequeueing pulls of at most four. Native Coordinator registration
+and its admit/settle registry currently compile only for contract tests until the result owner
+and browser IPC adapter are integrated; they are not production native enforcement. That model
 requires the actual call lease, authenticated scope and exact process resource pool. Admission
 stores one actual engine permit before replying; repeated admission reuses it. Settlement
 permanently closes delayed admission, and first sign/closed-confirmation wrappers use that same
 fence. End closes unstarted actions without refunding admitted work. A ByteBudget reservation may
 close unused bytes only; outstanding loans retain actual bytes/slots through their own release.
-These are inert Rust seams. The required VoiceConfirmationNative admitAction/commitConfirmation/
+The sync typed-action factories remain inert production Rust seams. The required VoiceConfirmationNative admitAction/commitConfirmation/
 settleAction interface is not implemented native IPC, and exact historical success/rejection
 receipts and pre-ingress queue/origin transactions remain outstanding. Never adapt through ordinary fresh-token
 admission or general Pair.open. Native/WebView and SDP/ICE result-lease integration remain open.

@@ -4,7 +4,8 @@
 use super::*;
 use catcoms_rt::SharedRequestKeepalive;
 
-/// Independent providers considered for one encrypted variant. Proven live members are preferred;
+/// Provider entries admitted in one search batch, not a cap on the peers a read can consider.
+/// Proven live members are preferred;
 /// the released explicit-read bootstrap may try known live candidates, but never causes fresh dials.
 pub const MAX_BLOB_FETCH_PEERS: usize = 4;
 
@@ -105,12 +106,24 @@ impl<T: MeshTransport> PendingBlobFetch<T> {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
-    /// At most four distinct live peers, preferring previously authenticated member responses.
+    /// First bounded search batch, preferring previously authenticated member responses.
     /// A restored connection may carry file gossip before a new catch-up response; preserve the
     /// existing explicit-read fallback to known live candidates in that case. Such a candidate is
     /// NOT trusted as a member or holder: only its current-member signed response can supply bytes.
     /// Empty/failing blob replies never downgrade unrelated document/membership evidence.
     pub fn blob_fetch_peers(&self) -> Vec<PeerId> {
+        self.blob_fetch_peers_excluding(&HashSet::new())
+    }
+
+    /// Next search batch for this read/round. Its tried set is separate from provider ranking:
+    /// an absent first four must not hide a fifth holder, and reordered proofs cannot make an
+    /// already queued connected provider disappear. Bound total churn as well as each batch.
+    pub fn blob_fetch_peers_excluding(&self, tried: &HashSet<PeerId>) -> Vec<PeerId> {
+        if tried.len() >= catcoms_rt::MAX_CONNECTED_PEER_SNAPSHOT {
+            return Vec::new();
+        }
+        let remaining =
+            MAX_BLOB_FETCH_PEERS.min(catcoms_rt::MAX_CONNECTED_PEER_SNAPSHOT - tried.len());
         let live: HashSet<_> = self
             .transport
             .connection_snapshot()
@@ -121,23 +134,47 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         for proof in self.member_peers.iter().rev() {
             if live.contains(&proof.peer)
                 && self.group.contains_device(&proof.device)
+                && !tried.contains(&proof.peer)
                 && !peers.contains(&proof.peer)
             {
                 peers.push(proof.peer);
-                if peers.len() == MAX_BLOB_FETCH_PEERS {
+                if peers.len() == remaining {
                     break;
                 }
             }
         }
         for peer in self.known_peers.iter().rev() {
-            if peers.len() == MAX_BLOB_FETCH_PEERS {
+            if peers.len() == remaining {
                 break;
             }
-            if live.contains(peer) && !peers.contains(peer) && *peer != self.local_peer() {
+            if live.contains(peer)
+                && !tried.contains(peer)
+                && !peers.contains(peer)
+                && *peer != self.local_peer()
+            {
                 peers.push(*peer);
             }
         }
         peers
+    }
+
+    /// Actual transport liveness only. Candidate preference and member proof order are not
+    /// connectivity evidence. This never consults remembered routes or causes a fresh dial.
+    pub fn blob_peer_is_connected(&self, peer: PeerId) -> bool {
+        self.transport
+            .connection_snapshot()
+            .iter()
+            .any(|row| row.peer == peer)
+    }
+
+    fn blob_peer_is_candidate(&self, peer: PeerId) -> bool {
+        peer != self.local_peer()
+            && self.blob_peer_is_connected(peer)
+            && (self.known_peers.contains(&peer)
+                || self
+                    .member_peers
+                    .iter()
+                    .any(|proof| proof.peer == peer && self.group.contains_device(&proof.device)))
     }
 
     /// The largest page this node is willing to grow to on `peer`'s current path.
@@ -173,7 +210,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         cid: Cid,
         max_bytes: usize,
     ) -> Result<PendingBlobFetch<T>, SyncError> {
-        if max_bytes > MAX_BOUNDED_BLOB_BYTES || !self.blob_fetch_peers().contains(&peer) {
+        if max_bytes > MAX_BOUNDED_BLOB_BYTES || !self.blob_peer_is_candidate(peer) {
             return Err(SyncError::Malformed);
         }
         let requester = self.device.public_key_bytes();
@@ -224,7 +261,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         max_bytes: usize,
     ) -> Result<PendingBlobFetch<T>, SyncError> {
         let max_bytes = max_bytes.min(MAX_BLOB_PAGE);
-        if max_bytes == 0 || !self.blob_fetch_peers().contains(&peer) {
+        if max_bytes == 0 || !self.blob_peer_is_candidate(peer) {
             return Err(SyncError::Malformed);
         }
         let requester = self.device.public_key_bytes();

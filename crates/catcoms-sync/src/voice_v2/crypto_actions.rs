@@ -21,6 +21,7 @@ const ACTIONS: usize = 32;
 const CONTEXT_BYTES: usize = 4096;
 const CONFIRM_BYTES: usize = 512;
 const RECORD_BYTES: usize = 1024;
+pub(crate) mod slots;
 
 /// Closed operation identity; the native factory selects it from actual protocol state.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -71,6 +72,7 @@ pub struct CryptoAction {
     engine_bytes: usize,
     engine: Mutex<Engine>,
     _record: Credit,
+    _slot: slots::Slot,
 }
 redacted_debug!(CryptoAction, CryptoInput<'_>, CryptoOperation);
 
@@ -184,6 +186,7 @@ pub(super) struct ActionQueue {
     serial: u64,
     actions: BTreeMap<Key, Arc<CryptoAction>>,
     cursor: u64,
+    slots: Arc<slots::Slots>,
 }
 
 pub(super) struct PreparedAction {
@@ -195,6 +198,7 @@ pub(super) struct PreparedAction {
     budget: ByteBudget,
     engine_bytes: usize,
     record: Credit,
+    slot: slots::Slot,
 }
 
 pub(super) struct Allocation {
@@ -207,6 +211,12 @@ pub(super) struct Allocation {
 }
 
 impl ActionQueue {
+    pub(super) fn with_slots(slots: Arc<slots::Slots>) -> Self {
+        Self {
+            slots,
+            ..Self::default()
+        }
+    }
     pub(super) fn get(&self, key: Key) -> Option<Arc<CryptoAction>> {
         self.actions.get(&key).cloned()
     }
@@ -231,6 +241,10 @@ impl ActionQueue {
             return Err(VoiceError::Capacity);
         }
         let serial = self.serial.checked_add(1).ok_or(VoiceError::Capacity)?;
+        let slot = match &budget {
+            ByteBudget::Exchange { exchange, .. } => exchange.action_slot(&self.slots)?,
+            _ => self.slots.charge(1)?,
+        };
         let bytes = payload_bytes
             .checked_add(RECORD_BYTES + CONFIRM_BYTES)
             .ok_or(VoiceError::Bounds)?;
@@ -245,6 +259,7 @@ impl ActionQueue {
             budget,
             engine_bytes,
             record,
+            slot,
         })
     }
 
@@ -267,6 +282,7 @@ impl ActionQueue {
             engine_bytes: prepared.engine_bytes,
             engine: Mutex::new(Engine::default()),
             _record: prepared.record,
+            _slot: prepared.slot,
         });
         assert!(
             self.actions.insert(prepared.key, action.clone()).is_none(),

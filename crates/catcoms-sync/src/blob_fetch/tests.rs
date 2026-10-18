@@ -160,6 +160,77 @@ async fn detached_provider_selection_bounds_and_prefers_live_member_proofs() {
 }
 
 #[tokio::test]
+async fn six_member_provider_search_reaches_each_sole_holder_despite_proof_reordering() {
+    let (_hub, mut members, ids) = build_members(6).await;
+    converge_and_publish_test_routes(&mut members);
+    let mut requester = members.remove(0);
+    let peers: Vec<_> = members.iter().map(ChannelSync::local_peer).collect();
+    for (index, peer) in peers.iter().enumerate() {
+        requester.promote_member_peer(*peer, ids[index + 1]);
+    }
+    for holder in 0..members.len() {
+        // Reset first-batch rank so each run's sole holder occupies a different position 0..4.
+        for (index, peer) in peers.iter().enumerate().rev() {
+            requester.promote_member_peer(*peer, ids[index + 1]);
+        }
+        let bytes = format!("only holder {holder}").into_bytes();
+        let cid = members[holder].put_blob(&bytes).unwrap();
+        let mut tried = HashSet::new();
+        let mut attempts = HashSet::new();
+        let mut delivered = false;
+        loop {
+            let batch = requester.blob_fetch_peers_excluding(&tried);
+            if batch.is_empty() {
+                break;
+            }
+            assert!(batch.len() <= MAX_BLOB_FETCH_PEERS);
+            tried.extend(batch.iter().copied());
+            // Move the former fifth peer to the first preference. Queued peers are still live,
+            // and the next batch must use the tried set rather than starting ranking over.
+            for (index, peer) in peers.iter().enumerate() {
+                requester.promote_member_peer(*peer, ids[index + 1]);
+            }
+            for peer in batch {
+                assert!(
+                    attempts.insert(peer),
+                    "one request per provider in this search round"
+                );
+                assert!(requester.blob_peer_is_connected(peer));
+                let pending = requester
+                    .prepare_blob_fetch(peer, cid, bytes.len())
+                    .unwrap();
+                let (_signal, receiver) = tokio::sync::watch::channel(false);
+                let provider = members
+                    .iter_mut()
+                    .find(|member| member.local_peer() == peer)
+                    .unwrap();
+                let (completed, _) = tokio::join!(
+                    pending.fetch(RequestCancellation::new(receiver, None)),
+                    provider.run_once()
+                );
+                if requester.complete_blob_fetch(completed).unwrap().is_some() {
+                    delivered = true;
+                    break;
+                }
+            }
+            if delivered {
+                break;
+            }
+        }
+        assert!(
+            delivered,
+            "sole holder at position {holder} was hidden by the first batch"
+        );
+        assert_eq!(requester.get_blob(&cid).unwrap(), bytes);
+        assert!(attempts.len() <= peers.len());
+    }
+    let saturated: HashSet<_> = (0..catcoms_rt::MAX_CONNECTED_PEER_SNAPSHOT as u64)
+        .map(|n| PeerId::from_u64(n + 100))
+        .collect();
+    assert!(requester.blob_fetch_peers_excluding(&saturated).is_empty());
+}
+
+#[tokio::test]
 async fn detached_connected_candidate_bootstraps_bytes_without_promoting_endpoint_trust() {
     let (_hub, members, _ids) = build_members(2).await;
     let mut members = members.into_iter();

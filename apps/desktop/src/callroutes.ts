@@ -112,6 +112,27 @@ export function routerMappedCandidate(
   };
 }
 
+/** A shared router acquisition can outlive an ICE restart. Match the candidate's own username
+ * fragment to its current media section; older WebViews without that field conservatively bind
+ * the complete local-description snapshot. Unchanged ICE may survive unrelated renegotiation. */
+export function mappedIceIsCurrent(
+  candidate: Pick<IceCandidateView, "usernameFragment" | "sdpMid" | "sdpMLineIndex">,
+  capturedSdp: string | null,
+  currentSdp: string | null,
+): boolean {
+  if (capturedSdp === null || currentSdp === null) return false;
+  if (!candidate.usernameFragment) return capturedSdp === currentSdp;
+  const sections = currentSdp.split(/^m=/m).map(section => section.split(/\r?\n/));
+  const session = sections[0];
+  const media = candidate.sdpMid != null
+    ? sections.slice(1).find(lines => lines.includes("a=mid:" + candidate.sdpMid))
+    : Number.isInteger(candidate.sdpMLineIndex) && candidate.sdpMLineIndex! >= 0
+      ? sections[candidate.sdpMLineIndex! + 1] : undefined;
+  if (!media) return false;
+  const fragment = media.find(line => line.startsWith("a=ice-ufrag:")) ?? session.find(line => line.startsWith("a=ice-ufrag:"));
+  return fragment === "a=ice-ufrag:" + candidate.usernameFragment;
+}
+
 /**
  * The call bar's one-line status. Mapping count is evidence of extra offered candidates, not
  * connectivity or the location of a failure. Host/STUN routes may work without router mapping.

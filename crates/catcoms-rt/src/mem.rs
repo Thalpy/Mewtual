@@ -283,12 +283,16 @@ impl MeshTransport for MemNetwork {
             proto,
             data,
             responder: Responder {
+                authority: None,
+                response_budget: None,
                 reply: tx,
                 _keepalive: None,
             },
         };
         self.hub.deliver(peer, event)?;
-        rx.await.map_err(|_| TransportError::NoResponse)
+        rx.await
+            .map(|reply| reply.into_bytes())
+            .map_err(|_| TransportError::NoResponse)
     }
 
     async fn request_cancellable(
@@ -309,6 +313,8 @@ impl MeshTransport for MemNetwork {
             // The unbounded test inbox can outlive this waiting future just like libp2p's
             // outbound table. Keep accounting with the event/responder until it is handled.
             responder: Responder {
+                authority: None,
+                response_budget: None,
                 reply,
                 _keepalive: cancellation.keepalive(),
             },
@@ -317,7 +323,7 @@ impl MeshTransport for MemNetwork {
         tokio::select! {
             biased;
             _ = cancellation.cancelled() => Err(TransportError::Cancelled),
-            result = response => result.map_err(|_| TransportError::NoResponse),
+            result = response => result.map(|reply| reply.into_bytes()).map_err(|_| TransportError::NoResponse),
         }
     }
 
@@ -354,6 +360,34 @@ impl MeshTransport for MemNetwork {
             return Err(TransportError::Closed);
         }
         let (responder, _rx) = Responder::channel();
+        self.hub.deliver(
+            peer,
+            TransportEvent::Request {
+                from: self.local,
+                proto,
+                data,
+                responder,
+            },
+        )
+    }
+
+    async fn notify_connected_cancellable(
+        &self,
+        peer: PeerId,
+        proto: ProtocolId,
+        data: Bytes,
+        cancellation: RequestCancellation,
+    ) -> Result<(), TransportError> {
+        if cancellation.is_cancelled() {
+            return Err(TransportError::Cancelled);
+        }
+        if !self.registration.lease.is_live() {
+            return Err(TransportError::Closed);
+        }
+        let (mut responder, _rx) = Responder::channel();
+        // Hub delivery is the entire lower request. Its queued responder holds actual custody
+        // until the recipient consumes or discards it; no answer buffer is retained for callers.
+        responder._keepalive = cancellation.keepalive();
         self.hub.deliver(
             peer,
             TransportEvent::Request {

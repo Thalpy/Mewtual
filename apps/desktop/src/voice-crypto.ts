@@ -50,7 +50,9 @@ const MAX_ACTIVE = 2;
 const MAX_QUEUED = 32;
 const MAX_GROUP_BYTES = 256 * 1024;
 const MAX_BYTES = 2 * 1024 * 1024;
-const MAX_PLAINTEXT = 32 * 1024;
+// Largest V2 plaintext kind; native admission still enforces each authenticated kind's bound.
+// Keep this in sync with voice_v2::MAX_SDP_PLAINTEXT, including the exact-boundary tests.
+const MAX_PLAINTEXT = 8 * 1024;
 const MAX_CONTEXT = 4 * 1024;
 const encoder = new TextEncoder();
 type Job = { owner: VoiceCryptoOwner; bytes: number; start(): Promise<void>; refuse(): void };

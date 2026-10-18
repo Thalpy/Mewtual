@@ -3,6 +3,7 @@
 //! nonces and OfferId retirement belong to the endpoint state machine above this ledger; creating
 //! a pair record here does not prove any of them. No public IPC may expose register/establish.
 
+use super::negotiation::{Binding as ExchangeBinding, Exchange, Stage};
 use super::resources::{Credit, ResourceKind, Resources};
 use super::*;
 use catcoms_rt::{Clock, CryptoRngCore, RequestAuthority};
@@ -79,6 +80,7 @@ struct Outgoing {
     live: CallLease,
     crypto: RevocationOwner,
     _credit: Credit,
+    exchange: Option<Arc<Exchange>>,
 }
 pub(super) enum PendingConfirmation {
     Attempt(CallLease),
@@ -98,6 +100,25 @@ struct Incoming {
     token: RevocationOwner,
     confirmation: Option<PendingConfirmation>,
     _credit: Arc<Credit>,
+    exchange: Option<Arc<Exchange>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SdpRole {
+    Ready,
+    Initiator(OfferId),
+    Responder(OfferId),
+}
+// Role and identities are owned by the sole ledger actor, independently of the shared capacity
+// mutex. No Group/Policy commit acquires the capacity mutex while a second thread holds it.
+struct SdpExchange {
+    owner: Arc<Exchange>,
+    handshake: [u8; 32],
+    role: SdpRole,
+    local: Option<MessageId>,
+    remote: Option<MessageId>,
+    ready_until: u64,
+    retire: Option<u64>,
 }
 
 pub struct PacketLedger {
@@ -111,6 +132,8 @@ pub struct PacketLedger {
     outgoing: BTreeMap<MessageId, Outgoing>,
     incoming: BTreeMap<u64, Incoming>,
     serial: u64,
+    sdp: Option<SdpExchange>,
+    action_slots: Arc<super::crypto_actions::slots::Slots>,
 }
 pub struct ReserveRequest {
     pub handshake: [u8; 32],
@@ -168,6 +191,7 @@ pub(crate) struct InboundAdmission {
     pair: CallLease,
     expires: u64,
     deadline: u64,
+    exchange: Option<Arc<Exchange>>,
 }
 impl InboundAdmission {
     pub(crate) fn check(&self, clock: &dyn Clock) -> Result<(), VoiceError> {
@@ -180,6 +204,10 @@ impl InboundAdmission {
             || !self.pair.is_live()
             || now > self.expires.saturating_add(CLOCK_SKEW_MS)
             || mono >= self.deadline
+            || self
+                .exchange
+                .as_ref()
+                .is_some_and(|exchange| !exchange.is_live())
         {
             return Err(VoiceError::Unauthorized);
         }
@@ -208,9 +236,13 @@ pub(super) struct SourcePacketAuthority {
     packet: CallLease,
     clock: Arc<dyn Clock>,
     deadline: u64,
+    exchange: Option<Arc<Exchange>>,
     expires: u64,
 }
 impl SourcePacketAuthority {
+    pub(super) fn exchange(&self) -> Option<Arc<Exchange>> {
+        self.exchange.clone()
+    }
     /// A native action can have a shorter lifetime than its signed packet. Capture that
     /// immutable deadline in queued work so an idle endpoint cannot extend it by omitting GC.
     pub(super) fn limit_deadline(mut self, deadline: u64) -> Result<Self, VoiceError> {
@@ -234,6 +266,11 @@ impl SourcePacketAuthority {
             && self.packet.is_same(&other.packet)
             && self.deadline == other.deadline
             && self.expires == other.expires
+            && match (&self.exchange, &other.exchange) {
+                (None, None) => true,
+                (Some(first), Some(second)) => Arc::ptr_eq(first, second),
+                _ => false,
+            }
     }
 }
 #[async_trait::async_trait]
@@ -244,12 +281,16 @@ impl catcoms_rt::RequestAuthority for SourcePacketAuthority {
             && self.packet.is_live()
             && self.clock.monotonic_ms() < self.deadline
             && self.clock.now_ms() < self.expires
+            && self
+                .exchange
+                .as_ref()
+                .is_none_or(|exchange| exchange.is_live())
     }
     async fn revoked(&self) {
         if !self.authorized() {
             return;
         }
-        let waits = vec![
+        let mut waits = vec![
             self.local.wait_revoked().boxed(),
             self.pair.wait_revoked().boxed(),
             self.packet.wait_revoked().boxed(),
@@ -257,6 +298,9 @@ impl catcoms_rt::RequestAuthority for SourcePacketAuthority {
                 self.deadline.saturating_sub(self.clock.monotonic_ms()),
             )),
         ];
+        if let Some(exchange) = &self.exchange {
+            waits.push(exchange.revoked().boxed());
+        }
         futures::future::select_all(waits).await;
     }
 }
@@ -307,7 +351,161 @@ impl PacketLedger {
             outgoing: BTreeMap::new(),
             incoming: BTreeMap::new(),
             serial: 0,
+            sdp: None,
+            action_slots: Arc::new(super::crypto_actions::slots::Slots::default()),
         })
+    }
+    /// Native readiness must prepay this before either SDP direction is positively admitted.
+    /// It is deliberately separate from confirmation's irreversible transition: a local
+    /// capacity refusal cannot strand an already consumed confirmation token.
+    pub(super) fn prepare_sdp_exchange(
+        &mut self,
+        handshake: [u8; 32],
+        authority: &Authority<'_>,
+        limits: &mut super::limits::OriginLimits,
+        helpers: &[DeviceId],
+        clock: &dyn Clock,
+    ) -> Result<Arc<Exchange>, VoiceError> {
+        self.prune(clock);
+        let pair = self.pair(&handshake, authority)?;
+        if pair.status != Status::Established {
+            return Err(VoiceError::Unauthorized);
+        }
+        if helpers.len() > 2 {
+            return Err(VoiceError::Bounds);
+        }
+        if limits.group() != self.scope.group {
+            return Err(VoiceError::Scope);
+        }
+        let mut helpers = helpers.to_vec();
+        helpers.sort();
+        if helpers.windows(2).any(|pair| pair[0] == pair[1])
+            || helpers
+                .iter()
+                .any(|helper| *helper == self.local || *helper == pair.binding.peer)
+        {
+            return Err(VoiceError::Malformed);
+        }
+        // Readiness cannot promise a helper route that the current scope forbids. Repeat
+        // membership even for exact retries; cached capacity is never cached authorization.
+        if (!helpers.is_empty()
+            && (!authority.context.indirect || authority.context.scope.policy.is_none()))
+            || helpers.iter().any(|helper| !(authority.member)(*helper))
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        if let Some(sdp) = &self.sdp {
+            if sdp.owner.is_live() {
+                return if sdp.handshake == handshake && sdp.owner.same_helpers(&helpers) {
+                    Ok(sdp.owner.clone())
+                } else {
+                    Err(VoiceError::Capacity)
+                };
+            }
+        }
+        let mut members = vec![self.local, pair.binding.peer];
+        members.extend_from_slice(&helpers);
+        let readiness_stamp = clock.monotonic_ms();
+        limits.prepare_exchange_members(&members, &self.resources, readiness_stamp)?;
+        let binding = ExchangeBinding {
+            scope: self.scope,
+            local: self.local,
+            join: self.join,
+            key_ref: self.key_ref,
+            peer: pair.binding.clone(),
+            call: self.lease.clone(),
+            pair: pair.live.clone(),
+            helpers,
+        };
+        let slots = self.action_slots.reserve(2)?;
+        let owner = Exchange::new_bound(self.resources.clone(), binding, slots)?;
+        self.sdp = Some(SdpExchange {
+            owner: owner.clone(),
+            handshake,
+            role: SdpRole::Ready,
+            local: None,
+            remote: None,
+            // The same stamp covers prerequisite retention and idle readiness. Preemption
+            // during prepayment cannot silently extend readiness beyond those member rows.
+            ready_until: readiness_stamp.saturating_add(MAX_DELEGATION_LIFETIME_MS),
+            retire: None,
+        });
+        Ok(owner)
+    }
+    pub(super) fn action_slots(&self) -> Arc<super::crypto_actions::slots::Slots> {
+        self.action_slots.clone()
+    }
+    fn sdp_owner(
+        &self,
+        header: &EncryptedHeader,
+        incoming: bool,
+    ) -> Result<Option<Arc<Exchange>>, VoiceError> {
+        if !matches!(header.kind, EncryptedKind::Offer | EncryptedKind::Answer) {
+            return Ok(None);
+        }
+        let sdp = self.sdp.as_ref().ok_or(VoiceError::Capacity)?;
+        if sdp.handshake != header.handshake || !sdp.owner.is_live() {
+            return Err(VoiceError::Unauthorized);
+        }
+        if (incoming && sdp.remote.is_some()) || (!incoming && sdp.local.is_some()) {
+            return Err(VoiceError::Capacity);
+        }
+        let permitted = match (incoming, header.kind, sdp.role) {
+            (_, EncryptedKind::Offer, SdpRole::Ready) => true,
+            (true, EncryptedKind::Answer, SdpRole::Initiator(offer))
+            | (false, EncryptedKind::Answer, SdpRole::Responder(offer)) => {
+                header.offer == Some(offer)
+            }
+            _ => false,
+        };
+        if !permitted {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(Some(sdp.owner.clone()))
+    }
+    fn publish_sdp_identity(
+        &mut self,
+        header: &EncryptedHeader,
+        id: MessageId,
+        incoming: bool,
+        mono: u64,
+    ) {
+        if !matches!(header.kind, EncryptedKind::Offer | EncryptedKind::Answer) {
+            return;
+        }
+        let sdp = self
+            .sdp
+            .as_mut()
+            .expect("prepaid SDP owner checked before commit");
+        // Idle readiness is separately bounded. Start the immutable work window with the
+        // first admitted SDP, so waiting before an Offer cannot shorten its fresh reply.
+        sdp.retire
+            .get_or_insert(mono.saturating_add(MAX_PACKET_LIFETIME_MS + CLOCK_SKEW_MS));
+        if header.kind == EncryptedKind::Offer {
+            let offer = header.offer.expect("validated OfferId");
+            sdp.role = if incoming {
+                SdpRole::Responder(offer)
+            } else {
+                SdpRole::Initiator(offer)
+            };
+        }
+        if incoming {
+            sdp.remote = Some(id);
+        } else {
+            sdp.local = Some(id);
+        }
+    }
+    fn sdp_deadline(&self, exchange: Option<&Arc<Exchange>>) -> Result<u64, VoiceError> {
+        let Some(exchange) = exchange else {
+            return Ok(u64::MAX);
+        };
+        let sdp = self.sdp.as_ref().ok_or(VoiceError::Unauthorized)?;
+        if !Arc::ptr_eq(exchange, &sdp.owner) || !exchange.is_live() {
+            return Err(VoiceError::Unauthorized);
+        }
+        // Capacity retirement is collected separately. Every effect-bearing crypto/source
+        // grant is bounded here, so delayed housekeeping cannot extend the work window.
+        Ok(sdp.retire.unwrap_or(sdp.ready_until))
     }
     fn current(&self, authority: &Authority<'_>) -> Result<(), VoiceError> {
         if !self.lease.is_live()
@@ -457,6 +655,11 @@ impl PacketLedger {
     fn prune(&mut self, clock: &dyn Clock) {
         let now = clock.now_ms();
         let mono = clock.monotonic_ms();
+        if let Some(sdp) = &self.sdp {
+            if mono >= sdp.retire.unwrap_or(sdp.ready_until) || !sdp.owner.is_live() {
+                sdp.owner.close();
+            }
+        }
         self.outgoing.retain(|_, outgoing| {
             mono < outgoing.retire && now <= outgoing.draft.expires.saturating_add(CLOCK_SKEW_MS)
         });
@@ -530,18 +733,22 @@ impl PacketLedger {
             .ok_or(VoiceError::Freshness)?;
         let draft = PacketDraft::new(self.scope, public_key, id, issued, expires, header)?;
         let aad = draft.aad();
+        let exchange = self.sdp_owner(&draft.header, false)?;
         // Prepay canonical bytes plus the cache/event copy and bounded record overhead before
         // returning AAD. Native engine permits use this same process pool concurrently.
-        let credit = self.resources.charge(
-            self.scope.group,
-            2 * (aad.len() + request.ciphertext_bytes) + 256,
-            ResourceKind::Retained,
-        )?;
+        let bytes = 2 * (aad.len() + request.ciphertext_bytes) + 256;
+        let mono = clock.monotonic_ms();
+        let credit = if let Some(exchange) = &exchange {
+            exchange.charge(Stage::LocalPacket, bytes)?
+        } else {
+            self.resources
+                .charge(self.scope.group, bytes, ResourceKind::Retained)?
+        };
+        self.publish_sdp_identity(&draft.header, id, false, mono);
         self.pairs
             .get_mut(&binding.handshake)
             .expect("checked pair")
             .next = sequence;
-        let mono = clock.monotonic_ms();
         self.outgoing.insert(
             id,
             Outgoing {
@@ -556,6 +763,7 @@ impl PacketLedger {
                 live: CallLease::default(),
                 crypto: RevocationOwner::default(),
                 _credit: credit,
+                exchange,
             },
         );
         Ok(ReservedPacket {
@@ -579,6 +787,13 @@ impl PacketLedger {
         self.current(authority)?;
         let outgoing = self.outgoing.get(&id).ok_or(VoiceError::Reservation)?;
         if !outgoing.live.is_live() {
+            return Err(VoiceError::Unauthorized);
+        }
+        if outgoing
+            .exchange
+            .as_ref()
+            .is_some_and(|exchange| !exchange.is_live())
+        {
             return Err(VoiceError::Unauthorized);
         }
         freshness(
@@ -650,7 +865,10 @@ impl PacketLedger {
             self.lease.clone(),
             pair.live.clone(),
             clock,
-            outgoing.construction.min(outgoing.source_deadline),
+            outgoing
+                .construction
+                .min(outgoing.source_deadline)
+                .min(self.sdp_deadline(outgoing.exchange.as_ref())?),
             outgoing.draft.expires,
         )?
         .with_pending(outgoing.crypto.0.clone())
@@ -681,7 +899,9 @@ impl PacketLedger {
             self.lease.clone(),
             pair.live.clone(),
             clock,
-            incoming.retire,
+            incoming
+                .retire
+                .min(self.sdp_deadline(incoming.exchange.as_ref())?),
             incoming.object.expires().saturating_add(CLOCK_SKEW_MS),
         )?
         .with_pending(incoming.token.0.clone())?;
@@ -753,8 +973,11 @@ impl PacketLedger {
             local: self.lease.clone(),
             pair: pair.live.clone(),
             packet: outgoing.live.clone(),
-            deadline: outgoing.source_deadline,
+            deadline: outgoing
+                .source_deadline
+                .min(self.sdp_deadline(outgoing.exchange.as_ref())?),
             expires: object.expires(),
+            exchange: outgoing.exchange.clone(),
             clock,
         })
     }
@@ -771,6 +994,9 @@ impl PacketLedger {
         if let Some(outgoing) = self.outgoing.get(&id) {
             outgoing.live.revoke();
             outgoing.crypto.0.revoke();
+            if let Some(exchange) = &outgoing.exchange {
+                exchange.close();
+            }
         }
         Ok(())
     }
@@ -843,11 +1069,14 @@ impl PacketLedger {
         }
         let token = self.serial.checked_add(1).ok_or(VoiceError::Reservation)?;
         let aad = object.aad()?;
-        let credit = Arc::new(self.resources.charge(
-            self.scope.group,
-            2 * (aad.len() + ciphertext.len()) + 256,
-            ResourceKind::Retained,
-        )?);
+        let exchange = self.sdp_owner(header, true)?;
+        let bytes = 2 * (aad.len() + ciphertext.len()) + 256;
+        let credit = Arc::new(if let Some(exchange) = &exchange {
+            exchange.charge(Stage::RemotePacket, bytes)?
+        } else {
+            self.resources
+                .charge(self.scope.group, bytes, ResourceKind::Retained)?
+        });
         let event = InboundPacket {
             token,
             issuer: object.issuer,
@@ -868,7 +1097,8 @@ impl PacketLedger {
                 local: self.lease.clone(),
                 pair: pair_lease,
                 expires: object.expires,
-                deadline: retire,
+                deadline: retire.min(self.sdp_deadline(exchange.as_ref())?),
+                exchange: exchange.clone(),
             },
             incoming: Incoming {
                 object,
@@ -876,6 +1106,7 @@ impl PacketLedger {
                 token: RevocationOwner::default(),
                 confirmation: None,
                 _credit: credit,
+                exchange,
             },
             event,
             serial: self.serial,
@@ -906,8 +1137,23 @@ impl PacketLedger {
         }
         let mut replay = pair.replay.clone();
         replay.admit(prepared.event.header.sequence)?;
+        let current_exchange = self.sdp_owner(&prepared.event.header, true)?;
+        if !match (&current_exchange, &prepared.incoming.exchange) {
+            (None, None) => true,
+            (Some(current), Some(prepared)) => Arc::ptr_eq(current, prepared) && prepared.is_live(),
+            _ => false,
+        } {
+            return Err(VoiceError::Unauthorized);
+        }
         prepared.admission.check(clock)?;
+        let mono = clock.monotonic_ms();
         commit(&prepared.admission)?;
+        self.publish_sdp_identity(
+            &prepared.event.header,
+            prepared.incoming.object.id(),
+            true,
+            mono,
+        );
         self.pairs
             .get_mut(&prepared.event.header.handshake)
             .expect("checked current pair")
@@ -931,6 +1177,16 @@ impl PacketLedger {
         self.prune(clock);
         self.current(authority)?;
         let incoming = self.incoming.get(&token).ok_or(VoiceError::Reservation)?;
+        if let Some(exchange) = &incoming.exchange {
+            if !exchange.is_live()
+                || !self
+                    .sdp
+                    .as_ref()
+                    .is_some_and(|sdp| Arc::ptr_eq(exchange, &sdp.owner))
+            {
+                return Err(VoiceError::Unauthorized);
+            }
+        }
         incoming.object.check_freshness(clock.now_ms())?;
         let Body::Encrypted {
             header,
@@ -971,6 +1227,9 @@ impl Drop for PacketLedger {
         // Counters cannot be reconstructed under the same join/key after allocator loss. Engine
         // charges live in independent native process records until actual settlement.
         self.lease.revoke();
+        if let Some(sdp) = &self.sdp {
+            sdp.owner.close();
+        }
     }
 }
 

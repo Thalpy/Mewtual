@@ -4,6 +4,88 @@ use catcoms_rt::ManualClock;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+/// Exercise boundaries that a stationary ManualClock conceals without using ambient time.
+#[derive(Debug)]
+struct AdvancingReadClock {
+    next: std::sync::atomic::AtomicU64,
+    elapsed: ManualClock,
+}
+impl AdvancingReadClock {
+    fn new(now: u64) -> Self {
+        Self {
+            next: std::sync::atomic::AtomicU64::new(now),
+            elapsed: ManualClock::new(1000),
+        }
+    }
+}
+impl Clock for AdvancingReadClock {
+    fn now_ms(&self) -> u64 {
+        self.next.fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+    }
+    fn monotonic_ms(&self) -> u64 {
+        self.elapsed.monotonic_ms()
+    }
+    fn sleep(
+        &self,
+        duration: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        self.elapsed.sleep(duration)
+    }
+}
+
+#[test]
+fn announcement_uses_one_issued_sample_when_clock_advances_between_reads() {
+    let mut rng = ChaCha20Rng::from_seed([7; 32]);
+    let mut participant = Participant::new(1, Arc::new(Resources::default()));
+    let clock = AdvancingReadClock::new(1000);
+    let first = participant
+        .join
+        .announce(
+            &participant.signer,
+            &ca(&participant.context, &participant.lease),
+            &clock,
+            &mut rng,
+        )
+        .unwrap();
+    assert_eq!(first.expires() - first.issued(), MAX_DELEGATION_LIFETIME_MS);
+    clock.elapsed.advance_ms(RENEW_MS);
+    let renewed = participant
+        .join
+        .announce(
+            &participant.signer,
+            &ca(&participant.context, &participant.lease),
+            &clock,
+            &mut rng,
+        )
+        .unwrap();
+    assert_eq!(
+        renewed.expires() - renewed.issued(),
+        MAX_DELEGATION_LIFETIME_MS
+    );
+    assert_ne!(renewed.id(), first.id());
+}
+
+#[test]
+fn announcement_timestamp_overflow_refuses_without_publishing_renewal() {
+    let mut rng = ChaCha20Rng::from_seed([7; 32]);
+    let mut participant = Participant::new(1, Arc::new(Resources::default()));
+    let clock = AdvancingReadClock::new(u64::MAX - MAX_DELEGATION_LIFETIME_MS + 1);
+    assert_eq!(
+        participant
+            .join
+            .announce(
+                &participant.signer,
+                &ca(&participant.context, &participant.lease),
+                &clock,
+                &mut rng
+            )
+            .err(),
+        Some(VoiceError::Freshness)
+    );
+    assert_eq!(participant.join.renewal, 0);
+    assert!(participant.join.announcement.is_none());
+}
+
 fn member(_: DeviceId) -> bool {
     true
 }

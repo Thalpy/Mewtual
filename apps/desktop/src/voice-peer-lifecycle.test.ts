@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { MediaCaptureSession } from "./media-capture.ts";
 import { heartbeatRecovery, isCurrentVoiceRoom } from "./voice-signaling.ts";
-import { mappableIcePort, mappingAddressPolicy, routerMappedCandidate, shouldSignalHostCandidate } from "./callroutes.ts";
+import { mappableIcePort, mappingAddressPolicy, routerMappedCandidate, shouldSignalHostCandidate, mappedIceIsCurrent } from "./callroutes.ts";
 
 const MEMBER = "a".repeat(64);
 const source = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
@@ -25,7 +25,7 @@ function deferred<T = void>() {
 
 /** Real App handlers, with RTC operations that can be held across peer/call replacement. */
 function fixture() {
-  return new Function("MediaCaptureSession", "heartbeatRecovery", "isCurrentVoiceRoom", "mappableIcePort", "mappingAddressPolicy", "routerMappedCandidate", "shouldSignalHostCandidate", `
+  return new Function("MediaCaptureSession", "heartbeatRecovery", "isCurrentVoiceRoom", "mappableIcePort", "mappingAddressPolicy", "routerMappedCandidate", "shouldSignalHostCandidate", "mappedIceIsCurrent", `
     let locked = false, inCall = true, callServer = 1, callChannel = "7", callSelfId = "b".repeat(64);
     const callLifecycleSession = new MediaCaptureSession();
     let activeCallLease = callLifecycleSession.begin();
@@ -128,7 +128,12 @@ function fixture() {
       invalidate() { callLifecycleSession.invalidate(); },
       lockBeforeCleanup() { locked = true; },
       rejoinBeforeCleanup() { activeCallLease = callLifecycleSession.begin(); },
-      map: signalMappedCandidate,
+      map(peer, candidate) {
+        // Real gathered candidates have a local media description. Supply that RTC-owned input
+        // explicitly so mapping tests exercise the production SDP generation check too.
+        peer.pc.localDescription ??= { type: "offer", sdp: "v=0\\r\\nm=audio 9 UDP/TLS/RTP/SAVPF 111\\r\\na=mid:" + (candidate.sdpMid ?? "0") + "\\r\\na=ice-ufrag:" + (candidate.usernameFragment ?? "fixture") + "\\r\\n" };
+        return signalMappedCandidate(peer, candidate);
+      },
       holdMap(promise) { mappingGates.push(promise); },
       route: refreshDefaultRoute,
       holdRoute(promise) { routeGates.push(promise); },
@@ -140,7 +145,7 @@ function fixture() {
       states() { return callPeerStates; },
       transport() { return { peerVideoCodec, peerTransport }; },
     };
-  `)(MediaCaptureSession, heartbeatRecovery, isCurrentVoiceRoom, mappableIcePort, mappingAddressPolicy, routerMappedCandidate, shouldSignalHostCandidate);
+  `)(MediaCaptureSession, heartbeatRecovery, isCurrentVoiceRoom, mappableIcePort, mappingAddressPolicy, routerMappedCandidate, shouldSignalHostCandidate, mappedIceIsCurrent);
 }
 
 test("an old default-route lookup cannot change a replacement call's candidate filter", async () => {
@@ -243,6 +248,39 @@ test("lock, call invalidation and same-room rejoin revoke callbacks before peer-
 });
 
 const candidate = { type: "host", protocol: "udp", address: "192.168.1.20", port: 49152 };
+
+test("a peer replaced during mapping acquisition waits for the shared result and sends its own ICE", async () => {
+  const app = fixture(), old = app.create(MEMBER), gate = deferred();
+  app.holdMap(gate.promise);
+  const retired = app.map(old, { ...candidate, foundation: "old", usernameFragment: "old-ufrag", sdpMid: "0", sdpMLineIndex: 0 });
+  const current = app.replace(MEMBER);
+  const waiting = app.map(current, { ...candidate, foundation: "new", usernameFragment: "new-ufrag", sdpMid: "1", sdpMLineIndex: 1 });
+  assert.equal(app.calls.maps.length, 1);
+  assert.equal(app.calls.signals.length, 0);
+  gate.resolve(); await Promise.all([retired, waiting]);
+  assert.deepEqual(app.mappings(), { slots: 1, routes: 1 });
+  assert.equal(app.calls.signals.length, 1);
+  const mapped = app.calls.signals[0][2].candidate;
+  assert.match(mapped.candidate, /^candidate:newR /);
+  assert.equal(mapped.usernameFragment, "new-ufrag");
+  assert.equal(mapped.sdpMid, "1");
+  assert.equal(mapped.sdpMLineIndex, 1);
+});
+
+test("a same-peer ICE restart shares the pending mapping and suppresses only the old generation", async () => {
+  const app = fixture(), peer = app.create(MEMBER), gate = deferred();
+  const sdp = (fragment: string) => ({ type: "offer", sdp: `v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\na=ice-ufrag:${fragment}\r\n` });
+  peer.pc.localDescription = sdp("old");
+  app.holdMap(gate.promise);
+  const old = app.map(peer, { ...candidate, sdpMid: "0", sdpMLineIndex: 0, usernameFragment: "old" });
+  peer.pc.localDescription = sdp("new");
+  const current = app.map(peer, { ...candidate, sdpMid: "0", sdpMLineIndex: 0, usernameFragment: "new" });
+  gate.resolve(); await Promise.all([old, current]);
+  assert.equal(app.calls.maps.length, 1);
+  assert.equal(app.calls.signals.length, 1);
+  assert.equal(app.calls.signals[0][2].candidate.usernameFragment, "new");
+  assert.deepEqual(app.mappings(), { slots: 1, routes: 1 });
+});
 
 test("a completed shared router mapping belongs to the call, while ICE sends belong to the exact peer", async () => {
   const app = fixture(), old = app.create(MEMBER), gate = deferred();

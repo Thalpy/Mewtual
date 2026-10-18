@@ -1,5 +1,16 @@
 # Mewtual; Architecture
 
+## Congested network dispatch (PR 48 revision)
+
+The driver owns bounded application payload and lifecycle reconciliation queues; it never awaits
+the application sink from a swarm callback. Actual payload/response/lower ownership carries a
+shared process byte credit, while dropped gossip requests ordinary anti-entropy. Automatic cached
+dials and reciprocal/probe forwarding prepare immutable exact authority on Root and wait in
+bounded detached jobs. Driver admission repeats ownership; completions return to the sole Root
+for current retry/accounting effects. Notifications have local ACKs and driver-discarded replies.
+See [the interface contract](INTERFACES.md#congested-transport-delivery-and-automatic-repair-submissions-pr-48-revision)
+for precise bounds, generation ordering and the still-immediate reconnect/manual paths.
+
 ## Connected discovery maintenance (2026-10-18)
 
 The server actor queues connected-only membership-commit, PEX, member-finalization and
@@ -30,8 +41,9 @@ handles state supersession without charging peer-health backoff. Queued actors w
 capacity release, while idle actors ignore unrelated releases. A sixth fair ready source consumes
 completions. Accepted raw signed-record changes request the existing core snapshot worker even in
 quiet legacy groups; native restore rebuilds its passive address cache from those saved records.
-Connectivity/duplicate records alone do not dirty that revision. Local dial submission, mesh repair
-and the bounded rendezvous drain still have separate waits; this is not a universal latency bound.
+Connectivity/duplicate records alone do not dirty that revision. Automatic cached dials and mesh
+repair now use the detached submission path above. Local reconnect, explicit manual redial and
+the bounded rendezvous drain retain separate waits; this is not a universal latency bound.
 
 ## Voice V2 foundation in progress (2026-10-18)
 
@@ -90,13 +102,22 @@ broker's combined byte/record/engine limits. It returns closed historical receip
 plaintext or fresh RTC/pair authority. Owner retirement wakes observers but does not refund
 actual pending work. An inert native typed-action queue now gives proven pairs and exact
 confirmation inputs continuing identities, immutable charged custody and one shared engine fence.
-Native registration matches the actual call lease, scope and process pool. Exact admission is
+The desktop registration/admit/settle model now compiles only for contract tests until its
+result owner and browser IPC adapter exist. It is not production native enforcement; the sync
+typed-action queue remains an inert production Rust seam. That model's registration matches
+the actual call lease, scope and process pool. Exact admission is
 idempotent, settlement permanently closes delayed admission, and first signing/confirmation
 effects use that same fence. End closes unstarted actions but leaves actual admitted work charged.
 The combined 32-record queue includes terminal identities; pulls rotate through at most four
 without dequeueing. Prepaid capacity can close unused bytes while retaining actual outstanding
-loan bytes and slots. Full-chain progress reservation and post-transition exact-result receipts
-remain requirements. Live Endpoint confirmation/presence wiring, native action IPC adapters, helper ingress
+loan bytes and slots. The narrow SDP foundation now requires a 224 KiB native exchange reserve
+before the first local nonce or incoming positive admission. It prepays one Crypto lane, two
+Forward lanes, two action continuation slots and member records for the endpoints and at most
+two fixed helpers. One local and one remote SDP of at most 8 KiB share one OfferId and fixed
+initiator/responder role; crossed Offers refuse before admission. Packet, Source, verification,
+engine/action/result capacity loans retain actual custody. This is capacity enforcement, not
+completed SDP crypto-action factories or browser result delivery. Full-chain integrated progress
+and post-transition exact-result receipts remain requirements. Live Endpoint confirmation/presence wiring, native action IPC adapters, helper ingress
 and UI V2/legacy separation are not yet enabled or accepted;
 the [communication ledger](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md) records the scope.
 

@@ -43,10 +43,10 @@ async fn my_fp(actor: &ServerActor) -> String {
         .fingerprint
 }
 
-/// One discovery tick, then a query to prove it finished. Serialising the two nodes' passes this
-/// way is required, not stylistic: an actor running a PEX pass is blocked on its own request and
-/// is therefore not in `sync_once` to answer anyone else's, so two simultaneous passes wait each
-/// other out to the per-request deadline.
+/// Admit one discovery tick, then prove the command turn finished. Maintenance and recovery
+/// submissions run separately; this query is not proof that PEX or a remote dial has completed.
+/// The assertions below wait for actual presence/history evidence instead of treating this
+/// local queue acknowledgement as a network barrier.
 async fn discovery_pass(actor: &ServerActor) {
     let _ = actor.drive_discovery().await;
     let _ = actor.member_count().await;

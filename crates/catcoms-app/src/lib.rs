@@ -8489,14 +8489,21 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Dial the cached previously-proven members (policy-gated; candidates only, never promoted
-    /// into the trusted catch-up pool). Returns the number of peers dialed.
-    pub async fn dial_cached_peers(&mut self) -> usize {
-        self.sync.dial_cached_peers().await
+    /// into the trusted catch-up pool). Returns locally admitted jobs; the sync loop applies
+    /// driver acknowledgements later. No network/command-channel wait borrows this Server.
+    pub async fn dial_cached_peers(&mut self) -> usize
+    where
+        T: 'static,
+    {
+        self.sync.queue_cached_dials().await
     }
 
-    /// Run one bounded SWIM/reciprocal/topology repair pass.
-    pub async fn drive_mesh_repair(&mut self) -> usize {
-        self.sync.drive_mesh_repair().await
+    /// Locally queue one bounded SWIM/reciprocal/topology repair pass.
+    pub async fn drive_mesh_repair(&mut self) -> usize
+    where
+        T: 'static,
+    {
+        self.sync.queue_mesh_repair().await
     }
 
     /// Queue a paced reconciliation of open documents with currently proven neighbours.
@@ -8509,12 +8516,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync.has_pending_reciprocal()
     }
 
-    pub async fn drive_pending_reciprocal(&mut self) -> usize {
-        self.sync.drive_pending_reciprocal().await
+    /// Admit reciprocal jobs without awaiting a driver acknowledgement inside the actor.
+    pub async fn drive_pending_reciprocal(&mut self) -> usize
+    where
+        T: 'static,
+    {
+        self.sync.queue_pending_reciprocal().await
     }
 
     /// Explicit fallback redial that preserves every shared safety budget.
-    pub async fn manual_fallback_redial(&mut self) -> catcoms_sync::ManualRedialOutcome {
+    pub async fn manual_fallback_redial(&mut self) -> catcoms_sync::ManualRedialOutcome
+    where
+        T: 'static,
+    {
         self.sync.manual_fallback_redial().await
     }
 

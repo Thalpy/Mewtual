@@ -8,6 +8,7 @@ mod forwarding;
 pub(super) use forwarding::RouteOwners;
 pub use forwarding::{
     CompletedVoiceForward, CompletedVoiceSource, PendingVoiceForward, PendingVoiceSource,
+    VoiceCompletionFailure,
 };
 
 const KIND: u8 = KIND_VOICE_TRANSPORT;
@@ -124,7 +125,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         object_hash: [u8; 32],
         response: &[u8],
     ) -> Result<VoiceTransportStatus, VoiceError> {
-        self.verify_voice_response(from, request, object_hash, response, None)
+        self.verify_voice_response(from, request, object_hash, response, None, None)
     }
     fn verify_voice_response(
         &mut self,
@@ -133,6 +134,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         object_hash: [u8; 32],
         response: &[u8],
         retained: Option<&Envelope>,
+        progress: Option<&Arc<voice_v2::negotiation::Exchange>>,
     ) -> Result<VoiceTransportStatus, VoiceError> {
         if response.len() > 512 {
             return Err(VoiceError::Bounds);
@@ -198,7 +200,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .voice_transport_actor()?
             // Verification also decodes the original envelope. Charge its maximum buffer
             // footprint, rather than only the small ACK, before any signature or allocation.
-            .admit_transport_verification(responder, verification_bytes)?;
+            .admit_transport_verification_in_exchange(
+                responder,
+                verification_bytes,
+                progress,
+                retained.is_some(),
+            )?;
         let transcript = response_transcript(
             &self.group.group_id(),
             request.key,

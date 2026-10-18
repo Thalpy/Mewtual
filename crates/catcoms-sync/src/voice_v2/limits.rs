@@ -13,6 +13,12 @@ const RETAIN_MS: u64 = 60_000;
 const RECORD_BYTES: usize = 2048;
 const MAX_BINDINGS: usize = 4;
 const MAX_PINS: usize = 16;
+// Readiness prepayment relies on ordinary origin records surviving the whole supported SDP
+// window. Raising either deadline requires revisiting this prerequisite, not only byte math.
+const _: () = assert!(
+    RETAIN_MS
+        > super::MAX_DELEGATION_LIFETIME_MS + super::MAX_PACKET_LIFETIME_MS + super::CLOCK_SKEW_MS
+);
 #[derive(Clone, Copy, Debug)]
 pub enum Traffic {
     Room,
@@ -78,6 +84,26 @@ pub struct OriginLimits {
 }
 redacted_debug!(OriginLimits);
 impl OriginLimits {
+    /// Prepay the existing member records before reserving an SDP workflow. This spends no
+    /// requester/original allowance and resets no bucket. A fresh row's normal 60s retention
+    /// exceeds the maximum 30s idle readiness plus 20s admitted work window.
+    pub(super) fn prepare_exchange_members(
+        &mut self,
+        members: &[DeviceId],
+        resources: &Arc<Resources>,
+        now: u64,
+    ) -> Result<(), VoiceError> {
+        if !Arc::ptr_eq(resources, &self.resources) {
+            return Err(VoiceError::Scope);
+        }
+        if members.len() > 4 {
+            return Err(VoiceError::Bounds);
+        }
+        for member in members {
+            self.record(*member, now)?;
+        }
+        Ok(())
+    }
     pub fn new(group: [u8; 32], resources: Arc<Resources>) -> Self {
         Self {
             group,
@@ -348,6 +374,46 @@ impl OriginLimits {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exchange_member_preparation_prepays_rows_without_spending_or_resetting_allowance() {
+        let resources = Arc::new(Resources::default());
+        let group = [9; 32];
+        let mut limits = OriginLimits::new(group, resources.clone());
+        limits
+            .prepare_exchange_members(&[id(1), id(2)], &resources, 0)
+            .unwrap();
+        assert_eq!(resources.counts().0, 2 * RECORD_BYTES);
+        for _ in 0..40 {
+            limits.origin(id(1), Traffic::Setup, 0).unwrap();
+        }
+        assert_eq!(
+            limits.origin(id(1), Traffic::Setup, 0),
+            Err(VoiceError::RateLimited)
+        );
+        limits
+            .prepare_exchange_members(&[id(1), id(2)], &resources, 0)
+            .unwrap();
+        assert_eq!(
+            limits.origin(id(1), Traffic::Setup, 0),
+            Err(VoiceError::RateLimited)
+        );
+        assert_eq!(resources.counts().0, 2 * RECORD_BYTES);
+        limits.collect_expired(50_000);
+        assert_eq!(
+            limits.records.len(),
+            2,
+            "records outlive maximum readiness plus work"
+        );
+        let other_pool = Arc::new(Resources::default());
+        assert_eq!(
+            limits.prepare_exchange_members(&[id(3)], &other_pool, 0),
+            Err(VoiceError::Scope)
+        );
+        assert_eq!(limits.records.len(), 2);
+        limits.collect_expired(60_001);
+        assert!(limits.records.is_empty());
+        assert_eq!(resources.counts().0, 0);
+    }
     fn id(seed: u8) -> DeviceId {
         DeviceId::from_bytes([seed; 32])
     }

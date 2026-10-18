@@ -979,6 +979,17 @@ impl ActorOwner {
         requester: DeviceId,
         frame: &[u8],
     ) -> Result<IngressTicket, VoiceError> {
+        self.admit_transport_verification_in_exchange(requester, frame, None, false)
+    }
+    /// Only an actual native source completion supplies `retained_exchange`; an untrusted
+    /// envelope can select capacity solely through the bounded binding peek below.
+    pub(crate) fn admit_transport_verification_in_exchange(
+        &self,
+        requester: DeviceId,
+        frame: &[u8],
+        retained_exchange: Option<&Arc<super::negotiation::Exchange>>,
+        trusted_completion: bool,
+    ) -> Result<IngressTicket, VoiceError> {
         if frame.is_empty() || frame.len() > super::MAX_ENVELOPE {
             return Err(VoiceError::Bounds);
         }
@@ -996,6 +1007,37 @@ impl ActorOwner {
         let epoch = state.epoch.ok_or(VoiceError::Unauthorized)?;
         let now = self.clock.monotonic_ms();
         self.current()?;
+        let bytes = VERIFICATION_BUFFERS * frame.len() + VERIFICATION_OVERHEAD;
+        let current_exchange = self.resources.exchange(self.group.hash);
+        let progress = if let Some(expected) = retained_exchange {
+            if !current_exchange
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, expected))
+                || !expected.uses_resources(&self.resources, self.group.hash)
+                || !expected.is_live()
+            {
+                return Err(VoiceError::Unauthorized);
+            }
+            Some(expected.clone())
+        } else {
+            current_exchange.filter(|exchange| exchange.lends_verification(requester, frame))
+        };
+        let allocate = || {
+            if let Some(exchange) = &progress {
+                exchange.charge(super::negotiation::Stage::Crypto, bytes)
+            } else {
+                self.resources
+                    .charge(self.group.hash, bytes, ResourceKind::Crypto)
+            }
+        };
+        // A retained affine completion has already paid for its immutable request and lower
+        // custody. Polling its own busy lane must not spend requester/process tokens repeatedly.
+        // Untrusted fresh ingress still pays both cheap work budgets BEFORE borrowing capacity.
+        let early_credit = if trusted_completion {
+            Some(allocate()?)
+        } else {
+            None
+        };
         state.limits.requester(requester, now)?;
         if !self
             .group
@@ -1006,11 +1048,10 @@ impl ActorOwner {
         {
             return Err(VoiceError::RateLimited);
         }
-        let credit = self.resources.charge(
-            self.group.hash,
-            VERIFICATION_BUFFERS * frame.len() + VERIFICATION_OVERHEAD,
-            ResourceKind::Crypto,
-        )?;
+        let credit = match early_credit {
+            Some(credit) => credit,
+            None => allocate()?,
+        };
         self.current()?;
         Ok(IngressTicket {
             actor: self.gate.clone(),

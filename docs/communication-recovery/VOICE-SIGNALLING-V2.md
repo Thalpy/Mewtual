@@ -292,8 +292,39 @@ new cursor charge before changing the cache or rotation. A native directory-inca
 separate from participant/watch consent, additionally fences queued effects. Permit expiry can
 stop forwarding before the longer original announcement's replay protection expires.
 
+### Narrow SDP capacity contract (PR 48 revision)
+
+Before the first local SDP nonce or incoming positive admission, the confirmed native LocalJoin
+must prepay a 224 KiB exchange owner from the existing 256 KiB group / 2 MiB process pool.
+Ordinary endpoint and at most two fixed helper origin records are retained first, without
+spending or resetting traffic buckets. The same owner reserves one Crypto work lane, two
+Forward lanes and two continuation slots from the existing combined 32-action limit. Capacity
+refusal occurs before a nonce, ACK, replay bit or original-issuer quota commit.
+
+The supported first exchange is deliberately narrow: one local SDP, one remote SDP, one Source
+record and at most two actual lower holders, all bound to the native pair and one OfferId.
+The first Offer pins initiator/responder role; crossed Offers refuse before positive admission.
+This does not implement glare recovery. Helper selection is immutable and at most two current
+members; direct-only scopes cannot prepare helpers. Actual lower custody can block a later
+hedge but cannot consume protected reply capacity. Readiness expires after 30 seconds; the first
+SDP begins an immutable 20-second work window. Exact retries cannot extend either deadline.
+
+At the 8 KiB plaintext ceiling, the declared simultaneous peak is 224,294 bytes: local packet,
+Source and two lower holders (111,014), remote packet, decrypt record and serialized engine/
+verification scratch (89,666), retained encrypt record (10,286), native result (9,232), and
+workflow metadata (4,096). These fit the 229,376-byte reserve without refunding actual work.
+All phase quotas count retained terminal records. Closing releases unused headroom only;
+actual bytes, engine/forward lanes and continuation slots remain charged until custody ends.
+Maximum native packet/Source/reply and pressured composition regressions pin this arithmetic.
+
+This is enforced native capacity infrastructure, not completed SDP crypto-action factories,
+browser-copy custody or RTC result delivery. Those integrations, exact historical receipts and
+complete native/browser acceptance remain enablement gates. Live V2 remains disabled.
+The native coordinator must also establish compatible fixed helper selections between endpoints
+or refuse readiness/delivery honestly; one endpoint's selection is not the other's authority.
+
 Initial defensive ceilings, not latency SLOs: 16 participants/pairs per local call; 8 pending pair
-handshakes; 32 packet reservations; 48 KiB complete inner envelope, 32 KiB SDP, 2 KiB ICE; 256 KiB
+handshakes; 32 packet reservations; 48 KiB complete inner envelope, 8 KiB SDP, 2 KiB ICE; 256 KiB
 queued per group and 2 MiB process-wide; 4 helper final recipients per announcement and 2 candidate
 helpers per targeted packet; 3 total route submissions within a 15-second packet expiry. Presence
 delegations last at most 30 seconds; verified liveness at most 15 seconds from challenge creation.
@@ -474,7 +505,9 @@ Retired action identities stay bounded until owner retirement. Fresh HMR derivat
 retained broker's pair factory; v2/v3 retained brokers refuse rather than creating another pool.
 
 The native IPC adapter is a REQUIRED FUTURE contract, not implemented commands. The inert native
-action/engine seam now enforces idempotent exact admission and permanent settlement fencing.
+action/engine seam models idempotent exact admission and permanent settlement fencing. Desktop
+Coordinator registration/admit/settle currently compiles only for contract tests, with no
+production IPC enforcement. Sync typed-action factories remain inert production Rust seams.
 Only opaque LocalJoin-issued actions register, matched to the exact native call lease, scope and
 shared process pool. Typed derive/seal fingerprints bind native inputs, scope, action serial and
 reservation/AAD/plaintext; decrypt binds the exact signed-object hash. The native queue retains

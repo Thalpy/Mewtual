@@ -376,14 +376,57 @@ pub trait DialPermit: Send + fmt::Debug {
 /// Owned permit passed through an object-safe transport seam.
 pub type BoxedDialPermit = Box<dyn DialPermit>;
 
-/// Reply handle handed to a request handler. Dropping it without calling
-/// [`Responder::respond`] surfaces [`TransportError::NoResponse`] to the caller.
+/// Capacity-only response custody. Implementations prepay actual queued/lower response buffers
+/// before accepting the bytes; they must not mutate protocol state or grant authorization.
+pub trait ResponseBudget: Send + Sync + fmt::Debug {
+    fn retain(
+        self: Arc<Self>,
+        actual_bytes: usize,
+    ) -> Result<SharedRequestKeepalive, TransportError>;
+}
+
+/// An admitted response together with opaque custody for its actual lower serialized copy.
+/// Native transports retain that owner until actual send/failure, separately from byte clones.
+#[derive(Debug)]
+pub struct ResponderReply {
+    data: Bytes,
+    custody: Option<SharedRequestKeepalive>,
+}
+impl ResponderReply {
+    /// Borrow the exact admitted bytes without detaching their capacity owner.
+    pub fn data(&self) -> &Bytes {
+        &self.data
+    }
+    /// Lend capacity custody only; this grants no response or application authorization.
+    pub fn keepalive(&self) -> Option<SharedRequestKeepalive> {
+        self.custody.clone()
+    }
+    /// Transfer the Bytes owner; its last clone still retains any response byte credit.
+    pub fn into_bytes(self) -> Bytes {
+        self.data
+    }
+}
+struct OwnedReplyBytes {
+    data: Bytes,
+    _custody: SharedRequestKeepalive,
+}
+impl AsRef<[u8]> for OwnedReplyBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+/// Reply handle with optional exact driver lifetime and capacity owners. These owners grant
+/// neither membership nor application effects; the handler still authenticates its request.
+/// Dropping without replying surfaces honest NoResponse to the remote caller.
 #[derive(Debug)]
 pub struct Responder {
-    pub(crate) reply: oneshot::Sender<Bytes>,
+    pub(crate) reply: oneshot::Sender<ResponderReply>,
     /// Optional request accounting retained by in-memory delivery until the queued request is
     /// actually handled or dropped. Production libp2p keeps the same authority in `pending_req`.
     pub(crate) _keepalive: Option<SharedRequestKeepalive>,
+    pub(crate) authority: Option<Arc<dyn RequestAuthority>>,
+    pub(crate) response_budget: Option<Arc<dyn ResponseBudget>>,
 }
 
 impl Responder {
@@ -396,7 +439,39 @@ impl Responder {
     /// Success means the channel accepted the bytes, even if they have not been read yet.
     /// It does NOT prove the transport driver sent them or that the remote peer received them.
     pub fn try_respond(self, data: Bytes) -> Result<(), TransportError> {
-        self.reply.send(data).map_err(|_| TransportError::Closed)
+        if self
+            .authority
+            .as_ref()
+            .is_some_and(|authority| !authority.authorized())
+        {
+            return Err(TransportError::Cancelled);
+        }
+        let custody = self
+            .response_budget
+            .as_ref()
+            .map(|budget| budget.clone().retain(data.len()))
+            .transpose()?;
+        let data = if let Some(custody) = &custody {
+            Bytes::from_owner(OwnedReplyBytes {
+                data,
+                _custody: custody.clone(),
+            })
+        } else {
+            data
+        };
+        self.reply
+            .send(ResponderReply { data, custody })
+            .map_err(|_| TransportError::Closed)
+    }
+
+    /// Driver ingress custody remains current only through its original connection and lower
+    /// response owner. This is transport lifetime, not membership or application authorization.
+    pub fn is_current(&self) -> bool {
+        !self.reply.is_closed()
+            && self
+                .authority
+                .as_ref()
+                .is_none_or(|authority| authority.authorized())
     }
 
     /// Create a responder paired with its receiver. A transport implementation
@@ -409,20 +484,53 @@ impl Responder {
             Responder {
                 reply: tx,
                 _keepalive: None,
+                authority: None,
+                response_budget: None,
             },
-            ResponderRx(rx),
+            ResponderRx(rx, None),
+        )
+    }
+
+    /// Bind exact ingress lifetime and retained accounting before either half escapes. Both the
+    /// application reply and driver waiter retain actual custody; dropping an outer waiter alone
+    /// cannot refund a queued payload or a still-owned lower response channel.
+    pub fn channel_owned(
+        keepalive: SharedRequestKeepalive,
+        authority: Arc<dyn RequestAuthority>,
+        response_budget: Arc<dyn ResponseBudget>,
+    ) -> (Responder, ResponderRx) {
+        let (reply, receiver) = oneshot::channel();
+        (
+            Responder {
+                reply,
+                _keepalive: Some(keepalive.clone()),
+                authority: Some(authority),
+                response_budget: Some(response_budget),
+            },
+            ResponderRx(receiver, Some(keepalive)),
         )
     }
 }
 
 /// The receiving half of a [`Responder`], held by a transport implementation.
 #[derive(Debug)]
-pub struct ResponderRx(oneshot::Receiver<Bytes>);
+pub struct ResponderRx(
+    oneshot::Receiver<ResponderReply>,
+    Option<SharedRequestKeepalive>,
+);
 
 impl ResponderRx {
     /// Await the reply, or `None` if the responder was dropped without replying.
     pub async fn recv(self) -> Option<Bytes> {
-        self.0.await.ok()
+        self.recv_owned().await.map(ResponderReply::into_bytes)
+    }
+    /// Keep the response's actual lower-owner custody distinct from its byte clones. Drivers
+    /// transfer this keepalive into their pending table until real ResponseSent/Failure.
+    pub async fn recv_owned(self) -> Option<ResponderReply> {
+        let custody = self.1;
+        let response = self.0.await.ok();
+        drop(custody);
+        response
     }
 }
 
@@ -519,6 +627,9 @@ pub struct PeerConnectionSnapshot {
 /// An inbound transport event, drained via [`MeshTransport::next_event`].
 #[derive(Debug)]
 pub enum TransportEvent {
+    /// Best-effort gossip was dropped under bounded local delivery pressure. Reconcile through
+    /// existing authenticated membership/document recovery; this signal itself grants nothing.
+    RecoveryNeeded,
     /// A gossip message delivered on a subscribed topic.
     Gossip {
         /// The topic it arrived on.
@@ -547,8 +658,10 @@ pub enum TransportEvent {
     /// time-bounded historical success after the connection closes. `active` is a full snapshot,
     /// not a delta, so consumers do not reconstruct path state. Events share the ordered
     /// `MeshTransport::next_event` stream; no cross-stream reordering guarantee is implied.
-    /// Existing `PeerConnected`/`PeerDisconnected` events retain their one-per-peer semantics for
-    /// callers interested only in aggregate liveness.
+    /// These are aggregate liveness edges, not one event per socket. Under congestion a driver
+    /// may coalesce a connection generation which was never announced to this stream. An
+    /// announced generation's disconnect and empty paths precede its replacement's connect;
+    /// captured connection leases still revoke immediately, before event consumption.
     PeerPathsChanged {
         /// The peer whose path set changed.
         peer: PeerId,
@@ -737,6 +850,20 @@ pub trait MeshTransport: Send + Sync {
         peer: PeerId,
         _proto: ProtocolId,
         _data: Bytes,
+    ) -> Result<(), TransportError> {
+        Err(TransportError::Unreachable(peer))
+    }
+
+    /// Admit an authorized connected-only notification, acknowledging local driver admission
+    /// only. The lower request retains cancellation.keepalive through actual response/failure,
+    /// but response payloads are discarded in the driver, never queued as application answers.
+    /// Unsupported transports fail closed; falling back to request would add unbudgeted replies.
+    async fn notify_connected_cancellable(
+        &self,
+        peer: PeerId,
+        _proto: ProtocolId,
+        _data: Bytes,
+        _cancellation: RequestCancellation,
     ) -> Result<(), TransportError> {
         Err(TransportError::Unreachable(peer))
     }

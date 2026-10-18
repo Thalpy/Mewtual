@@ -32,6 +32,11 @@ redacted_debug!(
 );
 
 pub const MAX_ENVELOPE: usize = 48 * 1024;
+/// Canonical ceiling shared with the browser crypto boundary. The former 32 KiB ceiling
+/// could not fit even one retained Offer plus Answer verification in the group budget.
+/// Native SDP packet factories additionally require the bounded prepaid exchange owner.
+/// Encrypted endpoint/action/browser integration remains disabled until all consumers use it.
+pub const MAX_SDP_PLAINTEXT: usize = 8 * 1024;
 pub const MAX_PACKET_LIFETIME_MS: u64 = 15_000;
 pub const MAX_DELEGATION_LIFETIME_MS: u64 = 30_000;
 pub const CLOCK_SKEW_MS: u64 = 5_000;
@@ -44,6 +49,7 @@ pub mod crypto_authority;
 pub mod directory;
 pub mod helper;
 pub mod limits;
+pub mod negotiation;
 pub mod packets;
 pub mod presence;
 pub mod resources;
@@ -440,7 +446,7 @@ impl EncryptedKind {
     }
     fn max_plaintext(self) -> usize {
         match self {
-            Self::Offer | Self::Answer => 32 * 1024,
+            Self::Offer | Self::Answer => MAX_SDP_PLAINTEXT,
             Self::Ice => 2 * 1024,
             Self::Bye => 128,
             _ => 512,
@@ -1146,6 +1152,14 @@ pub enum Disposition {
     Deliver,
     Forward(FinalScope),
 }
+// This value selects only an existing prepaid transient loan. It grants no verified scope,
+// signature, pair or replay authority; every length-delimited field is borrowed without Vecs.
+struct UnverifiedEncrypted {
+    envelope_kind: u8,
+    scope: Scope,
+    issuer: DeviceId,
+    header: EncryptedHeader,
+}
 
 /// Snapshot only for synchronous validation. Deferred effects must acquire fresh native/actor
 /// authority at commit. `indirect` comes from policy_allows_member_mesh(), never a UI mode.
@@ -1189,6 +1203,50 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> crate::ChannelS
     }
 }
 impl Envelope {
+    fn peek_encrypted(bytes: &[u8]) -> Result<UnverifiedEncrypted, VoiceError> {
+        if bytes.len() > MAX_ENVELOPE {
+            return Err(VoiceError::Bounds);
+        }
+        let mut outer = Decoder::new(bytes);
+        if outer.get_u8()? != VERSION {
+            return Err(VoiceError::Malformed);
+        }
+        let envelope_kind = outer.get_u8()?;
+        if !matches!(envelope_kind, 1..=3) {
+            return Err(VoiceError::Malformed);
+        }
+        let object = outer.get_bytes()?;
+        if envelope_kind != 1 && outer.get_bytes()?.len() > 1024 {
+            return Err(VoiceError::Bounds);
+        }
+        outer.finish()?;
+        let mut signed = Decoder::new(object);
+        let unsigned = signed.get_bytes()?;
+        let _: [u8; 64] = array(&mut signed)?;
+        signed.finish()?;
+        let mut d = Decoder::new(unsigned);
+        if d.get_str()? != OBJECT_DOMAIN || d.get_u8()? != VERSION || d.get_u8()? != 4 {
+            return Err(VoiceError::Malformed);
+        }
+        let scope = Scope::get(&mut d)?;
+        let issuer = DeviceId::from_bytes(array(&mut d)?);
+        let _: [u8; 32] = array(&mut d)?;
+        let _: MessageId = array(&mut d)?;
+        d.get_u64()?;
+        d.get_u64()?;
+        let header = EncryptedHeader::get(&mut d)?;
+        let ciphertext = d.get_bytes()?;
+        if ciphertext.len() < 16 || ciphertext.len() > header.kind.max_plaintext() + 16 {
+            return Err(VoiceError::Bounds);
+        }
+        d.finish()?;
+        Ok(UnverifiedEncrypted {
+            envelope_kind,
+            scope,
+            issuer,
+            header,
+        })
+    }
     pub fn object(&self) -> &SignedObject {
         match self {
             Self::Direct(object)

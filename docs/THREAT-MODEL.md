@@ -1,5 +1,29 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Congested driver and queued recovery boundary (PR 48 revision)
+
+Application congestion cannot suspend swarm responses/connection revocation. Shared affine
+credits bound declared queued ingress/response custody (64 MiB/driver, 128 MiB/process), with
+separate count and per-peer stream limits. This is not a bound on libp2p codec/socket or total
+application memory. Rejected requests fail honestly; local gossip loss requests ordinary signed
+reconciliation and grants no authentication or freshness evidence. Old queued input is never
+rebound to a same-peer replacement connection. Coalesced lifecycle events retain original issuer
+versus carrier distinction, and recovery wakes cannot be starved by path churn.
+
+Automatic cached/reciprocal/probe work captures current Root, epoch/policy, descriptor and
+connected proof/lease authority before transport waits. Driver admission rechecks it; Root
+completion checks it again before peer-health effects. Pre-commit refunds bind to an opaque
+original policy-window owner. Notification ACKs are local submission evidence only, and driver
+reply disposal prevents a hostile helper accumulating unneeded answers in Root completions.
+Actual lower custody survives waiter retirement. Local reconnect/manual immediate ACK paths
+retain their existing authorization and limits and are outside the detached-wrapper claim.
+
+File searches rotate beyond absent/busy preferred candidates without trusting them as holders.
+Actual connected eligibility is separate from preference rank, and each chunk/round has a
+320-peer tried cap while existing deadlines, page bounds and four/eight/one attempt limits stay
+authoritative. Different wrapped keys for the same ciphertext are authenticated independently;
+an opening failure rejects only the exact reference, including across retry rounds.
+
 ## Detached discovery boundary (2026-10-18)
 
 Connected maintenance holds no mutable MLS/store owner while waiting on peers. Driver authority
@@ -25,7 +49,8 @@ Queues/waiters and one supersession refresh are bounded. Shared capacity retirem
 queued actors. Signed-record mutation requests sealed core persistence independently of chat and
 rendered route changes; duplicate/liveness events do not cause disk writes. Transport frames may
 allocate up to the pre-existing lower frame ceiling before the narrower per-kind response cap.
-Local dial submission, mesh repair and rendezvous waits remain outside this scheduling correction.
+Automatic cached dials and mesh repair now use the bounded detached submissions described above.
+Local reconnect, explicit manual redial and rendezvous waits retain separate scheduling boundaries.
 
 ## Voice V2 implementation boundary (2026-10-18)
 
@@ -114,14 +139,29 @@ and shared conservative byte/engine limits. Engine failure stays failed; tempora
 pressure stays retryable. Full closed replies bind exact identity/input/result tags; no
 confirmation plaintext reaches RTC and historical success grants no fresh pair authority.
 Explicit retirement wakes callers while actual admission/engine/RPC promises retain custody.
-Native typed-action/engine registry seams now enforce exact opaque Root action, native call
+Native Coordinator action registration/admission/settlement currently compiles only for contract
+tests; it establishes no production IPC enforcement. The sync typed-action factories remain
+inert production Rust seams. That native model checks exact opaque Root action, native call
 lease/scope/process-pool registration and idempotent actual engine admission. Settlement latches
 before a delayed admission, and first signing/closed-confirmation effects serialize against the
 same fence. End/lock/replacement cannot refund an admitted engine. The combined native queue
 retains at most 32 pending/terminal identities; it has no browser commands or historical result
 cache yet. A capacity reserve releases only unused bytes on close, preserving actual loans and
-slots; closing it is not evidence that a workflow or uncertain engine has completed. Full-chain
-progress reservation and native post-transition exact-result recovery remain requirements.
+slots; closing it is not evidence that a workflow or uncertain engine has completed.
+
+The narrow SDP foundation prepays 224 KiB, one Crypto lane, two Forward lanes, two continuation
+slots and ordinary endpoint/helper origin records before a nonce or positive incoming admission.
+It supports one local and one remote 8 KiB SDP, one Source record and two actual lower holders,
+bound to one native pair/OfferId and fixed initiator/responder role. Crossed Offers refuse before
+ACK or replay mutation. At most two current helper identities are immutable for that exchange;
+changing a helper cannot allocate another protected lane or reset original traffic allowance.
+Readiness and work deadlines cannot extend each other; actual lower/engine custody survives them.
+A bounded zero-copy untrusted header peek can select only this existing exact capacity owner;
+it authenticates nothing and cannot skip signature, membership, scope, replay or origin checks.
+Retryable affine ACK completions retain their original request/response/authority and repeat
+those checks; a busy reserved lane consumes no requester allowance. Native budget composition
+tests do not prove browser-copy ownership, general SDP action integration or RTC delivery.
+Full-chain integrated progress and native post-transition exact-result recovery remain requirements.
 General Pair.open is not a live adapter path;
 SDP/ICE still need native current-offer receipts and charged dispatch/result ownership.
 

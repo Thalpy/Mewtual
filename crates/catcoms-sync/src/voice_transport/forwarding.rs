@@ -96,6 +96,12 @@ enum Work {
     },
 }
 impl Work {
+    fn exchange(&self) -> Option<Arc<voice_v2::negotiation::Exchange>> {
+        match self {
+            Self::Source { job, .. } => job.exchange(),
+            Self::Helper { .. } => None,
+        }
+    }
     fn peer(&self) -> PeerId {
         match self {
             Self::Helper { job, .. } => job.peer(),
@@ -176,6 +182,43 @@ pub struct CompletedVoiceForward {
 /// wrapper keeps source completion distinct from a helper edge at the public Rust boundary.
 pub struct PendingVoiceSource<T: MeshTransport>(PendingVoiceForward<T>);
 pub struct CompletedVoiceSource(CompletedVoiceForward);
+
+/// A local verification-capacity refusal preserves the exact affine completion, its actual
+/// flight/copy credits and original deadline. The actor retries it fairly without another send,
+/// signature, nonce or attempt debit. Other errors are terminal and carry no retry owner.
+pub struct VoiceCompletionFailure<T> {
+    error: VoiceError,
+    retry: Option<Box<T>>,
+}
+impl<T> fmt::Debug for VoiceCompletionFailure<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VoiceCompletionFailure")
+            .field("error", &self.error)
+            .field("retryable", &self.retry.is_some())
+            .finish()
+    }
+}
+impl<T> VoiceCompletionFailure<T> {
+    fn terminal(error: VoiceError) -> Self {
+        Self { error, retry: None }
+    }
+    fn map_retry<U>(self, map: impl FnOnce(T) -> U) -> VoiceCompletionFailure<U> {
+        VoiceCompletionFailure {
+            error: self.error,
+            retry: self.retry.map(|retry| Box::new(map(*retry))),
+        }
+    }
+    pub fn error(&self) -> &VoiceError {
+        &self.error
+    }
+    pub fn into_retry(self) -> Option<T> {
+        self.retry.map(|retry| *retry)
+    }
+    /// Explicitly abandon any retry custody. Callers normally use this only for terminal errors.
+    pub fn into_error(self) -> VoiceError {
+        self.error
+    }
+}
 impl<T: MeshTransport> fmt::Debug for PendingVoiceSource<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("PendingVoiceSource { .. }")
@@ -253,6 +296,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Weak rows stay counted while actual RouteGate owners exist. The separate lower Flight
     /// credit stays charged until real retirement even after route metadata has been released.
     pub(crate) fn reconcile_voice_routes(&mut self) {
+        self.reconcile_recovery_submissions();
         let gates: Vec<_> = self
             .voice_runtime
             .as_ref()
@@ -465,9 +509,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     pub fn complete_voice_forward(
         &mut self,
         completed: CompletedVoiceForward,
-    ) -> Result<VoiceTransportStatus, VoiceError> {
+    ) -> Result<VoiceTransportStatus, VoiceCompletionFailure<CompletedVoiceForward>> {
         if !matches!(completed.job, Work::Helper { .. }) {
-            return Err(VoiceError::Unauthorized);
+            return Err(VoiceCompletionFailure::terminal(VoiceError::Unauthorized));
         }
         self.complete_voice_request(completed)
             .map(|(status, _)| status)
@@ -477,41 +521,68 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     pub fn complete_voice_source(
         &mut self,
         completed: CompletedVoiceSource,
-    ) -> Result<(VoiceTransportStatus, SourceOutcome), VoiceError> {
-        let (status, outcome) = self.complete_voice_request(completed.0)?;
+    ) -> Result<(VoiceTransportStatus, SourceOutcome), VoiceCompletionFailure<CompletedVoiceSource>>
+    {
+        let (status, outcome) = self
+            .complete_voice_request(completed.0)
+            .map_err(|failure| failure.map_retry(CompletedVoiceSource))?;
         outcome
             .map(|outcome| (status, outcome))
-            .ok_or(VoiceError::Unauthorized)
+            .ok_or_else(|| VoiceCompletionFailure::terminal(VoiceError::Unauthorized))
     }
     fn complete_voice_request(
         &mut self,
         completed: CompletedVoiceForward,
-    ) -> Result<(VoiceTransportStatus, Option<SourceOutcome>), VoiceError> {
+    ) -> Result<
+        (VoiceTransportStatus, Option<SourceOutcome>),
+        VoiceCompletionFailure<CompletedVoiceForward>,
+    > {
         self.reconcile_voice_actor();
         if !Arc::ptr_eq(&completed.instance, &self.blob_fetch_instance)
             || !completed.authority.authorized()
         {
-            return Err(VoiceError::Unauthorized);
+            return Err(VoiceCompletionFailure::terminal(VoiceError::Unauthorized));
         }
-        completed.job.current(self.voice_transport_actor()?)?;
-        let status = completed.response.as_ref().ok().and_then(|response| {
-            self.verify_voice_response(
+        completed
+            .job
+            .current(
+                self.voice_transport_actor()
+                    .map_err(VoiceCompletionFailure::terminal)?,
+            )
+            .map_err(VoiceCompletionFailure::terminal)?;
+        let progress = completed.job.exchange();
+        let status = if let Ok(response) = &completed.response {
+            match self.verify_voice_response(
                 completed.job.peer(),
                 &completed.request,
                 completed.job.object_hash(),
                 response,
                 Some(completed.job.envelope()),
-            )
-            .ok()
-        });
+                progress.as_ref(),
+            ) {
+                Ok(status) => Some(status),
+                Err(error @ (VoiceError::Capacity | VoiceError::RateLimited)) => {
+                    return Err(VoiceCompletionFailure {
+                        error,
+                        retry: Some(Box::new(completed)),
+                    })
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
         // Keep the flight alive while validating. Fresh context, native lock and permanent route
         // generation must still agree at commit, including revocation during signature work.
         if !completed.authority.authorized() {
-            return Err(VoiceError::Unauthorized);
+            return Err(VoiceCompletionFailure::terminal(VoiceError::Unauthorized));
         }
-        let outcome = completed.job.complete(status)?;
+        let outcome = completed
+            .job
+            .complete(status)
+            .map_err(VoiceCompletionFailure::terminal)?;
         status
             .map(|status| (status, outcome))
-            .ok_or(VoiceError::Unauthorized)
+            .ok_or_else(|| VoiceCompletionFailure::terminal(VoiceError::Unauthorized))
     }
 }

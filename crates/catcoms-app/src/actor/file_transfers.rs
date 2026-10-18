@@ -148,6 +148,13 @@ pub(super) struct ReadJob {
     range: Option<RangeState>,
     keep: Option<KeepState>,
     candidates: Option<VecDeque<(FileRef, PeerId)>>,
+    /// Per-chunk/per-round search cursor. At most MAX_CONNECTED_PEER_SNAPSHOT distinct peers;
+    /// busy entries stay in candidates, while completed batches make room for later holders.
+    tried_providers: HashSet<PeerId>,
+    /// An exact authenticated reference which failed opening cannot be repaired by another
+    /// holder. A different wrapped key can still open the same ciphertext CID, so the verdict
+    /// is keyed by the full FileRef encoding across batches/retry rounds for this chunk.
+    rejected_variants: HashSet<Vec<u8>>,
     error: String,
     /// Ciphertext accumulated for the current chunk by paged fetching.
     ///
@@ -245,6 +252,8 @@ impl ReadJob {
             if self.index + 1 < keep.manifest.chunks.len() {
                 self.index += 1;
                 self.candidates = None;
+                self.tried_providers.clear();
+                self.rejected_variants.clear();
                 // Rounds and staged bytes are a per-chunk allowance, like the deadline beside
                 // them. Page size is not: it is what this link has been measured to carry, and
                 // that measurement is worth keeping across chunks of the same read.
@@ -286,6 +295,8 @@ impl ReadJob {
             if base + (bytes.len() as u64) < range.end {
                 self.index += 1;
                 self.candidates = None;
+                self.tried_providers.clear();
+                self.rejected_variants.clear();
                 self.rounds = 0;
                 self.retryable = false;
                 self.staged = Vec::new();
@@ -487,6 +498,8 @@ impl FileTransfers {
                         existing: recheck,
                     }),
                     candidates: None,
+                    tried_providers: HashSet::new(),
+                    rejected_variants: HashSet::new(),
                     error: "no connected provider supplied the kept file's exact chunk".into(),
                     rounds: 0,
                     retryable: false,
@@ -600,6 +613,8 @@ impl FileTransfers {
             range,
             keep: None,
             candidates: None,
+            tried_providers: HashSet::new(),
+            rejected_variants: HashSet::new(),
             error: format!("file not available yet; no connected provider supplied chunk {index}"),
             rounds: 0,
             retryable: false,
@@ -652,6 +667,9 @@ impl FileTransfers {
                 let mut held = None;
                 for manifest in manifests {
                     let reference = &manifest.chunks[job.index];
+                    if job.rejected_variants.contains(&reference.encode()) {
+                        continue;
+                    }
                     if let Some(ciphertext) = server.sync.get_blob(&reference.ciphertext_cid) {
                         if let Ok(bytes) = server.sync.open_file(&ciphertext, reference) {
                             if let Some(keep) = &job.keep {
@@ -664,6 +682,7 @@ impl FileTransfers {
                             break;
                         }
                         job.error = format!("chunk {} could not be decrypted", job.index);
+                        job.rejected_variants.insert(reference.encode());
                     } else {
                         missing.push(reference.clone());
                     }
@@ -681,7 +700,8 @@ impl FileTransfers {
                         None => return,
                     }
                 }
-                let peers = server.sync.blob_fetch_peers();
+                let peers = server.sync.blob_fetch_peers_excluding(&job.tried_providers);
+                job.tried_providers.extend(peers.iter().copied());
                 job.candidates = Some(
                     missing
                         .into_iter()
@@ -695,7 +715,6 @@ impl FileTransfers {
             // rotating the busy ones to the back rather than discarding them: a peer that is
             // busy now is a perfectly good provider a moment later, and dropping it here would
             // reintroduce the single-attempt failure through the other door.
-            let live = server.sync.blob_fetch_peers();
             let mut picked = None;
             let mut deferred = false;
             if let Some(candidates) = job.candidates.as_mut() {
@@ -706,7 +725,7 @@ impl FileTransfers {
                     // A proven or bootstrap candidate can disconnect during another attempt. Drop
                     // it without spending a permit or creating a request that could redial from
                     // remembered routes.
-                    if !live.contains(&peer) {
+                    if !server.sync.blob_peer_is_connected(peer) {
                         continue;
                     }
                     if self.inflight.contains(&peer) {
@@ -719,6 +738,38 @@ impl FileTransfers {
                 }
             }
             let Some((reference, peer)) = picked else {
+                let peers = server.sync.blob_fetch_peers_excluding(&job.tried_providers);
+                if !peers.is_empty() {
+                    // A busy preferred provider must not hide later holders. Keep its queued
+                    // entry while appending a bounded new batch; park only after the complete
+                    // search has no usable free provider. At most 320 peers x 4 exact variants
+                    // are retained, independent of proof reorderings or connection churn.
+                    let references: Vec<_> = if let Some(keep) = &job.keep {
+                        keep.manifest
+                            .chunks
+                            .get(job.index)
+                            .cloned()
+                            .into_iter()
+                            .collect()
+                    } else {
+                        file_resolution::resolve(&server.files(), &job.cid)
+                            .into_iter()
+                            .flat_map(|resolved| resolved.variants)
+                            .filter_map(|(_, manifest)| manifest.chunks.get(job.index).cloned())
+                            .collect()
+                    };
+                    job.tried_providers.extend(peers.iter().copied());
+                    let candidates = job
+                        .candidates
+                        .as_mut()
+                        .expect("provider search initialized");
+                    for reference in references {
+                        if !job.rejected_variants.contains(&reference.encode()) {
+                            candidates.extend(peers.iter().map(|peer| (reference.clone(), *peer)));
+                        }
+                    }
+                    continue;
+                }
                 if deferred {
                     // Every surviving provider is busy. Waiting is the whole point of the
                     // per-peer bound; failing here would make serialization worse than the
@@ -733,6 +784,7 @@ impl FileTransfers {
                     job.rounds += 1;
                     job.retryable = false;
                     job.candidates = None;
+                    job.tried_providers.clear();
                     tracing::debug!(
                         cid = ?job.cid,
                         chunk = job.index,
@@ -1021,6 +1073,7 @@ impl FileTransfers {
                     Err(error) => job.error = error.to_string(),
                 }
                 // A second provider cannot repair the exact authenticated ciphertext/key pair.
+                job.rejected_variants.insert(reference.encode());
                 if let Some(candidates) = job.candidates.as_mut() {
                     candidates.retain(|(r, _)| r.encode() != reference.encode());
                 }

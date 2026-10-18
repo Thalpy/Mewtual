@@ -774,6 +774,83 @@ fn abandoned_action_and_failed_replacement_reservation_cannot_restore_pending_cr
 }
 
 #[test]
+fn sdp_readiness_fits_actual_retained_three_flight_confirmation_without_repeating_transition() {
+    use catcoms_rt::RequestAuthority;
+    let mut f = fixture();
+    assert!(f
+        .low
+        .join
+        .prepare_sdp_exchange(
+            f.id,
+            &ca(&f.low.context, &f.low.lease),
+            &mut f.low.limits,
+            &[],
+            &f.clock
+        )
+        .is_err());
+    establish(&mut f);
+    let before = f.pool.counts();
+    let owner = f
+        .low
+        .join
+        .prepare_sdp_exchange(
+            f.id,
+            &ca(&f.low.context, &f.low.lease),
+            &mut f.low.limits,
+            &[],
+            &f.clock,
+        )
+        .unwrap();
+    assert_eq!(
+        f.pool.counts().0,
+        // The peer row already exists from the challenged proof. Readiness additionally
+        // prepays the local issuer's normal 2 KiB row before reserving the workflow.
+        before.0 + super::super::super::negotiation::EXCHANGE_BYTES + 2048
+    );
+    assert!(f.pool.counts().0 <= 256 * 1024);
+    let retry = f
+        .low
+        .join
+        .prepare_sdp_exchange(
+            f.id,
+            &ca(&f.low.context, &f.low.lease),
+            &mut f.low.limits,
+            &[],
+            &f.clock,
+        )
+        .unwrap();
+    assert!(Arc::ptr_eq(&owner, &retry));
+    let reserved = f
+        .low
+        .join
+        .ledger
+        .reserve(
+            f.low.signer.verifying_key().to_bytes(),
+            ReserveRequest {
+                handshake: f.id,
+                kind: EncryptedKind::Offer,
+                offer: None,
+                ciphertext_bytes: MAX_SDP_PLAINTEXT + 16,
+            },
+            &ca(&f.low.context, &f.low.lease),
+            &f.clock,
+            &mut f.rng,
+        )
+        .unwrap();
+    let pending = f
+        .low
+        .join
+        .packet_encryption_authority(
+            &reserved,
+            &ca(&f.low.context, &f.low.lease),
+            Arc::new(f.clock.clone()),
+        )
+        .unwrap();
+    assert!(pending.authorized());
+    assert!(f.low.join.confirmations.pairs[&f.id].established);
+}
+
+#[test]
 fn established_application_packet_uses_its_own_crypto_deadline_after_confirmation_window() {
     use catcoms_rt::RequestAuthority;
     let mut f = fixture();
@@ -788,8 +865,11 @@ fn established_application_packet_uses_its_own_crypto_deadline_after_confirmatio
             f.low.signer.verifying_key().to_bytes(),
             ReserveRequest {
                 handshake: f.id,
-                kind: EncryptedKind::Offer,
-                offer: None,
+                kind: EncryptedKind::Ice,
+                offer: Some(OfferId {
+                    issuer: f.low.context.local,
+                    message: [19; 32],
+                }),
                 ciphertext_bytes: 32,
             },
             &ca(&f.low.context, &f.low.lease),

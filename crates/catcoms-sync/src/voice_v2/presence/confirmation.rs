@@ -58,6 +58,11 @@ impl Drop for Pair {
     }
 }
 impl Confirmations {
+    pub(super) fn established(&self, handshake: Nonce) -> bool {
+        self.pairs
+            .get(&handshake)
+            .is_some_and(|pair| pair.established && !pair.retired && pair.pin.is_live())
+    }
     pub(super) fn source_deadline(&self, handshake: Nonce) -> Result<u64, VoiceError> {
         let pair = self.pairs.get(&handshake).ok_or(VoiceError::Unauthorized)?;
         if pair.retired || !pair.pin.is_live() {

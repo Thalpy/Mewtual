@@ -2,6 +2,20 @@
 
 ## Communication implementation in progress (2026-10-18)
 
+PR 48's current review revision is tracked separately in
+[PR48-REVIEW-REVISION.md](communication-recovery/PR48-REVIEW-REVISION.md). It reproduces and
+corrects the full application-event-sink/driver ACK deadlock, detaches automatic cached/reciprocal/
+probe forwarding submissions, and rotates file-provider searches beyond the first four peers.
+Mapping, announcement-clock and native warning-boundary corrections have focused proof and clear
+slice reviews. The narrow V2 capacity contract now prepays 224 KiB, work lanes, continuation slots
+and endpoint/helper origin records for one local/remote 8 KiB SDP exchange. Maximum native packet/
+reply and pressured declared engine/result composition regressions pass. General SDP crypto-action
+factories, historical receipts and browser/RTC custody remain unimplemented; live V2 stays disabled.
+Read-only re-review has no remaining blocker/high/medium. Full verification is running; the
+revision ledger records exact checks and limits.
+Local reconnect and explicit manual redial still use their existing immediate driver ACK paths;
+the driver no longer blocks swarm progress on application delivery. This is not programme acceptance.
+
 Gate7 commit `4d321fef17514c5080f96d98f01be3e86c375333` is pushed to `origin/Gate7`.
 `chat-update-implementation` was created from that checkpoint and pushed with its upstream.
 The separate [communication ledger](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md) tracks
@@ -66,6 +80,14 @@ identities count toward its combined 32-record cap. Capacity close releases only
 preserving actual loan bytes/slots. Exact historical-result recovery, whole-chain prepayment,
 retained Runtime progress ownership and main-window action IPC are still open; these foundations
 do not enable kind28 or establish native WebView/blocked-topology acceptance.
+
+PR48 review revision uses an isolated communication worktree while the main checkout contains
+separate Studio changes. Pending router mapping now shares its acquisition result among current
+peer waiters and checks the candidate's own current local ICE generation. Announcement timestamps
+use one checked Clock sample. The unused desktop V2 action registry compiles only for contract
+tests until its result owner/IPC consumers are implemented; the general warnings policy remains
+intact. See [the revision ledger](communication-recovery/PR48-REVIEW-REVISION.md) for focused evidence
+and the still-open actor/driver wait cycle, provider selection and whole-exchange resource work.
 
 ## Gate 7 complete; communication programme next (2026-10-18)
 

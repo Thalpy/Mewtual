@@ -60,6 +60,11 @@ pub struct SourceActivity {
     packet: Option<super::packets::SourcePacketAuthority>,
 }
 impl SourceActivity {
+    fn exchange(&self) -> Option<Arc<super::negotiation::Exchange>> {
+        self.packet
+            .as_ref()
+            .and_then(super::packets::SourcePacketAuthority::exchange)
+    }
     pub(super) fn joined(scope: Scope, local: DeviceId, key: JoinKey, lease: CallLease) -> Self {
         Self {
             scope,
@@ -267,6 +272,9 @@ redacted_debug!(
 );
 
 impl SourceJob {
+    pub(crate) fn exchange(&self) -> Option<Arc<super::negotiation::Exchange>> {
+        self.flight.packet.activity.exchange()
+    }
     pub fn peer(&self) -> PeerId {
         self.peer
     }
@@ -364,11 +372,14 @@ impl SourceLedger {
         };
         // Native PacketLedger already owns cache/event bytes. Reserve additional canonical
         // scratch before hash/encode; a cached exact retry above needs neither allocation.
-        let _scratch = self.resources.charge(
-            self.group,
-            2 * (body_bytes + 1024) + 4096,
-            ResourceKind::Crypto,
-        )?;
+        let scratch_bytes = 2 * (body_bytes + 1024) + 4096;
+        let exchange = activity.exchange();
+        let _scratch = if let Some(exchange) = &exchange {
+            exchange.charge(super::negotiation::Stage::Crypto, scratch_bytes)?
+        } else {
+            self.resources
+                .charge(self.group, scratch_bytes, ResourceKind::Crypto)?
+        };
         let hash = object.hash();
         let now = self.clock.now_ms();
         let mono = self.clock.monotonic_ms();
@@ -381,9 +392,12 @@ impl SourceLedger {
         }
         let deadline = mono.saturating_add(remaining);
         let bytes = object.encode().len() + 512;
-        let credit = self
-            .resources
-            .charge(self.group, bytes + 1024, ResourceKind::Retained)?;
+        let credit = if let Some(exchange) = &exchange {
+            exchange.charge(super::negotiation::Stage::Source, bytes + 1024)?
+        } else {
+            self.resources
+                .charge(self.group, bytes + 1024, ResourceKind::Retained)?
+        };
         let cursor_key = (object.issuer(), object.scope().room);
         let cursor_credit = if matches!(object.body(), Body::Announcement { .. })
             && !state.cursors.contains_key(&cursor_key)
@@ -510,7 +524,14 @@ impl SourceLedger {
             let mut helpers: Vec<_> = by_device
                 .keys()
                 .copied()
-                .filter(|id| *id != key.0 && Some(*id) != packet.object.body().target())
+                .filter(|id| {
+                    *id != key.0
+                        && Some(*id) != packet.object.body().target()
+                        && packet
+                            .activity
+                            .exchange()
+                            .is_none_or(|exchange| exchange.allows_helper(*id))
+                })
                 .collect();
             helpers.sort_by_key(|id| {
                 (
@@ -544,11 +565,14 @@ impl SourceLedger {
                 continue;
             };
             let effect = actor.effect(key.0, hop.device(), packet.object.expires())?;
-            let credit = match self.resources.charge(
-                self.group,
-                4 * packet.bytes + 4096,
-                ResourceKind::Forward,
-            ) {
+            let bytes = 4 * packet.bytes + 4096;
+            let budget = if let Some(exchange) = packet.activity.exchange() {
+                exchange.charge(super::negotiation::Stage::Lower, bytes)
+            } else {
+                self.resources
+                    .charge(self.group, bytes, ResourceKind::Forward)
+            };
+            let credit = match budget {
                 Ok(credit) => credit,
                 Err(VoiceError::Capacity) => continue,
                 Err(error) => return Err(error),

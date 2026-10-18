@@ -458,6 +458,27 @@ pub struct LocalJoin {
     actions: super::crypto_actions::ActionQueue,
 }
 impl LocalJoin {
+    /// Prepare the supported one-pair SDP exchange only after real native confirmation. No
+    /// outgoing SDP nonce or incoming positive admission may precede this separate readiness
+    /// step. Capacity refusal leaves confirmation, retained history and counters intact.
+    /// `limits` must be the actual actor's shared group owner; `helpers` selects at most two
+    /// distinct current member identities for this immutable exchange. Prepay their normal
+    /// requester/origin records before reserving the workflow; no rate bucket is reset/spent.
+    pub fn prepare_sdp_exchange(
+        &mut self,
+        handshake: Nonce,
+        authority: &Authority<'_>,
+        limits: &mut OriginLimits,
+        helpers: &[DeviceId],
+        clock: &dyn Clock,
+    ) -> Result<Arc<super::negotiation::Exchange>, VoiceError> {
+        self.pair_current(handshake, authority, clock)?;
+        if !self.confirmations.established(handshake) {
+            return Err(VoiceError::Unauthorized);
+        }
+        self.ledger
+            .prepare_sdp_exchange(handshake, authority, limits, helpers, clock)
+    }
     /// Pending application seal authority, bound to the actual unsigned native reservation.
     /// Confirmation actions use their stronger action/attempt factories instead.
     pub fn packet_encryption_authority(
@@ -576,6 +597,7 @@ impl LocalJoin {
             lease.clone(),
             resources.clone(),
         )?;
+        let actions = super::crypto_actions::ActionQueue::with_slots(ledger.action_slots());
         Ok(Self {
             scope: context.scope,
             local: context.local,
@@ -588,7 +610,7 @@ impl LocalJoin {
             announcement: None,
             proofs: BTreeMap::new(),
             confirmations: confirmation::Confirmations::default(),
-            actions: super::crypto_actions::ActionQueue::default(),
+            actions,
         })
     }
     pub fn key(&self) -> &JoinKey {
@@ -646,12 +668,18 @@ impl LocalJoin {
         let renewal = self.renewal.checked_add(1).ok_or(VoiceError::Capacity)?;
         let mut id = [0; 32];
         rng.fill_bytes(&mut id);
+        // One observation defines the signed interval. Two samples can cross a millisecond and
+        // exceed the constructor's exact lifetime cap; saturation could also hide overflow.
+        let issued = clock.now_ms();
+        let expires = issued
+            .checked_add(MAX_DELEGATION_LIFETIME_MS)
+            .ok_or(VoiceError::Freshness)?;
         let object = SignedObject::issue(
             self.scope,
             signer,
             id,
-            clock.now_ms(),
-            clock.now_ms().saturating_add(MAX_DELEGATION_LIFETIME_MS),
+            issued,
+            expires,
             Body::Announcement {
                 key: self.key.clone(),
                 epoch: authority.context.epoch,

@@ -61,6 +61,7 @@ use zeroize::Zeroizing;
 mod blob_fetch;
 mod member_finalization;
 mod member_maintenance;
+mod recovery_submission;
 mod recovery_wait;
 mod voice_transport;
 use member_finalization::KIND_MEMBER_FINALIZE;
@@ -106,7 +107,7 @@ pub use registry_ingress::RegistryWatch;
 pub use registry_publication::RegistrySyncInstance;
 pub use voice_transport::{
     CompletedVoiceForward, CompletedVoiceSource, PendingVoiceForward, PendingVoiceSource,
-    VoiceTransportStatus,
+    VoiceCompletionFailure, VoiceTransportStatus,
 };
 // Re-export the role-authority logic so the product/UI layer (catcoms-app) reuses this exact,
 // canonical implementation rather than keeping a second copy that could drift.
@@ -478,7 +479,9 @@ impl PreOwnerConnectionHandoff {
                 self.peers.remove(peer);
                 true
             }
-            TransportEvent::Gossip { .. } | TransportEvent::Request { .. } => false,
+            TransportEvent::RecoveryNeeded
+            | TransportEvent::Gossip { .. }
+            | TransportEvent::Request { .. } => false,
         }
     }
 }
@@ -4180,6 +4183,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     transport: Arc<T>,
     blob_fetch_instance: Arc<()>,
     member_maintenance: member_maintenance::MaintenanceOwner,
+    recovery_submissions: recovery_submission::Submissions,
     /// Process-local incarnation, freshly allocated by new/restore; never persisted or sent.
     registry_instance: RegistrySyncInstance,
     registry_ingress: registry_ingress::RegistryIngress,
@@ -4373,7 +4377,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// cancelling the tick cannot lose it. Its exact response wait also remains on this owner.
     catchup_inflight: Option<(CatchupTask, Option<PeerId>)>,
     pending_catchup: Option<recovery_wait::PendingCatchup>,
-    prefer_catchup_response: bool,
+    recovery_turn: u8,
     /// `(document, peer)` to the elapsed time before which that peer is not worth asking about
     /// that document again. See [`CATCHUP_PEER_COOLDOWN_MS`].
     catchup_cooldowns: HashMap<(DocType, u128, PeerId), u64>,
@@ -4667,6 +4671,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             transport: Arc::new(transport),
             blob_fetch_instance: Arc::new(()),
             member_maintenance: member_maintenance::MaintenanceOwner::default(),
+            recovery_submissions: recovery_submission::Submissions::default(),
             registry_instance: RegistrySyncInstance::new(),
             registry_ingress: registry_ingress::RegistryIngress::default(),
             studio_exchange: studio_exchange::StudioExchange::default(),
@@ -4738,7 +4743,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             catchup_empty_page_grace: HashMap::new(),
             catchup_inflight: None,
             pending_catchup: None,
-            prefer_catchup_response: true,
+            recovery_turn: 0,
             catchup_cooldowns: HashMap::new(),
             catchup_continuations: HashMap::new(),
             catchup_sources_checked: HashMap::new(),
@@ -6026,7 +6031,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         // Helper handlers only enqueue connected-only forwarding work. Draining it in a later
         // actor turn prevents A->C->B cycles from nesting request waits across sole-owner actors.
-        self.drain_repair_outbox().await;
+        self.queue_repair_outbox();
         // Apply any routing-label rotation from a previous tick: subscribe the new
         // label's topics and drop the ones that aged out of the grandfather window.
         self.resync_if_needed().await;
@@ -6045,6 +6050,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         match event {
             None => Ok(false),
+            Some(TransportEvent::RecoveryNeeded) => {
+                // Local best-effort delivery pressure is only a retry wake. Recover authoritative
+                // control through signed MLS catch-up before data; never infer a missing epoch,
+                // membership permission or delivery receipt from the transport indication.
+                self.enqueue_commit_catchup(self.group.epoch());
+                self.schedule_reconciliation();
+                Ok(true)
+            }
             Some(TransportEvent::Gossip { topic, from, data }) => {
                 self.remember_peer(from);
                 if self.control_topics.contains(&topic) {
@@ -9840,6 +9853,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         vec![1]
     }
 
+    #[cfg(test)]
     async fn drain_repair_outbox(&mut self) {
         let now = self.clock.now_ms();
         while let Some(item) = self.repair_outbox.front().cloned() {
@@ -9865,12 +9879,42 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
+    /// Detach automatic forwarding at a bounded local admission seam. A full pool keeps the
+    /// original item/expiry queued; it never holds the group actor on a driver channel or peer.
+    fn queue_repair_outbox(&mut self)
+    where
+        T: 'static,
+    {
+        for _ in 0..MAX_REPAIR_OUTBOX {
+            let Some(item) = self.repair_outbox.front().cloned() else {
+                break;
+            };
+            if item.expires_at_ms < self.clock.now_ms()
+                || !self.connected_peers.contains(&item.target)
+                || !item
+                    .required_refs
+                    .iter()
+                    .all(|reference| self.descriptor_ref_is_current(reference))
+            {
+                self.repair_outbox.pop_front();
+                continue;
+            }
+            match self.queue_recovery_notification(item) {
+                Ok(()) | Err(recovery_submission::Admission::Stale) => {
+                    self.repair_outbox.pop_front();
+                }
+                Err(recovery_submission::Admission::Busy) => break,
+            }
+        }
+    }
+
     /// Queue one connected-only probe and remember the exact result that may later be accepted.
     /// This waits only for the local transport command channel, never for the remote member.
     async fn queue_indirect_probe_to(
         &mut self,
         helper: ProvenMemberPeer,
         target: DescriptorRef,
+        detached: bool,
     ) -> bool {
         if helper.device == target.device || !self.proven_member_path(helper.device, helper.peer) {
             return false;
@@ -9898,22 +9942,46 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         else {
             return false;
         };
-        if self
+        self.pending_indirect_probes.push_back((
+            attempt,
+            PendingIndirectProbe {
+                helper,
+                target: target.clone(),
+                expires_at_ms: probe.expires_at_ms,
+            },
+        ));
+        // Register before handing bytes to another task/driver: a fast authenticated result can
+        // arrive before the submission acknowledgement. It must find this exact attempt.
+        if detached {
+            let refs = self
+                .descriptor_ref(self.device.device_id())
+                .zip(self.descriptor_ref(helper.device));
+            let Some((requester, helper_ref)) = refs else {
+                self.pending_indirect_probes
+                    .retain(|(id, _)| *id != attempt);
+                return false;
+            };
+            if self.repair_outbox.len() >= MAX_REPAIR_OUTBOX {
+                self.pending_indirect_probes
+                    .retain(|(id, _)| *id != attempt);
+                return false;
+            }
+            self.repair_outbox.push_back(RepairOutboxItem {
+                target: helper.peer,
+                payload: request,
+                expires_at_ms: probe.expires_at_ms,
+                required_refs: vec![requester, helper_ref, target],
+            });
+        } else if self
             .transport
             .notify_connected(helper.peer, ProtocolId(RR_PROTOCOL), Bytes::from(request))
             .await
             .is_err()
         {
+            self.pending_indirect_probes
+                .retain(|(id, _)| *id != attempt);
             return false;
         }
-        self.pending_indirect_probes.push_back((
-            attempt,
-            PendingIndirectProbe {
-                helper,
-                target,
-                expires_at_ms: probe.expires_at_ms,
-            },
-        ));
         true
     }
 
@@ -9976,7 +10044,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Submit one target-side reciprocal intent through the same policy and endpoint scheduler as
     /// every other discovered member route. Only one direct IPv4 and one direct IPv6 candidate
     /// survive; relay circuits are not smuggled through this direct repair verb.
-    async fn submit_reciprocal_intent(&mut self, intent: &ReciprocalIntent) -> bool {
+    async fn submit_reciprocal_intent(&mut self, intent: &ReciprocalIntent, detached: bool) -> bool
+    where
+        T: 'static,
+    {
         if !self.descriptor_ref_is_current(&intent.requester)
             || !self.descriptor_ref_is_current(&intent.target)
             || intent.target.device != self.device.device_id()
@@ -10059,6 +10130,22 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return false;
         }
         let permit_count = permits.len();
+        if detached {
+            return self.queue_recovery_dials(
+                intent.requester.peer,
+                vec![intent.requester.clone(), intent.target.clone()],
+                permits
+                    .into_iter()
+                    .map(|permit| Box::new(permit) as catcoms_rt::BoxedDialPermit)
+                    .collect(),
+                vec![(
+                    FreshnessPrincipal::Device(intent.requester.device.as_bytes().to_vec()),
+                    intent.requester.seq,
+                )],
+                true,
+                intent.expires_at_ms,
+            );
+        }
         let outcomes = match self
             .transport
             .dial_peer_permits(
@@ -10096,7 +10183,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// One globally bounded post-join repair pass. Pending inbound reciprocal work is first,
     /// followed by asynchronous connected-only probes for one disconnected member. No remote
     /// response deadline is held inside the sole-owner actor.
-    pub async fn drive_mesh_repair(&mut self) -> usize {
+    pub async fn drive_mesh_repair(&mut self) -> usize
+    where
+        T: 'static,
+    {
+        self.drive_mesh_repair_inner(false).await
+    }
+
+    /// Admit automatic repair work without waiting for driver or network acknowledgement.
+    /// The return value counts locally admitted reciprocal jobs, not submitted sockets.
+    pub async fn queue_mesh_repair(&mut self) -> usize
+    where
+        T: 'static,
+    {
+        self.drive_mesh_repair_inner(true).await
+    }
+
+    async fn drive_mesh_repair_inner(&mut self, detached: bool) -> usize
+    where
+        T: 'static,
+    {
         let now_wall = self.clock.now_ms();
         let now_monotonic = self.clock.monotonic_ms();
         self.indirect_reachability.retain(|device, evidence| {
@@ -10123,7 +10229,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.outbound_reciprocal.retain(|device, (hash, expires)| {
             *expires >= now_wall && current_hashes.get(device) == Some(hash)
         });
-        let submitted = self.drive_pending_reciprocal().await;
+        let submitted = self.drive_pending_reciprocal_inner(detached).await;
 
         let mut targets: Vec<DescriptorRef> = self
             .peer_records
@@ -10172,7 +10278,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return submitted;
         }
         for helper in helpers {
-            let _ = self.queue_indirect_probe_to(helper, target.clone()).await;
+            let _ = self
+                .queue_indirect_probe_to(helper, target.clone(), detached)
+                .await;
         }
         submitted
     }
@@ -10185,11 +10293,29 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Submit only already-accepted reciprocal work. Unlike [`Self::drive_mesh_repair`], this does
     /// no probing and therefore can be called immediately after an inbound event without turning
     /// ordinary message processing into a multi-peer wait.
-    pub async fn drive_pending_reciprocal(&mut self) -> usize {
+    pub async fn drive_pending_reciprocal(&mut self) -> usize
+    where
+        T: 'static,
+    {
+        self.drive_pending_reciprocal_inner(false).await
+    }
+
+    /// Automatic counterpart: local queue admission only, with exact driver authority.
+    pub async fn queue_pending_reciprocal(&mut self) -> usize
+    where
+        T: 'static,
+    {
+        self.drive_pending_reciprocal_inner(true).await
+    }
+
+    async fn drive_pending_reciprocal_inner(&mut self, detached: bool) -> usize
+    where
+        T: 'static,
+    {
         let mut submitted = 0usize;
         let intents = std::mem::take(&mut self.reciprocal_intents);
         for intent in intents.into_iter().take(MAX_PENDING_REPAIR_INTENTS) {
-            if self.submit_reciprocal_intent(&intent).await {
+            if self.submit_reciprocal_intent(&intent, detached).await {
                 submitted += 1;
             }
         }
@@ -10199,7 +10325,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Explicit, safety-bounded redial for complete isolation. It clears only this group's
     /// discovery retry cooldown once; the policy window and shared process/peer/socket/prefix
     /// scheduler remain authoritative, and repeated clicks coalesce behind a monotonic cooldown.
-    pub async fn manual_fallback_redial(&mut self) -> ManualRedialOutcome {
+    pub async fn manual_fallback_redial(&mut self) -> ManualRedialOutcome
+    where
+        T: 'static,
+    {
         let now = self.clock.monotonic_ms();
         if self
             .manual_redial_last_ms
@@ -10665,7 +10794,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// ten minutes ago is not evidence that they still belong. Addresses are re-validated on the
     /// way out too: the cache is at-rest state a colluding host could have edited, the integrity
     /// tag should have caught that, and this is the last gate before a socket.
-    pub async fn dial_cached_peers(&mut self) -> usize {
+    pub async fn dial_cached_peers(&mut self) -> usize
+    where
+        T: 'static,
+    {
+        self.dial_cached_peers_inner(false).await
+    }
+
+    /// Locally admit bounded cached-route jobs. Root remains available while acknowledgements
+    /// wait; only current Submitted completions create retry/backoff evidence.
+    pub async fn queue_cached_dials(&mut self) -> usize
+    where
+        T: 'static,
+    {
+        self.dial_cached_peers_inner(true).await
+    }
+
+    async fn dial_cached_peers_inner(&mut self, detached: bool) -> usize
+    where
+        T: 'static,
+    {
         let candidates: Vec<Candidate> = self
             .address_cache
             .candidates()
@@ -10744,6 +10892,32 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             self.discovery
                 .refund_endpoint_budget(pd.addresses.len().saturating_sub(granted.len()));
             if granted.is_empty() {
+                continue;
+            }
+            if detached {
+                let peer = PeerId::new(expected);
+                let reference = self
+                    .peer_records
+                    .keys()
+                    .filter_map(|device| self.descriptor_ref(*device))
+                    .find(|reference| reference.peer == peer);
+                if let Some(reference) = reference {
+                    if self.queue_recovery_dials(
+                        peer,
+                        vec![reference],
+                        granted
+                            .into_iter()
+                            .map(|permit| Box::new(permit) as catcoms_rt::BoxedDialPermit)
+                            .collect(),
+                        epochs,
+                        false,
+                        u64::MAX,
+                    ) {
+                        dialed += 1;
+                    }
+                } else {
+                    self.discovery.refund_endpoint_budget(granted.len());
+                }
                 continue;
             }
             let mut tally = DialOutcomeTally::default();
@@ -15864,7 +16038,7 @@ mod tests {
                     TransportEvent::Request { from, .. } => Some(*from),
                     TransportEvent::PeerConnected(p) => Some(*p),
                     TransportEvent::PeerPathsChanged { peer, .. } => Some(*peer),
-                    TransportEvent::PeerDisconnected(_) => None,
+                    TransportEvent::PeerDisconnected(_) | TransportEvent::RecoveryNeeded => None,
                 };
                 // An evicted peer has no connection, so nothing it sends reaches the membership
                 // layer. Dropping the event drops its `Responder` with it, so the sender sees

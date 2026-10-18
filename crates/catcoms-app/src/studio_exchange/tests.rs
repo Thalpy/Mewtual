@@ -180,6 +180,7 @@ impl MeshTransport for Net {
         loop {
             let event = self.inner.next_event().await?;
             let peer = match &event {
+                TransportEvent::RecoveryNeeded => return Some(event),
                 TransportEvent::Gossip { from, .. } | TransportEvent::Request { from, .. } => *from,
                 TransportEvent::PeerConnected(peer)
                 | TransportEvent::PeerDisconnected(peer)

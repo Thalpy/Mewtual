@@ -606,7 +606,7 @@ fn bounds_invalid_tags_suites_points_lengths_and_nested_envelopes_refuse() {
     bad.key_ref[0] ^= 1;
     assert!(bad.validate().is_err());
     for (kind, len) in [
-        (EncryptedKind::Offer, 32 * 1024 + 17),
+        (EncryptedKind::Offer, MAX_SDP_PLAINTEXT + 17),
         (EncryptedKind::Ice, 2 * 1024 + 17),
         (EncryptedKind::ConfirmHello, 529),
         (EncryptedKind::Bye, 145),

@@ -136,8 +136,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     {
         enum Ready {
             Response(Result<Bytes, SyncError>),
+            Submission(super::recovery_submission::Completion),
             Event(Option<TransportEvent>),
             Retry,
+            Capacity,
         }
         // A pending request has its own finite deadline. An unrelated expired cooldown must
         // not busy-loop while that single slot is occupied.
@@ -159,22 +161,45 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 None => std::future::pending().await,
             }
         };
-        futures::pin_mut!(event, retry);
+        let mut changed = self.recovery_submissions.changed.clone();
+        let waiting_submission = !self.repair_outbox.is_empty();
+        let capacity = async {
+            if waiting_submission {
+                let _ = changed.changed().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        futures::pin_mut!(event, retry, capacity);
         let ready = poll_fn(|cx| {
-            // Alternate ready completions and inbound events. A peer flooding either side
-            // cannot indefinitely suppress the other; a pending branch registers its waker.
-            for response_first in [self.prefer_catchup_response, !self.prefer_catchup_response] {
-                if response_first {
+            // Rotate catch-up, inbound events and detached submission completions. This poll
+            // may be cancelled by an actor command; the jobs/permits remain on the group owner.
+            for offset in 0..3 {
+                let source = (self.recovery_turn + offset) % 3;
+                if source == 0 {
                     if let Some(pending) = self.pending_catchup.as_mut() {
                         if let Poll::Ready(result) = pending.response.as_mut().poll(cx) {
-                            self.prefer_catchup_response = false;
+                            self.recovery_turn = 1;
                             return Poll::Ready(Ready::Response(result));
                         }
                     }
-                } else if let Poll::Ready(value) = event.as_mut().poll(cx) {
-                    self.prefer_catchup_response = true;
-                    return Poll::Ready(Ready::Event(value));
+                } else if source == 1 {
+                    if let Poll::Ready(value) = event.as_mut().poll(cx) {
+                        self.recovery_turn = 2;
+                        return Poll::Ready(Ready::Event(value));
+                    }
+                } else if !self.recovery_submissions.jobs.is_empty() {
+                    use futures::Stream;
+                    if let Poll::Ready(Some(completed)) =
+                        Pin::new(&mut self.recovery_submissions.jobs).poll_next(cx)
+                    {
+                        self.recovery_turn = 0;
+                        return Poll::Ready(Ready::Submission(completed));
+                    }
                 }
+            }
+            if capacity.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(Ready::Capacity);
             }
             retry.as_mut().poll(cx).map(|()| Ready::Retry)
         })
@@ -185,6 +210,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 None
             }
             Ready::Event(event) => Some(event),
+            Ready::Submission(completed) => {
+                self.complete_recovery_submission(completed);
+                None
+            }
+            Ready::Capacity => {
+                self.recovery_submissions.changed.borrow_and_update();
+                None
+            }
             Ready::Retry => None,
         }
     }

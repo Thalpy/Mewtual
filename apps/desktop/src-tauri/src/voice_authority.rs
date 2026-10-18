@@ -3,6 +3,9 @@
 //! No keys, decrypted SDP/ICE or call state are persisted. Actual actor membership/room/policy
 //! checks surround these synchronous transitions in the bridge, then repeat at protocol effects.
 
+// The V2 action handoff has no production IPC consumer yet. Compile its registry only for
+// contract tests until endpoint result recovery and the browser adapter are integrated.
+#[cfg(test)]
 use catcoms_sync::voice_v2::crypto_actions::CryptoAction;
 use catcoms_sync::voice_v2::resources::{Credit, ResourceKind, Resources};
 use catcoms_sync::voice_v2::runtime::Runtime;
@@ -12,17 +15,20 @@ use std::sync::Arc;
 
 const CANDIDATES: usize = 8;
 const CANDIDATE_TTL: u64 = 30_000;
+#[cfg(test)]
 const REGISTERED_ACTIONS: usize = 256;
 
 /// Parsed closed action identity. The bridge must decode canonical decimal u64 strings and a
 /// fixed hex fingerprint before constructing this; no JS payload can register a native action.
 #[derive(Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) struct ActionIdentity {
     pub owner: String,
     pub action: u64,
     pub version: u64,
     pub input_tag: [u8; 32],
 }
+#[cfg(test)]
 impl ActionIdentity {
     fn key(&self) -> Result<(String, u64), String> {
         if self.owner.is_empty() || self.owner.len() > 128 || self.action == 0 || self.version != 1
@@ -154,6 +160,7 @@ pub(crate) struct Coordinator {
     // Registered only from opaque Root-issued owners, before pull/admission can race. These
     // survive End/lock/replacement while an engine is admitted but actual settlement is unknown.
     // Lock order is Coordinator -> action fence. Root never calls Coordinator under its fence.
+    #[cfg(test)]
     actions: HashMap<(String, u64), Arc<CryptoAction>>,
     resources: Arc<Resources>,
     runtime: Arc<Runtime>,
@@ -177,6 +184,7 @@ impl Coordinator {
             owner: None,
             candidates: HashMap::new(),
             operations: HashMap::new(),
+            #[cfg(test)]
             actions: HashMap::new(),
             resources: runtime.resources(),
             runtime,
@@ -297,14 +305,18 @@ impl Coordinator {
     fn retire_owner(&mut self) {
         if let Some(owner) = self.owner.take() {
             owner.lease.revoke();
-            for ((id, _), action) in &self.actions {
-                if id == &owner.id {
-                    action.retire_if_unstarted();
+            #[cfg(test)]
+            {
+                for ((id, _), action) in &self.actions {
+                    if id == &owner.id {
+                        action.retire_if_unstarted();
+                    }
                 }
+                self.prune_actions();
             }
-            self.prune_actions();
         }
     }
+    #[cfg(test)]
     fn prune_actions(&mut self) {
         let current = self.owner.as_ref().map(|owner| owner.id.as_str());
         self.actions
@@ -314,6 +326,7 @@ impl Coordinator {
     /// Trusted Root-to-native registration, not a command callable by the browser. The exact
     /// scope, call lease and shared process pool must all match. ID equality cannot substitute
     /// another Root action/fence; repeated registration of that exact Arc is idempotent.
+    #[cfg(test)]
     pub fn register_action(
         &mut self,
         owner_id: &str,
@@ -347,6 +360,7 @@ impl Coordinator {
         Ok(identity)
     }
 
+    #[cfg(test)]
     fn action(&self, identity: &ActionIdentity) -> Result<&Arc<CryptoAction>, String> {
         let action = self
             .actions
@@ -361,6 +375,7 @@ impl Coordinator {
     /// Idempotent exact-action engine admission. Capacity refusal is temporary: it neither
     /// consumes the action nor creates a terminal rejected receipt. Never delegate this to
     /// ordinary fresh-token admit, which cannot recover a lost success reply without duplication.
+    #[cfg(test)]
     pub fn admit_action(&self, identity: &ActionIdentity, bytes: usize) -> Result<u64, String> {
         let owner = self.owner(&identity.owner).ok_or("voice owner changed")?;
         let action = self.action(identity)?;
@@ -374,6 +389,7 @@ impl Coordinator {
 
     /// Latch settlement even if admission has not arrived yet. Unknown IDs create no tombstone,
     /// charge or authority. A removed retired identity can never register/admit under a new owner.
+    #[cfg(test)]
     pub fn settle_action(&mut self, identity: &ActionIdentity) -> Result<bool, String> {
         if !self.actions.contains_key(&identity.key()?) {
             return Ok(false);

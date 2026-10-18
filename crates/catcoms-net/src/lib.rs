@@ -90,7 +90,7 @@ use libp2p::core::transport::PortUse;
 use libp2p::core::upgrade::Version;
 use libp2p::core::{ConnectedPoint, Endpoint};
 use libp2p::multiaddr::Protocol;
-use libp2p::request_response::{OutboundRequestId, ResponseChannel};
+use libp2p::request_response::{InboundRequestId, OutboundRequestId, ResponseChannel};
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::swarm::{
@@ -107,6 +107,7 @@ use tokio::sync::{mpsc, oneshot, watch, Mutex, Semaphore};
 use tokio::task::JoinHandle;
 
 mod connection_leases;
+mod event_dispatch;
 mod publication;
 
 /// Max request/response frame size.
@@ -1249,6 +1250,13 @@ enum Command {
         peer: PeerId,
         data: Bytes,
     },
+    /// Local admission ACK only; actual lower custody stays in pending_req with no answer sink.
+    NotifyConnectedOwned {
+        peer: PeerId,
+        data: Bytes,
+        cancellation: RequestCancellation,
+        reply: oneshot::Sender<Result<(), TransportError>>,
+    },
     /// Start listening on `addr` (e.g. a `…/p2p-circuit` relay reservation).
     Listen(Multiaddr),
     /// Dial `addr` (e.g. a relay, before reserving a circuit on it).
@@ -1525,8 +1533,30 @@ impl NetworkBehaviour for Eviction {
 }
 
 type InboundResponses = FuturesUnordered<
-    Pin<Box<dyn Future<Output = (ResponseChannel<Vec<u8>>, Option<Bytes>)> + Send>>,
+    Pin<
+        Box<
+            dyn Future<
+                    Output = (
+                        InboundRequestId,
+                        Option<(ResponseChannel<Vec<u8>>, catcoms_rt::ResponderReply)>,
+                        Arc<event_dispatch::Credit>,
+                    ),
+                > + Send,
+        >,
+    >,
 >;
+
+struct InboundRequest {
+    authority: Arc<event_dispatch::IngressAuthority>,
+    terminal: watch::Sender<bool>,
+    _request_credit: Arc<event_dispatch::Credit>,
+    response_credit: Option<SharedRequestKeepalive>,
+}
+impl Drop for InboundRequest {
+    fn drop(&mut self) {
+        self.terminal.send_replace(true);
+    }
+}
 
 /// A PCP/NAT-PMP worker is tied to exactly one stable TCP or UDP listen port. Dropping the actor
 /// aborts these workers and stops lease renewal; the router's bounded lease then expires naturally.
@@ -3433,7 +3463,9 @@ async fn run_ipv6_port_mapper_with<C, R, D>(
 }
 
 struct PendingRequest {
-    reply: oneshot::Sender<Result<Bytes, TransportError>>,
+    /// None for an accounted notification. Its possibly hostile reply is discarded directly
+    /// in the driver; a local ACK never creates an application-owned response buffer.
+    reply: Option<oneshot::Sender<Result<Bytes, TransportError>>>,
     /// Deliberately unread: ownership is the accounting action. It survives a dropped waiter and
     /// is released only by the matching response/failure event.
     _keepalive: Option<SharedRequestKeepalive>,
@@ -3454,6 +3486,13 @@ struct Actor {
     enable_port_mapping: bool,
     cmd_rx: mpsc::Receiver<Command>,
     event_tx: mpsc::Sender<TransportEvent>,
+    delivery: event_dispatch::Dispatcher,
+    delivery_budget: Arc<event_dispatch::Budget>,
+    inbound_req: HashMap<InboundRequestId, InboundRequest>,
+    // Test-only observation immediately before inbound application dispatch. This makes the
+    // real-driver congestion regression deterministic without sleeps or a fake transport.
+    #[cfg(test)]
+    test_requests: watch::Sender<u64>,
     /// Coalesced, present-time liveness/path table. Pre-actor admission and infrastructure waits
     /// observe this instead of consuming the sole ordered event stream that `ChannelSync` owns.
     connection_snapshot_tx: watch::Sender<Vec<PeerConnectionSnapshot>>,
@@ -3631,6 +3670,22 @@ impl Actor {
         }
     }
 
+    fn queue_connection_state(&mut self, peer_id: libp2p::PeerId, newly: Option<ConnectionPath>) {
+        let peer = to_peer(&peer_id);
+        let Some(lease) = connection_leases::current(&self.connection_leases.table, peer) else {
+            return;
+        };
+        let TransportEvent::PeerPathsChanged { active, .. } = self.peer_paths_event(peer_id, newly)
+        else {
+            unreachable!()
+        };
+        if !self.delivery.connected(peer, lease, active, newly) {
+            // Preserve existing announced owners instead of evicting their disconnect obligations.
+            // A new generation outside the bounded metadata table is not offered to the app.
+            let _ = self.swarm.disconnect_peer_id(peer_id);
+        }
+    }
+
     async fn run(mut self) {
         let mut inbound: InboundResponses = FuturesUnordered::new();
         // Held publications need a clock of their own; see `PENDING_PUBLISH_RETRY`. The arm is
@@ -3650,7 +3705,10 @@ impl Actor {
                             // what lets those addresses be raced in a single dial. Nothing here
                             // depends on the drain succeeding: an address that misses the batch is
                             // dialed on its own, which is still correct, just less efficient.
-                            while let Ok(next) = self.cmd_rx.try_recv() {
+                            // A producer cannot keep one turn alive indefinitely and starve
+                            // response/timeout/disconnect polling, even under a busy app actor.
+                            for _ in 0..31 {
+                                let Ok(next) = self.cmd_rx.try_recv() else { break; };
                                 self.handle_command(next);
                             }
                             self.flush_dials();
@@ -3659,7 +3717,11 @@ impl Actor {
                     }
                 }
                 event = self.swarm.select_next_some() => {
-                    self.on_swarm_event(event, &mut inbound).await;
+                    self.on_swarm_event(event, &mut inbound);
+                }
+                permit = self.event_tx.clone().reserve_owned(), if self.delivery.has_pending() => {
+                    let Ok(permit) = permit else { break; };
+                    if let Some(event) = self.delivery.next() { permit.send(event); }
                 }
                 Some(report) = self.port_mapper_rx.recv() => {
                     let current = port_mapper_report_is_current(&self.port_mapper_tasks, &report);
@@ -3677,14 +3739,20 @@ impl Actor {
                     publish_retry.set(SystemClock.sleep(PENDING_PUBLISH_RETRY));
                     self.flush_pending_publish();
                 }
-                Some((channel, resp)) = inbound.next(), if !inbound.is_empty() => {
-                    if let Some(bytes) = resp {
-                        let _ = self
-                            .swarm
-                            .behaviour_mut()
-                            .request_response
-                            .send_response(channel, bytes.to_vec());
+                Some((id, response, custody)) = inbound.next(), if !inbound.is_empty() => {
+                    if let (Some(pending), Some((channel, response))) = (self.inbound_req.get_mut(&id), response) {
+                        use catcoms_rt::RequestAuthority;
+                        // Sender bytes and the lower serialized Vec coexist until ResponseSent.
+                        // Refusal drops the lower channel honestly; retain initial custody until
+                        // its actual InboundFailure, rather than recycling it at outer timeout.
+                        if pending.authority.authorized() {
+                            pending.response_credit = response.keepalive();
+                            let _ = self.swarm.behaviour_mut().request_response.send_response(channel, response.data().to_vec());
+                        }
+                    } else if let Some(pending) = self.inbound_req.get_mut(&id) {
+                        pending.terminal.send_replace(true);
                     }
+                    drop(custody);
                 }
             }
         }
@@ -4119,7 +4187,7 @@ impl Actor {
                             self.pending_req.insert(
                                 id,
                                 PendingRequest {
-                                    reply,
+                                    reply: Some(reply),
                                     _keepalive: keepalive,
                                     kind: data.first().copied(),
                                     bytes: data.len(),
@@ -4168,7 +4236,7 @@ impl Actor {
                         self.pending_req.insert(
                             id,
                             PendingRequest {
-                                reply,
+                                reply: Some(reply),
                                 _keepalive: keepalive,
                                 kind: data.first().copied(),
                                 bytes: data.len(),
@@ -4212,6 +4280,41 @@ impl Actor {
                         "connected-only notification refused: peer is not live"
                     ),
                 }
+            }
+            Command::NotifyConnectedOwned {
+                peer,
+                data,
+                cancellation,
+                reply,
+            } => {
+                if reply.is_closed() || cancellation.is_cancelled() {
+                    let _ = reply.send(Err(TransportError::Cancelled));
+                    return;
+                }
+                let live = self
+                    .peers
+                    .get(&peer)
+                    .copied()
+                    .filter(|target| self.swarm.is_connected(target));
+                let Some(target) = live else {
+                    let _ = reply.send(Err(TransportError::Unreachable(peer)));
+                    return;
+                };
+                let id = self
+                    .swarm
+                    .behaviour_mut()
+                    .request_response
+                    .send_request(&target, data.to_vec());
+                self.pending_req.insert(
+                    id,
+                    PendingRequest {
+                        reply: None,
+                        _keepalive: cancellation.keepalive(),
+                        kind: data.first().copied(),
+                        bytes: data.len(),
+                    },
+                );
+                let _ = reply.send(Ok(()));
             }
             Command::Listen(addr) => {
                 // Listening on a `…/p2p-circuit` address is how a reservation is requested, so the
@@ -4768,7 +4871,7 @@ impl Actor {
         }
     }
 
-    async fn on_swarm_event(
+    fn on_swarm_event(
         &mut self,
         event: SwarmEvent<MeshBehaviourEvent>,
         inbound: &mut InboundResponses,
@@ -4903,17 +5006,10 @@ impl Actor {
                 // Update the queryable state atomically before sending either ordered edge. A
                 // waiter that wakes here sees both aggregate liveness and its current path.
                 self.publish_connection_snapshot();
-                if first_connection {
-                    let _ = self
-                        .event_tx
-                        .send(TransportEvent::PeerConnected(peer))
-                        .await;
-                }
-                // Preserve `PeerConnected` as the first event for a peer so existing consumers
-                // keep their one-edge liveness contract. The path snapshot follows immediately;
-                // consumers that understand it may refine "connected" to direct vs relay.
-                let paths = self.peer_paths_event(peer_id, Some(path));
-                let _ = self.event_tx.send(paths).await;
+                // Connection state precedes this generation's requests in the ordered stream.
+                // Congestion coalesces never-announced generations; announced disconnects are
+                // retained and cannot be mistaken for a replacement same-peer connection.
+                self.queue_connection_state(peer_id, Some(path));
             }
             SwarmEvent::OutgoingConnectionError {
                 connection_id,
@@ -4986,26 +5082,12 @@ impl Actor {
                             .retain(|candidate| candidate != &peer_id);
                         self.publish_mesh_observations();
                     }
-                    // Always paired: an evicted peer is refused by `Eviction` before a connection
-                    // is ever established, so it cannot reach this arm without having been
-                    // announced as connected first.
-                    let _ = self
-                        .event_tx
-                        .send(TransportEvent::PeerDisconnected(peer))
-                        .await;
-                    // `num_established` is libp2p's authoritative count. Clear every entry for
-                    // the peer as a fail-safe if an earlier close edge was missed or changed
-                    // shape, then publish the empty snapshot after the legacy disconnect edge.
-                    if paths_changed {
-                        let paths = self.peer_paths_event(peer_id, None);
-                        let _ = self.event_tx.send(paths).await;
-                    }
+                    self.delivery.disconnected(peer);
                 } else if paths_changed {
                     // The address-bearing watch was already published independently above. The
                     // coarse snapshot/event need move only when their deduplicated set changed.
                     self.publish_connection_snapshot();
-                    let paths = self.peer_paths_event(peer_id, None);
-                    let _ = self.event_tx.send(paths).await;
+                    self.queue_connection_state(peer_id, None);
                 }
             }
             SwarmEvent::Behaviour(MeshBehaviourEvent::Gossipsub(gossipsub::Event::Message {
@@ -5019,14 +5101,23 @@ impl Actor {
                     .unwrap_or_else(|| to_peer(&propagation_source));
                 let topic = from_topic_hash(&message.topic);
                 tracing::trace!(bytes = message.data.len(), "gossip received");
-                let _ = self
-                    .event_tx
-                    .send(TransportEvent::Gossip {
-                        topic,
-                        from,
-                        data: Bytes::from(message.data),
-                    })
-                    .await;
+                let carrier = to_peer(&propagation_source);
+                if let (Some(ingress), Some(credit)) = (
+                    connection_leases::current(&self.connection_leases.table, carrier),
+                    self.delivery_budget.charge(message.data.len(), None),
+                ) {
+                    self.delivery.queue(
+                        TransportEvent::Gossip {
+                            topic,
+                            from,
+                            data: event_dispatch::charged_bytes(Bytes::from(message.data), credit),
+                        },
+                        carrier,
+                        ingress,
+                    );
+                } else {
+                    self.delivery.note_gossip_loss();
+                }
             }
             SwarmEvent::Behaviour(MeshBehaviourEvent::Gossipsub(
                 gossipsub::Event::Subscribed { .. },
@@ -5037,31 +5128,83 @@ impl Actor {
                 request_response::Event::Message { peer, message, .. },
             )) => match message {
                 request_response::Message::Request {
-                    request, channel, ..
+                    request_id,
+                    request,
+                    channel,
                 } => {
+                    use catcoms_rt::RequestAuthority;
+                    #[cfg(test)]
+                    self.test_requests.send_modify(|count| *count += 1);
                     let from = to_peer(&peer);
-                    self.peers.entry(from).or_insert(peer);
-                    let (responder, rx) = Responder::channel();
-                    let _ = self
-                        .event_tx
-                        .send(TransportEvent::Request {
+                    let Some(ingress) =
+                        connection_leases::current(&self.connection_leases.table, from)
+                    else {
+                        return;
+                    };
+                    let Some(credit) = self.delivery_budget.charge(request.len(), Some(from))
+                    else {
+                        return;
+                    };
+                    let (authority, terminal) =
+                        event_dispatch::IngressAuthority::new(ingress.clone());
+                    let (responder, rx) = Responder::channel_owned(
+                        credit.clone(),
+                        authority.clone(),
+                        self.delivery_budget.clone(),
+                    );
+                    if !self.delivery.queue(
+                        TransportEvent::Request {
                             from,
                             proto: ProtocolId(RR_PROTOCOL),
-                            data: Bytes::from(request),
+                            data: event_dispatch::charged_bytes(
+                                Bytes::from(request),
+                                credit.clone(),
+                            ),
                             responder,
-                        })
-                        .await;
-                    inbound.push(Box::pin(async move { (channel, rx.recv().await) }));
+                        },
+                        from,
+                        ingress,
+                    ) {
+                        return;
+                    }
+                    self.inbound_req.insert(
+                        request_id,
+                        InboundRequest {
+                            authority: authority.clone(),
+                            terminal,
+                            _request_credit: credit.clone(),
+                            response_credit: None,
+                        },
+                    );
+                    inbound.push(Box::pin(async move {
+                        let custody = credit;
+                        let response = tokio::select! {
+                            response = rx.recv_owned() => response,
+                            _ = authority.revoked() => None,
+                            _ = SystemClock.sleep(catcoms_rt::REQUEST_TIMEOUT) => None,
+                        };
+                        (request_id, response.map(|bytes| (channel, bytes)), custody)
+                    }));
                 }
                 request_response::Message::Response {
                     request_id,
                     response,
                 } => {
                     if let Some(pending) = self.pending_req.remove(&request_id) {
-                        let _ = pending.reply.send(Ok(Bytes::from(response)));
+                        if let Some(reply) = pending.reply {
+                            let _ = reply.send(Ok(Bytes::from(response)));
+                        }
                     }
                 }
             },
+            SwarmEvent::Behaviour(MeshBehaviourEvent::RequestResponse(
+                request_response::Event::InboundFailure { request_id, .. }
+                | request_response::Event::ResponseSent { request_id, .. },
+            )) => {
+                // Actual lower terminal evidence, not application timeout or receiver loss.
+                // Bytes/responder clones still retain independent shared custody after this.
+                self.inbound_req.remove(&request_id);
+            }
             SwarmEvent::Behaviour(MeshBehaviourEvent::RequestResponse(
                 request_response::Event::OutboundFailure {
                     request_id,
@@ -5086,8 +5229,8 @@ impl Actor {
                     request_bytes = ?pending.as_ref().map(|entry| entry.bytes),
                     "outbound request failed"
                 );
-                if let Some(pending) = pending {
-                    let _ = pending.reply.send(Err(match error {
+                if let Some(reply) = pending.and_then(|pending| pending.reply) {
+                    let _ = reply.send(Err(match error {
                         request_response::OutboundFailure::Timeout => {
                             TransportError::Timeout(to_peer(&peer))
                         }
@@ -5355,6 +5498,10 @@ pub struct MeshService {
     /// cancellation until the queued command is drained. No unbounded admission waiters.
     publish_once_slots: Arc<Semaphore>,
     event_rx: Mutex<mpsc::Receiver<TransportEvent>>,
+    #[cfg(test)]
+    test_event_tx: mpsc::Sender<TransportEvent>,
+    #[cfg(test)]
+    test_requests: watch::Receiver<u64>,
     connection_snapshot_rx: watch::Receiver<Vec<PeerConnectionSnapshot>>,
     connection_leases: Arc<std::sync::Mutex<HashMap<PeerId, catcoms_rt::ConnectionLease>>>,
     authenticated_route_rx: watch::Receiver<Vec<AuthenticatedDialRoute>>,
@@ -5398,6 +5545,10 @@ impl MeshService {
         let local = to_peer(swarm.local_peer_id());
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
+        #[cfg(test)]
+        let test_event_tx = event_tx.clone();
+        #[cfg(test)]
+        let (test_requests_tx, test_requests_rx) = watch::channel(0);
         let (connection_snapshot_tx, connection_snapshot_rx) = watch::channel(Vec::new());
         let connection_owners = connection_leases::Owners::default();
         let connection_leases = connection_owners.table.clone();
@@ -5429,6 +5580,11 @@ impl MeshService {
             enable_port_mapping,
             cmd_rx,
             event_tx,
+            delivery: event_dispatch::Dispatcher::default(),
+            delivery_budget: event_dispatch::Budget::shared(),
+            inbound_req: HashMap::new(),
+            #[cfg(test)]
+            test_requests: test_requests_tx,
             connection_snapshot_tx,
             connection_leases: connection_owners,
             authenticated_route_tx,
@@ -5485,6 +5641,10 @@ impl MeshService {
             cmd_tx,
             publish_once_slots: Arc::new(Semaphore::new(publication::MAX_IN_FLIGHT)),
             event_rx: Mutex::new(event_rx),
+            #[cfg(test)]
+            test_event_tx,
+            #[cfg(test)]
+            test_requests: test_requests_rx,
             connection_snapshot_rx,
             connection_leases,
             authenticated_route_rx,
@@ -6264,8 +6424,45 @@ impl MeshTransport for MeshService {
             .map_err(|_| TransportError::Closed)
     }
 
+    async fn notify_connected_cancellable(
+        &self,
+        peer: PeerId,
+        _proto: ProtocolId,
+        data: Bytes,
+        mut cancellation: RequestCancellation,
+    ) -> Result<(), TransportError> {
+        if cancellation.is_cancelled() {
+            return Err(TransportError::Cancelled);
+        }
+        let (reply, rx) = oneshot::channel();
+        tokio::select! {
+            result = self.cmd_tx.send(Command::NotifyConnectedOwned { peer, data, cancellation: cancellation.clone(), reply }) => result.map_err(|_| TransportError::Closed)?,
+            _ = cancellation.cancelled() => return Err(TransportError::Cancelled),
+        }
+        tokio::select! {
+            result = rx => result.map_err(|_| TransportError::Closed)?,
+            _ = cancellation.cancelled() => Err(TransportError::Cancelled),
+        }
+    }
+
     async fn next_event(&self) -> Option<TransportEvent> {
-        self.event_rx.lock().await.recv().await
+        let mut events = self.event_rx.lock().await;
+        let mut skipped = 0;
+        loop {
+            let event = events.recv().await?;
+            if matches!(&event, TransportEvent::Request { responder, .. } if !responder.is_current())
+            {
+                // A response deadline/failure or disconnect can retire an already-enqueued
+                // request before the app reads it. It must not run under a replacement link.
+                skipped += 1;
+                if skipped == 32 {
+                    skipped = 0;
+                    tokio::task::yield_now().await;
+                }
+                continue;
+            }
+            return Some(event);
+        }
     }
 
     // Rendezvous discovery; delegate to the inherent methods, mapping rt-native opaque bytes/
@@ -6374,6 +6571,103 @@ mod tests {
     use catcoms_rt::{CryptoRng, ManualClock, RngCore};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn full_application_event_sink_keeps_real_tcp_driver_commands_and_responses_live() {
+        let (a, a_id) =
+            MeshService::new_tcp(Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()), &[]).unwrap();
+        let (b, b_id) = MeshService::new_tcp(None, &[]).unwrap();
+        let b = Arc::new(b);
+        let (c, c_id) =
+            MeshService::new_tcp(Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()), &[]).unwrap();
+        let a_listen = tokio::time::timeout(Duration::from_secs(3), a.next_listen_addr())
+            .await
+            .unwrap()
+            .unwrap();
+        let a_address = format!("{a_listen}/p2p/{a_id}").parse().unwrap();
+        b.dial(a_address).await.unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            a.wait_for_peer_connected(b.local_peer()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let lease = a.connection_lease(b.local_peer()).unwrap();
+        let mut observed = a.test_requests.clone();
+        // Fill the REAL bounded application sink. Only the deterministic fill/arrival observer
+        // is a test seam; Noise, TCP, request/response, command ACKs and connection owners are real.
+        while a
+            .test_event_tx
+            .try_send(TransportEvent::Gossip {
+                topic: Topic::new(Bytes::from_static(b"congestion fixture")),
+                from: b.local_peer(),
+                data: Bytes::from_static(b"queued"),
+            })
+            .is_ok()
+        {}
+        assert_eq!(a.test_event_tx.capacity(), 0);
+        let outbound = b.handle();
+        let a_peer = a.local_peer();
+        let waiting = tokio::spawn(async move {
+            outbound
+                .request_control_connected_only(a_peer, Bytes::from_static(b"overloaded request"))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while *observed.borrow_and_update() == 0 {
+                observed.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("the real inbound request reaches driver dispatch");
+
+        let c_listen = tokio::time::timeout(Duration::from_secs(3), c.next_listen_addr())
+            .await
+            .unwrap()
+            .unwrap();
+        let c_address = format!("{c_listen}/p2p/{c_id}").parse().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), a.dial_outcome(c_address))
+            .await
+            .expect("a full application sink cannot block a local dial acknowledgement")
+            .unwrap();
+
+        let responder_node = b.clone();
+        let responder = tokio::spawn(async move {
+            loop {
+                if let Some(TransportEvent::Request {
+                    data, responder, ..
+                }) = responder_node.next_event().await
+                {
+                    assert_eq!(&data[..], b"independent outbound request");
+                    responder.respond(Bytes::from_static(b"actual TCP response"));
+                    return;
+                }
+            }
+        });
+        let response = tokio::time::timeout(
+            Duration::from_secs(3),
+            a.handle().request_control_connected_only(
+                to_peer(&b_id),
+                Bytes::from_static(b"independent outbound request"),
+            ),
+        )
+        .await
+        .expect("swarm response polling continues while application delivery is full")
+        .unwrap();
+        assert_eq!(&response[..], b"actual TCP response");
+        responder.await.unwrap();
+        b.evict_peer(a.local_peer()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), lease.revoked())
+            .await
+            .expect("driver connection retirement does not depend on application delivery");
+        waiting.abort();
+        assert_eq!(
+            a.test_event_tx.capacity(),
+            0,
+            "no application drain concealed driver progress"
+        );
+    }
 
     #[derive(Debug)]
     struct DropObservedPermit {
@@ -8592,6 +8886,92 @@ mod tests {
             .expect("the matching response should retire the pending request and its keepalive");
             assert_eq!(drops.load(Ordering::SeqCst), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn owned_notification_ack_discards_max_reply_and_keeps_actual_tcp_request_custody() {
+        let (server, server_id) =
+            MeshService::new_tcp(Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()), &[]).unwrap();
+        let (client, _) = MeshService::new_tcp(None, &[]).unwrap();
+        let listen = tokio::time::timeout(Duration::from_secs(3), server.next_listen_addr())
+            .await
+            .unwrap()
+            .unwrap();
+        client
+            .dial(format!("{listen}/p2p/{server_id}").parse().unwrap())
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            client.wait_for_peer_connected(server.local_peer()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        for size in [0, MAX_FRAME] {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let custody: SharedRequestKeepalive = Arc::new(RequestDropObserved {
+                drops: drops.clone(),
+            });
+            let (publisher, receiver) = watch::channel(false);
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                client.notify_connected_cancellable(
+                    server.local_peer(),
+                    ProtocolId(RR_PROTOCOL),
+                    Bytes::from_static(b"notification"),
+                    RequestCancellation::new(receiver, Some(custody)),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            // No application answer future exists after this local ACK. Even a maximal reply
+            // must retire in the driver while the client never polls its application stream.
+            drop(publisher);
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            let responder = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let Some(TransportEvent::Request { responder, .. }) =
+                        server.next_event().await
+                    {
+                        break responder;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                0,
+                "local ACK cannot refund an active lower request"
+            );
+            responder.try_respond(Bytes::from(vec![0; size])).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while drops.load(Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect(
+                "driver consumes response and releases exact lower custody without Root polling",
+            );
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+        // An authority already retired at local submission grants neither a command nor a stream.
+        let (publisher, receiver) = watch::channel(true);
+        assert!(matches!(
+            client
+                .notify_connected_cancellable(
+                    server.local_peer(),
+                    ProtocolId(RR_PROTOCOL),
+                    Bytes::new(),
+                    RequestCancellation::new(receiver, None)
+                )
+                .await,
+            Err(TransportError::Cancelled)
+        ));
+        drop(publisher);
     }
 
     #[test]

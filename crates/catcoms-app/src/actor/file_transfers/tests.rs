@@ -1,4 +1,5 @@
 use super::*;
+use crate::{DocType, FileManifest};
 use async_trait::async_trait;
 use bytes::Bytes;
 use catcoms_mls::MlsDevice;
@@ -15,6 +16,8 @@ struct GatedTransport {
     inner: MemNetwork,
     gate: Arc<Semaphore>,
     entered: mpsc::UnboundedSender<RequestCancellation>,
+    gated_peer: std::sync::Mutex<Option<PeerId>>,
+    connection_events: std::sync::Mutex<VecDeque<PeerId>>,
 }
 
 #[async_trait]
@@ -53,6 +56,10 @@ impl MeshTransport for GatedTransport {
         b: Bytes,
         mut c: RequestCancellation,
     ) -> Result<Bytes, TransportError> {
+        let applies = self.gated_peer.lock().unwrap().is_none_or(|peer| peer == p);
+        if !applies {
+            return self.inner.request_connected_cancellable(p, t, b, c).await;
+        }
         self.entered.send(c.clone()).unwrap();
         tokio::select! {
             biased;
@@ -62,11 +69,15 @@ impl MeshTransport for GatedTransport {
         self.inner.request_connected_cancellable(p, t, b, c).await
     }
     async fn next_event(&self) -> Option<TransportEvent> {
+        if let Some(peer) = self.connection_events.lock().unwrap().pop_front() {
+            return Some(TransportEvent::PeerConnected(peer));
+        }
         self.inner.next_event().await
     }
 }
 
 struct Pair {
+    hub: Arc<Hub>,
     requester: Server<GatedTransport, ChaCha20Rng>,
     holder: Server<MemNetwork, ChaCha20Rng>,
     cid: Cid,
@@ -108,6 +119,8 @@ async fn pair_inner() -> Pair {
                 inner: hub.join(PeerId::from_u64(2)),
                 gate: gate.clone(),
                 entered,
+                gated_peer: std::sync::Mutex::new(None),
+                connection_events: std::sync::Mutex::new(VecDeque::new()),
             },
             MlsDevice::generate().unwrap(),
             ChaCha20Rng::seed_from_u64(2),
@@ -132,6 +145,7 @@ async fn pair_inner() -> Pair {
     assert!(requester.sync.blob_cids().is_empty());
     assert_eq!(requester.sync.blob_fetch_peers(), vec![holder_peer]);
     Pair {
+        hub,
         requester,
         holder,
         cid,
@@ -140,6 +154,223 @@ async fn pair_inner() -> Pair {
         entered: received,
         clock,
     }
+}
+
+#[tokio::test]
+async fn busy_preferred_provider_cannot_hide_a_later_connected_holder() {
+    let Pair {
+        hub,
+        mut requester,
+        mut holder,
+        cid,
+        data,
+        mut entered,
+        clock,
+        ..
+    } = pair().await;
+    let preferred = holder.sync.local_peer();
+    *requester.sync.transport().gated_peer.lock().unwrap() = Some(preferred);
+    // The later route is a restored current-member source. Bootstrap candidates are deliberately
+    // unproven endpoints: their signed blob answers still have to pass current membership.
+    let mut later = Server::restore(
+        &holder.snapshot().unwrap(),
+        hub.join(PeerId::from_u64(3)),
+        ChaCha20Rng::seed_from_u64(3),
+        Box::new(clock.clone()),
+        "restored holder",
+    )
+    .unwrap();
+    for blob in holder.sync.blob_cids() {
+        later
+            .sync
+            .put_blob(&holder.sync.get_blob(&blob).unwrap())
+            .unwrap();
+    }
+    holder.set_blob_store(Box::new(catcoms_storage::MemoryBlobStore::new()));
+    assert!(
+        holder.sync.blob_cids().is_empty(),
+        "the fifth provider is the sole ciphertext holder"
+    );
+    let mut empty_tasks = Vec::new();
+    for number in 4..7 {
+        let empty = hub.join(PeerId::from_u64(number));
+        empty_tasks.push(tokio::spawn(async move {
+            while let Some(event) = empty.next_event().await {
+                if let TransportEvent::Request { responder, .. } = event {
+                    responder.respond(Bytes::new());
+                }
+            }
+        }));
+    }
+    // Hub registration is real connectivity but emits no connection edges. Supply those edges
+    // through this wrapper's ordered event seam, independently of its real snapshot/requests.
+    requester
+        .sync
+        .transport()
+        .connection_events
+        .lock()
+        .unwrap()
+        .extend((3..7).map(PeerId::from_u64));
+    // The later route is fifth behind a preferred endpoint and three newer bootstrap peers.
+    while requester.sync.stats().known_peers < 5 {
+        bounded(requester.sync_once()).await.unwrap();
+    }
+    assert_eq!(requester.sync.blob_fetch_peers().len(), 4);
+    assert!(!requester
+        .sync
+        .blob_fetch_peers()
+        .contains(&later.sync.local_peer()));
+    let (later_actor, _later_events, later_task) = spawn(later);
+    let mut transfers = FileTransfers::new();
+    let (held_reply, mut held_result) = oneshot::channel();
+    transfers.chunk(&mut requester, cid.as_bytes().to_vec(), 0, None, held_reply);
+    let _held_lower = bounded(entered.recv()).await.unwrap();
+    assert!(transfers.inflight.contains(&preferred));
+    let (reply, mut result) = oneshot::channel();
+    transfers.chunk(&mut requester, cid.as_bytes().to_vec(), 0, None, reply);
+    let received = bounded(async {
+        loop {
+            tokio::select! {
+                value = &mut result => break value.unwrap().unwrap(),
+                step = transfers.next() => transfers.complete(&mut requester, step.unwrap()),
+            }
+        }
+    })
+    .await;
+    assert_eq!(received.0, data);
+    assert!(
+        transfers.inflight.contains(&preferred),
+        "first provider remains genuinely occupied"
+    );
+    assert_eq!(transfers.slots.available_permits(), SERVER_ATTEMPTS - 1);
+    assert!(
+        held_result.try_recv().is_err(),
+        "the first request never passed its gate"
+    );
+    drop(transfers);
+    later_actor.cmd_tx.send(AppCommand::Shutdown).await.unwrap();
+    bounded(later_task).await.unwrap();
+    for task in empty_tasks {
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn a_bad_wrapped_key_does_not_reject_a_valid_reference_to_the_same_ciphertext() {
+    let Pair {
+        mut holder,
+        cid,
+        data,
+        ..
+    } = pair().await;
+    add_bad_wrapped_variant(&mut holder, &cid).await;
+    let mut transfers = FileTransfers::new();
+    let (reply, result) = oneshot::channel();
+    transfers.chunk(&mut holder, cid.as_bytes().to_vec(), 0, None, reply);
+    assert_eq!(bounded(result).await.unwrap().unwrap().0, data);
+    assert!(
+        transfers.is_empty(),
+        "valid local alternative needs no provider request"
+    );
+}
+
+async fn add_bad_wrapped_variant<T: MeshTransport>(
+    server: &mut Server<T, ChaCha20Rng>,
+    cid: &Cid,
+) -> FileManifest {
+    let good = FileManifest::decode_or_legacy(&server.files()[0].file_ref).unwrap();
+    let good_version = crate::file_manifest_version(&good.encode());
+    let mut bad = good.clone();
+    // Put the invalid key first in the real deterministic variant order, not merely row order.
+    for nonce in 1u16..=u16::MAX {
+        bad.chunks[0].wrapped_key.nonce[..2].copy_from_slice(&nonce.to_be_bytes());
+        if crate::file_manifest_version(&bad.encode()) < good_version {
+            break;
+        }
+    }
+    assert!(crate::file_manifest_version(&bad.encode()) < good_version);
+    assert_eq!(bad.chunks[0].ciphertext_cid, good.chunks[0].ciphertext_cid);
+    let encoded = bad.encode();
+    server
+        .sync
+        .post(DocType::FileIndex, 0, |doc| {
+            crate::write_file_entry(
+                doc,
+                "bad.bin",
+                "legacy",
+                "",
+                &encoded,
+                crate::FileExpiry::Never,
+                None,
+            )
+        })
+        .await
+        .unwrap();
+    let resolved = crate::file_resolution::resolve(&server.files(), cid).unwrap();
+    assert_eq!(resolved.variants.len(), 2);
+    good
+}
+
+#[tokio::test]
+async fn exact_bad_reference_stays_rejected_across_network_retry_rounds() {
+    let Pair {
+        mut requester,
+        holder,
+        cid,
+        data,
+        gate,
+        mut entered,
+        clock,
+        ..
+    } = pair().await;
+    let good = add_bad_wrapped_variant(&mut requester, &cid).await;
+    let (source, _events, source_task) = spawn(holder);
+    let mut transfers = FileTransfers::new();
+    let (reply, result) = oneshot::channel();
+    gate.add_permits(1);
+    transfers.chunk(&mut requester, cid.as_bytes().to_vec(), 0, None, reply);
+    let first = bounded(entered.recv()).await.unwrap();
+    let first = {
+        drop(first);
+        bounded(transfers.next()).await.unwrap()
+    };
+    let TransferStep::Network(first_attempt) = &first else {
+        panic!("expected first provider attempt");
+    };
+    assert_ne!(
+        first_attempt.reference.encode(),
+        good.chunks[0].encode(),
+        "invalid key is attempted first"
+    );
+    transfers.complete(&mut requester, first);
+    let timed_out = bounded(entered.recv()).await.unwrap();
+    clock.advance_ms(ATTEMPT_MS);
+    let step = bounded(transfers.next()).await.unwrap();
+    let TransferStep::Network(attempt) = &step else {
+        panic!("expected valid reference's timed-out attempt");
+    };
+    assert_eq!(attempt.reference.encode(), good.chunks[0].encode());
+    assert_eq!(attempt.job.rejected_variants.len(), 1);
+    transfers.complete(&mut requester, step);
+    drop(timed_out);
+    gate.add_permits(1);
+    let resumed = resume_paused(&mut transfers, &clock, ROUND_BACKOFF_MS).await;
+    transfers.complete(&mut requester, resumed);
+    let lower = bounded(entered.recv()).await.unwrap();
+    let completed = bounded(transfers.next()).await.unwrap();
+    let TransferStep::Network(attempt) = &completed else {
+        panic!("expected resumed provider attempt");
+    };
+    assert_eq!(
+        attempt.reference.encode(),
+        good.chunks[0].encode(),
+        "retry does not reconsider the exact bad wrapped key"
+    );
+    transfers.complete(&mut requester, completed);
+    drop(lower);
+    assert_eq!(bounded(result).await.unwrap().unwrap().0, data);
+    source.shutdown().await;
+    bounded(source_task).await.unwrap();
 }
 
 async fn bounded<F: Future>(future: F) -> F::Output {
@@ -185,6 +416,7 @@ async fn a_transport_failure_retries_the_chunk_against_the_only_provider() {
         gate,
         mut entered,
         clock,
+        ..
     } = pair().await;
     let mut transfers = FileTransfers::new();
     let (reply, result) = oneshot::channel();
@@ -229,7 +461,7 @@ async fn a_provider_carries_one_bulk_request_at_a_time() {
     // rather than putting a second multi-megabyte request on the same wire.
     let Pair {
         mut requester,
-        holder: _,
+        holder: _holder,
         cid,
         mut entered,
         ..
@@ -392,7 +624,7 @@ async fn dropped_range_reply_and_shutdown_signal_pending_attempts() {
 async fn range_limit_is_checked_before_any_network_request() {
     let Pair {
         requester,
-        holder: _,
+        holder: _holder,
         cid,
         mut entered,
         ..
@@ -414,7 +646,7 @@ async fn range_limit_is_checked_before_any_network_request() {
 async fn cancelled_or_timed_out_requests_hold_capacity_until_transport_retirement() {
     let Pair {
         mut requester,
-        holder: _,
+        holder: _holder,
         cid,
         mut entered,
         clock,
@@ -536,7 +768,7 @@ async fn kept_download_bypasses_cache_and_survives_unlisting_and_recheck() {
 async fn cancelled_kept_wait_releases_reservation_without_storing_late_bytes() {
     let Pair {
         mut requester,
-        holder: _,
+        holder: _holder,
         cid,
         mut entered,
         ..

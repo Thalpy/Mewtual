@@ -42,6 +42,7 @@ impl ResourceKind {
 struct Counts {
     bytes: usize,
     slots: [usize; SLOT_KINDS],
+    exchange: std::sync::Weak<super::negotiation::Exchange>,
 }
 #[derive(Default)]
 struct State {
@@ -66,6 +67,63 @@ pub struct Credit {
     // A loan returns to its already charged reserve only after its actual owner releases it.
     // Once closed, the reserve instead releases that loan's part of the backing charge.
     reservation: Option<Arc<Reservation>>,
+    // A prepaid lane is counted once while idle or borrowed. This guard serializes actual
+    // verifier/scratch/engine work without taking a second process Crypto slot.
+    lane: Option<LaneBorrow>,
+    // Optional native phase/count owner. Its guard retires only with the actual byte credit.
+    custody: Option<catcoms_rt::SharedRequestKeepalive>,
+}
+
+/// One prepaid exclusive Crypto/Forward slot for a bounded progress workflow. This is capacity only,
+/// not authority to verify, decrypt or publish. Actual borrowers retain the slot after close.
+pub struct WorkLane {
+    pool: Arc<Resources>,
+    group: [u8; 32],
+    kind: ResourceKind,
+    state: Mutex<LaneState>,
+}
+struct LaneState {
+    credit: Option<Credit>,
+    busy: bool,
+    closed: bool,
+}
+struct LaneBorrow(Arc<WorkLane>);
+redacted_debug!(WorkLane);
+impl WorkLane {
+    /// Retirement releases an idle lane. An actual borrower remains charged until its last
+    /// credit owner drops; a timeout or lost result-RPC cannot make this lane reusable.
+    pub fn close(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.closed = true;
+        if !state.busy {
+            state.credit.take();
+        }
+    }
+    fn borrow(
+        self: &Arc<Self>,
+        pool: &Arc<Resources>,
+        group: [u8; 32],
+    ) -> Result<LaneBorrow, VoiceError> {
+        if !Arc::ptr_eq(pool, &self.pool) || group != self.group {
+            return Err(VoiceError::Scope);
+        }
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.closed || state.busy {
+            return Err(VoiceError::Capacity);
+        }
+        state.busy = true;
+        Ok(LaneBorrow(self.clone()))
+    }
+}
+impl Drop for LaneBorrow {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(state.busy, "one actual work lane borrower");
+        state.busy = false;
+        if state.closed {
+            state.credit.take();
+        }
+    }
 }
 
 /// Prepaid progress bytes for one bounded native workflow. Dropping the caller's Arc retires no
@@ -91,6 +149,16 @@ pub enum ByteBudget {
     #[default]
     Ordinary,
     Reserved(Arc<Reservation>),
+    Exchange {
+        exchange: Arc<super::negotiation::Exchange>,
+        stage: super::negotiation::Stage,
+    },
+    /// Private native workflow factories must pair this with their phase/count/identity gate.
+    /// The lane is acquired synchronously; busy work refuses without waiting on an actor.
+    ReservedLane {
+        reservation: Arc<Reservation>,
+        lane: Arc<WorkLane>,
+    },
 }
 redacted_debug!(ByteBudget);
 impl ByteBudget {
@@ -103,26 +171,90 @@ impl ByteBudget {
     ) -> Result<Credit, VoiceError> {
         match self {
             Self::Ordinary => resources.charge(group, bytes, kind),
+            Self::Exchange { exchange, stage } => {
+                if !exchange.uses_resources(resources, group) {
+                    return Err(VoiceError::Scope);
+                }
+                let stage = if kind == ResourceKind::Crypto {
+                    super::negotiation::Stage::Crypto
+                } else {
+                    *stage
+                };
+                if stage.resource_kind() != kind {
+                    return Err(VoiceError::Scope);
+                }
+                exchange.charge(stage, bytes)
+            }
             Self::Reserved(reservation) => {
                 if !Arc::ptr_eq(resources, &reservation.pool) {
                     return Err(VoiceError::Scope);
                 }
                 reservation.charge(group, bytes, kind)
             }
+            Self::ReservedLane { reservation, lane } => {
+                if !Arc::ptr_eq(resources, &reservation.pool) {
+                    return Err(VoiceError::Scope);
+                }
+                if matches!(kind, ResourceKind::Crypto | ResourceKind::Forward) {
+                    if kind != lane.kind {
+                        return Err(VoiceError::Scope);
+                    }
+                    let borrow = lane.borrow(resources, group)?;
+                    // The prepaid lane owns the Crypto slot. Bytes come from the same reserve,
+                    // with no nested Crypto acquisition while the single lane is occupied.
+                    let mut credit = reservation.charge(group, bytes, ResourceKind::Retained)?;
+                    credit.lane = Some(borrow);
+                    Ok(credit)
+                } else {
+                    reservation.charge(group, bytes, kind)
+                }
+            }
         }
     }
 }
 
 impl Resources {
+    pub(crate) fn register_exchange(
+        &self,
+        group: [u8; 32],
+        exchange: &Arc<super::negotiation::Exchange>,
+    ) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // The prepaid backing/metadata keeps this group present. A Weak capacity index neither
+        // prolongs a call nor resets its limits, and disappears with the bounded group record.
+        state
+            .groups
+            .get_mut(&group)
+            .expect("prepaid exchange group")
+            .exchange = Arc::downgrade(exchange);
+    }
+    pub(crate) fn exchange(&self, group: [u8; 32]) -> Option<Arc<super::negotiation::Exchange>> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .groups
+            .get(&group)?
+            .exchange
+            .upgrade()
+    }
     pub fn charge(
         self: &Arc<Self>,
         group: [u8; 32],
         bytes: usize,
         kind: ResourceKind,
     ) -> Result<Credit, VoiceError> {
+        self.charge_inner(group, bytes, kind, false)
+    }
+    fn charge_inner(
+        self: &Arc<Self>,
+        group: [u8; 32],
+        bytes: usize,
+        kind: ResourceKind,
+        prepaid_slot: bool,
+    ) -> Result<Credit, VoiceError> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let counts = state.groups.get(&group);
-        if (kind != ResourceKind::Crypto && bytes == 0)
+        if (kind != ResourceKind::Crypto && bytes == 0 && !prepaid_slot)
             || (counts.is_none() && state.groups.len() >= GROUP_RECORDS)
             || bytes > GROUP_BYTES
             || state.total.bytes > PROCESS_BYTES - bytes
@@ -149,6 +281,8 @@ impl Resources {
             bytes,
             kind,
             reservation: None,
+            lane: None,
+            custody: None,
         })
     }
 
@@ -167,6 +301,40 @@ impl Resources {
             state: Mutex::new(ReservationState {
                 credit,
                 available: bytes,
+                closed: false,
+            }),
+        }))
+    }
+    /// Prepay one slot from the existing four-per-group/eight-per-process Crypto limits.
+    /// Ordinary reservations still acquire slots only when work starts. A progress owner must
+    /// close this exceptional lane on retirement and lend it serially to all covered stages.
+    pub fn reserve_crypto_lane(
+        self: &Arc<Self>,
+        group: [u8; 32],
+    ) -> Result<Arc<WorkLane>, VoiceError> {
+        self.reserve_work_lane(group, ResourceKind::Crypto)
+    }
+    /// Prepay one of the existing four-per-group/eight-per-process lower-flight slots. At most
+    /// two such lanes belong to a narrow SDP exchange; ordinary helper work shares the same caps.
+    pub fn reserve_forward_lane(
+        self: &Arc<Self>,
+        group: [u8; 32],
+    ) -> Result<Arc<WorkLane>, VoiceError> {
+        self.reserve_work_lane(group, ResourceKind::Forward)
+    }
+    fn reserve_work_lane(
+        self: &Arc<Self>,
+        group: [u8; 32],
+        kind: ResourceKind,
+    ) -> Result<Arc<WorkLane>, VoiceError> {
+        let credit = self.charge_inner(group, 0, kind, true)?;
+        Ok(Arc::new(WorkLane {
+            pool: self.clone(),
+            group,
+            kind,
+            state: Mutex::new(LaneState {
+                credit: Some(credit),
+                busy: false,
                 closed: false,
             }),
         }))
@@ -248,11 +416,18 @@ impl Reservation {
             bytes,
             kind,
             reservation: Some(self.clone()),
+            lane: None,
+            custody: None,
         })
     }
 }
 
 impl Credit {
+    pub(crate) fn with_custody(mut self, custody: catcoms_rt::SharedRequestKeepalive) -> Self {
+        assert!(self.custody.is_none(), "one native phase owner per credit");
+        self.custody = Some(custody);
+        self
+    }
     /// Shrink only the ordinary retained backing credit. Reserved loans never refund bytes
     /// directly; their reserve serializes the refund with close/charge. Lock order is always
     /// reserve then pool. The remaining credit destructor releases only its remaining bytes.
@@ -315,6 +490,102 @@ impl Drop for Credit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn prepaid_lane_serializes_actual_work_and_survives_retirement_without_double_slots() {
+        let pool = Arc::new(Resources::default());
+        let group = [5; 32];
+        let reserve = pool.reserve(group, 224 * 1024).unwrap();
+        let lane = pool.reserve_crypto_lane(group).unwrap();
+        let budget = ByteBudget::ReservedLane {
+            reservation: reserve.clone(),
+            lane: lane.clone(),
+        };
+        let ordinary_bytes = pool
+            .charge(group, GROUP_BYTES - 224 * 1024, ResourceKind::Retained)
+            .unwrap();
+        let ordinary_slots: Vec<_> = (0..3)
+            .map(|_| pool.charge(group, 0, ResourceKind::Crypto).unwrap())
+            .collect();
+        assert!(pool.charge(group, 0, ResourceKind::Crypto).is_err());
+        let verification = Arc::new(
+            budget
+                .charge(&pool, group, 50_236, ResourceKind::Crypto)
+                .unwrap(),
+        );
+        assert_eq!(pool.counts(), (GROUP_BYTES, 4));
+        assert!(budget
+            .charge(&pool, group, 61_624, ResourceKind::Crypto)
+            .is_err());
+        let held = verification.clone();
+        drop(verification);
+        assert!(budget
+            .charge(&pool, group, 61_624, ResourceKind::Crypto)
+            .is_err());
+        drop(held);
+        let engine = Arc::new(
+            budget
+                .charge(&pool, group, 61_624, ResourceKind::Crypto)
+                .unwrap(),
+        );
+        assert_eq!(
+            pool.counts(),
+            (GROUP_BYTES, 4),
+            "lane is counted once across stage changes"
+        );
+        reserve.close();
+        lane.close();
+        lane.close();
+        assert_eq!(pool.counts(), (32 * 1024 + 61_624, 4));
+        assert!(budget
+            .charge(&pool, group, 1, ResourceKind::Crypto)
+            .is_err());
+        drop((budget, reserve, lane));
+        assert_eq!(pool.counts().1, 4, "actual engine keeps its retired lane");
+        drop(engine);
+        assert_eq!(pool.counts(), (32 * 1024, 3));
+        drop((ordinary_bytes, ordinary_slots));
+        assert_eq!(pool.counts(), (0, 0));
+    }
+
+    #[test]
+    fn prepaid_lane_refusal_preserves_bytes_and_cannot_use_another_pool_or_group() {
+        let pool = Arc::new(Resources::default());
+        let other = Arc::new(Resources::default());
+        let group = [6; 32];
+        let reserve = pool.reserve(group, 1024).unwrap();
+        let lane = pool.reserve_crypto_lane(group).unwrap();
+        let budget = ByteBudget::ReservedLane {
+            reservation: reserve.clone(),
+            lane: lane.clone(),
+        };
+        let before = pool.counts();
+        assert_eq!(
+            budget.charge(&other, group, 1, ResourceKind::Crypto).err(),
+            Some(VoiceError::Scope)
+        );
+        assert_eq!(
+            budget.charge(&pool, [7; 32], 1, ResourceKind::Crypto).err(),
+            Some(VoiceError::Scope)
+        );
+        assert_eq!(
+            budget
+                .charge(&pool, group, 1025, ResourceKind::Crypto)
+                .err(),
+            Some(VoiceError::Capacity)
+        );
+        assert_eq!(pool.counts(), before);
+        // Failed byte admission relinquishes its transient lane borrow atomically.
+        drop(
+            budget
+                .charge(&pool, group, 1024, ResourceKind::Crypto)
+                .unwrap(),
+        );
+        assert_eq!(pool.counts(), before);
+        lane.close();
+        reserve.close();
+        assert_eq!(pool.counts(), (0, 0));
+    }
+
     #[test]
     fn close_releases_only_unused_bytes_and_closed_loans_release_their_backing_once() {
         let pool = Arc::new(Resources::default());

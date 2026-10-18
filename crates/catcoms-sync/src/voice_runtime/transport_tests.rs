@@ -165,10 +165,53 @@ impl VoiceForwardFixture {
 }
 
 #[tokio::test]
+async fn voice_transport_busy_ack_verification_returns_exact_affine_completion_for_retry() {
+    use voice_v2::resources::ResourceKind;
+    for retire_before_retry in [false, true] {
+        let mut f = VoiceForwardFixture::new().await;
+        let completed = f.reply(1).await;
+        let group = f.helper.voice_v2_context(1).unwrap().scope.group;
+        let resources = f.helper_runtime.resources();
+        let occupied: Vec<_> = (0..4).map(|_| resources.charge(group, 0, ResourceKind::Crypto).unwrap()).collect();
+        let ledger = f.helper.voice_transport_actor().unwrap().helper().unwrap();
+        let held = ledger.counts();
+        let mut completed = completed;
+        for _ in 0..160 {
+            let failure = f.helper.complete_voice_forward(completed).unwrap_err();
+            assert_eq!(failure.error(), &VoiceError::Capacity, "busy polling cannot exhaust work buckets");
+            completed = failure.into_retry().expect("local pressure preserves the exact signed ACK and flight");
+        }
+        assert_eq!(ledger.counts(), held, "no lower/attempt retirement on a retryable verification refusal");
+        assert!(f.helper.prepare_voice_forwards().unwrap().is_empty(), "retained completion must not reauthor a request");
+        drop(occupied);
+        let requester = f.recipient.device.device_id();
+        let now = f.clock.monotonic_ms();
+        f.helper.voice_transport_actor().unwrap().with_limits(|limits| {
+            for _ in 0..40 { let _ = limits.requester(requester, now); }
+            Ok(())
+        }).unwrap();
+        let failure = f.helper.complete_voice_forward(completed).unwrap_err();
+        assert_eq!(failure.error(), &VoiceError::RateLimited, "genuine unrelated requester pressure stays retryable");
+        let completed = failure.into_retry().unwrap();
+        f.clock.advance_ms(1000);
+        if retire_before_retry { f.helper_runtime.revoke_session(); }
+        let answer = f.helper.complete_voice_forward(completed);
+        if retire_before_retry {
+            let failure = answer.unwrap_err();
+            assert_eq!(failure.error(), &VoiceError::Unauthorized);
+            assert!(failure.into_retry().is_none(), "stale authority is terminal");
+        } else {
+            assert_eq!(answer.unwrap(), crate::VoiceTransportStatus::EndpointAdmitted);
+            assert!(f.helper.prepare_voice_forwards().unwrap().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
 async fn voice_transport_detached_helper_requires_exact_endpoint_ack_and_bounds_refused_retries() {
     let mut f = VoiceForwardFixture::new().await;
     let completed = f.reply(2).await; // A final endpoint cannot turn itself into another helper.
-    assert_eq!(f.helper.complete_voice_forward(completed), Err(VoiceError::Unauthorized));
+    assert_eq!(f.helper.complete_voice_forward(completed).map_err(|failure| failure.into_error()), Err(VoiceError::Unauthorized));
     let completed = f.reply(3).await;
     assert_eq!(f.helper.complete_voice_forward(completed).unwrap(), crate::VoiceTransportStatus::Refused);
     let completed = f.reply(1).await;
@@ -193,7 +236,7 @@ async fn voice_transport_detached_reply_refuses_replaced_route_owner_and_native_
             4 => { f.helper_runtime.revoke_session(); }
             _ => { f.helper.blob_fetch_instance = Arc::new(()); }
         }
-        assert_eq!(f.helper.complete_voice_forward(completed), Err(VoiceError::Unauthorized), "scenario {scenario}");
+        assert_eq!(f.helper.complete_voice_forward(completed).map_err(|failure| failure.into_error()), Err(VoiceError::Unauthorized), "scenario {scenario}");
         // No valid late ACK may settle the edge. Except after native lock, a current route can
         // still reserve a bounded fresh attempt; it never revives the old route generation.
         if scenario != 4 { assert_eq!(f.helper.prepare_voice_forwards().unwrap().len(), 1); }
@@ -215,7 +258,7 @@ async fn voice_transport_deadline_keeps_helper_slot_until_actual_lower_responder
         }
     });
     let before = f.helper_runtime.resources().counts();
-    assert_eq!(f.helper.complete_voice_forward(completed), Err(VoiceError::Unauthorized));
+    assert_eq!(f.helper.complete_voice_forward(completed).map_err(|failure| failure.into_error()), Err(VoiceError::Unauthorized));
     assert!(f.helper.prepare_voice_forwards().unwrap().is_empty(), "upper timeout cannot recycle the lower edge");
     assert!(f.helper_runtime.resources().counts().0 >= before.0 - 512, "flight remains charged; only retired route metadata may drop");
     drop(held);
@@ -235,7 +278,7 @@ async fn voice_transport_driver_reconnect_rejects_queued_and_completed_old_work_
             let (_publisher, signal) = tokio::sync::watch::channel(false);
             prepared.execute(signal).await
         } else { completed.unwrap() };
-        assert_eq!(f.helper.complete_voice_forward(completed), Err(VoiceError::Unauthorized));
+        assert_eq!(f.helper.complete_voice_forward(completed).map_err(|failure| failure.into_error()), Err(VoiceError::Unauthorized));
         use futures::FutureExt;
         assert!(replacement.next_event().now_or_never().is_none(), "old queued request never enters replacement inbox");
     }
@@ -248,7 +291,7 @@ async fn voice_transport_old_disconnect_event_does_not_revoke_replacement_driver
     let replacement = f._hub.join(f.recipient.local_peer());
     let (_publisher, signal) = tokio::sync::watch::channel(false);
     let completed = prepared.execute(signal).await;
-    assert_eq!(f.helper.complete_voice_forward(completed), Err(VoiceError::Unauthorized));
+    assert_eq!(f.helper.complete_voice_forward(completed).map_err(|failure| failure.into_error()), Err(VoiceError::Unauthorized));
     let prepared = f.helper.prepare_voice_forwards().unwrap().pop().unwrap();
     // A delayed old event is advisory only for driver generations. It cannot burn this fresh
     // generation's pending request after the actual driver has already reconnected the peer.
@@ -290,7 +333,7 @@ async fn voice_transport_local_driver_retirement_rejects_queued_worker_and_retai
         let completed = if let Some(prepared) = prepared {
             let (_publisher, signal) = tokio::sync::watch::channel(false); prepared.execute(signal).await
         } else { completed.unwrap() };
-        assert_eq!(f.helper.complete_voice_forward(completed), Err(VoiceError::Unauthorized));
+        assert_eq!(f.helper.complete_voice_forward(completed).map_err(|failure| failure.into_error()), Err(VoiceError::Unauthorized));
         assert!(f.helper.transport.connection_snapshot().is_empty());
         // The replacement has a live independently owned driver; old A cannot send through it.
         assert!(replacement.connection_lease(f.recipient.local_peer()).unwrap().is_live());
@@ -338,7 +381,7 @@ async fn voice_transport_source_helper_ack_and_direct_upgrade_preserve_original_
             }
         });
         if status == 1 {
-            assert_eq!(f._source.complete_voice_source(completed), Err(VoiceError::Unauthorized), "a helper signature cannot assert final custody");
+            assert_eq!(f._source.complete_voice_source(completed).map_err(|failure| failure.into_error()), Err(VoiceError::Unauthorized), "a helper signature cannot assert final custody");
         } else {
             assert_eq!(f._source.complete_voice_source(completed).unwrap(), (crate::VoiceTransportStatus::HelperQueued, SourceOutcome::Pending));
         }
@@ -392,7 +435,7 @@ async fn voice_transport_source_end_and_driver_replacement_reject_queued_or_comp
             if scenario == 1 { parent.revoke(); } else { replacement = Some(f.helper.transport.rejoin()); }
             completed
         };
-        assert_eq!(f._source.complete_voice_source(completed), Err(VoiceError::Unauthorized), "scenario {scenario}");
+        assert_eq!(f._source.complete_voice_source(completed).map_err(|failure| failure.into_error()), Err(VoiceError::Unauthorized), "scenario {scenario}");
         assert_eq!(f._source.voice_transport_actor().unwrap().source().unwrap().counts().1, 1);
         if scenario < 2 { assert_eq!(f._source.queue_voice_source(original, activity), Err(VoiceError::Unauthorized)); }
         drop(replacement);
@@ -413,7 +456,7 @@ async fn voice_transport_source_timeout_keeps_actual_lower_flight_independent_of
             }
         }
     });
-    assert_eq!(f._source.complete_voice_source(completed), Err(VoiceError::Unauthorized));
+    assert_eq!(f._source.complete_voice_source(completed).map_err(|failure| failure.into_error()), Err(VoiceError::Unauthorized));
     let ledger = f._source.voice_transport_actor().unwrap().source().unwrap();
     assert_eq!(ledger.counts(), (1, 1, 1), "upper timeout retains the actual driver's flight");
     assert!(f._source.queue_voice_source(original, activity).unwrap());

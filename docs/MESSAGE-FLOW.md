@@ -92,6 +92,14 @@ barrier, bounded recovery storage and session/race checks.
 
 ## 3. Receiving live (gossip)
 
+The networking driver queues application delivery without awaiting its bounded application sink
+inside the swarm handler. Responses, connection retirement and local command acknowledgements
+therefore continue during application congestion. If gossip cannot be retained, or its original
+carrier connection retires while it waits, a coalesced `RecoveryNeeded` event schedules commit
+catch-up and document reconciliation. It is a local loss signal, not authenticated evidence of
+a particular sender, membership change or missing epoch. Payload, lifecycle and recovery delivery
+rotate fairly; ordinary signed/MLS checks below still decide what may be applied.
+
 [`on_gossip`](../crates/catcoms-sync/src/lib.rs) decodes the `SealedOp` and then:
 
 - **Document not open locally: dropped.** A node only ingests (and therefore only later relays)

@@ -47,6 +47,22 @@ test("voice keys are non-extractable and directional encryption opens only at th
   assert.equal(f.admitted.length, f.settled.length);
 });
 
+test("SDP accepts exactly 8 KiB and refuses the next byte before native admission or nonce use", async () => {
+  const f = await pairs(), aad = text("native bounded SDP header");
+  const reservation = { token: "bounded-sdp", sequence: 100n, aad };
+  const admitted = f.admitted.length;
+  assert.throws(() => freezeVoicePacket(f.broker, f.owner, f.left, reservation, new Uint8Array(8193)), /plaintext/);
+  assert.equal(f.admitted.length, admitted, "oversized local input never reaches native engine admission");
+  const maximum = new Uint8Array(8192).fill(7);
+  const packet = freezeVoicePacket(f.broker, f.owner, f.left, reservation, maximum);
+  const sealed = await packet.encrypt();
+  assert.equal(sealed.byteLength, 8192 + 16);
+  const beforeOpen = f.admitted.length;
+  await assert.rejects(f.right.open(aad, 100n, new Uint8Array(8192 + 17), "oversized-sdp"), /ciphertext/);
+  assert.equal(f.admitted.length, beforeOpen, "oversized peer input never reaches native engine admission");
+  assert.deepEqual(await f.right.open(aad, 100n, sealed, "maximum-sdp"), maximum);
+});
+
 test("a relay's own legitimate key cannot open an endpoint pair's packet", async () => {
   const f = await pairs(), relay = await createVoiceJoinKey(f.broker, f.owner);
   const unrelated = await deriveVoicePair(f.broker, f.owner, relay.privateKey, f.a.publicKey, f.transcript, false);

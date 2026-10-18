@@ -244,7 +244,7 @@
     withOrderedSwitchboardStatus,
   } from "./joinreply";
   import {
-    callBarStatus, mappableIcePort, mappingAddressPolicy, routerMappedCandidate,
+    callBarStatus, mappableIcePort, mappingAddressPolicy, routerMappedCandidate, mappedIceIsCurrent,
     shouldSignalHostCandidate, type MappedPort,
   } from "./callroutes";
   import { JamEngine, jamSequenceAccepted, type JamArchivalPlayback } from "./jam-engine";
@@ -18045,7 +18045,7 @@
   // grant marks a pending/refused attempt, so renegotiations do not repeatedly ask the router.
   // The eligibility rule, the candidate builder and the status phrasing live in callroutes.ts,
   // where they are unit-tested.
-  const mappedCallPorts = new Map<number, { granted: MappedPort | null }>();
+  const mappedCallPorts = new Map<number, { granted: MappedPort | null; pending: Promise<MappedPort | null> | null }>();
   // Reactive shadow of how many router-mapped routes this call holds, for the status line: a
   // plain Map mutation is invisible to $derived.
   let callMappedRoutes = $state(0);
@@ -18076,30 +18076,34 @@
     const policy = mappingAddressPolicy(c.address);
     if (!policy.map) return; // an IPv6/hostname socket is not what an IPv4 mapping reaches
     const port = c.port as number;
-    if (!mappedCallPorts.has(port)) {
+    const localSdp = peer.pc.localDescription?.sdp ?? null;
+    let owned = mappedCallPorts.get(port);
+    if (!owned) {
       // Mapping custody is call-wide, not peer-wide: a replaced peer must not strand a live
       // call's grant. The owned slot additionally rejects a same-port clear/replacement ABA.
-      const owned = { granted: null as MappedPort | null };
-      mappedCallPorts.set(port, owned);
-      try {
-        const granted = await callMappingSession.map(peer.callLease, port, policy.claim);
-        if (!granted) return;
-        if (!isCurrentCallJoin(peer.callLease, peer.server, peer.channel) || mappedCallPorts.get(port) !== owned) return;
-        owned.granted = granted;
-        callMappedRoutes += 1;
-        console.info("voice: router mapped the media port", {
-          port,
-          via: granted.mechanism,
-          confirmed: granted.confirmed,
-        });
-      } catch (e) {
-        // Advisory: STUN/TURN candidates still flow; the router simply couldn't help this call.
-        console.warn("voice: router would not map the media port", { port, error: String(e) });
-        return;
-      }
+      const slot = { granted: null as MappedPort | null, pending: null as Promise<MappedPort | null> | null };
+      mappedCallPorts.set(port, slot);
+      owned = slot;
+      // Every current peer using this port waits on the same acquisition. Its completion owns
+      // only call-wide mapping custody; each waiter supplies its own candidate and ICE generation.
+      slot.pending = (async () => {
+        try {
+          const granted = await callMappingSession.map(peer.callLease, port, policy.claim);
+          if (!granted || !isCurrentCallJoin(peer.callLease, peer.server, peer.channel) || mappedCallPorts.get(port) !== slot) return null;
+          slot.granted = granted;
+          callMappedRoutes += 1;
+          console.info("voice: router mapped the media port", { port, via: granted.mechanism, confirmed: granted.confirmed });
+          return granted;
+        } catch (e) {
+          // Advisory: STUN/TURN candidates still flow; the router simply couldn't help this call.
+          console.warn("voice: router would not map the media port", { port, error: String(e) });
+          return null;
+        }
+      })();
     }
-    const ext = mappedCallPorts.get(port)?.granted;
-    if (!ext || !isCurrentCallPeer(peer)) return;
+    const ext = await owned.pending;
+    if (!ext || mappedCallPorts.get(port) !== owned || !isCurrentCallPeer(peer)
+      || !mappedIceIsCurrent(c, localSdp, peer.pc.localDescription?.sdp ?? null)) return;
     void sendSignal(peer.server, peer.fp, {
       callId: peer.channel,
       type: "ice",

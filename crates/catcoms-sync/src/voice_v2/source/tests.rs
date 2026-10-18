@@ -137,6 +137,9 @@ impl Fixture {
         .unwrap()
     }
     fn targeted(&self, message: u8, bytes: usize) -> SignedObject {
+        self.targeted_kind(message, bytes, EncryptedKind::Ice)
+    }
+    fn targeted_kind(&self, message: u8, bytes: usize, kind: EncryptedKind) -> SignedObject {
         use super::super::packets::{PairBinding, ReserveRequest};
         let mut join = self.join.borrow_mut();
         let ledger = join.packet_ledger_for_test();
@@ -159,14 +162,34 @@ impl Fixture {
             )
             .unwrap();
         ledger.establish(&[9; 32], &authority).unwrap();
+        if kind == EncryptedKind::Offer {
+            self.actor
+                .with_limits(|limits| {
+                    ledger.prepare_sdp_exchange(
+                        [9; 32],
+                        &authority,
+                        limits,
+                        &[id(2), id(4)],
+                        self.runtime.clock().as_ref(),
+                    )
+                })
+                .unwrap();
+        }
         let mut rng = ChaCha20Rng::seed_from_u64(u64::from(message));
         let reserved = ledger
             .reserve(
                 signer(1).verifying_key().to_bytes(),
                 ReserveRequest {
                     handshake: [9; 32],
-                    kind: EncryptedKind::Offer,
-                    offer: None,
+                    kind,
+                    offer: if kind == EncryptedKind::Offer {
+                        None
+                    } else {
+                        Some(OfferId {
+                            issuer: id(1),
+                            message: [19; 32],
+                        })
+                    },
                     ciphertext_bytes: bytes,
                 },
                 &authority,
@@ -194,6 +217,34 @@ impl Fixture {
             },
             self.runtime.clock(),
         )
+    }
+    fn maximum_answer(&self, offer: &SignedObject) -> SignedObject {
+        let Body::Encrypted { header, .. } = offer.body() else {
+            unreachable!()
+        };
+        SignedObject::issue(
+            self.context.scope,
+            &signer(3),
+            [120; 32],
+            1000,
+            16_000,
+            Body::Encrypted {
+                header: EncryptedHeader {
+                    source_join: key(3).join,
+                    target: id(1),
+                    target_join: key(1).join,
+                    source_key_ref: key(3).key_ref,
+                    target_key_ref: key(1).key_ref,
+                    handshake: header.handshake,
+                    low_to_high: id(3) < id(1),
+                    kind: EncryptedKind::Answer,
+                    sequence: 1,
+                    offer: header.offer,
+                },
+                ciphertext: vec![6; MAX_SDP_PLAINTEXT + 16],
+            },
+        )
+        .unwrap()
     }
     fn admit(&self, object: SignedObject) -> Result<bool, VoiceError> {
         let activity = if matches!(object.body(), Body::Encrypted { .. }) {
@@ -571,14 +622,336 @@ async fn source_watcher_parent_end_revokes_queued_work_without_an_actor_turn() {
     }
 }
 #[test]
-fn source_max_payload_retained_b_capacity_refusal_does_not_burn_d_attempt() {
+fn maximum_offer_cache_and_successful_lower_custody_allow_maximum_answer_verification() {
+    for delayed_lower_retirement in [false, true] {
+        let f = Fixture::new(true);
+        let offer = f.targeted_kind(
+            119,
+            super::super::MAX_SDP_PLAINTEXT + 16,
+            EncryptedKind::Offer,
+        );
+        let Body::Encrypted { header: sent, .. } = offer.body() else {
+            unreachable!()
+        };
+        let answer = SignedObject::issue(
+            f.context.scope,
+            &signer(3),
+            [120; 32],
+            1000,
+            16_000,
+            Body::Encrypted {
+                header: EncryptedHeader {
+                    source_join: key(3).join,
+                    target: id(1),
+                    target_join: key(1).join,
+                    source_key_ref: key(3).key_ref,
+                    target_key_ref: key(1).key_ref,
+                    handshake: sent.handshake,
+                    low_to_high: id(3) < id(1),
+                    kind: EncryptedKind::Answer,
+                    sequence: 1,
+                    offer: sent.offer,
+                },
+                ciphertext: vec![6; super::super::MAX_SDP_PLAINTEXT + 16],
+            },
+        )
+        .unwrap();
+        f.admit(offer.clone()).unwrap();
+        let job = f.jobs(&[3]).pop().unwrap();
+        let actual_lower = job.keepalive();
+        assert_eq!(
+            f.source
+                .complete(job.finish(Some(crate::VoiceTransportStatus::EndpointAdmitted)))
+                .unwrap(),
+            SourceOutcome::EndpointAdmitted
+        );
+        let held = f.runtime.resources().counts();
+        assert!(
+            f.admit(offer).unwrap(),
+            "successful ACK preserves the exact source cache"
+        );
+        assert_eq!(f.runtime.resources().counts(), held);
+        let actual_lower = delayed_lower_retirement.then_some(actual_lower);
+        let frame = Envelope::Direct(answer).encode();
+        let ticket = f.actor.admit_transport_verification(id(3), &frame).unwrap();
+        let actual_verifier = ticket.actual_work();
+        let envelope = Envelope::decode(&frame).unwrap();
+        ticket.check(&f.actor, &frame).unwrap();
+        let incoming = f
+            .join
+            .borrow_mut()
+            .packet_ledger_for_test()
+            .admit_inbound(
+                envelope.object().clone(),
+                &Authority {
+                    context: &f.context,
+                    lease: &f.lease,
+                    member: &|_| true,
+                },
+                f.runtime.clock().as_ref(),
+            )
+            .unwrap();
+        assert_eq!(
+            incoming.ciphertext().len(),
+            super::super::MAX_SDP_PLAINTEXT + 16
+        );
+        assert_eq!(
+            f.source.counts(),
+            (1, 1, usize::from(delayed_lower_retirement))
+        );
+        assert!(f.runtime.resources().counts().0 <= 256 * 1024);
+        // This is the current packet/verification composition, not an SDP engine/result or
+        // crossed-Offer progress claim. Those owners must join a prepaid exchange before V2.
+        drop((incoming, ticket, actual_verifier, actual_lower));
+    }
+}
+
+#[tokio::test]
+async fn closing_sdp_exchange_wakes_actual_source_cancellation_without_refunding_lower_custody() {
     let f = Fixture::new(true);
-    let packet = f.targeted(24, 32 * 1024 + 16);
+    f.admit(f.targeted_kind(121, MAX_SDP_PLAINTEXT + 16, EncryptedKind::Offer))
+        .unwrap();
+    let job = f.jobs(&[2]).pop().unwrap();
+    let actual_lower = job.keepalive();
+    let owner = job.exchange().unwrap();
+    let authority = job.authority();
+    let mut revoked = Box::pin(authority.revoked());
+    assert!(futures::poll!(&mut revoked).is_pending());
+    owner.close();
+    assert!(
+        futures::poll!(&mut revoked).is_ready(),
+        "exchange closure wakes the existing lower cancellation waiter"
+    );
+    assert!(
+        f.lease.is_live(),
+        "the native call remains distinct from its exchange"
+    );
+    assert_eq!(
+        f.source.complete(job.finish(None)).unwrap(),
+        SourceOutcome::Retired
+    );
+    assert_eq!(
+        f.source.counts(),
+        (1, 1, 1),
+        "retirement refunds neither attempt nor actual lower owner"
+    );
+    let held = f.runtime.resources().counts().0;
+    drop(actual_lower);
+    assert_eq!(f.source.counts(), (1, 1, 0));
+    assert!(f.runtime.resources().counts().0 < held);
+}
+
+#[test]
+fn maximum_sdp_reply_and_declared_engine_result_fit_with_two_lowers_under_unrelated_pressure() {
+    use super::super::resources::ByteBudget;
+    let f = Fixture::new(true);
+    // Readiness must prepay the actual local/peer/two-helper member rows itself. Unrelated
+    // pressure applied afterward must not strand a later requester/original transaction.
+    let offer = f.targeted_kind(122, MAX_SDP_PLAINTEXT + 16, EncryptedKind::Offer);
+    let answer = f.maximum_answer(&offer);
+    f.admit(offer).unwrap();
+    let first = f.jobs(&[2, 4]).pop().unwrap();
+    let owner = first.exchange().unwrap();
+    let lower1 = first.keepalive();
+    drop(first);
+    f.clock.advance_ms(HEDGE_MS);
+    let second = f.jobs(&[2, 4]).pop().unwrap();
+    let lower2 = second.keepalive();
+    drop(second);
+    let resources = f.runtime.resources();
+    let group = f.context.scope.group;
+    let crypto_slots: Vec<_> = (0..3)
+        .map(|_| resources.charge(group, 0, ResourceKind::Crypto).unwrap())
+        .collect();
+    let forward_slots: Vec<_> = (0..2)
+        .map(|_| resources.charge(group, 1, ResourceKind::Forward).unwrap())
+        .collect();
+    let action_pool = f.join.borrow_mut().packet_ledger_for_test().action_slots();
+    let ordinary_actions: Vec<_> = (0..30).map(|_| action_pool.charge(1).unwrap()).collect();
+    assert!(action_pool.charge(1).is_err());
+    let ordinary = resources
+        .charge(
+            group,
+            256 * 1024 - resources.counts().0,
+            ResourceKind::Retained,
+        )
+        .unwrap();
+    let frame = Envelope::Direct(answer).encode();
+    let ticket = f.actor.admit_transport_verification(id(3), &frame).unwrap();
+    let actual_verifier = ticket.actual_work();
+    let envelope = Envelope::decode(&frame).unwrap();
+    ticket.check(&f.actor, &frame).unwrap();
+    let a = Authority {
+        context: &f.context,
+        lease: &f.lease,
+        member: &|_| true,
+    };
+    let mut join = f.join.borrow_mut();
+    let ledger = join.packet_ledger_for_test();
+    let prepared = ledger
+        .prepare_inbound(envelope.object().clone(), &a, f.runtime.clock().as_ref())
+        .unwrap();
+    let event = ledger
+        .commit_prepared_inbound(prepared, &a, f.runtime.clock().as_ref(), |admission| {
+            f.actor
+                .commit_endpoint_origin(&ticket, &envelope, &f.context, |wall, mono| {
+                    if !f.room.lease.is_live() {
+                        return Err(VoiceError::Unauthorized);
+                    }
+                    admission.check_at(wall, mono)
+                })
+        })
+        .unwrap();
+    drop(join);
+    assert!(
+        owner
+            .decryption_budget()
+            .charge(&resources, group, 61_624, ResourceKind::Crypto)
+            .is_err(),
+        "verification and engine serialize on one actual lane"
+    );
+    drop((ticket, actual_verifier));
+    // General SDP action/IPC dispatch is still disabled. These are its actual native slot,
+    // byte and result custody types at their conservative declared maxima, not an AEAD or
+    // end-to-end browser claim. The separate real WebCrypto test covers the 8 KiB payload.
+    struct RetainedActionInput {
+        _input: Vec<u8>,
+        _record: super::super::resources::Credit,
+        _slot: super::super::crypto_actions::slots::Slot,
+    }
+    let retain = |budget: ByteBudget| RetainedActionInput {
+        _input: vec![7; MAX_SDP_PLAINTEXT],
+        _record: budget
+            .charge(&resources, group, 10_286, ResourceKind::Retained)
+            .unwrap(),
+        _slot: owner.action_slot(&action_pool).unwrap(),
+    };
+    let encrypt = retain(owner.encryption_budget());
+    let decrypt = retain(owner.decryption_budget());
+    let engine = owner
+        .decryption_budget()
+        .charge(&resources, group, 61_624, ResourceKind::Crypto)
+        .unwrap();
+    let result = owner.retain_result(&vec![b'a'; MAX_SDP_PLAINTEXT]).unwrap();
+    assert_eq!(resources.counts(), (256 * 1024, 4));
+    f.clock.advance_ms(HEDGE_MS);
+    assert!(f.jobs(&[2, 4]).is_empty());
+    assert_eq!(
+        f.source.counts(),
+        (1, 2, 2),
+        "a third retained hedge cannot consume reply headroom or an attempt"
+    );
+    owner.close();
+    assert_eq!(
+        resources.counts().1,
+        4,
+        "actual engine retains the retired prepaid lane"
+    );
+    drop(engine);
+    assert_eq!(resources.counts().1, 3);
+    let held = resources.counts().0;
+    drop((lower1, lower2));
+    assert_eq!(f.source.counts(), (1, 2, 0));
+    assert!(resources.counts().0 < held);
+    drop((
+        encrypt,
+        decrypt,
+        event,
+        result,
+        ordinary,
+        crypto_slots,
+        forward_slots,
+        ordinary_actions,
+    ));
+}
+
+#[test]
+fn untrusted_peek_lends_only_existing_exact_binding_without_authenticating_a_signature() {
+    let f = Fixture::new(true);
+    let offer = f.targeted_kind(123, MAX_SDP_PLAINTEXT + 16, EncryptedKind::Offer);
+    let answer = f.maximum_answer(&offer);
+    let owner = f
+        .runtime
+        .resources()
+        .exchange(f.context.scope.group)
+        .unwrap();
+    let frame = Envelope::Direct(answer.clone()).encode();
+    assert!(owner.lends_verification(id(3), &frame));
+    let mut bad_signature = frame.clone();
+    *bad_signature.last_mut().unwrap() ^= 1;
+    assert!(
+        owner.lends_verification(id(3), &bad_signature),
+        "a peek selects transient capacity only"
+    );
+    assert_eq!(
+        Envelope::decode(&bad_signature).err(),
+        Some(VoiceError::Signature)
+    );
+    let held = f.runtime.resources().counts();
+    let ticket = f
+        .actor
+        .admit_transport_verification(id(3), &bad_signature)
+        .unwrap();
+    assert!(Envelope::decode(&bad_signature).is_err());
+    drop(ticket);
+    assert_eq!(
+        f.runtime.resources().counts(),
+        held,
+        "failed signatures retain no packet/origin admission or extra slot"
+    );
+    let Body::Encrypted {
+        mut header,
+        ciphertext,
+    } = answer.body().clone()
+    else {
+        unreachable!()
+    };
+    header.target_join = [99; 32];
+    let other_join = SignedObject::issue(
+        f.context.scope,
+        &signer(3),
+        [121; 32],
+        1000,
+        16_000,
+        Body::Encrypted { header, ciphertext },
+    )
+    .unwrap();
+    assert!(!owner.lends_verification(id(3), &Envelope::Direct(other_join).encode()));
+    let permit = RoutePermit::issue(&signer(3), &answer, id(2), 1000, 16_000).unwrap();
+    let relay = Envelope::HelperDelivery {
+        object: answer,
+        permit,
+    }
+    .encode();
+    assert!(owner.lends_verification(id(2), &relay));
+    assert!(
+        !owner.lends_verification(id(5), &relay),
+        "a new authenticated member cannot borrow this exchange's helper headroom"
+    );
+    assert_eq!(f.source.counts(), (0, 0, 0));
+}
+
+#[test]
+fn source_max_ice_payload_retained_b_capacity_refusal_does_not_burn_d_attempt() {
+    let f = Fixture::new(true);
+    let packet = f.targeted(24, EncryptedKind::Ice.max_plaintext() + 16);
     // The real native outgoing ledger reservation remains charged alongside SourceLedger.
     f.admit(packet).unwrap();
     let first = f.jobs(&[2, 4]).pop().unwrap();
     let lower = first.keepalive();
     drop(first);
+    // Capacity pressure, rather than an oversized supported SDP, pins the invariant:
+    // a refused hedge must not burn an attempt, and actual lower retirement makes room.
+    let current = f.runtime.resources().counts().0;
+    let fill = f
+        .runtime
+        .resources()
+        .charge(
+            f.context.scope.group,
+            256 * 1024 - current - 10,
+            ResourceKind::Retained,
+        )
+        .unwrap();
     f.clock.advance_ms(HEDGE_MS);
     for _ in 0..10 {
         assert!(f.jobs(&[2, 4]).is_empty());
@@ -589,6 +962,7 @@ fn source_max_payload_retained_b_capacity_refusal_does_not_burn_d_attempt() {
     assert_eq!(f.source.counts().1, 2);
     assert!(matches!(second.hop(), SourceHop::Helper(_)));
     drop(second);
+    drop(fill);
 }
 #[test]
 fn source_refused_capacity_spends_no_original_quota_and_room_revocation_stops_actual_work() {
