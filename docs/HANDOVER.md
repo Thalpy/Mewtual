@@ -1,5 +1,56 @@
 # Mewtual; Handover
 
+## PR #46 third review: rename context and Index-half Save (2026-10-18)
+
+The review of `22e4ed77` confirmed the previous three fixes and reproduced two new P2s, both fixed:
+
+- **A wiki rename never retargets another server's page.** `commitWikiRename` captures the server
+  and view generation before its awaits. It reloads the page list, reopens and falls back by name
+  only while the pane still shows that server's wiki. A rename on A that lands after a switch to B
+  no longer renames B's open "Shared" pane to "Renamed", so B's Save keeps its target.
+- **A document's Save covers both halves of a rename.** `affectedObject(s)` names the document a
+  record changes, including a Closing/Unconfirmed Index record. That record keeps the Index as its
+  native target and names the entry in its op. Save, the editor's pending indicators and the
+  sidebar's held rows all use it.
+
+Both regressions fail at `22e4ed77`, as does the new sidebar assertion for an Index-only held edit.
+
+An adversarial review of these fixes found no blocker/high and four medium findings, all fixed:
+
+- A Save whose Index half sits behind another document's held, failed or uncertain Index record
+  now refuses at once and names it, instead of timing out after 10 s with "try again".
+- The rename fallback also requires that no page has been opened into the pane since the rename
+  began. A pane serial, `wikiPane()`, captures server, generation, serial and page. A newer open of
+  the old name (which reads the post-rename, empty page) keeps its identity.
+- Leaving a restored document sends both halves of its rename: its Index-lane records are
+  released, not awaited.
+- The older wiki actions use the pane they began on. `saveWikiPage` (which marks clean only the
+  text actually sent), `deleteWikiPage`, `setWikiPageFormat` and `openWikiHistory` now use the
+  captured server and page, and touch the pane only while it is still that pane (history also
+  never behind a lock).
+
+Its lows are fixed too:
+
+- Playback and export decide "draft" from content records only.
+- Held rows take a deleted entry's title from the saved Index, and the sidebar comment is updated.
+- Reauthor of an Index record is gated on the Index's refusal.
+
+One low remains: a restored Index recovery record about one entry still has no held row. `affectedObject` has a direct unit test.
+
+A short re-review found no blocker/high and one new medium, introduced by the save fix: a stash
+restored into the pane survived a Save and could later revert the page. That is fixed (saving the
+pane retires its stash) and pinned. Of its lows, these are also fixed:
+
+- The stuck-behind check reruns on every queue change.
+- The refusal says "Retry or discard" for a failed blocker.
+- Delete clears only the pane it began on.
+
+`restoreWikiRev`'s toast still names the page then on screen (cosmetic).
+
+Checks: frontend 1746/1746, `npm run check` 0 errors, build, 9/9 Edge flows, ambient gate,
+root Rust 2463 passed (24 ignored; isolated target), native 363 passed (isolated target: the
+running desktop app held `src-tauri/target/debug/mewtual-desktop.exe`).
+
 ## PR #46 re-review fixes: route ownership, read-error recovery, settings requests (2026-10-18)
 
 The re-review of `13e338eb` confirmed the five original fixes and reproduced three remaining P2s:

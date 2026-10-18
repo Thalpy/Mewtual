@@ -297,17 +297,20 @@ test("a document's Save sends only that document's restored edits; other documen
   try {
     await settle();
     for (const [id, fps] of [[a, 7], [b, 8], [c, 9]] as const) { session.open(id); await settle(); session.setFps(id, fps); }
+    // D holds only an Index edit about it: the sidebar must still list D as holding work.
+    const d = id32(7); session.setEntryExpiry(d, { kind: "never" });
     // C was being delivered when the lock landed, so it restores as uncertain.
     const draft = JSON.parse(studioDraftSnapshot()!);
     const interrupted = draft.records.find((r: { object: string }) => r.object === c); interrupted.status = "inflight"; interrupted.attempts = 1;
     for (const s of mounted) await unmount(s);
     resetStudio(); restoreStudioDraft(JSON.stringify(draft)); mounted = surfaces(); flushSync(); await settle();
     choose("A"); await settle();
+    assert.ok(target.querySelector(`[data-held-object="${d}"]`), "an Index-only held edit is listed under the document it changes");
     const card = target.querySelector("[data-held-queued]"); assert.ok(card, target.textContent!);
     [...card.querySelectorAll<HTMLButtonElement>("button")].find(n => n.textContent?.trim() === "Save")!.click(); flushSync(); await settle();
     assert.deepEqual(ipc.calls.filter(x => x.cmd === "studio_apply").map(x => x.args.object), [a], "only A's edit was sent");
     const left = session.saves.map(s => [s.object, s.status]);
-    assert.deepEqual(left, [[b, "queued"], [c, "uncertain"]]);
+    assert.deepEqual(left, [[b, "queued"], [c, "uncertain"], [d, "queued"]]);
     assert.equal(session.awaitsExplicitSave(session.saves[0].id), true, "B is still held for its own action");
     assert.ok(!notices.some(n => /Could not confirm the save/.test(n)), notices.join("; "));
   } finally { for (const s of mounted) await unmount(s); disposeStudio(); target.remove(); }

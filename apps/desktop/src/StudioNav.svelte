@@ -7,7 +7,7 @@
   import { PixRaster } from "./pix-canvas.ts";
   import { DEFAULT_PALETTE } from "./studio-store.ts";
   import { FLIPNOTE_H, FLIPNOTE_W } from "./studio-contract.ts";
-  import { reason, type KnownView, type SaveRecord } from "./studio-session.ts";
+  import { affectedObject, reason, type KnownView, type SaveRecord } from "./studio-session.ts";
   import { base64ToBytes, type NativeExpiry } from "./studio-native.ts";
 
   let { me, server, channel, onopen, onnotice } = $props<{
@@ -37,23 +37,29 @@
     void studio.rev;
     return session.pendingFor(null).filter((s) => s.status === "blocked" || s.status === "uncertain");
   });
-  // Unsaved edits held for a document other than the one in the editor. Switching documents never
-  // leaves any (a document is saved as it is left); a lock/unlock restore does, and so, until its
-  // deadline, does deleting a document whose edits are still queued. Their Save, Retry and discard
-  // controls live in that document's own editor. Each row opens it, so those
+  // Unsaved edits held for a document other than the one in the editor. Switching documents saves
+  // the document left, and sends (without awaiting) its Index records, which can show here until
+  // they land. A lock/unlock restore leaves work here, and so, until its deadline, does deleting a
+  // document whose edits are still queued. Their Save, Retry and discard controls live in that
+  // document's own editor. Each row opens it, so those
   // controls stay one click away even for a document this list does not show (deleted from the
-  // Index, or past an unread listing). A pending Create already has its own row below.
+  // Index, or past an unread listing). Records are grouped by the document they change, so an
+  // Index edit about one entry (an expiry, the Index half of a rename, on any route) counts for
+  // that document. A pending Create already has its own row below.
   const heldElsewhere = $derived.by(() => {
     void studio.rev;
     const open = session.doc?.object ?? null;
     const creating = new Set(session.saves.filter((s) => s.kind === "create").map((s) => s.object));
     const byObject = new Map<string, SaveRecord[]>();
     for (const s of session.saves) {
-      if (s.kind === "applyIndex" || s.object === null || s.object === open || creating.has(s.object)) continue;
-      const list = byObject.get(s.object);
-      if (list) list.push(s); else byObject.set(s.object, [s]);
+      const object = affectedObject(s);
+      if (object === null || object === open || creating.has(object)) continue;
+      const list = byObject.get(object);
+      if (list) list.push(s); else byObject.set(object, [s]);
     }
-    const listed = [...(model?.entries ?? []), ...(model?.overflow ?? [])];
+    // The working Index first; the saved one names an entry whose pending delete hid it there.
+    const saved = session.indexModel;
+    const listed = [...(model?.entries ?? []), ...(model?.overflow ?? []), ...(saved?.entries ?? []), ...(saved?.overflow ?? [])];
     return [...byObject].map(([object, saves]) => ({
       object,
       title: listed.find((e) => e.id === object)?.title || `untitled ${session.objectKind(object)}`,

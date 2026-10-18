@@ -291,7 +291,13 @@ export class StudioSession {
     if (this.closeHeld) throw new StudioNativeError("The window is closing. Wait for saving to finish.");
     const current = this.claimNavigation();
     const leaving = this.doc?.object ?? null;
-    if (leaving !== null) await this.saveUntilClear(s => laneOf(s) === leaving);
+    if (leaving !== null) {
+      // The document's records in the shared Index lane (the Index half of a rename, an expiry)
+      // are its work too: send them, but never wait on them. That lane can sit behind another
+      // document's held work, and waiting there would bring back the deadlock this scoping removes.
+      this.releaseQueued(true, s => laneOf(s) !== leaving && affectedObject(s) === leaving);
+      await this.saveUntilClear(s => laneOf(s) === leaving);
+    }
     if (!current()) return;
     action();
   }
@@ -1305,10 +1311,17 @@ export class StudioSession {
     this.applyOp(object, { op: "set_header", field: "score", value: score }, "linked Score");
   }
 
+  /** Whether the document's own content has unsaved edits: exactly what its working model applies
+   * (see notify). Index records about it (its listing title, its expiry) change no media, so they
+   * never put playback or export on the draft path; their failures still refuse via pendingFor. */
+  private hasDocumentDraft(object: Hex32): boolean {
+    return this.records.some(s => s.kind !== "applyIndex" && s.object === object);
+  }
+
   /** Capture the displayed projection, not a silently substituted ordinary base beneath a draft. */
   private mediaSource(object: Hex32, kind: StudioObjectKind): { view: StudioObjectView; server: number; assertCurrent: () => void } {
     const doc = this.doc, scope = this.target(), gen = this.generation, epoch = this.mediaEpoch, editor = this.editorEpoch;
-    const draft = this.pendingFor(object).length > 0;
+    const draft = this.hasDocumentDraft(object);
     if (draft && !this.autosaveMs) throw new StudioNativeError("finish or reconcile this document's pending saves before playback/export");
     if (!doc || doc.object !== object || doc.objectKind !== kind || !doc.view || doc.loading || this.overlay?.loading) throw new StudioNativeError("wait for this document to finish loading");
     if (this.pendingFor(object).some(s => s.status === "blocked" || s.status === "uncertain" || s.mayHaveCommitted)) throw new StudioNativeError("resolve this document's failed save before playback/export");
@@ -1375,7 +1388,7 @@ export class StudioSession {
   prepareScorePlayback(object: Hex32): Promise<ScorePlayback> {
     return this.oneMedia(async () => {
       const source = this.mediaSource(object, "score");
-      const playback = this.pendingFor(object).length && this.workingScore
+      const playback = this.hasDocumentDraft(object) && this.workingScore
         ? await exportScorePlayback(this.scoreInput(object, this.workingScore), this.mediaContext(source.view))
         : await scorePlaybackFromNative(object, source.view as ScoreView, this.me);
       source.assertCurrent();
@@ -1385,7 +1398,7 @@ export class StudioSession {
 
   private async preparePixa(object: Hex32): Promise<{ bytes: Uint8Array; server: number; assertCurrent: () => void }> {
     const source = this.mediaSource(object, "flipnote"), view = source.view as FlipnoteView;
-    const draft = this.pendingFor(object).length > 0;
+    const draft = this.hasDocumentDraft(object);
     const model = draft ? this.workingModel! : flipnoteModel(view.content);
     if (!draft || view.content.timeline.length) preflightFlipnoteMedia(view);
     else if (Object.keys(view.content.frames).length) throw new StudioNativeError("The animation timeline is incomplete.");
@@ -1393,7 +1406,7 @@ export class StudioSession {
         model.frames.some(f => f.conflicts.length || f.insertions > 1)) throw new StudioNativeError("Resolve animation conflicts before playing or exporting.");
     let linked: { object: string; view: ScoreView } | undefined;
     if (model.sound.score) {
-      if (this.pendingFor(model.sound.score).length) throw new StudioNativeError("Save your music changes before playing this flipnote.");
+      if (this.hasDocumentDraft(model.sound.score)) throw new StudioNativeError("Save your music changes before playing this flipnote.");
       const score = await studioRead(this.ipc, this.target(), model.sound.score, "score");
       source.assertCurrent();
       if (!score) throw new StudioNativeError("the linked Score is not held locally; no shorter silent export was made");
@@ -1631,7 +1644,7 @@ export class StudioSession {
   /** `save()` for one document's records (including its Index records): what a Save button inside
    * that document's editor means. Other documents' restored work stays held for its own explicit
    * action, and another lane's failure cannot refuse this document's Save. */
-  async saveDocument(object: Hex32): Promise<void> { await this.saveCovered(s => s.object === object); }
+  async saveDocument(object: Hex32): Promise<void> { await this.saveCovered(s => affectedObject(s) === object); }
 
   /** `save()` restricted to the records `covers` selects; the rest keep their queue state. */
   private async saveCovered(covers: (s: SaveRecord) => boolean): Promise<void> {
@@ -1643,15 +1656,28 @@ export class StudioSession {
     if (ids.size === this.records.length) { this.cancelAutosave?.(); this.cancelAutosave = null; }
     this.releaseQueued(true, covers);
     if (!ids.size) return;
+    // A covered record can sit in a lane behind an uncovered one this Save will never move (the
+    // Index lane is shared by every document). Waiting would only time out with "try again", which
+    // never helps; say at once what it waits for. What could run has been released and still runs.
+    const stuck = (blocker: SaveEntry) => {
+      const entry = affectedObject(blocker), listed = [...(this.indexModel?.entries ?? []), ...(this.indexModel?.overflow ?? [])].find(e => e.id === entry);
+      const choice = blocker.status === "queued" ? "Save or discard" : "Retry or discard";
+      return new StudioNativeError(`Part of this Save waits behind an unsaved edit (${blocker.label}${listed?.title ? ` of "${listed.title}"` : ""}). ${choice} that edit first; this document's edits are kept.`);
+    };
+    const blocker = this.stuckBehind(ids);
+    if (blocker) throw stuck(blocker);
     await new Promise<void>((resolve, reject) => {
       let detach = () => {}, cancel = () => {};
       const check = () => {
         const remaining = this.records.filter(s => ids.has(s.id));
         const failure = remaining.find(s => s.status === "blocked" || s.status === "uncertain");
-        if (generation !== this.generation || failure || !remaining.length) {
+        // Asked again on every change: a record ahead that was in flight can fail meanwhile.
+        const behind = failure ? null : this.stuckBehind(ids);
+        if (generation !== this.generation || failure || behind || !remaining.length) {
           detach(); cancel();
           if (generation !== this.generation) reject(new StudioNativeError("Studio changed before saving finished"));
           else if (failure) reject(new StudioNativeError("Could not confirm the save. Your edits are still here; retry before leaving."));
+          else if (behind) reject(stuck(behind));
           else resolve();
         }
       };
@@ -1659,6 +1685,22 @@ export class StudioSession {
       cancel = this.schedule(() => { detach(); reject(new StudioNativeError("Studio is still saving. Your edits are still here; wait and try again.")); }, 10_000);
       check();
     });
+  }
+
+  /** The first uncovered record that keeps a covered, queued one of `ids` from ever running: it is
+   * ahead of it in its lane and only the member can move it (failed, uncertain, or restored and
+   * held). A record waiting for its deadline or already in flight will move on its own. */
+  private stuckBehind(ids: Set<number>): SaveEntry | null {
+    for (const s of this.records) {
+      if (!ids.has(s.id) || s.status !== "queued") continue;
+      const lane = laneOf(s);
+      for (const r of this.records) {
+        if (r === s) break;
+        if (ids.has(r.id) || laneOf(r) !== lane) continue;
+        if (r.status === "blocked" || r.status === "uncertain" || (r.status === "queued" && this.restoredHeld.has(r.id))) return r;
+      }
+    }
+    return null;
   }
 
   /** Leaving the Studio, a channel or the window: every retained edit must reach a definite receipt. */
@@ -1790,8 +1832,10 @@ export class StudioSession {
     return null;
   }
 
+  /// `null` is the channel Index's own lane (every Index record, of any route); a document is every
+  /// record that changes it, including its Index records (see `affectedObject`).
   pendingFor(object: Hex32 | null): SaveRecord[] {
-    return this.saves.filter((s) => (s.kind === "applyIndex" ? object === null || s.object === object : s.object === object));
+    return this.saves.filter((s) => object === null ? s.kind === "applyIndex" || s.object === null : affectedObject(s) === object);
   }
 
   /// Queued saves that cannot run until this uncertain or known-not-written save is handled.
@@ -2521,6 +2565,19 @@ function choicesForContent(content: StudioContent, mode: RecoveryMode): { choice
 
 function laneOf(s: SaveRecord): string {
   return s.kind === "applyIndex" ? "index" : s.object ?? "index";
+}
+
+/** The document a record changes, for "this document's work" (its Save, its pending indicators, the
+ * sidebar's held rows), never for routing. A document record names it as `object`, and so does an
+ * ordinary Index record. A Closing or Unconfirmed Index record keeps the channel Index as its
+ * native target (`object: null`, which must not change: the local-draft branch is the Index's),
+ * and names the entry it edits only inside its operation. A title edit therefore spans both kinds,
+ * and a document's Save must cover both. Null: an Index record about no one entry. */
+export function affectedObject(s: SaveRecord): Hex32 | null {
+  if (s.object !== null) return s.object;
+  if (s.kind !== "overlayApply") return null;
+  const entry = (s.op as { object?: unknown }).object;
+  return typeof entry === "string" ? entry : null;
 }
 
 const jobKey = (generation: number, cid: Hex64, bytes: number) => `${generation}:${cid}:${bytes}`;

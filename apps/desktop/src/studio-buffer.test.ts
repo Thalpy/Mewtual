@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { StudioSession } from "./studio-session.ts";
+import { StudioSession, affectedObject } from "./studio-session.ts";
 import { decodeStudioDraft, encodeStudioDraft, validateDraftOperation } from "./studio-draft.ts";
 import { decodePixa } from "./pixa.ts";
 import { sanitizeUiContinuity, planLegacyReadMarkMigration } from "./ui-continuity.ts";
@@ -258,17 +258,77 @@ test("navigation saves only the document it leaves; another document's held work
   h.session.reset();
 });
 
-test("a departure Save leaves the shared deadline running for the Index edit made with a title", async () => {
-  const h = await harness(), other = id32(9);
-  const listed = () => ({ ...ordinaryView(indexContent({ objects: { [object]: indexEntry({ title: "initial" }) } })), group });
+test("a departure Save leaves the shared deadline running for an Index edit about another document", async () => {
+  const h = await harness(), other = id32(9), third = id32(10);
+  const listed = () => ({ ...ordinaryView(indexContent({ objects: { [object]: indexEntry({ title: "initial" }), [third]: indexEntry({ title: "third" }) } })), group });
   h.ipc.on("studio_list", listed); h.ipc.on("studio_apply_index", listed);
   await h.session.refreshIndex(); await settle(8);
-  h.session.setTitle(object, "renamed");
-  assert.deepEqual(h.session.saves.map(s => s.kind).sort(), ["apply", "applyIndex"]);
+  h.session.setTitle(object, "renamed"); h.session.setEntryExpiry(third, { kind: "never" });
+  assert.deepEqual(h.session.saves.map(s => s.kind).sort(), ["apply", "applyIndex", "applyIndex"]);
   await h.session.navigate(() => h.session.open(other)); await settle(8);
-  assert.deepEqual(h.session.saves.map(s => s.kind), ["applyIndex"], "the document's own edit saved on departure");
+  assert.deepEqual(h.session.saves.map(s => s.object), [third], "both halves of the rename went with the departure");
   await h.tick(5000);
-  assert.equal(h.session.saves.length, 0, "the Index rename still saved at its deadline");
+  assert.equal(h.session.saves.length, 0, "the other document's Index edit still saved at its deadline");
+  h.session.reset();
+});
+
+// Adversarial review of 22e4ed77's fixes, M3: leaving a restored document sent only its document
+// half; its Index half (in the shared Index lane) stayed held.
+test("leaving a restored, renamed document sends both halves on the ordinary, Closing and Unconfirmed routes", async () => {
+  for (const route of ["ordinary", "closing", "unconfirmed"] as const) {
+    const h = await harness(), other = id32(9);
+    const listed = indexContent({ objects: { [object]: indexEntry({ title: "initial" }), [other]: indexEntry({ title: "other" }) } });
+    const view = (content: unknown) => route === "unconfirmed" ? { ...previewView(content), group } : { ...ordinaryView(content, { phase: route === "closing" ? "closing" : "open" }), group };
+    const doc = () => view(flipnoteContent({ frames: [] }));
+    h.ipc.on("studio_list", () => view(listed)); h.ipc.on("studio_read", doc); h.ipc.on("studio_apply", doc); h.ipc.on("studio_apply_index", () => view(listed));
+    for (const kind of ["unconfirmed", "closing"] as const) {
+      h.ipc.on(`studio_${kind}_overlay_save_begin`, a => ({ v: 1, kind: `${kind}OverlaySaveTicket`, channel: a.channel, object: a.object ?? null, basis: id64(1), branch: id64(2), provenance: kind }));
+      h.ipc.on(`studio_${kind}_overlay_save`, a => ({ v: 1, kind: `${kind}OverlaySave`, channel: a.channel, object: a.object ?? null, state: "saved", basis: id64(1), accepted: 1, localOnly: true, provisional: true, provenance: kind }));
+    }
+    await h.session.refreshIndex(); await h.session.refreshDoc(object); await settle(8);
+    h.session.setTitle(object, "renamed");
+    const draft = decodeStudioDraft(h.session.draftSnapshot()!);
+    h.session.reset(); h.session.restoreDraft(draft); h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); await settle(8);
+    h.session.open(object); await settle(8);
+    await h.session.navigate(() => h.session.open(other)); await settle(8);
+    const bodyOf = (args: Record<string, unknown>) => String(args.body ?? (args.save as { body?: unknown } | undefined)?.body ?? "");
+    assert.equal(h.ipc.calls.filter(c => /"title"/.test(bodyOf(c.args)) && /renamed/.test(bodyOf(c.args))).length, 2, `${route}: both halves sent`);
+    assert.equal(h.session.saves.length, 0, `${route}: nothing held behind`);
+    h.session.reset();
+  }
+});
+
+test("affectedObject names the document a record changes, whatever its native target", () => {
+  const base = { id: 1, status: "queued", attempts: 0, error: "", epochChanged: false, mayHaveCommitted: false, label: "x" };
+  const record = (r: object) => ({ ...base, ...r }) as unknown as SaveRecord;
+  assert.equal(affectedObject(record({ kind: "apply", object })), object, "a document record");
+  assert.equal(affectedObject(record({ kind: "applyIndex", object, op: { op: "set_title", object, title: "t" } })), object, "an ordinary Index record");
+  for (const op of [{ op: "set_title", object, title: "t" }, { op: "tombstone_object", object }, { op: "set_expiry", object, expiry: 0 }]) {
+    assert.equal(affectedObject(record({ kind: "overlayApply", object: null, op })), object, `a local-draft Index ${op.op}`);
+  }
+  assert.equal(affectedObject(record({ kind: "overlayApply", object: null, op: {} })), null, "an Index record about no one entry");
+  assert.equal(affectedObject(record({ kind: "recoveryApply", object: null })), null, "an Index recovery names no document here");
+});
+
+// Adversarial review of 22e4ed77's fixes, M1: B's Save waited ten seconds and then said "try
+// again" when B's Index half sat in the shared Index lane behind A's restored, held Index record.
+test("a document's Save behind another document's held Index edit refuses at once and names it", async () => {
+  const h = await harness(), other = id32(9);
+  const listed = () => ({ ...ordinaryView(indexContent({ objects: { [object]: indexEntry({ title: "first" }), [other]: indexEntry({ title: "second" }) } })), group });
+  h.ipc.on("studio_list", listed); h.ipc.on("studio_apply_index", listed);
+  await h.session.refreshIndex(); await settle(8);
+  h.session.setTitle(object, "first renamed");
+  h.session.open(other); await settle(8); h.session.setTitle(other, "second renamed");
+  const draft = decodeStudioDraft(h.session.draftSnapshot()!);
+  h.session.reset(); h.session.restoreDraft(draft); h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); await settle(8);
+  h.session.open(other); await settle(8);
+  // No clock tick: the refusal must not wait for the ten-second timer.
+  const outcome = await Promise.race([h.session.saveDocument(other).then(() => "saved", e => String(e)), settle(10).then(() => "still waiting")]);
+  assert.match(outcome, /waits behind an unsaved edit \(index title of "first"\)/);
+  await settle(8);
+  const left = h.session.saves.map(s => [s.object, s.kind, h.session.awaitsExplicitSave(s.id)]);
+  assert.deepEqual(left, [[object, "apply", true], [object, "applyIndex", true], [other, "applyIndex", false]],
+    "B's document half landed; its Index half waits, released, behind A's two held records");
   h.session.reset();
 });
 
@@ -334,6 +394,42 @@ test("before the Index is read, a restored edit is refused as unread without cou
   assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_apply").length, 0, "the retry compared the binding and refused");
   assert.match(h.session.saves[0].error, /Shared history changed/);
   h.session.reset();
+});
+
+// Re-review of 22e4ed77, finding 2: a document's Save covered `object === id`, which a Closing or
+// Unconfirmed Index record (native target null, entry in its op) never matches. A restored rename
+// then saved only its document half, and the held Index half vanished from the editor.
+test("a document's Save sends both halves of a rename on the ordinary, Closing and Unconfirmed routes", async () => {
+  for (const route of ["ordinary", "closing", "unconfirmed"] as const) {
+    const h = await harness(), other = id32(9);
+    const listed = indexContent({ objects: { [object]: indexEntry({ title: "initial" }), [other]: indexEntry({ title: "other" }) } });
+    const view = (content: unknown) => route === "unconfirmed" ? { ...previewView(content), group } : { ...ordinaryView(content, { phase: route === "closing" ? "closing" : "open" }), group };
+    const doc = () => view(flipnoteContent({ frames: [] }));
+    h.ipc.on("studio_list", () => view(listed)); h.ipc.on("studio_read", doc);
+    h.ipc.on("studio_apply", doc); h.ipc.on("studio_apply_index", () => view(listed));
+    for (const kind of ["unconfirmed", "closing"] as const) {
+      h.ipc.on(`studio_${kind}_overlay_save_begin`, a => ({ v: 1, kind: `${kind}OverlaySaveTicket`, channel: a.channel, object: a.object ?? null, basis: id64(1), branch: id64(2), provenance: kind }));
+      h.ipc.on(`studio_${kind}_overlay_save`, a => ({ v: 1, kind: `${kind}OverlaySave`, channel: a.channel, object: a.object ?? null, state: "saved", basis: id64(1), accepted: 1, localOnly: true, provisional: true, provenance: kind }));
+    }
+    await h.session.refreshIndex(); await h.session.refreshDoc(object); await settle(8);
+    h.session.setTitle(object, "renamed");
+    h.session.open(other); await settle(8); h.session.setFps(other, 5);
+    const draft = decodeStudioDraft(h.session.draftSnapshot()!);
+    h.session.reset(); h.session.restoreDraft(draft); h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); await settle(8);
+    h.session.open(object); await settle(8);
+    const mine = h.session.pendingFor(object);
+    assert.equal(mine.length, 2, `${route}: the editor counts both halves of the rename`);
+    if (route !== "ordinary") assert.ok(mine.some(s => s.kind === "overlayApply" && s.object === null), `${route}: the Index half keeps the Index as its native target`);
+    await h.session.saveDocument(object); await settle(8);
+    // Ordinary Apply carries `body`; a local-draft Save nests its request under `save`.
+    const bodyOf = (args: Record<string, unknown>) => String(args.body ?? (args.save as { body?: unknown } | undefined)?.body ?? "");
+    const titles = h.ipc.calls.filter(c => /"title"/.test(bodyOf(c.args)) && /renamed/.test(bodyOf(c.args)));
+    assert.equal(titles.length, 2, `${route}: the document title and the Index title were both sent (${titles.map(c => c.cmd).join(", ")})`);
+    if (route !== "ordinary") assert.ok(titles.some(c => c.args.object === undefined || c.args.object === null), `${route}: the Index half still went to the Index`);
+    assert.deepEqual(h.session.pendingFor(object), [], `${route}: nothing of this document is left behind`);
+    assert.equal(h.session.saves.length, 1); assert.equal(h.session.awaitsExplicitSave(h.session.saves[0].id), true, `${route}: the other document stays held`);
+    h.session.reset();
+  }
 });
 
 test("an admission read overtaken by a newer read of the document says it was still reading", async () => {

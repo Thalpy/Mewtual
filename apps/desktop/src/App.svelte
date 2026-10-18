@@ -4453,6 +4453,8 @@
   }
   let wikiMeta = $state<Record<string, string>>({}); // name -> "md" | "wiki" (per-page format, shared)
   let activeWikiPage = $state("");
+  // Bumped by every assignment of activeWikiPage: see wikiPane().
+  let wikiPaneSerial = 0;
   let wikiBody = $state("");
   let newWikiPage = $state("");
   let wikiDirty = $state(false); // unsaved edits in the open page (avoid clobbering on live updates)
@@ -7013,7 +7015,7 @@
     // The wiki editor and the chat/fileshare affordances below used to be reset only by
     // switchServer, so the paths that end with no active group (leaving your last server, empty
     // DM-home, locking) kept a page body and its drafts in memory as plaintext.
-    activeWikiPage = "";
+    activeWikiPage = ""; wikiPaneSerial++;
     wikiBody = "";
     wikiDirty = false;
     wikiEdit = false;
@@ -9899,8 +9901,13 @@
 
   async function openWikiHistory() {
     if (activeServerId === null || !activeWikiPage) return;
+    // Revisions carry page bodies: they land only in the pane they were read for, and never behind
+    // a lock that arrived while they were in flight.
+    const pane = wikiPane();
     try {
-      wikiHistory = await invoke<UiWikiRev[]>("get_wiki_history", { server: activeServerId, page: activeWikiPage });
+      const history = await invoke<UiWikiRev[]>("get_wiki_history", { server: pane.server, page: pane.page });
+      if (!unlockedViewCurrent(pane.gen, pane.server) || !wikiPaneCurrent(pane)) return;
+      wikiHistory = history;
       wikiHistorySel = wikiHistory.length ? wikiHistory[wikiHistory.length - 1].id : "";
       showWikiHistory = true;
       wikiEdit = false;
@@ -9985,6 +9992,15 @@
   // Unsaved page bodies survive navigation (in-memory, like per-channel chat drafts): following
   // a [[link]] away from a half-edited page stashes the draft; coming back restores it.
   const wikiDrafts = new Map<string, string>();
+  // The page in the wiki pane as a captured identity: server, view generation, and how many times a
+  // page has been put in the pane since. A wiki action that finishes after an await touches the
+  // pane (dirty flag, drafts, edit mode, its name) only while it is still this one. Name alone is
+  // not enough: two servers can both have "Shared", and one server can reopen a name (as an empty
+  // new page after a rename moved it away) in between. Native calls use the captured server and
+  // page, never whatever is on screen when they resume.
+  type WikiPane = { server: number | null; gen: number; serial: number; page: string };
+  function wikiPane(): WikiPane { return { server: activeServerId, gen: viewGeneration, serial: wikiPaneSerial, page: activeWikiPage }; }
+  function wikiPaneCurrent(p: WikiPane): boolean { return viewCurrent(p.gen, p.server) && p.serial === wikiPaneSerial && p.page === activeWikiPage; }
   /// `route` is the action that asked for the page (a standalone call is its own). It is asked twice:
   /// before the read, and again after it, right before the view changes, because the read takes
   /// time in which a newer action (returning to the Studio, say) can retire this one, or the Studio,
@@ -10023,7 +10039,7 @@
       if (!viewCurrent(gen, server)) return false;
       wikiRedirectedFrom = from;
       wikiBody = body;
-      activeWikiPage = name;
+      activeWikiPage = name; wikiPaneSerial++;
       wikiDirty = false;
       wikiRenaming = false;
       wikiDeleteArmed = false;
@@ -10052,12 +10068,15 @@
   // The per-page Markdown/Wikitext toggle: a shared page property (CRDT meta), not a local view.
   async function setWikiPageFormat(fmt: "md" | "wiki") {
     if (activeServerId === null || !activeWikiPage || wikiFormat === fmt) return;
+    // The format is set on the page it was chosen for: a shared setting every member sees, so a
+    // switch during the first Save must not move it onto another server's same-named page.
+    const server = activeServerId, gen = viewGeneration, page = activeWikiPage;
     try {
       // A brand-new page (opened via a red link) has nothing saved yet; save it so the meta
       // has a page to describe.
-      if (!wikiPages.includes(activeWikiPage)) await saveWikiPage();
-      await invoke("set_wiki_format", { server: activeServerId, name: activeWikiPage, format: fmt });
-      wikiMeta = { ...wikiMeta, [activeWikiPage]: fmt };
+      if (!wikiPages.includes(page)) await saveWikiPage();
+      await invoke("set_wiki_format", { server, name: page, format: fmt });
+      if (viewCurrent(gen, server)) wikiMeta = { ...wikiMeta, [page]: fmt };
       toast(`Page format set to ${fmt === "wiki" ? "wikitext" : "markdown"} for everyone`, "info", 2500);
     } catch (e) {
       toast(`Setting the page format failed: ${e}`, "err", 9000);
@@ -10074,13 +10093,21 @@
     if (!to || to === activeWikiPage || activeServerId === null || !activeWikiPage) return;
     // One action: if the member moved on while the rename and the page list ran, the renamed page
     // does not pull them back (the rename itself has landed and the toast still says so).
-    const route = studioExit.begin(), from = activeWikiPage;
+    // The page is the pane's captured identity, not its name (see wikiPane): Save writes the
+    // current server's page of the current name, so the pane is only touched while it is still
+    // the one this rename started from.
+    const route = studioExit.begin(), pane = wikiPane(), { server, gen, page: from } = pane;
     try {
-      await invoke("rename_wiki_page", { server: activeServerId, from, to });
-      await refreshWiki();
-      // A retired open leaves the pane on a name that no longer exists, where Edit and Save would
-      // recreate the old page. The renamed page has the same body, so point the pane at it.
-      if (!(await openWikiPage(to, { noRedirect: true }, route)) && activeWikiPage === from) activeWikiPage = to;
+      await invoke("rename_wiki_page", { server, from, to });
+      if (viewCurrent(gen, server)) {
+        await refreshWiki();
+        // A retired open leaves the pane on a name that no longer exists, where Edit and Save would
+        // recreate the old page. The renamed page has the same body, so point the pane at it, but
+        // only if nothing has been opened into it since: native reads run in order, so a later
+        // open of the old name read the post-rename (empty) page, and that pane must stay as it is.
+        const opened = await openWikiPage(to, { noRedirect: true }, route);
+        if (!opened && wikiPaneCurrent(pane)) { activeWikiPage = to; wikiPaneSerial++; }
+      }
       toast(`Renamed to "${to}" · links to the old name go red`, "ok", 5000);
     } catch (e) {
       toast(`Rename failed: ${e}`, "err", 9000);
@@ -10093,11 +10120,17 @@
   }
   async function deleteWikiPage(name: string) {
     if (activeServerId === null) return;
+    // The delete names this server's page; after the await, only this server's pane on it is cleared
+    // (another server's "Shared" being edited meanwhile keeps its unsaved text).
+    const pane = wikiPane(), { server, gen } = pane;
     try {
-      await invoke("delete_wiki_page", { server: activeServerId, name });
+      await invoke("delete_wiki_page", { server, name });
+      if (!viewCurrent(gen, server)) { toast(`Deleted "${name}"`, "ok"); return; }
       wikiDeleteArmed = false;
-      if (activeWikiPage === name) {
-        activeWikiPage = "";
+      // Only the pane that showed the page when the delete began: a fresh reopen of the name during
+      // the round trip is a new (empty) page whose typing is the member's, not the deleted page's.
+      if (wikiPaneCurrent(pane) && activeWikiPage === name) {
+        activeWikiPage = ""; wikiPaneSerial++;
         wikiBody = "";
         wikiDirty = false;
         wikiEdit = false;
@@ -10284,21 +10317,30 @@
   }
   async function saveWikiPage() {
     if (!activeWikiPage || activeServerId === null) return;
+    // What is saved is fixed now; the pane it came from may change while the save is out (another
+    // page opened, more typing, another server). Only what the saved bytes actually cover is
+    // marked clean: the same pane, and only if its text is still the text that was sent.
+    const pane = wikiPane(), { server, gen, page } = pane, body = wikiBody;
     try {
-      const { value: queued } = await invokeDebugged<boolean>("save_wiki_page", { server: activeServerId, name: activeWikiPage, body: wikiBody });
-      wikiDirty = false;
-      wikiDrafts.delete(activeWikiPage);
+      const { value: queued } = await invokeDebugged<boolean>("save_wiki_page", { server, name: page, body });
+      if (wikiPaneCurrent(pane)) {
+        // The pane owns this page's text, so any stash of it is older (openWikiPage restores a stash
+        // without removing it); leaving it would bring that older draft back over the saved page.
+        // Leaving the pane dirty again stashes its current text afresh.
+        if (wikiBody === body) wikiDirty = false;
+        wikiDrafts.delete(page);
+      } else if (viewCurrent(gen, server) && wikiDrafts.get(page) === body) wikiDrafts.delete(page);
       if (queued) {
         // Review mode: the save became a proposal. The page itself is unchanged until an
         // admin approves it (or the window lapses), so reload rather than pretend.
-        await refreshWiki();
-        wikiEdit = false;
+        if (viewCurrent(gen, server)) await refreshWiki();
+        if (wikiPaneCurrent(pane)) wikiEdit = false;
         toast(`Edit submitted for review: it publishes when approved, or automatically in ${wikiReviewDays} day${wikiReviewDays === 1 ? "" : "s"}`, "info", 6000);
       } else {
-        toast(`Saved "${activeWikiPage}"`, "ok", 2500);
+        toast(`Saved "${page}"`, "ok", 2500);
       }
     } catch (e) {
-      toast(`Saving "${activeWikiPage}" failed: ${e}`, "err", 9000);
+      toast(`Saving "${page}" failed: ${e}`, "err", 9000);
     }
   }
   const inviteRefreshGeneration = new Map<number, number>();
