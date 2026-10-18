@@ -35,7 +35,8 @@ Unlock restores that queue with no document open. Opening a document is never co
 held work saving first (a document switch saves only the document left), and the sidebar shows a
 row with an open button for documents holding unsaved edits (up to eight, then a count; Index
 edits and pending Creates keep their own rows), so their Save, Retry and discard controls stay
-reachable even for a document the Index does not list.
+reachable even for a document the Index does not list. Once open, those controls render whatever
+the document read did: a failing read shows its error beside them, never instead of them.
 
 ## Studio Save, navigation and playback corrections (2026-10-18)
 

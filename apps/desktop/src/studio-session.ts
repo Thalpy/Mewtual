@@ -1619,8 +1619,19 @@ export class StudioSession {
     // No timer, eligible identity or worker is installed: only Save/retry can submit restored work.
   }
 
+  /** Restored work that only an explicit Save, retry or discard (or leaving its document) will
+   * move: the deadline never releases it. Surfaces offer that Save and discard next to it. */
+  awaitsExplicitSave(id: number): boolean {
+    return this.restoredHeld.has(id) && this.records.some(s => s.id === id && s.status === "queued");
+  }
+
   /** Save a fixed revision and await definite receipts. Failure/timeout keeps the editor intact. */
   async save(): Promise<void> { await this.saveCovered(() => true); }
+
+  /** `save()` for one document's records (including its Index records): what a Save button inside
+   * that document's editor means. Other documents' restored work stays held for its own explicit
+   * action, and another lane's failure cannot refuse this document's Save. */
+  async saveDocument(object: Hex32): Promise<void> { await this.saveCovered(s => s.object === object); }
 
   /** `save()` restricted to the records `covers` selects; the rest keep their queue state. */
   private async saveCovered(covers: (s: SaveRecord) => boolean): Promise<void> {

@@ -137,6 +137,9 @@
   const pending = $derived.by(() => { void studio.rev; return objectId ? session.pendingFor(objectId) : []; });
   const attention = $derived(pending.filter((s) => s.mayHaveCommitted || s.status === "uncertain" || s.status === "blocked"));
   const inflight = $derived(pending.some((s) => s.status === "queued" || s.status === "inflight"));
+  // Restored after lock and never sent: the deadline will not move these, so the editor offers
+  // their explicit Save and discard in every state, without a refused departure first.
+  const heldQueued = $derived.by(() => { void studio.rev; return pending.filter((s) => session.awaitsExplicitSave(s.id)); });
   const blockedCount = $derived.by(() => { void studio.rev; return attention.length ? session.blockedBehind(attention[0].id) : 0; });
   const pendingInserts = $derived(pending.filter((s): s is Extract<SaveRecord, { kind: "frame" }> => s.kind === "frame" && s.op === "insert" && !model?.frames.some(f => f.id === s.frame)));
   const receivePaused = $derived.by(() => { void studio.rev; return session.receivePaused; });
@@ -892,10 +895,14 @@
   function retrySave(s: SaveRecord) { guard(() => session.retry(s.id)); }
   function reauthorSave(s: SaveRecord) { guard(() => session.reauthor(s.id)); }
   function overlayRetryOf(s: SaveRecord) { return s.kind === "frame" || s.kind === "overlayApply" ? s.overlayRetry : null; }
-  let discardArmed = $state(0);
+  // Armed for one record in one state. A record whose status changes since (a held edit that Save
+  // has since sent and left uncertain, say) needs a fresh confirmation: the first click armed the
+  // discard of something that may now have committed.
+  let discardArmed = $state("");
+  const armKey = (s: SaveRecord) => `${s.id}:${s.status}:${s.mayHaveCommitted}`;
   function discardSave(s: SaveRecord) {
-    if (discardArmed !== s.id) { discardArmed = s.id; return; }
-    discardArmed = 0;
+    if (discardArmed !== armKey(s)) { discardArmed = armKey(s); return; }
+    discardArmed = "";
     session.discard(s.id);
     if (s.kind === "frame" && s.frame === frameId) { rasterRef = ""; loadRaster(); }
   }
@@ -1134,8 +1141,39 @@
           {#if attention[0].kind === "frame" || attention[0].kind === "apply" || attention[0].kind === "applyIndex" || attention[0].kind === "overlayApply"}
             <button type="button" class="st-btn" title="available only after the backend proved the old attempt wrote nothing" disabled={!!readOnlyWhy || overlayRetryOf(attention[0]) === "none" || !session.canReauthor(attention[0].id)} onclick={() => reauthorSave(attention[0])}>save again as a new edit</button>
           {/if}
-          <button type="button" class="st-btn ghost" onclick={() => discardSave(attention[0])}>{discardArmed === attention[0].id ? "discard for real" : "discard"}</button>
+          <button type="button" class="st-btn ghost" onclick={() => discardSave(attention[0])}>{discardArmed === armKey(attention[0]) ? "discard for real" : "discard"}</button>
         </span>{/if}
+      </div>
+    {/if}
+{/snippet}
+<!-- Retained requests of a document with no model on screen: the read failed, the document is absent
+     here, or it is still being read. Their controls never depend on that read, which is the thing
+     recovery may be needed to get past (a restored queue can make leaving wait on them). Exact
+     retry identity and the armed discard are the same as in pendingSaves. -->
+{#snippet heldWork()}
+        {#each attention.slice(0, 8) as s (s.id)}
+          <div class="st-card warn" data-held-save={s.id}>
+            <span>{s.label} · {s.mayHaveCommitted || s.status !== "blocked" ? "uncertain" : "not written"}</span>
+            <span class="micro wrap">{s.error}{#if session.blockedBehind(s.id)} · {session.blockedBehind(s.id)} later {session.blockedBehind(s.id) === 1 ? "save waits" : "saves wait"} behind it{/if}</span>
+            {#if s.status === "uncertain" || s.status === "blocked"}<span class="st-card-acts">
+              {#if overlayRetryOf(s) !== "newTicket" && overlayRetryOf(s) !== "none"}
+                <button type="button" class="st-btn primary" onclick={() => retrySave(s)}>{overlayRetryOf(s) === "afterExplicitAccess" ? "access, then retry same request" : "retry same request"}</button>
+              {/if}
+              <button type="button" class="st-btn ghost" onclick={() => discardSave(s)}>{discardArmed === armKey(s) ? "discard for real" : "discard"}</button>
+            </span>{/if}
+          </div>
+        {/each}
+        {#if attention.length > 8}<p class="micro">and {attention.length - 8} more</p>{/if}
+        {@render heldQueuedCard()}
+{/snippet}
+{#snippet heldQueuedCard()}
+    {#if heldQueued.length}
+      <div class="st-card" data-held-queued>
+        <span>{heldQueued.length} restored {heldQueued.length === 1 ? "edit" : "edits"} not saved yet · {heldQueued[0].label}</span>
+        <span class="st-card-acts">
+          <button type="button" class="st-btn primary" onclick={() => void session.saveDocument(objectId).catch(e => onnotice(reason(e), "warn"))}>Save</button>
+          <button type="button" class="st-btn ghost" onclick={() => discardSave(heldQueued[0])}>{discardArmed === armKey(heldQueued[0]) ? "discard for real" : "discard"}</button>
+        </span>
       </div>
     {/if}
 {/snippet}
@@ -1314,7 +1352,7 @@
     </div>
   {:else if isScore}
     <div class="st-score">
-      {@render pendingSaves()}
+      {@render pendingSaves()}{@render heldQueuedCard()}
       <div class="st-itabs"><button class="st-itab" class:on={inspectorTab !== "history"} onclick={() => inspectorTab = "music"}>Music</button><button class="st-itab" class:on={inspectorTab === "history"} onclick={() => inspectorTab = "history"}>History</button></div>
       {#if inspectorTab === "history"}{@render historyStatus()}{@render historyRail()}{:else}
       <label class="micro st-score-loop"><input type="checkbox" aria-label="Loop whole authored score" bind:checked={loop} disabled={playing} /><span>loop whole authored score</span></label>
@@ -1332,22 +1370,13 @@
     <div class="studio-empty">
       {#if doc?.error}
         <div class="st-banner danger">could not read this flipnote: {doc.error} <button type="button" class="st-btn" onclick={() => session.open(objectId)}>retry</button></div>
-      {:else if doc?.absent && !pending.length}
+      {:else if doc?.absent && !pending.some((s) => s.kind === "create")}
         <p class="muted">This flipnote is not on this device yet. Absence is not a deletion: it may still arrive from another member.</p>
         <button type="button" class="st-btn" onclick={() => session.open(objectId)}>read again</button>
       {:else}
         <p class="muted">{pending.some((s) => s.kind === "create") ? "Creating…" : "Reading…"}</p>
-        {#each attention as s (s.id)}
-          <div class="st-card warn">
-            <span>{s.label} · {s.status === "blocked" ? "not written" : "uncertain"}</span>
-            <span class="micro wrap">{s.error}</span>
-            <span class="st-card-acts">
-              <button type="button" class="st-btn primary" onclick={() => retrySave(s)}>retry same request</button>
-              <button type="button" class="st-btn ghost" onclick={() => discardSave(s)}>{discardArmed === s.id ? "discard for real" : "discard"}</button>
-            </span>
-          </div>
-        {/each}
       {/if}
+      {@render heldWork()}
     </div>
   {:else}
     <!-- Header -->
@@ -1361,7 +1390,7 @@
       </label>
       <span class="st-chip {settlementChip().tone}" title={settlementChip().title}><i></i><span class="micro">{settlementChip().text}</span></span>
       {#if inflight}<span class="st-chip"><span class="micro">{pending.some(s => s.status === "inflight") ? "Saving…" : "Unsaved changes"}</span></span>{/if}
-      <button type="button" class="st-btn" onclick={() => void session.save().catch(e => onnotice(reason(e), "warn"))}>Save</button>
+      <button type="button" class="st-btn" onclick={() => void session.saveDocument(objectId).catch(e => onnotice(reason(e), "warn"))}>Save</button>
       <span class="grow"></span>
       <button type="button" class="st-btn" disabled={!audioActions} onclick={toggleStudioPlay}>{playing ? "stop" : "play"}</button>
       <button type="button" class="st-btn" title="Attach this flipnote to a chat message" disabled={mediaBusy || playing || !onpostPixa} onclick={() => downloadMedia(true)}>
@@ -1373,7 +1402,7 @@
     </div>
     {#if mediaReceipt}<div class="st-banner info wrap">{mediaReceipt}</div>{/if}
 
-    {@render pendingSaves()}
+    {@render pendingSaves()}{@render heldQueuedCard()}
     {#if overCapCount}
       <div class="st-banner warn">document full: {overCapCount} frame{overCapCount === 1 ? "" : "s"} past the {FLIPNOTE_MAX_FRAMES}-frame list or the 8 MiB promise. Editing and playback/export are refused until they are trimmed.</div>
     {:else if readOnlyWhy}

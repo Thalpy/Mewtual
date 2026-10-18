@@ -16,7 +16,7 @@ const { mount, unmount, flushSync } = await import("svelte");
 const { default: Studio } = await import("./Studio.svelte");
 const { default: StudioNav } = await import("./StudioNav.svelte");
 const { default: StudioPlaybackHarness } = await import("../scripts/fixtures/StudioPlaybackHarness.svelte");
-const { ensureStudio, useStudioIpc, disposeStudio, studio, studioDraftSnapshot, resetStudio, restoreStudioDraft } = await import("./studio-state.svelte.ts");
+const { ensureStudio, useStudioIpc, disposeStudio, studio, studioDraftSnapshot, resetStudio, restoreStudioDraft, saveStudio } = await import("./studio-state.svelte.ts");
 const a = id32(1), b = id32(2), frame = id32(3), cid = id64(4);
 
 test("editor Play starts all six frames and frame-one sound again after stopping on frame three", async () => {
@@ -216,5 +216,99 @@ test("held work for a document the Index does not list is still one sidebar clic
     assert.equal(ipc.calls.filter(c => c.cmd === "studio_apply").length, 0);
     [...target.querySelectorAll<HTMLButtonElement>("button")].find(n => n.textContent?.trim() === "Save")!.click(); flushSync(); await settle();
     assert.equal(session.saves.length, 0, notices.join("; ")); assert.equal(fps, 9);
+  } finally { for (const s of mounted) await unmount(s); disposeStudio(); target.remove(); }
+});
+
+// Re-review of 13e338eb, finding 2: with the document read failing, the editor showed only the read
+// error and its read retry, while the exact-request retry and discard lived in another branch, so a
+// restored queue that vetoed leaving could not be resolved from the editor at all.
+test("with the document read failing, restored queued and uncertain edits keep their Save, retry and discard", async () => {
+  for (const restored of ["uncertain", "queued-discard", "queued-save"] as const) {
+    const ipc = fakeIpc(), pixels = pixBytes(), notices: string[] = [], held = deferred<unknown>();
+    let readsFail = false, holdApply = restored === "uncertain";
+    ipc.on("studio_list", () => ({ ...ordinaryView(indexContent({ objects: { [a]: indexEntry({ title: "A" }) } })), group: "deadbeef" }));
+    ipc.on("studio_read", () => { if (readsFail) throw new Error("actor busy"); return { ...ordinaryView(flipnoteContent({ frames: [{ id: frame, cid, bytes: pixels.length }] })), group: "deadbeef" }; });
+    ipc.on("request_blob_bounded", () => ({ bytes: pixels.length, bytes_b64: b64(pixels) }));
+    ipc.on("studio_apply", () => holdApply ? held.promise : assert.fail("nothing may be sent while the document cannot be read"));
+    useStudioIpc(ipc, 5000); const session = ensureStudio(ME);
+    const settle = async () => { for (let i = 0; i < 12; i++) { session.flush(); await new Promise(resolve => setImmediate(resolve)); flushSync(); } };
+    const target = document.createElement("div"); document.body.append(target);
+    const surfaces = () => [
+      mount(StudioNav, { target, props: { me: ME, server: SERVER, channel: CHANNEL, onopen: () => {}, onnotice: (text: string) => notices.push(text) } }),
+      mount(Studio, { target, props: { me: ME, server: SERVER, channel: CHANNEL, nameOf: () => "member", colorOf: () => "#fff", onnotice: (text: string) => notices.push(text) } }),
+    ];
+    let mounted = surfaces(); flushSync();
+    const choose = (title: string) => { const button = [...target.querySelectorAll<HTMLButtonElement>(".studio-obj")].find(n => n.querySelector(".nm")?.textContent === title); assert.ok(button, target.textContent!); button.click(); flushSync(); };
+    const within = (selector: string, label: string) => [...target.querySelectorAll<HTMLButtonElement>(`${selector} button`)].find(n => n.textContent?.trim() === label);
+    try {
+      await settle(); choose("A"); await settle();
+      session.setFps(a, 7);
+      if (restored === "uncertain") { void session.save().catch(() => {}); await settle(); }
+      const json = studioDraftSnapshot()!;
+      for (const s of mounted) await unmount(s);
+      resetStudio(); holdApply = false; readsFail = true;
+      restoreStudioDraft(json); mounted = surfaces(); flushSync(); await settle();
+      choose("A"); await settle();
+      assert.equal(session.doc?.object, a, notices.join("; ")); assert.match(target.textContent!, /could not read this flipnote: actor busy/);
+      if (restored === "uncertain") {
+        assert.ok(within("[data-held-save]", "retry same request"), target.textContent!);
+        within("[data-held-save]", "discard")!.click(); flushSync(); within("[data-held-save]", "discard for real")!.click(); flushSync();
+      } else {
+        assert.ok(within("[data-held-queued]", "Save"), target.textContent!);
+        if (restored === "queued-discard") {
+          within("[data-held-queued]", "discard")!.click(); flushSync(); within("[data-held-queued]", "discard for real")!.click(); flushSync();
+        } else {
+          // Save cannot read the document either: refused as not written, and the refusal's own
+          // retry and discard appear beside the read error rather than replacing it. A discard
+          // armed before the Save does not carry over to the record's new state.
+          within("[data-held-queued]", "discard")!.click(); flushSync();
+          within("[data-held-queued]", "Save")!.click(); flushSync(); await settle();
+          assert.equal(session.saves[0].status, "blocked"); assert.match(target.textContent!, /could not read this flipnote/);
+          assert.ok(within("[data-held-save]", "retry same request"), target.textContent!);
+          assert.equal(within("[data-held-save]", "discard for real"), undefined, "the earlier arming does not survive the status change");
+          within("[data-held-save]", "discard")!.click(); flushSync(); within("[data-held-save]", "discard for real")!.click(); flushSync();
+        }
+      }
+      await settle();
+      assert.equal(session.saves.length, 0, `${restored}: the edit was resolved from the editor`);
+      await saveStudio(); // leaving is no longer vetoed
+    } finally { for (const s of mounted) await unmount(s); disposeStudio(); target.remove(); }
+  }
+});
+
+// Adversarial review of the read-error fix: the held card's Save called session.save(), which sent
+// every document's restored work (held precisely until the member acts on it) and was refused by
+// any other document's uncertain record.
+test("a document's Save sends only that document's restored edits; other documents' stay held", async () => {
+  const c = id32(6), ipc = fakeIpc(), pixels = pixBytes(), notices: string[] = [];
+  ipc.on("studio_list", () => ({ ...ordinaryView(indexContent({ objects: { [a]: indexEntry({ title: "A" }), [b]: indexEntry({ title: "B" }), [c]: indexEntry({ title: "C" }) } })), group: "deadbeef" }));
+  ipc.on("studio_read", () => ({ ...ordinaryView(flipnoteContent({ frames: [{ id: frame, cid, bytes: pixels.length }] })), group: "deadbeef" }));
+  ipc.on("request_blob_bounded", () => ({ bytes: pixels.length, bytes_b64: b64(pixels) }));
+  ipc.on("studio_apply", () => ({ ...ordinaryView(flipnoteContent({ frames: [{ id: frame, cid, bytes: pixels.length }] })), group: "deadbeef" }));
+  useStudioIpc(ipc, 5000); const session = ensureStudio(ME);
+  const settle = async () => { for (let i = 0; i < 12; i++) { session.flush(); await new Promise(resolve => setImmediate(resolve)); flushSync(); } };
+  const target = document.createElement("div"); document.body.append(target);
+  const surfaces = () => [
+    mount(StudioNav, { target, props: { me: ME, server: SERVER, channel: CHANNEL, onopen: () => {}, onnotice: (text: string) => notices.push(text) } }),
+    mount(Studio, { target, props: { me: ME, server: SERVER, channel: CHANNEL, nameOf: () => "member", colorOf: () => "#fff", onnotice: (text: string) => notices.push(text) } }),
+  ];
+  let mounted = surfaces(); flushSync();
+  const choose = (title: string) => { const button = [...target.querySelectorAll<HTMLButtonElement>(".studio-obj")].find(n => n.querySelector(".nm")?.textContent === title); assert.ok(button, target.textContent!); button.click(); flushSync(); };
+  try {
+    await settle();
+    for (const [id, fps] of [[a, 7], [b, 8], [c, 9]] as const) { session.open(id); await settle(); session.setFps(id, fps); }
+    // C was being delivered when the lock landed, so it restores as uncertain.
+    const draft = JSON.parse(studioDraftSnapshot()!);
+    const interrupted = draft.records.find((r: { object: string }) => r.object === c); interrupted.status = "inflight"; interrupted.attempts = 1;
+    for (const s of mounted) await unmount(s);
+    resetStudio(); restoreStudioDraft(JSON.stringify(draft)); mounted = surfaces(); flushSync(); await settle();
+    choose("A"); await settle();
+    const card = target.querySelector("[data-held-queued]"); assert.ok(card, target.textContent!);
+    [...card.querySelectorAll<HTMLButtonElement>("button")].find(n => n.textContent?.trim() === "Save")!.click(); flushSync(); await settle();
+    assert.deepEqual(ipc.calls.filter(x => x.cmd === "studio_apply").map(x => x.args.object), [a], "only A's edit was sent");
+    const left = session.saves.map(s => [s.object, s.status]);
+    assert.deepEqual(left, [[b, "queued"], [c, "uncertain"]]);
+    assert.equal(session.awaitsExplicitSave(session.saves[0].id), true, "B is still held for its own action");
+    assert.ok(!notices.some(n => /Could not confirm the save/.test(n)), notices.join("; "));
   } finally { for (const s of mounted) await unmount(s); disposeStudio(); target.remove(); }
 });
