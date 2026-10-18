@@ -296,6 +296,16 @@ impl StudioReceiver {
                 StudioOverlaySaveVisit::Busy
             });
         };
+        // Exact accepted requests owe an unchanged-file durability barrier, not fresh admission.
+        // In particular, a corrupt auxiliary owner journal must not strand a lost Save receipt.
+        let acknowledged = server.sync.with_registry_context(|group, device, _, _| {
+            store.acknowledge_studio_closing_retry(id, group, target, device, basis, branch, &operation)
+        });
+        match acknowledged {
+            Ok(Some(saved)) => return Ok(StudioOverlaySaveVisit::Saved(Box::new(saved))),
+            Ok(None) => {},
+            Err(error) => return refused_save_visit(error),
+        }
         // Read only once new work reaches S1b. Terminal retries and kept refusals above must keep
         // working without current observed tenure (V8).
         let tenure = server.observed_owner_tenure();

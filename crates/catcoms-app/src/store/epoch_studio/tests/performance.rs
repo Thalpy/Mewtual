@@ -381,6 +381,19 @@ pub(crate) fn studio_closing_control_fixture(
 }
 
 /// Simulate loss of just the local signing journal, leaving accepted draft/intent bytes intact.
+pub(crate) fn corrupt_studio_closing_journal_fixture(
+    store: &ServerStore, server: u64, group: &[u8], target: StudioTarget,
+) {
+    let document = target.document(group).unwrap();
+    let scope = crate::store::epoch_owner::scope_bytes(server, &document).unwrap();
+    let path = store.epoch_owner_path(&scope);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// Simulate loss of just the local signing journal, leaving accepted draft/intent bytes intact.
 pub(crate) fn remove_studio_closing_journal_fixture(
     store: &ServerStore,
     server: u64,

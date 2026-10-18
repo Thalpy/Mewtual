@@ -5,6 +5,7 @@
   // across retries. Score/Sound and immutable media reuse the native Studio, patch validator,
   // bounded blob fetch and App's existing JamEngine; neither a second store nor a synth lives here.
   import { onDestroy, onMount, untrack } from "svelte";
+  import { animationFrameAt } from "./pixa-media.ts";
   import { decodePix, pixToRgba } from "./pix.ts";
   import {
     CLEAR,
@@ -51,14 +52,19 @@
   import { frameClaimState, type ClaimView, type StudioClaimActions, type StudioClaimSnapshot } from "./draw-claims.ts";
   import ScoreEditor from "./ScoreEditor.svelte";
   import StudioSound from "./StudioSound.svelte";
-  import type { JamPatch, JamTake } from "./jam-contract.ts";
+  import StudioMusic, { type MusicTrack } from "./StudioMusic.svelte";
+  import StudioSoundfont from "./StudioSoundfont.svelte";
+  import { auditionPlayback } from "./studio-audition.ts";
+  import { instrumentName, noteName } from "./studio-sound-ui.ts";
+  import { JAM_SAVED_PATCHES_MAX, type JamPatch, type JamTake } from "./jam-contract.ts";
   import { jamPatchId, validateJamPatch } from "./jam-patch.ts";
   import type { StudioAudioActions, StudioAudioState } from "./studio-audio.ts";
   import { decodePixa, type Pixa } from "./pixa.ts";
   import { JAM_TAKE_MIME } from "./jukebox.ts";
 
   let { me, server, channel, nameOf, colorOf, adapt = true, onnotice, claims = null, claimActions = null,
-    patchLibrary = [], audioActions = null, audioState = { state: "stopped", elapsedMs: 0 }, onshareScore, onsharePixa, onpostPixa } = $props<{
+    patchLibrary = [], patchShelves = [], libraryCount = 0, serverName = "", onsavePatch, onsharePatch,
+    audioActions = null, audioState = { state: "stopped", elapsedMs: 0 }, onshareScore, onsharePixa, onpostPixa } = $props<{
     me: string;
     server: number | null;
     channel: string;
@@ -71,6 +77,17 @@
     claims?: StudioClaimSnapshot | null;
     claimActions?: StudioClaimActions | null;
     patchLibrary?: readonly { name: string; patch: JamPatch }[];
+    /// The same recipes with where each lives, for the Sound tab's rack shelves: presets ship with
+    /// the app, "mine" is this device's library, "share" came from this server's encrypted share.
+    patchShelves?: readonly { name: string; patch: JamPatch; shelf: "preset" | "mine" | "share" }[];
+    /// How many recipes this device's library holds (the soundfont popup's save footer).
+    libraryCount?: number;
+    /// The server's display name for the popup's share button; empty hides sharing.
+    serverName?: string;
+    /// Keep a recipe in this device's library / seal it into the server share. Both reject with a
+    /// message when refused (library full, wrong server); absent means the action is unavailable.
+    onsavePatch?: (name: string, patch: JamPatch) => Promise<void>;
+    onsharePatch?: (name: string, patch: JamPatch, server: number) => Promise<void>;
     audioActions?: StudioAudioActions | null;
     audioState?: StudioAudioState;
     onshareScore?: (take: JamTake, server: number) => Promise<void>;
@@ -157,7 +174,13 @@
   let inspectorTab = $state<"art" | "sound" | "music" | "history">("art");
   let stampIdx = $state(0);
   let textDraft = $state("nya~");
-  const playing = $derived(audioState.state !== "stopped");
+  // A one-note audition ("hear it", the popup keyboard) runs through the same audio session as
+  // document playback, so the session reports it as playing. The editor must not treat it as
+  // one: the rack stays enabled and the timeline does not follow the audition's clock. The flag
+  // is raised before the audition starts and lowered when the session reports stopped.
+  let auditioning = $state(false);
+  $effect(() => { if (audioState.state === "stopped") auditioning = false; });
+  const playing = $derived(audioState.state !== "stopped" && !auditioning);
   let loop = $state(true);
   $effect(() => { void objectId; const score = isScore; untrack(() => { loop = !score; }); });
   let mediaBusy = $state(false), mediaReceipt = $state("");
@@ -167,6 +190,9 @@
   let fitCanvas = $state(true);
   function setZoom(z: number) { fitCanvas = false; zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.round(z))); }
   let dirty = $state(false);
+  // A selection can change before Svelte runs its effects. Pixel custody belongs to the
+  // object/frame that loaded this raster, never to the newly selected sidebar item.
+  let rasterOwner: { generation: number; object: string; frame: string } | null = null;
   let tick = $state(0); // 1 Hz for countdowns
   let paintRev = $state(0); // bumped after every raster edit so overlays repaint
 
@@ -244,7 +270,7 @@
   function openFrame(id: string, fromPlayback = false) {
     if (!model) return;
     if (!fromPlayback && playing) audioActions?.stop();
-    commit();
+    if (!commit()) return;
     frameId = id;
     loadRaster();
   }
@@ -266,6 +292,7 @@
     const r = new PixRaster(img.w, img.h, img.palette);
     r.loadFlat(img.pixels);
     raster = r;
+    rasterOwner = objectId ? { generation: session.generation, object: objectId, frame: frameId } : null;
     rasterRef = unsaved ? "unsaved" : rec ? refKey(objectId, frameId, rec.cid, rec.bytes) : "";
     undo.clear();
     dirty = false;
@@ -275,16 +302,26 @@
   /// Write the raster back as a replace_frame save if anything changed (2.9: an op only when a
   /// value changed; bursts are coalesced by committing on stroke end, not per cell). The save
   /// keeps the pixels until it lands; a failure shows up in the save card, never as lost work.
-  function commit() {
-    if (!raster || !frameId || !dirty || !model || !objectId) return;
+  function commit(): boolean {
+    if (!dirty) return true;
+    if (!raster || !rasterOwner || rasterOwner.generation !== session.generation) return false;
     try {
-      session.saveFrame(objectId, frameId, raster.encode());
+      session.saveFrame(rasterOwner.object, rasterOwner.frame, raster.encode());
       rasterRef = "unsaved";
     } catch (e) {
       onnotice(reason(e), "warn");
+      return false;
     }
     dirty = false;
+    return true;
   }
+
+  const removeCloseHandler = session.beforeDocumentClose(() => {
+    // Pointer-up normally commits; navigation can also interrupt an in-progress stroke.
+    if (!commit()) throw new Error("Could not save this drawing. Please retry before opening another flipnote.");
+    stroking = false; last = null; anchor = null; previewCells = [];
+    audioActions?.stop();
+  });
 
   function edited(changedCells: number) {
     if (!changedCells) return;
@@ -665,8 +702,10 @@
 
   $effect(() => {
     const elapsed = audioState.elapsedMs, status = audioState.state, fps = model?.fps ?? 12;
-    if (status === "playing" && frameIds.length && !isScore && !savedPreview) {
-      const id = frameIds[Math.min(frameIds.length - 1, Math.floor(elapsed * fps / 1000))];
+    if (status === "playing" && !auditioning && frameIds.length && !isScore && !savedPreview) {
+      // Sound holds/releases may outlast the pictures. Keep the pictures moving without
+      // shortening authored sound or creating another overlapping synth playback.
+      const id = frameIds[animationFrameAt(frameIds.length, fps, elapsed, loop)];
       if (id !== frameId) untrack(() => openFrame(id, true));
     }
   });
@@ -691,6 +730,61 @@
     if (!object || gen !== session.generation || session.doc?.object !== object || session.doc.objectKind !== kind || session.doc.view !== sourceView || session.mediaGeneration !== sourceEpoch) throw new Error("the recipe target changed; choose it again");
     if (kind === "score") session.setScorePatch(object, id, checked.patch); else session.setSoundPatch(object, id, checked.patch);
     return id;
+  }
+
+  // --- Sound: audition and the soundfont popup ---------------------------------------------------
+  /// Play one note of a recipe through the Studio's own audio session. No second synth path: the
+  /// note is a one-event take, so it inherits the session's gesture, scope and Deafen gates.
+  function auditionSound(patch: JamPatch, note: number, durationMs: number) {
+    if (!audioActions) { onnotice("audio playback is unavailable on this surface", "warn"); return; }
+    const group = view?.group;
+    if (!group) { onnotice("reopen this flipnote before auditioning: its group is not known yet", "warn"); return; }
+    let playback;
+    try { playback = auditionPlayback({ group, exporter: me }, patch, note, durationMs); } catch (e) { onnotice(reason(e), "warn"); return; }
+    // Raised before start: the session reports "preparing"/"playing" for this note and the
+    // editor must already know it is not document playback when that lands.
+    auditioning = true;
+    void audioActions.start("score", async () => playback, false)
+      .then((started: boolean) => { if (!started) { auditioning = false; onnotice("audition unavailable; check Deafen and try again", "warn"); } })
+      .catch((e: unknown) => { auditioning = false; onnotice(reason(e), "warn"); });
+  }
+  /// The popup edits a clone and hands back a validated recipe; `null` means closed.
+  let soundfont = $state.raw<{ name: string; initial: JamPatch } | null>(null);
+  function openSoundfont(startFrom: JamPatch | null) {
+    const seed = startFrom ?? patchLibrary[0]?.patch;
+    if (!seed) { onnotice("no recipe to start from", "warn"); return; }
+    const named = patchLibrary.find((p: { name: string; patch: JamPatch }) => p.patch === startFrom);
+    soundfont = { name: named?.name ?? "", initial: JSON.parse(JSON.stringify(seed)) as JamPatch };
+  }
+  /// "Use in <flipnote>": the recipe joins the document; it is also kept in this device's library
+  /// under its name, because the document stores descriptors and a name lives only in a library.
+  /// A full library refuses the keeping half only, and says so.
+  async function useSoundfont(name: string, patch: JamPatch) {
+    await addStudioPatch(patch);
+    if (!onsavePatch || !name.trim()) return;
+    try { await onsavePatch(name.trim(), patch); }
+    catch (e) { onnotice(`added to the flipnote; not kept in your library: ${reason(e)}`, "info"); }
+  }
+  async function shareSoundfont(name: string, patch: JamPatch) {
+    const scope = session.scope;
+    if (!onsharePatch || !scope) throw new Error("sharing is unavailable on this surface");
+    await onsharePatch(name, patch, scope.server);
+  }
+  const refusePatch = async () => { throw new Error("unavailable on this surface"); };
+  /// Scores of this channel, for the Music tab's picker and for naming a linked track.
+  const musicTracks = $derived.by((): MusicTrack[] => {
+    void studio.rev;
+    const m = session.indexModel;
+    if (!m) return [];
+    return [...m.entries, ...m.overflow, ...m.deleted].filter((e) => e.kind === "score")
+      .map((e) => ({ id: e.id, title: e.title, createdBy: e.createdBy, where: e.where }));
+  });
+  /// The timeline's sfx lane: one pill per frame naming the first marker (and how many more).
+  function laneMarkers(frame: string): { label: string; author: string; count: number } | null {
+    const here = model?.sound.sfx.filter((s) => s.frame === frame) ?? [];
+    if (!here.length) return null;
+    const first = here[0];
+    return { label: `${instrumentName(model?.sound.patches[first.patch], patchLibrary)} · ${noteName(first.note)}`, author: first.source.author, count: here.length };
   }
   async function exportMedia(kind: "pixa" | "gif") {
     if (mediaBusy || !objectId) return;
@@ -959,7 +1053,7 @@
     const t = setInterval(() => { tick++; }, 1000);
     return () => clearInterval(t);
   });
-  onDestroy(() => { audioActions?.stop(); commit(); claimActions?.release(); claimActions?.cancelAsk(); });
+  onDestroy(() => { removeCloseHandler(); audioActions?.stop(); commit(); claimActions?.release(); claimActions?.cancelAsk(); });
 
   // --- Keys --------------------------------------------------------------------------------------
   function onKey(e: KeyboardEvent) {
@@ -1024,13 +1118,17 @@
       </div>
     {/if}
 {/snippet}
-{#snippet historyRail()}
+<!-- The document's standing in shared history: one line, read from the view, never inferred. -->
+{#snippet historyStatus()}
             {#if view}
               <p class="st-hist"><i class={view.awaitingTenureReceipt || view.phase === "closing" ? "warn" : view.phase === "fault" ? "danger" : "ok"}></i>
                 {view.awaitingTenureReceipt ? "Local draft" : view.phase === "fault" ? "History needs repair" : view.phase === "closing" ? "Updating shared history" : "Saved on this device"}
               </p>
               {#if view.phase === "fault"}<p>Ask the owner to check Studio in Server settings.</p>{/if}
             {/if}
+{/snippet}
+<!-- Retained local drafts, retained versions and recovery walks: everything below the status. -->
+{#snippet historyRail()}
             {#if overlay?.loading}
               <p class="micro wrap">checking this device for a retained local draft…</p>
             {:else if overlay?.error}
@@ -1197,7 +1295,7 @@
     <div class="st-score">
       {@render pendingSaves()}
       <div class="st-itabs"><button class="st-itab" class:on={inspectorTab !== "history"} onclick={() => inspectorTab = "music"}>Music</button><button class="st-itab" class:on={inspectorTab === "history"} onclick={() => inspectorTab = "history"}>History</button></div>
-      {#if inspectorTab === "history"}{@render historyRail()}{:else}
+      {#if inspectorTab === "history"}{@render historyStatus()}{@render historyRail()}{:else}
       <label class="micro st-score-loop"><input type="checkbox" aria-label="Loop whole authored score" bind:checked={loop} disabled={playing} /><span>loop whole authored score</span></label>
       <span class="st-card-acts"><button class="st-btn" disabled={mediaBusy || playing} onclick={() => downloadMedia()}>download .jamtake</button><button class="st-btn" disabled={mediaBusy || playing || !onshareScore} onclick={() => downloadMedia(true)}>share .jamtake</button></span>
       {#if mediaReceipt}<div class="st-banner info wrap">{mediaReceipt}</div>{/if}
@@ -1464,52 +1562,77 @@
               {/if}
             {/if}
           {:else if inspectorTab === "sound"}
-            {#key objectId}<StudioSound model={model.sound} frame={frameId} readonlyReason={playing ? "Stop playback before editing" : readOnlyWhy} {patchLibrary}
-              onhistory={() => inspectorTab = "history"}
+            {#key objectId}<StudioSound model={model.sound} frame={frameId} frameNumber={frameIndex + 1} frameIndexOf={(id) => frameIds.indexOf(id) + 1}
+              {who} {tint} readonlyReason={playing ? "Stop playback before editing" : readOnlyWhy} library={patchShelves}
               onpatch={addStudioPatch} onsfx={(sfx) => guard(() => session.setSfx(objectId, { ...sfx, id: sfx.id ?? session.newId(), frame: frameId }))}
-              onremove={(id) => guard(() => session.removeSfx(objectId, id))} onremovepatch={(id) => guard(() => session.removeSoundPatch(objectId, id))} {onnotice} />{/key}
+              onremove={(id) => guard(() => session.removeSfx(objectId, id))} onremovepatch={(id) => guard(() => session.removeSoundPatch(objectId, id))}
+              onaudition={auditionSound} onnew={openSoundfont} {onnotice} />{/key}
           {:else if inspectorTab === "music"}
-            <h4>Music</h4>
-            <label class="st-field">Music track <select value={model.sound.score ?? ""} disabled={!!readOnlyWhy || playing} onchange={(e) => guard(() => session.linkScore(objectId, e.currentTarget.value || null))}><option value="">None</option>{#each session.indexModel?.entries.filter((e) => e.kind === "score") ?? [] as s}<option value={s.id}>{s.title || "Untitled track"}</option>{/each}{#if model.sound.score && !session.indexModel?.entries.some((e) => e.id === model.sound.score)}<option value={model.sound.score}>Unavailable track</option>{/if}</select></label>
-            {#if model.sound.scoreRegister?.conflicts.length}<p class="warn">Two music tracks were chosen. Select the one you want before playing.</p>{/if}
-            {#if model.sound.score}<button class="st-btn" disabled={playing} onclick={() => { commit(); const id = model?.sound.score; if (id) { session.open(id); studio.selected = id; } }}>Edit music</button>{/if}
-            <button class="st-btn" disabled={playing || !!readOnlyWhy} onclick={() => guard(() => { commit(); const id = session.createScore("New music track"); session.open(id, {read: false}); studio.selected = id; })}>New music track</button>
+            <StudioMusic model={model.sound} frameCount={frames.length} fps={model.fps} tracks={musicTracks} {patchLibrary} {who} {tint}
+              readonlyReason={playing ? "Stop playback before editing" : readOnlyWhy}
+              onlink={(id) => guard(() => session.linkScore(objectId, id))}
+              onopen={(id) => guard(() => { session.open(id); studio.selected = id; })}
+              oncreate={() => guard(() => { session.prepareDocumentClose(); const id = session.createScore("New music track"); session.open(id, { read: false }); studio.selected = id; })} />
           {:else}
-            <h4>History</h4>
-            <details class="st-history-section"><summary>Saved flipnotes ({model.sound.exports.length})</summary>
-            <button class="st-btn" disabled={mediaBusy || playing} onclick={() => exportMedia("pixa")}>Save a version</button>
-            {#each model.sound.exports.slice(0, 8) as exported, i}<div class="st-card"><p>Version {i + 1} · {fmtKib(exported.bytes)}</p><span class="st-card-acts"><button class="st-btn" disabled={mediaBusy || playing || !audioActions} onclick={() => publishedMedia(exported.id, "play")}>Play</button><button class="st-btn" disabled={mediaBusy} onclick={() => publishedMedia(exported.id, "download")}>Download</button><button class="st-btn" disabled={mediaBusy || !onsharePixa} onclick={() => publishedMedia(exported.id, "share")}>Share</button><button class="st-btn" disabled={!!readOnlyWhy || playing} onclick={() => guard(() => session.removePublishedPixa(objectId, exported.id))}>Remove</button></span><details><summary>File details</summary><code>{exported.cid}</code></details></div>{/each}
-            {#if savedPreview}<div class="st-card"><p class="micro wrap">Saved export preview · actual immutable package frames, not the current edited timeline</p><canvas width={FLIPNOTE_W} height={FLIPNOTE_H} style="width:100%;image-rendering:pixelated" use:thumbBytes={{ bytes: savedPreview.frames[Math.min(savedPreview.frames.length - 1, Math.floor(audioState.elapsedMs * savedPreview.fps / 1000))], rev: 0 }}></canvas><button class="st-btn" onclick={() => { audioActions?.stop(); savedPreview = null; }}>close saved preview</button></div>{/if}
-            </details>
-            <details class="st-history-section"><summary>Flipnote settings</summary>
-            <div class="st-sec nxt">size</div>
+            <!-- History reads top to bottom as one story: what this flipnote is, the immutable
+                 versions it has been saved as, the retained edits recovery can bring back, the
+                 sound evidence behind the readiness flags, and finally the one destructive act. -->
+            <div class="st-sec">this flipnote</div>
+            {@render historyStatus()}
             <div class="st-bar"><i style="width: {Math.min(100, (totalBytes / FLIPNOTE_FRAME_BYTES_PROMISE) * 100)}%"></i></div>
             <p class="micro wrap">{fmtKib(totalBytes)} of 8 mib declared · {frames.length} of {FLIPNOTE_MAX_FRAMES} frames{#if model.deletedFrames.length} · {model.deletedFrames.length} deleted kept in history{/if}</p>
-
-            <div class="st-sec nxt">entry</div>
             {#if entry}
               <div class="st-opt"><span class="lb">expiry</span>
                 <button type="button" class="st-tile txt" class:on={entry.expiry.kind === "never"} disabled={!!readOnlyWhy} onclick={() => setExpiry({ kind: "never" })}>keeps</button>
                 <button type="button" class="st-tile txt" class:on={entry.expiry.kind === "unrecorded"} disabled={!!readOnlyWhy} onclick={() => setExpiry({ kind: "unrecorded" })}>unset</button>
                 <input type="date" class="st-input date" class:on={entry.expiry.kind === "at"} value={expiryDate(entry.expiry)} disabled={!!readOnlyWhy} onchange={(e) => { const ms = Date.parse(e.currentTarget.value); if (Number.isFinite(ms)) setExpiry({ kind: "at", ms }); }} aria-label="expiry date" />
               </div>
-              <p class="micro wrap">{expiryText(entry.expiry)}{#if entry.expiryConflicts} · another expiry was set at the same time{/if} · recorded now, enforced later</p>
-              <div class="st-opt"><span class="lb">delete</span>
-                {#if deleteArmed === deleteKey && deleteKey}
-                  <button type="button" class="st-btn danger" onclick={deleteFlipnote}>delete this flipnote</button>
-                  <button type="button" class="st-btn ghost" onclick={() => (deleteArmed = "")}>cancel</button>
-                {:else}
-                  <button type="button" class="st-btn ghost" disabled={!!readOnlyWhy} onclick={() => (deleteArmed = deleteKey)}>delete…</button>
-                {/if}
-              </div>
-              <p class="micro wrap">This removes the flipnote from the channel list.</p>
+              <p class="micro wrap">{expiryText(entry.expiry)}{#if entry.expiryConflicts} · another expiry was set at the same time{/if}</p>
             {:else}
-              <p class="micro wrap">this flipnote has no entry in the channel index on this device{#if pending.some((s) => s.kind === "create")} · it appears when the create lands{/if}</p>
+              <p class="micro wrap">no entry in the channel index on this device{#if pending.some((s) => s.kind === "create")} · it appears when the create lands{/if}</p>
             {/if}
 
+            <div class="st-sec nxt">versions <span class="n">· {model.sound.exports.length}</span></div>
+            <button type="button" class="st-btn" style="align-self: flex-start" disabled={mediaBusy || playing} onclick={() => exportMedia("pixa")}>save a version</button>
+            {#each model.sound.exports.slice(0, 8) as exported, i (exported.id)}
+              <div class="st-ver">
+                <p class="st-hist"><i class="info"></i>v{i + 1} · {fmtKib(exported.bytes)}{#if exported.expiry} · expires {new Date(exported.expiry).toLocaleDateString()}{/if}</p>
+                <span class="st-card-acts">
+                  <button type="button" class="st-link" disabled={mediaBusy || playing || !audioActions} onclick={() => publishedMedia(exported.id, "play")}>play</button>
+                  <button type="button" class="st-link" disabled={mediaBusy} onclick={() => publishedMedia(exported.id, "download")}>download</button>
+                  <button type="button" class="st-link" disabled={mediaBusy || !onsharePixa} onclick={() => publishedMedia(exported.id, "share")}>share</button>
+                  <button type="button" class="st-link" disabled={!!readOnlyWhy || playing} onclick={() => guard(() => session.removePublishedPixa(objectId, exported.id))}>remove</button>
+                </span>
+                <details class="st-fold"><summary class="micro">file details</summary><code>{exported.cid}</code></details>
+              </div>
+            {/each}
+            {#if savedPreview}<div class="st-card"><p class="micro wrap">saved version · the immutable package, not the timeline you are editing</p><canvas width={FLIPNOTE_W} height={FLIPNOTE_H} style="width:100%;image-rendering:pixelated" use:thumbBytes={{ bytes: savedPreview.frames[Math.min(savedPreview.frames.length - 1, Math.floor(audioState.elapsedMs * savedPreview.fps / 1000))], rev: 0 }}></canvas><button type="button" class="st-btn" onclick={() => { audioActions?.stop(); savedPreview = null; }}>close saved preview</button></div>{/if}
+
+            <div class="st-sec nxt">previous edits</div>
+            {@render historyRail()}
+
+            <details class="st-fold">
+              <summary class="st-sec nxt">evidence · sound</summary>
+              <StudioSound history model={model.sound} frame={frameId} frameNumber={frameIndex + 1} frameIndexOf={(id) => frameIds.indexOf(id) + 1} {who} {tint} readonlyReason={readOnlyWhy} library={patchShelves}
+                onpatch={addStudioPatch} onsfx={() => {}} onremove={(id) => guard(() => session.removeSfx(objectId, id))} onremovepatch={(id) => guard(() => session.removeSoundPatch(objectId, id))}
+                onaudition={auditionSound} onnew={openSoundfont} {onnotice} />
             </details>
-            <details class="st-history-section" open><summary>Previous edits and recovery</summary>{@render historyRail()}</details>
-            <details class="st-history-section"><summary>Sound history</summary><StudioSound history model={model.sound} frame={frameId} readonlyReason={readOnlyWhy} {patchLibrary} onpatch={addStudioPatch} onsfx={() => {}} onremove={(id) => guard(() => session.removeSfx(objectId, id))} onremovepatch={(id) => guard(() => session.removeSoundPatch(objectId, id))} {onnotice} /></details>
+            <details class="st-fold">
+              <summary class="st-sec nxt danger">danger</summary>
+              {#if entry}
+                <div class="st-card-acts">
+                  {#if deleteArmed === deleteKey && deleteKey}
+                    <button type="button" class="st-btn danger" onclick={deleteFlipnote}>delete this flipnote</button>
+                    <button type="button" class="st-btn ghost" onclick={() => (deleteArmed = "")}>cancel</button>
+                  {:else}
+                    <button type="button" class="st-btn ghost" disabled={!!readOnlyWhy} onclick={() => (deleteArmed = deleteKey)}>delete…</button>
+                  {/if}
+                </div>
+                <p class="micro wrap">removes it from the channel list · retained history stays recoverable</p>
+              {:else}
+                <p class="micro wrap">nothing to delete until the index entry lands</p>
+              {/if}
+            </details>
           {/if}
         </div>
       </div>
@@ -1580,10 +1703,18 @@
       <div class="st-sfxlane">
         <span class="micro lb">sfx</span>
         {#each frames as f (f.id)}
-          <span class="cell" title={`${model.sound.sfx.filter((s) => s.frame === f.id).length} sound markers`}>{#if model.sound.sfx.some((s) => s.frame === f.id)}♪{/if}</span>
+          {@const lane = laneMarkers(f.id)}
+          <span class="cell" title={lane ? `${lane.count} sound marker${lane.count === 1 ? "" : "s"} · ${lane.label}` : ""}>
+            {#if lane}<i class="pill" style="background: {tint(lane.author)}">{lane.label}{#if lane.count > 1} +{lane.count - 1}{/if}</i>{/if}
+          </span>
         {/each}
       </div>
     </div>
+  {/if}
+  {#if soundfont}
+    <StudioSoundfont name={soundfont.name} initial={soundfont.initial} startFrom={patchLibrary} {libraryCount} libraryMax={JAM_SAVED_PATCHES_MAX}
+      targetName={model?.title || "this flipnote"} recipeCount={model?.sound.patchSlots.filter((s) => !s.removed).length ?? 0} recipeMax={FLIPNOTE_MAX_PATCHES} shareName={onsharePatch ? serverName : ""}
+      onaudition={(patch, note) => auditionSound(patch, note, 400)} onuse={useSoundfont} onsave={onsavePatch ?? refusePatch} onshare={shareSoundfont} {onnotice} onclose={() => (soundfont = null)} />
   {/if}
 </div>
 
@@ -1594,11 +1725,15 @@
   .st-score-loop { display: flex; align-items: center; gap: 6px; margin: 6px 0; white-space: normal; }
   .st-score-loop input { width: auto; flex: none; margin: 0; }
   .st-score-loop span { min-width: 0; }
-  .st-history-section { margin: 12px 0; }
-  .st-history-section > summary { cursor: pointer; padding: 6px 0; color: var(--text-2); }
-  .st-history-section code { overflow-wrap: anywhere; font-size: .7rem; }
-  .st-field { display: flex; flex-direction: column; gap: 6px; font-size: .8rem; margin: 12px 0; }
-  .st-field select { width: 100%; padding: 8px; font: inherit; }
+  /* History folds: the summary IS the section rule, so a closed fold reads like a heading. */
+  .st-fold > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 6px; }
+  .st-fold > summary::-webkit-details-marker { display: none; }
+  .st-fold > summary::after { content: ""; margin-left: auto; width: 6px; height: 6px; border-right: 1px solid var(--faint); border-bottom: 1px solid var(--faint); transform: rotate(45deg); }
+  .st-fold[open] > summary::after { transform: rotate(-135deg); }
+  .st-fold > summary.micro { padding: 2px 0; }
+  .st-fold code { overflow-wrap: anywhere; font-size: .7rem; }
+  .st-sec .n { color: var(--faint); font-weight: 400; }
+  .st-sec.danger { color: var(--danger); }
   .studio { display: flex; flex-direction: column; flex: 1; min-height: 0; outline: none; gap: 0; }
   .studio-empty { padding: 2rem; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
   .micro { font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); white-space: nowrap; }
@@ -1762,5 +1897,8 @@
   .st-thumb .corner { position: absolute; right: 0; top: 0; width: 0; height: 0; border-top: 9px solid var(--warn); border-left: 9px solid transparent; }
   .st-sfxlane { display: flex; align-items: center; gap: 6px; }
   .st-sfxlane .lb { width: 24px; font-size: 0.5rem; }
-  .st-sfxlane .cell { width: 64px; height: 8px; border-bottom: 1px solid var(--border-soft); position: relative; flex: none; }
+  .st-sfxlane .cell { width: 64px; height: 12px; border-bottom: 1px solid var(--border-soft); position: relative; flex: none; display: flex; align-items: center; }
+  /* One pill per frame under its thumbnail: the first marker's name and note, tinted by who set
+     it. The pill is as wide as the frame; a longer label clips rather than pushing the lane. */
+  .st-sfxlane .pill { display: block; width: 100%; height: 11px; line-height: 11px; border-radius: 999px; padding: 0 5px; box-sizing: border-box; font-family: var(--mono); font-size: 0.5rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--on-accent); white-space: nowrap; overflow: hidden; text-overflow: clip; font-style: normal; }
 </style>

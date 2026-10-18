@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
-import { PixaPreviewManager, type PixaPreviewOptions, type PixaPreviewScope } from "./pixa-preview.ts";
-import { decodePixa, encodePixa } from "./pixa.ts";
+import { PixaPreviewManager, type PixaPreviewFile, type PixaPreviewOptions, type PixaPreviewScope } from "./pixa-preview.ts";
+import { decodePixa, encodePixa, PIXA_MAX_BYTES } from "./pixa.ts";
 import { legacyJamPatch } from "./jam-patch.ts";
 import { deferred, settle } from "./studio-testkit.ts";
 
@@ -143,5 +143,94 @@ test("a refused sound start remains retryable and a successful retry clears the 
     button(host, "Play sound").click(); await wait(() => host.textContent!.includes("Sound unavailable"));
     button(host, "Play sound").click(); await wait(() => !!button(host, "Mute"));
     assert.equal(attempts, 2); assert.doesNotMatch(host.textContent!, /Sound unavailable/);
+  } finally { h.destroy(); }
+});
+
+// The transport strip. Its buttons carry their names in a visually hidden span, so the same
+// `button(host, "Pause")` lookups above keep working; these tests pin the readouts around them.
+test("the strip's frame counter, progress and elapsed readouts follow the clock and hold with Pause", async () => {
+  const h = harness(), host = h.create(), canvas = host.querySelector("canvas")!;
+  const strip = host.querySelector<HTMLElement>(".pixa-tr")!, frame = host.querySelector(".pixa-frame")!, time = host.querySelector(".pixa-time")!;
+  // The style engine serialises "50.0%" as "50%", so read the bar back as a number.
+  const fill = host.querySelector<HTMLElement>(".pixa-prog > i")!, width = () => Number.parseFloat(fill.style.width);
+  try {
+    assert.equal(strip.hidden, true, "no transport before a package arrives");
+    h.visible(host); await wait(() => canvas.dataset.pixaFrame === "0");
+    assert.equal(strip.hidden, false);
+    assert.equal(frame.textContent, "1 / 3"); assert.equal(time.textContent, "0.0 s"); assert.equal(width(), 0);
+    h.setNow(150); await wait(() => canvas.dataset.pixaFrame === "1");
+    assert.equal(frame.textContent, "2 / 3"); assert.equal(time.textContent, "0.1 s"); assert.equal(width(), 50);
+    h.setNow(290); await wait(() => time.textContent === "0.2 s");
+    assert.equal(frame.textContent, "3 / 3"); assert.equal(width(), 96.7);
+    // The icon is decorative: the button's whole text is the action name, and the figure records
+    // the pause so the stylesheet keeps the strip on screen.
+    const pause = button(host, "Pause"); assert.equal(pause.querySelector("svg")!.textContent, ""); assert.equal(pause.title, "Pause");
+    pause.click(); assert.equal(host.dataset.paused, "true"); assert.equal(pause, button(host, "Play"));
+    h.setNow(1500); await sleep(60);
+    assert.equal(canvas.dataset.pixaFrame, "2"); assert.equal(frame.textContent, "3 / 3"); assert.equal(time.textContent, "0.2 s"); assert.equal(width(), 96.7);
+    button(host, "Play").click(); assert.equal(host.dataset.paused, undefined); assert.equal(button(host, "Pause"), pause);
+    // Leaving the viewport releases the package and the strip with it.
+    h.visible(host, false); assert.equal(strip.hidden, true); assert.equal(host.dataset.paused, undefined);
+  } finally { h.destroy(); }
+});
+
+test("Open hands the host this card's file and current scope from the strip and the facts link; without a handler neither exists", async () => {
+  const opened: { file: PixaPreviewFile; scope: PixaPreviewScope }[] = []; let membership = 1;
+  const h = harness({ open: (file, target) => { opened.push({ file, scope: target }); },
+    current: target => target.membership === membership, renewScope: previous => ({ ...previous, membership }) });
+  const host = h.create();
+  try {
+    h.visible(host); await wait(() => !host.querySelector("canvas")!.hidden);
+    button(host, "Open").click(); button(host, "open").click();
+    assert.equal(opened.length, 2);
+    for (const call of opened) { assert.equal(call.file.cid, "0".repeat(64)); assert.equal(call.file.name, "loop.pixa"); assert.deepEqual(call.scope, scope); }
+    assert.equal(host.querySelector(".pixa-facts button.pixa-link"), button(host, "open"), "the text link sits in the facts line");
+    // After a membership edge an explicit Play renews the card's scope; Open must pass the renewed
+    // one so the host compares against what the card actually observes now.
+    membership = 2; h.manager.reset(); button(host, "Play flipnote").click(); await wait(() => !host.querySelector("canvas")!.hidden);
+    button(host, "Open").click(); assert.equal(opened.length, 3); assert.equal(opened[2].scope.membership, 2);
+  } finally { h.destroy(); }
+  const bare = harness(), plain = bare.create();
+  try {
+    bare.visible(plain); await wait(() => !plain.querySelector("canvas")!.hidden);
+    assert.equal(button(plain, "Open"), undefined); assert.equal(button(plain, "open"), undefined);
+  } finally { bare.destroy(); }
+});
+
+test("the facts line names the file and its size up front and adds frames, fps, sound and expiry once known", async () => {
+  const h = harness({ expiryText: file => `expires 30d (${file.name})` }), host = h.create();
+  const facts = () => host.querySelector(".pixa-facts")!.textContent!;
+  try {
+    assert.equal(host.querySelector(".pixa-facts .pixa-name")!.textContent, "loop.pixa");
+    assert.match(facts(), /4\.9 kib/); assert.doesNotMatch(facts(), /frames/); assert.match(facts(), /expires 30d \(loop\.pixa\)/);
+    assert.equal(host.querySelector<HTMLElement>(".pixa-sounds")!.hidden, true);
+    h.visible(host); await wait(() => !host.querySelector("canvas")!.hidden);
+    assert.match(facts(), /3 frames · 10 fps · 4\.9 kib/); assert.match(facts(), /♪ 1 sounds/);
+    assert.equal(facts().includes("♫ music"), value.take.events.length > 0, "music is claimed only when the take carries events");
+    assert.equal(host.querySelector<HTMLElement>(".pixa-sounds")!.hidden, false);
+    // Content behind a cid is immutable, so the facts survive the package's release.
+    h.visible(host, false); assert.match(facts(), /3 frames · 10 fps/);
+  } finally { h.destroy(); }
+  const bare = harness({ expiryText: () => "" }), plain = bare.create();
+  try { assert.equal(plain.querySelectorAll(".pixa-facts .micro").length, 2, "an empty expiry adds no fact"); } finally { bare.destroy(); }
+});
+
+test("data-state follows idle, loading, ready, error and blocked so the veil can be styled truthfully", async () => {
+  const pending = deferred<typeof value>(); let reads = 0;
+  const h = harness({ reader: { read: () => ++reads === 1 ? pending.promise : Promise.reject(new Error("gone")), cancel() {} } }), host = h.create();
+  try {
+    assert.equal(host.dataset.state, "idle"); assert.equal(button(host, "Play flipnote").hidden, false);
+    h.visible(host); assert.equal(host.dataset.state, "loading"); assert.match(host.textContent!, /fetching 4\.9 kib/);
+    assert.equal(button(host, "Play flipnote").hidden, true);
+    pending.resolve(value); await wait(() => host.dataset.state === "ready"); assert.doesNotMatch(host.textContent!, /fetching/);
+    h.visible(host, false); assert.equal(host.dataset.state, "idle");
+    h.visible(host); await wait(() => host.dataset.state === "error");
+    assert.match(host.textContent!, /Couldn’t load this flipnote/); assert.equal(button(host, "Play flipnote").hidden, false);
+    assert.equal(host.querySelector("canvas")!.hidden, true);
+    const big = h.manager.create({ cid: "f".repeat(64), name: "huge.pixa", size: PIXA_MAX_BYTES + 1 }, scope); document.body.append(big);
+    try {
+      assert.equal(big.dataset.state, "blocked"); assert.match(big.textContent!, /too large to preview/); assert.equal(button(big, "Play flipnote").disabled, true);
+      h.visible(big); await settle(2); assert.equal(big.dataset.state, "blocked"); assert.equal(reads, 2, "an oversized card never reads");
+    } finally { big.remove(); }
   } finally { h.destroy(); }
 });

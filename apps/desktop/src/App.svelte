@@ -247,9 +247,11 @@
     shouldSignalHostCandidate, type MappedPort,
   } from "./callroutes";
   import { JamEngine, jamSequenceAccepted, type JamArchivalPlayback } from "./jam-engine";
-  import { JamTakeTransport } from "./jam-take-transport.ts";
+  import { archivalDjPosition, JamTakeTransport } from "./jam-take-transport.ts";
   import { JamTakeSuppression } from "./jam-take-suppression.ts";
   import PixaCanvas from "./PixaCanvas.svelte";
+  import PixaViewer from "./PixaViewer.svelte";
+  import { draftAttachments, removeDraftAttachment } from "./draft-attachments.ts";
   import ServerStudioSettings from "./ServerStudioSettings.svelte";
   import { PixaPreviewManager, type PixaPreviewScope } from "./pixa-preview.ts";
   import { decodePixaBase64, mayFetchPixa, PixaMediaCache, PixaFileReader, PIXA_MIME } from "./pixa-media.ts";
@@ -3752,6 +3754,11 @@
     for (const file of files) if (!index.has(file.cid)) index.set(file.cid, file);
     return index;
   });
+  // Flipnote embeds in the chat draft, for the composer's attachment chips. Only embeds whose
+  // cid names a listed .pixa qualify; other embeds keep rendering as they always have.
+  const draftFlipnotes = $derived(draftAttachments(draft)
+    .map((a) => ({ ...a, file: filesByCid.get(a.cid) }))
+    .filter((a): a is typeof a & { file: UiFile } => !!a.file && mediaKind(a.file.name, a.file.mime) === "pixa"));
   // Whether ≥1 live peer previously proved it could serve authenticated catch-up (a conservative
   // availability hint refreshed with the file list). This is stricter than `onlineMembers`.
   let hasPeers = $state(false);
@@ -11622,6 +11629,15 @@
       startAudio: (token, value, target) => startStudioAudio("flipnote", async () => encodePixa(value), true, 0, { token, scope: target }),
       stopAudio: token => { if (inlinePixaAudioOwner?.token === token) stopStudioAudio(); },
       audioState: token => inlinePixaAudioOwner?.token === token && studioAudioState.state !== "stopped" ? studioAudioState : null,
+      // "open" on a card opens the global viewer for the listed file, only while the card's
+      // channel is still the one on screen: a card left in a detached log must not open a
+      // viewer for another server's share.
+      open: (file, target) => {
+        const current = pixaPreviewScope(), listed = filesByCid.get(file.cid);
+        if (!current || current.server !== target.server || current.channel !== target.channel || !listed) return;
+        void openPixaViewer(listed);
+      },
+      expiryText: file => { const listed = filesByCid.get(file.cid); return listed ? fileExpiryText(listed) : ""; },
     });
     return pixaPreviews.create(file, scope, explicit);
   }
@@ -11656,12 +11672,20 @@
       if (current() && pixa) pixaViewer = { generation, server, file, pixa, error: "" };
     } catch (e) { if (current()) pixaViewer = { generation, server, file, pixa: null, error: String(e) }; }
   }
-  function playPixaViewer() {
+  /// The viewer's Play: sound and frames from the held frame, looping when the viewer says so.
+  /// The same Studio audio session as everything else; a false result means it could not start
+  /// (Deafen, scope, cancellation) and the viewer shows its own line for that.
+  function playPixaViewerFrom(offsetMs: number, loop: boolean): Promise<boolean> {
     const value = pixaViewer?.pixa;
-    if (!value) return;
-    void studioAudioActions.start("flipnote", async () => encodePixa(value), true)
-      .then(started => { if (!started && pixaViewer?.pixa === value) toast("Playback is unavailable; check Deafen and press Play to try again", "info"); })
-      .catch(e => toast(String(e), "err"));
+    if (!value) return Promise.resolve(false);
+    return studioAudioActions.start("flipnote", async () => encodePixa(value), loop, offsetMs)
+      .catch(e => { toast(String(e), "err"); return false; });
+  }
+  /// A listing's expiry as the card/viewer facts show it; empty when the share never recorded one.
+  function fileExpiryText(f: UiFile): string {
+    if (!f.expires_known) return "";
+    if (f.expires === null) return "keeps";
+    return `expires ${relDay(f.expires, nowTick)}`;
   }
   $effect(() => {
     // Closing on both directions of these lifecycle edges prevents an old async read or
@@ -13559,6 +13583,77 @@
   let jamSaved = $state(loadJamSaved());
   const studioPatchLibrary = $derived([...JAM_PRESETS.map((p) => ({ name: p.name, patch: p.patch })), ...jamSaved,
     ...(myPatch ? [{ name: myPatchName || "current creator recipe", patch: myPatch }] : [])]);
+  // --- The Studio rack's "from the share" shelf -------------------------------------------------
+  // `.jampatch` files of the active server's share, read while the Studio surface is open so a
+  // flipnote can audition and use a recipe a friend sealed into the share. Bounded on purpose:
+  // only files the share's trust rule already allows to auto-load (the same gate as media
+  // embeds), only patch-sized files (the 4 KiB cap), at most a dozen or so per listing, one
+  // read at a time, validated through the one patch validator. Keyed by cid; a server switch
+  // drops the shelf, and a late read for a server that is no longer active is discarded.
+  const STUDIO_SHARED_PATCH_LIMIT = 16;
+  let studioSharedPatches = $state.raw<Map<string, { name: string; patch: JamPatch }>>(new Map());
+  let studioSharedServer = -1;
+  let studioSharedReading = false;
+  const studioSharedPending = new Set<string>();
+  $effect(() => {
+    const server = activeServerId, open = view === "studio";
+    const candidates = files.filter((f) => isJamPatchFile(f.name, f.mime) && mayFetchJamPatch(f.size) && mayAutoLoadSharedFile(f, server)).slice(0, STUDIO_SHARED_PATCH_LIMIT);
+    untrack(() => {
+      if (server === null) return;
+      if (studioSharedServer !== server) { studioSharedServer = server; studioSharedPatches = new Map(); studioSharedPending.clear(); }
+      if (!open) return;
+      for (const f of candidates) if (!studioSharedPatches.has(f.cid)) studioSharedPending.add(f.cid);
+      void drainStudioSharedPatches(server, candidates);
+    });
+  });
+  async function drainStudioSharedPatches(server: number, candidates: UiFile[]) {
+    if (studioSharedReading) return;
+    studioSharedReading = true;
+    try {
+      for (const f of candidates) {
+        if (!studioSharedPending.has(f.cid) || studioSharedPatches.has(f.cid)) continue;
+        if (activeServerId !== server || studioSharedServer !== server || view !== "studio") return;
+        try {
+          const { value: base64 } = await invokeDebugged<string>("download_file", { server, cid: f.cid });
+          if (activeServerId !== server || studioSharedServer !== server) return;
+          const text = decodeJamPatchBase64(base64);
+          const checked = text === null ? null : parseJamPatchJson(text);
+          if (checked?.ok) {
+            const next = new Map(studioSharedPatches);
+            next.set(f.cid, { name: jamPatchFileName(f.name), patch: checked.patch });
+            studioSharedPatches = next;
+          }
+        } catch { /* a share file this build cannot read is simply not on the shelf */ }
+        finally { studioSharedPending.delete(f.cid); }
+      }
+    } finally { studioSharedReading = false; }
+  }
+  const studioPatchShelves = $derived([
+    ...JAM_PRESETS.map((p) => ({ name: p.name, patch: p.patch, shelf: "preset" as const })),
+    ...jamSaved.map((p) => ({ name: p.name, patch: p.patch, shelf: "mine" as const })),
+    ...[...studioSharedPatches.values()].map((p) => ({ name: p.name, patch: p.patch, shelf: "share" as const })),
+  ]);
+  /// The soundfont popup's "save to my library": the call drawer's library, same cap, same rule
+  /// that a typed name you already have replaces that tile and nothing else is ever evicted.
+  async function saveStudioPatch(name: string, patch: JamPatch): Promise<void> {
+    const checked = validateJamPatch(JSON.parse(JSON.stringify(patch)));
+    if (!checked.ok) throw new Error(checked.error);
+    const typed = name.trim().slice(0, JAM_PATCH_NAME_MAX_CHARS).toUpperCase();
+    if (!jamKeepSaved(typed || jamUniqueSavedName("PATCH"), checked.patch)) {
+      throw new Error(`your patch library is full at ${JAM_SAVED_PATCHES_MAX}: delete one, or save over a name you already have`);
+    }
+  }
+  /// The popup's "share": the same sealed `.jampatch` the call drawer shares, into the flipnote's
+  /// server share. The Studio names the server it is scoped to; it must still be the active one,
+  /// because the upload path writes into the active server's share.
+  async function shareStudioPatch(name: string, patch: JamPatch, server: number): Promise<void> {
+    if (activeServerId !== server) throw new Error("switch to the flipnote's server first: the patch belongs in that share");
+    const checked = validateJamPatch(JSON.parse(JSON.stringify(patch)));
+    if (!checked.ok) throw new Error(checked.error);
+    const fileName = `${jamTakeSlug(name.trim() || "patch")}${JAM_PATCH_EXT}`;
+    await addSharedFile(new File([checked.canonical], fileName, { type: JAM_PATCH_MIME }), "", fileName, JAM_PATCH_MIME);
+    void refreshFiles();
+  }
   let jamSaveName = $state("");
   let jamCustomOpen = $state(false); // saved patches expand DOWN, never off the row's right edge
   function jamSavePatch() {
@@ -13876,19 +13971,23 @@
     const transport = new JamTakeTransport(engine, jamPlaybackPreparationQueue);
     transport.setLevel(deckCid ? jukeVol : 1);
     const scope = { generation: gen, server, channel, membership: studioMembership };
-    const started = pixa ? await transport.startPixa(pixa, Math.max(0, offsetMs), scope, takePlaybackIsRemote(deckCid), current)
-      : await transport.start(take, Math.max(0, offsetMs), scope, takePlaybackIsRemote(deckCid), current);
+    const offsetAtStart = deckCid && !jukeIsDj() ? () => Math.max(0, jukeTarget() * 1000) : undefined;
+    const started = pixa ? await transport.startPixa(pixa, Math.max(0, offsetMs), scope, takePlaybackIsRemote(deckCid), current, offsetAtStart)
+      : await transport.start(take, Math.max(0, offsetMs), scope, takePlaybackIsRemote(deckCid), current, offsetAtStart);
     if (!current() || !started) { transport.stop(); if (jamPendingPlay?.gen === gen) jamPendingPlay = null; return; }
     // A slider may move across hashing; this exact capability gets the latest receiver level,
     // including lazy lanes that have not constructed their first source bus yet.
     transport.setLevel(deckCid ? jukeVol : 1);
-    jamPlay = { id: localId, deckCid, transport, startMs: performance.now(), baseMs: Math.max(0, offsetMs),
+    jamPlay = { id: localId, deckCid, transport, startMs: performance.now(), baseMs: transport.elapsedMs,
       timer: setInterval(() => { void jamPlayTick(); }, 40), catchupTimer: undefined, done: false, draining: false };
     jamPendingPlay = null; jamPlayingId = localId;
+    // Re-announce the actual seated audio clock using the existing press sequence. Peers must
+    // not project the DJ's download/preparation wait as if it had already played.
+    if (deckCid && jukeIsDj()) jukeTick();
     void jamPlayTick();
   }
   function jamPlayTake(entry: { id: number; take: JamTake }) { void jamStartTakePlayback(entry.take, 0, entry.id, null); }
-  function jamPlayElapsed(): number { return jamPlay ? jamPlay.baseMs + performance.now() - jamPlay.startMs : 0; }
+  function jamPlayElapsed(): number { return jamPlay ? jamPlay.transport.elapsedMs : 0; }
   async function jamPlayTick() {
     const pl = jamPlay;
     if (!pl || !jamEngine) { jamStopPlayback(); return; }
@@ -15995,12 +16094,15 @@
   // play); as a listener it is the DJ's offset aged on my own clock.
   function jukePos(): number {
     if (!jukeAdopted || !jukeNow) return 0;
-    // A take has no element clock: ageing the adopted offset on the local clock is the position
-    // for EVERYONE, the DJ included (the scheduler runs on the same clock, so they agree). A
+    // Archival playback has an actual synth clock once prepared. The DJ holds its pressed
+    // offset while fetching/preparing, then renders and announces that clock. A
     // linked video is the same shape of problem for a different reason: its clock lives in
     // another document and arrives late, so the projection is the base answer and the player's
     // own reading refines it when there is a fresh one.
     const takeOnDeck = jukeKind === "take" || jukeKind === "pixa";
+    if (takeOnDeck && jukeIsDj()) {
+      return archivalDjPosition(jukeAdopted.off, jamPlay?.deckCid === jukeNow.cid ? jamPlay.transport : null);
+    }
     const videoOnDeck = jukeKind === "linked-video" || jukeKind === "linked-audio";
     const projected = deckPosition({
       isDj: takeOnDeck || videoOnDeck ? false : jukeIsDj(),
@@ -26123,6 +26225,21 @@
                 <button type="button" disabled={sending || retryingPendingSends} onclick={() => retryPendingSends()}>Retry pending messages</button>
               </details>
             {/if}
+            {#if draftFlipnotes.length}
+              <!-- What the draft carries as flipnote embeds, as chips. The draft text stays the
+                   only source of truth (the durable send reads it as written); a chip's ✕ only
+                   edits that text, and a stale chip never cuts anything else (draft-attachments). -->
+              <div class="composer-attachments" aria-label="Attached flipnotes">
+                {#each draftFlipnotes as a (a.start)}
+                  <span class="composer-attach">
+                    <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="3" width="13" height="10" rx="1"></rect><path d="M4.5 3v10M11.5 3v10M1.5 6.5h3M11.5 6.5h3M1.5 9.5h3M11.5 9.5h3"></path></svg>
+                    <span>{a.file.name}</span>
+                    <span class="meta">attached · {fmtSize(a.file.size)}</span>
+                    <button type="button" aria-label={`Remove ${a.file.name} from the message`} onclick={() => (draft = removeDraftAttachment(draft, a))}>✕</button>
+                  </span>
+                {/each}
+              </div>
+            {/if}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <form
               class="composer"
@@ -27021,7 +27138,7 @@
           </div>
         {:else if view === "studio"}
           {#if StudioSurface}
-            <StudioSurface me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} nameOf={nameOfIdentity} colorOf={colorOfIdentity} onnotice={studioNotice} claims={studioClaimScope ? drawClaimSnapshot : null} claimActions={studioClaimActions} patchLibrary={studioPatchLibrary} audioActions={studioAudioActions} audioState={studioAudioState} onshareScore={shareStudioScore} onsharePixa={shareStudioPixa} onpostPixa={postStudioPixa} />
+            <StudioSurface me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} nameOf={nameOfIdentity} colorOf={colorOfIdentity} onnotice={studioNotice} claims={studioClaimScope ? drawClaimSnapshot : null} claimActions={studioClaimActions} patchLibrary={studioPatchLibrary} patchShelves={studioPatchShelves} libraryCount={jamSaved.length} serverName={cur?.name ?? ""} onsavePatch={saveStudioPatch} onsharePatch={shareStudioPatch} audioActions={studioAudioActions} audioState={studioAudioState} onshareScore={shareStudioScore} onsharePixa={shareStudioPixa} onpostPixa={postStudioPixa} />
           {:else}
             <h2>Studio</h2>
             <p class="muted">Loading the studio…</p>
@@ -30223,21 +30340,10 @@
     {/if}
 
     {#if pixaViewer}
-      <div class="overlay" role="presentation" use:dismissOnBackdrop={closePixaViewer}>
-        <div class="overlay-card" role="dialog" aria-modal="true" aria-label="Flipnote viewer" tabindex="-1">
-          <header class="overlay-head"><h2>{pixaViewer.file.name}</h2><button class="ghost" aria-label="Close flipnote viewer" onclick={closePixaViewer}>✕</button></header>
-          <div class="overlay-body">
-            {#if pixaViewer.error}<p role="alert">{pixaViewer.error}</p>
-            {:else if pixaViewer.pixa}
-              <div style="aspect-ratio:4/3;max-height:55vh"><PixaCanvas pixa={pixaViewer.pixa} elapsedMs={studioAudioState.elapsedMs} label={pixaViewer.file.name} /></div>
-              <p class="muted small">{pixaViewer.pixa.frames.length} frames · {pixaViewer.pixa.fps} FPS · music and sound play through Mewtual</p>
-              <button class="primary" disabled={studioAudioState.state === "preparing" || callDeafened} onclick={playPixaViewer}>{studioAudioState.state === "preparing" ? "Preparing…" : "Play from start"}</button>
-              <button class="ghost" disabled={studioAudioState.state === "stopped"} onclick={stopStudioAudio}>Stop</button>
-              {#if callDeafened}<p class="muted small">Turn off Deafen before playing.</p>{/if}
-            {:else}<p role="status">Loading and validating animation…</p>{/if}
-          </div>
-        </div>
-      </div>
+      <PixaViewer name={pixaViewer.file.name} pixa={pixaViewer.pixa} error={pixaViewer.error} bytes={pixaViewer.file.size}
+        author={nameOf(pixaViewer.file.author)} place={cur ? `#${activeName()}` : ""} expiry={fileExpiryText(pixaViewer.file)}
+        audioState={studioAudioState} deafened={callDeafened}
+        onplay={playPixaViewerFrom} onstop={stopStudioAudio} ondownload={() => { if (pixaViewer) void downloadFile(pixaViewer.file); }} onclose={closePixaViewer} />
     {/if}
 
     {#if fileInfo}

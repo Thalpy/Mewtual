@@ -1706,12 +1706,305 @@ img.emoji {
   color: var(--accent);
 }
 
-.pixa-preview { margin: 8px 0; padding: 8px; max-width: 360px; border: 1px solid var(--border); border-radius: var(--r); background: var(--panel); }
-.pixa-preview canvas { display: block; width: 100%; aspect-ratio: 4 / 3; image-rendering: pixelated; background: var(--bg-0); }
-.pixa-preview [hidden] { display: none; }
-.pixa-preview figcaption { font-size: .75rem; overflow-wrap: anywhere; margin: 5px 0; }
-.pixa-preview-controls { display: flex; gap: 8px; flex-wrap: wrap; }
-.pixa-preview-status { font-size: .75rem; color: var(--muted); margin: 0; }
+/* Flipnote card. Built imperatively by pixa-preview.ts, whose DOM contract names every class used
+   here; replaces the whole old .pixa-preview* block (card, canvas, [hidden], figcaption, -controls,
+   -status). Pixels at 1.5x (192 x 144 -> 288 x 216) with the transport strip overlaid on their
+   bottom edge and a mono facts line underneath. The strip fades while the loop runs unhovered and
+   always shows when the card is paused, hovered or holds keyboard focus, so its controls are never
+   lost to someone who is not pointing at it. Tokens only; the state borders read data-state. */
+.pixa-preview {
+  width: 100%;
+  max-width: 288px;
+  margin: 6px 0 2px;
+  padding: 0;
+}
+
+/* The stage keeps its 4:3 box in every state, so a fetching or idle card never reflows the chat
+   column when its pixels arrive. Veil children (status sentence, manual load button) are ordinary
+   flow content centred as a column; the canvas and the strip are lifted out of flow below. */
+.pixa-stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  box-sizing: border-box;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  padding: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: var(--px-bg, var(--bg-0));
+  line-height: 1.3;
+}
+
+.pixa-stage canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+
+/* Dashed while nothing is on screen; info-tinted while a fetch is in flight. */
+.pixa-preview[data-state="idle"] .pixa-stage,
+.pixa-preview[data-state="error"] .pixa-stage,
+.pixa-preview[data-state="blocked"] .pixa-stage {
+  border-style: dashed;
+}
+
+.pixa-preview[data-state="loading"] .pixa-stage {
+  border-style: dashed;
+  border-color: var(--info);
+}
+
+/* The veil sentence. It also appears over live pixels (a refused sound start), hence the backdrop
+   and the stacking above the canvas. An empty sentence takes no room in the veil column. */
+.pixa-stage > .pixa-preview-status {
+  position: relative;
+  z-index: 1;
+  max-width: 100%;
+  margin: 0;
+  padding: 3px 7px;
+  border-radius: var(--r);
+  background: color-mix(in oklab, var(--bg-0) 78%, transparent);
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  color: var(--muted);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.pixa-stage > .pixa-preview-status:empty {
+  display: none;
+}
+
+.pixa-preview[data-state="loading"] .pixa-preview-status {
+  color: var(--info);
+}
+
+.pixa-preview[data-state="error"] .pixa-preview-status {
+  color: var(--warn);
+}
+
+/* The manual "Play flipnote" button keeps the app's ghost look; it only needs to sit above the
+   (hidden) canvas layer. */
+.pixa-stage > .pixa-load {
+  position: relative;
+  z-index: 1;
+}
+
+/* Transport strip over the bottom edge of the pixels. */
+.pixa-tr {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  background: color-mix(in oklab, var(--bg-0) 78%, transparent);
+  line-height: 1;
+  transition: opacity 160ms ease;
+}
+
+/* Fade only while the loop runs and nobody is hovering or focused inside the card. A paused card
+   sets data-paused and keeps its strip, so Play is never hidden from the person who pressed Pause. */
+.pixa-preview[data-state="ready"]:not([data-paused]):not(:hover):not(:focus-within) .pixa-tr {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pixa-tr {
+    transition: none;
+  }
+}
+
+:root[data-motion="off"] .pixa-tr {
+  transition: none;
+}
+
+/* Strip buttons: a 10px glyph in a 20px square. Resets the global accent button look. The text
+   name lives in the .pixa-sr span, so the glyph may change without renaming the control. */
+.pixa-tb {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.pixa-tb:hover {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+
+.pixa-tb:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The sound button while this card owns the audio session. */
+.pixa-tb.on {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent-hi);
+}
+
+.pixa-tb svg {
+  width: 10px;
+  height: 10px;
+  fill: currentColor;
+}
+
+.pixa-tb.ol svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.pixa-frame,
+.pixa-time {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.pixa-frame {
+  color: var(--text);
+}
+
+.pixa-time {
+  color: var(--muted);
+}
+
+.pixa-prog {
+  flex: 1;
+  min-width: 20px;
+  height: 3px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--text) 18%, transparent);
+  overflow: hidden;
+}
+
+.pixa-prog i {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--accent);
+}
+
+/* Facts line under the pixels: name, counts, sound, expiry, open. */
+.pixa-facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 6px;
+  min-width: 0;
+  margin: 4px 0 0;
+  padding: 0;
+}
+
+/* A faint dot before every fact but the first. Hidden facts render neither themselves nor their
+   dot, and the inline-block keeps the open link's underline off the dot. */
+.pixa-facts > * + *::before {
+  content: "·";
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--faint);
+  text-decoration: none;
+}
+
+.pixa-facts .micro {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* The file name keeps its real case (it is peer-chosen) and may wrap anywhere. */
+.pixa-name {
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.pixa-facts .pixa-sounds {
+  color: var(--accent-hi);
+}
+
+/* The "open" text link is a button for keyboard reach; strip the global button chrome. */
+.pixa-link {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: none;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  text-decoration: underline;
+  line-height: inherit;
+  cursor: pointer;
+}
+
+.pixa-link:hover {
+  background: none;
+  color: var(--text);
+}
+
+.pixa-link:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Visually hidden text for the strip buttons: read by assistive technology and by textContent,
+   never painted. The clip pair covers engines with and without clip-path. */
+.pixa-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Last so it outranks every display rule above: hidden canvas, strip, sound button and facts
+   stay hidden. */
+.pixa-preview [hidden] {
+  display: none;
+}
 .embed-media {
   display: block;
   max-width: 320px;
@@ -17933,4 +18226,61 @@ button.id-pick .avatar { width: 28px; height: 28px; flex: none; }
   user-select: none;
   -webkit-user-drag: none;
   flex: none;
+}
+
+/* ============================================================
+   Composer attachment chips: one per flipnote embed in the draft.
+   The draft text is the attachment; the chip only shows it and
+   offers to take it out (App.svelte, draft-attachments.ts).
+   ============================================================ */
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 0 4px;
+}
+.composer-attach {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 3px 6px;
+  border: 1px solid var(--accent);
+  border-radius: var(--r);
+  background: var(--accent-dim);
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  color: var(--text);
+  max-width: 100%;
+  min-width: 0;
+}
+.composer-attach > span:not(.meta) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-attach .ico {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  color: var(--accent-hi);
+}
+.composer-attach .meta {
+  font-size: 0.56rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent-hi);
+  white-space: nowrap;
+}
+/* The global `button` rule paints accent-on-accent; the ✕ is a text glyph on the chip. */
+.composer-attach button {
+  background: transparent;
+  border: none;
+  padding: 0 0 0 2px;
+  color: var(--faint);
+  font: inherit;
+  cursor: pointer;
+  line-height: 1;
+}
+.composer-attach button:hover {
+  color: var(--danger);
 }

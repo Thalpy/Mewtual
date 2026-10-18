@@ -107,7 +107,7 @@ export class StudioPlaybackController {
    * `horizonMs` is authored length beyond the last event (a Score grid end). The shared deck passes
    * none: jam-take:v1 carries no such length, so a received take ends with its last release.
    */
-  async startTake(take: JamTake, offsetMs = 0, horizonMs = 0): Promise<boolean> { return this.start(take, undefined, offsetMs, horizonMs); }
+  async startTake(take: JamTake, offsetMs = 0, horizonMs = 0, offsetAtStart?: () => number): Promise<boolean> { return this.start(take, undefined, offsetMs, horizonMs, offsetAtStart); }
 
   /** Byte-capped package decode reuses PIX/take validators before any synthesis is prepared. */
   async startPixa(bytes: Uint8Array, offsetMs = 0): Promise<boolean> {
@@ -117,11 +117,11 @@ export class StudioPlaybackController {
   }
 
   /** The same validated archival schedule for a decoded package; this grants no media consent. */
-  async startAnimation(take: JamTake, animation: JamArchivalAnimation, offsetMs = 0): Promise<boolean> {
-    return this.start(take, animation, offsetMs, 0);
+  async startAnimation(take: JamTake, animation: JamArchivalAnimation, offsetMs = 0, offsetAtStart?: () => number): Promise<boolean> {
+    return this.start(take, animation, offsetMs, 0, offsetAtStart);
   }
 
-  private async start(take: unknown, animation: JamArchivalAnimation | undefined, offsetMs: number, horizonMs: number): Promise<boolean> {
+  private async start(take: unknown, animation: JamArchivalAnimation | undefined, offsetMs: number, horizonMs: number, offsetAtStart?: () => number): Promise<boolean> {
     this.stop();
     if (!this.scope || this.deafened || !Number.isFinite(offsetMs) || offsetMs < 0 ||
       !Number.isSafeInteger(horizonMs) || horizonMs < 0 || horizonMs > TAKE_MAX_DURATION_MS) return false;
@@ -151,6 +151,16 @@ export class StudioPlaybackController {
     }
     const admitted = this.engine.archivalPlaybackPlan(capability);
     if (!admitted) { this.engine.revokeArchivalPlayback(capability); this.stateValue = "stopped"; return false; }
+    // A room listener must include download AND synth preparation time in its seek. Sample
+    // only after the capability is ready; the DJ/local viewer keeps its pressed offset.
+    try { if (offsetAtStart) offsetMs = offsetAtStart(); }
+    catch { this.engine.revokeArchivalPlayback(capability); this.stateValue = "stopped"; return false; }
+    if (!current() || !Number.isFinite(offsetMs) || offsetMs < 0) {
+      this.engine.revokeArchivalPlayback(capability); this.stateValue = "stopped"; return false;
+    }
+    if (offsetMs >= completionMs(admitted, horizonMs)) {
+      this.engine.revokeArchivalPlayback(capability); this.stateValue = "stopped"; this.completedValue = true; return true;
+    }
     const seek = planJamArchivalSeek(admitted, offsetMs);
     const origin = this.nowMs();
     if (!Number.isFinite(origin)) { this.engine.revokeArchivalPlayback(capability); this.stateValue = "stopped"; return false; }

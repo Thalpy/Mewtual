@@ -2,9 +2,9 @@
   import type { Pixa } from "./pixa.ts";
   import { pixaFrameAt } from "./pixa-media.ts";
   import { decodePix, pixToRgba } from "./pix.ts";
-  let { pixa, elapsedMs = 0, label = "Animation" }: { pixa: Pixa; elapsedMs?: number; label?: string } = $props();
+  let { pixa, elapsedMs = 0, loop = false, label = "Animation" }: { pixa: Pixa; elapsedMs?: number; loop?: boolean; label?: string } = $props();
   let canvas: HTMLCanvasElement;
-  const frame = $derived(pixaFrameAt(pixa, elapsedMs));
+  const frame = $derived(pixaFrameAt(pixa, elapsedMs, loop));
   $effect(() => {
     // Only the selected encoded frame expands. No 999-frame raster collection is retained.
     const image = decodePix(pixa.frames[frame]);

@@ -286,6 +286,23 @@ async fn native_studio_superseded_view_is_rejected_after_conversion() {
 fn rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(81)
 }
+
+#[tokio::test]
+async fn native_studio_refresh_during_create_keeps_the_durable_save_receipt() {
+    let (_root, state, actor, task, drain) = fixture().await;
+    let saved = invoke_custody(&state, 7, InvokeRequest::Document(create()), |response| {
+        let InvokeResponse::Document(Some(read)) = response else { panic!("missing created view"); };
+        let value = read_view(read)?;
+        // The overlay/recovery refresh can start before the renderer receives Create/Save.
+        // This used to replace the same token and turn a successful first-frame Save uncertain.
+        drop(requests::ViewRequest::begin(&state, 7, target()));
+        Ok(value)
+    }).await.unwrap();
+    assert_eq!(saved["content"]["title"]["selected"]["value"], "moon cat");
+    actor.shutdown().await;
+    task.await.unwrap();
+    drain.await.unwrap();
+}
 fn channel() -> String {
     catcoms_app::channel_id("general").to_string()
 }

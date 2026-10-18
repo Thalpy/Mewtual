@@ -13,6 +13,83 @@ use catcoms_replication::studio::{
 };
 use catcoms_replication::{CloseRecord, LocalIntent, ReplError};
 
+impl ServerStore {
+    /// Acknowledge only an already accepted Closing request, without opening auxiliary journals
+    /// or admitting any new storage. The authenticated intent file is flushed unchanged before
+    /// answering; a lost response must remain resolvable even if the owner journal is corrupt.
+    /// Unmatched requests still require the complete inventory and ordinary mint/admission path.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn acknowledge_studio_closing_retry(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        basis: [u8; 32],
+        branch: [u8; 32],
+        operation: &DomainOp,
+    ) -> Result<Option<StudioOverlaySave>, AppError> {
+        self.acknowledge_studio_closing_retry_with_io(
+            server, group, target, device, basis, branch, operation, &mut WriteHooks::None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store) fn acknowledge_studio_closing_retry_with_io(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        basis: [u8; 32],
+        branch: [u8; 32],
+        operation: &DomainOp,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<Option<StudioOverlaySave>, AppError> {
+        current_save_member(group, device)?;
+        let logical = target.document(&group.group_id()).map_err(invalid)?;
+        match target {
+            StudioTarget::Index { .. } => { IndexOp::decode_domain(&logical, operation, &device.device_id()).map_err(invalid)?; }
+            StudioTarget::Flipnote { .. } => { FlipnoteOp::decode_domain(&logical, operation).map_err(invalid)?; }
+            StudioTarget::Score { .. } => { ScoreOp::decode_domain(&logical, operation).map_err(invalid)?; }
+        }
+        let scope = super::super::epoch_intents::scope_bytes(server, &logical)?;
+        let (state, bytes) = self.read_epoch_intent_record_structural(&scope, &logical)?;
+        let Some(metadata) = state.handoff_metadata() else { return Ok(None); };
+        let intent = LocalIntent { author: device.device_id(), operation: operation.clone() };
+        let acknowledged = match metadata.classify_request(target, branch, &intent).map_err(classify_save_error)? {
+            StudioOverlayRequestClass::Transferred(outcome) if outcome.basis == basis => Some(StudioOverlaySave::HandedOff(outcome)),
+            StudioOverlayRequestClass::Disposed(manifest) if manifest.basis == basis && matches!(manifest.provenance, StudioOverlayProvenance::Closing) => Some(StudioOverlaySave::Disposed(manifest)),
+            StudioOverlayRequestClass::Transferred(_) => return Err(studio_refused(StudioOverlaySaveRefusal::NonceConflict, "accepted transfer retry has a different basis")),
+            StudioOverlayRequestClass::Disposed(manifest) => return Err(studio_refused(
+                if matches!(manifest.provenance, StudioOverlayProvenance::Closing) { StudioOverlaySaveRefusal::NonceConflict } else { StudioOverlaySaveRefusal::OtherKindDraft },
+                "disposed draft retry has a different basis or draft kind",
+            )),
+            StudioOverlayRequestClass::Active => {
+                let overlay = state.overlay().ok_or_else(|| invalid("classified Active with no live branch"))?;
+                overlay.exact_retry(basis, &intent).map_err(classify_save_error)?
+                    .then(|| StudioOverlaySave::Acknowledged { basis, accepted: overlay.accepted() })
+            }
+            StudioOverlayRequestClass::Unmatched => metadata.completed_retry(target, basis, &intent)
+                .map_err(classify_save_error)?.map(StudioOverlaySave::HandedOff),
+        };
+        if acknowledged.is_none() { return Ok(None); }
+        if !matches!(metadata.provenance(), StudioOverlayProvenance::Closing) {
+            return Err(studio_refused(StudioOverlaySaveRefusal::OtherKindDraft, "accepted draft was not Closing work"));
+        }
+        let bytes = bytes.ok_or_else(|| invalid("accepted Closing request has no intent file"))?;
+        let path = self.epoch_intent_path(&scope);
+        // Even a failed flush invalidates captured accounting. This path never replaces or
+        // re-encodes the record, so it needs no replacement capacity or partial budget.
+        self.intent_generation = Arc::new(());
+        let mutation = self.epoch_mutation_guard();
+        hooks.before_sync(WriteTag::Intents, &path, bytes)?;
+        mutation.sync_intent(&path, bytes)?;
+        hooks.after_sync(WriteTag::Intents, &path)?;
+        Ok(acknowledged)
+    }
+}
+
 /// The stale-branch refusal, worded for the fresh basis's kind. The Closing wording is exactly what
 /// it was before Flow S was parameterized.
 fn stale_branch(fresh: &OwnedOverlayBasis) -> AppError {

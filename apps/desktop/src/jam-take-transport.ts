@@ -8,6 +8,11 @@ export interface JamTakeTransportEngine extends StudioPlaybackEngine {
   setArchivalPlaybackLevel(capability: JamArchivalPlayback, level: number): boolean;
 }
 
+/** The DJ's picture and advertised position use its synth clock, holding the press while loading. */
+export function archivalDjPosition(pressedSeconds: number, transport: Pick<JamTakeTransport, "state" | "elapsedMs"> | null): number {
+  return transport?.state === "playing" ? transport.elapsedMs / 1000 : pressedSeconds;
+}
+
 /**
  * Shared/local take adapter to the same archival renderer used by Studio. The shared deck keeps
  * its existing authenticated call/transport lease outside this class; imported metadata grants
@@ -44,18 +49,18 @@ export class JamTakeTransport {
   get state() { return this.controller.state; }
   get completed(): boolean { return this.controller.completed; }
   get elapsedMs(): number { return this.controller.elapsedMs; }
-  async start(take: JamTake, offsetMs: number, scope: StudioPlaybackScope, remote: boolean, isCurrent: () => boolean): Promise<boolean> {
+  async start(take: JamTake, offsetMs: number, scope: StudioPlaybackScope, remote: boolean, isCurrent: () => boolean, offsetAtStart?: () => number): Promise<boolean> {
     this.stop(); this.remote = remote; this.current = isCurrent;
     if (!isCurrent() || (remote && this.engine.context.state !== "running")) return false;
     this.controller.setScope(scope, false);
-    return this.controller.startTake(take, offsetMs);
+    return this.controller.startTake(take, offsetMs, 0, offsetAtStart);
   }
   /** PIXA carries authored animation/SFX into the SAME capability, remote gates and seek owner. */
-  async startPixa(pixa: Pixa, offsetMs: number, scope: StudioPlaybackScope, remote: boolean, isCurrent: () => boolean): Promise<boolean> {
+  async startPixa(pixa: Pixa, offsetMs: number, scope: StudioPlaybackScope, remote: boolean, isCurrent: () => boolean, offsetAtStart?: () => number): Promise<boolean> {
     this.stop(); this.remote = remote; this.current = isCurrent;
     if (!isCurrent() || (remote && this.engine.context.state !== "running")) return false;
     this.controller.setScope(scope, false);
-    return this.controller.startAnimation(pixa.take, { fps: pixa.fps, frameCount: pixa.frames.length, sfx: pixa.sfx }, offsetMs);
+    return this.controller.startAnimation(pixa.take, { fps: pixa.fps, frameCount: pixa.frames.length, sfx: pixa.sfx }, offsetMs, offsetAtStart);
   }
   setLevel(level: number): boolean {
     if (!Number.isFinite(level) || level < 0 || level > 1) return false;

@@ -37,6 +37,40 @@ async function harness(opts: { ipc?: FakeIpc } = {}) {
 
 const docView = (frames = [{ id: F1, cid: id64(1), bytes: pixBytes(1).length }], extra: { epochId?: string; phase?: string } = {}) => ordinaryView(flipnoteContent({ frames }), extra);
 
+test("switching commits the previous editor first and retains an uncertain Save offscreen", async () => {
+  const h = await harness(), other = id32(0x0c), ack = deferred<unknown>(), pix = pixBytes(2);
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => docView());
+  h.ipc.on("publish_pix", () => ({ cid: id64(2), bytes: pix.length }));
+  h.ipc.on("studio_apply", () => ack.promise);
+  h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.open(OBJ); await h.sync();
+  let dirty = true;
+  const remove = h.session.beforeDocumentClose(() => {
+    assert.equal(h.session.doc?.object, OBJ, "flush precedes replacing the editor");
+    if (dirty) { h.session.saveFrame(OBJ, F1, pix); dirty = false; }
+  });
+  h.session.open(other); remove(); await h.sync();
+  assert.equal(dirty, false); assert.equal(h.session.doc?.object, other);
+  assert.equal(h.calls("studio_apply")[0].args.object, OBJ);
+  ack.reject(new Error("response lost")); await h.sync();
+  assert.equal(h.session.doc?.object, other, "old completion cannot replace the new editor");
+  assert.equal(h.session.saves[0].status, "uncertain");
+  assert.deepEqual(h.session.unsavedPix(OBJ, F1), pix);
+  const exact = h.calls("studio_apply")[0].args;
+  h.ipc.on("studio_apply", () => docView()); h.session.retry(h.session.saves[0].id); await h.sync();
+  assert.deepEqual(h.calls("studio_apply")[1].args, exact); assert.equal(h.session.saves.length, 0);
+  assert.equal(h.session.doc?.object, other);
+});
+
+test("a failed editor flush vetoes switching and keeps the current document", async () => {
+  const h = await harness(); h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.open(OBJ, { read: false });
+  const old = h.session.doc;
+  const remove = h.session.beforeDocumentClose(() => { throw new Error("pixels could not be queued"); });
+  assert.throws(() => h.session.open(id32(0x0c)), /could not be queued/);
+  assert.equal(h.session.doc, old); assert.throws(() => h.session.open(null), /could not be queued/);
+  remove(); h.session.open(null); assert.equal(h.session.doc, null);
+});
+
 test("setting the scope lists the channel once per coalesced window and a stale list is dropped", async () => {
   const h = await harness();
   const first = deferred<unknown>();

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { JamTakeTransport, type JamTakeTransportEngine } from "./jam-take-transport.ts";
+import { archivalDjPosition, JamTakeTransport, type JamTakeTransportEngine } from "./jam-take-transport.ts";
+import { pixaFrameAt } from "./pixa-media.ts";
 import { JamLatestTaskQueue } from "./jam-publication.ts";
 import { planJamArchivalPlayback } from "./jam-archival-plan.ts";
 import type { JamArchivalPlayback, JamPlayResult } from "./jam-engine.ts";
@@ -10,6 +11,34 @@ import { readFileSync } from "node:fs";
 import { decodePixa } from "./pixa.ts";
 const take: JamTake = { v: 1, group: "group", call: "call", met: { bpm: 120, bpb: 4 }, parts: ["author"], lanes: [{ src: 0, sn: "a".repeat(16) }], patches: [], events: [{ ms: 0, lane: 0, n: 60, on: 1, w: "sine", q: 0 }, { ms: 95_000, lane: 0, n: 60, on: 0, q: 1 }] };
 const scope = { generation: 1, server: 1, channel: "channel", membership: 1 };
+
+test("PIXA DJ pictures and announcements use the actual audio clock after delayed fetch and preparation", async () => {
+  const vector = JSON.parse(readFileSync(new URL("../../../crates/catcoms-replication/tests/fixtures/studio-export-v1.json", import.meta.url), "utf8"));
+  const p = decodePixa(Buffer.from(vector.pixaHex, "hex"));
+  const animation = { ...p, fps: 2, frames: Array(6).fill(p.frames[0]), take: { ...p.take, patches: [vector.patch] }, sfx: [{ frame: 0, patch: 0, note: 72, durationMs: 5000 }] };
+  const h = harness(), download = deferred<void>(), preparation = deferred<void>();
+  h.digest(preparation.promise);
+  assert.equal(archivalDjPosition(0, null), 0);
+  const loading = (async () => { await download.promise; return h.transport.startPixa(animation, 0, scope, false, h.current); })();
+  h.now(2000); download.resolve(); await Promise.resolve();
+  assert.equal(archivalDjPosition(0, h.transport), 0, "the DJ holds its pressed frame during preparation");
+  h.now(3000); preparation.resolve(); assert.equal(await loading, true); await h.transport.tick();
+  assert.equal(h.transport.elapsedMs, 0); assert.equal(h.events[0].age, 0);
+  assert.equal(pixaFrameAt(animation, archivalDjPosition(0, h.transport) * 1000), 0);
+  h.now(3500); await h.transport.tick();
+  assert.equal(archivalDjPosition(0, h.transport), .5);
+  assert.equal(pixaFrameAt(animation, h.transport.elapsedMs), 1);
+});
+
+test("a listener samples its seek after preparation and reconstructs the actual held sound age", async () => {
+  const h = harness(), preparation = deferred<void>(); h.digest(preparation.promise);
+  let projectedMs = 2000;
+  const pending = h.transport.start(take, projectedMs, scope, true, h.current, () => projectedMs);
+  projectedMs = 3500; h.now(1500); preparation.resolve(); assert.equal(await pending, true);
+  await h.transport.tick();
+  assert.equal(h.transport.elapsedMs, 3500); assert.equal(h.events[0].age, 3500);
+  assert.equal(h.resumes(), 0);
+});
 function harness() {
   let now = 0, resumes = 0, live = true, revoked = 0;
   const plans = new Map<JamArchivalPlayback, ReturnType<typeof planJamArchivalPlayback>>(), events: { index: number; age: number }[] = [], levels: number[] = [];

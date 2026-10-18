@@ -250,6 +250,19 @@ type BlobJob = {
 };
 
 export class StudioSession {
+  private readonly documentCloseHandlers = new Set<() => void>();
+
+  /** Flush the mounted editor before replacing its document. Throwing vetoes the change;
+   * queued saves retain their original object, pixels and retry identity offscreen. */
+  beforeDocumentClose(handler: () => void): () => void {
+    this.documentCloseHandlers.add(handler);
+    return () => { this.documentCloseHandlers.delete(handler); };
+  }
+
+  prepareDocumentClose(): void {
+    if (this.doc) for (const handler of this.documentCloseHandlers) handler();
+  }
+
   readonly ipc: StudioIpc;
   me: Hex64;
   readonly now: () => number;
@@ -619,6 +632,7 @@ export class StudioSession {
   /// Open (or re-read) a flipnote. Opening a different object drops the previous document but
   /// keeps its pending saves: they are addressed by object and finish or fail on their own.
   open(object: Hex32 | null, opts: { read?: boolean; objectKind?: StudioObjectKind } = {}): void {
+    if (this.doc && this.doc.object !== object) this.prepareDocumentClose();
     if (this.doc?.object !== object) this.mediaEpoch++;
     if (object === null) {
       if (this.doc || this.overlay) { this.doc = null; this.overlay = null; this.notify(); }

@@ -2116,14 +2116,17 @@ impl EpochInventoryProfile {
         }
     }
 
-    /// The conservative background-service rail over all five families: lower limits checked
-    /// before any record is read or reconstructed. This is exactly what
-    /// `scan_studio_receive_inventory` has always applied.
+    /// The conservative background-service rail over all five families. Cardinality is a
+    /// cumulative vault bound, not a per-visit work budget: one document can have source,
+    /// intent, recovery and owner records, including records from other local servers.
+    /// Keep it aligned with the directory bound rather than rejecting an ordinary vault at
+    /// 64 records. The byte/cold-byte, cursor-step and detached-worker rails remain separate.
+    /// Legacy synchronous consumers still drain a complete bounded scan without a deadline.
     pub fn receive() -> Self {
         Self {
             coverage: EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio,
             entry_limit: 1024,
-            record_limit: 64,
+            record_limit: 1024,
             byte_limit: STUDIO_RECEIVE_READ_BYTES,
             cold_byte_limit: Some(STUDIO_RECEIVE_COLD_BYTES),
         }
@@ -3386,7 +3389,7 @@ mod tests {
         .unwrap();
         let mut scan = store.scan_studio_receive_inventory().unwrap();
         assert_eq!(scan.cursor.entry_limit, 1024);
-        assert_eq!(scan.cursor.record_limit, 64);
+        assert_eq!(scan.cursor.record_limit, 1024);
         assert_eq!(scan.cursor.byte_limit, STUDIO_RECEIVE_READ_BYTES);
         assert_eq!(scan.cursor.cold_byte_limit, Some(STUDIO_RECEIVE_COLD_BYTES));
         let error = loop {
@@ -3398,6 +3401,25 @@ mod tests {
         assert!(error.contains("byte limit"), "{error}");
         assert_eq!(scan.cursor.progress.authenticated_bytes, 0);
         assert!(scan.finish().is_err());
+    }
+
+    #[test]
+    fn studio_receive_inventory_supports_more_than_64_authenticated_vault_records() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = open(root.path());
+        // All local servers contribute to this inventory; 64 is not a document-count limit.
+        for id in 0u64..70 {
+            let doc = document(b"group", &id.to_be_bytes());
+            stage(&mut store, 7 + id % 2, &doc, 1);
+        }
+        let mut scan = store.scan_studio_receive_inventory().unwrap();
+        let mut visits = 0;
+        while !scan.step().unwrap().complete { visits += 1; }
+        assert!(visits >= 70, "each cursor step remains limited to one record");
+        let inventory = scan.finish().unwrap();
+        assert_eq!(inventory.records().len(), 70);
+        assert_eq!(inventory.records_for_server(7, b"group").unwrap().len(), 35);
+        assert_eq!(inventory.records_for_server(8, b"group").unwrap().len(), 35);
     }
 
     #[test]

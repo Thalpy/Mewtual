@@ -69,7 +69,9 @@ export function gate7FlowExpression(golden) {
     const globalCanvas = document.querySelector('[aria-label="Flipnote viewer"] canvas');
     const redAt = (canvas, x, y) => canvas.getContext('2d').getImageData(x,y,1,1).data[0];
     out.viewerFirstFrame = globalCanvas.dataset.pixaFrame === '0'; out.viewerHasPixels = redAt(globalCanvas, 32, 64) === 249;
-    await click(button('[aria-label="Flipnote viewer"] button', 'Play from start'));
+    // The viewer's transport has several icon buttons whose hidden labels mention playing; the
+    // play/pause control is the one whose text is exactly "Play" while stopped.
+    await click([...document.querySelectorAll('[aria-label="Flipnote viewer"] button')].find(b => b.textContent.trim() === 'Play'));
     await wait(() => Number(globalCanvas.dataset.pixaFrame) >= 1, 'viewer playback'); out.viewerAdvances = true;
     out.viewerRepaints = redAt(globalCanvas, 32, 64) === 24;
     document.querySelector('[aria-label="Close flipnote viewer"]').click();

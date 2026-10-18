@@ -129,13 +129,17 @@
     return session.known.get(id) ?? null;
   }
 
-  function chip(k: KnownView | null): { text: string; tone: "ok" | "warn" | "danger" | "" } {
+  function chip(id: string, k: KnownView | null): { text: string; tone: "ok" | "warn" | "danger" | "" } {
+    // The protocol's Open phase survives editor navigation. Only the current editor is open
+    // in the sidebar; retained phase observations still report actual faults/rotations below.
+    void studio.rev;
+    if (session.doc?.object === id) return { text: "open", tone: "ok" };
     if (!k) return { text: "", tone: "" };
     if (k.awaiting) return { text: "preview", tone: "warn" };
     if (k.phase === "fault") return { text: "fault", tone: "danger" };
     if (k.phase === "settled") return { text: "settled", tone: "ok" };
     if (k.phase === "closing") return { text: "rotating", tone: "warn" };
-    return { text: "open", tone: "ok" };
+    return { text: "", tone: "" };
   }
 
   function indexNote(): { text: string; tone: "warn" | "danger" | "" } {
@@ -152,15 +156,18 @@
   }
 
   function open(id: string) {
-    studio.selected = id;
-    session.open(id);
-    onopen();
+    try {
+      session.open(id);
+      studio.selected = id;
+      onopen();
+    } catch (e) { onnotice?.(reason(e), "warn"); }
   }
 
   function newFlipnote() {
     if (!session.scope) return;
     if (indexView?.awaitingTenureReceipt) { onnotice?.("read-only preview: the current owner has not confirmed this channel's history yet", "warn"); return; }
     try {
+      session.prepareDocumentClose();
       const n = (model?.entries.length ?? 0) + (model?.overflow.length ?? 0) + 1;
       const id = session.createFlipnote(`flipnote ${n}`);
       session.open(id, { read: false });
@@ -182,7 +189,7 @@
   }
   function newScore() {
     if (!session.scope) return;
-    try { const id = session.createScore(`score ${(model?.entries.filter((e) => e.kind === "score").length ?? 0) + 1}`); session.open(id, { read: false }); studio.selected = id; onopen(); }
+    try { session.prepareDocumentClose(); const id = session.createScore(`score ${(model?.entries.filter((e) => e.kind === "score").length ?? 0) + 1}`); session.open(id, { read: false }); studio.selected = id; onopen(); }
     catch (e) { onnotice?.(reason(e), "warn"); }
   }
 </script>
@@ -317,14 +324,14 @@
         </span>
         <span class="studio-obj-meta">
           <span class="micro">{o.kind}{#if expiryText(o.expiry)} · {expiryText(o.expiry)}{/if}{#if o.creations > 1} · created twice{/if}</span>
-          {#if chip(known(o.id)).text}<span class="studio-chip {chip(known(o.id)).tone}">{chip(known(o.id)).text}</span>{/if}
+          {#if chip(o.id, known(o.id)).text}<span class="studio-chip {chip(o.id, known(o.id)).tone}">{chip(o.id, known(o.id)).text}</span>{/if}
         </span>
       </button>
     </li>
   {/each}
   {#each pendingCreates as s (s.id)}
     <li>
-      <button type="button" class="studio-obj pending" class:active={studio.selected === s.object} onclick={() => { studio.selected = s.object; onopen(); }}>
+      <button type="button" class="studio-obj pending" class:active={studio.selected === s.object} onclick={() => open(s.object)}>
         <span class="studio-obj-name"><span class="nm">{s.kind === "create" ? s.request.title : ""}</span></span>
         <span class="studio-obj-meta"><span class="micro">{s.status === "uncertain" ? "create uncertain · retry in the editor" : "creating…"}</span></span>
       </button>

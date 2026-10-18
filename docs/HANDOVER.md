@@ -1,6 +1,68 @@
 # Mewtual; Handover
 
+## Studio sound/music/history tabs, soundfont popup, chat flipnote card and viewer (2026-10-18)
+
+Built from the owner-approved mockup canvas (Flipnote Sound & Chat). Frontend only; no wire,
+persistence or native command changes. Every Studio write still goes through the existing
+`StudioSession` operations (`setSoundPatch`, `setSfx`, `removeSfx`, `removeSoundPatch`,
+`linkScore`, `createScore`); every sound still plays through the one bounded archival controller.
+
+- **Sound tab** (`StudioSound.svelte`, rewritten): this frame's markers as rows; a rack of recipe
+  tiles in shelves (in this flipnote · presets · my library · from the share · new… · import…);
+  a one-octave piano plus semitone/octave steppers; length tiles plus an exact-seconds field;
+  "hear it"; "add to frame N" / "save changes"; an all-sounds list paged at 24. A library tile is
+  only written to the document (`onpatch`) when a marker is added, never on selection. Readiness
+  problems stay on the row (missing recipe, deleted frame, over cap, another value by X with
+  keep/use). Evidence mode (History) lists recipes with usage, cleanup markers and paged raw
+  records. The emoji `.json` import keeps its pitch-range and fixed-length constraints.
+- **Audition** (`studio-audition.ts`): "hear it" and the popup keyboard build a one-event
+  `jam-take:v1` (validated by `validateJamTake`) and start it through `StudioAudioActions` as a
+  score with `loop: false`, so it inherits the gesture, scope, Deafen and cancellation gates. The
+  Studio raises `auditioning` before the start so a playing audition is not document playback:
+  the rack stays enabled and the timeline does not follow its clock.
+- **Soundfont popup** (`StudioSoundfont.svelte`): the call drawer's patch editor as a modal
+  (start-from shelf, two-octave audition keyboard with home-row keys, osc layers one open at a
+  time, the four stage cards with scopes and knobs, `jam-editor.ts` transitions). Footer: save to
+  my library (the call drawer's 12-entry library, same replace-by-name rule), share to the server
+  (`.jampatch`, same sealed file as the drawer), use in the flipnote (`set_patch`, then kept in
+  the library under its name so the rack can show it; a full library refuses only the keeping
+  half and says so). Every edit mints a new recipe id; nothing is replaced silently.
+- **Rack shelves** (`App.svelte`): presets and the device library as before; "from the share"
+  reads `.jampatch` files of the active server while the Studio surface is open, bounded to 16,
+  only files the share's auto-load trust rule already permits, one read at a time, validated by
+  `parseJamPatchJson`, dropped on server switch.
+- **Music tab** (`StudioMusic.svelte`): soundtrack row from the channel index (title, author,
+  linked / unavailable chip), open / change / unlink, a picker of this channel's scores, "+ new
+  track", timing, recipe budget, export readiness (sounds need attention · two tracks chosen ·
+  linked track not on this device). It reads the Score object's own facts nowhere: linking is
+  native-checked and the track's readiness is seen by opening it.
+- **History tab** (`Studio.svelte`): one story: this flipnote (status line, size bar, frames,
+  expiry) · versions (immutable `.pixa` exports: play / download / share / remove, save a version)
+  · previous edits (the unchanged recovery rail) · evidence · sound (fold) · danger (delete, two
+  clicks). The status line moved into its own snippet so the Score surface renders it too.
+- **Timeline sfx lane**: a pill per frame naming the first marker and note, tinted by author.
+- **Chat card** (`pixa-preview.ts`, `app.css`): pixels at 1.5x with a transport strip over the
+  bottom edge (pause/play, frame counter, progress, elapsed, sound, open) and a mono facts line
+  (name · frames · fps · size · sounds/music · expiry · open). Same manager, same bounds (two
+  live packages, one read, one timer, 128 cards, gesture-only sound). New options `open` (checked
+  against the card's scope) and `expiryText`. Veil states: fetching, manual load, error, too large.
+- **Viewer** (`PixaViewer.svelte`): Studio transport (first/prev/play/next/last, loop, sound),
+  frame counter and time, frame thumbnails (up to 48) with sound pills, facts, download, close.
+  Sound on = the audio session from the held frame; sound off or Deafened = a local visual loop.
+  The acceptance flow now clicks the button whose text is exactly "Play".
+- **Composer chips** (`draft-attachments.ts`): a chip per flipnote embed marker in the draft with
+  a ✕ that edits the draft text; the text stays the single source of truth for the durable send,
+  and a stale chip can never cut other text.
+
+Verification for this change is recorded at the end of this entry's handoff; the Rust suites,
+frontend suites, svelte-check, build, flows and adversarial review run before handoff.
+
 ## Studio UX corrections — implementation complete, final checks running (2026-10-18)
+
+Concurrent Studio audition/popup/Music edits arrived after the frontend verification checkpoint
+and commit `8afb46e4`. Preserve that work. Current UI verification is pending stable files;
+the last full frontend/static/build passes predate those edits. Rust sources remain unchanged
+and their full verification continues. See the ledger for the browser failures during editing.
 
 The owner's follow-up UI issues are implemented: Post to chat stages a real streamed PIXA
 attachment without replacing draft text; chat/wiki/file details play silent looping previews;
@@ -18,8 +80,8 @@ needs fresh Index reconciliation; this is private diagnostic state, not protocol
 Focused regressions and the real App headless Edge flow pass, including distinct pixels,
 automatic inline loops, draft-preserving Send, ABA upload rejection and a late upload after
 window-close continuity capture. Read-only reviews found no blocker/high; their medium/low
-fixes have focused coverage. Final root/native/frontend suites and builds are being run
-sequentially with two Rust build jobs; the ledger records their exact results. The previous
+fixes have focused coverage. Final Rust suites and builds run sequentially with two build jobs;
+frontend tests run one file at a time. The ledger records their exact results. The previous
 partial root run was stopped for these UI changes and is not a full-suite pass. Two desktops
 remain explicitly deferred; native audible/platform observations are not supplied by fixtures.
 

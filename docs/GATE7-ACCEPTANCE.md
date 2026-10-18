@@ -2,6 +2,12 @@
 
 ## UX corrections and final verification (2026-10-18)
 
+Concurrent Studio edits arrived after the frontend suite/static/build checkpoint below and
+after commit `8afb46e4`. They are being preserved. The final browser rerun encountered Studio
+hot-reload/module-load failures while those files changed; final UI verification requires a
+stable worktree. The 1605-test pass and build are checkpoint evidence, not a claim that the new
+in-progress audition/popup/Music changes have passed. Root/native Rust sources remain unchanged.
+
 The owner requested working Post to chat, inline looping playback, simpler Sound/Music/history,
 repair in Server settings, removal of technical filler and a corrected default palette. These
 changes are implemented; [GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md) records the workflow and limits.
@@ -17,8 +23,9 @@ eviction is an explicit diagnostic reconciliation boundary.
 
 The prior full root attempt (`gate7-final-root-tests.log`) was stopped when this UX work arrived;
 its partial passes are not complete-suite evidence. Final suites start only after implementation
-and focused regressions are coherent, run sequentially with `CARGO_BUILD_JOBS=2`, and are recorded
-below. The owner explicitly defers two desktops. Browser fixtures do not establish native audible
+and focused regressions are coherent. Rust stages run sequentially with `CARGO_BUILD_JOBS=2`;
+frontend tests run one file at a time. Results are recorded below. The owner explicitly defers
+two desktops. Browser fixtures do not establish native audible
 hardware or other-platform release observations.
 
 Both read-only actual-diff reviews have no remaining BLOCKER/HIGH/MEDIUM findings. Fixes cover
@@ -27,16 +34,29 @@ instrument cleanup, import constraints, missing-tenure truthfulness, list ABA an
 composer authority. Actual AudioContext failure lacks a direct App regression; focused manager
 tests pin cancelled pending starts and token cleanup, and the failed-owner branch was reviewed.
 
+The first complete frontend run passed 1603/1604. Its one failure was the pre-Closing-route
+publication test expecting every Closing reference to refuse immediately. Closing now intentionally
+queues only a ticketed local draft reference. Fault/RNG refusal/custody coverage is retained, and
+a separate regression checks Closing pending uncertainty versus a refused ticket, actual blob
+CID/length retention and no ordinary/Unconfirmed write. The focused file passes 12/12; read-only
+review confirms this is the intended contract change, not a relaxed safety assertion.
+
 | Check / log under `target/` | Current result |
 |---|---|
 | Root solo and damaged-source sync (`gate7-ux-sync-root.log`) | PASS, 2/2 |
 | Native lossless state conversion (`gate7-ux-sync-native.log`) | PASS, 1/1 |
 | Focused UI/fixture/sync/preview (`gate7-ux-regressions.log`) | PASS, 58/58 |
 | Final preview/Sound (`gate7-ux-preview-sound.log`) | PASS, 16/16 |
+| Final inline sound refusal/retry (`gate7-ux-preview-final.log`) | PASS, 9/9 preview tests |
+| Corrected Closing publication contract (`gate7-ux-media-contract.log`) | PASS, 12/12; actual-diff re-review clear |
 | Expanded actual App Edge flow (`gate7-ux-browser-flow.log`) | PASS: Post/export/upload/Send, inline loops, fitted canvas, ABA/close rejection, global/deck/focus pixels, pause, native caps/cancellation |
 | Frontend static check (`gate7-ux-check.log`) | PASS, 0 errors/warnings |
 | Complete root workspace (`gate7-ux-final-root.log`) | RUNNING, sequential bounded jobs |
-| Complete native/frontend suites and final lint/build/startup | PENDING, after the root suite |
+| Complete frontend suite (`gate7-ux-final-frontend-pass.log`) | PASS, 1605/1605 before concurrent Studio edits, one file at a time; first run's stale Closing expectation recorded above |
+| Frontend static / production build (`gate7-ux-final-{check,build}.log`) | PASS before concurrent Studio edits, 0 static errors/warnings; existing large-chunk build advisory |
+| Final ordinary browser flows (`gate7-ux-final-flows.log`) | PASS, chat/search/friend request/recovery/boot panels |
+| Final Gate 7 browser reruns (`gate7-ux-final-gate7-flow*.log`) | NOT PASS: actions first passed with a hot-reload error; fresh rerun could not load the concurrently edited Studio module |
+| Complete native suite and final Rust lint/build/startup | PENDING, after the root suite |
 
 Screenshots inspected at 900 × 640: `gate7-art.png`, `gate7-sound.png`, `gate7-music.png`,
 `gate7-history.png`, `gate7-chat.png`, `gate7-file-preview.png`. The optional global/focus view

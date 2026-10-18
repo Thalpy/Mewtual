@@ -17,9 +17,15 @@ export function decodePixaBase64(encoded: unknown): Pixa {
   return decodePixa(Uint8Array.from(binary, char => char.charCodeAt(0)));
 }
 
-/** Hold the last picture through authored sound/release tails. The caller owns loop timing. */
-export function pixaFrameAt(pixa: Pixa, elapsedMs: number): number {
-  return Math.min(pixa.frames.length - 1, Math.floor(Math.max(0, Number.isFinite(elapsedMs) ? elapsedMs : 0) * pixa.fps / 1000));
+/** Loop pictures independently of a long authored sound tail; one-shot decks hold the end. */
+export function pixaFrameAt(pixa: Pixa, elapsedMs: number, loop = false): number {
+  return animationFrameAt(pixa.frames.length, pixa.fps, elapsedMs, loop);
+}
+
+/** Shared frame arithmetic for the editor and package viewers; sound owns its longer horizon. */
+export function animationFrameAt(frameCount: number, fps: number, elapsedMs: number, loop: boolean): number {
+  const frame = Math.floor(Math.max(0, Number.isFinite(elapsedMs) ? elapsedMs : 0) * fps / 1000);
+  return loop ? frame % frameCount : Math.min(frameCount - 1, frame);
 }
 
 /** Two bounded encoded packages per call; expanded rasters are never cached. */
