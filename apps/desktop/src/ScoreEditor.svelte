@@ -104,9 +104,15 @@
   // An in-progress gesture, owned by the pointer that began it. `place` carries what was true at
   // pointer down (the recipe, the empty start) so release can refuse a cell that changed meanwhile.
   type Drag =
-    | { kind: "place"; pointerId: number; row: number; start: number; end: number; patch: string; moved: boolean }
+    // `origin` is the pressed cell and `min` the previewed end: pointer jitter inside the pressed
+    // cell is not a length, and the gesture never writes a note shorter than the preview showed.
+    | { kind: "place"; pointerId: number; row: number; start: number; end: number; min: number; origin: number; patch: string; moved: boolean }
     | { kind: "resize"; pointerId: number; onset: string; row: number; from: number; end: number; original: number; patch: string };
   let drag = $state<Drag | null>(null);
+  // A press whose gesture was cancelled (Escape, pointercancel, blur) still completes with a
+  // pointerup and a click; that click must not place anything, so the press stays remembered
+  // until its release or the next press.
+  let cancelledPress = $state<number | null>(null);
   // The page width follows the card's width. Measured with a ResizeObserver where one exists;
   // without one (the unit-test DOM) the card reads as zero wide and pages 16 steps.
   $effect(() => {
@@ -202,7 +208,9 @@
   // the cell it began on cancels it with nothing written.
   $effect(() => {
     const locked = blocked;
-    untrack(() => { if (locked && drag) drag = null; });
+    // Through `dragCancel`, so the press is remembered: a block that lifts before the release
+    // must not let that release's click place what the cancelled gesture did not.
+    untrack(() => { if (locked && drag) dragCancel(); });
   });
 
   // --- helpers -----------------------------------------------------------------------------------
@@ -346,21 +354,33 @@
     if (tool === "audition") {
       selected = onset?.key ?? key;
       if (onset?.cell.k === "n") audition(onset.cell.p, row, onset.cell.len ?? 1);
-      // An empty cell sounds for the hold a placement there would get, never past the end.
-      else if (!onset && selectedPatch && step < model.steps) audition(selectedPatch, row, Math.max(1, Math.min(hold, model.steps - step)));
+      // An empty cell sounds for the hold a placement there would get: never past the end, and
+      // not on a folded row, which takes no placement either.
+      else if (!onset && selectedPatch && step < model.steps && !folded.has(row)) audition(selectedPatch, row, Math.max(1, Math.min(hold, model.steps - step)));
       return;
     }
     if (onset) { selected = onset.key; return; }
     if (folded.has(row)) return; // a folded row takes no new note
     if (mode === "drum") { place(step, row, 1); return; }
+    if (!selectedPatch) return;
     const fit = fitPlacement(step, row);
     if (fit) place(fit.start, row, fit.len, selectedPatch, fit.len === hold);
+  }
+  /** Placement is impossible here (past the end, no recipe, folded row); the cell stays focusable for navigation. */
+  function cellOff(step: number, row: number): boolean {
+    if (!model) return true;
+    const key = `${step}:${row}`;
+    if (model.cells[key] || holds.has(key)) return false;
+    return step >= model.steps || (mode === "note" && !selectedPatch) || folded.has(row);
   }
   function contextCell(event: MouseEvent, step: number, row: number) {
     event.preventDefault();
     if (!blocked) erase(step, row);
   }
   function pointerDownCell(event: PointerEvent, step: number, row: number) {
+    // A new primary press ends the memory of a cancelled one; a secondary button does not, so a
+    // chord cannot slip the cancelled press's click past the swallow.
+    if (event.button === 0) cancelledPress = null;
     if (event.button !== 0 || blocked || !model || tool !== "place" || drag) return;
     const key = `${step}:${row}`, cell = model.cells[key], held = holds.get(key);
     // The last cell of a note starts a resize of that note.
@@ -376,7 +396,8 @@
     // The gesture starts as exactly the click the preview shows; moving the pointer lengthens it.
     const fit = fitPlacement(step, row);
     if (!fit) return;
-    drag = { kind: "place", pointerId: event.pointerId, row, start: fit.start, end: fit.start + fit.len - 1, patch: selectedPatch, moved: false };
+    const end = fit.start + fit.len - 1;
+    drag = { kind: "place", pointerId: event.pointerId, row, start: fit.start, end, min: end, origin: step, patch: selectedPatch, moved: false };
   }
   function dragMove(event: PointerEvent) {
     if (!drag || event.pointerId !== drag.pointerId || !model) return;
@@ -385,13 +406,32 @@
     if (!key) return;
     const [s, r] = key.split(":").map(Number);
     if (r !== drag.row) return; // a hold runs along one pitch
-    const floor = drag.kind === "place" ? drag.start : drag.from;
-    const end = Math.max(floor, Math.min(s, model.steps - 1));
-    if (end !== drag.end) drag = drag.kind === "place" ? { ...drag, end, moved: true } : { ...drag, end };
+    if (drag.kind === "place") {
+      // Movement inside the pressed cell is a click, not a length; coming back to it after
+      // lengthening returns to the preview even when the move skipped the cells between.
+      if (s === drag.origin) { if (drag.moved && drag.end !== drag.min) drag = { ...drag, end: drag.min }; return; }
+      // Only lengthening beyond the preview is a gesture; shortening is the end handle's job.
+      const end = Math.max(drag.min, Math.min(s, model.steps - 1));
+      if (end !== drag.end || !drag.moved) drag = { ...drag, end, moved: true };
+      return;
+    }
+    const end = Math.max(drag.from, Math.min(s, model.steps - 1));
+    if (end !== drag.end) drag = { ...drag, end };
   }
+  /** Drops the gesture; the press it came from is remembered so its completion click is swallowed. */
   function dragCancel(event: PointerEvent | undefined = undefined) {
     if (!drag || (event && event.pointerId !== drag.pointerId)) return;
+    cancelledPress = drag.pointerId;
     drag = null;
+  }
+  function pointerUp(event: PointerEvent) {
+    if (cancelledPress !== null && event.pointerId === cancelledPress) {
+      cancelledPress = null;
+      dragged = true;
+      setTimeout(() => { dragged = false; }, 0);
+      return;
+    }
+    dragEnd(event);
   }
   function dragEnd(event: PointerEvent) {
     if (!drag || event.pointerId !== drag.pointerId) return;
@@ -415,9 +455,9 @@
       onnotice("another edit landed on that cell first; place the note again", "info");
       return;
     }
-    // A length the pointer chose becomes the next default; a plain click (or a fit the end or a
-    // neighbour forced) keeps the current one.
-    place(gesture.start, gesture.row, gesture.end - gesture.start + 1, gesture.patch, gesture.moved);
+    // A length the pointer chose, beyond what the preview already showed, becomes the next
+    // default; a click, drift inside the preview, or a fit the end or a neighbour forced keeps it.
+    place(gesture.start, gesture.row, gesture.end - gesture.start + 1, gesture.patch, gesture.end > gesture.min);
   }
   function hoverCell(event: PointerEvent) {
     const key = (event.target as HTMLElement | null)?.closest?.("[data-score-cell]")?.getAttribute("data-score-cell") ?? null;
@@ -506,7 +546,7 @@
     if (!rootEl || !rootEl.contains(active) || !target) return;
     if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable) return;
     if (event.ctrlKey || event.metaKey || event.altKey) return;
-    if (event.key === "Escape" && drag) { event.preventDefault(); drag = null; return; }
+    if (event.key === "Escape" && drag) { event.preventDefault(); dragCancel(); return; }
     // Tool and page keys work anywhere in the composer. Keys that move the selection or clear a
     // cell work only while focus is on the grid card: the inspector hosts the history rail and
     // the rack, where Backspace or an arrow must never turn into an edit of the score.
@@ -526,7 +566,7 @@
   }
 </script>
 
-<svelte:window onkeydown={onKey} onpointermove={drag ? dragMove : undefined} onpointerup={drag ? dragEnd : undefined} onpointercancel={drag ? dragCancel : undefined} onblur={drag ? () => dragCancel() : undefined} />
+<svelte:window onkeydown={onKey} onpointermove={drag ? dragMove : undefined} onpointerup={drag || cancelledPress !== null ? pointerUp : undefined} onpointercancel={drag ? dragCancel : undefined} onblur={drag ? () => dragCancel() : undefined} />
 
 {#snippet alternatives(item: ScoreDiagnostic)}
   {@const altPages = Math.max(1, Math.ceil(item.alternatives.length / SCORE_ALTERNATIVE_PAGE))}
@@ -622,9 +662,9 @@
               {@const cell = model.cells[key]}
               {@const held = holds.get(key)}
               {@const label = cellLabel(step, row)}
-              <button type="button" class="sc-cell {cellClass(step, row)}" class:blk={scoreRowIsBlack(row)} data-score-cell={key} data-k={cell?.k === "d" ? PAD_CODES[cell.pad] : undefined}
+              <button type="button" class="sc-cell {cellClass(step, row)}" class:blk={scoreRowIsBlack(row)} class:off={cellOff(step, row)} data-score-cell={key} data-k={cell?.k === "d" ? PAD_CODES[cell.pad] : undefined}
                 style={cellStyle(step, row)} aria-label={label} title={cellTitle(step, row, label)}
-                disabled={blocked || (!cell && !held && (step >= model.steps || (mode === "note" && !selectedPatch) || folded.has(row)))}
+                disabled={blocked} aria-disabled={cellOff(step, row)}
                 onclick={() => clickCell(step, row)} oncontextmenu={(e) => contextCell(e, step, row)} onpointerdown={(e) => pointerDownCell(e, step, row)}></button>
             {/each}
           {/each}
@@ -1009,6 +1049,9 @@
   .sc-cell.bar { border-right-color: color-mix(in oklab, var(--text-2) 35%, var(--border)); }
   .sc-cell:disabled { cursor: default; }
   .sc-cell:not(:disabled):hover { box-shadow: inset 0 0 0 1px var(--accent); }
+  /* Nothing can be placed here, but the cell stays focusable so arrow keys can pass through. */
+  .sc-cell.off { cursor: default; }
+  .sc-cell.off:not(:disabled):hover { box-shadow: none; }
   .sc-cell.end:not(:disabled) { cursor: ew-resize; }
   .sc-grid.locked .sc-cell.end { cursor: default; }
   /* A note: the onset starts the block, continuations carry it, the last step rounds it off. */

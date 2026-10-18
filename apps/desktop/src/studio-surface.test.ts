@@ -1049,12 +1049,12 @@ test("G7-UI: a library tile adds a Score set_patch through the session and selec
   const m = mountStudio(ipc, { patchLibrary: [{ name: "LANDING", patch }], patchShelves: [{ name: "LANDING", patch, shelf: "preset" }] });
   try {
     await settled(); state.studio.selected = OBJ; flushSync(); await settled(400);
-    assert.equal(m.target.querySelector<HTMLButtonElement>('[data-score-cell="0:0"]')!.disabled, true, "no recipe, no note placement");
+    assert.ok(m.target.querySelector<HTMLButtonElement>('[data-score-cell="0:0"]')!.classList.contains("off"), "no recipe, no note placement");
     m.target.querySelector<HTMLButtonElement>('[data-lib-patch="LANDING"]')!.click(); flushSync(); await settled(400);
     const apply = ipc.calls.find(c => c.cmd === "studio_apply")!.args;
     assert.equal(apply.objectKind, "score");
     assert.equal(m.target.querySelector(`[data-doc-patch="${id}"]`)?.getAttribute("aria-pressed"), "true", "the added recipe is the one notes are placed with");
-    assert.equal(m.target.querySelector<HTMLButtonElement>('[data-score-cell="0:0"]')!.disabled, false);
+    assert.equal(m.target.querySelector<HTMLButtonElement>('[data-score-cell="0:0"]')!.classList.contains("off"), false);
     assert.match(m.target.querySelector(".sc-foot")!.textContent!, /LANDING/);
   } finally { m.done(); }
 });

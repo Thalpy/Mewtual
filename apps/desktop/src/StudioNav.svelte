@@ -43,6 +43,10 @@
   // controls live in that document's own editor. Each row opens it, so those
   // controls stay one click away even for a document this list does not show (deleted from the
   // Index, or past an unread listing). A pending Create already has its own row below.
+  // Held documents are shown eight at a time, paged rather than counted: every one of them needs
+  // its own open button, because reaching its recovery controls is the only way to resolve it.
+  const HELD_PAGE = 8;
+  let heldPage = $state(0);
   const heldElsewhere = $derived.by(() => {
     void studio.rev;
     const open = session.doc?.object ?? null;
@@ -61,6 +65,10 @@
         : saves.some((s) => s.status === "blocked") ? "save not written" : "unsaved edits",
     }));
   });
+  const heldPages = $derived(Math.max(1, Math.ceil(heldElsewhere.length / HELD_PAGE)));
+  const heldShown = $derived(Math.min(heldPage, heldPages - 1));
+  // A list that shrank to one page and grew again starts over at page one, not at a stale index.
+  $effect(() => { void heldPages; untrack(() => { heldPage = 0; }); });
   // Read through the revision, and first in the expression below: a non-reactive read that
   // short-circuits on the first render would leave the template never subscribed to the rest.
   const hasScope = $derived.by(() => { void studio.rev; return session.scope !== null; });
@@ -243,14 +251,18 @@
     </span>
   </div>
 {/if}
-{#each heldElsewhere.slice(0, 8) as held (held.object)}
+{#each heldElsewhere.slice(heldShown * HELD_PAGE, (heldShown + 1) * HELD_PAGE) as held (held.object)}
   <div class="studio-index-draft warn" data-held-object={held.object}>
     <span><b>{held.status}</b> · {held.title}</span>
     <span class="index-draft-actions"><button type="button" class="ghost small ctx-action" onclick={() => open(held.object)}>open</button></span>
   </div>
 {/each}
-{#if heldElsewhere.length > 8}
-  <p class="studio-note warn">and {heldElsewhere.length - 8} more with unsaved edits</p>
+{#if heldPages > 1}
+  <p class="studio-note warn index-draft-actions" data-held-pager>
+    <button type="button" class="ghost small ctx-action" aria-label="Previous held documents" disabled={heldShown === 0} onclick={() => (heldPage = heldShown - 1)}>‹</button>
+    <span>{heldShown + 1} / {heldPages} · {heldElsewhere.length} with unsaved edits</span>
+    <button type="button" class="ghost small ctx-action" aria-label="Next held documents" disabled={heldShown + 1 >= heldPages} onclick={() => (heldPage = heldShown + 1)}>›</button>
+  </p>
 {/if}
 {#if indexOverlay?.loading}
   <p class="studio-note">Checking this device for a local-only index draft…</p>

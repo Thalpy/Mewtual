@@ -7283,9 +7283,16 @@
     // having read it: a failed `get_messages` used to leave the channel selected, empty and
     // marked read. `settleReadState` inside refresh clears them once the rows are actually up.
     await refresh(); // awaited so a search jump can address the target channel's loaded messages
+    // The read took real time. If the channel is no longer the one on screen (or the vault locked),
+    // nothing here is current. If it is on screen, its topic and delivery ticks must be refreshed
+    // whatever else happened meanwhile: they were cleared above and nothing else restores them.
+    if (cur?.active !== id || locked) return false;
     refreshTopic();
     refreshDelivery();
-    return true;
+    // A newer route (another channel, a surface, a server, a Studio exit) claims the same counter.
+    // The caller is about to act on "the switch committed": that is only true while this request
+    // is still the newest, so a superseded Search or Edit-topic does nothing.
+    return studioRequest === studioNavigation;
   }
 
   // The active channel's topic (a shared LWW scalar in the channel doc; any member may set it).
@@ -8484,11 +8491,26 @@
   });
   const releaseStudio = studioExit.release;
   const leaveStudioThen = studioExit.leaveThen;
+  // How long the current load has been running, for the placeholder's readout: a module import
+  // reports no progress, so the bar is indeterminate and the seconds say it is still moving.
+  let studioLoadSeconds = $state(0);
+  const studioModules = () => Promise.all([import("./Studio.svelte"), import("./StudioNav.svelte"), import("./studio-state.svelte.ts")]);
+  // Warm the chunk shortly after unlock so the first visit does not pay the cold import (in
+  // development, Vite's first transform of the editor graph) under the user's click. Only the
+  // modules are fetched; nothing restores a draft or touches the session until the tab opens.
+  $effect(() => {
+    if (locked || (StudioSurface && StudioNav)) return;
+    const timer = setTimeout(() => { void studioModules().catch(() => {}); }, 6000);
+    return () => clearTimeout(timer);
+  });
   async function loadStudio() {
     if ((StudioSurface && StudioNav) || studioLoading) return;
     studioLoading = true;
+    const startedAt = Date.now();
+    studioLoadSeconds = 0;
+    const ticker = setInterval(() => { studioLoadSeconds = Math.round((Date.now() - startedAt) / 1000); }, 500);
     try {
-      const [s, n, st] = await Promise.all([import("./Studio.svelte"), import("./StudioNav.svelte"), import("./studio-state.svelte.ts")]);
+      const [s, n, st] = await studioModules();
       StudioSurface = s.default;
       StudioNav = n.default;
       studioReset = st.resetStudio;
@@ -8500,6 +8522,7 @@
     } catch (cause) {
       toast(`The studio failed to load: ${String(cause)}`, "err");
     } finally {
+      clearInterval(ticker);
       studioLoading = false;
     }
   }
@@ -24319,7 +24342,10 @@
       <StudioNav me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} onopen={() => (view = "studio")} onnotice={studioNotice} />
     {:else}
       <h3><span>Studio</span></h3>
-      <p class="muted small">Loading the studio…</p>
+      <div class="studio-loading" role="status" aria-live="polite">
+        <div class="studio-loading-bar"><i></i></div>
+        <span class="micro">loading the editor<span aria-hidden="true">{studioLoadSeconds >= 2 ? ` · ${studioLoadSeconds} s` : ""}</span></span>
+      </div>
     {/if}
   {:else if view === "events"}
     <h3><span>Upcoming</span></h3>
@@ -27289,7 +27315,10 @@
             <StudioSurface me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} nameOf={nameOfIdentity} colorOf={colorOfIdentity} onnotice={studioNotice} claims={studioClaimScope ? drawClaimSnapshot : null} claimActions={studioClaimActions} patchLibrary={studioPatchLibrary} patchShelves={studioPatchShelves} libraryCount={jamSaved.length} serverName={cur?.name ?? ""} onsavePatch={saveStudioPatch} onsharePatch={shareStudioPatch} audioActions={studioAudioActions} audioState={studioAudioState} onshareScore={shareStudioScore} onsharePixa={shareStudioPixa} onpostPixa={postStudioPixa} />
           {:else}
             <h2>Studio</h2>
-            <p class="muted">Loading the studio…</p>
+            <div class="studio-loading wide" role="status" aria-live="polite">
+              <div class="studio-loading-bar"><i></i></div>
+              <span class="micro">loading the editor<span aria-hidden="true">{studioLoadSeconds >= 2 ? ` · ${studioLoadSeconds} s` : ""}</span></span>
+            </div>
           {/if}
         {:else if view === "events"}
           <h2>Events</h2>

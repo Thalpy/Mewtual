@@ -77,18 +77,24 @@ export function workingScore(base: ScoreModel, records: readonly SaveRecord[]): 
   }
   // Raw slots/headers above remain native evidence. Readiness for a local preview is computed
   // from its effective cells/recipes; the export validator independently checks the full input.
-  const cells: ScoreModel["readiness"]["cells"] = {}, patches: ScoreModel["readiness"]["patches"] = {};
+  const dense: ScoreModel["readiness"]["cells"] = {}, densePatches: ScoreModel["readiness"]["patches"] = {};
   const notes = new Map<number, { end: number; key: string }>();
   const ordered = Object.entries(model.cells).sort(([a], [b]) => Number(a.split(":")[0]) - Number(b.split(":")[0]) || a.localeCompare(b));
   ordered.forEach(([key, cell], i) => {
     const [step, row] = key.split(":").map(Number), end = step + (cell.k === "n" ? cell.len ?? 1 : 1), prior = notes.get(row);
     const overlap = cell.k === "n" && !!prior && step < prior.end;
-    cells[key] = { count: i >= 4096, extent: end > model.steps, recipe: cell.k === "n" && !model.patches[cell.p], overlap,
+    dense[key] = { count: i >= 4096, extent: end > model.steps, recipe: cell.k === "n" && !model.patches[cell.p], overlap,
       conflict: !!base.cellSlots[key]?.register.conflicts.length };
-    if (overlap) cells[prior!.key].overlap = true;
+    if (overlap) dense[prior!.key].overlap = true;
     if (cell.k === "n" && (!prior || end > prior.end)) notes.set(row, { end, key });
   });
-  Object.keys(model.patches).sort().forEach((id, i) => { patches[id] = { count: i >= 64, conflict: !!base.patchSlots[id]?.register.conflicts.length }; });
+  Object.keys(model.patches).sort().forEach((id, i) => { densePatches[id] = { count: i >= 64, conflict: !!base.patchSlots[id]?.register.conflicts.length }; });
+  // Native readiness is sparse: a slot with nothing wrong has no entry. The working projection
+  // takes the same shape, so a readback of the very score it projected fingerprints identically
+  // in the editor's media snapshot and is not mistaken for a source change (which would stop
+  // playback or an audition that was started from the working projection).
+  const cells = Object.fromEntries(Object.entries(dense).filter(([, v]) => Object.values(v).some(Boolean)));
+  const patches = Object.fromEntries(Object.entries(densePatches).filter(([, v]) => Object.values(v).some(Boolean)));
   model.readiness = { cells, patches, headerConflicts: base.readiness.headerConflicts };
   model.ready = !model.readiness.headerConflicts && !Object.values(cells).some(v => Object.values(v).some(Boolean)) && !Object.values(patches).some(v => Object.values(v).some(Boolean));
   return model;

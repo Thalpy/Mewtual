@@ -157,7 +157,8 @@ test("attention keeps only slots a person must act on, in diagnostics order", ()
 // Exercise the real compiled Svelte component, not a string pattern or substitute grid. The
 // repository preloads provide a DOM before Svelte evaluates (same setup as the complete suite).
 const w = (globalThis as unknown as { window: Window & typeof globalThis }).window;
-Object.assign(globalThis, { MouseEvent: w.MouseEvent, Event: w.Event, MutationObserver: w.MutationObserver });
+// The runtime's event delegation checks for HTMLMediaElement on every event it dispatches.
+Object.assign(globalThis, { MouseEvent: w.MouseEvent, Event: w.Event, MutationObserver: w.MutationObserver, HTMLMediaElement: w.HTMLMediaElement, KeyboardEvent: w.KeyboardEvent, HTMLInputElement: w.HTMLInputElement });
 const { default: ScoreEditor } = await import("./ScoreEditor.svelte");
 const { mount, unmount, flushSync } = await import("svelte");
 type Surface = ReturnType<typeof surface>;
@@ -227,7 +228,7 @@ test("compiled composer refuses missing recipes, invalid holds and read-only wri
   const m = model(); m.patches = {}; m.patchSlots = {};
   let ui = surface(m);
   try {
-    assert.equal(ui.cell("0:0").disabled, true); ui.click('[data-score-cell="0:0"]'); assert.equal(ui.ops.length, 0);
+    assert.ok(ui.cell("0:0").classList.contains("off")); ui.click('[data-score-cell="0:0"]'); assert.equal(ui.ops.length, 0);
     assert.match(ui.target.textContent!, /no recipes yet/);
   } finally { await ui.done(); }
   ui = surface(model(), { readonlyReason: "Awaiting current membership" });
@@ -281,10 +282,109 @@ test("lengthen is unavailable at the authored end, and the pad lane never folds 
     assert.ok(ui.cell("3:1").classList.contains("fold"));
     ui.click('[data-score-mode="drum"]');
     assert.equal(ui.cell("3:1").classList.contains("fold"), false, "C♯4 is the snare lane in pads mode");
-    assert.equal(ui.cell("3:1").disabled, false);
+    assert.equal(ui.cell("3:1").classList.contains("off"), false);
     ui.click('[data-score-cell="3:1"]');
     assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 3, row: 1, value: { k: "d", pad: 1 } });
-    assert.ok(ui.cell("3:3").classList.contains("fold"), "a pitch row outside the scale and the lane still folds");
+    assert.ok(ui.cell("3:13").classList.contains("fold"), "C♯5 is outside the scale and outside the lane, so it still folds");
+  } finally { await ui.done(); }
+});
+
+test("pointer jitter inside the pressed cell is a click: the note gets the previewed hold and the hold is unchanged", async () => {
+  const m = model(); m.steps = 16;
+  const ui = surface(m);
+  const pointer = (type: string, target: EventTarget, init: PointerEventInit = {}) => { target.dispatchEvent(new w.PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, button: 0, ...init })); flushSync(); };
+  const doc = document as unknown as { elementFromPoint: (x: number, y: number) => Element | null };
+  const original = doc.elementFromPoint;
+  try {
+    let under: Element | null = null;
+    doc.elementFromPoint = () => under;
+    for (const hold of [2, 4]) {
+      ui.input('[aria-label="Note hold in sixteenth steps"]', String(hold));
+      const row = hold; // a fresh row per hold
+      pointer("pointerdown", ui.cell(`2:${row}`)); under = ui.cell(`2:${row}`); pointer("pointermove", window); pointer("pointermove", window);
+      pointer("pointerup", window); ui.cell(`2:${row}`).click(); flushSync();
+      assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 2, row, value: { k: "n", p: PATCH_ID, len: hold } }, `a jittered click writes the previewed ${hold}-step hold`);
+      assert.match(ui.target.querySelector(".micro.hi")!.textContent!, hold === 2 ? /eighth/ : /quarter/, "the hold is still the chosen one");
+      // Moving back inside the preview after lengthening never shortens below the preview.
+      pointer("pointerdown", ui.cell(`8:${row}`)); under = ui.cell(`12:${row}`); pointer("pointermove", window); under = ui.cell(`9:${row}`); pointer("pointermove", window);
+      pointer("pointerup", window);
+      assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 8, row, value: { k: "n", p: PATCH_ID, len: hold } });
+    }
+    assert.equal(ui.ops.length, 4);
+    // A preview forced shorter than the hold by a neighbour: drifting one cell inside it writes
+    // the preview and leaves the hold alone; only lengthening beyond the preview changes it.
+    m.cells["4:7"] = { k: "n", p: PATCH_ID, len: 1 };
+    ui.input('[aria-label="Note hold in sixteenth steps"]', "4");
+    pointer("pointerdown", ui.cell("2:7")); under = ui.cell("3:7"); pointer("pointermove", window); pointer("pointerup", window);
+    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 2, row: 7, value: { k: "n", p: PATCH_ID, len: 2 } });
+    assert.match(ui.target.querySelector(".micro.hi")!.textContent!, /quarter/, "a forced fit plus drift is not a chosen length");
+    pointer("pointerdown", ui.cell("8:7")); under = ui.cell("13:7"); pointer("pointermove", window); under = ui.cell("8:7"); pointer("pointermove", window);
+    assert.ok(!ui.cell("13:7").classList.contains("drag") && ui.cell("11:7").classList.contains("drag"), "returning to the pressed cell returns to the preview, even past skipped cells");
+    pointer("pointerup", window);
+    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 8, row: 7, value: { k: "n", p: PATCH_ID, len: 4 } });
+  } finally { doc.elementFromPoint = original; await ui.done(); }
+});
+
+test("a read-only turn mid-press cancels the gesture and swallows its completion click even after the block lifts", async () => {
+  const { default: Harness } = await import("../scripts/fixtures/ScoreEditorHarness.svelte");
+  const m = model(); m.steps = 16;
+  const ops: unknown[] = [], heard: number[] = [];
+  const target = document.createElement("div"); document.body.appendChild(target);
+  const harness = mount(Harness, { target, props: { props: { model: m, readonlyReason: "", loading: false, error: "", patchLibrary: [{ name: "SYNTH", patch: PATCH }], onop: (op: unknown) => { ops.push(op); }, onaddpatch: async () => PATCH_ID, onaudition: (_p: JamPatch, note: number) => { heard.push(note); }, onnotice: () => {} } } }); flushSync();
+  const pointer = (type: string, el: EventTarget, init: PointerEventInit = {}) => { el.dispatchEvent(new w.PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, button: 0, ...init })); flushSync(); };
+  const cell = (key: string) => target.querySelector<HTMLButtonElement>(`[data-score-cell="${key}"]`)!;
+  const control = harness as unknown as { setReadonly: (reason: string) => void };
+  try {
+    pointer("pointerdown", cell("2:5"));
+    control.setReadonly("reading"); flushSync();
+    control.setReadonly(""); flushSync();
+    pointer("pointerup", window); cell("2:5").click(); flushSync();
+    assert.deepEqual(ops, []); assert.deepEqual(heard, []);
+    await new Promise((r) => setTimeout(r, 5));
+    pointer("pointerdown", cell("4:5")); pointer("pointerup", window); cell("4:5").click(); flushSync();
+    assert.equal(ops.length, 1, "the next press places normally");
+  } finally { await unmount(harness); target.remove(); }
+});
+
+test("a press cancelled with Escape is over: its release and click place nothing, and the next press works", async () => {
+  const m = model(); m.steps = 16;
+  const heard: number[] = [];
+  const ui = surface(m, { onaudition: (_p, note) => heard.push(note) });
+  const pointer = (type: string, target: EventTarget, init: PointerEventInit = {}) => { target.dispatchEvent(new w.PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, button: 0, ...init })); flushSync(); };
+  try {
+    pointer("pointerdown", ui.cell("2:5"));
+    ui.cell("2:5").focus(); ui.cell("2:5").dispatchEvent(new w.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); flushSync();
+    pointer("pointerup", window); ui.cell("2:5").click(); flushSync();
+    assert.deepEqual(ui.ops, []); assert.deepEqual(heard, [], "the cancelled press's completion click is swallowed");
+    await new Promise((r) => setTimeout(r, 5));
+    pointer("pointerdown", ui.cell("4:5")); pointer("pointerup", window); ui.cell("4:5").click(); flushSync();
+    assert.deepEqual(ui.ops, [{ op: "set_cell", step: 4, row: 5, value: { k: "n", p: PATCH_ID, len: SCORE_DEFAULT_HOLD } }], "a genuinely new press places as usual");
+    assert.deepEqual(heard, [65]);
+  } finally { await ui.done(); }
+});
+
+test("keyboard navigation keeps focus when the destination is a folded or past-the-end cell", async () => {
+  const m = model(); m.steps = 32; m.cells["15:1"] = { k: "n", p: PATCH_ID, len: 1 }; m.cellSlots["15:1"] = slot<ScoreCell>(m.cells["15:1"]);
+  m.cells["31:2"] = { k: "n", p: PATCH_ID, len: 1 }; m.cells["40:2"] = { k: "d", pad: 0 }; m.ready = false; // a tail past the end exists
+  const ui = surface(m);
+  const key = (el: Element, k: string) => { (el as HTMLElement).focus(); el.dispatchEvent(new w.KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true })); flushSync(); };
+  try {
+    ui.click('[data-score-scale="major"]');
+    assert.ok(ui.cell("15:1").classList.contains("fold"), "the retained C♯4 note sits on a folded row");
+    ui.click('[data-score-cell="15:1"]'); assert.equal(ui.ops.length, 0);
+    key(ui.cell("15:1"), "ArrowRight");
+    await new Promise((r) => setTimeout(r, 0)); flushSync();
+    assert.ok(ui.cell("16:1").classList.contains("off"), "the destination cannot take a note");
+    assert.equal(document.activeElement, ui.cell("16:1"), "but it can take focus");
+    key(ui.cell("16:1"), "ArrowLeft");
+    await new Promise((r) => setTimeout(r, 0)); flushSync();
+    assert.equal(document.activeElement, ui.cell("15:1"));
+    ui.click('[aria-label="Next score page"]'); ui.click('[data-score-cell="31:2"]');
+    key(ui.cell("31:2"), "ArrowRight");
+    await new Promise((r) => setTimeout(r, 0)); flushSync();
+    assert.ok(ui.cell("32:2").classList.contains("past") && ui.cell("32:2").classList.contains("off"));
+    assert.equal(document.activeElement, ui.cell("32:2"), "a past-the-end cell takes focus too");
+    assert.equal(ui.ops.length, 0);
   } finally { await ui.done(); }
 });
 
@@ -446,8 +546,8 @@ test("play from the selected step passes the export's millisecond offset; the sc
     target.querySelector<HTMLButtonElement>('[data-score-scale="minor"]')!.click(); flushSync();
     assert.ok(cell("3:1").classList.contains("fold"), "C♯4 is outside C minor");
     assert.ok(cell("3:1").classList.contains("n"), "the note there is still drawn");
-    assert.equal(cell("5:1").disabled, true, "nothing new is placed on a folded row");
-    assert.equal(cell("5:0").disabled, false);
+    assert.ok(cell("5:1").classList.contains("off"), "nothing new is placed on a folded row");
+    assert.equal(cell("5:0").classList.contains("off"), false);
     assert.match(target.querySelector("[data-score-scale-toggle]")!.textContent!, /C minor/);
     target.querySelector<HTMLButtonElement>("[data-score-scale-toggle]")!.click(); flushSync();
     assert.equal(cell("3:1").classList.contains("fold"), false);
@@ -473,7 +573,8 @@ test("compiled composer keeps cells past a shortened length visible, hatched and
     ui.click('[aria-label="Next score page"]');
     const past = ui.cell("20:3");
     assert.ok(past.classList.contains("past")); assert.ok(past.classList.contains("pad")); assert.equal(past.disabled, false);
-    assert.equal(ui.cell("19:3").disabled, true, "nothing can be placed past the end");
+    assert.ok(ui.cell("19:3").classList.contains("off"), "nothing can be placed past the end"); ui.click('[data-score-cell="19:3"]'); assert.equal(ui.ops.length, 0);
+    assert.equal(ui.cell("19:3").disabled, false, "but the cell stays focusable for keyboard navigation");
     assert.equal(ui.cell("21:3"), null, "the extent ends with the last live cell");
     ui.click('[aria-label="Erase"]'); past.click(); flushSync();
     assert.deepEqual(ui.ops, [{ op: "clear_cell", step: 20, row: 3 }]);
@@ -529,9 +630,9 @@ test("a queued library recipe does not enable note placement before native readb
     assert.ok(ui.target.querySelector('[data-lib-patch="SYNTH"]')!.classList.contains("indoc"), "a library tile already in the score is shown as such");
     ui.click('[data-lib-patch="OTHER"]');
     assert.equal(ui.target.querySelector('[data-lib-patch="OTHER"]')!.getAttribute("aria-busy"), "true");
-    assert.equal(ui.cell("0:0").disabled, false, "the current active recipe is still usable before the new queue resolves");
+    assert.equal(ui.cell("0:0").classList.contains("off"), false, "the current active recipe is still usable before the new queue resolves");
     resolve("c".repeat(64)); await pending; await Promise.resolve(); flushSync();
-    assert.equal(ui.cell("0:0").disabled, true);
+    assert.ok(ui.cell("0:0").classList.contains("off"));
     assert.ok(ui.target.querySelector(`[data-pending-patch="${"c".repeat(64)}"]`));
     assert.equal(ui.ops.length, 0);
   } finally { await ui.done(); }

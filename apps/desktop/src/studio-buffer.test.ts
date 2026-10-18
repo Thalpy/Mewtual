@@ -147,7 +147,10 @@ test("sound and music use their effective draft, preserving raw evidence and per
     { kind: "apply", op: { op: "set_cell", step: 2, row: 0, value: { k: "n", p: vector.patchId } } },
   ] as unknown as SaveRecord[];
   const working = workingScore(base, saves); assert.equal(working.ready, false); assert.equal(working.readiness.cells["0:0"].overlap, true);
-  assert.equal(workingScore(base, saves.slice(0, 2)).ready, true); assert.deepEqual(base.cells, {});
+  const clean = workingScore(base, saves.slice(0, 2)); assert.equal(clean.ready, true); assert.deepEqual(base.cells, {});
+  // Sparse like native: a clean slot has no readiness entry, so a readback of the same score
+  // fingerprints identically and cannot stop a playback that was started from the projection.
+  assert.deepEqual(clean.readiness, { cells: {}, patches: {}, headerConflicts: false });
   assert.equal(workingFlipnote(h.session.doc!.model!, h.session.saves, ME).sound.sfx.length, 0);
   h.session.reset();
 });

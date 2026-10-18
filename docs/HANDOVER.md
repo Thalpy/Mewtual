@@ -1,5 +1,62 @@
 # Mewtual; Handover
 
+## Score composer: third review, green CI, studio loading (2026-10-18, PR #49)
+
+The third external review (PR #49 head `8568250e`) reported six findings; all are fixed here:
+
+- **An own Save no longer stops playback.** `workingScore` produced a readiness entry for every
+  cell and recipe, all flags false, while native readiness omits clean slots; the editor's media
+  fingerprint serialises readiness, so the readback of an identical score looked like a source
+  change and stopped audio started from the working projection. The working projection is now
+  sparse like native (`studio-working.ts`), pinned in `studio-buffer.test.ts`.
+- **Jitter is a click.** A place gesture records the pressed cell and the previewed end; movement
+  inside the pressed cell is ignored, the gesture never writes shorter than the preview, and only
+  entering another cell counts as a drag that may change the remembered hold.
+- **A cancelled press is over.** Escape, pointercancel and blur remember the press; its release
+  and completion click are swallowed, and the next press works normally.
+- **A superseded channel switch no longer acts.** `switchTo` returns false after its awaited read
+  unless it is still the newest route and its channel is still on screen; Search-in-channel and
+  Edit-topic then do nothing instead of forcing the pane or opening against another channel.
+- **Every held document is reachable.** The sidebar pages held documents eight at a time with
+  prev/next instead of counting the rest.
+- **Keyboard focus survives folded and past-the-end destinations.** Cells are disabled only when
+  the editor is read-only; cells that cannot take a note are marked `off`/`aria-disabled`, stay
+  focusable, and refuse placement in the click handler.
+
+CI: the 24 score-component failures were the test file's DOM globals (the runtime's event
+delegation needs `HTMLMediaElement`); the audition failure was the own-Save stop above; the
+pads-lane fold assertion now uses a row outside both the scale and the lane. The three focused
+files (`score-editor`, `studio-surface`, `studio-buffer`) pass 89/89; svelte-check and the
+production build pass. The full suites were not run this round (user instruction).
+
+Loading: both "Loading the studio…" placeholders are now an indeterminate bar with a seconds
+readout, and the three studio modules are warmed six seconds after unlock so the first visit does
+not pay the cold import under the click (in development that import is Vite's first transform of
+the editor graph, tens of seconds; in the packaged app it is a local chunk). Nothing but the
+modules is fetched by the warm-up.
+
+This round's own read-only review found no blocker or high. Its mediums are fixed: a superseded
+`switchTo` still refreshes the on-screen channel's topic and delivery ticks and refuses only the
+caller's follow-up action; drift inside a preview that a neighbour forced short no longer rewrites
+the remembered hold (only lengthening beyond the preview does); and a read-only turn mid-press
+now cancels through the same path as Escape, so its completion click is swallowed even after the
+block lifts. Its lows are fixed too: no audition on a folded empty cell, returning to the pressed
+cell returns to the preview even past skipped cells, a secondary-button press does not forget a
+cancelled primary press, the loading seconds are hidden from live announcement, the held-document
+pager resets when its page count changes, and the focus test covers a past-the-end destination.
+Residual, noted by the review: a second pointer's tap during a drag is an ordinary click; a drag
+lengthened across a neighbour ends in the overlap refusal rather than a clamp; working readiness
+does not model the 64-recipe admission cap.
+
+Not changed, by decision: the loop period still grows with the last note's release tail (the
+controller completes at `max(grid, lastRelease)` and the session restarts after that), which the
+review identifies as the likely cause of long sounds feeling out of time. The fix it proposes, a
+cyclic playback owner in the engine that repeats on the authored bar while earlier voices finish
+under the existing budgets, is the next milestone together with note moves and undo under a
+bounded native gesture operation. Gaps: the `switchTo` refusal and the held-document pager have
+no automated regression yet (the route reproduction needs extracted App functions; the pager
+needs nine restored held documents).
+
 ## Score composer: review fixes and direct manipulation (2026-10-18, branch `score-composer-2`)
 
 The second review of the composer (PR #47, head `87ab2d89`) reported five P2 and one P3 defects,
