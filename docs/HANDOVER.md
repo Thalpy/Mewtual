@@ -86,8 +86,9 @@ separate Studio changes. Pending router mapping now shares its acquisition resul
 peer waiters and checks the candidate's own current local ICE generation. Announcement timestamps
 use one checked Clock sample. The unused desktop V2 action registry compiles only for contract
 tests until its result owner/IPC consumers are implemented; the general warnings policy remains
-intact. See [the revision ledger](communication-recovery/PR48-REVIEW-REVISION.md) for focused evidence
-and the still-open actor/driver wait cycle, provider selection and whole-exchange resource work.
+intact. See [the revision ledger](communication-recovery/PR48-REVIEW-REVISION.md) for corrected
+actor/driver progress, provider rotation and the narrow native SDP resource contract. Final
+branch verification and the wider native/browser/file/media acceptance remain outstanding.
 
 ## Gate 7 complete; communication programme next (2026-10-18)
 
@@ -205,8 +206,35 @@ persistence or native command changes. Every Studio write still goes through the
   a ✕ that edits the draft text; the text stays the single source of truth for the durable send,
   and a stale chip can never cut other text.
 
-Verification for this change is recorded at the end of this entry's handoff; the Rust suites,
-frontend suites, svelte-check, build, flows and adversarial review run before handoff.
+Adversarial review (read-only, against `8afb46e4..HEAD` plus the worktree): no blocker. Fixed
+before handoff, each with a regression that fails without the fix: HIGH, shelf tiles keyed by
+display name collapsed two share recipes whose names collide after the 12-character truncation
+(`libraryKey` = name + canonical recipe; `studio-sound-surface.test.ts`); MEDIUM, document Play
+replacing a sounding audition never observed "stopped" and left `auditioning` raised, so the
+transport kept reading "play" (cleared at both document-play entry points; `studio-surface.test.ts`
+G7-UI audition-then-Play); LOW, the card's `open` now checks generation and membership as well
+as server/channel; LOW, the composer-chip grammar now equals the renderer's `EMBED_RE` (newline
+labels); LOW, a document re-read while `onpatch` is pending no longer drops the marker (only a
+frame change does). Recorded as follow-ups: a trusted peer can fill the 16-slot share shelf with
+invalid `.jampatch` files (reads stay bounded; add a failed-cid skip); a popup "use" that resolves
+after Escape lands silently (idempotent by id; surface a notice); the chip scanner has no
+code-span awareness.
+
+Verification (2026-10-18, this change is frontend only): svelte-check 0 errors / 0 warnings;
+`npm test` 1708 passed, 0 failed, run after the fixes (an earlier run at the same tree reported
+1772 because a since-dropped commit of the parallel session added tests); `npm run build` ok;
+`test:flows` default 9/9 and the Gate 7 scenario pass on a quiet machine (under full cargo load
+the boot-panel stylesheet scenario and the search flow each failed once and passed on re-run;
+back-to-back flow runs can also fail on the harness port, re-run them apart). Root
+`cargo test --all --all-features`: 1922 passed, 1 failed under load
+(`an_inventory_job_keeps_its_profile_across_a_restart`, a file the parallel session changed;
+passes alone in 2 s). Native `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`:
+394 passed, 5 failed, all in files the parallel session's `4d321fef` changed
+(`studio::tests::native_studio_running_worker_retains_fences_after_invoke_or_actor_abort`,
+`studio::inspection::tests::…instance_span_both_visits`,
+`studio_exports::tests::studio_gif_stale_session_and_missing_server_never_write_or_reveal`, two
+`six_client_recovery::chat_matrix::*`); nothing in this change touches Rust. Fixture screenshots
+of the Sound/Music/History tabs, the popup, the file-info card and the viewer match the mockup.
 
 ## Studio UX corrections — implementation complete, final checks running (2026-10-18)
 

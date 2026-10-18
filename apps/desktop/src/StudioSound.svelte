@@ -10,10 +10,10 @@
   // - picking a LIBRARY tile never writes to the document. The recipe reaches the document only
   //   when "add to frame"/"save changes" is pressed (`commit`), so browsing recipes cannot
   //   pollute the 64-slot recipe list;
-  // - every async step (file read, `onpatch`) is fenced on the same model reference, the same
-  //   frame, the same form generation and the component still being mounted before it writes,
-  //   because the frame can change under an in-flight add and a marker must never land on a
-  //   frame the author did not have in front of them.
+  // - async steps require the same frame/form generation and a mounted component. File reads
+  //   also require their captured model; commit permits onpatch's expected projection replacement
+  //   so the paired marker can still be added. The host keys this component by document identity:
+  //   switching documents destroys it, and an old marker must never land in the new document.
   import { onDestroy, untrack } from "svelte";
   import type { JamPatch } from "./jam-contract.ts";
   import { FLIPNOTE_MAX_PATCHES, FLIPNOTE_MAX_SFX } from "./studio-contract.ts";
@@ -23,7 +23,7 @@
   import {
     ALL_SOUNDS_PAGE, ALTERNATIVES_PAGE, DEFAULT_LENGTH_MS, EVIDENCE_PAGE, LENGTH_PRESETS, NOTE_MAX, NOTE_MIN, type LibraryItem,
     clampNote, groupShelves, importName, instrumentName, noteName, pageSlice, patchUsage, pianoKeys, rackLabel, registerOf,
-    samePatch, secondsLabel, sortSfx, soundAttention, soundLengthMs, waveGlyph,
+    libraryKey, samePatch, secondsLabel, sortSfx, soundAttention, soundLengthMs, waveGlyph,
   } from "./studio-sound-ui.ts";
 
   let { model, frame, frameNumber = 0, frameIndexOf, who, tint, readonlyReason = "", library = [], history = false,
@@ -177,14 +177,16 @@
     }
     if (picked.kind !== "lib") return;
     // A library/imported recipe enters the document only now. The marker is written after the
-    // recipe id resolves, and only if nothing moved underneath: a different frame, a re-read
-    // document, a newer form generation or an unmounted component all mean the author is no
-    // longer looking at what they pressed "add" for.
-    const source = model, sourceFrame = frame, generation = formGeneration; busy = true;
+    // recipe id resolves, and only if nothing moved underneath: a different frame, a newer form
+    // generation, a read-only turn or an unmounted component all mean the author is no longer
+    // looking at what they pressed "add" for. A re-read of the SAME document is not a move: the
+    // model reference changes on every remote edit, and refusing the marker then would spend a
+    // recipe slot (the recipe is already written) without the sound the press asked for.
+    const sourceFrame = frame, generation = formGeneration; busy = true;
     try {
       const patchId = await onpatch(picked.patch);
       if (disposed) return;
-      if (source !== model || sourceFrame !== frame || generation !== formGeneration || locked) {
+      if (sourceFrame !== frame || generation !== formGeneration || locked) {
         onnotice("The frame or document changed before the sound was added; add it again.", "warn"); return;
       }
       onsfx({ ...(id ? { id } : {}), patch: patchId, note: pitch, durationMs: ms }); editing = "";
@@ -324,7 +326,7 @@
     {#each shelves as group (group.shelf)}
       <div class="shelf">{group.label} · {group.items.length}</div>
       <div class="rack">
-        {#each group.items as item (item.name)}
+        {#each group.items as item (libraryKey(item))}
           {@render tile(waveGlyph(item.patch), rackLabel(item.name), isLib(item), `${item.name} · ${group.label}`, () => pickLib(item), false, { "data-lib-patch": item.name })}
         {/each}
       </div>

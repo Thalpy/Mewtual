@@ -719,6 +719,10 @@
     if (playing) { audioActions?.stop(); return; }
     if (!audioActions || !objectId) { onnotice("audio playback is unavailable on this surface", "warn"); return; }
     if (!commit()) return;
+    // Document playback replacing a sounding audition: the session goes straight from
+    // "playing" to "preparing" without the UI ever observing "stopped", so the flag must be
+    // lowered here or the transport would keep reading "play" for the whole document run.
+    auditioning = false;
     savedPreview = null;
     const object = objectId, kind = isScore ? "score" : "flipnote";
     const prepare = () => kind === "score" ? session.prepareScorePlayback(object) : session.prepareFlipnotePixa(object);
@@ -848,6 +852,7 @@
     };
     if (action === "play") {
       if (!audioActions) return;
+      auditioning = false; // a saved version is document playback, never an audition
       void audioActions.start("flipnote", prepare, loop).catch((e: unknown) => onnotice(reason(e), "warn"));
       return;
     }

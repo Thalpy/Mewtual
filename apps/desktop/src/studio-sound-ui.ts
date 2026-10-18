@@ -116,6 +116,16 @@ export type LibraryItem = { name: string; patch: JamPatch; shelf: ShelfName };
 export const SHELF_LABELS: Readonly<Record<ShelfName, string>> = { preset: "presets", mine: "my library", share: "from the share" };
 const SHELF_ORDER: readonly ShelfName[] = ["preset", "mine", "share"];
 
+/**
+ * The identity of a shelf tile for keyed rendering and selection: name plus canonical recipe.
+ * Two share files whose names collide after `jamPatchFileName`'s 12-character truncation (or the
+ * same name shared twice with different knobs) are two tiles, not one; keying on the name alone
+ * made Svelte reconcile them as duplicates and let selection light the wrong one.
+ */
+export function libraryKey(item: { name: string; patch: JamPatch }): string {
+  return `${item.name}:${canonicalJson(item.patch)}`;
+}
+
 /** Library recipes grouped by shelf in presets/mine/share order; empty shelves are not returned. */
 export function groupShelves(library: readonly LibraryItem[]): { shelf: ShelfName; label: string; items: LibraryItem[] }[] {
   return SHELF_ORDER

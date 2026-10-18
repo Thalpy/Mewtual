@@ -18,6 +18,15 @@ test("every fileMarker embed is found with its exact span, and the renderer agre
   assert.ok(EMBED_RE.test(marker), "the chip grammar and the renderer grammar must name the same markers");
 });
 
+test("the chip grammar is the renderer's: a label with a newline is still one embed, and the chip finds it", () => {
+  const marker = `![cat\nloop](cid:${CID})`;
+  assert.ok(EMBED_RE.test(marker), "the renderer embeds a label that spans a line");
+  const found = draftAttachments(`hi ${marker}`);
+  assert.equal(found.length, 1);
+  assert.equal(found[0].cid, CID);
+  assert.equal(removeDraftAttachment(`hi ${marker}`, found[0]), "hi");
+});
+
 test("link markers are not attachments; two embeds come back in order with lowercase cids", () => {
   const draft = `${fileMarker("notes.pdf", CID, false)} ${fileMarker("a.pixa", CID.toUpperCase(), true)} and ${fileMarker("b.pixa", CID2, true)}`;
   const found = draftAttachments(draft);

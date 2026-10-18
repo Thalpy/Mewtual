@@ -6,13 +6,18 @@ Started 18 October 2026 on `chat-update-implementation`, from verified and pushe
 The pre-existing uncommitted invite regression in `apps/desktop/src/joinlog.test.ts` is preserved
 outside this programme's changes.
 
+The [PR48 revision ledger](PR48-REVIEW-REVISION.md) records the subsequent transport congestion,
+detached automatic submissions, pending mapping, provider rotation, announcement clock, native
+build and narrow SDP resource corrections. Those fixes have focused evidence and clear read-only
+reviews; full revision validation is running. They do not enable live V2 or durable file resume.
+
 | Package | Current state | Acceptance still required |
 | --- | --- | --- |
 | 0: reproduction and baseline | In progress: source trace and read-only design review completed; deterministic regressions being added | Constrained live topology, replacement races, measured recovery/control baseline and redacted native evidence |
-| 1: connections and scheduling | Initial native router/call lifecycle correction in focused verification | Broader permitted alternate paths, bounded fairness and measured limits |
+| 1: connections and scheduling | Detached connected maintenance and automatic repair; bounded driver delivery; native router/call lifecycle corrections | Broader permitted alternate paths, integrated multi-group congestion latency and full acceptance |
 | 2: room/signalling | Reviewed v2 design; focused crypto, signed codec and native ownership implementation; no live V2 or forwarding enabled | Fresh endpoint sessions, confidentiality/forwarding enforcement, legacy isolation, topology and native evidence |
 | 3: chat recovery | Existing mechanisms remain; new work not accepted | Exact-union recovery and demonstrated gaps under the plan's topology/restart matrix |
-| 4: file recovery | Existing explicit Keep remains; no resumable-store migration introduced | Reviewed durable states/budgets/migration, provider and bridge recovery, crash/cancellation matrix |
+| 4: file recovery | Provider search rotates beyond absent/busy first-four candidates; existing explicit Keep remains; no resumable-store migration introduced | Reviewed durable states/budgets/migration, bridge recovery and crash/cancellation matrix |
 | 5A: existing TURN feasibility | No new native/audio observation | Forced relay candidate, audible/native reconnect and unavailable-path evidence |
 | 5B: media bridging | No relay implementation or new dependency selected | Architecture/key/authority review, physical-network/audio evidence and resource bounds |
 | 6: combined rollout | Not accepted | Combined named scenarios, versioned compatibility, no forbidden edges or downgrade |
