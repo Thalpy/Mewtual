@@ -1,5 +1,72 @@
 # Mewtual; Handover
 
+## Communication implementation in progress (2026-10-18)
+
+Gate7 commit `4d321fef17514c5080f96d98f01be3e86c375333` is pushed to `origin/Gate7`.
+`chat-update-implementation` was created from that checkpoint and pushed with its upstream.
+The separate [communication ledger](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md) tracks
+subsequent unaccepted work. The live TCP baseline reproduces direct-only voice signalling through
+B and replacement D with A-C forbidden; local submission succeeds without C receipt. Initial
+changes fence stale RTC/call/mount work and introduce native optional router custody. Focused
+tests and adversarial corrections are in progress; this branch's full final suites and remaining
+room/chat/file/media packages are outstanding. Gate7's earlier full results are baseline evidence,
+not verification of these later changes. The pre-existing `joinlog.test.ts` edit remains separate.
+
+The demonstrated multi-second discovery stall is corrected with detached connected PEX/
+finalization/offer stages and fair actor completion. Exact lower flight/per-peer custody,
+coalesced bounded discovery, typed supersession and a queued-only shared retirement wake prevent
+early capacity reuse and reciprocal waits. Signed-record revisions request the existing sealed
+core persistence worker in quiet legacy groups; duplicate/liveness-only changes do not write.
+New-channel and missed-membership native TCP matrix cases now pass, including creator-offline
+unselected bridge service, exact original channel-operation unions and solo sealed restore.
+A reproduced quiet-removal gap is corrected by a released kind2 poll before PEX. Recovered epochs
+publish member/role effects even for equal-count replacement. Responses retain the 16 MiB ceiling
+with a separate 1024-record work cap; larger configured legacy replies refuse. Retained-answer
+bounds are now 32/64 MiB for two/four actual flights, plus bounded decoder scratch. Focused results
+and the clear re-review are recorded in the communication ledger; the whole programme remains open.
+The native regression observes the saved descriptor before close and offline cache reconstruction.
+The TCP baseline now measures bridge receipt 21–26 ms and a nominal one-second control exercise
+at 1,046–1,095 ms (`target/chat-maintenance-native-tcp-focused.log`), versus the earlier 5,491/
+7,147 ms result. This is narrow scenario evidence, not full connection-package/media acceptance.
+
+V2 implementation now includes the standalone browser crypto broker, signed canonical objects,
+native mount/call/resource ownership and packet reservation/replay foundation. Focused crypto,
+codec, resource, packet and directory regressions pass, with review corrections for exact inbound
+tuple binding, reload branding, allocator reconstruction and clock rollback. Main-window native
+ACL entries are connected, including the mapping lifecycle commands. Native watcher/active-join
+presence foundations now have focused freshness, renewal, capacity, removal/re-add and retained-
+evidence regressions. Desktop actor attachment now shares the process Runtime/pool, uses fresh
+owners on mounted unlock and revokes exact entries on removal. Newly accepted directory changes
+retire deleted room incarnations even when recreation is buffered or in the same edit; duplicate,
+forged and local no-op operations cannot replay that authority. Optional voice failures leave
+chat/vault access available. A committed UI authorization generation closes the lock-entry versus
+older-unlock race. These mechanisms remain unused by live calls. Live V2 Endpoint/helper/UI
+integration and all communication acceptance remain outstanding; see the separate ledger.
+
+Inert V2 transport admission now authenticates bound Noise endpoints before inner decoding, uses
+exact-frame/time admission and validates typed ACK roles. Detached source/helper requests retain actual
+lower custody and permanent driver connection generations, including disconnect/reconnect before
+Root events are consumed. Production member maintenance captures that same additive transport
+owner; old events cannot cancel fresh generations. Kind28 is still absent from normal dispatch,
+and production source scheduling, encrypted endpoint ingress/pull/negotiation and browser IPC remain
+outstanding. Trusted public-control intake/pumping now commits exact native recipients and original
+allowance atomically; only fresh native challenge/proof responses admit presence. Source retains
+actual native cached packet/pair/action ownership. Root now owns bounded
+watcher/active-join lifecycle state, retires members synchronously on observed MLS changes and uses
+weak native call custody. Review caught and corrected a strong-grant retention error; dropping the
+last external grant now closes an actual queued source job without an actor turn while preserving
+lower capacity until actual final drop. Metadata wakes coalesce. Prepared encrypted ingress has
+focused rejection/replay tests; its final native origin transaction still needs wiring. None of
+these internal seams establish live room/media acceptance.
+
+The inert native typed-action queue now registers exact immutable LocalJoin inputs before engine
+admission. It shares one permanent settlement fence across idempotent admission and first actual
+sign/closed-confirmation effects; End retains admitted work until real settlement. Terminal
+identities count toward its combined 32-record cap. Capacity close releases only unused bytes,
+preserving actual loan bytes/slots. Exact historical-result recovery, whole-chain prepayment,
+retained Runtime progress ownership and main-window action IPC are still open; these foundations
+do not enable kind28 or establish native WebView/blocked-topology acceptance.
+
 ## Gate 7 complete; communication programme next (2026-10-18)
 
 Gate 7 implementation and local acceptance are complete. Studio uses immediate working edits,

@@ -164,11 +164,94 @@ impl<T: Send + Sync + fmt::Debug> RequestKeepalive for T {}
 /// Shared, object-safe ownership token for one transport request.
 pub type SharedRequestKeepalive = Arc<dyn RequestKeepalive>;
 
-/// Cancellation signal plus optional accounting authority for an addressed request.
+/// Opaque ownership of one aggregate authenticated connection incarnation. A driver creates
+/// this when the first connection to a peer becomes live and revokes it synchronously on the
+/// final disconnect, before publishing events. Same-peer reconnect creates a different owner.
+/// This grants no membership or dial authority and is never serialized or restored.
+#[derive(Clone, Debug)]
+pub struct ConnectionLease(Arc<ConnectionLeaseState>);
+#[derive(Debug)]
+struct ConnectionLeaseState {
+    live: std::sync::atomic::AtomicBool,
+    changed: watch::Sender<bool>,
+    // Only MemNetwork composes two base registration owners. No recursive graph or spawned
+    // forwarding task is needed; local and remote retirement wake the captured pair directly.
+    parents: Option<(Arc<ConnectionLeaseState>, Arc<ConnectionLeaseState>)>,
+}
+impl Default for ConnectionLease {
+    fn default() -> Self {
+        Self(Arc::new(ConnectionLeaseState {
+            live: std::sync::atomic::AtomicBool::new(true),
+            changed: watch::channel(true).0,
+            parents: None,
+        }))
+    }
+}
+impl ConnectionLease {
+    pub fn is_live(&self) -> bool {
+        self.0.live.load(std::sync::atomic::Ordering::Acquire)
+            && self.0.parents.as_ref().is_none_or(|(local, remote)| {
+                local.live.load(std::sync::atomic::Ordering::Acquire)
+                    && remote.live.load(std::sync::atomic::Ordering::Acquire)
+            })
+    }
+    pub(crate) fn dependent(local: &Self, remote: &Self) -> Self {
+        // Registration owners are base leases, never compositions. This bounded internal seam
+        // avoids letting a synthetic transport create an unbounded recursive authority chain.
+        assert!(local.0.parents.is_none() && remote.0.parents.is_none());
+        Self(Arc::new(ConnectionLeaseState {
+            live: std::sync::atomic::AtomicBool::new(true),
+            changed: watch::channel(true).0,
+            parents: Some((local.0.clone(), remote.0.clone())),
+        }))
+    }
+    pub fn is_same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+    /// Trusted transport lifecycle only. Never revive this owner after revocation.
+    pub fn revoke(&self) {
+        self.0
+            .live
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.0.changed.send_replace(false);
+    }
+    pub async fn revoked(&self) {
+        let mut changed = self.0.changed.subscribe();
+        let mut parents = self
+            .0
+            .parents
+            .as_ref()
+            .map(|(local, remote)| (local.changed.subscribe(), remote.changed.subscribe()));
+        while self.is_live() {
+            tokio::select! {
+                _ = changed.changed() => {},
+                _ = async { if let Some((local, remote)) = &mut parents { tokio::select! { _ = local.changed() => {}, _ = remote.changed() => {} } } else { std::future::pending::<()>().await; } } => {},
+            }
+        }
+    }
+}
+
+/// Additional native authority for an addressed effect. This is deliberately independent of
+/// accounting: revocation can stop a waiter without terminating a transport-owned stream.
+///
+/// `authorized` must be bounded and synchronous, with no application or transport effects
+/// (bounded time/authority bookkeeping is permitted). Drivers call it at their
+/// admission boundary, before submitting bytes; revocation after admission cannot recall them.
+/// `revoked` must register its wakeup before rechecking authority, fail closed if its owner
+/// disappears, and complete permanently after revocation. Implementations must not restore an
+/// old authority on readmission, unlock or actor replacement; those operations need new owners.
+#[async_trait]
+pub trait RequestAuthority: Send + Sync + fmt::Debug {
+    fn authorized(&self) -> bool;
+    async fn revoked(&self);
+}
+
+/// Cancellation signal, optional current-effect authority and actual-completion accounting.
 #[derive(Clone)]
 pub struct RequestCancellation {
     signal: watch::Receiver<bool>,
     keepalive: Option<SharedRequestKeepalive>,
+    authority: Option<Arc<dyn RequestAuthority>>,
 }
 
 impl fmt::Debug for RequestCancellation {
@@ -176,6 +259,7 @@ impl fmt::Debug for RequestCancellation {
         f.debug_struct("RequestCancellation")
             .field("cancelled", &self.is_cancelled())
             .field("has_keepalive", &self.keepalive.is_some())
+            .field("has_authority", &self.authority.is_some())
             .finish()
     }
 }
@@ -183,18 +267,42 @@ impl fmt::Debug for RequestCancellation {
 impl RequestCancellation {
     /// Bind a native cancellation receiver to accounting that outlives the caller future.
     pub fn new(signal: watch::Receiver<bool>, keepalive: Option<SharedRequestKeepalive>) -> Self {
-        Self { signal, keepalive }
+        Self {
+            signal,
+            keepalive,
+            authority: None,
+        }
     }
 
-    /// Whether cancellation was already published.
+    /// Add an exact native effect owner without changing lower-layer accounting custody.
+    /// A queued driver checks it synchronously, so a separate task need not propagate revocation
+    /// through another cancellation channel before the driver can refuse stale work.
+    pub fn with_authority(mut self, authority: Arc<dyn RequestAuthority>) -> Self {
+        self.authority = Some(authority);
+        self
+    }
+
+    /// Whether cancellation was published, its publisher disappeared, or authority was revoked.
     pub fn is_cancelled(&self) -> bool {
         *self.signal.borrow()
+            || self.signal.has_changed().is_err()
+            || self
+                .authority
+                .as_ref()
+                .is_some_and(|owner| !owner.authorized())
     }
 
     /// Wait until cancellation is published or its authority disappears.
     pub async fn cancelled(&mut self) {
+        let authority = self.authority.clone();
         while !self.is_cancelled() {
-            if self.signal.changed().await.is_err() {
+            if let Some(owner) = &authority {
+                tokio::select! {
+                    biased;
+                    _ = owner.revoked() => break,
+                    changed = self.signal.changed() => if changed.is_err() { break; },
+                }
+            } else if self.signal.changed().await.is_err() {
                 break;
             }
         }
@@ -503,6 +611,18 @@ pub trait MeshTransport: Send + Sync {
     /// by [`MAX_CONNECTION_PATH_SNAPSHOT`].
     fn connection_snapshot(&self) -> Vec<PeerConnectionSnapshot> {
         Vec::new()
+    }
+    /// Capture the actual driver's current connection owner without consuming events. Consumers
+    /// must retain and recheck this exact lease at queued submission and completion. A current
+    /// snapshot alone cannot distinguish disconnect/reconnect before its events are drained.
+    /// Unsupported transports return None; upgraded effects must fail closed, never synthesize it.
+    fn connection_lease(&self, _peer: PeerId) -> Option<ConnectionLease> {
+        None
+    }
+    /// Legacy maintenance may use event-driven fencing on unsupported transports. Implementors
+    /// with this capability return true even while a peer is disconnected (and its lease None).
+    fn supports_connection_leases(&self) -> bool {
+        false
     }
 
     /// Start receiving gossip on `topic`.
@@ -816,6 +936,98 @@ pub trait MeshTransport: Send + Sync {
 }
 
 #[cfg(test)]
+mod authority_tests {
+    use super::*;
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Debug)]
+    struct Gate {
+        live: AtomicBool,
+        changed: watch::Sender<bool>,
+        revoke_at_registration: bool,
+    }
+    impl Gate {
+        fn new(revoke_at_registration: bool) -> Arc<Self> {
+            Arc::new(Self {
+                live: AtomicBool::new(true),
+                changed: watch::channel(false).0,
+                revoke_at_registration,
+            })
+        }
+        fn revoke(&self) {
+            self.live.store(false, Ordering::Release);
+            self.changed.send_replace(true);
+        }
+    }
+    #[async_trait]
+    impl RequestAuthority for Gate {
+        fn authorized(&self) -> bool {
+            self.live.load(Ordering::Acquire)
+        }
+        async fn revoked(&self) {
+            // Exercise revocation between the caller's first check and wake registration.
+            if self.revoke_at_registration {
+                self.revoke();
+            }
+            let mut receiver = self.changed.subscribe();
+            while self.authorized() {
+                if receiver.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn request_authority_refuses_stale_queued_work_without_a_propagation_task() {
+        let (_cancel, receiver) = watch::channel(false);
+        let authority = Gate::new(false);
+        let mut cancellation =
+            RequestCancellation::new(receiver, None).with_authority(authority.clone());
+        assert!(!cancellation.is_cancelled());
+        authority.revoke();
+        assert!(cancellation.is_cancelled());
+        cancellation.cancelled().await;
+    }
+
+    #[tokio::test]
+    async fn request_authority_registration_race_and_pending_revocation_wake() {
+        for at_registration in [true, false] {
+            let (_cancel, receiver) = watch::channel(false);
+            let authority = Gate::new(at_registration);
+            let mut cancellation =
+                RequestCancellation::new(receiver, None).with_authority(authority.clone());
+            // Poll once to prove the ordinary path registered a pending waiter. The race path
+            // revokes while that waiter is being registered and must already be ready.
+            let mut waiting = std::pin::pin!(cancellation.cancelled());
+            std::future::poll_fn(|cx| {
+                let polled = waiting.as_mut().poll(cx);
+                if at_registration {
+                    assert!(polled.is_ready());
+                } else {
+                    assert!(polled.is_pending());
+                }
+                std::task::Poll::Ready(())
+            })
+            .await;
+            authority.revoke();
+            if !at_registration {
+                waiting.await;
+            }
+        }
+    }
+
+    #[test]
+    fn a_closed_cancellation_owner_refuses_queued_work() {
+        let (cancel, receiver) = watch::channel(false);
+        let cancellation = RequestCancellation::new(receiver, None);
+        drop(cancel);
+        assert!(cancellation.is_cancelled());
+    }
+}
+
+#[cfg(test)]
 mod response_tests {
     use super::*;
 
@@ -884,6 +1096,8 @@ mod publication_tests {
         let transport: &dyn MeshTransport = &LegacyOnly;
         let (_sender, receiver) = watch::channel(false);
         let peer = PeerId::from_u64(1);
+        assert!(!transport.supports_connection_leases());
+        assert!(transport.connection_lease(peer).is_none());
         assert!(matches!(
             transport.request_connected_cancellable(peer, ProtocolId("test"), Bytes::new(),
                 RequestCancellation::new(receiver, None)).await,

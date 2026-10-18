@@ -1,0 +1,627 @@
+# Chat, files and voice implementation evidence
+
+Started 18 October 2026 on `chat-update-implementation`, from verified and pushed Gate7 commit
+`4d321fef17514c5080f96d98f01be3e86c375333`. Scope and ordering follow
+[CHAT-FILES-VOICE-PLAN](CHAT-FILES-VOICE-PLAN.md). This ledger is separate from Gate7 acceptance.
+The pre-existing uncommitted invite regression in `apps/desktop/src/joinlog.test.ts` is preserved
+outside this programme's changes.
+
+| Package | Current state | Acceptance still required |
+| --- | --- | --- |
+| 0: reproduction and baseline | In progress: source trace and read-only design review completed; deterministic regressions being added | Constrained live topology, replacement races, measured recovery/control baseline and redacted native evidence |
+| 1: connections and scheduling | Initial native router/call lifecycle correction in focused verification | Broader permitted alternate paths, bounded fairness and measured limits |
+| 2: room/signalling | Reviewed v2 design; focused crypto, signed codec and native ownership implementation; no live V2 or forwarding enabled | Fresh endpoint sessions, confidentiality/forwarding enforcement, legacy isolation, topology and native evidence |
+| 3: chat recovery | Existing mechanisms remain; new work not accepted | Exact-union recovery and demonstrated gaps under the plan's topology/restart matrix |
+| 4: file recovery | Existing explicit Keep remains; no resumable-store migration introduced | Reviewed durable states/budgets/migration, provider and bridge recovery, crash/cancellation matrix |
+| 5A: existing TURN feasibility | No new native/audio observation | Forced relay candidate, audible/native reconnect and unavailable-path evidence |
+| 5B: media bridging | No relay implementation or new dependency selected | Architecture/key/authority review, physical-network/audio evidence and resource bounds |
+| 6: combined rollout | Not accepted | Combined named scenarios, versioned compatibility, no forbidden edges or downgrade |
+
+## Initial source findings and design constraints
+
+`App.broadcastOn` filters through `onlineCallTargets`; `Server.online_members` reports local
+connected-member evidence. `ChannelSync.send_call_signal` addresses one exact peer and does not
+forward through another member. Thus A-B-C room/signalling failure is structurally supported,
+but source inspection alone is not a native reproduction or audible-media observation.
+
+Read-only review also found RTC callbacks and SDP continuations that can outlive their exact peer
+or call join. Regressions must demonstrate replacement, same-channel rejoin and suspended work
+before changing those paths. Legacy call signals already lack recipient/nonce-cache binding and
+use arrival time for presence; the threat model records that residual. New routing cannot inherit
+those checks as upgraded-session authority.
+
+Connected-only deferred work can reuse the reciprocal helper's capture/queue/live-revalidation
+pattern, but not its discovery protocol or authority. Group gossip is suitable only for reviewed
+group-visible ephemeral announcements. Forwarding plaintext SDP/ICE to B would broaden visibility.
+Targeted forwarding therefore waits for an endpoint confidentiality design and review.
+
+An isolated two-endpoint MLS signalling channel is a design option, not an approved implementation.
+Existing `MlsDevice.duplicate` and server snapshot APIs copy/serialize the whole provider; generic
+group receive can merge control traffic and omits the application sender in its return value.
+Safe reuse would need a fresh non-persistable provider owner, application-only authenticated
+receive, original-member identity delegation, exact handshake/Welcome retry ownership and bounded
+ratchet/session state. MLS alone does not bind the original server membership, room or recipient.
+No additional media-encryption claim follows from this investigation.
+
+## Verification policy
+
+Use focused regressions during implementation and sequential full suites before code handoff,
+with compilation limited to two jobs. The passing Gate7 suites are baseline evidence only; they
+do not qualify future changes on this branch. Record actual commands/results with each package.
+Native headless TCP and mocked RTC tests do not establish physical NAT or audible WebView results.
+
+## Package 0 / initial RTC correction checkpoint
+
+The actual-App RTC tests reproduced four failures before the fix: retired audio attachment,
+obsolete local offer submission, an old remote-offer continuation consuming replacement ICE,
+and callbacks surviving call invalidation/rejoin. Five initial regressions then passed; review
+found the adjacent deferred router mapping continuation. Three additional regressions reproduced
+stale ICE sends, route-count repopulation after lock/rejoin and same-port slot replacement.
+All eight lifecycle regressions now pass. Grants remain owned by a live call and exact slot,
+while sends require the exact peer. Current closed-peer cleanup remains valid. The independent
+lock guard is tested before peer-map cleanup. The subsequent native custody correction is below;
+the frontend fix alone did not establish native cleanup.
+
+Focused verification: 30 voice/media/identity tests, then 32 lifecycle/routes/call/draw wiring
+tests passed; Svelte check reported zero errors/warnings. The final read-only re-review reports
+no remaining blocker/high/medium in this frontend correction. These are focused checkpoints;
+the branch's complete final suites have not yet been run.
+
+The real TCP native baseline passed with A-C blocked in the actual swarms, fixed six-member
+membership and only A/B/C online, then B removed and authorized D reopened from its sealed state.
+B and D each received A's exact authenticated announcement. C received none in each one-second
+control observation window. Direct submission returned `true` in both phases, confirming that it
+does not prove receipt. Helper receipt measured 26 ms / 31 ms in this run; ten control commands
+completed in 1080 ms / 1064 ms windows including their intentional 100 ms service intervals.
+This is a quiet local baseline, not a latency SLO, physical-network result or successful indirect
+voice-room acceptance. No artificial A-C edge, test-only history handoff or room join by B/D was
+introduced. New protocol acceptance must add positive endpoint discovery/signalling oracles.
+
+Commands/logs: focused Node commands retain `test-dom.mjs`; `chat-voice-rtc-red.log`,
+`chat-voice-router-red.log`, `chat-voice-router-focused.log`, `chat-voice-router-check.log`;
+`cargo test --offline --manifest-path apps/desktop/src-tauri/Cargo.toml --lib legacy_voice_signals_have_no_member_bridge_fallback_on_tcp -- --test-threads=1 --nocapture`
+passed (`target/chat-voice-bridge-baseline.log`). Compilation used two jobs. Test observations
+are bounded to 64 actor deliveries per native client and do not persist or expose user content.
+
+The review-strengthened TCP rerun asserts `submitted == true` before observing non-delivery,
+so local refusal cannot make the reproduction pass. It passed through both B and D (27/29 ms
+helper receipts, 1096/1050 ms control windows; `chat-voice-bridge-baseline-rerun.log`). Native
+diagnostics now say `VOICE.SIGNAL.SUBMITTED` rather than claiming delivery.
+
+## Initial Package 1 native custody checkpoint
+
+Read-only design review confirmed stale native grant installation, port-only cleanup races,
+gateway retargeting and lost custody after acknowledged IGD Add. The correction follows
+[CALL-MAPPINGS](CALL-MAPPINGS.md): native mount/call/grant identities, prepare/activate CAS,
+exact UI/actor/group revalidation and port custody through acquisition/cleanup. Eight prepared
+candidates expire after 30 monotonic seconds. Sixty-four process port slots include uncertain
+retirement; those charges survive lock, remount and account changes until exit. The legacy PCP
+Client's missing drain barrier is explicit, with conservative refusal at exhaustion and continued
+STUN/TURN. No new wire, encryption, relay service or dependency is enabled.
+
+Nine initial native coordinator tests and eight injected IGD tests passed. Seven frontend mapping
+class tests plus actual-App/route/wiring/fixture neighbors passed (45 tests). Adversarial review
+then identified an old call surviving retained-WebView component destruction; the correction runs
+the actual leave path and tests stopped microphone/camera tracks, closed peers and inert queued
+RTC work (25 focused tests passed). Review also requested a production async acquisition seam;
+its dropped-waiter, delayed authorization/cleanup and commit-guard tests are in final focused
+verification. The final worker/advice run passed 13 native tests; eight injected IGD tests and
+48 frontend lifecycle/route/fixture tests pass. Focused net and native strict Clippy pass. Final
+read-only re-reviews have no remaining blocker/high/medium in this initial correction. Displayed
+call facts now distinguish mesh advertisements, helper admission offers and router candidates from
+media connectivity; a mapping cannot assign blame for failed ICE. Full branch suites remain
+outstanding. No physical router,
+native audible audio or indirect room success is claimed by these tests.
+
+## Package 2 design checkpoint
+
+[VOICE-SIGNALLING-V2](VOICE-SIGNALLING-V2.md) selects native original-member signatures/delegation
+and browser P-256 ECDH/HKDF/AES-GCM as the preferred implementation. It avoids changing the Rust
+provider RNG API or introducing an MLS pair-provider/Welcome lifecycle. Native single-use nonce
+reservations and exact ciphertext retries, post-decrypt native authorization, process-retained
+crypto charges, separate watcher proofs, policy-bound one-helper permits and strict legacy
+exclusion are required. Design review corrections pin allocator/renewal/cache lifetimes, offer
+identity under glare, exact transport roles, existing active P2P authority, helper replay ledgers
+and fair discovery rotation. Both design re-reviews report no remaining blocker/high/medium in
+their respective crypto/lifecycle and routing/policy scopes. This is permission to implement the
+reviewed design, not runtime/cryptographic acceptance or physical media evidence.
+
+## Package 2 foundation checkpoint
+
+`voice-crypto.ts` implements real WebCrypto P-256/HKDF/AES-GCM with non-extractable endpoint
+keys, directional context, frozen single-attempt plaintext/AAD, cached ciphertext, retained-window
+queue/byte bounds and native resource-admission callbacks. Nineteen focused Node WebCrypto tests
+pass, including altered tuples, an unrelated endpoint key, engine failure, reordered admission,
+nonce-window pruning and a fresh module using the retained HMR broker. Review corrected an
+incoming token that was not bound to its exact encrypted tuple, mutable owner rebinding and
+HMR branding; the standalone foundation re-review has no remaining blocker/high/medium.
+The retained broker's version 3 refuses an older owner rather than constructing another pool.
+Decrypt keeps its engine/native/byte charge through exact native plaintext commit, withholds the
+result until authorization, and clears owned engine/plaintext-copy buffers after commit rejection
+or final owner retirement. Real-engine tests and Svelte check pass
+(`target/chat-voice-crypto-confirmation-focused-rerun.log`,
+`target/chat-voice-confirmation-browser-check-rerun2.log`); cleanup re-review is clear.
+These tests do not prove native WebView support or confidentiality from a real MLS-member helper.
+
+`catcoms-sync::voice_v2` defines strict signed Announcement/delegation, WatchChallenge, JoinProof
+(including challenge identity and nonce), encrypted headers, renewal-stable pair transcripts and
+nonrecursive original-member route permits. `PacketLedger` retains native direction allocators,
+single-use reservations, exact ciphertext retries, bounded replay windows and exact post-decrypt
+delivery tokens. The native join lease permits only one ledger claim; loss revokes the join,
+preventing reconstruction under unchanged keys. Both signing/retry and delivery repeat freshness
+after wall-clock changes. Thirty-five focused sync tests plus one product directory test pass
+(`target/chat-voice-v2-ledger-focused-rerun.log`). Earlier testing exposed a fixture that had not
+opened the channel directory, and a stale root library artifact; neither failed run is acceptance.
+
+Native `voice_authority` separately owns mount/call prepare/activate CAS and active-or-uncertain
+crypto charges, independent of optional mappings. Its shared resource pool admits at most eight
+crypto operations/process and four/group, sharing 2 MiB/process and 256 KiB/group declared bytes
+with retained packet/cache credits. Charges outlive lock/remount/account/call changes until exact
+real settlement. The pool additionally bounds its group table to 1024 records. Native authority
+tests pass (seven pure plus one real bridge test, including deferred query versus End and actual
+lock races; `target/chat-voice-authority-races-focused.log`). No actor snapshot is treated as
+signing or delivery authority.
+
+The enforced main-window command policy/capabilities and frontend security ledger now include
+the mapping lifecycle and native voice resource commands. Five real Tauri RuntimeAuthority ACL
+tests and sixteen frontend command-security/mapping tests pass. Exact revocation/unmap/settlement
+remains callable while locked; it grants no fresh work and returns no token-existence bit.
+Live forwarding, native Endpoint presence/confirmation/offer integration, actor process-pool attachment,
+UI V2 admission/legacy exclusion and mixed-version/live-topology acceptance remain outstanding.
+These are foundation results, not Package 2 completion; full branch suites remain outstanding.
+
+## Package 2 fresh-presence foundation checkpoint
+
+Native `Watcher` and `LocalJoin` keep nonparticipant room observation separate from active-call
+proof responses. Announcements alone never admit presence. Challenges/proofs bind exact full
+identities, watcher incarnation, native challenge id/nonce, room/policy and fixed join/key. Local
+presence expires from challenge creation without arrival/duplicate/skew extension. Newer proof
+admission retires every older pending challenge, independently of later visible-row expiry.
+Actor-owned limits preserve join keys and renewal high-water marks across watcher/helper changes;
+active pairs can pin exact bindings beyond delegation expiry without resetting rate windows.
+
+Read-only review found removal/re-add reuse of retained evidence, renewal regression and inability
+to refresh a full roster. Corrections synchronously revoke exact evidence and pending proofs,
+reject stale new challenges and atomically transfer only uniquely held row credits. Actual clones
+remain charged. Wrong-group checks precede irreversible membership decisions. All 57 focused
+voice-v2 sync tests and affected sync/app strict Clippy pass (`target/chat-voice-presence-focused-rerun2.log`,
+`target/chat-voice-presence-clippy.log`). The initial presence run had one test expecting a removed
+challenge to survive re-add; the corrected contract requires a fresh challenge. Re-review is
+clear with no remaining blocker/high/medium. No live forwarding, UI room integration or physical
+media is claimed.
+
+## Package 2 initial key-confirmation checkpoint
+
+`LocalJoin` now owns one confirmation state per pair transcript. Exact native actions/reservations
+gate outbound signing and Finish establishment. Opaque affine committed-flight receipts bind the
+original signature/hash/tuple, local and pair leases, freshness and retained bytes. Native state
+keeps validated nonces/actions after response-capacity or engine failure; signed duplicates resume
+only the current cached action. Three starts share one original 15-second monotonic deadline.
+Admitted pair pins remain independent of roster observation replacement, and successful newer-pair
+promotion retires old pairs/candidates atomically. No bare-header or old async result establishes a
+pair. Review corrected split pair-revocation handles (all paths now share one irreversible lease)
+and lost prepare replies (expired unsigned drafts recover without unavailable old ids, while old
+results and credits retain their original ownership). All 73 focused voice-v2 tests pass
+(`target/chat-voice-confirmation-focused-rerun3.log`),
+including deferred engine workers, capacity recovery, nonce echoes, old/new promotion, renewal,
+lock/removal, exact cached flights and receipt ownership. Native state tests mock the trusted
+browser AEAD return; the separate WebCrypto tests use the real engine. This is not an end-to-end
+native/browser/transport test. Affected sync/app strict Clippy passes
+(`target/chat-voice-confirmation-clippy-rerun2.log`); actual-code re-review has no remaining
+blocker/high/medium. Native/UI
+IPC, legacy exclusion, helper transport, offer/ICE ownership and physical media remain outstanding.
+
+## Package 2 process and helper foundation checkpoint
+
+The unused native Runtime now retains group limits/helper caches and one byte/slot pool across
+actor/controller/session changes. Captured inactive session tickets, separate actor registration,
+exact member generations, policy leases and real-owner drop prevent removed/replaced work from
+reviving. An additive transport RequestAuthority performs a synchronous final driver admission
+check and race-free cancellation wait without changing lower keepalive custody. Closed native
+cancellation publishers fail closed. Three runtime-seam tests and two real libp2p request tests
+pass (`target/chat-request-authority-focused-rerun.log`,
+`target/chat-request-authority-net-queued.log`, `target/chat-request-authority-net-custody.log`).
+
+The helper core preserves original signed bytes, one target edge or rotating four-member room
+batches, cached duplicate outcomes and three attempts per helper/final edge. Targeted work can
+wait for a current proven connected route without spending an attempt or dialing. Four forwarding
+slots/group and eight/process share declared bytes with browser/cache work. Actual lower/worker/
+completion custody holds each affine Flight; only its final drop permits another lower attempt.
+Persistent packet/edge/cursor admission commits atomically after all charges succeed. Room
+authority remains separate from call participation; production must supply/revoke its exact
+directory incarnation. Each helper enforces its own budget; separate machines do not share a
+counter. Sender total-route limits are a separate outstanding enforcement point.
+
+Review corrected dropped-Runtime and contradictory-active-view authority, plus wall rollback
+before signed expiry. V2 logical wall time now advances with local monotonic elapsed time and
+forward local wall observations; remote timestamps cannot move it. Large clock corrections can
+make V2 signalling unavailable to other peers until clocks align or a fresh process starts.
+Remote initial validity includes both skew windows: up to 25 seconds for packets, 40 for
+delegations. Local challenge lifetime remains 15 seconds. All 104 focused V2 tests and affected
+rt/net/sync/app strict Clippy pass (`target/chat-voice-helper-focused-rerun3.log`,
+`target/chat-voice-helper-clippy-rerun.log`). Tests include three groups sharing eight lower slots
+and forced mid-edge/cursor allocation failure. Foundation re-review is clear with no remaining
+findings. A subsequent native integration design review identified registration/activation
+ordering, mounted-unlock reattachment and directory mutation hooks; those integration corrections
+and checks are in progress. No live request kind, helper route, UI V2 or physical media acceptance
+is established by this checkpoint. Full branch suites remain outstanding.
+
+## Package 2 desktop actor and directory checkpoint
+
+Desktop voice custody now shares one Runtime/pool with product actors. Found/join/pair prepare
+outside their final UI commit; reload uses the ticket captured before authentication. Native
+registration CAS runs under the exact row guard immediately before insertion. Typed conflicts
+preserve the current restored row; optional preparation expiry/capacity leaves chat usable with
+no voice authority. Mounted unlock reattaches fresh owners to retained actors one at a time,
+without holding native commit during actor preparation. Duplicate unlock keeps the same owner;
+registered inactive restores do not consume the eight uncommitted preparation slots.
+
+Root observes the exact newly authenticated directory change, including compound deletion and
+recreation, buffered dependencies and a successfully applied prefix before failure. The product
+schema bounds keys/rooms and preserves permanent `general`. A narrow raw-column budget precedes
+expanded operation inspection. Old duplicate, forged and local no-op operations never replay
+deletion authority. These hooks do not change legacy signed-operation admission or close R6.
+
+Review found stale native install ordering, actor waits under native commit, optional voice
+failures blocking unlock, preparation expiry discarding restored chat, and an older unlock
+erasing a newer lock flag before revocation hooks. Corrections include exact registration CAS,
+affine abandoned-reply grants and a separately committed UI authorization generation. The lock's
+first generation increment now closes IPC before any mutex/revocation hook. Static re-review of
+the corrected native attachment has no remaining blocker/high/medium finding. Production grants
+retain exact room custody and 256 declared bytes until actual last-owner drop. Additional
+read-only review of this correction has no remaining findings; its two capacity/lifetime
+regressions pass within all 123 Root voice tests (`target/chat-voice-grant-custody-focused.log`).
+
+Focused results: 121 Root voice tests (`target/chat-voice-native-attachment-root-focused-rerun.log`),
+17 native voice tests (`target/chat-voice-native-attachment-focused-rerun2.log`), four earlier product
+directory tests (`target/chat-voice-directory-product-authenticated-focused.log`) and three bounded
+scanner regressions (`target/chat-voice-directory-bounds-focused.log`) pass. Native regressions
+include twelve retained actors, idempotent unlock, actual lock versus pending native commit,
+healthy plus stopped actors, process-capacity refusal/recovery, expired preparation with continued
+chat, exact scope/grant rejection, and retained Owner clones after End. Initial native compiles
+needed a missing Arc import and updated fixture constructors; those runs are not acceptance.
+Five product/actor tests now pass (`target/chat-voice-actor-commands-focused.log`), including
+twelve lost preparation replies without exhausting pending capacity. Affected rt/net/replication/
+sync/app strict Clippy passes (`target/chat-voice-native-attachment-root-clippy-rerun.log`);
+its initial run requested two borrowed singleton slices in test code, corrected. Native session
+checks passed all 47 focused lock/unlock tests (`target/chat-voice-native-session-lock-focused.log`).
+The next voice rerun passed its 16 authority/lifecycle tests but its legacy TCP baseline exposed
+an unpinned target-descriptor readiness condition. A first normal-discovery readiness correction
+still timed out when both actors were driven together. The requester-only readiness correction
+passed (`target/chat-voice-descriptor-readiness-diagnostic.log`), preserving the forbidden A-C
+edge and all original receipt assertions, but measured 5,491 ms bridge receipt and a 7,147 ms
+control window while the actor awaited discovery RPCs. All 17 native voice checks then passed
+(`target/chat-voice-native-origin-rerun.log`). Native Clippy completed, but read an intermediate
+maintenance module and reported dependency warnings; this is not final clean-lint acceptance.
+Those earlier failing runs (`target/chat-voice-native-grant-custody-focused.log`,
+`target/chat-voice-native-grant-custody-focused-rerun.log`) are not acceptance.
+No live request kind,
+Endpoint/helper transport, UI V2, native WebView crypto or physical audio acceptance is claimed.
+Full branch suites remain outstanding.
+
+A subsequent read-only transport design review identified additional pre-enablement corrections:
+cheap bound-Noise-peer work admission before outer signature verification; exact frame hash/length
+and route-generation custody; original-issuer accounting only after replay classification and
+persistent capacity reservation; and helper-queued ACKs that cannot discharge a source's final
+recipient obligation. The [V2 decision](VOICE-SIGNALLING-V2.md) records these contracts. The current
+helper core's origin-charge ordering is now corrected: requester work remains independent;
+exact cached IDs and all persistent capacity are classified/reserved before an atomic original
+issuer commit. Rejected renewal changes restore the bounded origin/binding buckets, and final
+actor/session currency is rechecked under the locks immediately before commit. All 126 focused
+Root voice tests and affected strict Clippy pass (`target/chat-voice-origin-admission-focused-rerun2.log`,
+`target/chat-voice-origin-admission-clippy.log`). Read-only re-review has no remaining findings.
+
+## Package 1 detached discovery correction in progress
+
+Measured reciprocal actor waits motivated splitting connected PEX, member finalization and
+switchboard-offer network suspension from their sole mutable sync owner. Preparation and fresh
+completion preserve the released wire/authentication grammars. The networking-only generation
+is independent of desktop lock/V2 sessions and revokes on actual MLS transitions, effective
+policy changes, descriptor replacement, disconnect and originating owner drop. Finalization
+commands use the same scheduler. Two lower flights/server and four/process retain per-target
+dedup and declared bounded response capacity through actual transport retirement; a shared
+retirement wake lets a queued-only server resume without another minute tick. Injected-clock
+deadlines and a sixth fair ready source leave controls and inbound requests eligible.
+Review corrections preserve a discovery intent behind explicit finalization, even if its caller
+closes, avoid cached success for later explicit callers, retain per-peer occupancy between stages,
+rotate around lower-busy peers and limit benign supersession to one fresh retry without peer-health
+backoff. Idle actors ignore unrelated global retirements. First authenticated descriptor discovery
+pins once instead of spuriously canceling reciprocal initial finalization; later replacement remains
+irreversible. Actual empty-offer regressions cover current removal and descriptor/policy/disconnect/
+root-superseded replies preserving newer cache entries. Raw signed-record revision now drives the
+existing `SnapshotNeeded` worker; exact duplicates and connectivity alone leave it unchanged.
+
+Nine app and nine sync focused checks passed (`target/chat-maintenance-focused-rerun4.log`),
+including held reciprocal finalization plus overlapping discovery with continued control service.
+This includes actual signed local removal and injected deadline classification. Earlier runs exposed the first-
+descriptor case and missing peer-bound `/p2p` routes in the new offer fixture, corrected; they are
+not acceptance. The native quiet-legacy PEX regression passed in 0.67 seconds, checking actual sealed
+snapshot contents before close and cache reconstruction with an offline transport
+(`target/chat-maintenance-native-persistence-focused.log`). The forbidden-edge TCP baseline passed
+in 6.90 seconds; B/D receipt now measures 26/21 ms and its nominal one-second control window
+1,095/1,046 ms (`target/chat-maintenance-native-tcp-focused.log`). These measurements preserve the
+original no-forwarded-legacy-receipt assertion. Affected root and native strict Clippy pass
+(`target/chat-maintenance-root-clippy-rerun.log`, `target/chat-maintenance-native-clippy.log`);
+the initial lint requested a boxed completion variant and collapsed else-if, corrected. The
+final read-only actual-code re-review has no remaining blocker/high/medium findings. One narrow
+actor regression rerun passed after the boxed completion change
+(`target/chat-maintenance-final-actor-regression.log`); full branch suites remain
+outstanding until the whole programme is coherent.
+Existing local dial submission waits, mesh repair and the bounded rendezvous drain remain
+separate residual scheduling work. This correction alone does not claim a universal control SLO.
+
+## Package 3 stronger existing chat evidence
+
+The six-client native TCP fixture now compares exact canonical original signed-operation unions
+as well as stable message IDs, displayed authors and text. Every operation verifies its full device,
+signature and channel scope, and expected native sends contribute exactly one new original signed
+operation. Partition overlap must remain identical. The parser only observes the real actor's
+snapshot; it never supplies state to recovery actors. Secret prefix bytes are borrowed/skipped under
+a `Zeroizing` owner. The baseline partition/restart/solo-reopen scenario passed in 61.35 seconds
+(`target/chat-exact-signed-union-native-rerun.log`). The hostile reversed-restart/gossip-loss/delayed-
+reply/command-load variant passed in 138.29 seconds (`target/chat-exact-signed-union-native-hostile.log`).
+Two negative-oracle tests pass (`target/chat-signed-union-oracle-negative.log`): corrupt signatures,
+wrong-channel operations, duplicates, and rendered equality with missing/re-authored logs. Review
+and re-review have no remaining blocker/high/medium or oracle coverage finding. The first
+compile had a wrong DocType import, corrected to its existing `catcoms-wire` owner. No production
+chat defect or R6 semantic-binding closure was claimed by that checkpoint. The new-channel and
+membership-change matrix below is subsequent, separately recorded evidence.
+
+The new native TCP matrix passes both cases in 107.58 seconds
+(`target/chat-new-channel-membership-matrix-final-focused.log`). A channel created while clients
+0/1/2 are closed reaches the unselected bridge 3 through catch-up despite gossip loss. After its
+creator 4 and other recipient 5 close, bridge 3 reopens from sealed storage and serves the directory
+and exact original channel history onward to 0/1/2 without a UI open command. The returning pair
+replies bidirectionally; recipients 0/1/2/3 each reopen alone with the final sealed signed union.
+Directory discovery is semantic; exact signed-byte equality covers channel history, not its index.
+
+The membership case first failed: quiet connected members missed an owner removal when its control
+broadcast was dropped. Discovery now polls the existing kind2 commit exchange before PEX, then
+prepares subsequent stages from the recovered epoch. Empty/failed probes still continue ordinary
+discovery and cannot assert currency or PEX failure. The native case verifies member/role notices,
+original current-epoch history, non-founder control service to bridge 3, then onward recovery of
+survivor 4 after the non-founder closes. The founder and removed member remain offline. Surviving
+4 can author; 3/4 independently reopen with the exact full roster and signed history.
+
+Fourteen focused maintenance tests pass (`target/chat-quiet-commit-maintenance-final-focused.log`),
+including actual equal-count remove/add, exact request binding, old-root/removal/deadline refusal,
+oversized answers and signed count-cap rejection before promotion/application. Four existing/new
+commit-bundle tests pass (`target/chat-commit-bundle-boundary-focused.log`). Ten actor maintenance
+checks pass (`target/chat-quiet-maintenance-actor-focused-rerun.log`), plus the actual equal-count
+member/role projection and raw snapshot-dirty regression
+(`target/chat-quiet-equal-count-ui-focused.log`). Quiet legacy descriptor persistence still passes
+(`target/chat-quiet-commit-legacy-persistence-focused.log`); the legacy TCP voice reproduction passes
+in 7 seconds with B/D control windows at 1089/1049 ms
+(`target/chat-quiet-commit-legacy-voice-tcp-focused.log`). A compile-time Send-bound correction kept
+the projection helper on the mutable sole owner; no failed compile is acceptance evidence.
+
+Commit responses retain the released 16 MiB byte ceiling with a separate 1024-record work cap;
+default legacy logs hold 256. Larger configured legacy responses above that count refuse. This
+build serves larger retained local logs in consecutive epoch polls. Two/four actual lower permits
+bound retained answers at 32/64 MiB plus bounded decoder scratch; signature scratch is released
+before per-record decoding. Released kind2 remains unbound member evidence; kind26 separately
+proves the endpoint binding. Read-only design/re-review resolved both medium findings (quiet UI
+projection and record-count work); no blocker/high/medium remains in this slice. Affected strict
+Clippy passes (`target/chat-quiet-control-progress-reserve-clippy-rerun.log`); its first run only
+rejected an unnecessary constant assertion in the new test, subsequently removed. These results
+do not close removed-author R6 semantics, universal topology recovery or the whole programme.
+
+## Package 2 inert transport and source ownership in progress
+
+Strict borrowed kind28 framing, bound Noise/current MLS identity, pre-signature requester/process
+work, exact-frame affine admission, shared actual verification credit and typed role-bound ACKs
+are implemented as trusted Rust seams. Normal dispatch remains disabled. Review corrected helper
+as endpoint ACK confusion, repeated membership scans before work admission, expired admission at
+final helper origin commit, and serialized-buffer undercount. All136 focused voice tests and
+affected strict Clippy passed (`target/chat-voice-transport-review-fixes-focused-rerun.log`,
+`target/chat-voice-transport-review-fixes-clippy.log`); read-only re-review found no blocker/high/medium
+in that inert admission slice.
+
+Detached helper requests now retain actual lower flight custody and capture native Root route,
+descriptor/proof/member/policy/room/expiry owners. The first139 focused tests and affected Clippy
+passed (`target/chat-voice-forwarding-core-focused-rerun.log`, `target/chat-voice-forwarding-clippy.log`).
+Review then found an undrained-disconnect/same-peer-reconnect race. A new opaque driver connection
+lease revokes before snapshot/event publication and on shutdown/Drop; a fresh reconnect gets a
+different owner. Old events preserve replacement generations. Production maintenance captures
+this additive owner too; unsupported legacy seams retain documented event-time fencing.
+Three driver tests pass, including actual libp2p Noise reconnect with unread application events
+and a stale queued driver command plus fresh positive control
+(`target/chat-driver-connection-lease-focused-rerun.log`). Sixteen transport tests passed before
+the final local-registration harness correction (`target/chat-voice-forwarding-driver-focused-rerun.log`),
+including retained lower responder, stale signed ACK, descriptor/proof replacement, lock, Root
+drop and old-event/new-generation ordering. Ten maintenance and eight app checks passed
+(`target/chat-maintenance-connection-lease-focused-rerun2.log`,
+`target/chat-maintenance-connection-lease-app-focused.log`). A new maintenance fixture initially
+hit the existing one-second remote rate limit; injected time advance corrected it.
+The subsequent review closed the production race and identified missing local registration
+retirement in the Mem harness. Both local and remote dependent connection owners and retired-local
+send/snapshot rejection are now implemented. Both rt pair-owner tests and all ten sync maintenance
+tests pass (`target/chat-rt-connection-pair-focused-rerun.log`,
+`target/chat-maintenance-connection-pair-focused.log`); read-only re-review has no remaining findings.
+The native TCP/persistence checks have not yet been repeated after this additive driver change.
+
+The source core now retains original issuer+packet/hash ownership, three total source submissions,
+at most two helpers, independent overlapped lower owners and bounded rotating room cursors.
+Actual LocalJoin/Watcher accessors issue private incarnation-bound activity handles; a newer live
+lease cannot adopt an old first-admitted packet. HelperQueued cannot settle a final endpoint, and
+a direct room ACK cannot settle the room. The 500ms hedge is capacity-dependent; maximum-payload
+tests retain B and show no D attempt debit until capacity actually returns. Eight focused source
+tests passed initially (`target/chat-voice-source-focused.log`). Subsequent tests use the actual
+native PacketLedger reservation/cache/pair and per-action retirement, including every real
+confirmation supersession. All156 voice checks and strict affected Clippy passed after that
+correction (`target/chat-voice-confirmation-source-final-focused.log`,
+`target/chat-voice-confirmation-source-final-clippy.log`); source re-review has no remaining
+blocker/high/medium finding.
+
+Detached source framing now shares connected-driver/route/Root ownership and the typed ACK verifier
+with helper work while retaining distinct source settlement. Two native-root transport regressions
+cover helper ACK roles, unchanged originals across new direct routes, three total submissions, End
+and unread driver replacement. Typed WatchLease parents cancel actual queued source work without
+an actor turn. Call-grant validation recognizes both actual issuer registries, rejecting foreign,
+wrong-room, replaced-room and replaced-actor grants. All160 voice tests and strict affected Clippy
+passed (`target/chat-voice-source-transport-owner-focused.log`,
+`target/chat-voice-source-transport-owner-clippy.log`); both increment reviews have no remaining
+blocker/high/medium finding. Signed fixture endpoint assertions test only transport settlement;
+they are not native endpoint-delivery evidence. A retained source-responder timeout regression is
+added and awaits its next focused run.
+
+Prepared encrypted ingress now reserves bytes before native origin admission and publishes replay
+and token only after its final transaction succeeds. Twenty packet tests pass, including rejected
+origin, competing preparation, retired pair and End-during-commit regressions
+(`target/chat-voice-prepared-ingress-focused.log`); review and live endpoint wiring remain pending.
+Production source/helper scheduling, native Endpoint/Watcher/LocalJoin integration, UI V2/legacy
+exclusion, actual WebView crypto and physical TURN/audio acceptance remain outstanding.
+No whole-programme completion is claimed.
+
+Root endpoint lifecycle now owns bounded Watcher/LocalJoin state with affine observer custody,
+recognized call grants, idempotent same-key starts and coalesced nonblocking metadata wakes.
+Authenticated member removals invoke synchronous native watcher/pair/proof retirement inside the
+existing observed MLS transaction before additions/awaits. A real remove/re-admit regression verifies
+retained FreshPeer and PairSetup never revive and cached proofs are retired. The initial lifecycle
+run exposed a missing reconciliation in the metadata getter, corrected; all166 voice tests and
+strict affected Clippy then passed (`target/chat-voice-endpoint-lifecycle-all-focused.log`,
+`target/chat-voice-endpoint-lifecycle-clippy.log`), including the retained source-responder timeout.
+
+Adversarial review found Root's strong Arc could keep native call custody alive after every external
+owner disappeared. Root now holds Weak call identity and a revocation handle. All four endpoint
+checks pass (`target/chat-voice-endpoint-weak-owner-focused.log`), including loss of the only native
+owner with an actual bound-peer queued source flight, no Root turn, and independently retained
+lower credit. Short re-review has no remaining blocker/high/medium finding. Native public-key
+documentation explicitly limits its claim to structural SEC1/key-reference checks; on-curve import
+remains the browser crypto boundary. The prepared-ingress review is clear after a callback-contract
+wording correction; actual endpoint origin/queue integration remains pending.
+
+Native controllers now carry revocable parent consent for future explicit watchers. Replacement,
+End, lock and coordinator Drop close it, while a call start preserves the controller. Ten focused
+native checks passed (`target/chat-voice-controller-parent-native-focused.log`); read-only review
+has no blocker/high/medium finding. None of these lifecycle tests enable kind28,
+recoverable payload pull, browser V2 mode or a media path. Full branch suites remain outstanding.
+
+Trusted public-control intake now reserves bounded queue/ACK custody before committing original
+allowance under the current Group/Policy transaction. It captures exact native watch/call owners;
+replacement watchers cannot adopt cached ACKs. A native public-control pump retains exact cached
+challenge/proof responses on source capacity refusal. Announcements remain candidates, and only
+fresh native challenge responses admit presence. Actual MLS/bound-peer A/B/C tests prove both
+native participant joins through an unjoined bridge, but use Mem transport; they do not establish
+physical A-C exclusion, WebView encryption or audible media. Queue capacity, immutable retries,
+changed signed ID, parent retirement, expiry/rollback and held-receipt regressions pass. Read-only
+review has no blocker/high/medium finding; its requested capacity/expiry coverage is now included.
+All172 voice checks and affected strict Clippy passed at that checkpoint
+(`target/chat-voice-public-controls-all-focused.log`, `target/chat-voice-public-controls-clippy.log`),
+followed by both ingress lifecycle checks (`target/chat-voice-public-ingress-lifecycle-focused.log`).
+
+Actual `InboundPacket` payloads now retain their Arc byte credit after native token/receipt/pair
+retirement. Private borrowed payload accessors prevent moving the prepaid vector out of its owner;
+the compile-fail contract passes (`target/chat-voice-inbound-custody-doc-focused.log`). The prior
+receipt test was intentionally strengthened to retain credit while its actual event remains alive.
+Twenty-three transport checks passed (`target/chat-voice-public-controls-transport-focused.log`).
+
+Cold cache collection now runs independently of current session permission, through a bounded
+process snapshot and sole-actor absolute Clock wake. Origin windows/live pair pins, group member/
+epoch/revision evidence and native pair/replay/sequence tables survive collection. Actual lower,
+public receipt, decrypt payload and FreshPeer owners retain their credits. Unknown browser engine
+operations are never TTL refunded. Confirmation grants capture the original 15-second deadline
+even without collection; outgoing send deadlines are fixed at reservation, including exact retries
+after a wall correction. All184 focused voice checks pass (`target/chat-voice-collection-focused.log`)
+and affected strict Clippy passes (`target/chat-voice-collection-clippy-rerun.log`). Read-only review
+has no blocker/high/medium finding. Its requested idle-actor timer regression passes unlocked and
+locked without another command/network event (`target/chat-voice-collection-quiet-actor-focused-rerun.log`),
+and app strict Clippy passes (`target/chat-voice-collection-quiet-actor-clippy.log`). All12 native
+ownership checks pass, including injected-Clock collection, engine uncertainty and shutdown
+(`target/chat-voice-collection-native-focused-final.log`). An app forwarding method missing from the first Clippy
+run was added. New test imports/Clock Debug bounds needed harness corrections. Startup validation
+for the native setup change passes (`target/chat-voice-collection-native-build.log`,
+`target/chat-voice-collection-native-startup-unsandboxed.log`). The sandboxed launch timed out;
+the repository's same startup script passed outside the sandbox. Follow-up clock-domain coverage
+passes with independent server/voice monotonic origins and only the voice clock advanced
+(`target/chat-voice-collection-clock-domain-actor-focused-rerun.log`); the actor now pairs each
+absolute deadline with its own Clock. No production V2 dispatch/scheduler, encrypted action
+queue/pull/negotiation, browser adapter or physical media acceptance is claimed by this checkpoint.
+
+Pending crypto authority now binds actual native pair/action/reservation/token owners. Signing
+retires a separate pending encryption lease while exact cached submit/source eligibility survives
+the five-second construction cutoff. Token field custody revokes on consume/removal. Native nonce
+restart closes old Proof/Finish tokens, including attempts to reissue a grant for the old token.
+Hello candidates instead capture one stable per-pair accepted-sequence floor, advanced only by
+closed successful native progress and repeated at final token commit. Both completion orders pass:
+lower progress leaves a queued newer Hello/waiter eligible; higher progress closes older work
+before consuming its token or mutating the attempt. Failed higher input and duplicate completions
+do not advance state, and actual engine/payload charges remain held until release. Application
+packets after confirmed setup use their own lifetimes. All193 focused voice checks and affected
+strict Clippy pass (`target/chat-voice-pending-crypto-all-focused.log`,
+`target/chat-voice-pending-crypto-final-clippy.log`). Read-only implementation review has no
+blocker/high/medium finding. These factories remain pending-only trusted Rust seams: prepaid
+post-transition historical receipts, current OfferId fencing, recoverable encrypted action pull,
+browser commit uncertainty handling and production V2 scheduling/dispatch remain outstanding.
+
+Native prepaid progress capacity is now implemented as an inert resource primitive. Reservation
+holds one shared-pool charge; ByteBudget loans validate exact pool/group and acquire actual slots
+only at work admission. Dropping a chain owner cannot release actual loan custody, including a
+zero-byte engine loan. Eleven resource checks pass under full ordinary pressure and concurrent
+charge/drop (`target/voice-progress-reserve-complete-focused.log`), with read-only implementation
+review clear. All199 focused voice checks pass (`target/voice-progress-reserve-all-focused.log`),
+and the affected strict Clippy result above covers this primitive too.
+No confirmation/action/engine/source call sites use this budget yet. Raw-inbox
+self-starvation remains an open integration finding until a conservative complete confirmation
+chain and protected continuation slots pass saturated actual-path tests. Initial integration is
+confirmation-only; unknown SDP/ICE buffering remains deferred. Full branch suites are outstanding.
+
+The browser now has an inert confirmation-only action registry on the surviving broker v4.
+It freezes exact owner/pair/action/version/native input and shares one 32-record pending/
+uncertain/terminal cap plus the ordinary byte/engine budgets. A lost admission or commit reply
+retains the operation and retries only the exact native RPC; actual decrypt/digest computation
+runs once. Closed accepted/rejected receipts bind identity and input/result tags. Confirmation
+plaintext is withheld and wiped, never exported to RTC. Owner/action retirement wakes observers
+without refunding actual pending promises. Terminal rows retain their conservative byte charge;
+action-only retired identities cannot reconstruct until their owner ends. Temporary queue
+pressure is retryable and reports its actual queued state once capacity returns.
+
+All47 focused Node crypto checks pass (target/voice-confirmation-actions-queued-status-focused.log),
+and Svelte check reports zero errors/warnings (target/voice-confirmation-actions-typecheck-reviewed.log).
+They exercise real P-256/HKDF/AES-GCM but simulate the native action adapter. Tests include lost
+success/rejection/admission replies, full terminal and shared-byte capacity, both occupied broker
+slots, hanging RPCs, late retirement, exact u64 strings beyond safe integers, malformed receipts,
+closed input custody and fresh module/new owner/key/pair creation on the retained broker.
+Review corrected two medium findings (fresh-HMR pair marker mismatch and permanent failure on
+temporary queue saturation) and two low findings (extra input retention and stale queued status).
+Read-only re-review has no remaining actionable findings in this browser slice.
+
+The required native action queue, idempotent admission and permanently serialized settlement
+fence are NOT implemented by these Node tests. No native/WebView integration or live V2 acceptance
+is claimed. General Pair.open remains unused by calls and must not be the future adapter path;
+SDP/ICE require separate charged result/dispatch leases and native current-offer receipts.
+
+The subsequent native increment implements capacity close and typed engine-action custody.
+Reservation.close permanently refuses new loans and releases only unused backing; actual closed
+loans release their remaining backing and slots on actual drop. Fifteen resource checks pass
+(target/voice-progress-reserve-close-focused.log), including full group/process capacity,
+zero-byte engine/new-same-group credit and barrier-held concurrent close. Read-only close review
+has no blocker/high/medium/low finding. Closing alone never proves a workflow has completed.
+
+LocalJoin now issues opaque actions from actual native proof/pair, confirmation reservation or
+inbound token state. Its combined 32 pending/terminal records retain charged immutable inputs,
+typed fingerprints and shared irreversible engine fences. Pull rotates at most four without
+dequeueing. Native registration matches exact call lease/scope/process pool. Lost admission
+reuses one actual permit; settle-before-admit permanently closes delayed work. First actual sign
+and closed-confirmation wrappers use that same fence. End/lock/replacement close unstarted rows
+and retain admitted engines through actual settlement. Six new native-action path tests plus one
+existing matching source test pass (target/voice-native-typed-action-focused.log); four pure
+queue/fence checks pass (target/voice-native-action-fence-queue-focused.log). Four native registry
+tests pass (target/voice-native-action-registry-focused-rerun.log); the first build lacked a direct
+development-only crypto dependency and was corrected. Native cargo check passes with unused
+registry warnings while its IPC consumers are still unimplemented. These tests use actual signed
+public proof and confirmation state but simulate browser results and the native desktop grant.
+They do not prove native WebView, network topology, or full-chain progress.
+
+Native action factories can now use prepaid capacity; a proven-pair focused test exercises that
+under full ordinary pressure. Public prerequisites and the whole confirmation chain still do not
+use a retained Runtime progress gate/reserve. Exact post-transition success/rejection receipts,
+pre-ingress queue/origin atomic admission, coalesced action revisions, browser derive/seal recovery,
+native IPC and production V2 scheduling/dispatch remain outstanding. Native action implementation
+review has no blocker/high/medium/low finding. The combined 32 identities per join is a hard
+current limit; future cleanup cannot recreate expired identities or reset native counters.
+All213 voice-focused tests pass (target/voice-native-action-all-focused.log), and affected strict
+Clippy passes (target/voice-native-action-fence-clippy-rerun.log). The first lint attempt found
+an oversized enum variant, corrected by a prepaid boxed inbound owner. Native typed tagging now
+streams borrowed variable fields, avoiding an extra encoding copy. Full branch suites remain
+deferred until the programme is coherent.

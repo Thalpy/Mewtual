@@ -37,6 +37,8 @@ pub mod autonat_server;
 pub mod fdlimit;
 pub mod infra_transport;
 pub mod join_reply;
+#[cfg(test)]
+mod media_mapping_tests;
 pub mod metering;
 mod pcp_ipv6;
 pub mod relay_node;
@@ -104,6 +106,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot, watch, Mutex, Semaphore};
 use tokio::task::JoinHandle;
 
+mod connection_leases;
 mod publication;
 
 /// Max request/response frame size.
@@ -2575,8 +2578,8 @@ async fn run_upnp_bound_mapper_attempt(
 const MEDIA_MAP_LEASE_SECS: u32 = 4 * 60 * 60;
 
 /// A live media-port mapping: the public socket to advertise plus whatever keeps the route
-/// alive. A UPnP lease is bounded and self-sufficient; a PCP/NAT-PMP lease is short and renewed
-/// by the retained `portmapper` client, so dropping this struct is what ends that route.
+/// alive. A UPnP lease is bounded and self-sufficient; a PCP/NAT-PMP lease is renewed by the
+/// retained `portmapper` client. Release is best-effort, not proof of immediate router closure.
 pub struct MediaPortMapping {
     /// The public socket a remote peer can be told about.
     pub external: SocketAddrV4,
@@ -2590,6 +2593,9 @@ pub struct MediaPortMapping {
     pub confirmed: bool,
     local_port: NonZeroU16,
     keepalive: Option<portmapper::Client>,
+    // Cleanup must address the router that granted this lease, even after Wi-Fi/default-route
+    // changes. Rediscovering a gateway here could delete an unrelated router's same-port entry.
+    upnp: Option<UpnpMediaLease<igd_next::aio::Gateway<igd_next::aio::tokio::Tokio>>>,
 }
 
 // `portmapper::Client` is a live handle, not data; report only whether one is retained.
@@ -2606,13 +2612,157 @@ impl std::fmt::Debug for MediaPortMapping {
 }
 
 impl MediaPortMapping {
-    /// Release the route. Best-effort for UPnP (the bounded lease dies on its own regardless);
-    /// dropping the retained client is the whole release for PCP/NAT-PMP.
-    pub async fn release(self) {
-        if self.keepalive.is_none() {
-            unmap_media_udp_port(self.local_port).await;
+    /// Retire the route. `true` means the granting IGD acknowledged deletion. `false` means
+    /// effects may survive: the caller must retain its same-port exclusion and capacity charge.
+    /// PCP/NAT-PMP Client drop requests cancellation, but exposes no worker-drain/deletion ACK.
+    pub async fn release(self) -> bool {
+        if let Some(lease) = self.upnp {
+            lease.release().await
+        } else {
+            false
         }
     }
+}
+
+/// A failed media mapping and whether router/worker effects may still occupy the port. An
+/// uncertain attempt must not be retried automatically or refunded as completed cleanup.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct MediaPortMappingError {
+    message: String,
+    /// Retain exclusive port ownership and the attempt's process capacity charge until exit.
+    pub uncertain: bool,
+}
+
+impl MediaPortMappingError {
+    fn clean(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            uncertain: false,
+        }
+    }
+    fn uncertain(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            uncertain: true,
+        }
+    }
+}
+
+/// The subset of IGD used by media custody. Kept separate from discovery so tests can defer or
+/// fail router operations without real network access, and assert cleanup at the original owner.
+#[async_trait]
+trait MediaGateway: Send + Sync {
+    async fn add_media_port(&self, local_ip: Ipv4Addr, port: NonZeroU16) -> Result<(), String>;
+    async fn external_ip(&self) -> Result<IpAddr, String>;
+    async fn confirmed(&self, port: NonZeroU16) -> bool;
+    async fn remove_media_port(&self, port: NonZeroU16) -> Result<(), String>;
+}
+
+#[async_trait]
+impl MediaGateway for igd_next::aio::Gateway<igd_next::aio::tokio::Tokio> {
+    async fn add_media_port(&self, local_ip: Ipv4Addr, port: NonZeroU16) -> Result<(), String> {
+        self.add_port(
+            igd_next::PortMappingProtocol::UDP,
+            port.get(),
+            SocketAddr::new(IpAddr::V4(local_ip), port.get()),
+            MEDIA_MAP_LEASE_SECS,
+            "Mewtual call",
+        )
+        .await
+        .map_err(|error| format!("gateway refused the mapping: {error}"))
+    }
+
+    async fn external_ip(&self) -> Result<IpAddr, String> {
+        self.get_external_ip()
+            .await
+            .map_err(|error| format!("external-address query failed: {error}"))
+    }
+
+    async fn confirmed(&self, port: NonZeroU16) -> bool {
+        upnp_mapping_confirmed(self, port).await
+    }
+
+    async fn remove_media_port(&self, port: NonZeroU16) -> Result<(), String> {
+        self.remove_port(igd_next::PortMappingProtocol::UDP, port.get())
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// One acknowledged Add, including the exact gateway and external UDP port. The native caller
+/// must retain its worker through finalization/cleanup; cancelling a waiter is not cancellation
+/// of the router side effect. No persistent ownership or crash-atomic deletion is claimed.
+struct UpnpMediaLease<G> {
+    gateway: G,
+    port: NonZeroU16,
+}
+
+const MEDIA_GATEWAY_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn media_gateway_rpc<T>(
+    clock: &impl Clock,
+    operation: impl Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    tokio::select! {
+        result = operation => result,
+        _ = clock.sleep(MEDIA_GATEWAY_RPC_TIMEOUT) => Err("router request timed out".into()),
+    }
+}
+
+impl<G: MediaGateway> UpnpMediaLease<G> {
+    async fn release(self) -> bool {
+        // A failed deletion is still bounded by the requested lease. Never rediscover another
+        // gateway, and never turn best-effort cleanup into an external-reachability claim.
+        media_gateway_rpc(&SystemClock, self.gateway.remove_media_port(self.port))
+            .await
+            .is_ok()
+    }
+}
+
+async fn acquire_upnp_media_lease<G: MediaGateway>(
+    gateway: G,
+    local_ip: Ipv4Addr,
+    port: NonZeroU16,
+    clock: &impl Clock,
+) -> Result<(UpnpMediaLease<G>, SocketAddrV4, bool), MediaPortMappingError> {
+    // Only an acknowledged Add establishes custody. An ambiguous Add timeout can leave a
+    // bounded router lease, but deleting on a refusal/timeout could remove somebody else's
+    // existing entry. Do not report success or blindly delete in that case.
+    media_gateway_rpc(clock, gateway.add_media_port(local_ip, port))
+        .await
+        .map_err(MediaPortMappingError::uncertain)?;
+    let lease = UpnpMediaLease { gateway, port };
+    let external = media_gateway_rpc(clock, lease.gateway.external_ip()).await;
+    let usable = match external {
+        Ok(IpAddr::V4(ip)) if ipv4_is_globally_routable(&ip) => Ok(ip),
+        Ok(ip) => Err(format!(
+            "gateway returned a non-public IPv4 mapping address ({ip})"
+        )),
+        Err(error) => Err(error),
+    };
+    let external = match usable {
+        Ok(ip) => ip,
+        Err(error) => {
+            // The grant already exists: retain custody until this cleanup completes before
+            // falling through to another protocol. Previously this path leaked its handle.
+            return Err(
+                match media_gateway_rpc(clock, lease.gateway.remove_media_port(port)).await {
+                    Ok(()) => MediaPortMappingError::clean(error),
+                    Err(cleanup) => MediaPortMappingError::uncertain(format!(
+                        "{error}; cleanup uncertain: {cleanup}"
+                    )),
+                },
+            );
+        }
+    };
+    // Confirmation is advisory. Cap the whole table scan rather than allowing 64 slow router
+    // replies to hold an acquisition slot indefinitely.
+    let confirmed = tokio::select! {
+        confirmed = lease.gateway.confirmed(port) => confirmed,
+        _ = clock.sleep(MEDIA_GATEWAY_RPC_TIMEOUT) => false,
+    };
+    Ok((lease, SocketAddrV4::new(external, port.get()), confirmed))
 }
 
 /// Scan the router's own mapping table for the UDP entry on `port`. The strongest check
@@ -2641,53 +2791,38 @@ async fn upnp_mapping_confirmed(
 async fn map_media_port_upnp(
     local_ip: Ipv4Addr,
     port: NonZeroU16,
-) -> Result<MediaPortMapping, String> {
+) -> Result<MediaPortMapping, MediaPortMappingError> {
     let gateway = igd_next::aio::tokio::search_gateway(igd_next::SearchOptions {
         bind_addr: SocketAddr::new(IpAddr::V4(local_ip), 0),
         timeout: Some(UPNP_BOUND_SEARCH_TIMEOUT),
         ..Default::default()
     })
     .await
-    .map_err(|error| format!("no IGD gateway answered a search bound to {local_ip}: {error}"))?;
-    gateway
-        .add_port(
-            igd_next::PortMappingProtocol::UDP,
-            port.get(),
-            SocketAddr::new(IpAddr::V4(local_ip), port.get()),
-            MEDIA_MAP_LEASE_SECS,
-            "Mewtual call",
-        )
-        .await
-        .map_err(|error| format!("gateway refused the mapping: {error}"))?;
-    let external = match gateway.get_external_ip().await {
-        Ok(IpAddr::V4(ip)) => ip,
-        Ok(IpAddr::V6(ip)) => {
-            return Err(format!(
-                "gateway reported an IPv6 external address ({ip}) for an IPv4 mapping"
-            ))
-        }
-        Err(error) => return Err(format!("external-address query failed: {error}")),
-    };
-    if !ipv4_is_globally_routable(&external) {
-        return Err(format!(
-            "gateway returned non-public address {external} (likely CGNAT or double NAT)"
-        ));
-    }
-    let confirmed = upnp_mapping_confirmed(&gateway, port).await;
+    .map_err(|error| {
+        MediaPortMappingError::clean(format!(
+            "no IGD gateway answered a search bound to {local_ip}: {error}"
+        ))
+    })?;
+    let (lease, external, confirmed) =
+        acquire_upnp_media_lease(gateway, local_ip, port, &SystemClock).await?;
     Ok(MediaPortMapping {
-        external: SocketAddrV4::new(external, port.get()),
+        external,
         mechanism: PortMappingMechanism::Upnp,
         confirmed,
         local_port: port,
         keepalive: None,
+        upnp: Some(lease),
     })
 }
 
 /// The PCP/NAT-PMP rung for a media port, for routers that don't speak UPnP. Probe first (an
 /// unprobed one-shot optimistically tries PCP and stops at its timeout without falling through,
-/// same trap as [`run_port_mapper_attempt`]), then give each advertised protocol a bounded
-/// attempt. The client that succeeds is retained: it owns the short lease's renewal.
-async fn map_media_port_pcp_natpmp(port: NonZeroU16) -> Result<MediaPortMapping, String> {
+/// same trap as [`run_port_mapper_attempt`]), then give the first advertised protocol a bounded
+/// attempt. An uncertain result cannot fall through to another protocol on the same port. The
+/// client that succeeds is retained: it owns the lease's renewal, but exposes no joined shutdown.
+async fn map_media_port_pcp_natpmp(
+    port: NonZeroU16,
+) -> Result<MediaPortMapping, MediaPortMappingError> {
     const ACQUIRE_WITHIN: Duration = Duration::from_secs(5);
     let probe_client = portmapper::Client::new(portmapper::Config {
         enable_upnp: false,
@@ -2697,15 +2832,25 @@ async fn map_media_port_pcp_natpmp(port: NonZeroU16) -> Result<MediaPortMapping,
     });
     let probe = match probe_client.probe().await {
         Ok(Ok(probe)) => probe,
-        Ok(Err(error)) => return Err(error.to_string()),
-        Err(error) => return Err(format!("port-mapping probe stopped: {error}")),
+        // Even the probe client owns a spawned service. Its public API has no joined shutdown;
+        // retain the attempt charge on every failure after creating it, not just after MAP.
+        Ok(Err(error)) => return Err(MediaPortMappingError::uncertain(error.to_string())),
+        Err(error) => {
+            return Err(MediaPortMappingError::uncertain(format!(
+                "port-mapping probe stopped: {error}"
+            )))
+        }
     };
     drop(probe_client);
     let plan = mapping_attempt_plan(probe.pcp, probe.nat_pmp);
     if plan.is_empty() {
-        return Err("no compatible gateway answered the probe".to_string());
+        return Err(MediaPortMappingError::uncertain(
+            "no compatible gateway answered the probe",
+        ));
     }
-    for mechanism in plan {
+    // Once a mutating attempt starts, the public Client API cannot prove its worker drained on
+    // drop. Do not start another protocol on this port after an ambiguous result.
+    if let Some(mechanism) = plan.into_iter().next() {
         let client = portmapper::Client::new(portmapper::Config {
             enable_upnp: false,
             enable_pcp: mechanism == PortMappingMechanism::Pcp,
@@ -2723,10 +2868,10 @@ async fn map_media_port_pcp_natpmp(port: NonZeroU16) -> Result<MediaPortMapping,
         };
         if let Some(socket) = first {
             if !ipv4_is_globally_routable(socket.ip()) {
-                return Err(format!(
+                return Err(MediaPortMappingError::uncertain(format!(
                     "gateway returned non-public address {} (likely CGNAT or double NAT)",
                     socket.ip()
-                ));
+                )));
             }
             return Ok(MediaPortMapping {
                 external: socket,
@@ -2734,21 +2879,24 @@ async fn map_media_port_pcp_natpmp(port: NonZeroU16) -> Result<MediaPortMapping,
                 confirmed: true,
                 local_port: port,
                 keepalive: Some(client),
+                upnp: None,
             });
         }
     }
-    Err("a gateway answered discovery but granted no mapping".to_string())
+    Err(MediaPortMappingError::uncertain(
+        "a gateway answered discovery but granted no mapping",
+    ))
 }
 
 /// Map one webview media UDP port through the router and return the live mapping. One-shot by
 /// design: the mesh's mapping workers own the stable listen port, but a call's ICE agent binds
 /// fresh ephemeral ports the mesh never sees. The caller signals the mapping's public socket as
-/// an extra ICE candidate; a router mapping forwards from **any** source, which is what makes
-/// one mapped side sufficient for a call regardless of the other side's NAT type.
+/// an extra ICE candidate. A mapping can help the pair connect, but does not prove a working
+/// media route: firewalls, peer candidate policy and connectivity checks still matter.
 ///
 /// Tries UPnP over the bound-interface search first (the proven path; see
-/// [`run_upnp_bound_mapper_attempt`]), then PCP and NAT-PMP for routers that speak those
-/// instead.
+/// [`run_upnp_bound_mapper_attempt`]), then the first advertised PCP/NAT-PMP protocol after a
+/// clean IGD failure. Any uncertain Add/delete/client result stops fallback and remains charged.
 ///
 /// `claimed_ip` is the address the ICE candidate itself named (a mic-granted page gets real IPs
 /// in its host candidates); when present it must be the default-route interface, or the port
@@ -2760,42 +2908,27 @@ async fn map_media_port_pcp_natpmp(port: NonZeroU16) -> Result<MediaPortMapping,
 pub async fn map_media_udp_port(
     port: NonZeroU16,
     claimed_ip: Option<Ipv4Addr>,
-) -> Result<MediaPortMapping, String> {
-    let local_ip = default_route_ipv4().ok_or("no IPv4 default route")?;
+) -> Result<MediaPortMapping, MediaPortMappingError> {
+    let local_ip = default_route_ipv4()
+        .ok_or_else(|| MediaPortMappingError::clean("no IPv4 default route"))?;
     if let Some(claimed) = claimed_ip {
         if claimed != local_ip {
-            return Err(format!(
+            return Err(MediaPortMappingError::clean(format!(
                 "ICE socket {claimed}:{port} is not on the default-route interface ({local_ip}); a router mapping cannot reach it"
-            ));
+            )));
         }
     }
     match map_media_port_upnp(local_ip, port).await {
         Ok(mapping) => Ok(mapping),
+        Err(upnp_error) if upnp_error.uncertain => Err(upnp_error),
         Err(upnp_error) => match map_media_port_pcp_natpmp(port).await {
             Ok(mapping) => Ok(mapping),
-            Err(pcp_error) => Err(format!("UPnP: {upnp_error}; PCP/NAT-PMP: {pcp_error}")),
+            Err(pcp_error) => Err(MediaPortMappingError {
+                uncertain: pcp_error.uncertain,
+                message: format!("UPnP: {upnp_error}; PCP/NAT-PMP: {pcp_error}"),
+            }),
         },
     }
-}
-
-/// Best-effort removal of a mapping created by [`map_media_udp_port`]. Failure is acceptable:
-/// the lease is bounded and dies on its own.
-pub async fn unmap_media_udp_port(port: NonZeroU16) {
-    let Some(local_ip) = default_route_ipv4() else {
-        return;
-    };
-    let Ok(gateway) = igd_next::aio::tokio::search_gateway(igd_next::SearchOptions {
-        bind_addr: SocketAddr::new(IpAddr::V4(local_ip), 0),
-        timeout: Some(UPNP_BOUND_SEARCH_TIMEOUT),
-        ..Default::default()
-    })
-    .await
-    else {
-        return;
-    };
-    let _ = gateway
-        .remove_port(igd_next::PortMappingProtocol::UDP, port.get())
-        .await;
 }
 
 /// The bound-interface UPnP companion to [`run_port_mapper`], with the same retry cadence and
@@ -3324,6 +3457,7 @@ struct Actor {
     /// Coalesced, present-time liveness/path table. Pre-actor admission and infrastructure waits
     /// observe this instead of consuming the sole ordered event stream that `ChannelSync` owns.
     connection_snapshot_tx: watch::Sender<Vec<PeerConnectionSnapshot>>,
+    connection_leases: connection_leases::Owners,
     /// Address-bearing companion to the privacy-preserving connection snapshot. Only current
     /// outbound, Noise-authenticated direct routes enter this table; consumers use it to seal a
     /// same-LAN reconnect hint after admission, never for UI presence.
@@ -3556,6 +3690,7 @@ impl Actor {
         }
         // A normal command-channel shutdown has an explicit empty terminal value. A panic cannot
         // run this line, so readers additionally reject any retained value once the sender closes.
+        self.connection_leases.clear();
         self.connection_snapshot_tx.send_replace(Vec::new());
         self.authenticated_route_tx.send_replace(Vec::new());
         self.authenticated_route_evidence_tx
@@ -4751,6 +4886,9 @@ impl Actor {
                     endpoint.get_remote_address().clone(),
                 );
                 let first_connection = self.peers.insert(peer, peer_id).is_none();
+                if first_connection {
+                    self.connection_leases.connected(peer);
+                }
                 self.connection_paths.insert((peer_id, connection_id), path);
                 if let Some(route) = authenticated_dial_route(peer_id, &endpoint) {
                     self.authenticated_routes
@@ -4839,6 +4977,9 @@ impl Actor {
                     self.clear_dial_ledger(&peer_id);
                     let peer = to_peer(&peer_id);
                     self.peers.remove(&peer);
+                    // Close captured driver authority before snapshot/event publication. An
+                    // undrained application disconnect must not authorize a replacement link.
+                    self.connection_leases.disconnected(peer);
                     self.publish_connection_snapshot();
                     if self.mesh_observations.remove(&peer_id).is_some() {
                         self.mesh_observation_order
@@ -5215,6 +5356,7 @@ pub struct MeshService {
     publish_once_slots: Arc<Semaphore>,
     event_rx: Mutex<mpsc::Receiver<TransportEvent>>,
     connection_snapshot_rx: watch::Receiver<Vec<PeerConnectionSnapshot>>,
+    connection_leases: Arc<std::sync::Mutex<HashMap<PeerId, catcoms_rt::ConnectionLease>>>,
     authenticated_route_rx: watch::Receiver<Vec<AuthenticatedDialRoute>>,
     authenticated_route_evidence_rx: watch::Receiver<Vec<AuthenticatedDialRoute>>,
     listen_rx: Mutex<mpsc::Receiver<Multiaddr>>,
@@ -5257,6 +5399,8 @@ impl MeshService {
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
         let (connection_snapshot_tx, connection_snapshot_rx) = watch::channel(Vec::new());
+        let connection_owners = connection_leases::Owners::default();
+        let connection_leases = connection_owners.table.clone();
         let (authenticated_route_tx, authenticated_route_rx) = watch::channel(Vec::new());
         let (authenticated_route_evidence_tx, authenticated_route_evidence_rx) =
             watch::channel(Vec::new());
@@ -5286,6 +5430,7 @@ impl MeshService {
             cmd_rx,
             event_tx,
             connection_snapshot_tx,
+            connection_leases: connection_owners,
             authenticated_route_tx,
             authenticated_route_evidence_tx,
             listen_tx,
@@ -5341,6 +5486,7 @@ impl MeshService {
             publish_once_slots: Arc::new(Semaphore::new(publication::MAX_IN_FLIGHT)),
             event_rx: Mutex::new(event_rx),
             connection_snapshot_rx,
+            connection_leases,
             authenticated_route_rx,
             authenticated_route_evidence_rx,
             listen_rx: Mutex::new(listen_rx),
@@ -5965,6 +6111,12 @@ impl MeshTransport for MeshService {
     fn connection_snapshot(&self) -> Vec<PeerConnectionSnapshot> {
         MeshService::connection_snapshot(self)
     }
+    fn connection_lease(&self, peer: PeerId) -> Option<catcoms_rt::ConnectionLease> {
+        connection_leases::current(&self.connection_leases, peer)
+    }
+    fn supports_connection_leases(&self) -> bool {
+        true
+    }
 
     async fn subscribe(&self, topic: Topic) -> Result<(), TransportError> {
         self.cmd_tx
@@ -6238,6 +6390,23 @@ mod tests {
     #[derive(Debug)]
     struct RequestDropObserved {
         drops: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug)]
+    struct RequestTestAuthority(watch::Receiver<bool>);
+    #[async_trait::async_trait]
+    impl catcoms_rt::RequestAuthority for RequestTestAuthority {
+        fn authorized(&self) -> bool {
+            !*self.0.borrow() && self.0.has_changed().is_ok()
+        }
+        async fn revoked(&self) {
+            let mut receiver = self.0.clone();
+            while !*receiver.borrow() {
+                if receiver.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
     }
 
     impl Drop for RequestDropObserved {
@@ -7234,8 +7403,14 @@ mod tests {
         let refused = map_media_udp_port(port, Some(other)).await;
         let message = refused.expect_err("a foreign-interface claim must never reach the router");
         assert!(
-            message.contains("not on the default-route interface"),
+            message
+                .to_string()
+                .contains("not on the default-route interface"),
             "refusal must say why: {message}"
+        );
+        assert!(
+            !message.uncertain,
+            "a refused interface must not start router work"
         );
     }
 
@@ -8219,10 +8394,11 @@ mod tests {
             .expect("the memory peers should connect");
         }
 
-        for closed_reply in [false, true] {
+        for refusal in 0..3 {
             let (reply, receiver) = oneshot::channel();
-            let (signal, cancelled) = watch::channel(!closed_reply);
-            if closed_reply {
+            let (signal, cancelled) = watch::channel(refusal == 0);
+            let (_native_owner, native_signal) = watch::channel(refusal == 2);
+            if refusal == 1 {
                 drop(receiver);
             }
             // Send directly so caller-side early cancellation cannot hide a missing driver check.
@@ -8232,7 +8408,10 @@ mod tests {
                     peer: server_peer,
                     data: Bytes::from_static(b"must not send"),
                     reply,
-                    cancellation: Some(RequestCancellation::new(cancelled, None)),
+                    cancellation: Some(
+                        RequestCancellation::new(cancelled, None)
+                            .with_authority(Arc::new(RequestTestAuthority(native_signal))),
+                    ),
                 })
                 .await
                 .unwrap();
@@ -8343,13 +8522,15 @@ mod tests {
             .expect("the memory peers should connect");
         }
 
-        for connected_only in [false, true] {
+        for (connected_only, native_authority) in [(false, false), (true, false), (true, true)] {
             let drops = Arc::new(AtomicUsize::new(0));
             let keepalive: SharedRequestKeepalive = Arc::new(RequestDropObserved {
                 drops: Arc::clone(&drops),
             });
             let (cancel, receiver) = watch::channel(false);
-            let cancellation = RequestCancellation::new(receiver, Some(keepalive));
+            let (native_owner, native_signal) = watch::channel(false);
+            let cancellation = RequestCancellation::new(receiver, Some(keepalive))
+                .with_authority(Arc::new(RequestTestAuthority(native_signal)));
             let request_client = Arc::clone(&client);
             let request = tokio::spawn(async move {
                 if connected_only {
@@ -8386,7 +8567,11 @@ mod tests {
             })
             .await
             .expect("the request should enter the remote transport");
-            cancel.send(true).unwrap();
+            if native_authority {
+                native_owner.send(true).unwrap();
+            } else {
+                cancel.send(true).unwrap();
+            }
             assert!(matches!(
                 request.await.unwrap(),
                 Err(TransportError::Cancelled)

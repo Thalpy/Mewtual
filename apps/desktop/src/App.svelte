@@ -7,6 +7,7 @@
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
   import { onDestroy, onMount, tick, untrack } from "svelte";
+  import { CallMappingSession } from "./call-mappings.ts";
   import { renderMessage, renderTextDocument, renderWiki, parseRedirect, tocDirective } from "./render";
   import {
     TEXT_PREVIEW_MAX_BYTES, decodeTextFile, lineCountLabel, textFileKind,
@@ -6281,6 +6282,7 @@
       isDm: r.is_dm,
     }));
     locked = false;
+    void callMappingSession.claimController();
     const reconnectWarnings = reloaded.filter((r) => r.reconnect_warning);
     if (reconnectWarnings.length) {
       toast(reconnectWarnings.map((r) => `${r.name}: ${r.reconnect_warning}`).join("\n"), "warn", 0);
@@ -6361,6 +6363,7 @@
   // back the registered servers, so no actor or transport is duplicated.
   function lockScreen(nativeAlreadyLocked = false) {
     pendingSendRetry.cancel();
+    callMappingSession.resetController();
     // Lock also cancels calls still waiting on a native permission prompt; those have not yet set
     // `inCall`, so the ordinary leave path alone cannot see or invalidate them.
     callLifecycleSession.invalidate();
@@ -12315,6 +12318,9 @@
     fp: string;
     server: number;
     channel: string;
+    // A channel name can be left and rejoined. RTC callbacks belong to this exact join,
+    // as well as this exact peer object; identity or room equality cannot renew them.
+    callLease: number;
     pc: RTCPeerConnection;
     dc: RTCDataChannel | null;
     polite: boolean;
@@ -12403,6 +12409,15 @@
   let localStream: MediaStream | null = null;
   const micCaptureSession = new MediaCaptureSession();
   const callLifecycleSession = new MediaCaptureSession();
+  const callMappingSession = new CallMappingSession(invoke);
+  function destroyVoiceOnUnmount() {
+    // HMR can replace this component without destroying the WebView. Revoke old callbacks
+    // before teardown, then close RTC/media and pending capture through the ordinary leave path.
+    callLifecycleSession.invalidate();
+    try { leaveVoice(); }
+    finally { callMappingSession.destroy(); }
+  }
+  onDestroy(destroyVoiceOnUnmount);
   const callPeers: Record<string, CallPeer> = {};
   // Trickle ICE may beat the offer over independent Tauri invokes. Hold it until that peer has a
   // remote description instead of throwing it away and making the call depend on event timing.
@@ -12625,7 +12640,7 @@
     // "every ice candidate failed while the offer got through".
     const kind = typeof msg.type === "string" ? msg.type : "unknown";
     try {
-      const { value: delivered } = await invokeDebugged<boolean>("send_call_signal", {
+      const { value: submitted } = await invokeDebugged<boolean>("send_call_signal", {
         server,
         target,
         payload: b64enc(JSON.stringify(msg)),
@@ -12633,7 +12648,7 @@
       // The incident this whole section exists for: the roster shows a claimed path and the
       // transport has nowhere to send to. A run of these is a call that is about to die, and it
       // used to be a console.warn nobody had open.
-      if (!delivered) {
+      if (!submitted) {
         diagRecord({
           section: "voice",
           code: "VOICE.SIGNAL.NO_MEMBER_ROUTE",
@@ -12641,7 +12656,7 @@
           fields: { kind },
         });
       }
-      return delivered;
+      return submitted;
     } catch (e) {
       diagRecord({
         section: "voice",
@@ -17894,11 +17909,22 @@
   );
   let focusCols = $derived(focusTiles.length <= 1 ? 1 : focusTiles.length <= 4 ? 2 : 3);
 
+  // Account lock and call invalidation can precede map cleanup. Check both owners, including
+  // after every RTC await; only the state-change handler may retain a closed PC for cleanup.
+  function isCurrentCallJoin(lease: number, server: number, channel: string): boolean {
+    return !locked && inCall && callServer === server && callChannel === channel &&
+      lease === activeCallLease && callLifecycleSession.isCurrent(lease);
+  }
+  function isCurrentCallPeer(peer: CallPeer, allowClosed = false): boolean {
+    return isCurrentCallJoin(peer.callLease, peer.server, peer.channel) &&
+      callPeers[peer.fp] === peer && (allowClosed || peer.pc.signalingState !== "closed");
+  }
   async function negotiatePeer(peer: CallPeer) {
-    if (callPeers[peer.fp] !== peer || peer.pc.signalingState === "closed") return;
+    if (!isCurrentCallPeer(peer)) return;
     try {
       peer.makingOffer = true;
       await peer.pc.setLocalDescription();
+      if (!isCurrentCallPeer(peer)) return;
       if (peer.pc.localDescription?.type === "offer") {
         void sendSignal(peer.server, peer.fp, {
           callId: peer.channel,
@@ -17913,10 +17939,11 @@
     }
   }
   async function flushWaitingIce(peer: CallPeer) {
-    if (!peer.pc.remoteDescription) return;
+    if (!isCurrentCallPeer(peer) || !peer.pc.remoteDescription) return;
     const queued = waitingIce[peer.fp] ?? [];
     delete waitingIce[peer.fp];
     for (const candidate of queued) {
+      if (!isCurrentCallPeer(peer)) return;
       try {
         await peer.pc.addIceCandidate(new RTCIceCandidate(candidate));
       } catch (e) {
@@ -17925,6 +17952,7 @@
     }
   }
   function recoverPeer(peer: CallPeer) {
+    if (!isCurrentCallPeer(peer)) return;
     const now = Date.now();
     if (now - peer.lastRetry < 4000) return;
     const action = heartbeatRecovery({
@@ -17954,9 +17982,12 @@
   // difference in what leaks and the room deserves to be told, so it is surfaced rather than
   // averaged away. Best-effort throughout: on any miss the badge stays unknown, which is an
   // honest answer, where guessing "direct" would not be.
-  async function sniffTransport(fp: string, pc: RTCPeerConnection) {
+  async function sniffTransport(peer: CallPeer) {
+    if (!isCurrentCallPeer(peer)) return;
+    const { fp, pc } = peer;
     try {
       const stats = await pc.getStats();
+      if (!isCurrentCallPeer(peer)) return;
       let codecId = "";
       stats.forEach((stat) => {
         const outbound = stat as RTCStats & {
@@ -18010,12 +18041,11 @@
   // UDP ports this call asked the router to open (bound-interface IGD on the native side, the
   // same path the invite reachability fix proved out). One mapping per local ICE port; the
   // granted public socket is signalled to the peer as an extra srflx candidate. A router mapping
-  // forwards from any source, so ONE mapped side connects the pair no matter how hostile the
-  // other side's NAT is: the same one-public-route-suffices shape as invites. `null` marks a
-  // port that was tried and refused, so renegotiations don't re-ask the router every time.
+  // forwards from any source, so ONE mapped side can help the pair traverse NAT. An empty
+  // grant marks a pending/refused attempt, so renegotiations do not repeatedly ask the router.
   // The eligibility rule, the candidate builder and the status phrasing live in callroutes.ts,
   // where they are unit-tested.
-  const mappedCallPorts = new Map<number, MappedPort | null>();
+  const mappedCallPorts = new Map<number, { granted: MappedPort | null }>();
   // Reactive shadow of how many router-mapped routes this call holds, for the status line: a
   // plain Map mutation is invisible to $derived.
   let callMappedRoutes = $state(0);
@@ -18027,23 +18057,35 @@
   // silently, because a filter nobody can see is indistinguishable from a bug when a call fails.
   let suppressedIceCandidates = $state(0);
   async function refreshDefaultRoute() {
+    const lease = activeCallLease, server = callServer, channel = callChannel;
+    if (server === null || !channel || !isCurrentCallJoin(lease, server, channel)) return;
+    // A prior call's interface is not evidence for this one, especially after a network change.
+    // Unknown route signals all candidates while lookup awaits; suppressed ICE is not replayed.
+    defaultRouteIpv4 = null;
     try {
-      defaultRouteIpv4 = await invoke<string | null>("default_route_address");
+      const address = await invoke<string | null>("default_route_address");
+      if (isCurrentCallJoin(lease, server, channel)) defaultRouteIpv4 = address;
     } catch {
-      defaultRouteIpv4 = null; // unknown route: signal everything, as before
+      if (isCurrentCallJoin(lease, server, channel)) defaultRouteIpv4 = null;
     }
   }
 
   async function signalMappedCandidate(peer: CallPeer, c: RTCIceCandidate) {
+    if (!isCurrentCallPeer(peer)) return;
     if (!mappableIcePort(c)) return;
     const policy = mappingAddressPolicy(c.address);
     if (!policy.map) return; // an IPv6/hostname socket is not what an IPv4 mapping reaches
     const port = c.port as number;
     if (!mappedCallPorts.has(port)) {
-      mappedCallPorts.set(port, null); // claim before the await so a concurrent candidate doesn't double-map
+      // Mapping custody is call-wide, not peer-wide: a replaced peer must not strand a live
+      // call's grant. The owned slot additionally rejects a same-port clear/replacement ABA.
+      const owned = { granted: null as MappedPort | null };
+      mappedCallPorts.set(port, owned);
       try {
-        const granted = await invoke<MappedPort>("map_call_port", { port, address: policy.claim });
-        mappedCallPorts.set(port, granted);
+        const granted = await callMappingSession.map(peer.callLease, port, policy.claim);
+        if (!granted) return;
+        if (!isCurrentCallJoin(peer.callLease, peer.server, peer.channel) || mappedCallPorts.get(port) !== owned) return;
+        owned.granted = granted;
         callMappedRoutes += 1;
         console.info("voice: router mapped the media port", {
           port,
@@ -18056,8 +18098,8 @@
         return;
       }
     }
-    const ext = mappedCallPorts.get(port);
-    if (!ext) return;
+    const ext = mappedCallPorts.get(port)?.granted;
+    if (!ext || !isCurrentCallPeer(peer)) return;
     void sendSignal(peer.server, peer.fp, {
       callId: peer.channel,
       type: "ice",
@@ -18066,9 +18108,8 @@
   }
 
   function releaseMappedCallPorts() {
-    for (const [port, granted] of mappedCallPorts) {
-      if (granted) void invoke("unmap_call_port", { port }).catch(() => {});
-    }
+    // Revoke the native owner, including acquisitions that have not returned a grant yet.
+    callMappingSession.endCall();
     mappedCallPorts.clear();
     callMappedRoutes = 0;
   }
@@ -18077,12 +18118,13 @@
     if (callPeers[fp]) return callPeers[fp];
     const server = callServer;
     const channel = callChannel;
-    if (server === null || !channel || !callSelfId) return null;
+    if (locked || !inCall || server === null || !channel || !callSelfId || !callLifecycleSession.isCurrent(activeCallLease)) return null;
     const pc = new RTCPeerConnection({ iceServers: iceServers() });
     const peer: CallPeer = {
       fp,
       server,
       channel,
+      callLease: activeCallLease,
       pc,
       dc: null,
       polite: isPoliteTowards(callSelfId, fp),
@@ -18128,11 +18170,15 @@
       ensureJamEngine().setSourceLevel(fp, peerInstLevelFor(fp) / 100); // the trim you set for them last time
       const dc = peer.dc;
       dc.onopen = () => {
+        if (!isCurrentCallPeer(peer) || peer.dc !== dc || dc.readyState !== "open") return;
         pushInstState();
         void openJamOutboundEdge(dc); // publication barrier before this edge's first note/drum
         jamMetHello(dc); // and, if I anchor the grid, the running metronome
       };
-      dc.onmessage = (e) => handleJamFrame(fp, jamChan, jamDec, e.data);
+      dc.onmessage = (e) => {
+        if (!isCurrentCallPeer(peer) || peer.dc !== dc) return;
+        handleJamFrame(fp, jamChan, jamDec, e.data);
+      };
     } catch {
       /* data channels unavailable: voice still works */
     }
@@ -18141,7 +18187,7 @@
     const claims = drawClaims;
     if (claims) {
       peer.draw = openDrawEdge(pc, claims, fp, {
-        live: () => callPeers[fp] === peer,
+        live: () => isCurrentCallPeer(peer),
         changed: () => {
           if (drawClaims === claims) syncDrawClaims();
         },
@@ -18151,6 +18197,7 @@
     // later. The no-argument setLocalDescription picks offer/answer from the signaling state.
     pc.onnegotiationneeded = () => void negotiatePeer(peer);
     pc.onicecandidate = (e) => {
+      if (!isCurrentCallPeer(peer)) return;
       if (e.candidate) {
         // A candidate on one of this machine's virtual adapters can never be reached from
         // outside, and sending it costs the far end a connectivity check before ICE settles.
@@ -18162,13 +18209,17 @@
         void signalMappedCandidate(peer, e.candidate);
       }
     };
-    pc.onicecandidateerror = (e) => console.warn("voice ICE server/candidate error", {
-      peer: displayKey(fp),
-      code: e.errorCode,
-      text: e.errorText,
-      url: e.url,
-    });
+    pc.onicecandidateerror = (e) => {
+      if (!isCurrentCallPeer(peer)) return;
+      console.warn("voice ICE server/candidate error", {
+        peer: displayKey(fp),
+        code: e.errorCode,
+        text: e.errorText,
+        url: e.url,
+      });
+    };
     pc.ontrack = (e) => {
+      if (!isCurrentCallPeer(peer)) return;
       const stream = e.streams[0];
       if (!stream) return;
       if (e.track.kind === "audio") {
@@ -18182,19 +18233,22 @@
       // that arrived first, in which case that audio moves to the share chain.
       if (remoteAudioRouter.noteVideo(fp, stream.id)) regroupRemoteAudio(fp, stream.id);
       remoteStreams = { ...remoteStreams, [fp]: stream };
-      e.track.onended = () => dropRemoteVideo(fp, stream);
+      e.track.onended = () => { if (isCurrentCallPeer(peer)) dropRemoteVideo(fp, stream); };
       stream.onremovetrack = () => {
+        if (!isCurrentCallPeer(peer)) return;
         if (!stream.getVideoTracks().length) dropRemoteVideo(fp, stream);
       };
     };
     pc.onconnectionstatechange = () => {
+      // A current closed PC still owns its cleanup. A retired PC owns no replacement state.
+      if (!isCurrentCallPeer(peer, true)) return;
       callPeerStates = { ...callPeerStates, [fp]: pc.connectionState };
       // Claims never outlive a dead link, and an unreachable peer is absent until this side sees
       // it "connected" again (draw-wiring.ts).
       if (claims && callPeers[fp] === peer && drawClaims === claims) {
         drawConnectionState(claims, fp, pc.connectionState, peer.draw, syncDrawClaims);
       }
-      if (pc.connectionState === "connected") void sniffTransport(fp, pc);
+      if (pc.connectionState === "connected") void sniffTransport(peer);
       if (pc.connectionState === "failed") recoverPeer(peer);
       else if (pc.connectionState === "closed") removePeer(fp);
     };
@@ -18447,6 +18501,7 @@
     callServerName = servers.find((s) => s.id === server)?.name ?? "";
     inCall = true;
     activeCallLease = joinLease;
+    callMappingSession.start(joinLease, server, channel);
     ensureJamEngine(); // fresh engine, session nonce and sequence domain for this call
     void ensurePublishedJamPatch(); // local echo + every edge wait on the same verified recipe
     void refreshCallProfiles();
@@ -18480,7 +18535,7 @@
         // Re-read the winning candidate pair: an ICE restart can migrate a live call from
         // direct to relayed (or back) with no connection-state change to notice it by.
         for (const [fp, p] of Object.entries(callPeers)) {
-          if (p.pc.connectionState === "connected") void sniffTransport(fp, p.pc);
+          if (p.pc.connectionState === "connected") void sniffTransport(p);
         }
       }
     }, 5000);
@@ -18618,6 +18673,7 @@
     callSelfId = "";
     callSharedIds = new Set();
     activeCallLease = 0;
+    defaultRouteIpv4 = null;
     callProfiles = {};
     peerTransport = {};
     peerVideoCodec = {};
@@ -18835,7 +18891,7 @@
       createPeer(fromFp); // its tracks + data channel raise onnegotiationneeded, which sends the offer
     } else if (type === "offer") {
       const peer = callPeers[fromFp] ?? createPeer(fromFp);
-      if (!peer) return;
+      if (!peer || !isCurrentCallPeer(peer)) return;
       const pc = peer.pc;
       // Perfect negotiation, answer side: on a collision the impolite end ignores the incoming
       // offer (its own is in flight and will win); the polite end lets setRemoteDescription
@@ -18845,11 +18901,14 @@
       if (peer.ignoreOffer) return;
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
+        if (!isCurrentCallPeer(peer)) return;
         for (const transceiver of pc.getTransceivers()) {
           if (transceiver.receiver.track.kind === "video") preferVideoCodecs(transceiver);
         }
         await flushWaitingIce(peer);
+        if (!isCurrentCallPeer(peer)) return;
         await pc.setLocalDescription(); // no-arg picks "answer" from the have-remote-offer state
+        if (!isCurrentCallPeer(peer)) return;
         void sendSignal(server, fromFp, { callId: cid, type: "answer", sdp: pc.localDescription });
       } catch (e) {
         console.warn("voice offer handling failed", { peer: displayKey(fromFp), error: String(e) });
@@ -18858,9 +18917,10 @@
       const peer = callPeers[fromFp];
       const pc = peer?.pc;
       // Guard against a stale answer landing after a rollback settled the state.
-      if (peer && pc && pc.signalingState === "have-local-offer") {
+      if (peer && pc && isCurrentCallPeer(peer) && pc.signalingState === "have-local-offer") {
         try {
           await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
+          if (!isCurrentCallPeer(peer)) return;
           await flushWaitingIce(peer);
         } catch (e) {
           console.warn("voice answer handling failed", { peer: displayKey(fromFp), error: String(e) });
@@ -26601,9 +26661,9 @@
               {#if callTransport}
                 <ul class="conn-facts">
                   <li>
-                    <span class="stage-label">DIRECT ROUTE</span>
-                    <span class={callTransport.public_direct ? "ok-t" : "fail-t"}>
-                      {callTransport.public_direct ? "this device is directly reachable" : "behind NAT"}
+                    <span class="stage-label">MESH ADDRESS</span>
+                    <span class="muted small">
+                      {callTransport.public_direct ? "public mesh address advertised" : "no public mesh address advertised"}
                     </span>
                   </li>
                   <li><span class="stage-label">AUTONAT</span><span class="muted small">{callTransport.autonat}</span></li>
@@ -26611,8 +26671,8 @@
                     <span class="stage-label">ROUTER</span>
                     <span class={callTransport.router_maps ? "ok-t" : "muted small"}>
                       {callTransport.router_maps
-                        ? "opens ports on request; each call's media socket is offered a mapped route"
-                        : "has not granted a mapping; calls rely on STUN hole punching or TURN"}
+                        ? "mesh mapping granted; calls can try a separate UDP mapping"
+                        : "no mesh mapping reported; calls can still try STUN or TURN"}
                     </span>
                   </li>
                   {#if callTransport.public_ipv6.length}
@@ -26622,7 +26682,7 @@
                     <li><span class="stage-label">PUBLIC IPV4</span><span class="muted small">{callTransport.public_ipv4.join(", ")}</span></li>
                   {/if}
                   <li>
-                    <span class="stage-label">RELAY HOSTS</span>
+                    <span class="stage-label">MESH HELPERS</span>
                     <span class={callTransport.bridges.length ? "ok-t" : "muted small"}>
                       {callTransport.bridges.length
                         ? `${callTransport.bridges.length} member(s) offering, ${callTransport.bridges.filter((b) => b.direct).length} with a public route`

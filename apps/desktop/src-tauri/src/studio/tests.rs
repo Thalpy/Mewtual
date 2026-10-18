@@ -349,6 +349,7 @@ pub(super) async fn install(
             is_dm: false,
             switchboard: false,
             record_seq: 0,
+            voice: None,
             persist: PersistCounters::default(),
         },
     );

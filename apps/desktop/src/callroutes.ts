@@ -113,10 +113,8 @@ export function routerMappedCandidate(
 }
 
 /**
- * The call bar's one-line status. On failure it says which half of the path is missing: with a
- * router-mapped route on offer this side did its part and the block is on the peer's side;
- * without one, this side has no direct route either and the honest ask is TURN or a router
- * that maps.
+ * The call bar's one-line status. Mapping count is evidence of extra offered candidates, not
+ * connectivity or the location of a failure. Host/STUN routes may work without router mapping.
  */
 export function callBarStatus(
   participants: number,
@@ -128,6 +126,6 @@ export function callBarStatus(
   if (connected === participants) return `${participants} connected`;
   if (!anyFailed) return `${connected}/${participants} · connecting…`;
   return mappedRoutes > 0
-    ? `${connected}/${participants} connected · direct route offered; their side may need TURN`
-    : `${connected}/${participants} connected · no direct route; set a TURN server or allow router mapping`;
+    ? `${connected}/${participants} connected · router-mapped candidate offered; check TURN settings`
+    : `${connected}/${participants} connected · no router-mapped candidate offered; check TURN settings`;
 }

@@ -139,6 +139,14 @@ received work can still be lost if the actor or process stops before a covering 
 
 This is the path that matters for micelles. Gossip only carries live edits; it replays nothing.
 
+Quiet connected discovery first requests missed MLS commits at its current epoch using the
+existing kind2 exchange. This exposes a lost removal broadcast before future chat is required to
+reveal the gap. Preparation and detached waiting use the same bounded maintenance scheduler as
+PEX/finalization; only the originating Root validates and applies the signed reply. Empty/failed
+probes continue ordinary discovery. Applied epochs publish member and role updates even when
+remove+add leaves the count unchanged, and request ordinary sealed snapshot persistence. A
+1024-record work cap is separate from the released 16 MiB byte cap; default logs hold 256.
+
 ### 4.1 The requester states what it holds
 
 [`sync_frontier(max)`](../crates/catcoms-replication/src/doc.rs) returns the Automerge heads

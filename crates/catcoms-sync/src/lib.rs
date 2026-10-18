@@ -60,7 +60,9 @@ use zeroize::Zeroizing;
 
 mod blob_fetch;
 mod member_finalization;
+mod member_maintenance;
 mod recovery_wait;
+mod voice_transport;
 use member_finalization::KIND_MEMBER_FINALIZE;
 pub use member_finalization::{
     MAX_MEMBER_FINALIZATION_OBSERVATIONS, MEMBER_FINALIZATION_WORK_PER_PASS,
@@ -70,6 +72,10 @@ pub mod durable_chat;
 pub mod epoch_service;
 mod group_policy;
 mod owner_tenure;
+mod voice_endpoint;
+mod voice_runtime;
+pub use voice_endpoint::VoiceWatchGrant;
+pub mod voice_v2;
 pub use catcoms_mls::{GroupMode, GroupPolicy, PolicyError};
 pub use owner_tenure::{
     ArchivedOwnerTenure, ObservedOwnerTenure, MAX_HISTORICAL_OWNER_WITNESS_BYTES,
@@ -92,8 +98,16 @@ mod roles;
 pub use blob_fetch::{
     BlobPage, BlobPageOutcome, CompletedBlobFetch, PendingBlobFetch, MAX_BLOB_FETCH_PEERS,
 };
+pub use member_maintenance::{
+    CompletedMemberMaintenance, MemberMaintenanceError, MemberMaintenanceKind,
+    PendingMemberMaintenance,
+};
 pub use registry_ingress::RegistryWatch;
 pub use registry_publication::RegistrySyncInstance;
+pub use voice_transport::{
+    CompletedVoiceForward, CompletedVoiceSource, PendingVoiceForward, PendingVoiceSource,
+    VoiceTransportStatus,
+};
 // Re-export the role-authority logic so the product/UI layer (catcoms-app) reuses this exact,
 // canonical implementation rather than keeping a second copy that could drift.
 pub use roles::{
@@ -164,6 +178,9 @@ const KIND_JOIN_FORWARD: u8 = 11;
 /// the strict v1 PEX bundle is a compatibility boundary: older peers answer an unknown kind with
 /// an empty response instead of rejecting otherwise valid peer records.
 const KIND_SWITCHBOARD_OFFER: u8 = 12;
+/// Reserved V2 transport codec/integration seam; deliberately absent from live dispatch until
+/// native endpoint ownership and the bounded actor forwarding/completion path are integrated.
+const KIND_VOICE_TRANSPORT: u8 = 28;
 /// Pre-admission proof-of-reply-channel request. Public so the desktop's retained pre-join
 /// transport can verify it before constructing `ChannelSync` and disclosing the bearer invite.
 pub const JOIN_REPLY_PROOF_KIND: u8 = 13;
@@ -805,7 +822,8 @@ pub struct SyncConfig {
     /// How many epochs back to retain per-document channel keys, so an op sealed
     /// just before an epoch advance still opens without a network round-trip.
     pub max_past_epochs: u64,
-    /// Cap on retained membership commits available to serve catch-up to peers.
+    /// Cap on retained membership commits available to serve catch-up to peers. Responses
+    /// contain at most 1024 records; a larger retained log is served in consecutive epoch polls.
     pub max_commit_log: usize,
     /// Cap on out-of-order commits buffered awaiting their predecessors.
     pub max_pending_commits: usize,
@@ -3922,7 +3940,10 @@ fn encode_commit_bundle(records: &[CommitRecord]) -> Vec<u8> {
 fn decode_commit_bundle(bytes: &[u8]) -> Result<Vec<CommitRecord>, SyncError> {
     let mut d = Decoder::new(bytes);
     let count = d.get_u32().map_err(|_| SyncError::Malformed)?;
-    if count > MAX_BUNDLE_ELEMENTS {
+    // Membership recovery runs automatically on quiet connections. Its per-record MLS and
+    // gap processing needs a tighter work cap than generic document bundles. The default
+    // retained log is 256; this supports four times that in one released-kind2 response.
+    if count > MAX_COMMIT_BUNDLE_RECORDS {
         return Err(SyncError::Malformed);
     }
     let mut out = Vec::new();
@@ -3933,6 +3954,8 @@ fn decode_commit_bundle(bytes: &[u8]) -> Result<Vec<CommitRecord>, SyncError> {
     d.finish().map_err(|_| SyncError::Malformed)?;
     Ok(out)
 }
+
+const MAX_COMMIT_BUNDLE_RECORDS: u32 = 1024;
 
 fn encode_bundle(ops: &[SealedOp]) -> Vec<u8> {
     let mut e = Encoder::new();
@@ -4156,6 +4179,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     // moving MLS state, document authority, RNG, or the blob store out of the actor.
     transport: Arc<T>,
     blob_fetch_instance: Arc<()>,
+    member_maintenance: member_maintenance::MaintenanceOwner,
     /// Process-local incarnation, freshly allocated by new/restore; never persisted or sent.
     registry_instance: RegistrySyncInstance,
     registry_ingress: registry_ingress::RegistryIngress,
@@ -4164,6 +4188,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     receipt_heads: receipt_head::HeadRequests,
     registry_seeds: registry_seed::SeedRequests,
     epoch_service: epoch_service::EpochService,
+    voice_runtime: Option<voice_runtime::VoiceRuntime>,
     // A cancelled subscribe/unsubscribe may already have reached the transport. Reconcile this uncertain
     // topic before calculating the next routing diff; never lose unsubscribe ownership.
     routing_subscription_pending: Option<Topic>,
@@ -4507,6 +4532,8 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// self-signed by a current member. The discovery layer turns these into
     /// PEX-sourced dial candidates. Bounded by `MAX_PEER_RECORDS`.
     peer_records: HashMap<DeviceId, PeerDescriptor>,
+    /// Actual signed-record mutation, independent of connectivity or rendered route changes.
+    peer_record_revision: u64,
     /// When each entry in `peer_records` was last written, so eviction past the cap drops the
     /// least-recently-refreshed record rather than whatever `HashMap` iteration happened to yield
     /// first. Transient, and seeded for every restored record on `restore` so a reload does not
@@ -4639,6 +4666,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let mut this = Self {
             transport: Arc::new(transport),
             blob_fetch_instance: Arc::new(()),
+            member_maintenance: member_maintenance::MaintenanceOwner::default(),
             registry_instance: RegistrySyncInstance::new(),
             registry_ingress: registry_ingress::RegistryIngress::default(),
             studio_exchange: studio_exchange::StudioExchange::default(),
@@ -4657,6 +4685,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             device,
             rng,
             clock: clock.clone(),
+            voice_runtime: None,
             file_wrap_key,
             ledger: InviteLedger::new(),
             docs: HashMap::new(),
@@ -4755,6 +4784,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             pending_dm_invites: Vec::new(),
             pending_call_signals: Vec::new(),
             peer_records: HashMap::new(),
+            peer_record_revision: 0,
             peer_record_seen: HashMap::new(),
             pex_served_at: HashMap::new(),
             switchboard_offer_served_at: HashMap::new(),
@@ -5460,7 +5490,22 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         let key = (doc_type, doc_id);
         let doc = self.docs.get_mut(&key).ok_or(SyncError::NoSuchDoc)?;
-        let (sealed, change) = doc.edit_tracked(&self.device, &self.group, &mut self.rng, edit)?;
+        let voice = &mut self.voice_runtime;
+        let edited = doc.edit_tracked_observed(
+            &self.device,
+            &self.group,
+            &mut self.rng,
+            edit,
+            |doc, change| {
+                if let Some(voice) = voice {
+                    voice.observe_document(doc_type, doc_id, doc, change);
+                }
+            },
+        );
+        // Legacy editing can mutate AutoCommit before returning an error. Revocation follows the
+        // actual materialized directory even on that path, before any publication suspension.
+        self.observe_voice_document(doc_type, doc_id);
+        let (sealed, change) = edited?;
         // Publish on the current routing label's channel topic.
         let topic = self
             .channel_topic_for(doc_type, doc_id, self.routing_label)
@@ -5892,6 +5937,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
     /// Apply the aggregate disconnect edge even if no path snapshot follows it.
     fn note_peer_disconnected(&mut self, peer: PeerId) {
+        self.member_maintenance.disconnected(peer);
+        if let Some(voice) = &self.voice_runtime {
+            voice.routes.disconnected(peer);
+        }
         if !self.connected_peers.remove(&peer) {
             return;
         }
@@ -5948,6 +5997,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     where
         T: 'static,
     {
+        self.reconcile_voice_actor();
         self.drain_durable_chat().await;
         // Admin invites (Option C): re-broadcast any pending Add-request whose retry elapsed
         // (caught up by the owner on its reconnect), then flush the Welcome a result produced;
@@ -6729,6 +6779,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         while self.member_peers.len() > self.config.max_known_peers {
             self.member_peers.pop_front();
         }
+        self.reconcile_voice_routes();
         if newly_proven && bound && self.first_proof_sweep_owed {
             // The restore's outstanding sweep, discharged now that a source exists for it.
             //
@@ -6760,6 +6811,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// catch-up source.
     fn demote_member_peer(&mut self, peer: PeerId) {
         self.member_peers.retain(|proof| proof.peer != peer);
+        self.reconcile_voice_routes();
     }
 
     /// Mark `peer` as having answered a catch-up without filling the gap, so the
@@ -8427,8 +8479,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         passive
     }
 
-    /// Every known member peer record (the discovery layer turns these into
-    /// PEX-sourced dial candidates).
+    /// O(1) raw snapshot invalidation. Connectivity/presence changes never advance this counter.
+    pub fn peer_record_revision(&self) -> u64 {
+        self.peer_record_revision
+    }
+
+    /// Every known member peer record (the discovery layer turns these into PEX candidates).
     pub fn known_peer_records(&self) -> Vec<PeerDescriptor> {
         self.peer_records.values().cloned().collect()
     }
@@ -9207,6 +9263,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .insert(device);
         }
         if descriptor_changed {
+            self.peer_record_revision = self.peer_record_revision.wrapping_add(1);
             // Every repair/probe is exact-descriptor-bound. A refresh cancels stale local work;
             // already-submitted transport dials remain bounded but cannot be recalled through the
             // current transport seam, so no stronger cancellation claim is made.
@@ -9235,6 +9292,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         self.bound_peer_records();
         self.touch_member_routes();
+        self.reconcile_member_maintenance();
     }
 
     /// Bound the known-records map to `MAX_PEER_RECORDS`, never evicting our own record.
@@ -9347,6 +9405,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .request(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req))
                 .await?
         };
+        self.apply_pex_response(peer, &req_auth, resp)
+    }
+
+    fn apply_pex_response(
+        &mut self,
+        peer: PeerId,
+        req_auth: &RequestAuth,
+        resp: Bytes,
+    ) -> Result<usize, SyncError> {
         if resp.is_empty() {
             return Ok(0);
         }
@@ -9430,6 +9497,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .transport
             .request(peer, ProtocolId(RR_PROTOCOL), Bytes::from(request))
             .await?;
+        self.apply_switchboard_offer_response(peer, response)
+    }
+
+    fn apply_switchboard_offer_response(
+        &mut self,
+        peer: PeerId,
+        response: Bytes,
+    ) -> Result<bool, SyncError> {
         if response.is_empty() {
             self.switchboard_offers
                 .retain(|_, offer| offer.peer_id != *peer.as_bytes());
@@ -10883,6 +10958,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         self.group_policy = routing.policy;
         self.group_policy_active = self.group_policy.is_some();
+        self.reconcile_voice_actor();
         // Adopt the transferred file-wrap key first (Phase 9h); independent of the routing
         // secrets, so the joiner shares the group's file key even at the L=0 baseline.
         if let Some(k) = routing.file_wrap_key {
@@ -11936,11 +12012,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // End the document borrow before queueing receipts, because the receipt outbox belongs to
         // the sync owner. Catch-up is the ordinary offline delivery path and must acknowledge the
         // same newly verified ops that live and past-epoch gossip do.
+        let voice = &mut self.voice_runtime;
         let (applied, terminal) = self
             .docs
             .get_mut(&key)
             .expect("just inserted")
-            .import_catchup_tracked(&bundle, &self.group, &self.device);
+            .import_catchup_tracked_observed(&bundle, &self.group, &self.device, |doc, change| {
+                if let Some(voice) = voice {
+                    voice.observe_document(doc_type, doc_id, doc, change);
+                }
+            });
         let applied_count = applied.len();
         for tracked in applied {
             self.queue_delivery_receipt(doc_type, doc_id, tracked);
@@ -12356,6 +12437,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             );
             return Ok(CommitCatchupOutcome::Unanswered);
         }
+        // This includes the whole bounded bundle; release its signature scratch before making
+        // decoded record copies. The lower reply remains charged through actual completion.
+        drop(transcript);
         // A member signature authenticates the bytes but does not make malformed bytes usable.
         // Decode before promotion so operational availability means this peer completed a
         // syntactically valid catch-up exchange, not merely that a current member signed junk.
@@ -12600,11 +12684,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Ingest an op sealed under the current epoch (the common path).
     fn ingest_current(&mut self, sealed: &SealedOp) {
         let key = (sealed.doc_type, sealed.doc_id);
+        let voice = &mut self.voice_runtime;
         let result = self
             .docs
             .get_mut(&key)
             .expect("checked open")
-            .ingest_tracked(sealed, &self.group, &self.device);
+            .ingest_tracked_observed(sealed, &self.group, &self.device, |doc, change| {
+                if let Some(voice) = voice {
+                    voice.observe_document(sealed.doc_type, sealed.doc_id, doc, change);
+                }
+            });
+        self.observe_voice_document(sealed.doc_type, sealed.doc_id);
         match result {
             Ok(Some(applied)) => {
                 self.stats.ops_ingested += 1;
@@ -12624,11 +12714,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // scrubbed on drop) so the `past_keys` borrow ends before we touch
         // `docs`/`stats`/`catchup_queue`.
         if let Some(key) = self.past_keys.get(&pk).map(|k| Zeroizing::new(**k)) {
+            let voice = &mut self.voice_runtime;
             let result = self
                 .docs
                 .get_mut(&(sealed.doc_type, sealed.doc_id))
                 .expect("checked open")
-                .ingest_with_key_tracked(sealed, sealed.epoch, &key);
+                .ingest_with_key_tracked_observed(sealed, sealed.epoch, &key, |doc, change| {
+                    if let Some(voice) = voice {
+                        voice.observe_document(sealed.doc_type, sealed.doc_id, doc, change);
+                    }
+                });
+            self.observe_voice_document(sealed.doc_type, sealed.doc_id);
             match result {
                 Ok(Some(applied)) => {
                     self.stats.ops_recovered_past_epoch += 1;
@@ -13327,9 +13423,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .commit_log
             .iter()
             .filter(|r| r.commit_epoch >= from_epoch)
+            .take(MAX_COMMIT_BUNDLE_RECORDS as usize)
         {
             let entry = r.encode().len() + 4;
-            if size + entry > MAX_CONTROL_RESPONSE {
+            if size + entry > MAX_SIGNED_CATCHUP_BUNDLE {
                 tracing::debug!("commit catch-up truncated to response budget");
                 break;
             }
@@ -15533,6 +15630,30 @@ mod tests {
             Err(SyncError::Malformed)
         ));
         assert!(matches!(decode_bundle(&forged), Err(SyncError::Malformed)));
+    }
+
+    #[test]
+    fn commit_bundle_work_ceiling_accepts_boundary_and_rejects_one_more() {
+        let record = CommitRecord {
+            group_id: b"fixture".to_vec(),
+            commit_epoch: 1,
+            committer_device: [3; 32],
+            mls_commit: vec![9],
+            base_authenticator: [5; 32],
+            committer_sig: [6; 64],
+        };
+        let mut records = vec![record; MAX_COMMIT_BUNDLE_RECORDS as usize];
+        assert_eq!(
+            decode_commit_bundle(&encode_commit_bundle(&records))
+                .unwrap()
+                .len(),
+            records.len()
+        );
+        records.push(records[0].clone());
+        assert!(matches!(
+            decode_commit_bundle(&encode_commit_bundle(&records)),
+            Err(SyncError::Malformed)
+        ));
     }
 
     #[test]

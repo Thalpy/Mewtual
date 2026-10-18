@@ -4,7 +4,7 @@
 use super::*;
 
 pub(super) const KIND_MEMBER_FINALIZE: u8 = 26;
-const MAX_FRAME: usize = 4_096;
+pub(super) const MAX_FRAME: usize = 4_096;
 const RESPONSE_DOMAIN: &str = "catcoms/member-finalization/response/v1";
 const DEADLINE_MS: u64 = 2_000;
 /// Scheduling is independent of the number of listener routes retained on disk.
@@ -58,7 +58,7 @@ pub(super) fn decode_pending_snapshot(
     Ok(result)
 }
 
-fn body(
+pub(super) fn body(
     policy: [u8; 32],
     requester: PeerId,
     provider: PeerId,
@@ -294,6 +294,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 return Err(TransportError::Unreachable(peer).into())
             }
         };
+        self.apply_member_finalization_response(peer, &auth, request_digest, policy, response)
+    }
+
+    pub(super) fn apply_member_finalization_response(
+        &mut self,
+        peer: PeerId,
+        auth: &RequestAuth,
+        request_digest: [u8; 32],
+        policy: [u8; 32],
+        response: Bytes,
+    ) -> Result<bool, SyncError> {
+        let requester = self.transport.local_peer();
         if response.is_empty() {
             return Ok(false);
         }
@@ -389,13 +401,17 @@ mod tests {
     type Node = ChannelSync<MemNetwork, ChaCha20Rng>;
 
     include!("member_finalization_snapshot_tests.rs");
+    include!("member_maintenance_tests.rs");
 
     fn pair(p2p: bool) -> (Node, Node) {
+        pair_with_peers(p2p, PeerId::from_u64(1), PeerId::from_u64(2))
+    }
+    fn pair_with_peers(p2p: bool, alice_peer: PeerId, bob_peer: PeerId) -> (Node, Node) {
         let hub = Hub::new();
         let device = MlsDevice::generate().unwrap();
         let group = ServerGroup::create(&device).unwrap();
         let mut alice = Node::new(
-            hub.join(PeerId::from_u64(1)),
+            hub.join(alice_peer),
             group,
             device,
             ChaCha20Rng::seed_from_u64(1),
@@ -415,7 +431,7 @@ mod tests {
             .unwrap();
         let response = alice
             .serve_join(
-                PeerId::from_u64(2),
+                bob_peer,
                 &encode_join_req(&invite, &serialize_key_package(&package).unwrap()),
             )
             .unwrap();
@@ -423,7 +439,7 @@ mod tests {
         let (group, routing) =
             finish_join(&device, &invite, &welcome, &signature, &transfer).unwrap();
         let mut bob = Node::new_joined(
-            hub.join(PeerId::from_u64(2)),
+            hub.join(bob_peer),
             group,
             device,
             ChaCha20Rng::seed_from_u64(2),

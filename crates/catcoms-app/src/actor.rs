@@ -13,6 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use catcoms_crypto::{DeviceCertificate, DeviceId};
@@ -35,6 +36,7 @@ mod fair;
 #[cfg(test)]
 mod fair_tests;
 mod file_transfers;
+mod member_maintenance;
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
 const DISCOVERY_DRAIN_MS: u64 = 500;
@@ -48,12 +50,6 @@ const MAX_REPORTED_ARRIVALS: usize = 32;
 const DELIVERY_THROTTLE_MS: u64 = 1_000;
 /// Per-tick cap on discovered records ingested, so one tick can't block the actor unboundedly.
 const MAX_DISCOVERED_PER_TICK: usize = 16;
-/// Ceiling on a **single** member-PEX request (ms). Deliberately per request rather than per
-/// pass: a shared budget lets the first peer asked spend all of it, so a peer that accepts and
-/// never answers silently starves every peer behind it, on every tick, forever. Whatever misses
-/// its deadline is backed off (`note_pex_failure`) and retried on a later tick.
-const PEX_REQUEST_MS: u64 = 3_000;
-
 /// A fetched + decrypted file chunk: its plaintext bytes plus the provider that served it (or an
 /// error string). One chunk per command keeps the actor responsive during a large download.
 type ChunkResult = Result<(Vec<u8>, Option<String>), String>;
@@ -642,6 +638,23 @@ pub enum AppCommand {
         target: DeviceId,
         payload: Vec<u8>,
         reply: oneshot::Sender<Result<bool, String>>,
+    },
+    /// Snapshot of current voice eligibility; not a retained call/delivery authorization.
+    VoiceV2Context {
+        room: u128,
+        reply: oneshot::Sender<Result<catcoms_sync::voice_v2::Context, String>>,
+    },
+    /// Native supplies the process registry and a ticket captured before authorization awaits.
+    /// The returned preparation cannot activate until native commits its exact registry row.
+    PrepareVoiceActor {
+        runtime: Arc<catcoms_sync::voice_v2::runtime::Runtime>,
+        ticket: catcoms_sync::voice_v2::runtime::SessionTicket,
+        reply: oneshot::Sender<Result<catcoms_sync::voice_v2::runtime::ActorRegistration, String>>,
+    },
+    /// Dropping the reply or caller revokes this exact actor/directory child grant.
+    VoiceCallGrant {
+        room: u128,
+        reply: oneshot::Sender<Result<catcoms_sync::voice_v2::CallGrant, String>>,
     },
     /// This call's E2E media base key + epoch (derived from MLS; never sent on the wire).
     MediaKey {
@@ -2636,6 +2649,47 @@ impl ServerActor {
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
+    pub async fn voice_v2_context(
+        &self,
+        room: u128,
+    ) -> Result<catcoms_sync::voice_v2::Context, String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::VoiceV2Context { room, reply })
+            .await
+            .map_err(|_| "server stopped")?;
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    pub async fn prepare_voice_actor(
+        &self,
+        runtime: Arc<catcoms_sync::voice_v2::runtime::Runtime>,
+        ticket: catcoms_sync::voice_v2::runtime::SessionTicket,
+    ) -> Result<catcoms_sync::voice_v2::runtime::ActorRegistration, String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::PrepareVoiceActor {
+                runtime,
+                ticket,
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped")?;
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    pub async fn voice_call_grant(
+        &self,
+        room: u128,
+    ) -> Result<catcoms_sync::voice_v2::CallGrant, String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::VoiceCallGrant { room, reply })
+            .await
+            .map_err(|_| "server stopped")?;
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
     /// This call's E2E media base key (raw bytes) + the epoch it's keyed to.
     pub async fn media_key(&self, call_id: u128) -> Result<(Vec<u8>, u64), String> {
         let (reply, rx) = oneshot::channel();
@@ -3920,12 +3974,15 @@ where
         // coalesced here and revisited by an injected-clock timer even if the network goes idle.
         let mut delivery_dirty = HashSet::new();
         let mut file_transfers = file_transfers::FileTransfers::new();
+        let mut maintenance = member_maintenance::Maintenance::new();
         let mut studio_preview_resets_open = true;
         // Startup persistence belongs to the host. Thereafter raw versions are independent of
         // the UI's change detector: an accepted signed operation can leave its projection equal.
         let mut snapshot_versions = SnapshotVersions::capture(&server);
         let mut ready_cursor = 0;
         loop {
+            server.collect_expired_voice();
+            maintenance.pump(&mut server);
             // Check at the owner boundary, including after a command cancelled a sync tick that
             // already applied a valid prefix. No snapshot I/O belongs in this event channel.
             if snapshot_versions.update(&server) {
@@ -3954,7 +4011,27 @@ where
             // Anchor before the selector's first poll. Clock advancement during another turn
             // must not arm a fresh full relative interval after the original deadline elapsed.
             let delivery_due = delivery_delay.map(|delay| wake_sampled_at.saturating_add(delay));
-            let delivery_wake = deadline::wait(delivery_clock, delivery_due);
+            let voice_wake = server.voice_housekeeping_wake();
+            let delivery_wake = async move {
+                let delivery = deadline::wait(delivery_clock, delivery_due);
+                let voice = async move {
+                    if let Some((clock, due)) = voice_wake {
+                        deadline::wait(clock, Some(due)).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                };
+                tokio::pin!(delivery, voice);
+                // Both wakes enter the same fair turn; no clock-domain conversion or separate
+                // unbounded owner source is needed. Each future retains its absolute deadline.
+                std::future::poll_fn(|cx| {
+                    if delivery.as_mut().poll(cx).is_ready() {
+                        std::task::Poll::Ready(())
+                    } else {
+                        voice.as_mut().poll(cx)
+                    }
+                }).await;
+            };
             tokio::pin!(delivery_wake);
             let turn = fair::next(
                 &mut ready_cursor,
@@ -3981,6 +4058,7 @@ where
                     }
                 },
                 delivery_wake,
+                maintenance.next(),
                 server.sync_once(),
             )
             .await;
@@ -4634,16 +4712,8 @@ where
                             let _ = reply.send(server.member_finalization_work(&observed));
                         }
                     }
-                    Some(AppCommand::FinalizeMemberConnection { peer, mut reply }) => {
-                        if reply.is_closed() {
-                            continue;
-                        }
-                        tokio::select! {
-                            result = server.finalize_member_connection(peer) => {
-                                let _ = reply.send(result.map_err(|e| e.to_string()));
-                            }
-                            _ = reply.closed() => {}
-                        }
+                    Some(AppCommand::FinalizeMemberConnection { peer, reply }) => {
+                        maintenance.finalize(peer, reply);
                     }
                     Some(AppCommand::JoinAttempts { reply }) => {
                         let _ = reply.send(server.join_attempts());
@@ -4681,6 +4751,15 @@ where
                             .await
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
+                    }
+                    Some(AppCommand::VoiceV2Context { room, reply }) => {
+                        let _ = reply.send(server.voice_v2_context(room));
+                    }
+                    Some(AppCommand::PrepareVoiceActor { runtime, ticket, reply }) => {
+                        let _ = reply.send(server.prepare_voice_actor(&runtime, &ticket));
+                    }
+                    Some(AppCommand::VoiceCallGrant { room, reply }) => {
+                        let _ = reply.send(server.voice_call_grant(room));
                     }
                     Some(AppCommand::MediaKey { call_id, reply }) => {
                         let res = server
@@ -5162,54 +5241,11 @@ where
                             )
                             .await;
                         }
-                        // Member peer exchange, every pass and independent of rendezvous: this is
-                        // how `peer_records` fills, and with it presence, the cross-session
-                        // re-dial and the eclipse detector's reach term. Then offer the
-                        // cross-session cache's previously-proven members to the dial policy
-                        // (candidates only; the first-contact route past a hostile rendezvous),
-                        // and fold whatever we now know back into the cache for next launch.
-                        //
-                        // Each request carries its own deadline, not the pass as a whole. One
-                        // budget for the pass meant a peer that accepted the first request and
-                        // then went quiet consumed the entire tick, every tick, and the peers
-                        // behind it were never reached: a self-eclipse of the discovery layer
-                        // for the price of one idle connection. A peer that misses its deadline
-                        // is backed off, so it also stops being picked for a while.
-                        for peer in server.pex_targets() {
-                            match tokio::time::timeout(
-                                std::time::Duration::from_millis(PEX_REQUEST_MS),
-                                server.request_pex(peer),
-                            )
-                            .await
-                            {
-                                Ok(Ok(_)) => {
-                                    // PEX pulls descriptors in only one direction. This additive,
-                                    // connected-only exchange confirms both member endpoints so
-                                    // a reply callback can become a permitted restart route.
-                                    let _ = server.finalize_member_connection(peer).await;
-                                    // The role offer uses its own additive request kind so old
-                                    // peers remain PEX-compatible. It is best-effort and bounded
-                                    // by the same per-peer deadline as PEX.
-                                    let _ = tokio::time::timeout(
-                                        std::time::Duration::from_millis(PEX_REQUEST_MS),
-                                        server.request_switchboard_offer(peer),
-                                    )
-                                    .await;
-                                }
-                                Ok(Err(e)) => {
-                                    tracing::trace!(error = %e, "PEX request failed");
-                                    server.note_pex_failure(peer);
-                                }
-                                Err(_) => {
-                                    tracing::debug!("PEX request timed out; backing the peer off");
-                                    server.note_pex_failure(peer);
-                                }
-                            }
-                        }
-                        // Fold records learned by the PEX requests above into the passive view
-                        // before dialing it. The previous order delayed a newly learned member or
-                        // dynamic-IP epoch until the *next* minute tick, even though its fresh
-                        // signature is precisely the signal that should bypass retry backoff.
+                        // Queued connected-only stages keep inbound requests and controls live
+                        // while slow peers answer. Each stage prepares against fresh owner state.
+                        maintenance.discover(server.pex_targets());
+                        // Fold current records before dialing. Detached PEX completions repeat
+                        // this refresh when new records arrive during the same discovery pass.
                         server.cache_known_records();
                         // SWIM observations, reciprocal signalling and HyParView promotion share
                         // one bounded repair pass. Helpers inspect only live proven paths; all
@@ -5355,6 +5391,54 @@ where
                     event_tx.idle();
                     if let Some(completed) = completed {
                         file_transfers.complete(&mut server, completed);
+                    }
+                },
+                fair::Turn::Maintenance(completed) => {
+                    event_tx.idle();
+                    let Some(effects) = maintenance.complete(completed, &mut server) else {
+                        tracing::error!("member maintenance task panicked; stopping actor");
+                        return;
+                    };
+                    if effects.epoch_changed {
+                        // Quiet detached control recovery can change the full roster without a
+                        // Sync turn, including remove+add bundles with an unchanged count. Tell
+                        // consumers to re-read it now; the epoch independently dirties native
+                        // snapshot persistence and revokes captured protocol work.
+                        studio_receiver.signal(&server, &studio_signal);
+                        publish_recovered_membership(
+                            &mut server, &mut members, &mut versions, &mut last_roles,
+                            &mut last_moderation, &event_tx,
+                        ).await;
+                        delivery_dirty.extend(counts.keys().copied());
+                        for (channel, snapshot) in recompute_due_delivery(
+                            &mut server,
+                            &mut delivery,
+                            &mut delivery_dirty,
+                        ) {
+                            let _ = event_tx.send(AppEvent::DeliveryChanged { channel, snapshot }).await;
+                        }
+                        server.schedule_reconciliation();
+                    }
+                    if effects.records_ready {
+                        server.cache_known_records();
+                        server.drive_mesh_repair().await;
+                        server.dial_cached_peers().await;
+                        server.schedule_reconciliation();
+                    }
+                    let online = server.online_members();
+                    if online != last_online {
+                        last_online = online.clone();
+                        let _ = event_tx.send(AppEvent::ConnectivityChanged { online }).await;
+                    }
+                    let revision = server.member_route_revision();
+                    if revision != last_member_route_revision {
+                        last_member_route_revision = revision;
+                        let _ = event_tx.send(AppEvent::MemberRoutesChanged).await;
+                    }
+                    let switchboards = server.connected_switchboard_offers();
+                    if switchboards != last_switchboards {
+                        last_switchboards = switchboards;
+                        let _ = event_tx.send(AppEvent::SwitchboardsChanged).await;
                     }
                 },
                 // A receipt may be the final network event in a quiet room. Wake from the same
@@ -5604,6 +5688,30 @@ where
     )
 }
 
+/// Surface a recovered epoch even when remove+add leaves the count unchanged. This is shared by
+/// detached control completion and its projection regression; the caller separately schedules
+/// data reconciliation and revokes/saves protocol state through the normal epoch owners.
+async fn publish_recovered_membership<T: MeshTransport, R: CryptoRngCore>(
+    server: &mut Server<T, R>,
+    members: &mut usize,
+    versions: &mut DocVersions,
+    roles: &mut HashMap<String, String>,
+    moderation: &mut ModerationState,
+    events: &EventSink,
+) {
+    *members = server.member_count();
+    versions.epoch_moved(server);
+    let _ = events
+        .send(AppEvent::MembersChanged { count: *members })
+        .await;
+    if roles_changed(server, roles) {
+        let _ = events.send(AppEvent::RolesUpdated).await;
+    }
+    if moderation_changed(server, moderation) {
+        let _ = events.send(AppEvent::ModerationUpdated).await;
+    }
+}
+
 /// Notice channel-directory changes, subscribe newly-discovered channel documents, and recover
 /// their existing history. The catalog event is emitted only after those subscriptions exist, so
 /// clicking a channel immediately cannot race its first catch-up.
@@ -5662,6 +5770,7 @@ async fn sync_channels<T, R>(
 struct SnapshotVersions {
     epoch: u64,
     group_policy_revision: u64,
+    peer_record_revision: u64,
     documents: HashMap<(crate::DocType, u128), u64>,
 }
 
@@ -5670,6 +5779,7 @@ impl SnapshotVersions {
         Self {
             epoch: server.epoch(),
             group_policy_revision: server.sync().group_policy_revision(),
+            peer_record_revision: server.sync().peer_record_revision(),
             documents: server.sync().document_versions().collect(),
         }
     }
@@ -5678,6 +5788,7 @@ impl SnapshotVersions {
         let next = Self::capture(server);
         let changed = self.epoch != next.epoch
             || self.group_policy_revision != next.group_policy_revision
+            || self.peer_record_revision != next.peer_record_revision
             || self.documents != next.documents;
         *self = next;
         changed
@@ -6124,6 +6235,153 @@ mod tests {
     const GENERAL: u128 = 1;
 
     #[tokio::test]
+    async fn voice_housekeeping_wakes_quiet_actor_and_reclaims_watchers_even_while_locked() {
+        use catcoms_rt::Clock;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        #[derive(Clone, Debug)]
+        struct ObservedClock {
+            inner: ManualClock,
+            armed: Arc<AtomicUsize>,
+        }
+        impl Clock for ObservedClock {
+            fn now_ms(&self) -> u64 {
+                self.inner.now_ms()
+            }
+            fn monotonic_ms(&self) -> u64 {
+                self.inner.monotonic_ms()
+            }
+            fn sleep(
+                &self,
+                duration: Duration,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+                Box::pin(async move {
+                    self.armed.fetch_add(1, Ordering::SeqCst);
+                    self.inner.sleep(duration).await;
+                })
+            }
+        }
+        for locked in [false, true] {
+            let clock = ManualClock::new(1000);
+            let armed = Arc::new(AtomicUsize::new(0));
+            let observed = ObservedClock {
+                inner: clock.clone(),
+                armed: armed.clone(),
+            };
+            let runtime = catcoms_sync::voice_v2::runtime::Runtime::new(Arc::new(observed.clone()));
+            let hub = Hub::new();
+            let mut server = Server::found(
+                hub.join(PeerId::from_u64(1)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(1),
+                // Different monotonic origins catch comparing a Voice deadline with the
+                // ordinary actor Clock. Only the voice clock advances below.
+                Box::new(ObservedClock {
+                    inner: ManualClock::new(0),
+                    armed: armed.clone(),
+                }),
+                "alice",
+            )
+            .unwrap();
+            let ticket = runtime.session_ticket();
+            server
+                .prepare_voice_actor(&runtime, &ticket)
+                .unwrap()
+                .register()
+                .unwrap();
+            runtime.activate_session(&ticket).unwrap();
+            let parent = catcoms_sync::voice_v2::CallLease::default();
+            let grant = server
+                .sync
+                .start_voice_watch(crate::channel_id("general"), parent.clone())
+                .unwrap();
+            let charged = runtime.resources().counts().0;
+            let (actor, mut events, task) = spawn(server);
+            let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+            timeout(Duration::from_secs(5), async {
+                while armed.load(Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("quiet actor must arm the native voice Clock deadline");
+            // No actor command or network event follows. Neither parent/lock revocation is a
+            // substitute wake: only the captured Clock deadline can reclaim this Root owner.
+            if locked {
+                runtime.revoke_session();
+            } else {
+                parent.revoke();
+            }
+            clock.advance_ms(1000);
+            timeout(Duration::from_secs(5), async {
+                while runtime.resources().counts().0 >= charged {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("idle Root watcher must be collected without another command");
+            assert!(!grant.is_live());
+            actor.shutdown().await;
+            task.await.unwrap();
+            drain.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn voice_actor_command_lost_preparation_replies_do_not_hold_pending_capacity() {
+        let hub = Hub::new();
+        let server = founder(&hub, PeerId::from_u64(1), "alice", 1);
+        let runtime =
+            catcoms_sync::voice_v2::runtime::Runtime::new(Arc::new(ManualClock::new(1000)));
+        let ticket = runtime.session_ticket();
+        let (actor, mut events, task) = spawn(server);
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        for _ in 0..12 {
+            let (reply, rx) = oneshot::channel();
+            drop(rx);
+            actor
+                .cmd_tx
+                .send(AppCommand::PrepareVoiceActor {
+                    runtime: runtime.clone(),
+                    ticket: ticket.clone(),
+                    reply,
+                })
+                .await
+                .unwrap();
+            actor.member_count().await;
+        }
+        let registration = actor
+            .prepare_voice_actor(runtime.clone(), ticket.clone())
+            .await
+            .unwrap();
+        registration.register().unwrap();
+        assert!(actor
+            .voice_call_grant(crate::channel_id("general"))
+            .await
+            .is_err());
+        runtime.activate_session(&ticket).unwrap();
+        let grant = actor
+            .voice_call_grant(crate::channel_id("general"))
+            .await
+            .unwrap();
+        let lease = grant.lease();
+        drop(grant);
+        assert!(!lease.is_live());
+        let grant = actor
+            .voice_call_grant(crate::channel_id("general"))
+            .await
+            .unwrap();
+        registration.revoke();
+        assert!(!grant.lease().is_live());
+        actor.shutdown().await;
+        task.await.unwrap();
+        drain.await.unwrap();
+        assert!(actor
+            .voice_call_grant(crate::channel_id("general"))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
     async fn pixa_publication_actor_validates_promotes_and_returns_no_metadata() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -6434,6 +6692,83 @@ mod tests {
             name,
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn quiet_recovered_equal_count_membership_publishes_roster_and_role_changes() {
+        let hub = Hub::new();
+        let owner_peer = PeerId::from_u64(91);
+        let mut owner = founder(&hub, owner_peer, "owner", 91);
+        owner.subscribe_control().await.unwrap();
+
+        async fn join_member(
+            owner: &mut Server<MemNetwork, ChaCha20Rng>,
+            hub: &Arc<Hub>,
+            peer: u64,
+        ) -> Server<MemNetwork, ChaCha20Rng> {
+            let invite = owner.mint_invite([peer as u8; 16], 60_000, vec![]).unwrap();
+            let join = Server::join(
+                hub.join(PeerId::from_u64(peer)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(peer),
+                Box::new(ManualClock::new(1_000)),
+                "member",
+                owner.local_peer(),
+                &invite,
+            );
+            tokio::pin!(join);
+            loop {
+                tokio::select! {
+                    joined = &mut join => return joined.unwrap(),
+                    result = owner.sync_once() => { result.unwrap(); }
+                }
+            }
+        }
+        let old = join_member(&mut owner, &hub, 92).await;
+        let mut members = owner.member_count();
+        let original_count = members;
+        let mut roles = owner.roles();
+        let mut moderation = owner.moderation_state();
+        let mut versions = DocVersions::default();
+        versions.epoch_moved(&owner);
+        let mut snapshot_versions = SnapshotVersions::capture(&owner);
+        owner.remove_member(&old.my_fingerprint()).await.unwrap();
+        drop(old);
+        let _new = join_member(&mut owner, &hub, 93).await;
+        assert_eq!(owner.member_count(), original_count);
+        assert!(
+            snapshot_versions.update(&owner),
+            "raw epoch is durably dirty despite equal count"
+        );
+        let (tx, mut rx) = mpsc::channel(8);
+        let events = EventSink::new(tx);
+        publish_recovered_membership(
+            &mut owner,
+            &mut members,
+            &mut versions,
+            &mut roles,
+            &mut moderation,
+            &events,
+        )
+        .await;
+        assert_eq!(members, original_count);
+        assert!(!versions.epoch_moved(&owner));
+        let mut roster = false;
+        let mut role = false;
+        while let Ok(event) = rx.try_recv() {
+            match event.event {
+                AppEvent::MembersChanged { count } => {
+                    assert_eq!(count, original_count);
+                    roster = true;
+                }
+                AppEvent::RolesUpdated => role = true,
+                _ => {}
+            }
+        }
+        assert!(
+            roster && role,
+            "quiet equal-count recovery must update both UI projections"
+        );
     }
 
     #[tokio::test]

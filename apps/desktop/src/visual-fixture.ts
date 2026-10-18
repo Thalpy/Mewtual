@@ -188,6 +188,17 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
   const channel = String(args.channel ?? "general");
 
   switch (command) {
+    // The visual fixture has no router. It still explicitly models controller acquisition so
+    // unlocked App lifecycle cannot silently bypass a newly added native command.
+    case "prepare_call_mapping_controller":
+      return "fixture-call-controller";
+    case "prepare_call_mapping_owner":
+      return "fixture-call-owner";
+    case "activate_call_mapping_owner":
+      return String(args.candidate);
+    case "end_call_mapping_owner":
+    case "unmap_call_port":
+      return null;
     case "resume_session":
       return clone([
         {
@@ -668,7 +679,7 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
         relay_likely_required: true,
         router_maps: true,
         advice:
-          "This device is behind NAT and no member is offering to host. Calls to peers who are also behind NAT need a relay.",
+          "Voice tries its own direct connection checks. If voice cannot connect, configure TURN in Settings, Calls.",
       });
     case "get_debug_logging":
     case "test_debug_logging":

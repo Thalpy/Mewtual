@@ -25,6 +25,12 @@ export const TAURI_COMMAND_GROUPS = {
       // Inline-download cancellation is also deliberately available while locked. It returns no
       // existence bit and can only destroy a bounded operation registration / actor future.
       "cancel_inline_download",
+      // Exact ephemeral revocation/settlement only. These must work after lock or remount;
+      // they expose no existence bit and never authorize fresh engine/network work.
+      "end_call_mapping_owner", "end_voice_owner", "settle_voice_crypto",
+      // CAS lifecycle and bounded engine admission, independent of optional router grants.
+      "prepare_voice_controller", "prepare_voice_owner", "activate_voice_owner", "admit_voice_crypto",
+      "prepare_call_mapping_controller", "prepare_call_mapping_owner", "activate_call_mapping_owner",
       "create_backup", "change_vault_secret", "get_debug_logging", "set_debug_logging",
       // Emits a marked record and re-reads the sink's health, so Settings can report what the
       // writer is doing rather than what the preference asked for. Gated like the pair above.

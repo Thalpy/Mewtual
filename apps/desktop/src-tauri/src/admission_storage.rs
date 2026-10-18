@@ -429,6 +429,7 @@ mod tests {
                 is_dm: false,
                 switchboard: false,
                 record_seq: net.record_seq,
+                voice: None,
                 persist: PersistCounters::default(),
             },
         );

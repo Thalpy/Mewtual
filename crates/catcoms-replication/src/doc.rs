@@ -646,24 +646,51 @@ impl EncryptedDoc {
     where
         F: FnOnce(&mut AutoCommit) -> Result<(), automerge::AutomergeError>,
     {
-        if is_epoch_managed(self.doc_type) {
-            // New P1 types have no legacy writers. A v1 operation here would bypass durable
-            // intents, semantic validation and the shared epoch lifecycle gate.
-            return Err(ReplError::EpochScope);
-        }
-        edit(&mut self.doc).map_err(|e| ReplError::Automerge(e.to_string()))?;
-        self.doc.commit();
-        let change = self
-            .doc
-            .get_last_local_change()
-            .ok_or(ReplError::NoChange)?;
-        let hash = change.hash();
-        let delta = change.raw_bytes().to_vec();
+        self.edit_tracked_observed(device, group, rng, edit, |_, _| {})
+    }
 
-        let op = SignedOp::sign(device, self.doc_type, self.doc_id, delta)?;
-        let sealed = SealedOp::seal(&op, group, device, rng)?;
-        self.record(op);
-        Ok((sealed, hash))
+    /// A synchronous observer sees the exact newly accepted authenticated change, including
+    /// deletion followed by recreation inside one change. `None` reports a possibly mutated
+    /// projection on error; it never authorizes replaying an unaccepted change's operations.
+    pub fn edit_tracked_observed<F>(
+        &mut self,
+        device: &MlsDevice,
+        group: &ServerGroup,
+        rng: &mut impl CryptoRngCore,
+        edit: F,
+        mut observe: impl FnMut(&AutoCommit, Option<&Change>),
+    ) -> Result<(SealedOp, ChangeHash), ReplError>
+    where
+        F: FnOnce(&mut AutoCommit) -> Result<(), automerge::AutomergeError>,
+    {
+        let mut accepted = None;
+        let outcome = (|| {
+            if is_epoch_managed(self.doc_type) {
+                // New P1 types have no legacy writers. A v1 operation here would bypass durable
+                // intents, semantic validation and the shared epoch lifecycle gate.
+                return Err(ReplError::EpochScope);
+            }
+            edit(&mut self.doc).map_err(|e| ReplError::Automerge(e.to_string()))?;
+            self.doc.commit();
+            let change = self
+                .doc
+                .get_last_local_change()
+                .ok_or(ReplError::NoChange)?;
+            let hash = change.hash();
+            let delta = change.raw_bytes().to_vec();
+
+            let op = SignedOp::sign(device, self.doc_type, self.doc_id, delta)?;
+            let sealed = SealedOp::seal(&op, group, device, rng)?;
+            // A no-op commit returns the previous local change. Preserve legacy publication
+            // behavior, but a previously recorded operation cannot replay deletion authority
+            // against a room incarnation created after that operation was first observed.
+            if self.record(op) {
+                accepted = Some(change);
+            }
+            Ok((sealed, hash))
+        })();
+        observe(&self.doc, accepted.as_ref());
+        outcome
     }
 
     /// Author a P1 operation through the epoch lifecycle gate.
@@ -965,13 +992,24 @@ impl EncryptedDoc {
         group: &ServerGroup,
         device: &MlsDevice,
     ) -> Result<Option<AppliedOp>, ReplError> {
+        self.ingest_tracked_observed(sealed, group, device, |_, _| {})
+    }
+    /// Tracked ingress with exact new-change observation. Duplicate/rejected changes cannot
+    /// exercise the observer's deletion effects; it still sees partial mutation errors.
+    pub fn ingest_tracked_observed(
+        &mut self,
+        sealed: &SealedOp,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        observe: impl FnMut(&AutoCommit, Option<&Change>),
+    ) -> Result<Option<AppliedOp>, ReplError> {
         self.check_doc(sealed.doc_type, sealed.doc_id)?;
         if sealed.epoch != group.epoch() {
             return Err(ReplError::EpochUnavailable(sealed.epoch));
         }
         let key = group.channel_secret(device, self.doc_type, self.doc_id)?;
         let op = sealed.open(&key)?;
-        self.apply_signed_tracked(op)
+        self.apply_signed_tracked_observed(op, observe)
     }
 
     /// Decrypt, verify and apply an inbound sealed op using an **externally
@@ -1005,12 +1043,22 @@ impl EncryptedDoc {
         expected_epoch: u64,
         key: &[u8; 32],
     ) -> Result<Option<AppliedOp>, ReplError> {
+        self.ingest_with_key_tracked_observed(sealed, expected_epoch, key, |_, _| {})
+    }
+    /// The same observer contract on authenticated retained-epoch ingress.
+    pub fn ingest_with_key_tracked_observed(
+        &mut self,
+        sealed: &SealedOp,
+        expected_epoch: u64,
+        key: &[u8; 32],
+        observe: impl FnMut(&AutoCommit, Option<&Change>),
+    ) -> Result<Option<AppliedOp>, ReplError> {
         self.check_doc(sealed.doc_type, sealed.doc_id)?;
         if sealed.epoch != expected_epoch {
             return Err(ReplError::EpochUnavailable(sealed.epoch));
         }
         let op = sealed.open(key)?;
-        self.apply_signed_tracked(op)
+        self.apply_signed_tracked_observed(op, observe)
     }
 
     /// Export the full signed-op log, re-sealed under the current epoch, so a
@@ -1254,6 +1302,21 @@ impl EncryptedDoc {
         group: &ServerGroup,
         device: &MlsDevice,
     ) -> (Vec<AppliedOp>, Result<(), ReplError>) {
+        self.import_catchup_tracked_observed(ops, group, device, |_, _| {})
+    }
+
+    /// The tracked import with synchronous materialized-state observation after each attempted
+    /// signed-op application, including an error after mutation. Native ephemeral authority
+    /// (such as room incarnations) must see intermediate deletion/recreation and accepted prefixes,
+    /// rather than only the bundle's final projection. The observer must be bounded, must not
+    /// publish/await, and cannot alter document acceptance or the original signed-operation log.
+    pub fn import_catchup_tracked_observed(
+        &mut self,
+        ops: &[SealedOp],
+        group: &ServerGroup,
+        device: &MlsDevice,
+        mut observe: impl FnMut(&AutoCommit, Option<&Change>),
+    ) -> (Vec<AppliedOp>, Result<(), ReplError>) {
         let key = match group.channel_secret(device, self.doc_type, self.doc_id) {
             Ok(key) => key,
             Err(error) => return (Vec::new(), Err(error.into())),
@@ -1270,7 +1333,8 @@ impl EncryptedDoc {
                 Ok(op) => op,
                 Err(error) => return (applied, Err(error)),
             };
-            match self.apply_signed_tracked(op) {
+            let result = self.apply_signed_tracked_observed(op, &mut observe);
+            match result {
                 Ok(Some(tracked)) => applied.push(tracked),
                 Ok(None) => {}
                 Err(error) => return (applied, Err(error)),
@@ -1279,7 +1343,11 @@ impl EncryptedDoc {
         (applied, Ok(()))
     }
 
-    fn apply_signed_tracked(&mut self, op: SignedOp) -> Result<Option<AppliedOp>, ReplError> {
+    fn apply_signed_tracked_observed(
+        &mut self,
+        op: SignedOp,
+        mut observe: impl FnMut(&AutoCommit, Option<&Change>),
+    ) -> Result<Option<AppliedOp>, ReplError> {
         self.check_doc(op.doc_type, op.doc_id)?;
         if is_epoch_managed(self.doc_type) {
             // Epoch-managed types must bind logical scope, semantic validation and lifecycle
@@ -1299,25 +1367,33 @@ impl EncryptedDoc {
         // A locally authored SignedOp always carries exactly one Automerge change. Parse that
         // exact frame before moving it into the document so a receipt can name a stable hash;
         // malformed or multi-change bytes fail closed exactly as load_incremental would.
-        let change = Change::from_bytes(op.delta.clone())
-            .map_err(|e| ReplError::Automerge(e.to_string()))?
-            .hash();
-        let author_device = op.author_device;
-        self.doc
-            .load_incremental(&op.delta)
+        let parsed = Change::from_bytes(op.delta.clone())
             .map_err(|e| ReplError::Automerge(e.to_string()))?;
+        let change = parsed.hash();
+        let author_device = op.author_device;
+        let outcome = self
+            .doc
+            .load_incremental(&op.delta)
+            .map_err(|e| ReplError::Automerge(e.to_string()));
+        if let Err(error) = outcome {
+            observe(&self.doc, None);
+            return Err(error);
+        }
         self.record(op);
+        observe(&self.doc, Some(&parsed));
         Ok(Some(AppliedOp {
             author_device,
             change,
         }))
     }
 
-    fn record(&mut self, op: SignedOp) {
+    fn record(&mut self, op: SignedOp) -> bool {
         if self.applied.insert(op.hash()) {
             Self::index_catchup_op(&mut self.catchup_index, &self.doc, self.log.len(), &op);
             self.log.push(op);
+            return true;
         }
+        false
     }
 
     fn index_catchup_op(

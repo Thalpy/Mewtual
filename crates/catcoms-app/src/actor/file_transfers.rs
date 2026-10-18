@@ -74,8 +74,8 @@ struct AttemptAccounting {
     _caller: Option<SharedRequestKeepalive>,
 }
 
-/// Dropping a watch sender does not make `is_cancelled()` true. Signal explicitly even during
-/// abort/unwind so a request still queued behind a busy transport cannot be admitted afterward.
+/// Publish cancellation explicitly during abort/unwind, including while other sender clones
+/// still exist. Closed publishers now also fail closed at the transport admission boundary.
 struct CancelOnDrop(watch::Sender<bool>);
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {

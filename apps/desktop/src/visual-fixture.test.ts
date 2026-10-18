@@ -2,6 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { VISUAL_FIXTURE_NOW, visualFixtureResponse } from "./visual-fixture.ts";
 
+test("visual fixture explicitly supports native call controller lifecycle", () => {
+  const candidate = visualFixtureResponse("prepare_call_mapping_controller");
+  assert.equal(visualFixtureResponse("activate_call_mapping_owner", { candidate }), candidate);
+  assert.equal(visualFixtureResponse("end_call_mapping_owner", { owner: candidate }), null);
+  assert.equal(visualFixtureResponse("unmap_call_port", { owner: candidate, grant: "fixture-grant" }), null);
+});
+
 test("visual fixture resumes into a deterministic unlocked server", () => {
   const servers = visualFixtureResponse("resume_session") as Array<{
     server: number;

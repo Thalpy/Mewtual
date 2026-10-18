@@ -46,6 +46,20 @@ pub use epoch::{
 };
 pub use op::{SealedOp, SignedOp};
 
+/// Decode a bounded observer projection of an already parsed/authenticated legacy change. Raw
+/// bytes, action count and expanded RLE cells/predecessors/strings are capped BEFORE expansion.
+/// This does not change historical operation admission; callers must close their ephemeral
+/// authority on refusal and must never use this as an alternate signature/semantic validator.
+pub fn decode_change_projection(
+    change: &automerge::Change,
+) -> Result<automerge::ExpandedChange, ReplError> {
+    if change.raw_bytes().len() > 64 * 1024 || change.len() > 512 {
+        return Err(ReplError::EpochBound);
+    }
+    bounded_change::check_projection(change.raw_bytes(), 512)?;
+    Ok(change.decode())
+}
+
 /// Errors from the replication engine.
 #[derive(Debug, Error)]
 pub enum ReplError {

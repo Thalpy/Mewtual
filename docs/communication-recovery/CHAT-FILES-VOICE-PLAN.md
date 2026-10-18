@@ -1,7 +1,10 @@
 # Chat file sharing and voice reliability plan
 
 Prepared 17 October 2026; amended 18 October 2026 following external design review.
-Status: proposed work; no runtime changes or acceptance results.
+Status: implementation in progress on `chat-update-implementation`, based on accepted Gate 7
+commit `4d321fef17514c5080f96d98f01be3e86c375333`. Runtime changes and focused results are recorded
+in [the separate communication acceptance ledger](CHAT-FILES-VOICE-ACCEPTANCE.md); the programme
+is not complete or accepted.
 Initial source baseline: `f3596ac859293293701b0e5d2dd0339bd7b1f5fe`. Amendments checked against
 `b2f26d0b208ca67952032cf44cbcbcc509b49033` and the current worktree, which contains unrelated
 Studio, native and frontend changes. Preserve those changes and record the actual implementation

@@ -1,5 +1,127 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Detached connected member maintenance (2026-10-18)
+
+`ChannelSync::prepare_member_maintenance(peer, kind)` returns an affine pending Commits, PEX,
+Finalize or Offer request, or None when current connected/policy eligibility is absent. `execute` accepts
+actual-retirement custody via `RequestCancellation`, uses connected-only transport admission and
+injected absolute deadlines (3 seconds Commits/PEX/Offer, 2 seconds Finalize), and caps a retained response
+before decoding. `complete_member_maintenance` authenticates on the exact original sync owner.
+Typed `Superseded` denotes local epoch/policy/descriptor/connection/incarnation change; `Failed`
+denotes transport/deadline/validation failure. Only the latter authorizes ordinary peer backoff.
+Negative empty-offer cache removal requires the same current owner checks as positive evidence.
+The transport's existing larger frame-allocation ceiling remains separate from these response caps.
+Production preparation captures `MeshTransport::connection_lease(peer)`, an opaque aggregate
+connection incarnation revoked by the driver before disconnect publication. A late ordered edge
+does not close a newly captured live lease. `supports_connection_leases()` distinguishes current
+disconnection from unsupported legacy transport seams; only the latter retain event-only fencing.
+
+The product actor queues each stage without awaiting its network response. Sixteen bounded peer
+chains, four waiters/chain, two lower flights/server and four/process are retained through actual
+lower release. Discovery coalesced onto explicit finalization survives waiter cancellation; later
+explicit callers receive a fresh exchange rather than a cached success. Original async sync-owner
+wrappers and released kind 2/4/12/26 grammars remain available. Commits uses the existing current-
+epoch request and exact request-bound response, with unchanged unbound signer evidence; kind26
+remains the separate endpoint-bound exchange. Commit responses retain the existing 16 MiB byte
+ceiling and now have a 1024-record work ceiling before per-record allocation/application/promotion; serving
+larger retained logs takes successive current-epoch polls. Empty/failed probes continue discovery.
+Actual epoch changes publish member/role/routing consequences even when roster count is unchanged.
+Two/four actual flights permit at most 32/64 MiB retained answers, plus bounded decoder scratch.
+O(1) `peer_record_revision()` counts
+actual stored signed-descriptor changes and feeds `SnapshotNeeded`; ordinary liveness and exact
+duplicate descriptors do not increment it. The counter is ephemeral and adds no persistence field.
+
+## Native ephemeral voice ownership foundation (2026-10-18)
+
+Trusted Rust transport seams remain inert: `receive_voice_transport` and
+`verify_voice_transport_response` enforce closed role-bound kind28 frames/ACKs. `prepare_voice_forwards`
+and `prepare_voice_sources` return at most four affine requests each, subject to the same four-group/
+eight-process actual lower-flight pool; `execute` takes a cancellation receiver and owns the
+exact lower flight. `complete_voice_forward` authenticates on the original Root with current
+driver connection, actor/member/policy, room and packet authority. HelperQueued is custody only;
+EndpointAdmitted can come only from the original envelope's exact final endpoint. These functions
+are neither request dispatch nor WebView commands. Legacy kind8 is unchanged. See the V2 decision
+for buffer/work limits and the remaining scheduling/endpoint/browser integration requirements.
+
+Native Rust lifecycle seams now include `start_voice_watch(room, parent)`, `validate_voice_watch`,
+`start_voice_endpoint(Arc<CallGrant>, native_join, public_key)` and `voice_endpoint_changes`.
+They are not IPC commands. Watch grants are affine native custody; Root keeps no strong owner.
+Parent consent is bound before lending clones. An endpoint recognizes the actual actor/policy and
+room child registries, keeps only Weak call-grant identity plus revocation handles, and owns one
+LocalJoin/implicit watcher. Exact same-grant/key retries do not recreate its allocator. Last native
+grant drop revokes work without a Root turn. Metadata wakes coalesce through a watch channel;
+recoverable payload pull and encrypted ingress/confirmation/negotiation IPC remain unimplemented.
+`pump_voice_endpoint` and `voice_watch_peers` are trusted Rust public-control seams, also absent
+from normal dispatch/IPC. Their bounded queue captures exact original native recipients before
+origin allowance commits; cached retries cannot be adopted by replacement watchers. Announcements
+are candidates, not presence. Only fresh native challenge/proof validation returns `FreshPeer`.
+`Runtime::collect_expired` is independent of session authority and retains group membership/epoch
+evidence. `collect_expired_voice` runs at the actor's absolute housekeeping deadline. Neither
+collector resets packet replay/sequence state or releases credits held by actual lower work.
+
+Pending native crypto factories now return opaque `CryptoAuthority`: `pair_derivation_authority`,
+`confirmation_encryption_authority`, `packet_encryption_authority` and `incoming_crypto_authority`.
+They validate actual retained native pair/action/reservation/token state; PairSetup/CryptoFlight
+data alone is insufficient. Signing closes only the pending encryption lease, preserving exact
+cached submit/source eligibility. Token consume/expiry closes pending decrypt. Proof/Finish bind
+the admitting confirmation attempt; Hello binds a stable native accepted-sequence floor, allowing
+a queued newer Hello to survive earlier progress. The final native commit repeats these checks.
+These are trusted Rust pending-work seams, not IPC or historical-result receipt authority.
+Historical receipts must be issued post-transition from the prepaid Endpoint queue and current
+attempt/OfferId, with their original packet deadlines. That integration remains unimplemented.
+
+The standalone browser broker v4 exposes registerConfirmation and an immutable attempt/inspect/
+retire handle. It retains exact owner/pair/action/version/native input and one computation across
+lost replies, within a combined 32-record cap and the ordinary broker's byte/engine budgets.
+Closed confirmation outcomes expose no plaintext and confer no fresh RTC/pair authority.
+Explicit owner retirement is irreversible and wakes observers; actual work drains before native
+settlement. Temporary shared queue pressure returns busy and permits a later exact attempt.
+Trusted LocalJoin factories now issue opaque CryptoAction owners for proven-pair derivation and
+exact native confirmation encryption/decryption. Their combined 32-record queue includes terminal
+identities and rotating non-dequeueing pulls of at most four. Native Coordinator registration
+requires the actual call lease, authenticated scope and exact process resource pool. Admission
+stores one actual engine permit before replying; repeated admission reuses it. Settlement
+permanently closes delayed admission, and first sign/closed-confirmation wrappers use that same
+fence. End closes unstarted actions without refunding admitted work. A ByteBudget reservation may
+close unused bytes only; outstanding loans retain actual bytes/slots through their own release.
+These are inert Rust seams. The required VoiceConfirmationNative admitAction/commitConfirmation/
+settleAction interface is not implemented native IPC, and exact historical success/rejection
+receipts and pre-ingress queue/origin transactions remain outstanding. Never adapt through ordinary fresh-token
+admission or general Pair.open. Native/WebView and SDP/ICE result-lease integration remain open.
+
+Main-window-only commands, not yet used by the live call UI:
+
+| Command | Contract |
+| --- | --- |
+| `prepare_voice_controller()` | Unlocked UI generation; returns one expiring CAS candidate. |
+| `prepare_voice_owner({controller,server,room})` | Known directory room as canonical decimal u128; captures exact actor/group/policy/UI generation. |
+| `activate_voice_owner({candidate})` | Revalidates and CAS-activates; returns `{owner,group,join}`, with null group/join for a controller and 64 lowercase hex strings for a call. |
+| `end_voice_owner({owner})` | Exact idempotent revocation, including while locked; no existence bit or crypto refund. |
+| `admit_voice_crypto({owner,operation,bytes})` | `generate|derive|encrypt|decrypt`, bounded bytes and exact current owner; returns one process-retained operation token. |
+| `settle_voice_crypto({token})` | Exact actual-settlement report, including after lock; no existence bit and no replacement refund. |
+
+Controllers also own an irreversible parent lease for explicit observers; replacement, End, lock
+and native coordinator Drop revoke it synchronously. Starting a call preserves the controller.
+Eight prepared candidates expire after 30 monotonic seconds. The process admits eight active-or-
+uncertain crypto operations, four/group, with shared declared-byte limits of 2 MiB/process and
+256 KiB/group. Generate/derive/encrypt/decrypt declarations are bounded respectively to
+128/4352/36864/36880 bytes. These commands grant resources, not packet signatures, forwarding,
+microphone consent or decrypted delivery. A current actor query is only a snapshot; future
+protocol effects must check authority again in their actor turn. No live V2 request kind or
+delivery/confirmation IPC is implemented yet. See [the V2 contract](communication-recovery/VOICE-SIGNALLING-V2.md).
+
+Internal Rust `PrepareVoiceActor` returns an inactive registration tied to the exact process
+Runtime and captured session ticket. Native registers it under its exact row guard before
+publication; competing installation differs from optional expiry/capacity refusal. Retained
+actors receive fresh registrations on mounted unlock. Internal `VoiceCallGrant` returns affine
+reply custody tied to the current room/policy, so canceled replies revoke their child lease.
+Production grant custody retains the room owner and 256 declared bytes until its actual last
+holder drops, including after lock, actor replacement or room deletion.
+These handles are not serialized or supplied by the webview. The trusted Rust `CallGrant::from_lease`
+adapter adds custody only; it is not a membership authorization factory. Production IPC obtains
+grants from the actual product actor. Voice attachment failures leave that row unavailable for
+V2 and retry on a later unlock, while ordinary authenticated vault/chat access continues.
+
 ## Optional desktop invite refresh (2026-10-18)
 
 `get_invite(server)` returns `null` when there is no stored invite or this exact current device
@@ -3976,7 +4098,9 @@ already in the authenticated request, and the receiver derives `DeviceId` from i
   64 lowercase hex, and returns `Err` before queuing anything else.
 - **Bridge.** The `call-signal` event payload is `{server, from, from_fp, payload(base64)}`. Command
   `send_call_signal({server, target, payload, trace?}) -> bool` refuses a malformed `target` with
-  `VOICE.SIGNAL.FAILED`.
+  `VOICE.SIGNAL.FAILED`. `true` establishes local transport submission, not receipt or media
+  connectivity. Successful commands record `VOICE.SIGNAL.SUBMITTED`; the former
+  `VOICE.SIGNAL.DELIVERED` label in historical logs did not establish recipient delivery either.
 - **Frontend.** It refuses an event unless `from` is 64 lowercase hex and `from_fp ===
   from.slice(0, 8)` (diagnostic `VOICE.SIGNAL.BAD_SENDER`).
   - Every call authority, session, budget, consent, claim and slot key is `from`.
@@ -3986,6 +4110,36 @@ already in the authenticated request, and the receiver derives `DeviceId` from i
     their contract and golden behaviour are unchanged.
 - **Legacy route.** `peer_for_fingerprint` serves DM invites only and returns no route when more
   than one current member carries the fingerprint.
+
+**Optional router-mapped ICE routes (communication update, 18 October 2026).**
+`prepare_call_mapping_controller() -> candidate` followed by
+`activate_call_mapping_owner({candidate}) -> owner` claims one unlocked webview mount. After
+resume/unlock this retires its predecessor even if the new UI never joins a room.
+`prepare_call_mapping_owner({controller, server, room}) -> candidate` captures the current
+native revision and binds the UI generation, server actor incarnation, group and room. Activation
+compares that revision; a delayed prepare/activate cannot revoke a newer owner.
+`end_call_mapping_owner({owner})` revokes exactly that candidate/controller/call, including pending
+acquisitions. Its return is an authority barrier, not confirmed router deletion.
+
+`map_call_port({owner, port, address?}) -> {grant, ip, port, mechanism, confirmed}` reserves a
+physical port and native worker before router I/O. It revalidates the UI commit/session, registry
+incarnation and exact call owner before returning a grant. `unmap_call_port({owner, grant})`
+releases only that exact attempt; the old port-only command contract is unsupported. Lock and
+server leave revoke native ownership. IPC cancellation does not cancel the responsible worker.
+Frontend use additionally requires the exact call join, mapping slot and RTC peer; component
+destruction tears down the old call, peer connections and captured tracks.
+
+There are at most 8 prepared candidates (30-second monotonic expiry) and 64 process port slots.
+Acquisition, cleanup and uncertain retirement all retain their slots. Acknowledged IGD deletion
+at the original granting gateway refunds a slot; ambiguous IGD results and legacy PCP/NAT-PMP
+worker retirement quarantine the port and capacity until process exit. This survives lock,
+account changes and remount. At capacity, optional router mapping refuses while STUN/TURN still
+operate. A definite IGD Add refusal is also conservatively classified uncertain; fallback is only
+allowed after clean pre-mutation failure or acknowledged Add followed by successful deletion.
+PCP/NAT-PMP tries one advertised protocol, because Client drop exposes no joined shutdown.
+Router state can survive until lease expiry, including after process restart; no immediate
+physical closure, native audio route or kernel proof of WebRTC socket ownership is implied.
+See [the custody decision and evidence](communication-recovery/CALL-MAPPINGS.md).
 
 **`draw` data channel.** `pc.createDataChannel("draw", {negotiated: true, id: 8, ordered: true})`
 is created per peer connection beside `inst` (id 7), before the first offer. Older builds never open

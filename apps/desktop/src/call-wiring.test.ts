@@ -10,6 +10,15 @@ import { fileURLToPath } from "node:url";
 const app = readFileSync(fileURLToPath(new URL("./App.svelte", import.meta.url)), "utf8");
 const studio = readFileSync(fileURLToPath(new URL("./Studio.svelte", import.meta.url)), "utf8");
 
+test("call diagnostics describe mesh advertisements without promising media connectivity", () => {
+  const start = app.indexOf('<section class="connection-voice"');
+  const view = app.slice(start, app.indexOf("</section>", start));
+  assert.match(view, /public mesh address advertised/);
+  assert.match(view, /calls can try a separate UDP mapping/);
+  assert.match(view, /MESH HELPERS/);
+  assert.doesNotMatch(view, /this device is directly reachable|behind NAT|each call's media socket is offered|RELAY HOSTS/);
+});
+
 /** The text of one `function name(` up to the next function at the same indentation. */
 function body(source: string, signature: string): string {
   const start = source.indexOf(signature);
@@ -53,7 +62,13 @@ test("every edge gets a negotiated draw channel bound to a claim capability, tor
   // The wiring itself lives in draw-wiring.ts (behaviour-tested there, and run over real WebRTC by
   // scripts/claims-webrtc-check.mjs); the App must use it, for this exact peer and session.
   const create = body(app, "function createPeer(");
-  assert.match(create, /peer\.draw = openDrawEdge\(pc, claims, fp, \{\s*live: \(\) => callPeers\[fp\] === peer,/);
+  assert.match(create, /peer\.draw = openDrawEdge\(pc, claims, fp, \{\s*live: \(\) => isCurrentCallPeer\(peer\),/);
+  const current = body(app, "function isCurrentCallPeer(");
+  assert.match(current, /callPeers\[peer\.fp\] === peer/);
+  assert.match(current, /isCurrentCallJoin\(peer\.callLease, peer\.server, peer\.channel\)/);
+  const join = body(app, "function isCurrentCallJoin(");
+  assert.match(join, /lease === activeCallLease/);
+  assert.match(join, /callLifecycleSession\.isCurrent\(lease\)/);
   assert.match(create, /drawConnectionState\(claims, fp, pc\.connectionState, peer\.draw, syncDrawClaims\)/);
   assert.doesNotMatch(app, /createDataChannel\(DRAW_CHANNEL_LABEL/, "no second, hand-rolled draw wiring");
   assert.match(body(app, "function removePeer("), /withDrawClaims\(\(s\) => s\.removePeer\(fp\)\)/);

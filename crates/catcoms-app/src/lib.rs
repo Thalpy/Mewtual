@@ -14,7 +14,7 @@
 //! [`Server::sync_once`]. The background run-loop + live event stream and multi-server
 //! management land with the Tauri bridge (8b), where the real async runtime lives.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use automerge::transaction::Transactable;
@@ -490,6 +490,72 @@ fn read_channel_index(doc: &AutoCommit) -> Vec<ChannelInfo> {
     });
     out.dedup_by_key(|c| c.id);
     out
+}
+
+/// Native V2 authority has a bounded/fallible directory reader rather than using the UI's full
+/// catalog projection. `general` is a permanent compatibility room, including missing old
+/// catalogs and a deleted general key. Invalid entries grant no room; overflow closes V2 room
+/// authority instead of retaining a stale/truncated permission set. This changes no chat data.
+fn voice_directory_snapshot(
+    doc: Option<&AutoCommit>,
+) -> Result<BTreeSet<u128>, catcoms_sync::voice_v2::VoiceError> {
+    use catcoms_sync::voice_v2::directory::{MAX_DIRECTORY_KEYS, MAX_DIRECTORY_ROOMS};
+    use catcoms_sync::voice_v2::VoiceError;
+    let mut rooms = BTreeSet::from([channel_id("general")]);
+    let Some(doc) = doc else { return Ok(rooms) };
+    for (index, key) in doc.keys(ROOT).enumerate() {
+        if index >= MAX_DIRECTORY_KEYS {
+            return Err(VoiceError::Capacity);
+        }
+        if key.len() != 32 {
+            continue;
+        }
+        let Ok(id) = u128::from_str_radix(&key, 16) else {
+            continue;
+        };
+        let Some((value, _)) = doc.get(ROOT, &key).map_err(|_| VoiceError::Malformed)? else {
+            continue;
+        };
+        let Some(name) = value.to_str() else { continue };
+        if name.len() > MAX_CHANNEL_NAME_CHARS * 4 || name.is_empty() {
+            continue;
+        }
+        if channel_id(name) == id {
+            rooms.insert(id);
+        }
+        if rooms.len() > MAX_DIRECTORY_ROOMS {
+            return Err(VoiceError::Capacity);
+        }
+    }
+    Ok(rooms)
+}
+
+/// Inspect only newly accepted authenticated original changes. Projection alone misses a
+/// buffered deletion/recreation or both actions in one change. Decoding uses the replication
+/// scanner's raw/action/RLE bounds first; refusal retires V2 authority without changing history.
+fn voice_directory_deletions(
+    change: &automerge::Change,
+) -> Result<BTreeSet<u128>, catcoms_sync::voice_v2::VoiceError> {
+    use automerge::legacy::{Key, ObjectId, OpType};
+    use catcoms_sync::voice_v2::VoiceError;
+    let expanded =
+        catcoms_replication::decode_change_projection(change).map_err(|_| VoiceError::Bounds)?;
+    let mut removed = BTreeSet::new();
+    for op in expanded.operations {
+        if op.obj != ObjectId::Root || !matches!(op.action, OpType::Delete) {
+            continue;
+        }
+        if let Key::Map(key) = op.key {
+            if key.len() == 32 {
+                if let Ok(id) = u128::from_str_radix(&key, 16) {
+                    if id != channel_id("general") {
+                        removed.insert(id);
+                    }
+                }
+            }
+        }
+    }
+    Ok(removed)
 }
 
 /// Wall-clock ceiling on a join handshake. Past this the joiner gives up (and the user can
@@ -4026,6 +4092,63 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     name: "general".into(),
                 }]
             })
+    }
+
+    /// Ephemeral voice-v2 admission uses the current MLS member/policy and known channel
+    /// directory. Opening an arbitrary document is not authority to invent a voice room.
+    pub fn voice_v2_context(&self, room: u128) -> Result<catcoms_sync::voice_v2::Context, String> {
+        let directory = voice_directory_snapshot(
+            self.sync
+                .doc(DocType::ChannelIndex, CHANNEL_INDEX_DOC)
+                .map(|doc| doc.doc()),
+        )
+        .map_err(|error| error.to_string())?;
+        if !directory.contains(&room) {
+            return Err("voice room is not in this server".into());
+        }
+        self.sync
+            .voice_v2_context(room)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Sole-actor housekeeping remains active across lock and needs no UI call authority.
+    pub(crate) fn collect_expired_voice(&mut self) {
+        self.sync.collect_expired_voice();
+    }
+    pub(crate) fn voice_housekeeping_wake(&self) -> Option<(Arc<dyn Clock>, u64)> {
+        self.sync.voice_housekeeping_wake()
+    }
+    pub fn prepare_voice_actor(
+        &mut self,
+        runtime: &catcoms_sync::voice_v2::runtime::Runtime,
+        ticket: &catcoms_sync::voice_v2::runtime::SessionTicket,
+    ) -> Result<catcoms_sync::voice_v2::runtime::ActorRegistration, String> {
+        self.sync
+            .prepare_voice_actor(
+                runtime,
+                ticket,
+                CHANNEL_INDEX_DOC,
+                voice_directory_snapshot,
+                voice_directory_deletions,
+            )
+            .map_err(|error| error.to_string())
+    }
+    pub fn voice_call_lease(
+        &mut self,
+        room: u128,
+    ) -> Result<catcoms_sync::voice_v2::CallLease, String> {
+        self.sync
+            .voice_call_lease(room)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn voice_call_grant(
+        &mut self,
+        room: u128,
+    ) -> Result<catcoms_sync::voice_v2::CallGrant, String> {
+        self.sync
+            .voice_call_grant(room)
+            .map_err(|error| error.to_string())
     }
 
     /// Add a channel to the shared directory and subscribe to its message document locally.
@@ -8566,6 +8689,106 @@ mod tests {
             "alice",
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn voice_v2_requires_a_directory_room_instead_of_an_arbitrary_open_document() {
+        let mut server = founder();
+        assert!(server.voice_v2_context(channel_id("general")).is_ok());
+        let invented = channel_id("not in the directory");
+        server.open_channel(invented).await.unwrap();
+        assert!(server.voice_v2_context(invented).is_err());
+        server.open_channel_index().await.unwrap();
+        let created = server.create_channel("new voice room").await.unwrap();
+        assert!(server.voice_v2_context(created.id).is_ok());
+    }
+
+    #[test]
+    fn voice_directory_schema_is_bounded_and_preserves_permanent_general() {
+        use catcoms_sync::voice_v2::{directory::MAX_DIRECTORY_KEYS, VoiceError};
+        let general = channel_id("general");
+        let room = channel_id("room");
+        assert_eq!(
+            voice_directory_snapshot(None).unwrap(),
+            BTreeSet::from([general])
+        );
+        let mut doc = AutoCommit::new();
+        doc.put(ROOT, format!("{room:032x}"), "room").unwrap();
+        doc.put(ROOT, "invalid-key", "ignored").unwrap();
+        doc.put(
+            ROOT,
+            format!("{:032x}", channel_id("redirected")),
+            "somewhere else",
+        )
+        .unwrap();
+        assert_eq!(
+            voice_directory_snapshot(Some(&doc)).unwrap(),
+            BTreeSet::from([general, room])
+        );
+        doc.put(ROOT, format!("{general:032x}"), "general").unwrap();
+        doc.delete(ROOT, format!("{general:032x}")).unwrap();
+        assert!(voice_directory_snapshot(Some(&doc))
+            .unwrap()
+            .contains(&general));
+        for index in 0..MAX_DIRECTORY_KEYS {
+            doc.put(ROOT, format!("invalid{index}"), true).unwrap();
+        }
+        assert_eq!(
+            voice_directory_snapshot(Some(&doc)),
+            Err(VoiceError::Capacity)
+        );
+    }
+
+    #[test]
+    fn voice_directory_deletions_see_compound_changes_but_exempt_general_and_bound_expansion() {
+        use catcoms_sync::voice_v2::VoiceError;
+        let general = channel_id("general");
+        let room = channel_id("room");
+        let mut doc = AutoCommit::new().with_actor(automerge::ActorId::from(vec![1; 32]));
+        doc.put(ROOT, format!("{general:032x}"), "general").unwrap();
+        doc.put(ROOT, format!("{room:032x}"), "room").unwrap();
+        doc.commit();
+        doc.delete(ROOT, format!("{general:032x}")).unwrap();
+        doc.delete(ROOT, format!("{room:032x}")).unwrap();
+        doc.put(ROOT, format!("{room:032x}"), "room").unwrap();
+        doc.commit();
+        assert_eq!(
+            voice_directory_deletions(&doc.get_last_local_change().unwrap()).unwrap(),
+            BTreeSet::from([room])
+        );
+        for index in 0..513 {
+            doc.put(ROOT, format!("invalid{index}"), true).unwrap();
+        }
+        doc.commit();
+        assert_eq!(
+            voice_directory_deletions(&doc.get_last_local_change().unwrap()),
+            Err(VoiceError::Bounds)
+        );
+    }
+
+    #[tokio::test]
+    async fn product_voice_attachment_uses_current_directory_incarnations_after_unlock() {
+        use catcoms_sync::voice_v2::runtime::Runtime;
+        let mut server = founder();
+        server.open_channel_index().await.unwrap();
+        let room = server.create_channel("voice room").await.unwrap().id;
+        let runtime = Runtime::new(Arc::new(ManualClock::new(1000)));
+        let ticket = runtime.session_ticket();
+        let registration = server.prepare_voice_actor(&runtime, &ticket).unwrap();
+        registration.register().unwrap();
+        assert!(server.voice_call_lease(room).is_err());
+        runtime.activate_session(&ticket).unwrap();
+        let old = server.voice_call_lease(room).unwrap();
+        server
+            .sync
+            .post(DocType::ChannelIndex, CHANNEL_INDEX_DOC, |doc| {
+                doc.delete(ROOT, format!("{room:032x}"))?;
+                doc.put(ROOT, format!("{room:032x}"), "voice room")
+            })
+            .await
+            .unwrap();
+        assert!(!old.is_live());
+        assert!(server.voice_call_lease(room).unwrap().is_live());
     }
 
     // ---------- multi-device: companion admission by certificate (M3) ----------

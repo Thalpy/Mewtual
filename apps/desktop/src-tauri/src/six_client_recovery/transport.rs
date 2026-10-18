@@ -136,6 +136,12 @@ impl MeshTransport for Transport {
         }
         snapshot
     }
+    fn connection_lease(&self, peer: PeerId) -> Option<catcoms_rt::ConnectionLease> {
+        self.inner.connection_lease(peer)
+    }
+    fn supports_connection_leases(&self) -> bool {
+        self.inner.supports_connection_leases()
+    }
     async fn subscribe(&self, topic: Topic) -> Result<(), TransportError> {
         self.inner.subscribe(topic).await
     }

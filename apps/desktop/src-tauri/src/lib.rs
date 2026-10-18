@@ -44,6 +44,9 @@ use catcoms_rt::{
     Clock, MeshTransport, OsCryptoRng, PeerId, RequestCancellation, RngCore,
     SharedRequestKeepalive, SystemClock, TransportEvent,
 };
+use catcoms_sync::voice_v2::runtime::{
+    ActorRegistration, RegistrationError, Runtime as VoiceRuntime, SessionTicket,
+};
 use catcoms_sync::{fingerprint, join_namespace, PreOwnerConnectionHandoff, JOIN_REPLY_PROOF_KIND};
 use libp2p::multiaddr::Protocol;
 use libp2p::Multiaddr;
@@ -54,6 +57,7 @@ use tokio::time::timeout;
 use zeroize::Zeroizing;
 
 mod admission_storage;
+mod call_mappings;
 mod creative_blobs;
 mod discovery_timer;
 mod durable_chat;
@@ -64,6 +68,7 @@ mod media_decode;
 mod media_worker;
 mod member_reconnect;
 mod studio_exports;
+mod voice_authority;
 // This broker model has no registered command consumers yet. Retain its contract tests without
 // presenting the unwired implementation as a production pairing boundary.
 #[cfg(test)]
@@ -96,6 +101,9 @@ struct InterfaceRouteIdentity {
 /// its display name (kept here too so the registry can be re-sealed on disk, Phase 9f).
 struct ServerEntry {
     actor: ServerActor,
+    /// Exact native registry custody. Removal/replacement revokes detached voice work before
+    /// waiting for the still-network-active actor to process any shutdown command.
+    voice: Option<RegisteredVoiceActor>,
     /// Process-local incarnation of this registry row. Persisted ids are intentionally reused on
     /// reload, so the id alone cannot stop a scan begun for a removed actor from populating a new
     /// actor's cache after that id is installed again.
@@ -141,6 +149,42 @@ struct ServerEntry {
     /// how many the newest completed write covered. See [`persist_server`]. Per incarnation, so a
     /// reinstalled id starts from zero and cannot inherit a departed entry's completions.
     persist: PersistCounters,
+}
+
+struct RegisteredVoiceActor(ActorRegistration);
+impl Drop for RegisteredVoiceActor {
+    fn drop(&mut self) {
+        self.0.revoke();
+    }
+}
+
+/// Called under the native row guard immediately before restore insertion. A competing owner
+/// preserves the previous row; optional preparation expiry/capacity leaves restored chat usable.
+fn install_reloaded_voice(
+    registration: Option<ActorRegistration>,
+) -> Result<Option<RegisteredVoiceActor>, String> {
+    let Some(registration) = registration else {
+        return Ok(None);
+    };
+    match registration.register_install() {
+        Ok(()) => Ok(Some(RegisteredVoiceActor(registration))),
+        Err(RegistrationError::Unavailable(error)) => {
+            registration.revoke();
+            tracing::warn!(%error, "VOICE.ATTACHMENT.UNAVAILABLE");
+            Ok(None)
+        }
+        Err(RegistrationError::Conflict) => {
+            Err("server reload was superseded by another voice actor installation".into())
+        }
+    }
+}
+
+fn voice_runtime(state: &AppState) -> Arc<VoiceRuntime> {
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .runtime()
 }
 
 /// Where one server is between "a change happened" and "a write that contains it finished".
@@ -408,10 +452,12 @@ struct AppState {
     /// Serialize the state-map transition with the actor's revoke/authorize commands. Without
     /// this, concurrent replacement completions can re-install a displaced helper capability.
     join_reply_apply: Mutex<()>,
-    /// Live router mappings for the active call's media UDP ports, keyed by the local port. A
-    /// PCP/NAT-PMP entry's short lease is renewed by the client retained inside the mapping, so
-    /// dropping the entry (call end, or the app closing) is what ends that route.
-    media_mappings: Mutex<HashMap<u16, catcoms_net::MediaPortMapping>>,
+    /// Native call/controller/grant custody. Pending and uncertain effects remain charged across
+    /// lock, leave and remount; neither a UI waiter nor a physical port is release authority.
+    media_mappings: Arc<StdMutex<call_mappings::Coordinator<catcoms_net::MediaPortMapping>>>,
+    /// Distinct voice-session authority and active-or-uncertain process crypto charges. Revoking
+    /// a UI/controller ends effects immediately but cannot refund unresolved engine work.
+    voice_authority: StdMutex<voice_authority::Coordinator>,
     next_id: Mutex<u64>,
     /// Serialize first mount and already-mounted authentication. A duplicate frontend unlock must
     /// never race two reloads, while an explicitly UI-locked session must authenticate against
@@ -436,6 +482,9 @@ struct AppState {
     /// Every explicit lock invalidates work that began in an earlier UI authorization epoch.
     /// Long-running joins carry the captured value to both their reply event and durable commit.
     ui_session_generation: AtomicU64,
+    /// Exact generation last committed by authenticated unlock. Publishing a newer lock
+    /// generation closes IPC even if that thread stops before setting the separate request flag.
+    ui_authorized_generation: AtomicU64,
     /// Orders the externally-visible parts of a long command against explicit lock completion.
     /// The lock-request atomic closes new IPC immediately; this mutex makes it impossible for a
     /// reply event or server registration to occur after `lock_session` itself has completed.
@@ -1006,13 +1055,19 @@ struct PendingGrant {
 /// Reject webview IPC while the explicit UI lock is active. Server actors intentionally continue
 /// networking in the background, but that must not leave their plaintext projections callable by
 /// injected/stale frontend code behind the lock screen.
+fn ui_session_closed(state: &AppState) -> bool {
+    state.session_lock_requested.load(Ordering::Acquire)
+        || state.ui_session_generation.load(Ordering::Acquire)
+            != state.ui_authorized_generation.load(Ordering::Acquire)
+}
+
 async fn require_unlocked_session(state: &AppState) -> Result<(), String> {
-    if state.session_lock_requested.load(Ordering::Acquire) {
+    if ui_session_closed(state) {
         return Err("the vault is locked".into());
     }
     if *state.session_resumable.lock().await
         && state.store.lock().await.is_some()
-        && !state.session_lock_requested.load(Ordering::Acquire)
+        && !ui_session_closed(state)
     {
         Ok(())
     } else {
@@ -3354,6 +3409,7 @@ async fn register_server(
     app: &AppHandle,
     state: &AppState,
     actor: ServerActor,
+    registration: Option<ActorRegistration>,
     events: mpsc::Receiver<catcoms_app::TracedEvent>,
     task: tokio::task::JoinHandle<()>,
     group_id: Vec<u8>,
@@ -3368,16 +3424,46 @@ async fn register_server(
     is_dm: bool,
     switchboard: bool,
     record_seq: u64,
-) -> u64 {
+    expected_generation: u64,
+) -> Result<u64, String> {
     let id = {
         let mut n = state.next_id.lock().await;
         *n += 1;
         *n
     };
     let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
-    supervise("server_actor", id, task);
     let timer_actor = actor.clone();
-    state.servers.lock().await.insert(
+    let mut servers = state.servers.lock().await;
+    let install = if state.ui_session_generation.load(Ordering::Acquire) != expected_generation
+        || ui_session_closed(state)
+    {
+        Err("server registration was superseded by a lock request".into())
+    } else {
+        Ok(())
+    };
+    if let Err(error) = install {
+        drop(servers);
+        if let Some(registration) = &registration {
+            registration.revoke();
+        }
+        drop(registration);
+        drop(events);
+        // Caller holds native commit. Never wait for an actor command here: authority is
+        // already closed, and actual task/lower-work custody survives until cancellation drops it.
+        task.abort();
+        return Err(error);
+    }
+    let voice = registration.and_then(|registration| match registration.register() {
+        Ok(()) => Some(RegisteredVoiceActor(registration)),
+        Err(error) => {
+            registration.revoke();
+            tracing::warn!(server = id, %error, "VOICE.ATTACHMENT.UNAVAILABLE");
+            None
+        }
+    });
+    // Exact row guard is already held. No await or fallible operation may separate the voice
+    // registration CAS from publishing the native row that owns it.
+    servers.insert(
         id,
         ServerEntry {
             actor,
@@ -3394,9 +3480,12 @@ async fn register_server(
             is_dm,
             switchboard,
             record_seq,
+            voice,
             persist: PersistCounters::default(),
         },
     );
+    drop(servers);
+    supervise("server_actor", id, task);
     admission_storage::prune_stale_pending(state).await;
     install_persistence_worker(app, id, instance).await;
     forward_events(app.clone(), id, instance, events);
@@ -3405,7 +3494,7 @@ async fn register_server(
     // Start only after the entry exists. A zero-millisecond randomized first tick must not race
     // the registry insertion and silently skip the initial interface/discovery refresh.
     spawn_discovery_timer(app.clone(), id, instance, timer_actor);
-    id
+    Ok(id)
 }
 
 /// Draw the next peer-record sequence number for `server` from this launch's reserved block, or
@@ -5839,6 +5928,7 @@ async fn found_server_inner(
     ui_session_generation: u64,
     diag: &mut Connectivity,
 ) -> Result<FoundResult, String> {
+    let voice_ticket = voice_runtime(state).session_ticket();
     // This server's own network identity + stable port, minted once here and sealed to disk, so
     // every later launch keeps the same PeerId and port and the invites minted today still resolve
     // tomorrow. Per server, never per device (see `ServerNet`).
@@ -5943,6 +6033,16 @@ async fn found_server_inner(
     let (actor, events, task) = spawn(server);
     actor.open_channel(general).await;
     let channels = ui_channels(actor.channels().await);
+    let registration = match actor
+        .prepare_voice_actor(voice_runtime(state), voice_ticket)
+        .await
+    {
+        Ok(registration) => Some(registration),
+        Err(error) => {
+            tracing::warn!(%error, "VOICE.ATTACHMENT.UNAVAILABLE");
+            None
+        }
+    };
     let session_commit = match require_ui_session_generation(state, ui_session_generation).await {
         Ok(commit) => commit,
         Err(error) => {
@@ -5956,6 +6056,7 @@ async fn found_server_inner(
         app,
         state,
         actor,
+        registration,
         events,
         task,
         group_id,
@@ -5973,8 +6074,9 @@ async fn found_server_inner(
         is_dm,
         net.switchboard,
         net.record_seq,
+        ui_session_generation,
     )
-    .await;
+    .await?;
     // Seal the new server, its network identity and the registry to disk (if the store is
     // unlocked). The identity has to land before the first restart or the invite just minted dies
     // with the process that made it.
@@ -6226,6 +6328,7 @@ async fn join_server_inner(
     ui_session_generation: u64,
     diag: &mut Connectivity,
 ) -> Result<FoundResult, String> {
+    let voice_ticket = voice_runtime(state).session_ticket();
     let decoded = decode_and_verify_invite(&invite_hex).inspect_err(|e| {
         diag.steps.push(DiagStep::failed("invite", "", e.clone()));
     })?;
@@ -6740,6 +6843,16 @@ async fn join_server_inner(
     // peer record. A later router mapping or relay reservation is folded into this same set.
     let joiner_bootstrap_owners =
         bootstrap_owners(&joiner_addrs, BootstrapOwner::AutomaticInterface);
+    let registration = match actor
+        .prepare_voice_actor(voice_runtime(state), voice_ticket)
+        .await
+    {
+        Ok(registration) => Some(registration),
+        Err(error) => {
+            tracing::warn!(%error, "VOICE.ATTACHMENT.UNAVAILABLE");
+            None
+        }
+    };
     // Catch-up can take arbitrarily longer than the UI session that initiated it. Serialize the
     // native registration + sealing boundary with explicit lock, and abandon the transient actor
     // if that lock already invalidated this operation. No server id, registry row, or event
@@ -6757,6 +6870,7 @@ async fn join_server_inner(
         app,
         state,
         actor,
+        registration,
         events,
         task,
         group_id,
@@ -6774,8 +6888,9 @@ async fn join_server_inner(
         is_dm,
         net.switchboard,
         net.record_seq,
+        ui_session_generation,
     )
-    .await;
+    .await?;
     // Seal the joined server, its network identity and the registry to disk (if unlocked).
     let membership_save = persist_server(state, server_id).await;
     let network_save = persist_server_net(state, server_id, &net).await;
@@ -7122,7 +7237,18 @@ async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), Str
     let _persist = persist_lock_for(&state, server).lock_owned().await;
     let _session = require_ui_session_generation(&state, generation).await?;
     let removed = stopped.remove(&mut *state.servers.lock().await)?;
+    let mappings = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retire_server(server, removed.instance);
+    clean_call_mappings(&state.media_mappings, mappings);
     admission_storage::remove_pending_net(&state, server, removed.instance);
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retire_server(server, removed.instance);
     remove_persistence_signal(&state, server, removed.instance);
     state.storage_health.lock().await.remove(&server);
     if let Ok(mut signals) = state.reconnect_capture_signals.lock() {
@@ -8782,7 +8908,8 @@ async fn send_dm_invite(
 }
 
 /// Push a call-signalling message (base64 payload) to the member whose full device identity is
-/// `target` (64 lowercase hex, `MemberView.identity`). `true` if addressed.
+/// `target` (64 lowercase hex, `MemberView.identity`). `true` means local network submission,
+/// not a peer receipt: the transport may still fail to connect or deliver after this returns.
 ///
 /// The target used to be an 8-hex fingerprint, which a member can collide with a victim's by
 /// grinding a device key; the actor now refuses anything but the canonical full identity, and a
@@ -8793,8 +8920,7 @@ async fn send_dm_invite(
 /// turned into a `console.warn` and nothing else. The `false` is not an error and must not be
 /// recorded as one, but it is the whole diagnosis, so it is recorded as its own outcome.
 ///
-/// The payload is opaque here and stays that way: what is recorded is whether it went, never what
-/// it said.
+/// The payload is opaque here and stays that way: record submission, never its contents.
 #[tauri::command]
 async fn send_call_signal(
     state: State<'_, AppState>,
@@ -8814,18 +8940,18 @@ async fn send_call_signal(
         .decode(payload.as_bytes())
         .map_err(|e| op.fail(codes::VOICE_SIGNAL_FAILED, format!("bad payload: {e}")))?;
     let actor = op.actor(&state, server).await?;
-    let delivered = actor
+    let submitted = actor
         .send_call_signal(target, bytes)
         .await
         .map_err(|e| op.fail(codes::VOICE_SIGNAL_FAILED, e))?;
-    if delivered {
-        op.succeeded("VOICE.SIGNAL.DELIVERED");
+    if submitted {
+        op.succeeded("VOICE.SIGNAL.SUBMITTED");
     } else {
         // The roster says this member is here and the transport has nowhere to send to. Not a
         // failure of this command, and precisely the thing that was invisible.
         op.failed("VOICE.SIGNAL.NO_MEMBER_ROUTE");
     }
-    Ok(delivered)
+    Ok(submitted)
 }
 
 /// This call's E2E media base key (base64) + the MLS epoch it's keyed to. Derived locally from the
@@ -9108,7 +9234,7 @@ fn register_inline_download(state: &AppState, id: &str) -> Result<(), String> {
         .unwrap_or_else(|e| e.into_inner());
     // Lock publishes this flag before acquiring the same table to cancel its contents. Testing it
     // while holding the table closes the otherwise possible sweep-before-insert race.
-    if state.session_lock_requested.load(Ordering::Acquire) {
+    if ui_session_closed(state) {
         return Err("the vault is locked".to_string());
     }
     if let Some(existing) = table.get(id) {
@@ -9149,7 +9275,7 @@ fn claim_internal_inline_download(
             .inline_downloads
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if state.session_lock_requested.load(Ordering::Acquire) {
+        if ui_session_closed(state) {
             return Err("the vault is locked".to_string());
         }
         require_inline_download_capacity(&mut table)?;
@@ -10011,7 +10137,7 @@ fn routable_media_hosts(advertised: &[String]) -> (Vec<String>, Vec<String>) {
     (v4, v6)
 }
 
-/// One member this device could hand its media to when a direct path cannot be built.
+/// One member offering mesh admission help. This grants no media-relay authority or allocation.
 #[derive(Serialize)]
 struct CallBridge {
     /// Short fingerprint, matching the identifier the call UI already renders for a peer.
@@ -10019,19 +10145,18 @@ struct CallBridge {
     /// How many routes the helper published. More routes is a better bet, not a guarantee.
     addresses: usize,
     /// True when at least one published route is a literal public address rather than a circuit.
-    /// A helper reachable only through *another* relay is a poor media bridge: it inherits that
-    /// relay's latency and its liveness.
+    /// This describes the helper's mesh route only; it does not establish a media route.
     direct: bool,
 }
 
-/// What the media plane should do for this server, derived entirely from what the mesh already
-/// proved. The frontend owns ICE; this is the evidence it has never had access to.
+/// Mesh route context for call troubleshooting. Advertisements are distinct from tested
+/// reachability; the frontend's ICE checks establish the separate media route.
 ///
 /// The two planes are otherwise disjoint by construction: the libp2p transport's PCP/UPnP/PCPv6
 /// mappings cover the *mesh* socket, and the webview's ICE agent binds its own ephemeral ports,
 /// so none of that traversal work has ever applied to a call. What does transfer is the
-/// *knowledge*: whether this node is directly reachable, whether it has a global IPv6 route, and
-/// which members have proven they can host for others.
+/// *knowledge*: advertised public mesh addresses, separate AutoNAT observations, and
+/// which members offer mesh admission help. None of these establish a WebRTC media relay.
 #[derive(Serialize)]
 struct CallTransport {
     /// Whether this node advertises at least one non-circuit, globally routable address.
@@ -10044,7 +10169,7 @@ struct CallTransport {
     /// Public IPv6 literals. These matter more than IPv4: IPv6 has no NAT to traverse, so a
     /// direct media path needs only a firewall pinhole rather than a mapping.
     public_ipv6: Vec<String>,
-    /// Members currently offering to host, best candidates first.
+    /// Mesh admission helpers, best routes first; these are not voice-relay allocations.
     bridges: Vec<CallBridge>,
     /// Whether a third-party relay is likely to be required for this node to be heard at all.
     relay_likely_required: bool,
@@ -10084,9 +10209,8 @@ async fn get_call_transport(
     };
     let (public_ipv4, public_ipv6) = routable_media_hosts(&advertised);
 
-    // Reuse the switchboard's consent-gated offer pool: a member who has already agreed to carry
-    // somebody else's traffic is exactly the member who should be asked to carry their media.
-    // Sorting puts literal-route helpers first so the picker never prefers a relayed helper.
+    // Report the existing consent-gated admission offer pool as mesh context only. Its hosting
+    // consent does not authorize media forwarding, and no WebRTC relay is created by an offer.
     let mut bridges: Vec<CallBridge> = actor
         .switchboard_offers()
         .await
@@ -10110,23 +10234,7 @@ async fn get_call_transport(
     });
 
     let relay_likely_required = !public_direct && public_ipv6.is_empty() && !router_maps;
-    let mut advice = if public_direct {
-        "This device is directly reachable, so a call should connect without a relay. A peer that still fails is behind the stricter NAT.".to_string()
-    } else if !public_ipv6.is_empty() {
-        "This device has a public IPv6 route but no verified IPv4 path. Calls will connect directly to IPv6 peers once the router permits inbound UDP to the app; IPv4-only peers will need a relay.".to_string()
-    } else if bridges.is_empty() {
-        "This device is behind NAT and no member is offering to host. Calls to peers who are also behind NAT need a relay: ask a member with a public route to enable hosting, or set a TURN server in Settings, Calls.".to_string()
-    } else {
-        format!(
-            "This device is behind NAT. {} member(s) are offering to host, so a relayed path is available.",
-            bridges.len()
-        )
-    };
-    if router_maps {
-        advice.push_str(
-            " Your router opens ports on request, so each call also offers a router-mapped direct route; one mapped side is enough for the pair.",
-        );
-    }
+    let advice = call_transport_advice(public_direct, router_maps, !bridges.is_empty());
 
     Ok(CallTransport {
         public_direct,
@@ -10140,9 +10248,32 @@ async fn get_call_transport(
     })
 }
 
+/// Mesh addresses, admission consent and router support are context for troubleshooting; none
+/// proves voice connectivity. Keep this advice independent of any claimed media-relay offer.
+fn call_transport_advice(public_mesh_route: bool, router_maps: bool, mesh_helpers: bool) -> String {
+    let mut advice = if public_mesh_route {
+        "This device advertises a public mesh address. Voice uses its own connection checks."
+            .to_string()
+    } else {
+        "Voice tries its own direct connection checks.".to_string()
+    };
+    if router_maps {
+        advice.push_str(" The call can also try a router-mapped UDP port.");
+    }
+    if mesh_helpers {
+        advice.push_str(
+            " Connection helpers assist with joining the server; voice uses separate routes.",
+        );
+    }
+    advice.push_str(" If voice cannot connect, configure TURN in Settings, Calls.");
+    advice
+}
+
 /// The public socket a router granted for one webview media port.
 #[derive(Serialize)]
 struct MappedCallPort {
+    /// Opaque attempt identity; port-only unmap authority is deliberately unsupported.
+    grant: String,
     ip: String,
     port: u16,
     /// Which protocol granted it, for the log and the call panel.
@@ -10169,52 +10300,451 @@ async fn default_route_address(state: State<'_, AppState>) -> Result<Option<Stri
     Ok(catcoms_net::default_route_ipv4().map(|ip| ip.to_string()))
 }
 
-/// Ask the router to forward one of the active call's media UDP ports to this machine, over the
-/// bound-interface IGD path the invite reachability fix proved out, with PCP/NAT-PMP as the
-/// fallback rung for routers that don't speak UPnP. The webview signals the returned public
-/// socket to the peer as an extra ICE candidate; a router mapping forwards from any source, so
-/// one mapped side connects the pair regardless of the other side's NAT type. This is the
-/// media-plane counterpart of the mesh's mapping workers, which only ever cover the stable
-/// libp2p listen port and never the ICE agent's ephemeral sockets.
+/// Prepare a fresh webview controller without revoking the current controller/call. Activation
+/// is a separate compare-and-swap after the frontend checks that this mount is still current.
+#[tauri::command]
+async fn prepare_call_mapping_controller(state: State<'_, AppState>) -> Result<String, String> {
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let _commit = require_ui_session_generation(&state, generation).await?;
+    state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .prepare(
+            call_mappings::CandidateKind::Controller { generation },
+            SystemClock.monotonic_ms(),
+        )
+}
+
+#[tauri::command]
+async fn prepare_call_mapping_owner(
+    state: State<'_, AppState>,
+    controller: String,
+    server: u64,
+    room: String,
+) -> Result<String, String> {
+    if room
+        .parse::<u128>()
+        .ok()
+        .map(|id| id.to_string())
+        .as_deref()
+        != Some(room.as_str())
+    {
+        return Err("invalid call room".into());
+    }
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let _commit = require_ui_session_generation(&state, generation).await?;
+    let servers = state.servers.lock().await;
+    let entry = servers
+        .get(&server)
+        .ok_or("call server is no longer open")?;
+    let binding = call_mappings::Binding {
+        generation,
+        server,
+        instance: entry.instance,
+        group: entry.group_id.clone(),
+        room,
+    };
+    state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .prepare(
+            call_mappings::CandidateKind::Call {
+                controller,
+                binding,
+            },
+            SystemClock.monotonic_ms(),
+        )
+}
+
+async fn call_mapping_binding_current(state: &AppState, binding: &call_mappings::Binding) -> bool {
+    let servers = state.servers.lock().await;
+    !ui_session_closed(state)
+        && state.ui_session_generation.load(Ordering::Acquire) == binding.generation
+        && servers.get(&binding.server).is_some_and(|entry| {
+            entry.instance == binding.instance && entry.group_id == binding.group
+        })
+}
+
+fn clean_call_mappings(
+    coordinator: &Arc<StdMutex<call_mappings::Coordinator<catcoms_net::MediaPortMapping>>>,
+    work: Vec<call_mappings::Cleanup<catcoms_net::MediaPortMapping>>,
+) {
+    for cleanup in work {
+        let coordinator = coordinator.clone();
+        // The task, not its IPC caller, owns cleanup. Its slot remains charged even when the
+        // caller disappears. No server actor or UI commit mutex is held across router I/O.
+        tokio::spawn(async move {
+            let reusable = cleanup.grant.release().await;
+            coordinator
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .finish_cleanup(&cleanup.id, reusable);
+        });
+    }
+}
+
+#[tauri::command]
+async fn activate_call_mapping_owner(
+    state: State<'_, AppState>,
+    candidate: String,
+) -> Result<String, String> {
+    let kind = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .candidate(&candidate, SystemClock.monotonic_ms())
+        .ok_or("call mapping candidate expired")?;
+    let generation = match &kind {
+        call_mappings::CandidateKind::Controller { generation } => *generation,
+        call_mappings::CandidateKind::Call { binding, .. } => binding.generation,
+    };
+    let _commit = require_ui_session_generation(&state, generation).await?;
+    if let call_mappings::CandidateKind::Call { binding, .. } = &kind {
+        if !call_mapping_binding_current(&state, binding).await {
+            return Err("call server changed".into());
+        }
+    }
+    let work = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .activate(&candidate, SystemClock.monotonic_ms())?;
+    clean_call_mappings(&state.media_mappings, work);
+    Ok(candidate)
+}
+
+/// Revoke one exact candidate/controller/call. This closes authority immediately; best-effort
+/// router cleanup continues in native-owned workers and may remain uncertain until process exit.
+#[tauri::command]
+async fn end_call_mapping_owner(state: State<'_, AppState>, owner: String) -> Result<(), String> {
+    let work = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .end(&owner);
+    clean_call_mappings(&state.media_mappings, work);
+    Ok(())
+}
+
+/// Optional extra ICE route. Ownership, capacity and the physical port are reserved before a
+/// detached worker starts. A router grant helps connectivity; it does not establish reachability.
 #[tauri::command]
 async fn map_call_port(
+    app: AppHandle,
     state: State<'_, AppState>,
+    owner: String,
     port: u16,
     address: Option<String>,
 ) -> Result<MappedCallPort, String> {
-    require_unlocked_session(&state).await?;
-    let key = port;
     let port = std::num::NonZeroU16::new(port).ok_or("port must be nonzero")?;
     // The candidate's own claimed IPv4, when the webview could read one (mic-granted pages get
     // real IPs; an mDNS-obfuscated candidate passes None and is mapped permissively).
     let claimed = address
         .as_deref()
         .and_then(|a| a.parse::<std::net::Ipv4Addr>().ok());
-    let mapped = catcoms_net::map_media_udp_port(port, claimed).await?;
-    let result = MappedCallPort {
-        ip: mapped.external.ip().to_string(),
-        port: mapped.external.port(),
-        mechanism: mapped.mechanism.to_string(),
-        confirmed: mapped.confirmed,
-    };
-    // Retain the mapping: a PCP/NAT-PMP lease is renewed by the client inside it, and call end
-    // releases it. A same-port remap (shouldn't happen; ICE ports are fresh per call) releases
-    // the entry it replaces rather than leaking its renewal task.
-    if let Some(previous) = state.media_mappings.lock().await.insert(key, mapped) {
-        previous.release().await;
+    let binding = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .binding(&owner)
+        .cloned()
+        .ok_or("call mapping owner is no longer active")?;
+    let commit = require_ui_session_generation(&state, binding.generation).await?;
+    if !call_mapping_binding_current(&state, &binding).await {
+        return Err("call server changed".into());
     }
-    Ok(result)
+    let grant = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .reserve(&owner, port.get())?;
+    drop(commit);
+    // Dropping the JoinHandle detaches rather than cancels this worker. Even a cancelled Tauri
+    // waiter leaves someone responsible for the router result and its charged slot.
+    call_mappings::spawn_acquisition(
+        state.media_mappings.clone(),
+        grant,
+        async move {
+            catcoms_net::map_media_udp_port(port, claimed)
+                .await
+                .map_err(|e| (e.uncertain, e.to_string()))
+        },
+        move || async move {
+            let state = app.state::<AppState>();
+            // Return the owned commit guard so the shared worker retains it through exact
+            // owner installation. Returning a boolean here would reopen a lock/commit gap.
+            let commit = state.ui_session_commit.clone().lock_owned().await;
+            if require_unlocked_session(&state).await.is_ok()
+                && call_mapping_binding_current(&state, &binding).await
+            {
+                Some(commit)
+            } else {
+                None
+            }
+        },
+        |mapped, grant| MappedCallPort {
+            grant: grant.into(),
+            ip: mapped.external.ip().to_string(),
+            port: mapped.external.port(),
+            mechanism: mapped.mechanism.to_string(),
+            confirmed: mapped.confirmed,
+        },
+        catcoms_net::MediaPortMapping::release,
+    )
+    .await
+    .map_err(|e| format!("router mapping worker failed: {e}"))?
 }
 
-/// Release a call mapping when the call ends. Best-effort at the router; the UPnP lease is
-/// bounded and a dropped PCP/NAT-PMP client stops renewing, so nothing outlives a crash long.
+/// Exact grant release. A queued old release cannot affect a newer same-port grant.
 #[tauri::command]
-async fn unmap_call_port(state: State<'_, AppState>, port: u16) -> Result<(), String> {
-    require_unlocked_session(&state).await?;
-    let mapping = state.media_mappings.lock().await.remove(&port);
-    if let Some(mapping) = mapping {
-        mapping.release().await;
+async fn unmap_call_port(
+    state: State<'_, AppState>,
+    owner: String,
+    grant: String,
+) -> Result<(), String> {
+    let work = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .unmap(&owner, &grant);
+    clean_call_mappings(&state.media_mappings, work.into_iter().collect());
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct VoiceActivation {
+    owner: String,
+    group: Option<String>,
+    join: Option<String>,
+}
+
+async fn voice_binding_current(state: &AppState, binding: &voice_authority::Binding) -> bool {
+    let servers = state.servers.lock().await;
+    !ui_session_closed(state)
+        && state.ui_session_generation.load(Ordering::Acquire) == binding.generation
+        && servers.get(&binding.server).is_some_and(|entry| {
+            entry.instance == binding.instance && entry.group_id == binding.group
+        })
+}
+
+/// An actor query can suspend. Its answer is only a snapshot; the command must subsequently
+/// reacquire UI commit and exact native-owner/registry authority before any synchronous effect.
+async fn check_voice_binding(
+    state: &AppState,
+    binding: &voice_authority::Binding,
+) -> Result<(), String> {
+    let actor = {
+        let servers = state.servers.lock().await;
+        let entry = servers
+            .get(&binding.server)
+            .filter(|entry| entry.instance == binding.instance && entry.group_id == binding.group)
+            .ok_or("voice server changed")?;
+        entry.actor.clone()
+    };
+    let context = actor.voice_v2_context(binding.scope.room).await?;
+    if context.scope != binding.scope {
+        return Err("voice policy changed; rejoin the call".into());
     }
+    Ok(())
+}
+
+#[tauri::command]
+async fn prepare_voice_controller(state: State<'_, AppState>) -> Result<String, String> {
+    require_unlocked_session(&state).await?;
+    prepare_voice_controller_inner(&state).await
+}
+
+async fn prepare_voice_controller_inner(state: &AppState) -> Result<String, String> {
+    let generation = unlocked_ui_session_generation(state).await?;
+    let _commit = require_ui_session_generation(state, generation).await?;
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .prepare(
+            voice_authority::CandidateKind::Controller(generation),
+            SystemClock.monotonic_ms(),
+        )
+}
+
+async fn prepare_voice_owner_inner(
+    state: &AppState,
+    controller: String,
+    server: u64,
+    room: String,
+) -> Result<String, String> {
+    let room_id = room.parse::<u128>().map_err(|_| "invalid voice room")?;
+    if room_id.to_string() != room {
+        return Err("invalid voice room".into());
+    }
+    let generation = unlocked_ui_session_generation(state).await?;
+    let (actor, instance, group) = {
+        let servers = state.servers.lock().await;
+        let entry = servers
+            .get(&server)
+            .ok_or("voice server is no longer open")?;
+        (entry.actor.clone(), entry.instance, entry.group_id.clone())
+    };
+    let context = actor.voice_v2_context(room_id).await?;
+    let binding = voice_authority::Binding {
+        generation,
+        server,
+        instance,
+        group,
+        scope: context.scope,
+    };
+    let _commit = require_ui_session_generation(state, generation).await?;
+    if !voice_binding_current(state, &binding).await {
+        return Err("voice server changed".into());
+    }
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .prepare(
+            voice_authority::CandidateKind::Call {
+                controller,
+                binding,
+            },
+            SystemClock.monotonic_ms(),
+        )
+}
+
+#[tauri::command]
+async fn prepare_voice_owner(
+    state: State<'_, AppState>,
+    controller: String,
+    server: u64,
+    room: String,
+) -> Result<String, String> {
+    require_unlocked_session(&state).await?;
+    prepare_voice_owner_inner(&state, controller, server, room).await
+}
+
+async fn activate_voice_owner_inner(
+    state: &AppState,
+    candidate: String,
+) -> Result<VoiceActivation, String> {
+    let kind = state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .candidate(&candidate, SystemClock.monotonic_ms())
+        .ok_or("voice candidate expired")?;
+    let (generation, grant) = match &kind {
+        voice_authority::CandidateKind::Controller(generation) => (*generation, None),
+        voice_authority::CandidateKind::Call { binding, .. } => {
+            let actor = {
+                let servers = state.servers.lock().await;
+                servers
+                    .get(&binding.server)
+                    .filter(|entry| {
+                        entry.instance == binding.instance && entry.group_id == binding.group
+                    })
+                    .ok_or("voice server changed")?
+                    .actor
+                    .clone()
+            };
+            // The reply owns its child grant. Cancellation while waiting for the final native
+            // boundary drops/revokes it, rather than leaving an actor-retained lease live.
+            let grant = actor.voice_call_grant(binding.scope.room).await?;
+            if grant.scope() != binding.scope || !grant.lease().is_live() {
+                return Err("voice policy changed; rejoin the call".into());
+            }
+            (binding.generation, Some(grant))
+        }
+    };
+    let _commit = require_ui_session_generation(state, generation).await?;
+    if let voice_authority::CandidateKind::Call { binding, .. } = &kind {
+        if !voice_binding_current(state, binding).await {
+            return Err("voice server changed".into());
+        }
+    }
+    let mut nonce = [0; 32];
+    OsCryptoRng.fill_bytes(&mut nonce);
+    let mut authority = state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    authority.activate(&candidate, nonce, SystemClock.monotonic_ms(), grant)?;
+    let owner = authority.owner(&candidate);
+    Ok(VoiceActivation {
+        owner: candidate,
+        group: owner
+            .as_ref()
+            .map(|owner| hex::encode(owner.binding.scope.group)),
+        join: owner.map(|owner| hex::encode(owner.join)),
+    })
+}
+
+#[tauri::command]
+async fn activate_voice_owner(
+    state: State<'_, AppState>,
+    candidate: String,
+) -> Result<VoiceActivation, String> {
+    require_unlocked_session(&state).await?;
+    activate_voice_owner_inner(&state, candidate).await
+}
+
+/// Exact revocation is available during lock/destruction. It never refunds unsettled crypto.
+#[tauri::command]
+async fn end_voice_owner(state: State<'_, AppState>, owner: String) -> Result<(), String> {
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .end(&owner);
+    Ok(())
+}
+
+async fn admit_voice_crypto_inner(
+    state: &AppState,
+    owner: String,
+    operation: String,
+    bytes: usize,
+) -> Result<String, String> {
+    let operation = voice_authority::Operation::parse(&operation)?;
+    let binding = state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .owner(&owner)
+        .ok_or("voice owner changed")?
+        .binding;
+    check_voice_binding(state, &binding).await?;
+    let _commit = require_ui_session_generation(state, binding.generation).await?;
+    if !voice_binding_current(state, &binding).await {
+        return Err("voice server changed".into());
+    }
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .admit(&owner, operation, bytes)
+}
+
+/// Resource admission alone authorizes no signing, network submission or plaintext delivery.
+#[tauri::command]
+async fn admit_voice_crypto(
+    state: State<'_, AppState>,
+    owner: String,
+    operation: String,
+    bytes: usize,
+) -> Result<String, String> {
+    require_unlocked_session(&state).await?;
+    admit_voice_crypto_inner(&state, owner, operation, bytes).await
+}
+
+/// The trusted window reports real settlement even after its owner retires or the vault locks.
+#[tauri::command]
+async fn settle_voice_crypto(state: State<'_, AppState>, token: String) -> Result<(), String> {
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .settle(&token);
     Ok(())
 }
 
@@ -12326,7 +12856,15 @@ async fn reload_one(
     state: &AppState,
     snapshot: &[u8],
     record: &ServerRecord,
+    expected_generation: u64,
+    voice_ticket: &SessionTicket,
 ) -> Result<(), String> {
+    let previous_instance = state
+        .servers
+        .lock()
+        .await
+        .get(&record.id)
+        .map(|entry| entry.instance);
     // 9g used to dial every address in the snapshot's peer records here, straight at the
     // transport: up to `MAX_PEX_ADDRESSES` per record for every record ever stored, unconditional,
     // bypassing `DiscoveryPolicy` and its dial budget entirely, and with no membership check, so a
@@ -12434,11 +12972,52 @@ async fn reload_one(
         Some(record.invite.clone())
     };
 
+    // Preparation remains outside native commit. Slow actor work cannot delay lock completion;
+    // the exact ticket captured before authentication keeps this result inert until unlock.
+    let registration = actor
+        .prepare_voice_actor(voice_runtime(state), voice_ticket.clone())
+        .await;
+    let registration = match registration {
+        Ok(registration) => Some(registration),
+        Err(error) => {
+            tracing::warn!(server = record.id, %error, "VOICE.ATTACHMENT.UNAVAILABLE");
+            None
+        }
+    };
     // Register under the SAME id as on disk (don't allocate a new one).
-    supervise("server_actor", record.id, task);
     let instance = state.next_server_instance.fetch_add(1, Ordering::Relaxed);
     let timer_actor = actor.clone();
-    state.servers.lock().await.insert(
+    let commit = state.ui_session_commit.lock().await;
+    let mut servers = state.servers.lock().await;
+    let install = if state.ui_session_generation.load(Ordering::Acquire) != expected_generation
+        || !voice_runtime(state).is_current_ticket(voice_ticket)
+        || servers.get(&record.id).map(|entry| entry.instance) != previous_instance
+    {
+        Err("server reload was superseded by a lock request".into())
+    } else {
+        Ok(())
+    };
+    if let Err(error) = install {
+        drop(servers);
+        drop(commit);
+        drop(registration);
+        drop(events);
+        actor.shutdown().await;
+        let _ = task.await;
+        return Err(error);
+    }
+    let voice = match install_reloaded_voice(registration) {
+        Ok(voice) => voice,
+        Err(error) => {
+            drop(servers);
+            drop(commit);
+            drop(events);
+            actor.shutdown().await;
+            let _ = task.await;
+            return Err(error);
+        }
+    };
+    servers.insert(
         record.id,
         ServerEntry {
             actor,
@@ -12458,9 +13037,13 @@ async fn reload_one(
             is_dm: record.is_dm,
             switchboard: net.switchboard,
             record_seq: net.record_seq,
+            voice,
             persist: PersistCounters::default(),
         },
     );
+    drop(servers);
+    drop(commit);
+    supervise("server_actor", record.id, task);
     admission_storage::prune_stale_pending(state).await;
     install_persistence_worker(app, record.id, instance).await;
     forward_events(app.clone(), record.id, instance, events);
@@ -13889,16 +14472,93 @@ async fn settle_ui_lock_continuity_before_unlock(
     Ok(())
 }
 
-/// Commit a successful authentication only if no newer explicit lock began while Argon2, disk
-/// reads, or actor reloads were in flight. The generation is checked on both sides of updating the
-/// flags because `lock_session_inner` deliberately invalidates commands before awaiting this
-/// commit mutex. A racing lock therefore either wins first or makes this transition roll itself
-/// back; a completed lock can never be undone by stale unlock work.
+/// Prepare retained actors one at a time outside native commit. Mounted lock deliberately keeps
+/// their network loops alive, but unlock must attach new owners rather than revive closed ones.
+async fn reattach_voice_actors(
+    state: &AppState,
+    expected_generation: u64,
+    ticket: &SessionTicket,
+) -> Result<(), String> {
+    let actors: Vec<_> = state
+        .servers
+        .lock()
+        .await
+        .iter()
+        .filter(|(_, entry)| {
+            entry
+                .voice
+                .as_ref()
+                .is_none_or(|owner| !owner.0.is_current_for(ticket))
+        })
+        .map(|(id, entry)| (*id, entry.instance, entry.actor.clone()))
+        .collect();
+    for (id, instance, actor) in actors {
+        let preparation = actor
+            .prepare_voice_actor(voice_runtime(state), ticket.clone())
+            .await;
+        let _commit = state.ui_session_commit.lock().await;
+        let mut servers = state.servers.lock().await;
+        if state.ui_session_generation.load(Ordering::Acquire) != expected_generation
+            || !voice_runtime(state).is_current_ticket(ticket)
+        {
+            return Err("unlock was superseded by a newer lock request; try again".into());
+        }
+        let Some(entry) = servers
+            .get_mut(&id)
+            .filter(|entry| entry.instance == instance)
+        else {
+            // Leave/reload won while the actor reply was pending. Its abandoned candidate is
+            // dropped; it must never install itself onto a reused numeric server id.
+            continue;
+        };
+        if entry
+            .voice
+            .as_ref()
+            .is_some_and(|owner| owner.0.is_current_for(ticket))
+        {
+            continue;
+        }
+        match preparation.and_then(|registration| {
+            registration.register().map_err(|error| error.to_string())?;
+            Ok(registration)
+        }) {
+            Ok(registration) => entry.voice = Some(RegisteredVoiceActor(registration)),
+            Err(error) => {
+                // Voice capacity and a stopped actor cannot turn authentication into a vault-
+                // wide failure. This row remains closed; a later unlock retries the attachment.
+                entry.voice = None;
+                tracing::warn!(server = id, %error, "VOICE.ATTACHMENT.UNAVAILABLE");
+            }
+        }
+        // Drop both native guards before the next actor await. Already registered inactive
+        // actors consume no pending-preparation slot, so large restores do not hit the cap of 8.
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 async fn finalize_unlock_session(
     state: &AppState,
     expected_generation: u64,
     include_running_servers: bool,
 ) -> Result<Option<Vec<ReloadedServer>>, String> {
+    let ticket = voice_runtime(state).session_ticket();
+    finalize_unlock_session_with_voice(state, expected_generation, include_running_servers, &ticket)
+        .await
+}
+
+/// Commit a successful authentication only if no newer explicit lock began while Argon2, disk
+/// reads, or actor reloads were in flight. The generation is checked on both sides of updating the
+/// flags because `lock_session_inner` deliberately invalidates commands before awaiting this
+/// commit mutex. A racing lock therefore either wins first or makes this transition roll itself
+/// back; a completed lock can never be undone by stale unlock work.
+async fn finalize_unlock_session_with_voice(
+    state: &AppState,
+    expected_generation: u64,
+    include_running_servers: bool,
+    voice_ticket: &SessionTicket,
+) -> Result<Option<Vec<ReloadedServer>>, String> {
+    reattach_voice_actors(state, expected_generation, voice_ticket).await?;
     let _commit = state.ui_session_commit.lock().await;
     if state.ui_session_generation.load(Ordering::Acquire) != expected_generation {
         return Err("unlock was superseded by a newer lock request; try again".into());
@@ -13918,10 +14578,21 @@ async fn finalize_unlock_session(
     }
 
     let mut resumable = state.session_resumable.lock().await;
-    let reopening = !*resumable || state.session_lock_requested.load(Ordering::Acquire);
+    let reopening = !*resumable || ui_session_closed(state);
     *resumable = true;
-    state.session_lock_requested.store(false, Ordering::Release);
-    if state.ui_session_generation.load(Ordering::Acquire) != expected_generation {
+    let activation = voice_runtime(state).activate_session(voice_ticket);
+    if activation.is_ok()
+        && state.ui_session_generation.load(Ordering::Acquire) == expected_generation
+    {
+        state
+            .ui_authorized_generation
+            .store(expected_generation, Ordering::Release);
+        state.session_lock_requested.store(false, Ordering::Release);
+    }
+    if activation.is_err()
+        || state.ui_session_generation.load(Ordering::Acquire) != expected_generation
+        || state.session_lock_requested.load(Ordering::Acquire)
+    {
         // A lock request may publish its generation without this mutex so new IPC fails promptly.
         // Restore the conservative state before releasing either transition boundary.
         *resumable = false;
@@ -13961,6 +14632,7 @@ async fn unlock(
     // Capture before the first await. Any lock command that starts after this unlock invalidates
     // its generation, even if the unlock was queued behind another mount or expensive KDF work.
     let unlock_generation = state.ui_session_generation.load(Ordering::Acquire);
+    let voice_ticket = voice_runtime(&state).session_ticket();
     // This lock covers both the already-mounted authentication path and first reload. Without it,
     // two concurrent webview mounts can both observe `None` and start duplicate actors.
     let _mount = state.vault_mount.lock().await;
@@ -13968,10 +14640,11 @@ async fn unlock(
         .await
         .map_err(|e| op.fail(codes::VAULT_LOCKED_OUT, e.to_string()))?
     {
-        let servers = finalize_unlock_session(&state, unlock_generation, true)
-            .await
-            .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?
-            .expect("the mounted-store path requests a running-server projection");
+        let servers =
+            finalize_unlock_session_with_voice(&state, unlock_generation, true, &voice_ticket)
+                .await
+                .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?
+                .expect("the mounted-store path requests a running-server projection");
         op.succeeded("VAULT.UNLOCK.ALREADY_OPEN");
         return Ok(servers);
     }
@@ -14038,7 +14711,16 @@ async fn unlock(
             failed += 1;
             continue;
         };
-        if let Err(e) = reload_one(&app, &state, bytes, record).await {
+        if let Err(e) = reload_one(
+            &app,
+            &state,
+            bytes,
+            record,
+            unlock_generation,
+            &voice_ticket,
+        )
+        .await
+        {
             tracing::error!(target: "catcoms_app", server = record.id, error = %e, "VAULT.SERVER.RESTORE_FAILED");
             failed += 1;
             continue;
@@ -14057,7 +14739,7 @@ async fn unlock(
             reconnect_warning,
         });
     }
-    finalize_unlock_session(&state, unlock_generation, false)
+    finalize_unlock_session_with_voice(&state, unlock_generation, false, &voice_ticket)
         .await
         .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     // The summary that makes a partial unlock visible.
@@ -14285,6 +14967,18 @@ async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> 
         .1
 }
 
+/// Register the lock before calling any hook that may acquire a mutex. The separately committed
+/// authorized generation makes this one atomic increment close IPC immediately, even if this
+/// thread is descheduled before publishing the request flag or revoking actor/mapping owners.
+fn register_ui_lock_request(state: &AppState) -> u64 {
+    let generation = state
+        .ui_session_generation
+        .fetch_add(1, Ordering::AcqRel)
+        .wrapping_add(1);
+    state.session_lock_requested.store(true, Ordering::Release);
+    generation
+}
+
 /// Execute one lock request and return the exact generation it registered. Native window-close
 /// policy needs this provenance because a different caller may consume the request's snapshot
 /// while holding the shared commit mutex.
@@ -14294,14 +14988,21 @@ async fn lock_session_with_generation_inner(
 ) -> (u64, Result<(), String>) {
     // Invalidate old work before awaiting anything. The commit mutex is acquired next so, once
     // this function returns, an old join can neither emit its private reply nor register/persist.
-    state.session_lock_requested.store(true, Ordering::Release);
+    let lock_generation = register_ui_lock_request(state);
+    state
+        .voice_authority
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .revoke_all();
+    let mappings = state
+        .media_mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .revoke_all();
+    clean_call_mappings(&state.media_mappings, mappings);
     // Cancellation destroys authority and must not wait behind the persistence transaction. This
     // also retires unclaimed registrations left by a reloaded/crashed webview.
     cancel_all_inline_downloads(state);
-    let lock_generation = state
-        .ui_session_generation
-        .fetch_add(1, Ordering::AcqRel)
-        .wrapping_add(1);
     // Register before either session mutex await. A later close from a remounted webview carries no
     // JS snapshot, but it can still save this exact native transaction if it reaches commit first.
     if let Some(json) = ui_state_json {
@@ -14801,6 +15502,8 @@ async fn join_one_grant(
     state: &AppState,
     grant: &PerServerGrant,
 ) -> Result<u64, String> {
+    let voice_ticket = voice_runtime(state).session_ticket();
+    let ui_session_generation = unlocked_ui_session_generation(state).await?;
     // The device identity the certificate names. Every granted server needs its own MLS provider
     // but the SAME signature key (one certified device id across the bundle), so each join takes
     // a duplicate and the ceremony secrets stay intact for a retry.
@@ -14912,10 +15615,30 @@ async fn join_one_grant(
     // becomes visible on its first reload, which goes through `reload_one` on a persisted
     // identity and a reserved sequence block like every other server. (Giving this path a
     // persisted identity is multi-device work, not discovery work.)
+    let registration = match actor
+        .prepare_voice_actor(voice_runtime(state), voice_ticket)
+        .await
+    {
+        Ok(registration) => Some(registration),
+        Err(error) => {
+            tracing::warn!(%error, "VOICE.ATTACHMENT.UNAVAILABLE");
+            None
+        }
+    };
+    let _commit = match require_ui_session_generation(state, ui_session_generation).await {
+        Ok(commit) => commit,
+        Err(error) => {
+            drop(events);
+            actor.shutdown().await;
+            let _ = task.await;
+            return Err(error);
+        }
+    };
     let server_id = register_server(
         app,
         state,
         actor,
+        registration,
         events,
         task,
         group_id,
@@ -14930,8 +15653,9 @@ async fn join_one_grant(
         false,
         false,
         0,
+        ui_session_generation,
     )
-    .await;
+    .await?;
     persist_server(state, server_id).await;
     persist_registry(state).await;
     Ok(server_id)
@@ -16468,6 +17192,9 @@ pub fn run() {
                 dir,
             });
             spawn_network_monitor(&handle);
+            app.manage(voice_authority::CollectionTask::start(&voice_runtime(
+                &app.state::<AppState>(),
+            )));
             // The last line of `setup`, and the only proof that startup got all the way through.
             //
             // Everything before this point can fail in ways that leave a plausible-looking log: a
@@ -16609,6 +17336,16 @@ pub fn run() {
             get_connectivity,
             get_call_transport,
             map_call_port,
+            prepare_call_mapping_controller,
+            prepare_call_mapping_owner,
+            activate_call_mapping_owner,
+            end_call_mapping_owner,
+            prepare_voice_controller,
+            prepare_voice_owner,
+            activate_voice_owner,
+            end_voice_owner,
+            admit_voice_crypto,
+            settle_voice_crypto,
             default_route_address,
             unmap_call_port,
             get_switchboard_status,
@@ -20121,8 +20858,435 @@ mod tests {
             is_dm: false,
             switchboard: false,
             record_seq: 0,
+            voice: None,
             persist: PersistCounters::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn voice_authority_bridge_checks_room_actor_call_cas_and_lock_before_engine_admission() {
+        use catcoms_rt::{Hub, ManualClock};
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        *state.store.lock().await =
+            Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let server = Server::found(
+            Hub::new().join(PeerId::from_u64(71)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(71),
+            Box::new(ManualClock::new(1000)),
+            "member",
+        )
+        .unwrap();
+        let group = server.group_id();
+        let device = server.device_id();
+        let (actor, mut events, task) = spawn(server);
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        state
+            .servers
+            .lock()
+            .await
+            .insert(7, snapshot_test_entry(1, actor.clone(), group, device));
+        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .unwrap();
+        let controller = prepare_voice_controller_inner(&state).await.unwrap();
+        let activated = activate_voice_owner_inner(&state, controller.clone())
+            .await
+            .unwrap();
+        assert!(activated.join.is_none());
+        assert!(
+            prepare_voice_owner_inner(&state, controller.clone(), 7, "001".into())
+                .await
+                .is_err()
+        );
+        assert!(
+            prepare_voice_owner_inner(&state, controller.clone(), 7, "999".into())
+                .await
+                .is_err()
+        );
+        let room = channel_id("general").to_string();
+        let stale = prepare_voice_owner_inner(&state, controller.clone(), 7, room.clone())
+            .await
+            .unwrap();
+        let candidate = prepare_voice_owner_inner(&state, controller.clone(), 7, room.clone())
+            .await
+            .unwrap();
+        let first = activate_voice_owner_inner(&state, candidate).await.unwrap();
+        assert_eq!(first.join.as_ref().unwrap().len(), 64);
+        assert_eq!(first.group.as_ref().unwrap().len(), 64);
+        let lease = state
+            .voice_authority
+            .lock()
+            .unwrap()
+            .owner(&first.owner)
+            .unwrap()
+            .lease;
+        assert!(activate_voice_owner_inner(&state, stale).await.is_err());
+        assert!(lease.is_live());
+        let charge = admit_voice_crypto_inner(&state, first.owner.clone(), "generate".into(), 128)
+            .await
+            .unwrap();
+        // Hold the real final commit boundary. The following actor query is ordered after the
+        // admission's eligibility query, so End occurs after that snapshot but before its charge.
+        let boundary = state.ui_session_commit.lock().await;
+        let (late_end, ()) = tokio::join!(biased;
+            admit_voice_crypto_inner(&state, first.owner.clone(), "generate".into(), 128),
+            async {
+                actor.member_count().await;
+                state.voice_authority.lock().unwrap().end(&first.owner);
+                drop(boundary);
+            }
+        );
+        assert!(late_end.is_err());
+        assert!(!lease.is_live());
+        let candidate = prepare_voice_owner_inner(&state, controller.clone(), 7, room.clone())
+            .await
+            .unwrap();
+        let second = activate_voice_owner_inner(&state, candidate).await.unwrap();
+        let current_lease = state
+            .voice_authority
+            .lock()
+            .unwrap()
+            .owner(&second.owner)
+            .unwrap()
+            .lease;
+        let candidate = prepare_voice_owner_inner(&state, controller, 7, room)
+            .await
+            .unwrap();
+        state.servers.lock().await.get_mut(&7).unwrap().instance = 2;
+        assert!(activate_voice_owner_inner(&state, candidate).await.is_err());
+        assert!(
+            admit_voice_crypto_inner(&state, second.owner.clone(), "generate".into(), 128)
+                .await
+                .is_err()
+        );
+        state.servers.lock().await.get_mut(&7).unwrap().instance = 1;
+        let boundary = state.ui_session_commit.lock().await;
+        let (late_lock, ()) = tokio::join!(biased;
+            admit_voice_crypto_inner(&state, second.owner.clone(), "generate".into(), 128),
+            async {
+                actor.member_count().await;
+                // Poll the production lock first: it revokes synchronously before waiting for
+                // the held commit mutex. Releasing it cannot let the older charge slip through.
+                let (locked, ()) = tokio::join!(biased;
+                    lock_session_inner(&state, None), async { drop(boundary); }
+                );
+                locked.unwrap();
+            }
+        );
+        assert!(late_lock.is_err());
+        assert!(!current_lease.is_live());
+        assert!(prepare_voice_controller_inner(&state).await.is_err());
+        assert!(
+            admit_voice_crypto_inner(&state, second.owner, "generate".into(), 128)
+                .await
+                .is_err()
+        );
+        assert!(
+            state.voice_authority.lock().unwrap().settle(&charge),
+            "lock retains the exact uncertain operation"
+        );
+        actor.shutdown().await;
+        task.await.unwrap();
+        drain.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn voice_mounted_unlock_reattaches_more_than_eight_actors_without_reviving_old_calls() {
+        use catcoms_rt::{Hub, ManualClock};
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+        let state = AppState::default();
+        let runtime = VoiceRuntime::new(Arc::new(ManualClock::new(1000)));
+        *state.voice_authority.lock().unwrap() =
+            voice_authority::Coordinator::with_runtime(runtime.clone());
+        let mut workers = Vec::new();
+        let mut actors = Vec::new();
+        for id in 1..=12 {
+            let server = Server::found(
+                Hub::new().join(PeerId::from_u64(id)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(id),
+                Box::new(ManualClock::new(1000)),
+                "member",
+            )
+            .unwrap();
+            let (group, device) = (server.group_id(), server.device_id());
+            let (actor, mut events, task) = spawn(server);
+            let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+            state
+                .servers
+                .lock()
+                .await
+                .insert(id, snapshot_test_entry(id, actor.clone(), group, device));
+            actors.push(actor);
+            workers.push((task, drain));
+        }
+        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .unwrap();
+        let mut old = Vec::new();
+        for actor in &actors {
+            old.push(actor.voice_call_grant(channel_id("general")).await.unwrap());
+        }
+        let counts = runtime.resources().counts();
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .unwrap();
+        assert!(
+            old.iter().all(|grant| grant.lease().is_live()),
+            "idempotent unlock keeps exact registered owners"
+        );
+        assert_eq!(runtime.resources().counts(), counts);
+        lock_session_inner(&state, None).await.unwrap();
+        assert!(old.iter().all(|grant| !grant.lease().is_live()));
+        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .unwrap();
+        let mut current = Vec::new();
+        for actor in &actors {
+            current.push(actor.voice_call_grant(channel_id("general")).await.unwrap());
+        }
+        assert!(current.iter().all(|grant| grant.lease().is_live()));
+        assert!(old.iter().all(|grant| !grant.lease().is_live()));
+        state.servers.lock().await.remove(&1);
+        assert!(
+            !current[0].lease().is_live(),
+            "native row removal revokes before actor shutdown"
+        );
+        assert!(current[1].lease().is_live());
+        state.servers.lock().await.clear();
+        for actor in &actors {
+            actor.shutdown().await;
+        }
+        for (task, drain) in workers {
+            task.await.unwrap();
+            drain.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn voice_reattachment_waiting_for_native_commit_cannot_win_after_lock() {
+        use catcoms_rt::{Hub, ManualClock};
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+        let state = AppState::default();
+        let server = Server::found(
+            Hub::new().join(PeerId::from_u64(75)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(75),
+            Box::new(ManualClock::new(1000)),
+            "member",
+        )
+        .unwrap();
+        let (group, device) = (server.group_id(), server.device_id());
+        let (actor, mut events, task) = spawn(server);
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        state
+            .servers
+            .lock()
+            .await
+            .insert(7, snapshot_test_entry(1, actor.clone(), group, device));
+        let runtime = voice_runtime(&state);
+        let old_ticket = runtime.session_ticket();
+        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        let boundary = state.ui_session_commit.lock().await;
+        let (result, ()) = tokio::join!(biased;
+            reattach_voice_actors(&state, generation, &old_ticket),
+            async {
+                actor.member_count().await;
+                let (locked, ()) = tokio::join!(biased;
+                    lock_session_inner(&state, None), async { drop(boundary); }
+                );
+                locked.unwrap();
+            }
+        );
+        assert!(result.is_err());
+        assert!(state.servers.lock().await.get(&7).unwrap().voice.is_none());
+        assert!(actor.voice_call_grant(channel_id("general")).await.is_err());
+        assert!(runtime.activate_session(&old_ticket).is_err());
+        state.servers.lock().await.clear();
+        actor.shutdown().await;
+        task.await.unwrap();
+        drain.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn voice_attachment_failure_does_not_block_healthy_servers_or_authenticated_unlock() {
+        use catcoms_rt::{Hub, ManualClock};
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+        let state = AppState::default();
+        let mut actors = Vec::new();
+        let mut workers = Vec::new();
+        for id in 1..=2 {
+            let server = Server::found(
+                Hub::new().join(PeerId::from_u64(id)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(id),
+                Box::new(ManualClock::new(1000)),
+                "member",
+            )
+            .unwrap();
+            let (group, device) = (server.group_id(), server.device_id());
+            let (actor, mut events, task) = spawn(server);
+            let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+            state
+                .servers
+                .lock()
+                .await
+                .insert(id, snapshot_test_entry(id, actor.clone(), group, device));
+            actors.push(actor);
+            workers.push((task, drain));
+        }
+        actors[0].shutdown().await;
+        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .unwrap();
+        assert!(*state.session_resumable.lock().await);
+        assert!(state.servers.lock().await.get(&1).unwrap().voice.is_none());
+        let grant = actors[1]
+            .voice_call_grant(channel_id("general"))
+            .await
+            .unwrap();
+        assert!(grant.lease().is_live());
+        lock_session_inner(&state, None).await.unwrap();
+        let runtime = voice_runtime(&state);
+        // Fill the declared process byte budget without fabricating any native admission.
+        let resources = runtime.resources();
+        let mut charges = Vec::new();
+        while let Ok(credit) = resources.charge(
+            [99; 32],
+            1024,
+            catcoms_sync::voice_v2::resources::ResourceKind::Retained,
+        ) {
+            charges.push(credit);
+        }
+        // One group has a stricter cap than the process; consume the remainder in other groups.
+        for group in 100..108 {
+            while let Ok(credit) = resources.charge(
+                [group; 32],
+                1024,
+                catcoms_sync::voice_v2::resources::ResourceKind::Retained,
+            ) {
+                charges.push(credit);
+            }
+        }
+        let generation = state.ui_session_generation.load(Ordering::Acquire);
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .unwrap();
+        assert!(*state.session_resumable.lock().await);
+        assert!(actors[1]
+            .voice_call_grant(channel_id("general"))
+            .await
+            .is_err());
+        drop(charges);
+        finalize_unlock_session(&state, generation, false)
+            .await
+            .unwrap();
+        assert!(actors[1]
+            .voice_call_grant(channel_id("general"))
+            .await
+            .unwrap()
+            .lease()
+            .is_live());
+        assert!(!grant.lease().is_live());
+        state.servers.lock().await.clear();
+        actors[1].shutdown().await;
+        for (task, drain) in workers {
+            task.await.unwrap();
+            drain.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn voice_old_unlock_cannot_erase_lock_registered_before_revocation_hooks() {
+        let state = AppState::default();
+        let old_generation = state.ui_session_generation.load(Ordering::Acquire);
+        let runtime = voice_runtime(&state);
+        let old_ticket = runtime.session_ticket();
+        // Split the real synchronous entry seam at the point where a coordinator/mapping mutex
+        // could stall. The new generation is already published, even before any Runtime hook.
+        let new_generation = register_ui_lock_request(&state);
+        assert_ne!(old_generation, new_generation);
+        assert!(
+            finalize_unlock_session_with_voice(&state, old_generation, false, &old_ticket)
+                .await
+                .is_err()
+        );
+        assert!(ui_session_closed(&state));
+        assert!(!*state.session_resumable.lock().await);
+        assert!(require_unlocked_session(&state).await.is_err());
+        // Clearing only the separate flag cannot open the still-uncommitted generation.
+        state.session_lock_requested.store(false, Ordering::Release);
+        assert!(ui_session_closed(&state));
+        assert!(require_unlocked_session(&state).await.is_err());
+        state.voice_authority.lock().unwrap().revoke_all();
+        assert!(runtime.activate_session(&old_ticket).is_err());
+    }
+
+    #[tokio::test]
+    async fn voice_restore_install_keeps_chat_when_optional_preparation_expired() {
+        use catcoms_rt::{Hub, ManualClock};
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+        let clock = Arc::new(ManualClock::new(1000));
+        let runtime = VoiceRuntime::new(clock.clone());
+        let ticket = runtime.session_ticket();
+        let server = Server::found(
+            Hub::new().join(PeerId::from_u64(76)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(76),
+            Box::new(ManualClock::new(1000)),
+            "member",
+        )
+        .unwrap();
+        let (actor, mut events, task) = spawn(server);
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        let registration = actor
+            .prepare_voice_actor(runtime.clone(), ticket.clone())
+            .await
+            .unwrap();
+        clock.advance_ms(30_000);
+        assert!(runtime.is_current_ticket(&ticket));
+        assert!(install_reloaded_voice(Some(registration))
+            .unwrap()
+            .is_none());
+        runtime.activate_session(&ticket).unwrap();
+        let room = channel_id("general");
+        assert!(actor.voice_call_grant(room).await.is_err());
+        actor.open_channel(room).await;
+        actor
+            .send_message(room, "chat survives optional voice expiry")
+            .await;
+        assert!(actor
+            .messages(room)
+            .await
+            .iter()
+            .any(|message| message.text == "chat survives optional voice expiry"));
+        let first = actor
+            .prepare_voice_actor(runtime.clone(), ticket.clone())
+            .await
+            .unwrap();
+        let second = actor
+            .prepare_voice_actor(runtime.clone(), ticket.clone())
+            .await
+            .unwrap();
+        let current = install_reloaded_voice(Some(first)).unwrap().unwrap();
+        assert!(install_reloaded_voice(Some(second)).is_err());
+        assert!(current.0.is_current_for(&ticket));
+        actor.shutdown().await;
+        task.await.unwrap();
+        drain.await.unwrap();
     }
 
     #[tokio::test]
@@ -20297,6 +21461,8 @@ mod tests {
         .await
         .expect("the background snapshot worker did not complete its dirty ticket");
     }
+
+    include!("member_discovery_tests.rs");
 
     #[tokio::test]
     async fn received_chat_is_saved_by_the_event_worker_while_the_ui_is_locked() {
@@ -20633,6 +21799,7 @@ mod tests {
                 is_dm: false,
                 switchboard: false,
                 record_seq: 0,
+                voice: None,
                 persist: PersistCounters::default(),
             },
         );
@@ -20816,6 +21983,7 @@ mod tests {
             is_dm: false,
             switchboard: false,
             record_seq: 0,
+            voice: None,
             persist: PersistCounters::default(),
         };
 
@@ -20943,6 +22111,7 @@ mod tests {
             is_dm: false,
             switchboard: false,
             record_seq: 0,
+            voice: None,
             persist: PersistCounters::default(),
         };
         const SERVER: u64 = 12;
@@ -21435,6 +22604,7 @@ mod tests {
                     is_dm: records[0].is_dm,
                     switchboard: network.switchboard,
                     record_seq: network.record_seq,
+                    voice: None,
                     persist: PersistCounters::default(),
                 },
             );

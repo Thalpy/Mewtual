@@ -25,7 +25,10 @@ the same total cap to preserve restart bootstrap. A candidate is never trusted a
 actual response signer must be in the current roster and authenticate the exact request. This
 explicit-read fallback can reveal a requested ciphertext CID to an unproven connected candidate,
 as the released fetch path already could; it never promotes endpoint trust and cannot redial. At most four distinct providers per encrypted variant are
-considered, with an eight-second attempt deadline and a sixty-second read/chunk deadline. Admission
+considered, with a twelve-second attempt deadline (transport timeout plus two seconds) and a
+sixty-second quiet read/chunk deadline. Accepted page progress refreshes the quiet deadline;
+separate page/round bounds limit repeated partial work. This is not a persistent execution budget
+across restart; durable resume is tracked in the communication plan. Admission
 fails with a busy error instead of waiting on actor-owned capacity. Media ranges are at most one
 `CHUNK_BYTES` window (8 MiB), including windows crossing two chunks.
 

@@ -1,5 +1,118 @@
 # Mewtual; Architecture
 
+## Connected discovery maintenance (2026-10-18)
+
+The server actor queues connected-only membership-commit, PEX, member-finalization and
+switchboard-offer stages. Quiet discovery first polls the released commit catch-up protocol at
+its current epoch: a lost removal broadcast must not depend on future chat to expose the gap.
+Empty/failed probes still continue ordinary discovery and do not establish currency or PEX
+failure. Applied epochs publish member/role consequences, including equal-count replacement,
+and request the existing sealed snapshot worker before subsequent stages prepare fresh authority.
+Each stage prepares its authenticated request on the sole sync owner, waits in a detached worker,
+then commits only against that originating owner's current epoch, effective policy, descriptor
+generation and live connection. The networking generation is independent of UI lock and V2 call
+sessions. Legacy PEX remains unbound member evidence; finalization retains its stronger policy
+and both-endpoint transcript. Production transport connection leases revoke at aggregate close,
+before the sync owner consumes any event; same-peer reconnect cannot revive captured work. Old
+disconnect events cannot revoke a replacement lease. Unsupported legacy test transports retain
+event-driven fencing; upgraded voice refuses a transport without a live driver lease.
+Released wire encodings and public synchronous-owner async wrappers
+are unchanged. Explicit finalization commands use this same nonblocking actor scheduler.
+
+Two actual lower flights/server and four/process bound retained answers to 32 MiB/server and
+64 MiB/process for the released 16 MiB commit response; PEX remains capped at 512 KiB. Existing
+bounded signature/record decoding scratch is additional. Commit bundles have a separate 1024-
+record work ceiling (default retained log: 256); larger local logs serve successive epoch polls.
+A flight and its per-target occupancy survive timeout,
+worker cancellation and queued completion through the transport's actual last keepalive owner.
+At most sixteen peer chains and four explicit waiters/chain coalesce discovery; one bounded refresh
+handles state supersession without charging peer-health backoff. Queued actors wake on actual shared
+capacity release, while idle actors ignore unrelated releases. A sixth fair ready source consumes
+completions. Accepted raw signed-record changes request the existing core snapshot worker even in
+quiet legacy groups; native restore rebuilds its passive address cache from those saved records.
+Connectivity/duplicate records alone do not dirty that revision. Local dial submission, mesh repair
+and the bounded rendezvous drain still have separate waits; this is not a universal latency bound.
+
+## Voice V2 foundation in progress (2026-10-18)
+
+The reviewed [V2 decision](communication-recovery/VOICE-SIGNALLING-V2.md) is being implemented
+as separate foundation modules; live calls still use legacy signalling. Strict signed objects
+and route roles live in `catcoms-sync::voice_v2`;
+the standalone browser crypto broker uses non-extractable P-256/HKDF/AES-GCM keys. Native call
+ownership is distinct from optional mappings. A unique allocator claim on the shared native lease
+prevents packet-ledger recreation, and dropping that allocator revokes the join. Affine native
+resource credits survive uncertain engine work and share a process/group byte pool with packet
+caches. Native `Watcher`/`LocalJoin` now implement separate fresh observation/challenge proofs and
+immutable active-join renewal. Observations retain exact charges and revoke on replacement or
+membership loss; actor-owned origin limits keep key/renewal protection across watcher replacement.
+`LocalJoin` now owns initial three-flight confirmation, exact action/reservation Submit and
+atomic newer-pair promotion. Packet commit produces an opaque affine signed-flight receipt rather
+than a forgeable bare header. Capacity/engine failure preserves validated pending actions without
+resetting counters; roster observation refresh does not retire native pair authority.
+The desktop now shares one process Runtime/resource pool with attached product actors. Helper
+owners retain group limits/caches across actor replacement and
+capture irreversible session, actor, policy, member and directory-incarnation gates for deferred
+work. Transport RequestAuthority checks those gates synchronously at lower admission; lower
+keepalive ownership still survives waiter cancellation. V2 time advances with local monotonic
+elapsed time as well as forward wall observations, so rollback cannot outlive pruned protection.
+Helper flights share four group/eight process slots and the same declared-byte pool.
+An inert kind28 admission seam now enforces bound Noise identity, pre-signature work/byte budgets,
+exact frame tickets and role-bound typed ACKs. Detached source/helper requests capture actual driver
+connection generations plus Root descriptor/proof/epoch owners, and retain lower flight custody.
+Source attempts preserve exact native cached packets/pairs/actions and share the helper flight
+pool, with separate typed settlement. Normal request dispatch, production source retry scheduling
+and native endpoint/UI delivery remain disabled. Root now owns bounded Watcher/LocalJoin lifecycle
+state and observes exact authenticated removals inside the current runtime membership transaction,
+before fallible additions or any await. It keeps weak call-grant identity, so losing the last native
+owner closes queued source activity. Watcher grants bind native controller/call parent consent before
+cloning; abandoned replies revoke observation. A coalesced metadata channel avoids awaited event
+sink backpressure. The trusted public-control intake now commits original allowance and bounded
+queue custody atomically; its pump derives challenges/proofs from actual native owners, and only
+fresh native challenge responses admit presence. Encrypted intake and recoverable payload/
+confirmation/negotiation pull remain next. Process and actor Clock housekeeping expire cold caches
+while locked without erasing membership, replay or allocator protection. Actual transport/payload
+owners retain their credits, and unresolved browser operations have no expiry refund. Confirmation
+source work captures the original handshake deadline; exact retries use immutable reservation time.
+Native entry custody revokes the exact actor on removal. Lock publishes a newer UI generation
+before revocation hooks; IPC requires the exact generation last committed by authenticated unlock.
+Unlock prepares fresh retained-actor owners outside native commit, then registers each exact row
+before activating the captured session ticket. Optional voice capacity or a stopped actor leaves
+that row without V2 authority and does not prevent chat/vault access. Duplicate unlock retains the
+same installed owner. Root directory observation sees newly authenticated deletions even within a
+compound change or prefix-applying error; duplicate/rejected operations grant no new revocation.
+The bounded reader always includes the permanent `general` room. Affine native call grants revoke
+on abandoned replies; production activation validates their exact scope and live child lease.
+Production grants also retain the exact room allocation and a 256-byte affine charge through
+actual last-owner drop; deletion/revocation alone cannot refund retained native work.
+No call keys or replayable call state are persisted. A standalone confirmation-only browser
+registry retains one computation through lost admission/commit replies under the surviving
+broker's combined byte/record/engine limits. It returns closed historical receipts without
+plaintext or fresh RTC/pair authority. Owner retirement wakes observers but does not refund
+actual pending work. An inert native typed-action queue now gives proven pairs and exact
+confirmation inputs continuing identities, immutable charged custody and one shared engine fence.
+Native registration matches the actual call lease, scope and process pool. Exact admission is
+idempotent, settlement permanently closes delayed admission, and first signing/confirmation
+effects use that same fence. End closes unstarted actions but leaves actual admitted work charged.
+The combined 32-record queue includes terminal identities; pulls rotate through at most four
+without dequeueing. Prepaid capacity can close unused bytes while retaining actual outstanding
+loan bytes and slots. Full-chain progress reservation and post-transition exact-result receipts
+remain requirements. Live Endpoint confirmation/presence wiring, native action IPC adapters, helper ingress
+and UI V2/legacy separation are not yet enabled or accepted;
+the [communication ledger](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md) records the scope.
+
+## Call lifecycle and optional router custody (2026-10-18)
+
+Call RTC callbacks and asynchronous SDP/stats/router continuations require the exact peer object
+and call-join lease. Component destruction explicitly leaves the old call, stops captured tracks
+and closes peers, including retained-WebView remounts. Native optional router mappings have a
+separate process-owned controller/call/grant coordinator: non-destructive prepare, revision-CAS
+activation, actor/group/UI-generation binding, exclusive port slots and detached acquisition/
+cleanup. The UI never owns a router effect merely by awaiting its command. Lock/leave/remount
+revoke ownership; uncertain cleanup stays charged until process exit. IGD cleanup addresses its
+original granting gateway. See [custody and limits](communication-recovery/CALL-MAPPINGS.md).
+These corrections do not add indirect voice signalling or media encryption; those remain in the
+separately tracked [communication programme](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md).
+
 ## Studio working edits and five-second saves (2026-10-18)
 
 Production Studio edits update a separate volatile working projection immediately. Native views

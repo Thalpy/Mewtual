@@ -9,12 +9,41 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod chat_matrix;
 mod runtime;
+mod signed_history;
 mod transport;
+mod voice;
 use runtime::{mount, network, register, Running};
 use transport::{forbidden, NetworkRules, Trace, Transport};
 
-type History = BTreeMap<String, (String, String)>;
+/// Two independent oracles: the product projection and the exact original signed-operation
+/// union. Rendered equality alone cannot detect a helper re-authoring or dropping signed history.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct History {
+    messages: BTreeMap<String, (String, String)>,
+    operations: BTreeMap<[u8; 32], catcoms_replication::SignedOp>,
+}
+impl History {
+    fn new() -> Self {
+        Self::default()
+    }
+    fn extend(&mut self, other: Self) {
+        for (id, value) in other.messages {
+            if let Some(old) = self.messages.insert(id, value.clone()) {
+                assert_eq!(old, value, "partition overlap changed a message");
+            }
+        }
+        for (hash, op) in other.operations {
+            if let Some(old) = self.operations.insert(hash, op.clone()) {
+                assert_eq!(
+                    old, op,
+                    "partition overlap changed an original signed operation"
+                );
+            }
+        }
+    }
+}
 const ALL: &[usize] = &[0, 1, 2, 3, 4, 5];
 
 async fn bounded<F: Future>(label: &str, future: F) -> F::Output {
@@ -283,6 +312,12 @@ impl Scenario {
     }
 
     async fn reopen(&mut self, indices: &[usize]) {
+        self.reopen_in(indices, true).await;
+    }
+
+    /// A changing-membership scenario checks its full roster after automatic recovery. Checking
+    /// a saved count after spawning would race a valid control commit from an already live peer.
+    async fn reopen_in(&mut self, indices: &[usize], fixed_membership: bool) {
         let mut order = indices.to_vec();
         if self.reverse {
             order.reverse();
@@ -351,11 +386,13 @@ impl Scenario {
                 )
                 .await,
             );
-            assert_eq!(
-                self.online(index).actor.members().await.len(),
-                6,
-                "membership is fixed across every restart"
-            );
+            if fixed_membership {
+                assert_eq!(
+                    self.online(index).actor.members().await.len(),
+                    6,
+                    "membership is fixed across every restart"
+                );
+            }
         }
     }
 
@@ -384,14 +421,52 @@ impl Scenario {
         phase: &str,
         history: &mut History,
     ) -> Vec<String> {
+        self.author_in(channel_id("general"), indices, phase, history)
+            .await
+    }
+
+    async fn author_in(
+        &mut self,
+        channel: u128,
+        indices: &[usize],
+        phase: &str,
+        history: &mut History,
+    ) -> Vec<String> {
         let mut accepted_ids = Vec::with_capacity(indices.len());
         for index in indices {
             self.token += 1;
             let text = format!("{phase}: original client {}", index + 1);
-            let id = self.online(*index).send(self.token, &text).await;
-            let author = fingerprint(&self.clients[*index].identity.as_ref().unwrap().1);
+            let before = self.online(*index).history_in(channel).await;
+            let id = self
+                .online(*index)
+                .send_in(channel, self.token, &text)
+                .await;
+            let device = self.clients[*index].identity.as_ref().unwrap().1;
+            let author = fingerprint(&device);
+            let after = self.online(*index).history_in(channel).await;
+            let original: Vec<_> = after
+                .operations
+                .iter()
+                .filter(|(hash, op)| {
+                    op.author_device == device && !before.operations.contains_key(*hash)
+                })
+                .collect();
+            assert_eq!(
+                original.len(),
+                1,
+                "one native durable send must retain one original device-signed operation"
+            );
+            let (hash, op) = original[0];
+            assert!(op.verify());
             assert!(
-                history.insert(id.clone(), (author, text)).is_none(),
+                history.operations.insert(*hash, op.clone()).is_none(),
+                "native acceptance reused an operation identity"
+            );
+            assert!(
+                history
+                    .messages
+                    .insert(id.clone(), (author, text))
+                    .is_none(),
                 "native acceptance reused an ID"
             );
             accepted_ids.push(id);
@@ -400,20 +475,25 @@ impl Scenario {
     }
 
     async fn converge(&self, indices: &[usize], expected: &History, phase: &str) {
+        self.converge_in(channel_id("general"), indices, expected, phase)
+            .await;
+    }
+
+    async fn converge_in(&self, channel: u128, indices: &[usize], expected: &History, phase: &str) {
         eprintln!("six-client phase: {phase}");
         tokio::select! {
             _ = async {
                 loop {
                     let mut complete = true;
-                    for index in indices { complete &= self.online(*index).history().await == *expected; }
+                    for index in indices { complete &= self.online(*index).history_in(channel).await == *expected; }
                     if complete { break; }
                     SystemClock.sleep(Duration::from_millis(100)).await;
                 }
             } => {},
             _ = SystemClock.sleep(Duration::from_secs(90)) => {
                 let mut actual = Vec::new();
-                for index in indices { actual.push((*index + 1, self.online(*index).history().await)); }
-                panic!("{phase} failed exact ID/author/text convergence; expected={expected:?}; actual={actual:?}");
+                for index in indices { actual.push((*index + 1, self.online(*index).history_in(channel).await)); }
+                panic!("{phase} failed exact ID/author/text/original-signed-operation convergence; expected={expected:?}; actual={actual:?}");
             }
         }
         self.rules.assert_graph();

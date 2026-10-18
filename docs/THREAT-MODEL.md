@@ -1,5 +1,130 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Detached discovery boundary (2026-10-18)
+
+Connected maintenance holds no mutable MLS/store owner while waiting on peers. Driver authority
+and fresh actor completion reject old root, membership epoch, effective policy, known descriptor
+replacement and disconnect/reconnect results before positive evidence or empty-offer deletion.
+The first authenticated descriptor can be pinned while reciprocal finalization is outstanding;
+subsequent replacement is irreversible. UI lock does not revoke ordinary authenticated discovery.
+PEX still proves a current member signed a request-bound response, not the transport endpoint's
+identity. No existing peer-bound authentication is relaxed and no private dial authority is added.
+Quiet discovery also polls the released membership-commit exchange before data reconciliation.
+Its exact request/nonce/epoch signature remains unbound endpoint evidence. Only existing MLS
+authorization applies commits; removed requesters fail the serving peer's current roster gate.
+Empty or failed probes cannot prove currency or suppress ordinary discovery. A separate 1024-
+record cap precedes per-record allocation, promotion and MLS processing, alongside the existing 16 MiB
+response cap. Older default peers retain at most 256 commits; larger configured legacy responses
+above 1024 records refuse, while this build serves larger local logs over successive epoch polls.
+
+Actual lower custody bounds two flights/server and four/process, including timed-out streams and
+retained completions; per-target occupancy also excludes overlapping stages until actual release.
+The worst case is 32 MiB/server and 64 MiB/process of retained answers; bounded signature/bundle/
+record decoding scratch is additional, and the signature transcript is released before decoding.
+Queues/waiters and one supersession refresh are bounded. Shared capacity retirement wakes only
+queued actors. Signed-record mutation requests sealed core persistence independently of chat and
+rendered route changes; duplicate/liveness events do not cause disk writes. Transport frames may
+allocate up to the pre-existing lower frame ceiling before the narrower per-kind response cap.
+Local dial submission, mesh repair and rendezvous waits remain outside this scheduling correction.
+
+## Voice V2 implementation boundary (2026-10-18)
+
+V2 foundations are not a live forwarding or endpoint-authentication guarantee. Typed native
+resource admission bounds engine work and survives lost UI waiters; it grants no signing or
+plaintext delivery authority. Current-member/directory/policy queries are snapshots, never
+permissions retained over awaits. The native packet ledger has a one-time allocator claim per
+join lease, exact ciphertext retry identity, bounded replay and exact AAD/sequence/ciphertext
+delivery binding. Unused native watcher/active-join owners additionally reject stale challenges,
+renewal regressions and removal/re-add reuse; a public announcement alone grants no liveness.
+Root's native lifecycle registry now calls synchronous member retirement inside the actual observed
+membership transaction, before re-add and fallible additions. Retained
+presence clones remain revocable and charged after their visible row disappears. Its caller must
+still connect the native presence/three-flight confirmation owners, current offer ownership and
+actor-turn authority before exposing them through IPC. Native confirmation binds Submit to the
+current action/reservation, keeps validated progress through capacity failure, and consumes only
+opaque exact signed-flight receipts. Pair pins outlive roster refresh; only successful newer-pair
+promotion retires old authority. These unused native paths do not themselves enable live calls.
+The standalone WebCrypto broker does not make those decisions. Browser-managed randomness and
+secret memory remain browser responsibilities; no RAM zeroization or signalling ratchet is claimed.
+Legacy calls remain in use until V2 integration and compatibility acceptance; their existing
+recipient/replay and arrival-time presence residuals are not closed by these unused codecs.
+
+Process/helper foundations separately retain original-issuer limits and immutable helper
+packet/final-edge replay state across controller and actor changes. Detached effects capture
+irreversible actor/session/policy and both issuer/final-member generations; remove/re-add cannot
+revive them. Desktop actor attachment now shares the exact process pool and captured session ticket;
+native row removal and pre-await lock revoke old owners. A separately committed UI authorization
+generation prevents an older unlock from clearing a newer lock while revocation hooks wait.
+Voice attachment exhaustion never grants authority and does not block otherwise valid vault/chat
+access. The directory-incarnation observer runs for newly accepted authenticated operations,
+including compound deletion/recreation, buffered dependencies and prefix-applying errors. Local
+no-op, remote duplicate and rejected operations cannot replay deletion authority. Narrow raw-column
+budgets precede expanded-change allocation; this does not close legacy CRDT admission or R6
+semantic-binding limitations. Driver authority checks are the lower
+admission boundary; revocation cannot recall bytes already submitted. Actual lower/worker owners
+retain affine flight capacity after cancellation. The V2 logical clock advances through wall
+rollback using local monotonic elapsed time, so pruned protection cannot become valid again.
+Clock corrections can impair interoperation; this protection is process-local and restart ends
+all joins. No helper confidentiality/live-routing claim follows from this unused foundation.
+
+The inert V2 transport seam bounds framing before copying/verification, charges requester/process
+work before signatures, and checks the affine exact-frame admission again at final origin commit.
+A helper's valid signature cannot claim final endpoint admission: status and responder are bound
+to the original envelope's role/target. Driver-owned connection leases revoke before event queues
+are drained, so same-peer disconnect/reconnect cannot revive queued helper or maintenance effects.
+Native Root descriptor/proof/policy/epoch gates remain additional checks. Source work shares that
+driver custody while retaining distinct attempt/ACK settlement, and encrypted source grants require
+the exact native cached packet, current pair and current action. Controller/call parent revocation
+closes watcher activity before another actor turn. The trusted public-control queue now commits
+original allowance with exact native recipient custody; announcements alone never admit presence.
+Encrypted endpoint delivery and UI V2 mode remain disabled. Legacy transports without connection-lease support retain event-time
+maintenance fencing; upgraded helper work refuses them. Already submitted bytes cannot be recalled.
+
+Affine production call grants retain their exact room allocation and 256 declared bytes through
+actual last-owner drop. Synchronous revocation closes effects without refunding those bytes.
+Room owns only lease revocation handles, so retained grant custody creates no ownership cycle.
+The public Rust `from_lease` adapter is a trusted lifecycle boundary, not membership enforcement;
+the production native bridge obtains charged grants from its exact product actor. Endpoint start
+additionally recognizes exact actor/policy and room issuer registries. Root keeps only Weak call
+custody, so losing the last native owner cannot leave its LocalJoin alive. Native public-key checks
+are structural SEC1/key-reference checks; WebCrypto import must validate the curve point before
+derivation/confirmation. Prepared encrypted ingress leaves replay and tokens unchanged until the
+final origin transaction succeeds, but live Group/Policy endpoint admission is not yet connected.
+
+Clock housekeeping can collect cold caches while locked but cannot reconstruct authority. Group
+membership/epoch/revision evidence and native pair/replay/allocator tables survive collection;
+live origin pair pins retain exact key bindings. Confirmation source work captures the original
+deadline even when no collector runs. Source deadlines are immutable reservation properties,
+with wall expiry checked independently. Actual lower/payload owners retain credits beyond cache
+expiry, and uncertain WebCrypto operations have no TTL refund. No collector is entered through a
+resource charge callback or while holding the process registry across ledger locks.
+
+Pending crypto authority captures native pair/action/token revocation owners rather than trusting
+public derivation/flight data. Sign and token consume retire pending engine eligibility; actual
+engine/payload credits are independent. Native confirmation restart retires old Proof/Finish
+tokens permanently, including attempts to obtain a new grant for that old token. Hello proposes
+a new attempt and instead binds its native stored sequence to the pair's accepted floor. Only
+closed validated native progress advances that floor; a lower completion cannot revoke a queued
+newer Hello. Final token commit repeats the fence. No pending grant converts into historical
+success. The future Endpoint queue still needs prepaid exact-result receipts, current OfferId/
+attempt binding and native lost-reply recovery before these seams can enable live V2.
+The inert browser confirmation registry now keeps exact frozen computation/result custody
+through admission/commit uncertainty in the surviving broker, with a combined 32-record cap
+and shared conservative byte/engine limits. Engine failure stays failed; temporary queue
+pressure stays retryable. Full closed replies bind exact identity/input/result tags; no
+confirmation plaintext reaches RTC and historical success grants no fresh pair authority.
+Explicit retirement wakes callers while actual admission/engine/RPC promises retain custody.
+Native typed-action/engine registry seams now enforce exact opaque Root action, native call
+lease/scope/process-pool registration and idempotent actual engine admission. Settlement latches
+before a delayed admission, and first signing/closed-confirmation effects serialize against the
+same fence. End/lock/replacement cannot refund an admitted engine. The combined native queue
+retains at most 32 pending/terminal identities; it has no browser commands or historical result
+cache yet. A capacity reserve releases only unused bytes on close, preserving actual loans and
+slots; closing it is not evidence that a workflow or uncertain engine has completed. Full-chain
+progress reservation and native post-transition exact-result recovery remain requirements.
+General Pair.open is not a live adapter path;
+SDP/ICE still need native current-offer receipts and charged dispatch/result ownership.
+
 ## Volatile Studio edits and orderly lock recovery (2026-10-18)
 
 Working editor projections are unconfirmed local intentions. They never replace authenticated
@@ -448,6 +573,16 @@ table with the commit that closed it.
   router-assigned lifetime up to a 24-hour sanity cap; a crash can therefore leave the pinhole
   until that grant expires. Publishing a global IPv6 privacy address also makes that
   device/address visible to invite recipients, peers and the configured AutoNAT observer.
+  Optional WebRTC UDP mappings additionally use native mount/call/grant custody rather than
+  port-only release authority. Pending native work survives a lost IPC waiter through cleanup;
+  lock, call end, remount and server-incarnation retirement revoke its installation authority.
+  IGD cleanup retains the granting gateway, and post-Add validation failures retain custody.
+  Uncertain router or legacy PCP/NAT-PMP worker results quarantine both port and capacity for
+  the process lifetime (64 total slots); repeated End, lock or account change cannot refund
+  them. This can exhaust the optional mapping aid while STUN/TURN continue. Client drop is not a
+  joined shutdown or physical closure proof; router leases and pre-crash effects can survive
+  process restart. The existing interface check does not prove kernel ownership of a named
+  WebRTC socket. [The custody contract](communication-recovery/CALL-MAPPINGS.md) records these limits.
 - **Discovery retries are availability aids, not proof of presence.** The current member roster and
   self-signature gate every cached record. Every route accepted from PEX/cache/rendezvous is parsed
   by one canonical grammar, must terminate in the exact signed/discovered transport peer, and is
