@@ -128,9 +128,15 @@
   const isScore = $derived(doc?.objectKind === "score" || (!doc && entry?.kind === "score"));
   const score = $derived.by(() => { void studio.rev; return session.doc?.object === objectId ? session.buffering ? session.workingScore : session.doc.score : null; });
   const sourceGeneration = $derived.by(() => { void studio.rev; return session.editorMediaGeneration; });
+  // Which object and source generation the current audio was started against. Playback is
+  // stopped when the source it was prepared from is no longer the one on screen (a remote edit,
+  // a navigation, a lock) and never because of the generation its own gesture produced: placing a
+  // note bumps the generation and then auditions that note, and the audition must survive it.
+  let audioOwner = { object: "", generation: -1 };
+  function claimAudio() { audioOwner = { object: objectId, generation: untrack(() => session.editorMediaGeneration) }; }
   $effect(() => {
-    void objectId; void sourceGeneration;
-    untrack(() => { audioActions?.stop(); });
+    const object = objectId, generation = sourceGeneration;
+    untrack(() => { if (audioOwner.object !== object || audioOwner.generation !== generation) audioActions?.stop(); });
   });
   $effect(() => { void objectId; untrack(() => { mediaReceipt = ""; savedPreview = null; }); });
   const readOnlyWhy = $derived.by(() => { void studio.rev; return objectId ? session.editRefusal(objectId) : ""; });
@@ -723,7 +729,9 @@
     }
   });
 
-  function toggleStudioPlay() {
+  /// `offsetMs` lets the score composer start from its selected step. Button handlers pass a
+  /// MouseEvent here, and the space hotkey nothing: both read as "from the start".
+  function toggleStudioPlay(offsetMs: number | Event | undefined = undefined) {
     if (playing) { audioActions?.stop(); return; }
     if (!audioActions || !objectId) { onnotice("audio playback is unavailable on this surface", "warn"); return; }
     if (!commit()) return;
@@ -734,10 +742,13 @@
     savedPreview = null;
     const object = objectId, kind = isScore ? "score" : "flipnote";
     const prepare = () => kind === "score" ? session.prepareScorePlayback(object) : session.prepareFlipnotePixa(object);
+    const from = typeof offsetMs === "number" && Number.isFinite(offsetMs) && offsetMs > 0 ? Math.floor(offsetMs) : 0;
+    claimAudio();
     // The App adapter resumes its existing context immediately, before prepare fetches/hashes.
-    // Editor Play is the whole composition. Stop leaves a frame selected for editing, which
-    // must not turn the next Play into an implicit seek that skips the first sound marker.
-    void audioActions.start(kind, prepare, loop, 0)
+    // Editor Play is the whole composition unless the composer asked for a start step. Stop
+    // leaves a frame selected for editing, which must not turn the next Play into an implicit
+    // seek that skips the first sound marker.
+    void audioActions.start(kind, prepare, loop, from)
       .then((started: boolean) => { if (!started) onnotice("playback was cancelled or audio is unavailable; press Play to try again", "warn"); })
       .catch((e: unknown) => onnotice(reason(e), "warn"));
   }
@@ -764,6 +775,7 @@
     // editor must already know it is not document playback when that lands.
     auditioning = true;
     const request = ++auditionRequest;
+    claimAudio();
     void audioActions.start("score", async () => playback, false)
       .then((started: boolean) => { if (!started && request === auditionRequest) { auditioning = false; onnotice("audition unavailable; check Deafen and try again", "warn"); } })
       .catch((e: unknown) => { if (request === auditionRequest) { auditioning = false; onnotice(reason(e), "warn"); } });
@@ -862,6 +874,7 @@
     if (action === "play") {
       if (!audioActions) return;
       auditioning = false; auditionRequest++; // a saved version is document playback, never an audition
+      claimAudio();
       void audioActions.start("flipnote", prepare, loop).catch((e: unknown) => onnotice(reason(e), "warn"));
       return;
     }

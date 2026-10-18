@@ -1122,6 +1122,50 @@ test("G7-UI: a superseded audition's late completion cannot turn the newer note 
   } finally { audio.stop(); unmount(app); target.remove(); state.disposeStudio(); }
 });
 
+// Review of 87ab2d89, finding 1. Placing a note queues an edit (which bumps the editor's media
+// generation) and then auditions the note. The generation change used to stop every playback,
+// including the audition that same gesture had just started. Audio now belongs to the object and
+// generation it was started against; only a change from elsewhere stops it.
+test("G7-UI: placing a note keeps the audition it started; a source change from elsewhere still stops playback", async () => {
+  const { legacyJamPatch, jamPatchId } = await import("./jam-patch.ts");
+  const patch = legacyJamPatch("sine"), id = await jamPatchId(patch);
+  const ipc = fakeIpc();
+  const source = { opId: id64(0x52), author: ME, nonce: id32(0x52) };
+  let score: Record<string, unknown> = { kind: "score", title: null, bpm: null, bpb: null, steps: null, cells: {},
+    patches: { [id]: { removed: false, register: { selected: { value: patch, source }, conflicts: [] } } },
+    readiness: { cells: {}, patches: {}, headerConflicts: false } };
+  ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ kind: "score", title: "music" }) } })));
+  ipc.on("studio_read", () => ({ ...ordinaryView(score), group: "deadbeef" }));
+  ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ }));
+  // A faithful backend echoes the applied cell, so the readback equals the working projection and
+  // bumps nothing; a fake that forgot the cell would read as a source change and stop the audition.
+  ipc.on("studio_apply", (args) => {
+    const body = JSON.parse(String(args.body)) as { op: string; step: number; row: number; value: unknown };
+    if (body.op === "set_cell") score = { ...score, cells: { ...(score.cells as object), [`${body.step}:${body.row}`]: { removed: false, register: { selected: { value: body.value, source: { opId: id64(0x53), author: ME, nonce: id32(0x53) } }, conflicts: [] } } } };
+    return { ...ordinaryView(score), group: "deadbeef" };
+  });
+  const plans = new Map<JamArchivalPlayback, ReturnType<typeof planJamArchivalPlayback>>();
+  const audio = new StudioAudioSession({ context: { state: "running", resume: async () => {} },
+    prepareArchivalPlayback: async (take, animation) => { const capability = {} as JamArchivalPlayback; plans.set(capability, planJamArchivalPlayback(take, animation)); return capability; },
+    archivalPlaybackPlan: capability => plans.get(capability) ?? null,
+    playArchivalEvent: () => ({ ok: true }),
+    revokeArchivalPlayback: capability => plans.delete(capability),
+  }, () => 0);
+  audio.setScope({ generation: 1, server: SERVER, channel: CHANNEL, membership: 1 }, false);
+  let stops = 0;
+  const m = mountStudio(ipc, { patchLibrary: [{ name: "LANDING", patch }], audioActions: { start: (kind, prepare, loop, offset) => audio.start(kind, prepare, loop, offset), stop: () => { stops++; audio.stop(); } } });
+  try {
+    await settled(); state.studio.selected = OBJ; flushSync(); await settled(400);
+    const before = stops;
+    m.target.querySelector<HTMLButtonElement>('[data-score-cell="0:12"]')!.click(); flushSync(); await settled(300);
+    assert.equal(audio.state.state, "playing", "the note placed is still sounding");
+    assert.equal(stops, before, "the edit's own generation bump did not stop its audition");
+    assert.ok(!m.notices.some((n) => /audition unavailable/.test(n)), m.notices.join("; "));
+    state.ensureStudio(ME).invalidate({ objects: [OBJ] }); flushSync(); await settled(30);
+    assert.ok(stops > before, "a source change from elsewhere still stops playback");
+  } finally { audio.stop(); m.done(); }
+});
+
 test("G6-UI-003: Score loop is an explicit transport toggle, off by default, and forwards only the local choice", async () => {
   const ipc = fakeIpc();
   const score = { kind: "score", title: null, bpm: null, bpb: null, steps: null, cells: {}, patches: {}, readiness: { cells: {}, patches: {}, headerConflicts: false } };

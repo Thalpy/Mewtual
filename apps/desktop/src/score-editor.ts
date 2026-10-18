@@ -106,32 +106,141 @@ export function scoreContinuations(model: ScoreModel, page: number, size = SCORE
   return new Set(scoreHolds(model, columns).keys());
 }
 
-export type ScoreHold = { onset: string; p: string; last: boolean };
+export type ScoreHold = { onset: string; p: string; last: boolean; /** Later onsets whose holds also cover this coordinate. */ others: string[] };
+
 /**
- * Every continuation cell inside `columns`, mapped to the onset it belongs to, the recipe it
- * sounds with and whether it is the hold's final step. Onsets off the page still project their
+ * Ownership of a coordinate when holds overlap (retained concurrent edits can produce that, and
+ * readiness flags it): the EARLIEST onset owns it. That is the note the renderer sounds, because
+ * a same-pitch attack during a hold is a dropped event, so colour, label, selection, audition
+ * and erase all follow the same note. Later covering onsets are listed, never hidden, so the
+ * composer can offer them as an explicit choice.
+ */
+function coveringOnsets(model: Pick<ScoreModel, "cells">, step: number, row: number): string[] {
+  const keys: string[] = [];
+  for (const [key, cell] of Object.entries(model.cells)) if (cell.k === "n") {
+    const [s, r] = key.split(":").map(Number);
+    if (r === row && s < step && step < s + (cell.len ?? 1)) keys.push(key);
+  }
+  return keys.sort((a, b) => Number(a.split(":")[0]) - Number(b.split(":")[0]));
+}
+
+/**
+ * Every continuation cell inside `columns`, mapped to the onset that owns it, the recipe it
+ * sounds with and whether it is that hold's final step. Onsets off the page still project their
  * tail onto it, so a hold that crosses a page boundary keeps its colour and its rounded end.
  */
 export function scoreHolds(model: Pick<ScoreModel, "cells">, columns: readonly number[]): Map<string, ScoreHold> {
   const result = new Map<string, ScoreHold>();
   if (!columns.length) return result;
   const start = columns[0], end = columns[columns.length - 1];
-  for (const [key, cell] of Object.entries(model.cells)) if (cell.k === "n") {
+  // Earliest onsets first, so the first writer of a coordinate is its owner and later covering
+  // onsets only join `others`, whatever order the map enumerates.
+  const notes = Object.entries(model.cells).filter((entry): entry is [string, Extract<ScoreCell, { k: "n" }>] => entry[1].k === "n")
+    .sort(([a], [b]) => Number(a.split(":")[0]) - Number(b.split(":")[0]));
+  for (const [key, cell] of notes) {
     const [step, row] = key.split(":").map(Number), finish = step + (cell.len ?? 1) - 1;
-    for (let s = Math.max(start, step + 1); s <= Math.min(end, finish); s++) result.set(`${s}:${row}`, { onset: key, p: cell.p, last: s === finish });
+    for (let s = Math.max(start, step + 1); s <= Math.min(end, finish); s++) {
+      const at = `${s}:${row}`, existing = result.get(at);
+      if (existing) existing.others.push(key);
+      else if (!model.cells[at]) result.set(at, { onset: key, p: cell.p, last: s === finish, others: [] });
+    }
   }
   return result;
 }
 
-/** The onset that owns a coordinate: the cell itself, or the note whose hold covers it. */
+/** The onset that owns a coordinate: the cell itself, else the earliest note whose hold covers it. */
 export function scoreOnsetAt(model: Pick<ScoreModel, "cells">, step: number, row: number): { key: string; cell: ScoreCell } | null {
   const own = model.cells[`${step}:${row}`];
   if (own) return { key: `${step}:${row}`, cell: own };
-  for (const [key, cell] of Object.entries(model.cells)) if (cell.k === "n") {
-    const [s, r] = key.split(":").map(Number);
-    if (r === row && s < step && step < s + (cell.len ?? 1)) return { key, cell };
+  const first = coveringOnsets(model, step, row)[0];
+  return first ? { key: first, cell: model.cells[first] } : null;
+}
+
+/** Every note sounding at a coordinate, owner first: the cell's own onset, then covering holds by onset. */
+export function scoreNotesAt(model: Pick<ScoreModel, "cells">, step: number, row: number): { key: string; cell: ScoreCell }[] {
+  const own = model.cells[`${step}:${row}`];
+  const covering = coveringOnsets(model, step, row).map((key) => ({ key, cell: model.cells[key] }));
+  return own ? [{ key: `${step}:${row}`, cell: own }, ...covering] : covering;
+}
+
+/** The note at `key` first, then every other note on its row whose hold overlaps its run, by onset. */
+export function scoreOverlappingNotes(model: Pick<ScoreModel, "cells">, key: string): { key: string; cell: ScoreCell }[] {
+  const own = model.cells[key];
+  if (!own) return [];
+  if (own.k !== "n") return [{ key, cell: own }];
+  const [step, row] = key.split(":").map(Number), end = step + (own.len ?? 1);
+  const others: { key: string; cell: ScoreCell }[] = [];
+  for (const [other, cell] of Object.entries(model.cells)) if (other !== key && cell.k === "n") {
+    const [s, r] = other.split(":").map(Number);
+    if (r === row && s < end && step < s + (cell.len ?? 1)) others.push({ key: other, cell });
   }
-  return null;
+  others.sort((a, b) => Number(a.key.split(":")[0]) - Number(b.key.split(":")[0]));
+  return [{ key, cell: own }, ...others];
+}
+
+// --- placement assistance: snap, default hold, scale view, pad lane ----------------------------
+
+/** Placement snap in sixteenth steps: sixteenth, eighth, quarter. The grid stays at sixteenths. */
+export const SCORE_SNAPS: readonly number[] = [1, 2, 4];
+/** A placed note starts as an eighth: long enough to hear, short enough to phrase. */
+export const SCORE_DEFAULT_HOLD = 2;
+/** The step a click at `step` places on under `snap`: never past the authored length. */
+export function scoreSnapStart(step: number, snap: number, steps: number): number {
+  const unit = SCORE_SNAPS.includes(snap) ? snap : 1;
+  return Math.max(0, Math.min(steps - 1, Math.floor(step / unit) * unit));
+}
+
+/**
+ * How many consecutive cells from `step` on `row` hold no note or continuation, at most `max`
+ * and never past the authored length. Zero means the cell itself is taken. A new note is fitted
+ * to this run so a click can never collide with a neighbour the preview did not show.
+ */
+export function scoreFreeRun(model: Pick<ScoreModel, "steps" | "cells">, step: number, row: number, max: number): number {
+  const limit = Math.min(max, model.steps - step);
+  if (limit <= 0) return 0;
+  const taken = new Set<number>();
+  for (const [key, cell] of Object.entries(model.cells)) {
+    const [s, r] = key.split(":").map(Number);
+    if (r !== row) continue;
+    const len = cell.k === "n" ? (cell.len ?? 1) : 1;
+    for (let i = Math.max(s, step); i < s + len && i < step + limit; i++) taken.add(i);
+  }
+  let run = 0;
+  while (run < limit && !taken.has(step + run)) run++;
+  return run;
+}
+
+export type ScoreScaleKind = "chromatic" | "major" | "minor" | "pentatonic";
+export const SCORE_SCALE_KINDS: readonly ScoreScaleKind[] = ["chromatic", "major", "minor", "pentatonic"];
+const SCALE_INTERVALS: Readonly<Record<ScoreScaleKind, readonly number[]>> = {
+  chromatic: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], major: [0, 2, 4, 5, 7, 9, 11], minor: [0, 2, 3, 5, 7, 8, 10], pentatonic: [0, 2, 4, 7, 9],
+};
+/** Root names for the scale picker, indexed by semitone above C. */
+export const SCORE_ROOTS: readonly string[] = PITCHES;
+/** Rows that belong to the scale. A view filter: notes outside it stay in the document and the grid. */
+export function scoreScaleRows(kind: ScoreScaleKind, root: number): Set<number> {
+  const intervals = SCALE_INTERVALS[kind] ?? SCALE_INTERVALS.chromatic;
+  const rows = new Set<number>();
+  for (let row = 0; row < SCORE_ROWS; row++) if (intervals.includes((((row - root) % 12) + 12) % 12)) rows.add(row);
+  return rows;
+}
+
+/** In pads mode the bottom ten rows double as the pad lane: row r places pad r. */
+export function scorePadForRow(row: number): number | null {
+  return integer(row, 0, PAD_CODES.length - 1) ? row : null;
+}
+
+/**
+ * Tempo from tap timestamps (ms): the mean gap of the last four taps, rounded, within the
+ * metronome's bounds. Fewer than two taps, or a pause over two seconds, means no tempo yet.
+ */
+export function scoreTapTempo(taps: readonly number[]): number | null {
+  const recent = taps.slice(-4);
+  if (recent.length < 2) return null;
+  let total = 0;
+  for (let i = 1; i < recent.length; i++) { const gap = recent[i] - recent[i - 1]; if (!(gap > 0) || gap > 2000) return null; total += gap; }
+  const bpm = Math.round(60000 / (total / (recent.length - 1)));
+  return Math.max(JAM_MET_BPM_MIN, Math.min(JAM_MET_BPM_MAX, bpm));
 }
 
 /** Recipe ids in the stable order the rack lists them; the position doubles as the swatch colour. */

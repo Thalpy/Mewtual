@@ -1,5 +1,65 @@
 # Mewtual; Handover
 
+## Score composer: review fixes and direct manipulation (2026-10-18, branch `score-composer-2`)
+
+The second review of the composer (PR #47, head `87ab2d89`) reported five P2 and one P3 defects,
+all reproduced from its descriptions and fixed on a worktree branched from that head with the
+`Gate7` review-fix commit merged in:
+
+- **Placing a note no longer cancels its own audition.** Studio records which object and editor
+  media generation each playback was started against (`claimAudio`) and stops audio only when the
+  source on screen is a different one; a note's own edit bumps the generation and then auditions,
+  and that audition survives. A remote invalidation, a navigation or a lock still stops playback.
+- **One owner per overlapped coordinate.** `scoreHolds`, `scoreOnsetAt` and the new `scoreNotesAt`
+  agree: the earliest onset owns a covered continuation cell, so colour, label, selection,
+  audition and erase name the same note there; a later note's own onset cell still shows that
+  note and lists the earlier one. Overlapped cells are striped, the tooltip names the other notes,
+  and the selected panel offers them to select or clear.
+- **A cancelled drag writes nothing.** A drag belongs to the pointer that began it; pointercancel,
+  Escape, a window blur and a read-only turn drop it without an operation or an audition, and a
+  foreign pointer's release is ignored by it.
+- **A drag revalidates its start on release.** The start cell must still be free and the recipe
+  still the chosen one; otherwise nothing is written and a notice says another edit landed first.
+- **Keyboard navigation keeps focus.** Arrow moves focus the selected cell after it renders, so
+  crossing a page boundary no longer parks focus on the body.
+- **Paging keeps an absolute first step.** The view coordinate is the first visible step; the
+  page index is derived from it and the current width, so widening the card keeps the same bars.
+
+Manipulation, the first milestone the review recommended, with the user's answers (short pieces;
+manipulation first, timing second): placement snaps to a chosen unit (eighth by default; the
+snap only moves the start, and only when every cell between the snapped start and the click is
+free), a hover preview shows exactly the cells a click writes (the remembered hold fitted to the
+free run before the next note and to the authored end), the hold is remembered only when the
+author chose it (a drag, a resize or the stepper, never a forced fit), a note's last cell drags to
+resize, the selected panel changes a note's recipe or length (lengthen is unavailable at the end),
+playback can start from the selected step, the pad lane (rows C4..A4 in pads mode) places its
+row's pad and never folds under the scale view, and the scale view (toggle in the header or `s`,
+kind and root in the placing section) folds rows outside the scale to slivers without hiding or
+disabling the notes there. The score tab gained the mockup's tempo (big readout, ±1/±5, tap that
+writes once the tapping settles, half/double), meter (segmented 1..8), length (steps, beats, bars,
+time; "+ bar", "− bar", "fit to last note", which may extend the score to notes past the end,
+"fit to bars") and export (checklist and actions) sections; the transport's "trim" still only
+shortens. Regression tests cover each finding and each gesture, including a real pointer click
+(pointerdown, pointerup, click) that must write the previewed hold; the "model changed under a
+drag" case mounts the composer through `scripts/fixtures/ScoreEditorHarness.svelte`. The round's
+own read-only review found no blocker; its two highs were defects in these unexecuted tests
+(fixed: the widened `ScoreHold` shape, and a fake backend that forgot the applied cell and so read
+as a source change), its medium was the pointer click writing `max(hold, snap)` (fixed as above),
+and its lows are fixed except two design notes: a later note's own onset cell shows that note
+(documented above), and tap tempo uses ambient time in the component (the pure helper is tested).
+
+Timing, deliberately not changed in this round: the engine already schedules each note's release
+on the audio clock when the note is created, so only attacks ride the 16 ms tick. A fix needs
+attack lookahead inside `jam-engine.ts` (allow a negative age in `playArchivalEvent` and
+`noteOnWithHold`, start the source at `now + lead`, hold the gain at zero until then, and give
+`noteOff` a scheduled release so two same-pitch notes inside the lookahead window are not seen as
+a duplicate), plus a controller tick that dispatches events up to the lookahead early. The other
+half of "longer envelopes feel off" is the loop: `StudioAudioSession` restarts only after the last
+release tail, and restarting on the bar instead needs the engine to keep a draining archival
+capability alive beside the new one. Both are engine changes and were not made without running
+the engine's suites. Per the user's instruction the unit suites were NOT run for this round; the
+tests above are written but unexecuted, and svelte-check passed.
+
 ## Score composer surface (2026-10-18)
 
 The Studio's score composer now matches the designed surface instead of the table-based
