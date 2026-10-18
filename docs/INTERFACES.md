@@ -200,6 +200,62 @@ for existing network/restart state; this optional read does not grant or revoke 
 Explicit `mint_invite_fresh` remains owner/admin gated, and join-time authorization is unchanged.
 Roles on non-owner devices still have the existing published-roster freshness limitations.
 
+## Studio departure scope, restored-work reach and App exit routes (2026-10-18)
+
+`StudioSession.navigate(action)` (sidebar and Music) saves only the document being left: records
+in that document's lane must reach a definite receipt or the open is vetoed. With no document open
+nothing is left, so nothing is saved first. Records held for any other document keep their state,
+so opening a restored document never requires its own held work to save. Restored work is sent
+only by explicit Save or retry, or by leaving its own document (that document's departure Save).
+A partial departure Save leaves the shared five-second deadline running for uncovered records.
+`saveBeforeLeaving()` (leaving the Studio, a channel, a server or the window) still covers every
+record. Before a first delivery, admission reads a record's document when no view of it is held
+(restored or evicted) and compares the authoring binding with that fresh view. That read runs
+while the record is still `queued` and uncounted, so a lock during it restores the record as
+unsent. An unreadable document ("could not read"), a read overtaken by a newer one ("still
+reading"), an unread channel Index and a changed server group are all refused as no-write
+without counting an attempt, so a retry is admitted afresh.
+
+`studio-exit.ts` `createStudioExit(host)` is the gate for App routes that change the main pane
+directly (`view`, the inbox, DM home, the add-server and vault-change screens). `begin()` claims
+navigation for one user action and returns a `StudioRoute`: `current()` (no newer action, lock,
+reload or Studio channel/server change since: the claim includes the Studio session's lease),
+`leave()` (may this action change the main pane now, saving first when the Studio is on screen
+with work) and `scope()` (the same for a channel/server change, counting any retained edit). None
+of the three renews the claim, and a departure runs at most 16 Saves before refusing. An action
+that awaits anything carries its route across the await and asks `leave()` again right before
+the screen changes, so a response that outlived a newer action is discarded and work drawn
+meanwhile is saved first. Because moving the channel under a mounted Studio ends the lease, a
+composite action changes the surface before the channel. `release()` is `begin().leave()` and
+`leaveThen(go)` runs `go(route)` synchronously when nothing needs saving. A navigation call made
+without a route after an await is a new action of its own; `studio-exit-routes.test.ts` lists the
+few such calls (a completed join, leaving a server, channel reconciliation, a lost moderation
+permission) with their reasons, and every other one carries its function's route.
+
+In App, `switchView(v, route?)`, `switchServer(id, committed?, route?)`, `switchTo(id, keepSearch?,
+route?)`, `openWikiPage(name, opts?, route?)` and `openStatusRef(id, route?)` take the action's
+route (a standalone call begins its own). `switchServer`/`switchTo` resolve `Promise<boolean>`
+(false when the switch never happened) and stay synchronous up to their first await when the route
+is current and the Studio holds nothing. `switchServer` resolves after the new server's batch
+read; `committed` runs in the turn it commits. Composite routes use `arriveAtServer(id, route)`.
+Every `openServerSettings` request begins a route, including one for the server already on
+screen, so a newer request retires an older one still waiting to switch; the dialog opens in
+the committed turn for the requested, still-current request only. Like any newer action it also
+retires other in-flight navigation (a pending sidebar open, a deferred tab change). `openWikiPage`
+resolves `true` only when it opened a page; Rename, Delete and new-page edit mode act only on the
+page their own request opened. No IPC, wire or persistence format changes.
+
+Studio's editor renders a document's retained requests whatever its read state: with no model
+(read error, absent, still reading), attention records keep their exact retry and armed discard
+beside the read error. Restored queued records awaiting an explicit Save
+(`StudioSession.awaitsExplicitSave(id)`) show a Save and armed discard in every editor state. A
+Save inside a document's editor is `StudioSession.saveDocument(id)`: it releases and awaits only
+that document's records (its Index records included), so other documents' restored work stays
+held and another document's failure cannot refuse it. The exception is the shared Index lane: one
+of its Index records can wait behind another document's unresolved Index record, and that Save
+then times out as still saving. A discard confirmation is armed for one
+record in one state and lapses when that record's status changes.
+
 ## Studio local working state and Save boundaries (2026-10-18)
 
 `StudioSession` production `autosaveMs=5000` stages ordinary edits locally. `workingModel`,

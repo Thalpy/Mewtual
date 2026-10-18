@@ -165,6 +165,12 @@ admission reserves frozen-request/diagnostic overhead and counts UTF-8 plus oute
 The sealed envelope is capped at 16 MiB with the existing independent 1 MiB allowance for all
 non-Studio continuity. Physical reads are bounded before decryption. This is orderly lock/close
 recovery, not a write-ahead log or a claim of receipt recovery after a hard process/OS crash.
+Unlock restores that queue with no document open. Opening a document is never conditional on its
+held work saving first (a document switch saves only the document left), and the sidebar shows a
+row with an open button for documents holding unsaved edits (up to eight, then a count; Index
+edits and pending Creates keep their own rows), so their Save, Retry and discard controls stay
+reachable even for a document the Index does not list. Once open, those controls render whatever
+the document read did: a failing read shows its error beside them, never instead of them.
 
 ## Studio Save, navigation and playback corrections (2026-10-18)
 

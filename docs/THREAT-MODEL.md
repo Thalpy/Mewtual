@@ -178,7 +178,11 @@ recovery: 512 records, 8 MiB of PIX file bytes, 12 MiB serialized Studio data, 1
 the original independent 1 MiB non-Studio allowance. Admission includes UTF-8, outer escaping and
 future request/diagnostic reserve. Disk reads check physical size/regularity and use a bounded
 read before authentication. Restore validates typed requests and original scope/group, holds
-them until an explicit action, and never restores a native view as authority. No plaintext
+them until an explicit action (Save, retry, discard, or leaving the record's own document, which
+saves it), and never restores a native view as authority. Opening a document never sends its held
+records, and admission re-reads a document it holds no view of before comparing a record's
+authoring binding; an unread or superseded read sends nothing and does not count as an attempt, so
+a later retry is admitted afresh. No plaintext
 browser fallback exists. Lock proceeds immediately even if raster staging/serialization fails;
 the failure is disclosed and previous sealed continuity is preserved. A hard crash between a
 native commit and continuity capture can still lose the latest receipt: this is not a write-ahead

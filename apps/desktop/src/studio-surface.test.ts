@@ -5,6 +5,9 @@
 // real components; jsdom is the document; the fake bridge scripts every native answer.
 import assert from "node:assert/strict";
 import test from "node:test";
+import { StudioAudioSession, type StudioAudioActions, type StudioAudioState } from "./studio-audio.ts";
+import { planJamArchivalPlayback } from "./jam-archival-plan.ts";
+import type { JamArchivalPlayback } from "./jam-engine.ts";
 import {
   CHANNEL, ME, SERVER, b64, deferred, fakeIpc, flipnoteContent, id32, id64, indexContent, indexEntry, ordinaryView, pixBytes, previewView, recoveryListing, version,
   type FakeIpc,
@@ -1025,6 +1028,69 @@ test("G7-UI: document Play after a sounding audition lowers the audition flag, s
     assert.deepEqual(kinds, ["score", "flipnote"]);
     assert.ok(target.querySelector('[title="stop [space]"]'), "document playback after an audition must read stop");
   } finally { unmount(app); target.remove(); state.disposeStudio(); }
+});
+
+// Review of 149e7321, finding 5. A second note cancels the first while it is still preparing.
+// Preparations are serialized, so the first request resolves false while the second waits its
+// turn. That stale completion used to lower the flag owned by the second note, so once it sounded
+// the editor read its clock as document playback, scrubbed the timeline and said the audition had
+// failed. The real audio session decides cancellation; the test only holds each preparation open.
+test("G7-UI: a superseded audition's late completion cannot turn the newer note into document playback", async () => {
+  const { default: Harness } = await import("../scripts/fixtures/StudioPlaybackHarness.svelte");
+  const { legacyJamPatch } = await import("./jam-patch.ts");
+  const w = (globalThis as unknown as { window: Window & typeof globalThis }).window;
+  const frames = Array.from({ length: 6 }, (_, i) => ({ id: id32(0x40 + i), cid: id64(1), bytes: pix.length }));
+  const ipc = fakeIpc();
+  ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ title: "moon cat" }) } })));
+  ipc.on("studio_read", () => ({ ...ordinaryView(flipnoteContent({ fps: 12, frames })), group: "deadbeef" }));
+  ipc.on("request_blob_bounded", () => ({ bytes_b64: b64(pix), bytes: pix.length }));
+  ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ }));
+  state.useStudioIpc(ipc);
+  let now = 0;
+  const gates: ReturnType<typeof deferred<void>>[] = [];
+  const plans = new Map<JamArchivalPlayback, ReturnType<typeof planJamArchivalPlayback>>();
+  const audio = new StudioAudioSession({ context: { state: "running", resume: async () => {} },
+    prepareArchivalPlayback: async (take, animation) => {
+      const gate = deferred<void>(); gates.push(gate); await gate.promise;
+      const capability = {} as JamArchivalPlayback; plans.set(capability, planJamArchivalPlayback(take, animation)); return capability;
+    },
+    archivalPlaybackPlan: capability => plans.get(capability) ?? null,
+    playArchivalEvent: () => ({ ok: true }),
+    revokeArchivalPlayback: capability => plans.delete(capability),
+  }, () => now);
+  audio.setScope({ generation: 1, server: SERVER, channel: CHANNEL, membership: 1 }, false);
+  const notices: string[] = [], outcomes: boolean[] = [];
+  const target = document.createElement("div"); document.body.appendChild(target);
+  let harness: { updateAudio: (s: StudioAudioState) => void } | null = null;
+  const audioActions: StudioAudioActions = {
+    start: async (kind, prepare, loop, offset = 0) => { const started = await audio.start(kind, prepare, loop, offset); outcomes.push(started); harness?.updateAudio(audio.state); return started; },
+    stop: () => { audio.stop(); harness?.updateAudio(audio.state); },
+  };
+  const app = mount(Harness, { target, props: { props: { me: ME, server: SERVER, channel: CHANNEL, nameOf: (id: string) => id.slice(0, 4), colorOf: () => "#000000", onnotice: (t: string) => notices.push(t), audioActions, patchLibrary: [{ name: "LANDING", patch: legacyJamPatch("sine") }] } } });
+  harness = app as unknown as typeof harness; flushSync();
+  const button = (label: RegExp) => [...target.querySelectorAll<HTMLButtonElement>("button")].find((b) => label.test(b.textContent?.trim() ?? ""));
+  const press = (note: string) => {
+    const key = target.querySelector<HTMLButtonElement>(`[aria-label="Play ${note}"]`); assert.ok(key, `no ${note} key`);
+    key.dispatchEvent(new w.PointerEvent("pointerdown", { bubbles: true, cancelable: true, pointerId: 1 })); flushSync();
+    harness!.updateAudio(audio.state); flushSync();
+  };
+  try {
+    await settled(); state.studio.selected = OBJ; flushSync(); await settled(400);
+    button(/^sound$/)!.click(); flushSync();
+    button(/new…/)!.click(); flushSync(); await settled(50);
+    press("C4"); await settled(20);
+    press("E4"); await settled(20);
+    assert.equal(gates.length, 1, "the second note waits behind the first preparation");
+    gates[0].resolve(); await settled(20);
+    assert.deepEqual(outcomes, [false], "the cancelled note resolved false while the newer one is pending");
+    assert.equal(gates.length, 2); gates[1].resolve(); await settled(20);
+    assert.deepEqual(outcomes, [false, true]);
+    now += 200; await audio.tick(); harness!.updateAudio(audio.state); flushSync(); await settled(20);
+    assert.equal(audio.state.state, "playing", "the newer note is still sounding");
+    assert.match(target.querySelector(".st-transport .mono.strong")!.textContent!, /1 \/ 6/, "an audition never scrubs the timeline");
+    assert.ok(target.querySelector('[title="play [space]"]'), "a sounding audition is not document playback");
+    assert.ok(!notices.some((n) => /audition unavailable/.test(n)), notices.join("; "));
+  } finally { audio.stop(); unmount(app); target.remove(); state.disposeStudio(); }
 });
 
 test("G6-UI-003: Score loop has an explicit labelled checkbox and forwards only the local choice", async () => {

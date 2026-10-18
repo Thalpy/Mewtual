@@ -92,6 +92,78 @@ tests until its result owner/IPC consumers are implemented; the general warnings
 intact. See [the revision ledger](communication-recovery/PR48-REVIEW-REVISION.md) for corrected
 actor/driver progress, provider rotation and the narrow native SDP resource contract. Final
 branch verification and the wider native/browser/file/media acceptance remain outstanding.
+## PR #46 re-review fixes: route ownership, read-error recovery, settings requests (2026-10-18)
+
+The re-review of `13e338eb` confirmed the five original fixes and reproduced three remaining P2s:
+
+- **Stale responses no longer take over the screen.** A navigation action now owns a
+  `StudioRoute` from first step to last (`studioExit.begin()`). It carries the route across
+  every await and asks `route.leave()` again right before changing the view, never with a fresh
+  claim. A wiki response that arrives after the member returned to the Studio is discarded. Work
+  drawn in a Studio that stayed on screen during the read is saved first, or keeps the Studio on
+  refusal. History Back/Forward, ticker, inbox, news, mention, topic/search, call-diagnostics,
+  wiki rename/create and add-channel flows hand one route to `switchServer`/`switchTo`/
+  `switchView`/`openWikiPage`. From the Studio they change the surface before the channel, because
+  a channel moved under a mounted Studio ends every route. The route audit rejects a guard separated from its
+  screen change by an await. It also rejects a route-less navigation call after an await, except
+  four stated forced or background cases and one branch that begins its own action.
+- **Wiki menus act on the page they opened.** `openWikiPage` reports whether it opened a page, so a
+  retired request can no longer arm Delete or Rename on the page still shown.
+- **Read errors no longer hide recovery.** With no model on screen, the editor shows the read
+  error beside the retained requests' exact retry, armed discard and waiting count. Restored
+  queued work has a Save and discard in every editor state, without a refused departure first.
+  Save inside an editor now saves only that document (`saveDocument`), so other documents'
+  restored work stays held. A discard confirmation lapses when its record's state changes.
+- **Settings requests own navigation.** A request for the server already on screen retires an
+  older one still waiting on a Studio Save to switch, so that switch never commits, closes the
+  newer dialog or seeds over its draft.
+
+Each regression fails with its fix removed (wiki second check, current-server claim, surface-first
+order, document-scoped Save, state-keyed arming, route threading) or against `13e338eb`
+(read-error controls). An adversarial review of this round found no blocker/high finding; its three
+medium findings (Back to another channel, wiki menu arming, Save scope) and its low findings are
+fixed. Opening settings for the current server deliberately retires other in-flight navigation
+(newest action wins). A short re-review of those fixes found no blocker/high/medium; its low
+findings are fixed, except that the discard key can match again after an uncertain → retry →
+uncertain cycle (accepted: the same risk as when it was armed).
+
+Checks: frontend 1740/1740, `npm run check` 0 errors, build, 9/9 Edge flows, root Rust 2463
+passed (24 ignored), native 363 passed, ambient gate. Root Rust note: a run in the shared `target/`
+reused a `catcoms-rt` artifact from the `chat-update-implementation` worktree and failed to compile.
+The isolated-target run is the one reported.
+
+## PR #46 review fixes: restored drafts, Studio exits, settings, playback (2026-10-18)
+
+An external review of `149e7321` reported one P1 and four P2 defects, all reproduced and fixed:
+
+- **Restored drafts no longer deadlock.** A document switch saves only the document being left, and
+  nothing when no document is open. The sidebar lists documents holding unsaved edits, each with
+  an open button. Before a first delivery, admission reads a document it holds no view of. It does
+  this while the record is still queued and uncounted, so a lock during the read restores the
+  record as unsent. "Could not read", "still reading", unread-Index and changed-server refusals
+  send nothing and do not count an attempt, so a retry is admitted afresh.
+- **Every App route out of the Studio uses the exit gate** (`studio-exit.ts`), so a drawing the
+  full draft queue refused can no longer be destroyed by Ctrl+F, Ctrl+Shift+F, the inbox, DM home,
+  add-server, vault change, wiki/status links, menus, ticker jumps or Back/Forward. Lock, leaving
+  the last server and a native server close are marked forced edges.
+  `studio-exit-routes.test.ts` audits App.svelte for unguarded route writes.
+- **Composite routes act only on success.** `switchServer`/`switchTo` resolve whether the switch
+  happened. `openServerSettings` opens in the turn the switch to the requested server commits, so
+  it never opens on, or renames, the server being left. A refused Back/Forward step leaves the
+  cursor on the place still on screen.
+- **Playback.** Inline PIXA "Play sound" re-arms the repaint loop. Audition requests carry a
+  generation, so a superseded one cannot clear a newer note's flag or report a failure.
+
+Checks: frontend 1730/1730, `npm run check` 0 errors, build, 9/9 Edge flows, root Rust
+2463 passed (24 ignored), native 363 passed, ambient gate. Every new regression was confirmed to
+fail on the pre-fix code. A read-only adversarial review found one HIGH (lock during the
+admission read), two MEDIUM (add-server/vault-change routes; settings re-seeding after the load)
+and five LOW findings; all are fixed. A re-review found no remaining blocker/high/medium, and its
+one LOW (the unread-Index path, identical at HEAD) is fixed too. Residual: `leaveServer`/`server-closed` with other servers remaining still go
+through a `switchServer` whose Studio Save can refuse. A frame publication not yet applied is
+still classified as possibly committed if a lock lands mid-publish. `jumpToInbox` does not await
+its channel switch. An absent document holding only queued restored edits shows no Save button
+until a Studio exit's global Save refuses it into retry/discard.
 
 ## Gate 7 complete; communication programme next (2026-10-18)
 

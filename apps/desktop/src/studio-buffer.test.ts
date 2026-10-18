@@ -9,7 +9,7 @@ import { workingFlipnote, workingScore } from "./studio-working.ts";
 import { scoreModel, parseScoreView } from "./studio-native.ts";
 import type { SaveRecord } from "./studio-session.ts";
 import { canonicalJson } from "./studio-contract.ts";
-import { CHANNEL, ME, SERVER, b64, deferred, fakeIpc, flipnoteContent, id32, id64, indexContent, pixBytes, previewView, settle } from "./studio-testkit.ts";
+import { CHANNEL, ME, SERVER, b64, deferred, fakeIpc, flipnoteContent, id32, id64, indexContent, indexEntry, ordinaryView, pixBytes, previewView, settle } from "./studio-testkit.ts";
 const object = id32(1), frame = id32(2), cid = id64(3), group = "deadbeef";
 
 async function harness(empty = false) {
@@ -232,5 +232,122 @@ test("admission reserves full local-only ticket bodies and later diagnostics bef
     record.attempts = 1; record.status = "uncertain"; record.mayHaveCommitted = true; record.error = "\\".repeat(512);
   }
   assert.equal(decodeStudioDraft(encodeStudioDraft(draft)).records.length, h.session.saves.length, "freezing complete bodies cannot overflow the retained snapshot");
+  h.session.reset();
+});
+
+// Review of 149e7321, finding 1. A departure Save covers the document being left; held work for
+// another document is reached by opening it, so it can never veto that open.
+test("navigation saves only the document it leaves; another document's held work never vetoes reaching it", async () => {
+  const h = await harness(), other = id32(9);
+  h.session.setFps(object, 7); h.session.open(other); await settle(8); h.session.setFps(other, 8);
+  const draft = decodeStudioDraft(h.session.draftSnapshot()!);
+  // An interrupted delivery restores as uncertain: only the member may retry or discard it.
+  const held = draft.records.find(r => r.object === other)!;
+  held.status = "inflight"; held.attempts = 1;
+  h.session.reset(); h.session.restoreDraft(draft); h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); await settle(8);
+  const applied = () => h.ipc.calls.filter(c => c.cmd === "studio_apply").map(c => c.args.object);
+  assert.equal(h.session.doc, null);
+  await h.session.navigate(() => h.session.open(object)); await settle(8);
+  assert.equal(h.session.doc?.object, object, "nothing open: nothing is left, so nothing is saved first");
+  assert.deepEqual(applied(), [], "opening never replays restored work");
+  await h.session.navigate(() => h.session.open(other)); await settle(8);
+  assert.equal(h.session.doc?.object, other, "the uncertain edit of the target cannot veto opening it");
+  assert.deepEqual(applied(), [object], "leaving the first document saved exactly its own held edit");
+  assert.deepEqual(h.session.saves.map(s => [s.object, s.status]), [[other, "uncertain"]]);
+  await assert.rejects(h.session.saveBeforeLeaving(), /Could not confirm the save/, "leaving the Studio still requires every edit");
+  h.session.reset();
+});
+
+test("a departure Save leaves the shared deadline running for the Index edit made with a title", async () => {
+  const h = await harness(), other = id32(9);
+  const listed = () => ({ ...ordinaryView(indexContent({ objects: { [object]: indexEntry({ title: "initial" }) } })), group });
+  h.ipc.on("studio_list", listed); h.ipc.on("studio_apply_index", listed);
+  await h.session.refreshIndex(); await settle(8);
+  h.session.setTitle(object, "renamed");
+  assert.deepEqual(h.session.saves.map(s => s.kind).sort(), ["apply", "applyIndex"]);
+  await h.session.navigate(() => h.session.open(other)); await settle(8);
+  assert.deepEqual(h.session.saves.map(s => s.kind), ["applyIndex"], "the document's own edit saved on departure");
+  await h.tick(5000);
+  assert.equal(h.session.saves.length, 0, "the Index rename still saved at its deadline");
+  h.session.reset();
+});
+
+test("a restored edit for a document this session never read is admitted against a fresh read", async () => {
+  const h = await harness(); h.session.setFps(object, 7);
+  const draft = decodeStudioDraft(h.session.draftSnapshot()!);
+  h.session.reset(); h.session.restoreDraft(draft); h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); await settle(8);
+  const reads = h.ipc.calls.filter(c => c.cmd === "studio_read").length;
+  await h.session.save();
+  assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_read").length, reads + 1, "admission read the document first");
+  assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_apply").length, 1); assert.equal(h.session.saves.length, 0);
+  h.session.reset();
+  // An unreadable document is refused as not written, never as a possible commit or a history change.
+  h.ipc.on("studio_read", () => { throw new Error("offline"); });
+  h.session.restoreDraft(draft); h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); await settle(8);
+  await assert.rejects(h.session.save());
+  const [refused] = h.session.saves;
+  assert.equal(refused.status, "blocked"); assert.equal(refused.mayHaveCommitted, false);
+  assert.match(refused.error, /could not read this document/); assert.doesNotMatch(refused.error, /history changed/);
+  assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_apply").length, 1, "nothing further was sent");
+  h.session.reset();
+});
+
+// Adversarial re-review: the admission read must not make an unsent edit look like a delivery.
+test("a lock during the admission read restores the edit as unsent, and an unread refusal re-admits on retry", async () => {
+  const h = await harness(); h.session.setFps(object, 7);
+  const restore = (draft: ReturnType<typeof decodeStudioDraft>) => {
+    h.session.reset(); h.session.restoreDraft(draft); h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush();
+  };
+  restore(decodeStudioDraft(h.session.draftSnapshot()!)); await settle(8);
+  const read = deferred<unknown>(); h.ipc.on("studio_read", () => read.promise);
+  void h.session.save().catch(() => {}); await settle(3);
+  assert.deepEqual([h.session.saves[0].status, h.session.saves[0].attempts], ["queued", 0], "reading is not delivering");
+  restore(decodeStudioDraft(h.session.draftSnapshot()!)); await settle(8); // lock lands mid-read
+  const [restored] = h.session.saves;
+  assert.equal(restored.status, "queued"); assert.equal(restored.mayHaveCommitted, false);
+  // Unreadable: refused as not written and not counted as an attempt; reauthor stays available.
+  h.ipc.on("studio_read", () => { throw new Error("offline"); });
+  await assert.rejects(h.session.save());
+  assert.deepEqual([h.session.saves[0].status, h.session.saves[0].attempts], ["blocked", 0]);
+  assert.equal(h.session.canReauthor(h.session.saves[0].id), true);
+  // The document is rotating when it can be read again: the exact retry must read and compare
+  // again, and refuse, rather than skip admission as a repeat delivery.
+  h.ipc.on("studio_read", () => ({ ...h.view(), phase: "closing" }));
+  h.session.retry(h.session.saves[0].id); await settle(8);
+  assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_apply").length, 0, "nothing was sent into a changed history");
+  assert.match(h.session.saves[0].error, /Shared history changed/);
+  h.session.reset();
+});
+
+test("before the Index is read, a restored edit is refused as unread without counting, and its retry is admitted afresh", async () => {
+  const h = await harness(); h.session.setFps(object, 7);
+  const draft = decodeStudioDraft(h.session.draftSnapshot()!);
+  const listing = deferred<unknown>(); h.ipc.on("studio_list", () => listing.promise);
+  h.session.reset(); h.session.restoreDraft(draft); h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); await settle(8);
+  await assert.rejects(h.session.save());
+  const [refused] = h.session.saves;
+  assert.deepEqual([refused.status, refused.attempts, refused.mayHaveCommitted], ["blocked", 0, false]);
+  assert.match(refused.error, /has not read this channel's index/); assert.doesNotMatch(refused.error, /server .* changed/);
+  listing.resolve({ ...ordinaryView(indexContent()), group }); await settle(8);
+  h.ipc.on("studio_read", () => ({ ...h.view(), phase: "closing" })); await h.session.refreshDoc(object);
+  h.session.retry(refused.id); await settle(8);
+  assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_apply").length, 0, "the retry compared the binding and refused");
+  assert.match(h.session.saves[0].error, /Shared history changed/);
+  h.session.reset();
+});
+
+test("an admission read overtaken by a newer read of the document says it was still reading", async () => {
+  const h = await harness(); h.session.setFps(object, 7);
+  const draft = decodeStudioDraft(h.session.draftSnapshot()!);
+  h.session.reset(); h.session.restoreDraft(draft); h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); await settle(8);
+  const reads: ReturnType<typeof deferred<unknown>>[] = [];
+  h.ipc.on("studio_read", () => { const next = deferred<unknown>(); reads.push(next); return next.promise; });
+  const saving = assert.rejects(h.session.save()); await settle(3);
+  h.session.open(object); await settle(3); // the editor's own read supersedes the admission read
+  reads[0].resolve(h.view()); await saving;
+  assert.match(h.session.saves[0].error, /still reading this document/); assert.equal(h.session.saves[0].attempts, 0);
+  reads[1].resolve(h.view()); await settle(8);
+  h.session.retry(h.session.saves[0].id); await settle(8);
+  assert.equal(h.session.saves.length, 0, "the retry admitted against the view that landed");
   h.session.reset();
 });
