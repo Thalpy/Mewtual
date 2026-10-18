@@ -1,5 +1,49 @@
 # Mewtual; Handover
 
+## Score composer surface (2026-10-18)
+
+The Studio's score composer now matches the designed surface instead of the table-based
+stand-in. `ScoreEditor.svelte` renders the native Score as a chromatic step grid (C4..C6 at
+sixteenths, 16 or 32 steps per page depending on the card width) with a tool rail (place, erase,
+audition; keys or pads), a recipe rack fed by the Sound tab's library shelves plus the soundfont
+popup, a transport (page navigation, play/stop, loop toggle, bpm, beats per bar, steps, "+ bar",
+"trim"), an overview strip, and an inspector with patches, score and history tabs; the history tab
+renders Studio's existing history rail through a snippet. Dragging along a row sets a note's hold;
+right-click, the erase tool, Delete and the selected-cell panel clear; placing a note auditions it
+through the existing one-note audition path. Studio's score block lost its own Music/History tab
+bar, loop checkbox and download/share buttons; those live in the composer's header and transport.
+
+Nothing retained is hidden: the grid pages over every live cell, including cells past a shortened
+length, hatches over-cap and past-the-end cells, hollows cells whose recipe is gone, marks
+concurrent values and clears that beat a value, and the score tab's attention list (24 per page,
+alternatives 8 per page) is where a value is re-authored or a coordinate cleared. A chosen recipe
+enables placement only once the working projection holds it (immediately under Gate 7's working
+edits, after native readback otherwise); it never falls back to another recipe. Pure helpers live in
+`score-editor.ts` (`scoreExtent`, `scoreHolds`, `scoreOnsetAt`, `scoreAttention`,
+`scorePlayheadStep` and friends) and are unit-tested beside the compiled component.
+
+The read-only adversarial review found no blocker or high finding. Its mediums are fixed: the
+add-recipe completion no longer fences on the model reference (the working projection replaces it
+synchronously, so the fence could never pass under autosave; target identity is the host's fence),
+Delete/Backspace/arrow keys act only while focus is on the grid card (never from the inspector's
+history rail), recipe names and library membership are memoised per model instead of serialised
+per cell, and the "read back" wording was corrected to "in the working projection". Lows fixed:
+"trim" only shortens, a removed recipe's clear is the highlighted current value, an empty-cell
+audition is clamped to the steps left, a hold whose recipe is gone is hollow along its whole run,
+the page keeps its first step across a 16/32 resize, and the header distinguishes "to review"
+(ready, retained values waiting) from "to fix". Left as follow-ups: the implicit first-recipe
+fallback when nothing was picked (visible in the footer), the host's art hotkeys still moving the
+art tool while a score has focus (view state only), and the loop playhead wrapping at the grid end
+while the release tail still sounds (display only).
+
+Limitations: pads share the 25 pitch rows because jam-score:v1 keys a cell by (step, row) with one
+note or one pad hit; there is no separate drum lane. Removing a recipe in use leaves its cells
+flagged until each is cleared or re-placed. Claims/Ask/Pass are unchanged. Checks run for this
+change: svelte-check, the focused `score-editor` and `studio-surface` files, the complete frontend
+unit suite, the root and native Cargo suites, the production frontend build, and fixture
+screenshots at 1280×800 and 900×640; the startup and flow gates were not run because the change
+touches neither `setup`, process spawning nor the chat/friend-request flows.
+
 ## Gate 7 complete; communication programme next (2026-10-18)
 
 Gate 7 implementation and local acceptance are complete. Studio uses immediate working edits,
