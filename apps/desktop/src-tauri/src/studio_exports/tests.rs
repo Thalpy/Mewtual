@@ -254,7 +254,37 @@ async fn studio_gif_stale_session_and_missing_server_never_write_or_reveal() {
     .await
     .is_err());
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    assert_eq!(
+        unlocked_ui_session_generation(&state).await.unwrap_err(),
+        "the vault is locked",
+        "a changed generation is not an authenticated unlock"
+    );
+    {
+        let _commit = state.ui_session_commit.lock().await;
+        // This fixture already holds an unlocked vault. Explicitly model successful native
+        // authentication before allowing fresh work; never restore authority to the old token.
+        state.ui_authorized_generation.store(
+            state.ui_session_generation.load(Ordering::Acquire),
+            Ordering::Release,
+        );
+    }
     let current = unlocked_ui_session_generation(&state).await.unwrap();
+    assert_ne!(current, generation);
+    assert!(save_gif(
+        &state,
+        12,
+        41,
+        generation,
+        dir.path().to_path_buf(),
+        gif.clone(),
+        &cancellation,
+        || {},
+        std::future::ready(()),
+        |_| panic!("unlock must not revive the old generation")
+    )
+    .await
+    .is_err());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     let result = save_gif(
         &state,
         12,

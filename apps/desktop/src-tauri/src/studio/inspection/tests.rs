@@ -134,8 +134,11 @@ async fn native_studio_inspection_expiring_after_conversion_is_rejected() {
 #[tokio::test]
 async fn native_studio_inspection_original_session_request_and_instance_span_both_visits() {
     let f = InspectionFixture::new(true).await;
-    let state = state(&f).await;
     for mode in 0..3 {
+        // Each fault starts from its own explicitly unlocked test registry, retaining the real
+        // actor/store. Mode 0 retires UI authorization as well as its captured operation; reusing
+        // that registry would refuse the next case before it can exercise the intended fence.
+        let state = state(&f).await;
         let reached = std::cell::Cell::new(false);
         let result = read_with(
             &state,
@@ -177,10 +180,25 @@ async fn native_studio_inspection_original_session_request_and_instance_span_bot
         .await;
         assert!(
             reached.get(),
-            "must rebuild before changing original operation context"
+            "mode {mode} must rebuild before changing original operation context"
         );
-        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            match mode {
+                0 => "Studio request belongs to a locked or changed UI session",
+                1 => "Studio view request was superseded; refresh",
+                _ => "server changed before Studio commit",
+            }
+        );
+        if mode == 0 {
+            assert_eq!(
+                read(&state, fixture::SERVER, f.target).await.unwrap_err(),
+                "the vault is locked",
+                "refusing the stale operation must not authorize a new UI session"
+            );
+        }
     }
+    let state = state(&f).await;
     check(&read(&state, fixture::SERVER, f.target).await.unwrap(), &f);
     f.shutdown().await;
 }
