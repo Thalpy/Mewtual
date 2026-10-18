@@ -1,5 +1,38 @@
 # Mewtual; Handover
 
+## PR #46 fourth review: departure ordering (2026-10-18)
+
+The review of `5bc43d2c` confirmed the rename-context and Index-half fixes, plus 14 extended wiki
+cases and the media separation. It reproduced one new P2: leaving a document released its
+Index-lane records before draining its own lane. The single save worker then took the Index record
+first, so a slow Index receipt held the document's Save and the navigation until the 10 s refusal.
+The departure now drains the document's lane, then releases its Index records without awaiting
+them. The regression keeps the Index receipt pending: navigation completes, the document's Save
+lands first, the Index record stays in flight with its original request, and another document's
+restored work stays held. It fails at `5bc43d2c`.
+
+An adversarial review of the fix found no blocker/high; its medium is that the fix holds only
+while the worker is free. Two changes and a pinned limit follow from it:
+
+- A Save being awaited now goes ahead of other lanes' runnable heads, so an Index record an
+  earlier deadline released can no longer overtake a departure's own record (pinned; it fails
+  without the preference).
+- The post-drain release is skipped across a reset and still happens after a superseded but
+  drained departure, so a drained departure does not split the rename. A refused departure holds
+  its restored Index half for Save/retry (pinned). Overlapping Saves keep a list of active
+  preferences, so one finishing early cannot leave a stale one behind.
+- **Follow-up (pre-existing, pinned as a known limit):** one worker serves every lane, so an Index
+  delivery already running still delays a departure or a Create until it answers or the 10 s
+  refusal. It can come from a deadline, an earlier departure or a sidebar retry. A separate
+  Index-lane worker would remove this; it needs a concurrency design review.
+
+The two disclosed lows (Index recovery record without a held row, the restore toast's page name)
+remain follow-ups.
+
+Checks: frontend 1751/1751, `npm run check` 0 errors, build, 9/9 Edge flows (one earlier run
+failed the debug-console flow on load and passed on rerun), ambient gate, root Rust 2463 passed
+(24 ignored), native 363 passed (both in isolated target directories).
+
 ## PR #46 third review: rename context and Index-half Save (2026-10-18)
 
 The review of `22e4ed77` confirmed the previous three fixes and reproduced two new P2s, both fixed:

@@ -292,11 +292,18 @@ export class StudioSession {
     const current = this.claimNavigation();
     const leaving = this.doc?.object ?? null;
     if (leaving !== null) {
+      const generation = this.generation;
+      await this.saveUntilClear(s => laneOf(s) === leaving);
       // The document's records in the shared Index lane (the Index half of a rename, an expiry)
       // are its work too: send them, but never wait on them. That lane can sit behind another
       // document's held work, and waiting there would bring back the deadlock this scoping removes.
-      this.releaseQueued(true, s => laneOf(s) !== leaving && affectedObject(s) === leaving);
-      await this.saveUntilClear(s => laneOf(s) === leaving);
+      // Released only AFTER the document's own lane drained: there is one save worker across all
+      // lanes, so an Index record released first would take it, and its receipt (which can be slow)
+      // would then gate the document's Save and this navigation after all. Released even if a newer
+      // action superseded this navigation: the document half has been sent, and holding the Index
+      // half back would split the rename. Not across a reset, though (a lock and restore landing in
+      // the resume gap would otherwise release freshly restored work nobody chose to send).
+      if (generation === this.generation) this.releaseQueued(true, s => laneOf(s) !== leaving && affectedObject(s) === leaving);
     }
     if (!current()) return;
     action();
@@ -519,6 +526,7 @@ export class StudioSession {
 
   private clearScoped(): void {
     this.closeHeld = false;
+    this.preferring.length = 0; // every awaited Save of the old scope rejects on the generation change
     this.cancelAutosave?.(); this.cancelAutosave = null; this.eligible.clear();
     this.restoredHeld.clear(); this.editorSnapshot = null;
     this.draftGroup = null;
@@ -1646,8 +1654,18 @@ export class StudioSession {
    * action, and another lane's failure cannot refuse this document's Save. */
   async saveDocument(object: Hex32): Promise<void> { await this.saveCovered(s => affectedObject(s) === object); }
 
+  /** The records each awaited Save is draining, most recent last; pump prefers the most recent
+   * one's (see pump). A list, not one slot: overlapping Saves can finish in any order. */
+  private readonly preferring: ((s: SaveRecord) => boolean)[] = [];
+
   /** `save()` restricted to the records `covers` selects; the rest keep their queue state. */
   private async saveCovered(covers: (s: SaveRecord) => boolean): Promise<void> {
+    this.preferring.push(covers);
+    try { await this.saveCoveredNow(covers); }
+    finally { const at = this.preferring.lastIndexOf(covers); if (at >= 0) this.preferring.splice(at, 1); }
+  }
+
+  private async saveCoveredNow(covers: (s: SaveRecord) => boolean): Promise<void> {
     this.stageDrawing();
     const generation = this.generation, ids = new Set(this.records.filter(covers).map(s => s.id));
     // The shared deadline is cancelled only when every record is being released now. A partial
@@ -1848,16 +1866,22 @@ export class StudioSession {
 
   /// One save at a time, in queue order within each lane (a document, or the Index). An
   /// uncertain, known-not-written or in-flight save blocks later saves of its lane; other lanes proceed.
+  /// Across lanes the next save is the earliest runnable lane head, except that the most recently
+  /// started Save still being awaited (`preferring`) goes first: a departure draining its document must not hand
+  /// the one worker to an Index record released earlier and then wait on that record's receipt.
+  /// Known limit: one worker serves every lane, so a save already running (an Index receipt, say)
+  /// still delays every other lane until it answers.
   private pump(): void {
     if (this.saving) return;
-    const blocked = new Set<string>();
-    let next: SaveEntry | undefined;
+    const seen = new Set<string>(), heads: SaveEntry[] = [];
     for (const s of this.records) {
       const lane = laneOf(s);
-      if (blocked.has(lane)) continue;
-      if (s.status === "queued" && (!this.autosaveMs || this.eligible.has(s.id))) { next = s; break; }
-      blocked.add(lane); // blocked/uncertain (or, defensively, inflight): nothing later runs
+      if (seen.has(lane)) continue;
+      seen.add(lane); // a lane's first record decides it: runnable now, or nothing later runs
+      if (s.status === "queued" && (!this.autosaveMs || this.eligible.has(s.id))) heads.push(s);
     }
+    const preferred = this.preferring.at(-1);
+    const next = (preferred && heads.find(preferred)) || heads[0];
     if (!next) return;
     const token = ++this.workerSeq;
     this.saving = token;
