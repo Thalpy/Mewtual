@@ -13,6 +13,9 @@ reply and pressured declared engine/result composition regressions pass. General
 factories, historical receipts and browser/RTC custody remain unimplemented; live V2 stays disabled.
 Read-only re-review has no remaining blocker/high/medium. Full verification is running; the
 revision ledger records exact checks and limits.
+The next native result-recovery slice has a read-only
+[design checkpoint](communication-recovery/VOICE-NATIVE-RESULTS-NEXT.md); it is planned work,
+including terminal receipts and the IPC/result copy handoff, not live V2 integration.
 Local reconnect and explicit manual redial still use their existing immediate driver ACK paths;
 the driver no longer blocks swarm progress on application delivery. This is not programme acceptance.
 

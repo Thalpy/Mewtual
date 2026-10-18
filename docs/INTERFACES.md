@@ -446,6 +446,7 @@ pub trait MeshTransport: Send + Sync {
     async fn request_connected_cancellable(&self, peer: PeerId, proto: ProtocolId, data: Bytes, cancellation: RequestCancellation) -> Result<Bytes, TransportError>; // fail-closed default
     async fn notify(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<(), TransportError>;
     async fn notify_connected(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<(), TransportError>; // fail-closed default
+    async fn notify_connected_cancellable(&self, peer: PeerId, proto: ProtocolId, data: Bytes, cancellation: RequestCancellation) -> Result<(), TransportError>; // fail-closed default; local ACK, actual lower custody, discard reply
     async fn next_event(&self) -> Option<TransportEvent>;   // single-consumer
     async fn rendezvous_register(&self, namespace:&str, rz_node:&[u8]) -> Result<(),TransportError>;
     async fn rendezvous_discover(&self, namespace:&str, rz_node:&[u8]) -> Result<(),TransportError>;
@@ -464,6 +465,7 @@ pub struct PeerId([u8;32]);   fn from_u64(n)->Self; fn as_bytes()->&[u8;32];
 pub struct Topic(Bytes);      fn new(impl Into<Bytes>)->Self; fn as_bytes()->&[u8];
 pub struct ProtocolId(pub &'static str);
 pub enum TransportEvent {
+    RecoveryNeeded, // coalesced local loss/congestion wake; no remote authority
     Gossip { topic: Topic, from: PeerId, data: Bytes },
     Request { from: PeerId, proto: ProtocolId, data: Bytes, responder: Responder },
     PeerConnected(PeerId),
@@ -479,9 +481,13 @@ pub const MAX_CONNECTION_PATH_SNAPSHOT: usize = 64;
 pub enum ConnectionFamily { Ipv4, Ipv6, Dns, Memory, Unknown }
 pub enum ConnectionTransport { Tcp, QuicV1, WebSocket, CircuitRelay, Memory, Unknown }
 pub enum ConnectionDirection { Dialer, Listener }
-pub struct Responder;  fn respond(self, Bytes);  fn channel() -> (Responder, ResponderRx);
-pub struct ResponderRx; async fn recv(self) -> Option<Bytes>;
-pub enum TransportError { Unreachable(PeerId), Timeout(PeerId), Closed, NoResponse, InvalidDialBatch }
+pub struct Responder;  fn respond(self, Bytes);  fn try_respond(self, Bytes) -> Result<(), TransportError>;
+    fn channel() -> (Responder, ResponderRx);
+    fn channel_owned(SharedRequestKeepalive, Arc<dyn RequestAuthority>, Arc<dyn ResponseBudget>) -> (Responder, ResponderRx);
+pub struct ResponderRx; async fn recv(self) -> Option<Bytes>; async fn recv_owned(self) -> Option<ResponderReply>;
+pub struct ResponderReply; fn data(&self) -> &Bytes; fn keepalive(&self) -> Option<SharedRequestKeepalive>; fn into_bytes(self) -> Bytes;
+pub trait ResponseBudget: Send + Sync + Debug { fn retain(self: Arc<Self>, actual_bytes: usize) -> Result<SharedRequestKeepalive, TransportError>; }
+pub enum TransportError { Unreachable(PeerId), Timeout(PeerId), Closed, Cancelled, NoResponse, InvalidDialBatch }
 pub enum PublishSubmission { Submitted, Duplicate } // local driver/cache evidence, NEVER delivery
 pub enum PublishOnceError { Unsupported, TooLarge, Busy, Closed, NoPeers, QueuesFull, Failed }
 pub trait DialPermit: Send + Debug { fn address(&self)->&str; fn commit_if_current(self:Box<Self>)->Option<String>; }

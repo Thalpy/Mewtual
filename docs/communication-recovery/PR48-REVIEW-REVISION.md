@@ -169,5 +169,27 @@ pressured initiator/responder/browser integration. Branch-wide validation is run
 
 The full frontend suite passes all 1,776 tests (`pr48-full-frontend-test.log`).
 
+The accepted Gate7 cleanup commit `149e7321` was subsequently merged without source conflicts.
+Read-only merge review found no blocker/high/medium; two stale comments were corrected. The
+post-merge frontend suite passes all 1,780 tests, with zero Svelte errors/warnings and a passing
+production build. All nine standard browser flows pass with normal process access; the sandboxed
+attempt failed at CDP Runtime.enable before any application assertion.
+
+The first complete native unit run found three fixture failures (396 passes, three failures,
+zero ignored): inspection fault cases reused an invalidated UI session, and worker/export tests
+treated a generation bump or cleared lock request as authenticated unlock. The newer native
+authorization floor correctly refused those states. Test-only corrections isolate inspection
+cases and explicitly model authenticated fixture unlock under the commit mutex, while proving
+old generations still refuse and actual saved content remains readable/exportable. Production
+checks were not changed. All three focused reruns pass and read-only re-review is clear
+(`pr48-native-{inspection,worker,export}-session-focused.log`). The original failed full log is
+retained as `pr48-full-native-test.log`; the final full repeat is pending.
+
+The initial two-worker root full run was deliberately stopped during storage fixtures to improve
+test throughput on the 24-thread host. It is an aborted run, not passing evidence. The complete
+rerun uses eight test workers and two compiler jobs (`pr48-full-root-test-final.log`); no test
+filters or extra ignores were introduced. Native strict all-target/all-feature Clippy also passes
+after the fixture corrections (`pr48-final-native-clippy.log`).
+
 Full branch suites, native WebView/forced relay/audio acceptance, historical result recovery,
 file durable migration/resume and final combined rollout remain outstanding.
