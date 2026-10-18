@@ -19,6 +19,13 @@ including terminal receipts and the IPC/result copy handoff, not live V2 integra
 Local reconnect and explicit manual redial still use their existing immediate driver ACK paths;
 the driver no longer blocks swarm progress on application delivery. This is not programme acceptance.
 
+Later Gate7 Studio corrections `13e338eb` and `22e4ed77` are also merged. Integration review
+caught and corrected close/no-work and final-microtask navigation gaps, a stale cross-server wiki
+rename target and a stale channel-open sidebar mutation. Exact page-instance and mutation-time
+route checks preserve the original saved work and scope. Red regressions reproduce the defects;
+55 focused Studio/confirmation checks pass and re-review has no blocker/high/medium. The crypto
+retirement test now waits for actual engine/native settlement instead of fixed event-loop turns.
+
 Gate7 commit `4d321fef17514c5080f96d98f01be3e86c375333` is pushed to `origin/Gate7`.
 `chat-update-implementation` was created from that checkpoint and pushed with its upstream.
 The separate [communication ledger](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md) tracks
@@ -162,8 +169,8 @@ and five LOW findings; all are fixed. A re-review found no remaining blocker/hig
 one LOW (the unread-Index path, identical at HEAD) is fixed too. Residual: `leaveServer`/`server-closed` with other servers remaining still go
 through a `switchServer` whose Studio Save can refuse. A frame publication not yet applied is
 still classified as possibly committed if a lock lands mid-publish. `jumpToInbox` does not await
-its channel switch. An absent document holding only queued restored edits shows no Save button
-until a Studio exit's global Save refuses it into retry/discard.
+its channel switch. The absent-document restored-edit Save limitation recorded in this earlier
+round is superseded by the read-error/held-queue controls described in the later re-review above.
 
 ## Gate 7 complete; communication programme next (2026-10-18)
 

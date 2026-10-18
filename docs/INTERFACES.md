@@ -227,7 +227,11 @@ that awaits anything carries its route across the await and asks `leave()` again
 the screen changes, so a response that outlived a newer action is discarded and work drawn
 meanwhile is saved first. Because moving the channel under a mounted Studio ends the lease, a
 composite action changes the surface before the channel. `release()` is `begin().leave()` and
-`leaveThen(go)` runs `go(route)` synchronously when nothing needs saving. A navigation call made
+`leaveThen(go)` runs `go(route)` synchronously when nothing needs saving, only while the claim
+is current and window close is not in progress. Close holds navigation even after all edits have
+saved. A successful awaited Save is a snapshot, not a reservation of the next microtask: both
+the gate's deferred callback and every App continuation recheck current ownership and close
+immediately before changing flags. A navigation call made
 without a route after an await is a new action of its own; `studio-exit-routes.test.ts` lists the
 few such calls (a completed join, leaving a server, channel reconciliation, a lost moderation
 permission) with their reasons, and every other one carries its function's route.
@@ -244,6 +248,13 @@ the committed turn for the requested, still-current request only. Like any newer
 retires other in-flight navigation (a pending sidebar open, a deferred tab change). `openWikiPage`
 resolves `true` only when it opened a page; Rename, Delete and new-page edit mode act only on the
 page their own request opened. No IPC, wire or persistence format changes.
+
+A delayed wiki rename captures the original unlocked server/view generation and exact displayed
+page generation. Clear, successful open (including the same name) and rename reconciliation each
+advance that page identity. Reconciliation may rename only the unchanged original page, even
+when its navigation action has retired; it cannot relabel a replacement page or expose an old
+rename result after lock/server replacement. Channel-open completions likewise check the original
+unlocked scope and current route before adding to the current sidebar or displaying an error.
 
 Studio's editor renders a document's retained requests whatever its read state: with no model
 (read error, absent, still reading), attention records keep their exact retry and armed discard

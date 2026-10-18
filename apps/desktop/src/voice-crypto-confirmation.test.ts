@@ -183,12 +183,27 @@ test("retiring held admission wakes callers but settlement waits for the actual 
   assert.equal((await f.native.admitAction(identity, 1)).kind, "rejected");
 });
 
-test("retirement during an actual engine promise clears the late result without early refund", async () => {
+test("retirement during an actual engine promise clears the late result without early refund", { timeout: 30_000 }, async () => {
   const f = await fixture(), handle = f.register(await f.input()), engine = f.holdEngine();
+  const settleEntered = signal<void>(), settleGate = signal<void>(), settled = signal<void>();
+  const settle = f.native.settleAction;
+  f.native.settleAction = async (...args) => {
+    settleEntered.resolve(); await settleGate.promise;
+    await settle(...args); settled.resolve();
+  };
   const attempt = handle.attempt(); await engine.entered;
+  const charged = f.broker.counts().bytes;
   f.owner.retire(); assert.equal((await attempt).kind, "retired");
   assert.equal(f.broker.counts().active, 1); assert.equal(f.counts().settleCalls, 0);
-  engine.release(); await flush(); await flush();
+  assert.equal(f.broker.counts().bytes, charged);
+  // engineEntered precedes real WebCrypto settlement. Fixed setImmediate turns cannot prove
+  // that external work finished, especially under load. Await the actual native settlement
+  // seam and also prove its pending RPC retains the original byte and active-work charge.
+  engine.release(); await settleEntered.promise;
+  assert.equal(f.broker.counts().active, 1); assert.equal(f.broker.counts().bytes, charged);
+  assert.equal(f.counts().settleCalls, 0);
+  settleGate.resolve(); await settled.promise; await flush();
+  assert.equal(f.counts().settleCalls, 1); assert.equal(f.broker.counts().active, 0);
   assert.equal(f.counts().commitCalls, 0); assert.equal(f.broker.counts().bytes, 0);
   assert.ok(f.result()!.every(value => value === 0));
 });

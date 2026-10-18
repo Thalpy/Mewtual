@@ -148,8 +148,11 @@ admitted epoch/trust route across publication/ticket awaits; only explicit reaut
 
 Normal document, channel, server, surface and window changes await definite Save receipts,
 including a new interrupted stroke drawn while the first revision was saving. Refusal or timeout
-keeps the old editor. Playback/export may use complete validated owned working inputs without
-writing; exact native group/channel/epoch and linked-Score checks still apply. Semantic media
+keeps the old editor. Window close holds routes even after its Save drains, and every awaited navigation
+decision is rechecked in the continuation that changes the screen. Delayed wiki rename results
+also bind an exact displayed-page generation, so a same-name reopen or another server's page
+cannot become the stale write's target. Playback/export may use complete validated owned working
+inputs without writing; exact native group/channel/epoch and linked-Score checks still apply. Semantic media
 generation ignores delivery status and an ACK of identical content, so autosave does not stop
 playback. Data notices are re-read before content comparison; settlement, explicit invalidation,
 membership and lock still revoke playback ownership. A new editor Play begins at frame one.

@@ -191,5 +191,29 @@ rerun uses eight test workers and two compiler jobs (`pr48-full-root-test-final.
 filters or extra ignores were introduced. Native strict all-target/all-feature Clippy also passes
 after the fixture corrections (`pr48-final-native-clippy.log`).
 
-Full branch suites, native WebView/forced relay/audio acceptance, historical result recovery,
-file durable migration/resume and final combined rollout remain outstanding.
+The complete native repeat passes all 404 tests (399 unit plus five command ACL checks), with
+zero ignored (`pr48-full-native-test-final.log`). The normal native build and actual startup
+also pass (`pr48-final-native-build.log`, `pr48-final-native-startup.log`).
+
+Remote Gate7 subsequently advanced with Studio fixes `13e338eb` and `22e4ed77`; merge `74641c13`
+retains both sets of handover notes. Read-only integration review found a stale cross-server wiki
+rename target, close/no-work and final-microtask navigation gaps, and a stale channel-open sidebar
+mutation. These are corrected with exact displayed-page identity, original unlocked scope and
+mutation-time route/close checks. Six regressions fail before correction with the required Svelte
+preload (`pr48-gate7-merge-races-red-corrected-loader.log`); two further continuation checks also
+fail before their correction (`pr48-studio-route-continuation-red.log`). The final 55 focused
+Studio/confirmation checks pass (`pr48-gate7-merge-races-final-focused.log`); re-review is clear.
+The first red attempt omitted the Svelte loader, additionally failing one mounted-editor test;
+that harness failure is excluded from the six reproduced defects.
+
+The first full frontend run after that merge passed 1,811 of 1,812 tests. Its confirmation
+retirement test incorrectly assumed two event-loop turns proved actual WebCrypto completion
+under concurrent Rust test load. The corrected test waits for actual settlement, explicitly
+holds the native settlement RPC and proves the original active/byte charge remains until it
+settles. No broker invariant was weakened and production crypto code is unchanged. Read-only
+review is clear. An intermediate full repeat passes 1,820 tests; final checks after the last
+continuation guards are pending.
+
+Root full verification is still running. Native WebView/forced relay/audio acceptance,
+historical result recovery, file durable migration/resume and final combined rollout remain
+outstanding.

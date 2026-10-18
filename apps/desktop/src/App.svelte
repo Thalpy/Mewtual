@@ -4454,6 +4454,9 @@
   }
   let wikiMeta = $state<Record<string, string>>({}); // name -> "md" | "wiki" (per-page format, shared)
   let activeWikiPage = $state("");
+  // Exact displayed-page identity for delayed writes. A same-name reopen is a replacement too;
+  // server/view generation alone cannot distinguish it from the page an old rename captured.
+  let wikiPageGeneration = 0;
   let wikiBody = $state("");
   let newWikiPage = $state("");
   let wikiDirty = $state(false); // unsaved edits in the open page (avoid clobbering on live updates)
@@ -7017,6 +7020,7 @@
     // switchServer, so the paths that end with no active group (leaving your last server, empty
     // DM-home, locking) kept a page body and its drafts in memory as plaintext.
     activeWikiPage = "";
+    wikiPageGeneration++;
     wikiBody = "";
     wikiDirty = false;
     wikiEdit = false;
@@ -7065,6 +7069,7 @@
   async function switchServer(id: number, committed: () => void = () => {}, route: StudioRoute = studioExit.begin()): Promise<boolean> {
     if (windowCloseInFlight) return false;
     if ((!route.current() || studioHasWork?.()) && !(await route.scope())) return false;
+    if (!route.current() || windowCloseInFlight) return false;
     saveDraftFor(chanKey()); // stash the current channel's draft before switching servers
     const gen = beginViewSwitch(); // everything still in flight for the old group is now stale
     activeServerId = id;
@@ -7223,15 +7228,19 @@
 
   async function addChannel() {
     const name = newChannel.trim().replace(/^#/, "");
-    if (!name || activeServerId === null) return;
+    if (!name || activeServerId === null || windowCloseInFlight) return;
     newChannel = "";
     const route = studioExit.begin(); // a newer action taken while the channel opens wins
+    const gen = viewGeneration, server = activeServerId;
     try {
-      const id = await invoke<string>("open_channel", { server: activeServerId, name });
+      const id = await invoke<string>("open_channel", { server, name });
+      // Opening may finish after switching groups, locking or a newer navigation. Its native
+      // effect belongs to the original server; it must not seed the replacement sidebar.
+      if (!unlockedViewCurrent(gen, server) || !route.current() || windowCloseInFlight) return;
       if (cur && !cur.channels.some((c) => c.id === id)) cur.channels.push({ id, name });
       switchTo(id, false, route);
     } catch (e) {
-      error = String(e);
+      if (unlockedViewCurrent(gen, server) && route.current() && !windowCloseInFlight) error = String(e);
     }
   }
 
@@ -7267,6 +7276,7 @@
     if (windowCloseInFlight) return false;
     if (!cur) return false;
     if ((!route.current() || studioHasWork?.()) && !(await route.scope())) return false;
+    if (!route.current() || windowCloseInFlight) return false;
     saveDraftFor(chanKey()); // stash the current channel's draft before leaving it
     // Channel-scoped content, dropped before the move rather than when the read returns: the
     // group's own state (roster, files, branding) is unchanged by a channel hop and stays put.
@@ -8469,11 +8479,11 @@
   let restoredStudioDraft: string | null = null;
   let studioNavigation = 0;
   // Every route that takes the main pane away from the Studio asks a route from this gate BEFORE it
-  // changes `view`, opens the inbox or enters DM home: `releaseStudio` for a one-step action,
-  // `leaveStudioThen` for a synchronous one, `studioExit.begin()` for an action that awaits more
-  // than its own departure. That last kind carries its route across every await and asks
+  // changes `view`, opens the inbox or enters DM home: `leaveStudioThen` for a synchronous
+  // action, `studioExit.begin()` for an awaiting action. It carries its route across every await and asks
   // `route.leave()` again right before the screen changes (see studio-exit.ts for why a fresh
-  // claim there would be wrong). switchView, switchServer and switchTo take an optional route so
+  // claim there would be wrong), then rechecks currency/close in the mutation's own continuation.
+  // switchView, switchServer and switchTo take an optional route so
   // a composite action stays one owner. studio-exit-routes.test.ts audits this file.
   const studioExit = createStudioExit({
     onStudio: () => view === "studio",
@@ -8491,7 +8501,6 @@
     },
     exhausted: () => { if (!locked) toast("The Studio kept changing while it saved. Try again once you stop drawing.", "warn", 6000); },
   });
-  const releaseStudio = studioExit.release;
   const leaveStudioThen = studioExit.leaveThen;
   async function loadStudio() {
     if ((StudioSurface && StudioNav) || studioLoading) return;
@@ -8587,7 +8596,7 @@
       const page = el.getAttribute("data-wikilink") ?? "";
       if (page) {
         const route = studioExit.begin();
-        if (!(await route.leave())) return;
+        if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
         view = "wiki";
         await openWikiPage(page, {}, route);
       }
@@ -9281,7 +9290,8 @@
     saveDraftFor(chanKey());
     // The text is already in this channel's draft, so a refused Studio Save loses nothing: the
     // member stays with the work Save could not confirm and finds the text in Chat later.
-    if (!(await releaseStudio())) return;
+    const route = studioExit.begin();
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
     view = "chat";
     await tick();
     composerEl?.focus();
@@ -9497,10 +9507,10 @@
   // changes nothing. The topic editor and the search open only once the move landed.
   async function editTopicOf(id: string) {
     const route = studioExit.begin();
-    if (!(await route.leave())) return;
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
     if (view === "studio") view = "chat";
     if (cur?.active !== id && !(await switchTo(id, false, route))) return; // never edit the channel left on screen
-    if (!(await route.leave())) return;
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
     view = "chat";
     await tick();
     if (!route.current()) return;
@@ -9509,10 +9519,10 @@
   }
   async function searchInChannel(id: string) {
     const route = studioExit.begin();
-    if (!(await route.leave())) return;
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
     if (view === "studio") view = "chat";
     if (cur?.active !== id && !(await switchTo(id, false, route))) return;
-    if (!(await route.leave())) return;
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
     view = "chat";
     openSearch();
   }
@@ -9996,7 +10006,7 @@
   /// redirect may have changed). A continuation that acts on "the open page" (rename, delete,
   /// edit) must check that, or a retired request would arm it on whatever page is still shown.
   async function openWikiPage(name: string, opts: { noRedirect?: boolean } = {}, route: StudioRoute = studioExit.begin()): Promise<boolean> {
-    if (!(await route.leave())) return false;
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return false;
     const gen = viewGeneration;
     const server = activeServerId;
     if (server === null) return false;
@@ -10019,7 +10029,7 @@
       }
       // The same action, asked again (never a fresh claim, which would revive a retired request);
       // a superseded response is discarded here, before it can replace the screen.
-      if (!(await route.leave())) return false;
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return false;
       // The whole point of the guard: without it this page's text lands in the editor of whatever
       // server you moved to, and because that server's wikiPages lacks the name it opens in EDIT
       // mode, one Ctrl+S from publishing one server's wiki content into another's.
@@ -10027,6 +10037,7 @@
       wikiRedirectedFrom = from;
       wikiBody = body;
       activeWikiPage = name;
+      wikiPageGeneration++;
       wikiDirty = false;
       wikiRenaming = false;
       wikiDeleteArmed = false;
@@ -10078,15 +10089,26 @@
     // One action: if the member moved on while the rename and the page list ran, the renamed page
     // does not pull them back (the rename itself has landed and the toast still says so).
     const route = studioExit.begin(), from = activeWikiPage;
+    const gen = viewGeneration, server = activeServerId, pageGeneration = wikiPageGeneration;
+    // A retired navigation can still reconcile the exact original page's new name. It cannot
+    // adopt a same-name page opened later, another server or an authenticated replacement session.
+    const ownsPage = () => unlockedViewCurrent(gen, server) && !windowCloseInFlight &&
+      wikiPageGeneration === pageGeneration && activeWikiPage === from;
     try {
-      await invoke("rename_wiki_page", { server: activeServerId, from, to });
+      await invoke("rename_wiki_page", { server, from, to });
+      if (!ownsPage()) return;
       await refreshWiki();
+      if (!ownsPage()) return;
       // A retired open leaves the pane on a name that no longer exists, where Edit and Save would
-      // recreate the old page. The renamed page has the same body, so point the pane at it.
-      if (!(await openWikiPage(to, { noRedirect: true }, route)) && activeWikiPage === from) activeWikiPage = to;
-      toast(`Renamed to "${to}" · links to the old name go red`, "ok", 5000);
+      // recreate the old page. Reconcile only the unchanged original page, preserving local edits.
+      if (!(await openWikiPage(to, { noRedirect: true }, route))) {
+        if (!ownsPage()) return;
+        activeWikiPage = to;
+        wikiPageGeneration++;
+      }
+      if (unlockedViewCurrent(gen, server) && !windowCloseInFlight) toast(`Renamed to "${to}" · links to the old name go red`, "ok", 5000);
     } catch (e) {
-      toast(`Rename failed: ${e}`, "err", 9000);
+      if (unlockedViewCurrent(gen, server) && !windowCloseInFlight) toast(`Rename failed: ${e}`, "err", 9000);
     }
   }
 
@@ -12231,7 +12253,7 @@
       toast("Announcements are a server noticeboard; a DM does not have one", "info", 3500);
       return;
     }
-    if (!(await route.leave())) return; // nor through switchView's Studio Save, so it runs its own
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return; // nor through switchView's Studio Save, so it runs its own
     view = "status";
     void refreshStatusPolicy(); // this route reaches the surface without going through switchView
     if (!statuses.some((s) => s.id === id)) await refreshStatuses();
@@ -12414,7 +12436,7 @@
       inboxView = false;
       // A refused or superseded switch leaves another server on screen; never jump within it.
       if (!(await arriveAtServer(it.server, route))) return;
-      if (!(await route.leave())) return; // the switch awaited the server's load
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return; // the switch awaited the server's load
       view = "chat";
       // The entry's channel was scanned (so it's open in the backend) but may not be in this UI's
       // sidebar list: register it so it renders + selects, then switch to it.
@@ -19910,7 +19932,7 @@
     try {
       // One action from first step to last: each step after an await asks the same route again.
       const route = studioExit.begin();
-      if (!(await route.leave())) return false;
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return false;
       if (loc.area === "inbox") {
         openInbox();
         return (applied = true);
@@ -19927,13 +19949,13 @@
         // included: Back from the Studio to a chat in another channel would otherwise move the
         // channel and then find itself retired before showing it. From anywhere else the channel
         // moves first, so a refused move changes nothing on screen.
-        if (!(await route.leave())) return false;
+        if (!(await route.leave()) || !route.current() || windowCloseInFlight) return false;
         const fromStudio = view === "studio";
         if (fromStudio) switchView("chat", route);
         if (loc.channel && cur?.active !== loc.channel && !(await switchTo(loc.channel, false, route))) return false;
         if (!fromStudio) switchView("chat", route);
       } else if (loc.view === "wiki" && loc.page) {
-        if (!(await route.leave())) return false; // the server switch awaited its load
+        if (!(await route.leave()) || !route.current() || windowCloseInFlight) return false; // the server switch awaited its load
         menu = null;
         view = "wiki";
         // Awaited, not left to switchView: openWikiPage reads the page list to decide read vs
@@ -20068,7 +20090,7 @@
     try {
       const route = studioExit.begin();
       if (!(await arriveAtServer(server, route))) return;
-      if (!(await route.leave())) return; // the switch awaited the server's load
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return; // the switch awaited the server's load
       menu = null;
       view = "wiki";
       await refreshWiki();
@@ -20083,7 +20105,7 @@
       const route = studioExit.begin();
       inboxView = false;
       if (!(await arriveAtServer(server, route))) return;
-      if (!(await route.leave())) return;
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
       view = "chat";
       // A channel update can arrive before its channel-list event. Register a readable fallback
       // so the click can still land instead of silently selecting an absent sidebar entry.
@@ -20373,7 +20395,7 @@
     try {
       // Save the Studio first; switchView's own deferred Save would otherwise race switchTo's.
       const route = studioExit.begin();
-      if (!(await route.leave())) return;
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
       switchView("chat", route);
       await switchTo(channel, false, route);
     } finally {
