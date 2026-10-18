@@ -127,6 +127,7 @@
   } from "./deck-players";
   import { soundcloudDeckUrl } from "./providers-audio";
   import { StudioAudioSession, type StudioAudioActions, type StudioAudioState } from "./studio-audio.ts";
+  import { createStudioExit } from "./studio-exit.ts";
   import { vimeoFrameUrl } from "./providers-video";
   import {
     CLOCK_SKEW_GRACE_MS, NO_READ_MARK, chatIsObserved, effectiveTs, readCeiling, readChannelChange,
@@ -682,9 +683,10 @@
     if (target === "dms") enterDmHome();
     else if (target === "inbox") openInbox();
     else if (target === "news") {
-      openInbox();
-      inboxMode = "news";
-      loadNews();
+      openInbox(() => {
+        inboxMode = "news";
+        loadNews();
+      });
     } else if (target === "quick") openQuickSwitch();
     else if (target === "space" && !spaceOpen) toggleSpace();
     else if (target === "feedback") showFeedback = true;
@@ -701,13 +703,22 @@
   }
 
   function openServerSettings(id: number | null = null, page: string = serverSettingsPage) {
+    if (id !== null && id !== activeServerId) {
+      // With nothing for the Studio to save, switchServer runs synchronously as far as its first
+      // await, so `cur` below already names the target. It also empties `livery` on the way past
+      // and refills it a round-trip later, which is why the editor draft is seeded from
+      // liveryLoaded rather than from `livery` directly. When the Studio must save first the
+      // switch has NOT happened yet, and seeding now would show (and Rename) the server being left;
+      // a refused Save keeps that server for good. Open the dialog in the turn the switch commits
+      // (never after B's whole load, by when the member may already be editing a dialog of their
+      // own that a late re-entry would re-seed); a refused or superseded switch never commits.
+      let deferred = false;
+      void switchServer(id, () => { if (deferred && activeServerId === id) openServerSettings(id, page); });
+      if (activeServerId !== id) { deferred = true; return; }
+    }
     communicationMode = null;
     communicationModeError = "";
     const targetServer = id ?? activeServerId;
-    // switchServer runs synchronously as far as its first await, so `cur` below already names the
-    // target. It also empties `livery` on the way past and refills it a round-trip later, which is
-    // why the editor draft is seeded from liveryLoaded rather than from `livery` directly.
-    if (id !== null && id !== activeServerId) void switchServer(id);
     serverNameDraft = cur ? serverLabel(cur) : "";
     // Seeded from the published name only; an unread livery seeds nothing, for the same reason
     // the colour draft does not. Publishing an empty name would clear the group's name for
@@ -1505,14 +1516,17 @@
     melodySeq = [];
   }
   function beginVaultSecretChange() {
-    showSettings = false;
-    error = "";
-    vaultChangeCurrent = "";
-    vaultChangeFirst = "";
-    vaultChangeMismatch = false;
-    vaultChangeError = "";
-    vaultChangeStep = "current";
-    clearUnlockEntry();
+    // The vault-change screen replaces the whole layout, so beginning it takes the Studio off screen.
+    leaveStudioThen(() => {
+      showSettings = false;
+      error = "";
+      vaultChangeCurrent = "";
+      vaultChangeFirst = "";
+      vaultChangeMismatch = false;
+      vaultChangeError = "";
+      vaultChangeStep = "current";
+      clearUnlockEntry();
+    });
   }
   function cancelVaultSecretChange() {
     vaultChangeCurrent = "";
@@ -1581,6 +1595,7 @@
       vaultChangeFirst = "";
       vaultChangeMismatch = false;
       vaultChangeError = `The vault secret was not changed: ${e}`;
+      // studio-exit: forced edge (not an exit: the vault change already left the Studio as it began)
       vaultChangeStep = "current";
       clearUnlockEntry();
     } finally {
@@ -3196,7 +3211,7 @@
   async function goToHit(h: SearchHit, pos: number) {
     searchPos = pos;
     if (cur && h.ch !== cur.active) {
-      await switchTo(h.ch, true);
+      if (!(await switchTo(h.ch, true))) return; // a refused move must not jump in the channel left on screen
       if (h.m.id) jumpToMessageId(h.m.id);
       else void scrollToMatch(h.idx); // a legacy message has no id: its index still holds
       return;
@@ -3281,7 +3296,7 @@
   let quickItems = $derived.by(() => {
     const out: QuickItem[] = [];
     for (const c of cur?.channels ?? []) {
-      out.push({ label: `#${c.name}`, hint: "channel", run: () => { switchTo(c.id); view = "chat"; } });
+      out.push({ label: `#${c.name}`, hint: "channel", run: () => leaveStudioThen(() => { switchTo(c.id); view = "chat"; }) });
     }
     if (cur) {
       for (const s of QUICK_SURFACES) out.push({ label: s.label, hint: "surface", run: () => switchView(s.tab) });
@@ -5643,9 +5658,13 @@
     navStepStart(); // the server hop and the surface hop are one move, not two
     inboxView = false;
     switchServer(n.server)
-      .then(() => switchView(n.kind === "event" ? "events" : "status"))
-      // The row named one post, so land on it rather than on the feed it sits somewhere in.
-      .then(() => (n.kind === "status" && n.id ? openStatusRef(n.id) : undefined))
+      .then((switched) => {
+        // A refused or superseded switch leaves another server on screen: its feed is not this row's.
+        if (!switched || activeServerId !== n.server) return;
+        switchView(n.kind === "event" ? "events" : "status");
+        // The row named one post, so land on it rather than on the feed it sits somewhere in.
+        return n.kind === "status" && n.id ? openStatusRef(n.id) : undefined;
+      })
       .finally(navStepEnd);
   }
 
@@ -6447,13 +6466,15 @@
     if (studioCaptureError) error = studioCaptureError;
     servers = [];
     beginViewSwitch(); // a read still in flight must not land behind the lock
+    // studio-exit: forced edge. Lock does not ask the Studio to save: studioSnapshot() above
+    // captured its retained queue and it is restored after unlock.
     activeServerId = null;
     dmHome = false;
     inboxView = false;
     // One definition of "every window onto a group's contents", not two that drift. The hand-rolled
     // list here used to miss the sanitized message-render cache and wikiMap, both of which hold
     // plaintext, along with roles, livery, badges and the rest.
-    clearServerView();
+    clearServerView(); // studio-exit: forced edge (lock, as above)
     inboxItems = [];
     newsItems = [];
     serverIcons = {};
@@ -6473,7 +6494,7 @@
     embedAutoLoad = false; // a locked app contacts nobody on its own; unlock re-reads the answer
     embedGrants.clear();
     pendingStatusMarks.clear(); // and a mark still waiting on hydration is not replayed behind a lock
-    uiStateReady = false;
+    uiStateReady = false; // studio-exit: forced edge (lock; the Studio queue was snapshotted above)
     uiStateSaveFailed = false;
     uiStateLoadGeneration += 1;
     clearTimeout(uiStateSaveTimer);
@@ -6481,7 +6502,7 @@
     revealPassphrase = false; // never leave a lock screen showing the next thing typed into it
     error = "";
     syncIntent = false;
-    locked = true;
+    locked = true; // studio-exit: forced edge (lock, as above)
   }
 
   async function found() {
@@ -6863,22 +6884,25 @@
   // Open the DMs area (the friends/DM list); land on the first DM if there is one, else an empty
   // DM-home (no active group) ready for a New DM / Add friend.
   function enterDmHome() {
-    dmHome = true;
-    inboxView = false;
-    menu = null;
-    showNewDm = false;
-    showAddFriend = false;
-    refreshDmStats();
-    if (dmList.length) {
-      // Sequenced, not raced: switchServer merges the target DM's own requests in, so running the
-      // cross-server aggregate first would have it replaced or not depending on IPC timing.
-      void switchServer(dmList[0].id).then(refreshAllDmRequests);
-    } else {
-      refreshAllDmRequests();
-      beginViewSwitch();
-      activeServerId = null;
-      clearServerView(); // no active group: drop the previous server's stale messages/roster/etc.
-    }
+    // DM home with no DM clears the active group, which takes the Studio off screen.
+    leaveStudioThen(() => {
+      dmHome = true;
+      inboxView = false;
+      menu = null;
+      showNewDm = false;
+      showAddFriend = false;
+      refreshDmStats();
+      if (dmList.length) {
+        // Sequenced, not raced: switchServer merges the target DM's own requests in, so running the
+        // cross-server aggregate first would have it replaced or not depending on IPC timing.
+        void switchServer(dmList[0].id).then(refreshAllDmRequests);
+      } else {
+        refreshAllDmRequests();
+        beginViewSwitch();
+        activeServerId = null;
+        clearServerView(); // no active group: drop the previous server's stale messages/roster/etc.
+      }
+    });
   }
   // Reset every collection the panes render for the active group, synchronously. Called when there
   // is no active group (the empty DM-home placeholder) and at the top of every switch: without it
@@ -7008,14 +7032,27 @@
     dmInvite = "";
   }
 
-  async function switchServer(id: number) {
-    if (windowCloseInFlight) return;
+  /// For composite routes ("go to that server, then act there"): true only when `server` is the one
+  /// on screen afterwards, because it already was or because the switch committed and still holds.
+  async function arriveAtServer(server: number): Promise<boolean> {
+    return server === activeServerId || ((await switchServer(server)) && activeServerId === server);
+  }
+  /// Resolves false when the switch never happened: the window is closing, the Studio's Save
+  /// refused, or a newer navigation superseded it. A caller with a continuation (open that server's
+  /// settings, jump to a message there) must check it; carrying on after a refusal acts on the
+  /// server still on screen. True means the switch committed (`activeServerId` was set to `id`),
+  /// even if a later switch has since replaced it, so callers that care also compare
+  /// `activeServerId`. It resolves only after the new server's batch read; `committed` runs in the
+  /// turn the switch commits, once that read has started and before it is awaited. With no Studio
+  /// work that is the call's own synchronous prefix, which openServerSettings relies on.
+  async function switchServer(id: number, committed: () => void = () => {}): Promise<boolean> {
+    if (windowCloseInFlight) return false;
     const studioRequest = ++studioNavigation;
     const studioGeneration = uiStateLoadGeneration;
     const studioCurrent = studioClaimNavigation?.() ?? (() => true);
     if (studioHasWork?.()) {
-      if (!(await saveStudioForNavigation(studioRequest))) return;
-      if (studioRequest !== studioNavigation || studioGeneration !== uiStateLoadGeneration || locked || !studioCurrent()) return;
+      if (!(await saveStudioForNavigation(studioRequest))) return false;
+      if (studioRequest !== studioNavigation || studioGeneration !== uiStateLoadGeneration || locked || !studioCurrent()) return false;
     }
     saveDraftFor(chanKey()); // stash the current channel's draft before switching servers
     const gen = beginViewSwitch(); // everything still in flight for the old group is now stale
@@ -7088,7 +7125,7 @@
     // `all`, one rejection abandoned the rest of this function, and the panes it had not reached
     // yet kept their loading claim for the rest of the session: a roster that never stopped saying
     // "Loading members…" on a server that had plenty of them.
-    await Promise.allSettled([
+    const batch = Promise.allSettled([
       messages,
       refreshMembers(),
       refreshProfiles(),
@@ -7106,7 +7143,10 @@
       refreshWikiPages(),
       refreshFileSizeLimit(),
     ]);
-    if (!viewCurrent(gen, id)) return; // moved on while this group was loading
+    // Exactly the state a synchronous caller saw before this hook existed: committed, reads begun.
+    committed();
+    await batch;
+    if (!viewCurrent(gen, id)) return true; // committed, then moved on while this group was loading
     groupLoading = false;
     messagesLoading = false; // already false unless the messages read itself failed
     syncProfileEditor();
@@ -7114,6 +7154,7 @@
     // badges right for a server whose directory was still a stub when the session started, and for
     // anything that arrived in a channel this session has never opened.
     void rebuildUnread(id);
+    return true;
   }
 
   // Populate the Profile tab's editor from this member's own saved profile (so the tab shows
@@ -7161,8 +7202,10 @@
       if (servers.length) switchServer(servers[0].id);
       else {
         beginViewSwitch();
+        // studio-exit: forced edge. Membership already ended above, so this is not a navigation
+        // the member can be held back from to finish a Studio Save.
         activeServerId = null;
-        clearServerView(); // leaving the last one must not leave its messages on screen
+        clearServerView(); // studio-exit: forced edge. Leaving the last one must not leave its messages on screen
       }
     }
   }
@@ -7203,16 +7246,18 @@
   }
 
   // `keepSearch` is set when the search itself is driving the move (jumping to a hit in another
-  // channel): everything else closes the search bar, as before.
-  async function switchTo(id: string, keepSearch = false) {
-    if (windowCloseInFlight) return;
-    if (!cur) return;
+  // channel): everything else closes the search bar, as before. Resolves false when the channel
+  // never changed (no server, window closing, Studio Save refused or superseded), exactly as
+  // switchServer does; a caller that goes on to jump or edit there must check it.
+  async function switchTo(id: string, keepSearch = false): Promise<boolean> {
+    if (windowCloseInFlight) return false;
+    if (!cur) return false;
     const studioRequest = ++studioNavigation;
     const studioGeneration = uiStateLoadGeneration;
     const studioCurrent = studioClaimNavigation?.() ?? (() => true);
     if (studioHasWork?.()) {
-      if (!(await saveStudioForNavigation(studioRequest))) return;
-      if (studioRequest !== studioNavigation || studioGeneration !== uiStateLoadGeneration || locked || !studioCurrent()) return;
+      if (!(await saveStudioForNavigation(studioRequest))) return false;
+      if (studioRequest !== studioNavigation || studioGeneration !== uiStateLoadGeneration || locked || !studioCurrent()) return false;
     }
     saveDraftFor(chanKey()); // stash the current channel's draft before leaving it
     // Channel-scoped content, dropped before the move rather than when the read returns: the
@@ -7240,6 +7285,7 @@
     await refresh(); // awaited so a search jump can address the target channel's loaded messages
     refreshTopic();
     refreshDelivery();
+    return true;
   }
 
   // The active channel's topic (a shared LWW scalar in the channel doc; any member may set it).
@@ -8419,6 +8465,25 @@
     try { await studioSave?.(); return request === studioNavigation && generation === uiStateLoadGeneration && !locked; }
     catch (e) { if (!locked) toast(String(e), "err", 6000); return false; }
   }
+  // Every route that takes the main pane away from the Studio passes through `releaseStudio`, or its
+  // synchronous form `leaveStudioThen`, BEFORE it changes `view`, opens the inbox or enters DM home.
+  // Studio's onDestroy cannot veto anything (see studio-exit.ts). switchView, switchServer and
+  // switchTo run the same awaited Save inline; studio-exit-routes.test.ts audits this file for a
+  // route assignment that skips all of them.
+  const studioExit = createStudioExit({
+    onStudio: () => view === "studio",
+    hasWork: () => studioHasWork?.() ?? false,
+    closing: () => windowCloseInFlight,
+    claim: () => {
+      const request = ++studioNavigation, generation = uiStateLoadGeneration;
+      const current = studioClaimNavigation?.() ?? (() => true);
+      return () => request === studioNavigation && generation === uiStateLoadGeneration && !locked && current();
+    },
+    // Called straight after claim(), so the counter it reads is this route's own request.
+    save: () => saveStudioForNavigation(studioNavigation),
+  });
+  const releaseStudio = studioExit.release;
+  const leaveStudioThen = studioExit.leaveThen;
   async function loadStudio() {
     if ((StudioSurface && StudioNav) || studioLoading) return;
     studioLoading = true;
@@ -8513,6 +8578,7 @@
       e.preventDefault();
       const page = el.getAttribute("data-wikilink") ?? "";
       if (page) {
+        if (!(await releaseStudio())) return;
         view = "wiki";
         await openWikiPage(page);
       }
@@ -9204,6 +9270,9 @@
   async function appendToDraft(text: string) {
     draft = draft ? `${draft} ${text}` : text;
     saveDraftFor(chanKey());
+    // The text is already in this channel's draft, so a refused Studio Save loses nothing: the
+    // member stays with the work Save could not confirm and finds the text in Chat later.
+    if (!(await releaseStudio())) return;
     view = "chat";
     await tick();
     composerEl?.focus();
@@ -9327,9 +9396,11 @@
     return items;
   }
   function mentionInComposer(fp: string) {
-    insertTarget = "chat";
-    view = "chat";
-    insertAtCaret(`@[${mentionName(nameOf(fp))}] `);
+    leaveStudioThen(() => {
+      insertTarget = "chat";
+      view = "chat";
+      insertAtCaret(`@[${mentionName(nameOf(fp))}] `);
+    });
   }
 
   function fileMenu(f: UiFile): MenuItem[] {
@@ -9412,14 +9483,16 @@
     ];
   }
   async function editTopicOf(id: string) {
-    if (cur?.active !== id) await switchTo(id);
+    if (!(await releaseStudio())) return;
+    if (cur?.active !== id && !(await switchTo(id))) return; // never edit the channel left on screen
     view = "chat";
     await tick();
     topicDraft = channelTopic;
     editingTopic = true;
   }
   async function searchInChannel(id: string) {
-    if (cur?.active !== id) await switchTo(id);
+    if (!(await releaseStudio())) return;
+    if (cur?.active !== id && !(await switchTo(id))) return;
     view = "chat";
     openSearch();
   }
@@ -9574,7 +9647,7 @@
       { label: "Quote in reply", icon: "quote", onSelect: () => appendToDraft(m ? `> ${nameOf(m.author)}: ${trimmed}` : `> ${trimmed}`) },
     ];
     if (activeServerId !== null && cur) {
-      items.push({ label: "Search for it", icon: "search", onSelect: () => { view = "chat"; openSearch(); searchQuery = trimmed; } });
+      items.push({ label: "Search for it", icon: "search", onSelect: () => leaveStudioThen(() => { view = "chat"; openSearch(); searchQuery = trimmed; }) });
     }
     items.push(...rowActions(el));
     return items;
@@ -9695,7 +9768,7 @@
       const page = el.getAttribute("data-wikilink") ?? "";
       openMenu(e, [
         { head: true, kind: "wiki", title: page },
-        { label: "Open page", icon: "ext", onSelect: () => { view = "wiki"; openWikiPage(page); } },
+        { label: "Open page", icon: "ext", onSelect: () => leaveStudioThen(() => { view = "wiki"; openWikiPage(page); }) },
         { label: "Post link to chat", icon: "reply", onSelect: () => appendToDraft(`[[${page}]]`) },
         { label: "Copy link", icon: "link", onSelect: () => copyText(`[[${page}]]`) },
         ...rowActions(el),
@@ -9896,6 +9969,8 @@
   // a [[link]] away from a half-edited page stashes the draft; coming back restores it.
   const wikiDrafts = new Map<string, string>();
   async function openWikiPage(name: string, opts: { noRedirect?: boolean } = {}) {
+    // Some callers reach here straight from a surface; this sets `view = "wiki"` further down.
+    if (!(await releaseStudio())) return;
     const gen = viewGeneration;
     const server = activeServerId;
     if (server === null) return;
@@ -12118,6 +12193,7 @@
       toast("Announcements are a server noticeboard; a DM does not have one", "info", 3500);
       return;
     }
+    if (!(await releaseStudio())) return; // nor through switchView's Studio Save, so it runs its own
     view = "status";
     void refreshStatusPolicy(); // this route reaches the surface without going through switchView
     if (!statuses.some((s) => s.id === id)) await refreshStatuses();
@@ -12275,15 +12351,20 @@
   function inboxChannelName(it: InboxEntry): string {
     return servers.find((s) => s.id === it.server)?.channels.find((c) => c.id === it.channel)?.name ?? "channel";
   }
-  function openInbox() {
-    inboxView = true;
-    dmHome = false;
-    if (newsUnseen) {
-      inboxMode = "news";
-      newsUnseen = false;
-      loadNews();
-    }
-    loadInbox();
+  /// The inbox replaces the main pane, so opening it takes the Studio off screen. `then` runs only
+  /// once the inbox actually opened (never after a refused Studio Save).
+  function openInbox(then: () => void = () => {}) {
+    leaveStudioThen(() => {
+      inboxView = true;
+      dmHome = false;
+      if (newsUnseen) {
+        inboxMode = "news";
+        newsUnseen = false;
+        loadNews();
+      }
+      loadInbox();
+      then();
+    });
   }
   // Open the server + channel an inbox entry points at and scroll to the message.
   async function jumpToInbox(it: InboxEntry) {
@@ -12292,7 +12373,9 @@
     navStepStart();
     try {
       inboxView = false;
-      if (it.server !== activeServerId) await switchServer(it.server);
+      // A refused or superseded switch leaves another server on screen; never jump within it.
+      if (!(await arriveAtServer(it.server))) return;
+      if (!(await releaseStudio())) return;
       view = "chat";
       // The entry's channel was scanned (so it's open in the backend) but may not be in this UI's
       // sidebar list: register it so it renders + selects, then switch to it.
@@ -16718,7 +16801,8 @@
    * a question nobody asked.
    */
   async function openCallDiagnostics() {
-    if (callServer !== null && callServer !== activeServerId) await switchServer(callServer);
+    // A refused switch would otherwise open the report of the server left on screen.
+    if (callServer !== null && !(await arriveAtServer(callServer))) return;
     void refreshCallTransport();
     void refreshConnectivity();
     switchView("connectivity");
@@ -19716,21 +19800,27 @@
 
   // Put the app back at a recorded place. Order matters: switching group resets the surface, the
   // wiki page and the folder, so the group has to land first.
-  async function applyLoc(loc: Loc) {
+  // Resolves false when a refusal (a Studio Save that could not confirm) stopped it part way, rather
+  // than landing the rest of the recorded place on whatever server or channel is still on screen.
+  // `refused` runs before recording resumes, so the cursor can be put back first.
+  async function applyLoc(loc: Loc, refused: () => void = () => {}): Promise<boolean> {
     navApplying = true;
+    let applied = false;
     try {
+      // Asked once, first: every step below then finds the Studio already saved (or off screen).
+      if (!(await releaseStudio())) return false;
       if (loc.area === "inbox") {
         openInbox();
-        return;
+        return (applied = true);
       }
       if (loc.area === "dms") {
         enterDmHome();
-        return;
+        return (applied = true);
       }
       inboxView = false;
-      if (loc.server !== null && loc.server !== activeServerId) await switchServer(loc.server);
+      if (loc.server !== null && !(await arriveAtServer(loc.server))) return false;
       if (loc.view === "chat") {
-        if (loc.channel && cur?.active !== loc.channel) await switchTo(loc.channel);
+        if (loc.channel && cur?.active !== loc.channel && !(await switchTo(loc.channel))) return false;
         switchView("chat"); // switchTo moves the channel; the surface is this call's job
       } else if (loc.view === "wiki" && loc.page) {
         menu = null;
@@ -19743,7 +19833,11 @@
         if (loc.view === "files") folder = loc.folder;
         switchView(loc.view);
       }
+      return (applied = true);
     } finally {
+      // While navApplying is still set: the recording effect runs as soon as it drops, and must not
+      // see the cursor on an entry this walk never reached.
+      if (!applied) refused();
       await tick(); // let the effect see the applied state before recording resumes
       navApplying = false;
     }
@@ -19753,14 +19847,20 @@
   // in flight just moves the cursor again, and the drain picks up wherever it ended: mashing the
   // thumb button walks the trail rather than being swallowed one press at a time.
   function navGo(i: number) {
+    const from = navAt;
     navAt = i;
     if (navApplying) return;
-    void navDrain();
+    void navDrain(from);
   }
-  async function navDrain() {
+  /** `from` is the entry on screen when the walk began. A refused step puts the cursor back on the
+   * last entry actually reached; left on the refused one, the recording effect would append the
+   * place still on screen after it and drop the forward trail. */
+  async function navDrain(from: number) {
     let target: Loc | null = navStack[navAt] ?? null;
     while (target) {
-      await applyLoc(target);
+      const at = navAt, back = from;
+      if (!(await applyLoc(target, () => { navAt = back; }))) return;
+      from = at;
       const landed: Loc | null = navStack[navAt] ?? null;
       target = landed && !sameLoc(landed, target) ? landed : null;
     }
@@ -19845,7 +19945,7 @@
   async function goSurface(server: number, v: Tab) {
     navStepStart();
     try {
-      if (server !== activeServerId) await switchServer(server);
+      if (!(await arriveAtServer(server))) return; // never open the item's surface on another server
       switchView(v);
     } finally {
       navStepEnd();
@@ -19854,7 +19954,8 @@
   async function goWikiPage(server: number, page: string) {
     navStepStart();
     try {
-      if (server !== activeServerId) await switchServer(server);
+      if (!(await arriveAtServer(server))) return;
+      if (!(await releaseStudio())) return;
       menu = null;
       view = "wiki";
       await refreshWiki();
@@ -19867,14 +19968,15 @@
     navStepStart();
     try {
       inboxView = false;
-      if (server !== activeServerId) await switchServer(server);
+      if (!(await arriveAtServer(server))) return;
+      if (!(await releaseStudio())) return;
       view = "chat";
       // A channel update can arrive before its channel-list event. Register a readable fallback
       // so the click can still land instead of silently selecting an absent sidebar entry.
       if (cur && !cur.channels.some((c) => c.id === channel)) {
         cur.channels = [...cur.channels, { id: channel, name: channelNameFor(server, channel) }];
       }
-      if (cur?.active !== channel) await switchTo(channel);
+      if (cur?.active !== channel) { if (!(await switchTo(channel))) return; }
       else await refresh();
       jumpToMessageId(messageId);
     } finally {
@@ -20155,6 +20257,8 @@
   async function goMention(channel: string) {
     navStepStart();
     try {
+      // Save the Studio first; switchView's own deferred Save would otherwise race switchTo's.
+      if (!(await releaseStudio())) return;
       switchView("chat");
       await switchTo(channel);
     } finally {
@@ -20872,8 +20976,9 @@
           if (servers.length) void switchServer(servers[0].id);
           else {
             beginViewSwitch();
+            // studio-exit: forced edge. The native server is gone; nothing could accept a Save.
             activeServerId = null;
-            clearServerView();
+            clearServerView(); // studio-exit: forced edge (server closed, as above)
           }
         }
       }),
@@ -21060,8 +21165,7 @@
       if ((e.ctrlKey || e.metaKey) && !e.altKey && e.shiftKey && e.key.toLowerCase() === "f") {
         if (activeServerId !== null) {
           e.preventDefault();
-          view = "chat";
-          openSearch(true);
+          leaveStudioThen(() => { view = "chat"; openSearch(true); });
         }
         return;
       }
@@ -21085,8 +21189,7 @@
           // Search messages in the active conversation (no browser find in the webview).
           if (activeServerId !== null) {
             e.preventDefault();
-            view = "chat";
-            openSearch();
+            leaveStudioThen(() => { view = "chat"; openSearch(); });
           }
         }
       }
@@ -24249,7 +24352,7 @@
             class="channel-name"
             class:active={c.id === cur?.active && view === "chat"}
             class:unread={cur?.unread.includes(c.id)}
-            onclick={() => { switchTo(c.id); view = "chat"; }}
+            onclick={() => leaveStudioThen(() => { switchTo(c.id); view = "chat"; })}
           >
             <span class="chan-hash">#</span>{c.name}
             {#if mentionChannels.has(c.id)}<span class="mention-badge" title="You were mentioned">@</span>{/if}
@@ -25402,7 +25505,7 @@
             class="server-icon inbox-circle"
             class:active={inboxView}
             title="Inbox: mentions, replies & server news"
-            onclick={openInbox}
+            onclick={() => openInbox()}
           >
             {@render icoInbox()}
             {#if inboxUnseenCount || newsUnseenNow}
@@ -25430,7 +25533,7 @@
               {/if}
             </button>
           {/each}
-          <button class="server-icon add" title="Add a server" onclick={() => (showAdd = true)}>+</button>
+          <button class="server-icon add" title="Add a server" onclick={() => leaveStudioThen(() => (showAdd = true))}>+</button>
         </div>
         <div class="rail-fixed rail-foot">
           <div class="rail-sep"></div>
@@ -26534,7 +26637,7 @@
               {@render connDetail(connectivity)}
               <div class="connect-actions"><button class="ghost small" onclick={copyConnectivity}>{connCopied ? "Copied" : "Copy diagnostic"}</button><button class="ghost small" disabled={manualRedialBusy || activeServerId === null} onclick={manualFallbackRedial}>{manualRedialBusy ? "Retrying…" : "Retry group routes now"}</button><button class="ghost small" onclick={() => openSettings("network")}>Open network settings</button><button class="ghost small" onclick={() => openSettings("diagnostics")}>Debug logging</button></div>
               {#if manualRedialNote}<p class="muted small">{manualRedialNote}</p>{/if}
-            {:else}<section class="repair-card"><div><h3>No attempt recorded this session</h3><p class="muted small">Founding or joining a server populates the detailed action log. Current member-path evidence below is still available.</p></div><button onclick={() => (showAdd = true)}>Add or join a server</button></section>{/if}
+            {:else}<section class="repair-card"><div><h3>No attempt recorded this session</h3><p class="muted small">Founding or joining a server populates the detailed action log. Current member-path evidence below is still available.</p></div><button onclick={() => leaveStudioThen(() => (showAdd = true))}>Add or join a server</button></section>{/if}
             {@render memberRecoveryPanel()}
             <section class="connection-member-health" aria-labelledby="connection-member-health-title">
               <header>

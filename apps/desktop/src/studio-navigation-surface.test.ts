@@ -5,7 +5,7 @@ import { StudioAudioSession, type StudioAudioActions } from "./studio-audio.ts";
 import { planJamArchivalPlayback } from "./jam-archival-plan.ts";
 import type { JamArchivalPlayback } from "./jam-engine.ts";
 import { decodePix } from "./pix.ts";
-import { CHANNEL, ME, SERVER, b64, fakeIpc, flipnoteContent, fsource, id32, id64, indexContent, indexEntry, ordinaryView, pixBytes, reg } from "./studio-testkit.ts";
+import { CHANNEL, ME, SERVER, b64, deferred, fakeIpc, flipnoteContent, fsource, id32, id64, indexContent, indexEntry, ordinaryView, pixBytes, reg } from "./studio-testkit.ts";
 const w = (globalThis as unknown as { window: Window & typeof globalThis }).window;
 Object.assign(globalThis, { MutationObserver: w.MutationObserver, HTMLInputElement: w.HTMLInputElement, HTMLSelectElement: w.HTMLSelectElement, HTMLCanvasElement: w.HTMLCanvasElement, HTMLMediaElement: w.HTMLMediaElement, MouseEvent: w.MouseEvent, Event: w.Event });
 globalThis.getComputedStyle = w.getComputedStyle.bind(w);
@@ -16,7 +16,7 @@ const { mount, unmount, flushSync } = await import("svelte");
 const { default: Studio } = await import("./Studio.svelte");
 const { default: StudioNav } = await import("./StudioNav.svelte");
 const { default: StudioPlaybackHarness } = await import("../scripts/fixtures/StudioPlaybackHarness.svelte");
-const { ensureStudio, useStudioIpc, disposeStudio, studio } = await import("./studio-state.svelte.ts");
+const { ensureStudio, useStudioIpc, disposeStudio, studio, studioDraftSnapshot, resetStudio, restoreStudioDraft } = await import("./studio-state.svelte.ts");
 const a = id32(1), b = id32(2), frame = id32(3), cid = id64(4);
 
 test("editor Play starts all six frames and frame-one sound again after stopping on frame three", async () => {
@@ -124,4 +124,97 @@ test("the mounted editor saves drawn pixels to A before sidebar B opens; refusal
       assert.equal(target.querySelectorAll(".studio-chip").length, 1, "only the current editor is open");
     } finally { await unmount(editor); await unmount(nav); disposeStudio(); target.remove(); }
   }
+});
+
+// Review of 149e7321, finding 1: lock/unlock restores held work with no document open. Opening that
+// document used to require a successful departure Save of the very work whose Save, Retry and
+// discard controls live inside it, so the sidebar click did nothing and the controls were gone.
+test("a restored queued or uncertain edit reopens through the sidebar and waits for an explicit Save or retry", async () => {
+  for (const restored of ["queued", "uncertain"] as const) {
+    const ipc = fakeIpc(), pixels = pixBytes(), notices: string[] = [], held = deferred<unknown>();
+    let fps = 12, holdApply = restored === "uncertain";
+    const view = () => ({ ...ordinaryView(flipnoteContent({ fps, frames: [{ id: frame, cid, bytes: pixels.length }] })), group: "deadbeef" });
+    ipc.on("studio_list", () => ({ ...ordinaryView(indexContent({ objects: { [a]: indexEntry({ title: "A" }) } })), group: "deadbeef" }));
+    ipc.on("studio_read", view);
+    ipc.on("request_blob_bounded", () => ({ bytes: pixels.length, bytes_b64: b64(pixels) }));
+    ipc.on("studio_apply", args => {
+      if (holdApply) return held.promise; // still awaiting its receipt when the lock lands
+      const op = JSON.parse(String(args.body)); if (op.op === "set_header" && op.field === "fps") fps = op.value;
+      return view();
+    });
+    useStudioIpc(ipc, 5000); const session = ensureStudio(ME);
+    const settle = async () => { for (let i = 0; i < 12; i++) { session.flush(); await new Promise(resolve => setImmediate(resolve)); flushSync(); } };
+    const target = document.createElement("div"); document.body.append(target);
+    const surfaces = () => [
+      mount(StudioNav, { target, props: { me: ME, server: SERVER, channel: CHANNEL, onopen: () => {}, onnotice: (text: string) => notices.push(text) } }),
+      mount(Studio, { target, props: { me: ME, server: SERVER, channel: CHANNEL, nameOf: () => "member", colorOf: () => "#fff", onnotice: (text: string) => notices.push(text) } }),
+    ];
+    let mounted = surfaces(); flushSync();
+    const choose = (title: string) => { const button = [...target.querySelectorAll<HTMLButtonElement>(".studio-obj")].find(n => n.querySelector(".nm")?.textContent === title); assert.ok(button, target.textContent!); button.click(); flushSync(); };
+    const button = (label: string) => [...target.querySelectorAll<HTMLButtonElement>("button")].find(n => n.textContent?.trim() === label);
+    const applies = () => ipc.calls.filter(c => c.cmd === "studio_apply");
+    try {
+      await settle(); choose("A"); await settle();
+      session.setFps(a, 7);
+      if (restored === "uncertain") { void session.save().catch(() => {}); await settle(); assert.equal(session.saves[0].status, "inflight"); }
+      // Lock: App captures the draft, the whole surface goes, and the session forgets everything.
+      const json = studioDraftSnapshot(); assert.ok(json);
+      for (const s of mounted) await unmount(s);
+      resetStudio(); holdApply = false;
+      // Unlock: the draft is handed back and the surfaces remount on the same channel.
+      restoreStudioDraft(json); mounted = surfaces(); flushSync(); await settle();
+      const sent = applies().length;
+      assert.equal(studio.selected, ""); assert.equal(session.doc, null);
+      assert.equal(session.saves.length, 1); assert.equal(session.saves[0].status, restored);
+      assert.ok(target.querySelector(`[data-held-object="${a}"]`), "the sidebar names the document holding the restored edit");
+      choose("A"); await settle();
+      assert.equal(studio.selected, a, notices.join("; ")); assert.equal(session.doc?.object, a);
+      assert.equal(target.querySelector("[data-held-object]"), null, "the open document is no longer held elsewhere");
+      assert.equal(applies().length, sent, "opening the document never replays restored work");
+      assert.equal(session.saves.length, 1); assert.equal(session.saves[0].status, restored);
+      if (restored === "queued") {
+        assert.match(target.textContent!, /Unsaved changes/);
+        button("Save")!.click(); flushSync(); await settle();
+      } else {
+        assert.match(target.textContent!, /save uncertain/); assert.ok(button("discard"), "discard stays reachable");
+        button("retry same request")!.click(); flushSync(); await settle();
+        assert.deepEqual(applies().at(-1)!.args, applies()[0].args, "retry resends the exact interrupted request");
+      }
+      assert.equal(applies().length, sent + 1); assert.equal(session.saves.length, 0, notices.join("; "));
+      assert.equal(session.doc?.model?.fps, 7);
+    } finally { for (const s of mounted) await unmount(s); disposeStudio(); target.remove(); }
+  }
+});
+
+test("held work for a document the Index does not list is still one sidebar click from its Save", async () => {
+  const ipc = fakeIpc(), pixels = pixBytes(), notices: string[] = [];
+  const view = (fps = 12) => ({ ...ordinaryView(flipnoteContent({ fps, frames: [{ id: frame, cid, bytes: pixels.length }] })), group: "deadbeef" });
+  let fps = 12;
+  ipc.on("studio_list", () => ({ ...ordinaryView(indexContent()), group: "deadbeef" }));
+  ipc.on("studio_read", () => view(fps));
+  ipc.on("request_blob_bounded", () => ({ bytes: pixels.length, bytes_b64: b64(pixels) }));
+  ipc.on("studio_apply", args => { const op = JSON.parse(String(args.body)); if (op.field === "fps") fps = op.value; return view(fps); });
+  useStudioIpc(ipc, 5000); const session = ensureStudio(ME);
+  const settle = async () => { for (let i = 0; i < 12; i++) { session.flush(); await new Promise(resolve => setImmediate(resolve)); flushSync(); } };
+  const target = document.createElement("div"); document.body.append(target);
+  const surfaces = () => [
+    mount(StudioNav, { target, props: { me: ME, server: SERVER, channel: CHANNEL, onopen: () => {}, onnotice: (text: string) => notices.push(text) } }),
+    mount(Studio, { target, props: { me: ME, server: SERVER, channel: CHANNEL, nameOf: () => "member", colorOf: () => "#fff", onnotice: (text: string) => notices.push(text) } }),
+  ];
+  let mounted = surfaces(); flushSync();
+  try {
+    await settle(); session.open(b); studio.selected = b; flushSync(); await settle();
+    session.setFps(b, 9);
+    const json = studioDraftSnapshot()!;
+    for (const s of mounted) await unmount(s);
+    resetStudio(); restoreStudioDraft(json); mounted = surfaces(); flushSync(); await settle();
+    assert.equal(target.querySelectorAll(".studio-obj").length, 0, "the Index lists nothing to click");
+    const row = target.querySelector<HTMLElement>(`[data-held-object="${b}"]`);
+    assert.ok(row, target.textContent!); assert.match(row.textContent!, /unsaved edits · untitled flipnote/);
+    row.querySelector("button")!.click(); flushSync(); await settle();
+    assert.equal(session.doc?.object, b, notices.join("; ")); assert.equal(studio.selected, b);
+    assert.equal(ipc.calls.filter(c => c.cmd === "studio_apply").length, 0);
+    [...target.querySelectorAll<HTMLButtonElement>("button")].find(n => n.textContent?.trim() === "Save")!.click(); flushSync(); await settle();
+    assert.equal(session.saves.length, 0, notices.join("; ")); assert.equal(fps, 9);
+  } finally { for (const s of mounted) await unmount(s); disposeStudio(); target.remove(); }
 });

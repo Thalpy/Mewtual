@@ -1,5 +1,38 @@
 # Mewtual; Handover
 
+## PR #46 review fixes: restored drafts, Studio exits, settings, playback (2026-10-18)
+
+An external review of `149e7321` reported one P1 and four P2 defects, all reproduced and fixed:
+
+- **Restored drafts no longer deadlock.** A document switch saves only the document being left, and
+  nothing when no document is open. The sidebar lists documents holding unsaved edits, each with
+  an open button. Before a first delivery, admission reads a document it holds no view of. It does
+  this while the record is still queued and uncounted, so a lock during the read restores the
+  record as unsent. "Could not read", "still reading", unread-Index and changed-server refusals
+  send nothing and do not count an attempt, so a retry is admitted afresh.
+- **Every App route out of the Studio uses the exit gate** (`studio-exit.ts`), so a drawing the
+  full draft queue refused can no longer be destroyed by Ctrl+F, Ctrl+Shift+F, the inbox, DM home,
+  add-server, vault change, wiki/status links, menus, ticker jumps or Back/Forward. Lock, leaving
+  the last server and a native server close are marked forced edges.
+  `studio-exit-routes.test.ts` audits App.svelte for unguarded route writes.
+- **Composite routes act only on success.** `switchServer`/`switchTo` resolve whether the switch
+  happened. `openServerSettings` opens in the turn the switch to the requested server commits, so
+  it never opens on, or renames, the server being left. A refused Back/Forward step leaves the
+  cursor on the place still on screen.
+- **Playback.** Inline PIXA "Play sound" re-arms the repaint loop. Audition requests carry a
+  generation, so a superseded one cannot clear a newer note's flag or report a failure.
+
+Checks: frontend 1730/1730, `npm run check` 0 errors, build, 9/9 Edge flows, root Rust
+2463 passed (24 ignored), native 363 passed, ambient gate. Every new regression was confirmed to
+fail on the pre-fix code. A read-only adversarial review found one HIGH (lock during the
+admission read), two MEDIUM (add-server/vault-change routes; settings re-seeding after the load)
+and five LOW findings; all are fixed. A re-review found no remaining blocker/high/medium, and its
+one LOW (the unread-Index path, identical at HEAD) is fixed too. Residual: `leaveServer`/`server-closed` with other servers remaining still go
+through a `switchServer` whose Studio Save can refuse. A frame publication not yet applied is
+still classified as possibly committed if a lock lands mid-publish. `jumpToInbox` does not await
+its channel switch. An absent document holding only queued restored edits shows no Save button
+until a Studio exit's global Save refuses it into retry/discard.
+
 ## Gate 7 complete; communication programme next (2026-10-18)
 
 Gate 7 implementation and local acceptance are complete. Studio uses immediate working edits,

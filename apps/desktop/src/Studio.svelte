@@ -180,6 +180,12 @@
   // is raised before the audition starts and lowered when the session reports stopped.
   let auditioning = $state(false);
   $effect(() => { if (audioState.state === "stopped") auditioning = false; });
+  // Which audition request owns the flag. A newer start cancels an older one still preparing, and
+  // the older request then resolves false; that completion belongs to nobody and must neither
+  // lower the newer audition's flag (the editor would read its clock as document playback and
+  // scrub the timeline) nor report a failure. Both document Plays (editor and saved version) and
+  // teardown also retire it.
+  let auditionRequest = 0;
   const playing = $derived(audioState.state !== "stopped" && !auditioning);
   let loop = $state(true);
   $effect(() => { void objectId; const score = isScore; untrack(() => { loop = !score; }); });
@@ -722,7 +728,7 @@
     // Document playback replacing a sounding audition: the session goes straight from
     // "playing" to "preparing" without the UI ever observing "stopped", so the flag must be
     // lowered here or the transport would keep reading "play" for the whole document run.
-    auditioning = false;
+    auditioning = false; auditionRequest++;
     savedPreview = null;
     const object = objectId, kind = isScore ? "score" : "flipnote";
     const prepare = () => kind === "score" ? session.prepareScorePlayback(object) : session.prepareFlipnotePixa(object);
@@ -755,9 +761,10 @@
     // Raised before start: the session reports "preparing"/"playing" for this note and the
     // editor must already know it is not document playback when that lands.
     auditioning = true;
+    const request = ++auditionRequest;
     void audioActions.start("score", async () => playback, false)
-      .then((started: boolean) => { if (!started) { auditioning = false; onnotice("audition unavailable; check Deafen and try again", "warn"); } })
-      .catch((e: unknown) => { auditioning = false; onnotice(reason(e), "warn"); });
+      .then((started: boolean) => { if (!started && request === auditionRequest) { auditioning = false; onnotice("audition unavailable; check Deafen and try again", "warn"); } })
+      .catch((e: unknown) => { if (request === auditionRequest) { auditioning = false; onnotice(reason(e), "warn"); } });
   }
   /// The popup edits a clone and hands back a validated recipe; `null` means closed.
   let soundfont = $state.raw<{ name: string; initial: JamPatch } | null>(null);
@@ -852,7 +859,7 @@
     };
     if (action === "play") {
       if (!audioActions) return;
-      auditioning = false; // a saved version is document playback, never an audition
+      auditioning = false; auditionRequest++; // a saved version is document playback, never an audition
       void audioActions.start("flipnote", prepare, loop).catch((e: unknown) => onnotice(reason(e), "warn"));
       return;
     }
@@ -1067,7 +1074,7 @@
     const t = setInterval(() => { tick++; }, 1000);
     return () => clearInterval(t);
   });
-  onDestroy(() => { removeCloseHandler(); removeSaveHandler(); audioActions?.stop(); commit(); claimActions?.release(); claimActions?.cancelAsk(); });
+  onDestroy(() => { removeCloseHandler(); removeSaveHandler(); auditionRequest++; audioActions?.stop(); commit(); claimActions?.release(); claimActions?.cancelAsk(); });
 
   // --- Keys --------------------------------------------------------------------------------------
   function onKey(e: KeyboardEvent) {
