@@ -183,7 +183,7 @@ cases and explicitly model authenticated fixture unlock under the commit mutex, 
 old generations still refuse and actual saved content remains readable/exportable. Production
 checks were not changed. All three focused reruns pass and read-only re-review is clear
 (`pr48-native-{inspection,worker,export}-session-focused.log`). The original failed full log is
-retained as `pr48-full-native-test.log`; the final full repeat is pending.
+retained as `pr48-full-native-test.log`; the passing repeat is recorded below.
 
 The initial two-worker root full run was deliberately stopped during storage fixtures to improve
 test throughput on the 24-thread host. It is an aborted run, not passing evidence. The eight-worker
@@ -192,10 +192,20 @@ in the Studio unconfirmed-branch restart fixture. A single-case run reproduces i
 (`pr48-root-stack-focused-red.log`; an earlier `--exact` attempt selected zero tests and is not
 evidence). Boxing that test's two large fixture/preview child futures preserves every assertion
 and restart/drop boundary; the same single case then passes on the default stack
-(`pr48-root-stack-focused-boxed.log`). Read-only review is clear. The final unfiltered root repeat
-uses sixteen test workers now that the native suite has finished, two compiler jobs and no
-`RUST_MIN_STACK` override (`pr48-full-root-test-verified.log`). No test filters or extra ignores
-were introduced. Native strict all-target/all-feature Clippy also passes
+(`pr48-root-stack-focused-boxed.log`). A sixteen-worker full repeat then aborts after 911 passes
+in the separate wrong-device/group basis fixture (`pr48-full-root-test-verified.log`). That
+single-case failure also reproduces (`pr48-root-stack-scope-red.log`). Boxing the intermediate
+proof fixture passes both isolated cases, but a focused Studio exchange run exposes a succession
+constructor path that bypasses it after 117 passes (`pr48-studio-exchange-default-stack.log`).
+
+The final correction boxes only the shared test-only `Pair::with_legacy_group` setup body. All
+ordinary/legacy setup work remains lazy and in the same order; individual and intermediate
+boxing experiments are removed, and every original assertion remains. All 160 Studio exchange
+cases complete on the default stack: 158 passed, two existing ignored
+(`pr48-studio-exchange-boxed-setup.log`). Read-only re-review is clear. The final unfiltered root
+repeat uses sixteen test workers, two compiler jobs and no `RUST_MIN_STACK` override
+(`pr48-full-root-test-complete.log`). No full-suite filters or extra ignores were introduced.
+Native strict all-target/all-feature Clippy also passes
 after the fixture corrections (`pr48-final-native-clippy.log`).
 
 The complete native repeat passes all 404 tests (399 unit plus five command ACL checks), with
@@ -224,8 +234,10 @@ continuation guards are pending.
 The final frontend suite passes all 1,822 tests with zero skipped; Svelte check reports zero
 errors/warnings and the production build passes (`pr48-full-frontend-verified.log`,
 `pr48-frontend-check-verified.log`, `pr48-frontend-build-verified.log`). Its existing bundle-size
-warning remains. A repeat native rebuild is temporarily blocked by a reopened application holding
-the executable; the prior native build/startup passed against unchanged native production code.
+warning remains. All nine final browser flows pass (`pr48-browser-flows-verified.log`). A repeat
+native rebuild was initially blocked by a reopened application holding the executable. Once the
+owner closed it, the final native build and actual startup check both pass
+(`pr48-native-build-unlocked.log`, `pr48-native-startup-unlocked.log`).
 
 Root full verification is still running. Native WebView/forced relay/audio acceptance,
 historical result recovery, file durable migration/resume and final combined rollout remain

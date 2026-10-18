@@ -224,74 +224,80 @@ impl Pair {
         Self::with_legacy_group(true).await
     }
 
-    async fn with_legacy_group(legacy: bool) -> Self {
-        let hub = Hub::new();
-        let wire = Net::new(hub.join(PeerId::from_u64(1)));
-        let bob_wire = Net::new(hub.join(PeerId::from_u64(2)));
-        let clock = ManualClock::new(1000);
-        let mut alice = if legacy {
-            let device = MlsDevice::generate().unwrap();
-            let device_id = device.device_id();
-            let group = catcoms_mls::ServerGroup::create(&device).unwrap();
-            Server {
-                sync: catcoms_sync::ChannelSync::new(
+    fn with_legacy_group(legacy: bool) -> impl Future<Output = Self> {
+        // Authenticated setup retains two peers plus their join/control futures. Keep this
+        // common fixture state on the heap so nested preview/restart and two-pair tests fit
+        // the default thread stack. The async body stays lazy; membership, RNG, store creation
+        // and teardown retain their original order. No production future or assertion changes.
+        Box::pin(async move {
+            let hub = Hub::new();
+            let wire = Net::new(hub.join(PeerId::from_u64(1)));
+            let bob_wire = Net::new(hub.join(PeerId::from_u64(2)));
+            let clock = ManualClock::new(1000);
+            let mut alice = if legacy {
+                let device = MlsDevice::generate().unwrap();
+                let device_id = device.device_id();
+                let group = catcoms_mls::ServerGroup::create(&device).unwrap();
+                Server {
+                    sync: catcoms_sync::ChannelSync::new(
+                        wire.clone(),
+                        group,
+                        device,
+                        rng(),
+                        Box::new(clock.clone()),
+                    ),
+                    display_name: "legacy alice".into(),
+                    device_id,
+                    own_message_changes: Default::default(),
+                    messages_cache: Default::default(),
+                    delivery_snapshot_revision: 0,
+                    devices_sig: None,
+                }
+            } else {
+                Server::found(
                     wire.clone(),
-                    group,
-                    device,
+                    MlsDevice::generate().unwrap(),
                     rng(),
                     Box::new(clock.clone()),
+                    "alice",
+                )
+                .unwrap()
+            };
+            alice.subscribe_control().await.unwrap();
+            let invite = alice.mint_invite([1; 16], u64::MAX, vec![]).unwrap();
+            let (bob, tick) = tokio::join!(
+                Server::join(
+                    bob_wire,
+                    MlsDevice::generate().unwrap(),
+                    rng(),
+                    Box::new(clock.clone()),
+                    "bob",
+                    alice.local_peer(),
+                    &invite
                 ),
-                display_name: "legacy alice".into(),
-                device_id,
-                own_message_changes: Default::default(),
-                messages_cache: Default::default(),
-                delivery_snapshot_revision: 0,
-                devices_sig: None,
+                alice.sync_once()
+            );
+            tick.unwrap();
+            let mut bob = bob.unwrap();
+            let a_root = tempfile::tempdir().unwrap();
+            let b_root = tempfile::tempdir().unwrap();
+            let a_store = open(a_root.path());
+            let b_store = open(b_root.path());
+            let watch = bob.watch_studio_epoch(&b_store, SERVER, target()).unwrap();
+            bob.flush_studio_subscriptions().await.unwrap();
+            Self {
+                hub,
+                _a_root: a_root,
+                b_root,
+                alice,
+                bob,
+                a_store,
+                b_store,
+                wire,
+                watch,
+                clock,
             }
-        } else {
-            Server::found(
-                wire.clone(),
-                MlsDevice::generate().unwrap(),
-                rng(),
-                Box::new(clock.clone()),
-                "alice",
-            )
-            .unwrap()
-        };
-        alice.subscribe_control().await.unwrap();
-        let invite = alice.mint_invite([1; 16], u64::MAX, vec![]).unwrap();
-        let (bob, tick) = tokio::join!(
-            Server::join(
-                bob_wire,
-                MlsDevice::generate().unwrap(),
-                rng(),
-                Box::new(clock.clone()),
-                "bob",
-                alice.local_peer(),
-                &invite
-            ),
-            alice.sync_once()
-        );
-        tick.unwrap();
-        let mut bob = bob.unwrap();
-        let a_root = tempfile::tempdir().unwrap();
-        let b_root = tempfile::tempdir().unwrap();
-        let a_store = open(a_root.path());
-        let b_store = open(b_root.path());
-        let watch = bob.watch_studio_epoch(&b_store, SERVER, target()).unwrap();
-        bob.flush_studio_subscriptions().await.unwrap();
-        Self {
-            hub,
-            _a_root: a_root,
-            b_root,
-            alice,
-            bob,
-            a_store,
-            b_store,
-            wire,
-            watch,
-            clock,
-        }
+        })
     }
     fn save(&mut self, op: &DomainOp) -> u128 {
         let doc = target().document(&self.alice.group_id()).unwrap();
