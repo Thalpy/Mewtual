@@ -43,6 +43,7 @@
   import PendingSendManager from "./PendingSendManager.svelte";
   import { PendingSendRetry } from "./pending-send-retry";
   import { ImageSrcCache } from "./image-src";
+  import { DARK_INK, inkOn, onAccentOverride } from "./accent-ink";
   import { pastedMedia, pastedName } from "./clipboard-media";
   import {
     confirmQuestion, confirmVerb, parseTally, placeMenu, tallyReaction, topReactions, typeaheadIndex,
@@ -1358,6 +1359,15 @@
     for (const [k, v] of Object.entries(liveryDraft.tokens)) {
       if (LIVERY_TOKENS.includes(k) && HEX_COLOR.test(v)) parts.push(`${k}:${v}`);
     }
+    // The ink on the accent follows the accent this preview paints. A valid `--accent` token is
+    // pushed after the draft accent, so it wins in the inline style and wins here too. A light
+    // accent still needs an explicit ink when the draft is Nightshade: with no data-preset the
+    // preview would otherwise inherit the root's ink, including a light-ink override made for the
+    // dark accent the app itself is wearing.
+    const tokenAccent = liveryDraft.tokens["--accent"] ?? "";
+    const ink = onAccentOverride(HEX_COLOR.test(tokenAccent) ? tokenAccent : accent);
+    if (ink) parts.push(`--on-accent:${ink}`);
+    else if (!liveryDraft.preset) parts.push(`--on-accent:${DARK_INK}`);
     const rad = LIVERY_RADIUS[liveryDraft.tokens["radius"] ?? ""];
     if (rad?.r) parts.push(`--r:${rad.r}`, `--r-lg:${rad.rlg}`);
     const font = LIVERY_FONTS[liveryDraft.tokens["font"] ?? ""];
@@ -1444,7 +1454,7 @@
       ? "off"
       : appearance.textEffects === "low" || reduced ? "low" : "full";
     set("text-effects", textEffects);
-    for (const t of [...LIVERY_TOKENS, "--r", "--r-lg", "--ui", "--livery-cursor"]) el.style.removeProperty(t);
+    for (const t of [...LIVERY_TOKENS, "--on-accent", "--r", "--r-lg", "--ui", "--livery-cursor"]) el.style.removeProperty(t);
     el.removeAttribute("data-livery-pattern");
     el.removeAttribute("data-livery-cursor");
     if (followLivery) {
@@ -1469,6 +1479,13 @@
       el.style.setProperty("--accent", accent);
       el.style.setProperty("--accent-hi", `color-mix(in oklab, ${accent} 80%, white)`);
     }
+    // Text on a solid accent follows the accent actually painted: the accent override, else a
+    // livery's own `--accent` token, else the preset's default. Each preset's near-black ink suits
+    // its default accent, but a custom or livery accent can be any hex, and a dark one left black
+    // text on a near-black button. Only a dark accent overrides; otherwise the preset's ink (cleared
+    // above along with the other inline tokens) stays in charge.
+    const ink = onAccentOverride(accent || (followLivery ? livery.tokens["--accent"] ?? "" : ""));
+    if (ink) el.style.setProperty("--on-accent", ink);
     // Scale the root rather than one chat token: menus, member names, dialogs and every other
     // rem-sized label now follow the same accessibility preference.
     const scale = Math.min(200, Math.max(70, appearance.scale || 100));
@@ -15354,6 +15371,8 @@
     return m;
   });
   // A peer's chosen name colour, or the accent when their profile never set one.
+  // A member's colour can be any hex they picked, so text drawn on it takes its ink from inkOn
+  // (the accent fallback resolves to the accent's own ink).
   function instColor(key: string): string {
     return profiles[displayKey(key)]?.color?.trim() || "var(--accent-hi)";
   }
@@ -21699,7 +21718,7 @@
   {#if p?.avatar}
     <img class="avatar" src={imgSrc(p.avatar)} alt="" />
   {:else}
-    <span class="avatar fallback" style={p?.color ? `background:${p.color}` : ""}>
+    <span class="avatar fallback" style={p?.color ? `background:${p.color};color:${inkOn(p.color)}` : ""}>
       {nameOf(fp).slice(0, 1).toUpperCase()}
     </span>
   {/if}
@@ -21749,7 +21768,7 @@
   {#if p?.avatar}
     <img class="avatar" src={imgSrc(p.avatar)} alt="" />
   {:else}
-    <span class="avatar fallback" style={p?.color ? `background:${p.color}` : ""}>
+    <span class="avatar fallback" style={p?.color ? `background:${p.color};color:${inkOn(p.color)}` : ""}>
       {callNameOf(fp).slice(0, 1).toUpperCase()}
     </span>
   {/if}
@@ -21924,7 +21943,7 @@
                 {#if ident.avatar}
                   <img class="avatar" src={imgSrc(ident.avatar)} alt="" />
                 {:else}
-                  <span class="avatar fallback" style={`background:${ident.color}`}>{(ident.name || ident.label).slice(0, 1).toUpperCase()}</span>
+                  <span class="avatar fallback" style={`background:${ident.color};color:${inkOn(ident.color)}`}>{(ident.name || ident.label).slice(0, 1).toUpperCase()}</span>
                 {/if}
                 <span class="id-text">
                   {@render styledName(ident.name || ident.label, ident.color, ident.font, ident.effect)}
@@ -21951,7 +21970,7 @@
         {#if pAvatar}
           <img class="avatar lg" src={imgSrc(pAvatar)} alt="" />
         {:else}
-          <span class="avatar lg fallback" style={`background:${pColor}`}>
+          <span class="avatar lg fallback" style={`background:${pColor};color:${inkOn(pColor)}`}>
             {(pName || displayName).slice(0, 1).toUpperCase()}
           </span>
         {/if}
@@ -22544,7 +22563,7 @@
           {#if pAvatar}
             <img class="avatar" src={imgSrc(pAvatar)} alt="" />
           {:else}
-            <span class="avatar fallback" style={`background:${pColor}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>
+            <span class="avatar fallback" style={`background:${pColor};color:${inkOn(pColor)}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>
           {/if}
         </span>
       </span>
@@ -22592,7 +22611,7 @@
           {#if pAvatar}
             <img class="avatar lg stx-pav" src={imgSrc(pAvatar)} alt="" />
           {:else}
-            <span class="avatar lg fallback stx-pav" style={`background:${pColor}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>
+            <span class="avatar lg fallback stx-pav" style={`background:${pColor};color:${inkOn(pColor)}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>
           {/if}
           <div class="stx-prof-body">
             <span class="stx-prof-name">{@render styledName(pName || displayName, pColor, pFont, pEffect)}</span>
@@ -22618,7 +22637,7 @@
         <div class="stx-pcap">MEMBER LIST · COMPACT</div>
         <div class="stx-member-preview">
           <span class="presence online">●</span>
-          {#if pAvatar}<img class="avatar" src={imgSrc(pAvatar)} alt="" />{:else}<span class="avatar fallback" style={`background:${pColor}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>{/if}
+          {#if pAvatar}<img class="avatar" src={imgSrc(pAvatar)} alt="" />{:else}<span class="avatar fallback" style={`background:${pColor};color:${inkOn(pColor)}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>{/if}
           <span class="stx-member-name">{@render styledName(pName || displayName, pColor, pFont, pEffect)}</span>
           <span class="you-badge">you</span>
         </div>
@@ -23975,7 +23994,7 @@
             type="button"
             class="jam-pad"
             class:hit={who === "me"}
-            style={who && who !== "me" ? `background:${instColor(who)};border-color:${instColor(who)};color:#131218` : ""}
+            style={who && who !== "me" ? `background:${instColor(who)};border-color:${instColor(who)};color:${inkOn(instColor(who))}` : ""}
             title={who && who !== "me" ? `${pad.name} · ${nameOf(who)}` : `${pad.name} (${padKeys[pad.id]})`}
             onpointerdown={() => jamPadHit(pad.id)}
           >
@@ -23998,7 +24017,7 @@
             class:sharp={PC_SHARP[pc]}
             class:held={callHeld.includes(note)}
             class:rheld={!!rfp}
-            style={rfp ? `background:${instColor(rfp)};border-color:${instColor(rfp)};color:#131218` : ""}
+            style={rfp ? `background:${instColor(rfp)};border-color:${instColor(rfp)};color:${inkOn(instColor(rfp))}` : ""}
             title={rfp ? `${noteName(note)} · ${nameOf(rfp)}` : noteName(note)}
             onpointerdown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); instNoteOn(note); }}
             onpointerup={() => instNoteOff(note)}
@@ -24009,7 +24028,7 @@
       {#if instEdges.below.length}
         <div class="inst-edge low">
           {#each instEdges.below.slice(0, 3) as ed (ed.note)}
-            <span class="inst-pill" style={`background:${instColor(ed.fp)};color:#131218`} title={`${nameOf(ed.fp)} is playing ${noteName(ed.note)}, below this register`}>
+            <span class="inst-pill" style={`background:${instColor(ed.fp)};color:${inkOn(instColor(ed.fp))}`} title={`${nameOf(ed.fp)} is playing ${noteName(ed.note)}, below this register`}>
               <svg class="inst-tri" viewBox="0 0 8 8" aria-hidden="true"><path d="M6.4 0.8 0.9 4l5.5 3.2z" fill="currentColor" /></svg>
               {noteName(ed.note)}
             </span>
@@ -24020,7 +24039,7 @@
       {#if instEdges.above.length}
         <div class="inst-edge high">
           {#each instEdges.above.slice(0, 3) as ed (ed.note)}
-            <span class="inst-pill" style={`background:${instColor(ed.fp)};color:#131218`} title={`${nameOf(ed.fp)} is playing ${noteName(ed.note)}, above this register`}>
+            <span class="inst-pill" style={`background:${instColor(ed.fp)};color:${inkOn(instColor(ed.fp))}`} title={`${nameOf(ed.fp)} is playing ${noteName(ed.note)}, above this register`}>
               {noteName(ed.note)}
               <svg class="inst-tri" viewBox="0 0 8 8" aria-hidden="true"><path d="M1.6 0.8 7.1 4l-5.5 3.2z" fill="currentColor" /></svg>
             </span>
@@ -28484,7 +28503,7 @@
               {#if p?.avatar}
                 <img class="avatar lg" src={imgSrc(p.avatar)} alt="" />
               {:else}
-                <span class="avatar lg fallback" style={`background:${p?.color || "#4f8cff"}`}>{nameOf(fp).slice(0, 1).toUpperCase()}</span>
+                <span class="avatar lg fallback" style={`background:${p?.color || "#4f8cff"};color:${inkOn(p?.color || "#4f8cff")}`}>{nameOf(fp).slice(0, 1).toUpperCase()}</span>
               {/if}
               <div class="pc-id">
                 <div class="pc-name">{@render nameTag(fp)}</div>

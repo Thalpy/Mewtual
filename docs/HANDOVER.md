@@ -1,5 +1,32 @@
 # Mewtual; Handover
 
+## Readable text on dark accents and member colours (2026-10-19)
+
+User report: a dark custom accent left near-black text on accent buttons (a dark red "EXPORT .WAV").
+`--on-accent` was fixed per preset while the accent can be any hex (personal appearance, a livery's
+`accent` or `--accent` token, the Livery preview), and member colours painted avatar initials,
+instrument pills, piano keys, jam pads and Studio sound-lane pills with hard-coded dark text.
+
+- `apps/desktop/src/accent-ink.ts` picks white when it out-contrasts the near-black ink (WCAG 2;
+  the flip is near luminance 0.19, `#797979` white / `#7a7a7a` dark). Every preset accent,
+  `ACCENT_CHOICES` and `NAME_COLORS` stays dark, so defaults are unchanged.
+- The root theme effect clears and re-derives `--on-accent` from the painted accent; the Livery
+  preview does the same for the draft (and pins Nightshade's ink so it cannot inherit the root's).
+  A livery still cannot set any ink: `--on-accent` is not an allow-listed token.
+- Member-colour boxes use `inkOn(colour)`. Text on the fixed `--ok/--warn/--danger` fills now uses
+  a new constant `--on-signal` (moderation badges, Leave and hang-up buttons), so a dark accent
+  cannot sink them.
+- Pre-existing bugs fixed on the way: reaction chips (`<button>`s on `--panel`) inherited the
+  accent ink, so their count and "+" were invisible in every preset, and hovering repainted them
+  `--accent-hi`; a natural piano key pressed with the mouse lost its held highlight to the ivory
+  hover rule.
+
+Verification: `accent-ink.test.ts` (unit tests, plus App's real theme `$effect` and
+`liveryDraftVars` and Studio's `tintInk` run from production text); each guard was confirmed to
+fail when its fix was removed. Headless-Edge fixture shots with accent `#6b0f0f` (white ink) and
+`#e2a83d` (unchanged). Known limit: accent-coloured TEXT on the dark grounds (links, the rail
+monogram) is still low-contrast under a very dark accent; that is a separate change.
+
 ## Pre-upload video editor (2026-10-19)
 
 A video dropped, picked or pasted into the chat or status composer now opens a small editor

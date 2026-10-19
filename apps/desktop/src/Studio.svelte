@@ -6,6 +6,7 @@
   // bounded blob fetch and App's existing JamEngine; neither a second store nor a synth lives here.
   import { onDestroy, onMount, untrack } from "svelte";
   import { animationFrameAt } from "./pixa-media.ts";
+  import { DARK_INK, inkOn } from "./accent-ink.ts";
   import { decodePix, pixToRgba } from "./pix.ts";
   import {
     CLEAR,
@@ -147,6 +148,9 @@
 
   function who(id: string): string { return id === me ? "you" : nameOf(id); }
   function tint(id: string): string { return id === me ? "var(--accent)" : colorOf(id); }
+  // Text on a tint: mine is the accent, so its own ink; anyone else's is their colour, or the
+  // muted grey `colorOf` falls back to, which takes the dark ink rather than the accent's.
+  function tintInk(id: string): string { return id === me ? "var(--on-accent)" : inkOn(colorOf(id), DARK_INK); }
 
   // --- Editor state ------------------------------------------------------------------------------
   let frameId = $state("");
@@ -1762,7 +1766,7 @@
         {#each frames as f (f.id)}
           {@const lane = laneMarkers(f.id)}
           <span class="cell" title={lane ? `${lane.count} sound marker${lane.count === 1 ? "" : "s"} · ${lane.label}` : ""}>
-            {#if lane}<i class="pill" style="background: {tint(lane.author)}">{lane.label}{#if lane.count > 1} +{lane.count - 1}{/if}</i>{/if}
+            {#if lane}<i class="pill" style="background: {tint(lane.author)}; color: {tintInk(lane.author)}">{lane.label}{#if lane.count > 1} +{lane.count - 1}{/if}</i>{/if}
           </span>
         {/each}
       </div>
