@@ -207,6 +207,70 @@ fn sdp_without_prepaid_readiness_and_crossed_offer_refuse_without_nonce_or_repla
 }
 
 #[test]
+fn validated_token_publication_can_be_abandoned_without_replay_serial_or_sdp_effects() {
+    let pool = Arc::new(Resources::default());
+    let a = Endpoint::new(1, Arc::new(Resources::default()));
+    let mut b = Endpoint::new(2, pool.clone());
+    b.register(&a);
+    b.establish();
+    let clock = ManualClock::new(1000);
+    b.prepare_sdp(&clock).unwrap();
+    let baseline = pool.counts();
+    let offer = OfferId {
+        issuer: a.context.local,
+        message: [90; 32],
+    };
+    let signed = sdp_from(&a, &b, EncryptedKind::Offer, offer.message, offer, 1);
+    let prepared = b
+        .ledger
+        .prepare_inbound(signed.clone(), &authority(&b.context, &b.lease), &clock)
+        .unwrap();
+    let (publication, event) = b
+        .ledger
+        .validate_prepared_inbound(prepared, &authority(&b.context, &b.lease), &clock)
+        .unwrap();
+    publication
+        .admission()
+        .check_at(clock.now_ms(), clock.monotonic_ms())
+        .unwrap();
+    let token = event.token;
+    // A prepared action may take this event's owned buffers, but abandoning the final origin
+    // transaction still consumes neither the replay sequence nor the proposed ledger token.
+    drop(publication);
+    assert_eq!(b.ledger.serial, 0);
+    assert!(b.ledger.incoming.is_empty());
+    assert_eq!(b.ledger.pairs[&HANDSHAKE].replay.highest, 0);
+    assert!(b.ledger.sdp.as_ref().unwrap().role == SdpRole::Ready);
+    // This is a loan from the already-prepaid SDP envelope, not another ordinary charge.
+    assert_eq!(pool.counts(), baseline);
+    drop(event);
+    assert_eq!(pool.counts(), baseline);
+
+    let prepared = b
+        .ledger
+        .prepare_inbound(signed, &authority(&b.context, &b.lease), &clock)
+        .unwrap();
+    let (publication, event) = b
+        .ledger
+        .validate_prepared_inbound(prepared, &authority(&b.context, &b.lease), &clock)
+        .unwrap();
+    assert_eq!(event.token, token);
+    publication.publish();
+    assert_eq!(b.ledger.serial, token);
+    assert!(b.ledger.incoming.contains_key(&token));
+    assert_eq!(b.ledger.pairs[&HANDSHAKE].replay.highest, 1);
+    assert!(b.ledger.sdp.as_ref().unwrap().role == SdpRole::Responder(offer));
+    b.ledger.sdp.as_ref().unwrap().owner.close();
+    drop(b);
+    assert!(
+        pool.counts().0 > 0,
+        "the actual moved event keeps its byte custody"
+    );
+    drop(event);
+    assert_eq!(pool.counts(), (0, 0));
+}
+
+#[test]
 fn sdp_responder_pins_original_offer_only_at_successful_admission_and_allows_one_exact_answer() {
     let pool = Arc::new(Resources::default());
     let a = Endpoint::new(1, Arc::new(Resources::default()));

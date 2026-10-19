@@ -1,5 +1,26 @@
 # Next voice milestone: native result recovery
 
+## Unpublished token and origin transaction prerequisite (19 October, inactive)
+
+`PacketLedger::validate_prepared_inbound` finishes fallible ledger/time checks and lends an
+exclusive unpublished token transaction. Its separately returned decrypt event can move into a
+future protected action without cloning its buffers. Dropping the transaction leaves replay,
+serial and SDP identity untouched; `publish` has no callback, time sampling or recoverable tail.
+The existing intake wrapper preserves its original final-admission ordering.
+
+`ActorOwner::with_endpoint_origin` lends a private affine origin transaction under the original
+Group -> Policy fence. Publication repeats the original actor/session/ticket/actual-driver gates
+immediately before quota debit and accepts only a synchronous unit-returning publication closure.
+Refusal cannot publish and does not spend origin quota. No serialized envelope can construct it.
+
+These are prerequisites, not the atomic confirmation consumer: History/candidate/action/receipt
+publication and protected role consumers remain unimplemented. A future History fence must be
+nonblocking (`try_lock`, Busy without effects), or time/deadline validation must occur afresh
+before lending. Keep unstarted row owners outside the callback; dropping an unpublished row can
+otherwise block on History while Group/Policy are held. No engine, Clock or native reentry may run
+under that final fence. Focused verification passes289 voice tests and strict sync Clippy; full
+combined validation remains required before handoff of this continuation.
+
 ## Browser derivation prerequisite (19 October, inactive)
 
 The surviving broker v5 now has a shared closed derive/confirmation driver. Its opaque key

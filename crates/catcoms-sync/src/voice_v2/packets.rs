@@ -187,6 +187,42 @@ pub struct PreparedInbound {
     admission: InboundAdmission,
     serial: u64,
 }
+/// Validated, still unpublished token transaction. The exclusive ledger borrow prevents a
+/// second actor operation from changing serial/replay/capacity between validation and the
+/// infallible publication. All Clock callbacks run before this value is lent to a short native
+/// Group -> Policy -> protected-row transaction; that transaction uses only check_at samples.
+///
+/// The decrypt event is returned separately so a protected action can MOVE its owned buffers
+/// before origin/replay publication, without exporting an action or cloning another body.
+pub(super) struct PreparedTokenPublication<'a> {
+    ledger: &'a mut PacketLedger,
+    incoming: Incoming,
+    admission: InboundAdmission,
+    token: u64,
+    replay: Replay,
+    mono: u64,
+}
+impl PreparedTokenPublication<'_> {
+    pub(super) fn admission(&self) -> &InboundAdmission {
+        &self.admission
+    }
+    /// No time seam, allocation failure result, callback or engine lock follows origin commit.
+    /// As with existing map publication, process allocator failure is not recoverable here.
+    pub(super) fn publish(self) {
+        let Body::Encrypted { header, .. } = self.incoming.object.body() else {
+            unreachable!("validated encrypted token")
+        };
+        self.ledger
+            .publish_sdp_identity(header, self.incoming.object.id(), true, self.mono);
+        self.ledger
+            .pairs
+            .get_mut(&header.handshake)
+            .expect("exclusive validated pair")
+            .replay = self.replay;
+        self.ledger.serial = self.token;
+        self.ledger.incoming.insert(self.token, self.incoming);
+    }
+}
 impl PreparedInbound {
     /// Bind the actual native candidate/attempt before the replay/token transaction. This is
     /// still unpublished preparation: no caller can obtain an action or engine grant from it.
@@ -1218,6 +1254,20 @@ impl PacketLedger {
         clock: &dyn Clock,
         commit: impl FnOnce(&InboundAdmission) -> Result<(), VoiceError>,
     ) -> Result<InboundPacket, VoiceError> {
+        let (publication, event) = self.validate_prepared_inbound(prepared, authority, clock)?;
+        commit(publication.admission())?;
+        publication.publish();
+        Ok(event)
+    }
+    /// Finish every fallible ledger check before origin allowance or a protected role is
+    /// consumed. The returned exclusive loan cannot be interleaved with another ledger call.
+    /// Callers must repeat admission.check_at under their final native authorization fence.
+    pub(super) fn validate_prepared_inbound(
+        &mut self,
+        prepared: PreparedInbound,
+        authority: &Authority<'_>,
+        clock: &dyn Clock,
+    ) -> Result<(PreparedTokenPublication<'_>, InboundPacket), VoiceError> {
         self.prune(clock);
         let pair = self.inbound_pair(&prepared.incoming.object, authority, clock)?;
         if self.serial != prepared.serial
@@ -1241,21 +1291,17 @@ impl PacketLedger {
         }
         prepared.admission.check(clock)?;
         let mono = clock.monotonic_ms();
-        commit(&prepared.admission)?;
-        self.publish_sdp_identity(
-            &prepared.event.header,
-            prepared.incoming.object.id(),
-            true,
-            mono,
-        );
-        self.pairs
-            .get_mut(&prepared.event.header.handshake)
-            .expect("checked current pair")
-            .replay = replay;
-        self.serial = prepared.event.token;
-        self.incoming
-            .insert(prepared.event.token, prepared.incoming);
-        Ok(prepared.event)
+        Ok((
+            PreparedTokenPublication {
+                token: prepared.event.token,
+                ledger: self,
+                incoming: prepared.incoming,
+                admission: prepared.admission,
+                replay,
+                mono,
+            },
+            prepared.event,
+        ))
     }
     /// Called in a FRESH actor turn after decrypt. A valid token for peer B cannot authorize A's
     /// tuple. Wrong tuples do not consume B's token; successful delivery is single-use.

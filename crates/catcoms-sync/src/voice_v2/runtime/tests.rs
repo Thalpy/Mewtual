@@ -609,6 +609,18 @@ fn endpoint_final_native_time_sample_rechecks_parent_before_spending_origin_allo
     );
     assert!(!watch.is_live());
     let current = actor.watch_lease().unwrap();
+    // An abandoned affine origin transaction has no quota effect. A protected row may
+    // refuse here before it consumes origin, and must then return its unpublished claim.
+    let untouched = envelope(61);
+    let untouched_ticket = actor
+        .admit_transport_verification(device(2), &untouched.encode())
+        .unwrap();
+    assert_eq!(
+        actor.with_endpoint_origin(&untouched_ticket, &untouched, &context, |_, _, _origin| {
+            Err::<(), _>(VoiceError::Capacity)
+        }),
+        Err(VoiceError::Capacity)
+    );
     // This unit exercises only the final budget transaction. Root intake tests separately pin
     // persistent queue reservation. Rejection above must leave all eight original room tokens.
     for id in 52..=60 {
@@ -632,7 +644,97 @@ fn endpoint_final_native_time_sample_rechecks_parent_before_spending_origin_allo
             }
         );
     }
+    let refused = envelope(62);
+    let refused_ticket = actor
+        .admit_transport_verification(device(2), &refused.encode())
+        .unwrap();
+    let refused_result: Result<(), VoiceError> =
+        actor.with_endpoint_origin(&refused_ticket, &refused, &context, |_, _, origin| {
+            origin.publish(|| panic!("origin refusal cannot publish a protected row"))
+        });
+    assert_eq!(refused_result, Err(VoiceError::RateLimited));
 }
+#[test]
+fn endpoint_origin_loan_rechecks_session_actor_and_actual_driver_before_publication() {
+    use super::super::{Body, Context, Envelope, JoinKey, Scope, SignedObject};
+    for revoke in ["session", "actor", "driver"] {
+        let runtime = Runtime::new(Arc::new(ManualClock::new(1000)));
+        let actor = active(&runtime, 1);
+        let context = Context {
+            scope: Scope {
+                group: [1; 32],
+                policy: Some([7; 32]),
+                room: 1,
+            },
+            local: device(1),
+            now: 1000,
+            epoch: 1,
+            indirect: true,
+        };
+        let point = hex::decode("046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5").unwrap();
+        let key = JoinKey::new([2; 32], point.try_into().unwrap()).unwrap();
+        let signer = DeviceKeypair::from_seed(&[2; 32]);
+        let envelope = Envelope::Direct(
+            SignedObject::issue(
+                context.scope,
+                &signer,
+                [51; 32],
+                1000,
+                31_000,
+                Body::Announcement {
+                    key,
+                    epoch: 1,
+                    renewal: 1,
+                },
+            )
+            .unwrap(),
+        );
+        let (responder, receiver) = catcoms_rt::Responder::channel();
+        let mut receiver = Some(receiver);
+        let ticket = actor
+            .admit_transport_verification(device(2), &envelope.encode())
+            .unwrap()
+            .bind_request(responder.cancellation_authority())
+            .unwrap();
+        let watch = actor.watch_lease().unwrap();
+        let mut published = false;
+        let result = actor.with_endpoint_origin(&ticket, &envelope, &context, |_, _, origin| {
+            // This models the first atomic part of lock/replacement while its policy/child
+            // cleanup would wait for the very Policy mutex held by this transaction.
+            match revoke {
+                "session" => actor.gate.session.live.revoke(),
+                "actor" => actor.gate.live.revoke(),
+                "driver" => drop(receiver.take().unwrap()),
+                _ => unreachable!(),
+            }
+            assert!(
+                watch.is_live(),
+                "old child cleanup has not acquired Policy yet"
+            );
+            origin.publish(|| {
+                published = true;
+            })
+        });
+        assert_eq!(result, Err(VoiceError::Unauthorized), "{revoke}");
+        assert!(!published, "{revoke} must refuse before publication");
+        // Probe quota directly: this old actor is rightly ineligible for a fresh operation.
+        // All eight original room tokens must remain after the refused final origin commit.
+        let mut state = actor.group.state.lock().unwrap();
+        for _ in 0..8 {
+            state
+                .limits
+                .origin(device(2), super::super::limits::Traffic::Room, 0)
+                .unwrap();
+        }
+        assert_eq!(
+            state
+                .limits
+                .origin(device(2), super::super::limits::Traffic::Room, 0),
+            Err(VoiceError::RateLimited)
+        );
+    }
+}
+
 impl Clock for RegisterObservedClock {
     fn now_ms(&self) -> u64 {
         if let Some(lease) = self.revoke_on_wall.lock().unwrap().take() {

@@ -24,6 +24,37 @@ const CHILDREN: usize = 64;
 const VERIFICATION_BUFFERS: usize = 5;
 const VERIFICATION_OVERHEAD: usize = 4096;
 
+/// Affine final origin transaction lent only while the original Group -> Policy locks and
+/// native route/epoch/membership checks remain held. A protected row fence must perform every
+/// fallible owner/candidate check BEFORE consuming this value. The apply closure publishes only
+/// already-prepaid state; it cannot await, sample Clock, enter Engine, or return a recoverable
+/// publication error. No caller can manufacture this transaction from an envelope/header.
+pub(crate) struct EndpointOrigin<'a> {
+    limits: &'a mut OriginLimits,
+    object: &'a super::SignedObject,
+    actor: &'a ActorOwner,
+    ticket: &'a IngressTicket,
+    context: &'a super::Context,
+    wall: u64,
+    mono: u64,
+}
+impl EndpointOrigin<'_> {
+    pub(crate) fn publish(self, apply: impl FnOnce()) -> Result<(), VoiceError> {
+        // Session/actor/driver revocation wins atomically before it waits for Policy. The
+        // caller may have acquired a nonblocking History fence since the loan was made; repeat
+        // these original
+        // observations at the quota boundary, without another native time sample or lock.
+        // Production original_request is the responder's bounded driver/reply lease; this
+        // final observer must not sample Clock or reenter Group/Policy/History.
+        self.ticket
+            .check_at_commit(self.actor, self.context, self.mono)?;
+        self.limits
+            .admit_packet(self.object, self.mono, self.wall)?;
+        apply();
+        Ok(())
+    }
+}
+
 /// Signed freshness advances with local monotonic elapsed time even during wall-clock rollback.
 /// Only local Clock observations set/advance this anchor. Remote timestamps cannot set it. A large
 /// correction can make our newly signed objects unacceptable to other peers until clocks align
@@ -731,6 +762,25 @@ impl ActorOwner {
         context: &super::Context,
         final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
     ) -> Result<(), VoiceError> {
+        self.with_endpoint_origin(ticket, envelope, context, |wall, mono, origin| {
+            final_owner(wall, mono)?;
+            origin.publish(|| ())
+        })
+    }
+    /// All time sampling/native revalidation precedes lending the origin transaction. A
+    /// protected consumer may then enter its short History/candidate fence, check pure leases
+    /// using these samples, and atomically spend/publish without a later fallible row operation.
+    /// It must use try_lock and abort on contention: blocking after the samples were frozen
+    /// could let an original deadline expire without another time validation. Keep unstarted
+    /// row owners outside this callback so their Drop cannot wait for History under Policy.
+    /// Existing public intake uses the wrapper above; encrypted dispatch remains disabled.
+    pub(crate) fn with_endpoint_origin(
+        &self,
+        ticket: &IngressTicket,
+        envelope: &super::Envelope,
+        context: &super::Context,
+        publish: impl FnOnce(u64, u64, EndpointOrigin<'_>) -> Result<(), VoiceError>,
+    ) -> Result<(), VoiceError> {
         self.route_operation(
             ticket.requester(),
             envelope,
@@ -744,11 +794,22 @@ impl ActorOwner {
                 ticket.check_at_commit(self, context, now)?;
                 // Lend native samples; final consent checks must not reenter a Clock seam or
                 // Runtime while Group/Policy are held. Check irreversible owner gates last.
-                final_owner(native.now, now)?;
-                limits.admit_packet(envelope.object(), now, native.now)
+                publish(
+                    native.now,
+                    now,
+                    EndpointOrigin {
+                        limits,
+                        object: envelope.object(),
+                        actor: self,
+                        ticket,
+                        context,
+                        wall: native.now,
+                        mono: now,
+                    },
+                )
             },
         )
-        .map(|_| ())
+        .map(|(_, result)| result)
     }
     fn route_operation<T>(
         &self,
