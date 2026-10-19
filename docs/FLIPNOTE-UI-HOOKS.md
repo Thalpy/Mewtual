@@ -268,6 +268,7 @@ are 64 lowercase hex. A four-byte display fingerprint is never an authority key.
 | New flipnote | `studio_create({server, channel, object, nonce, title, createdAtMs})` | Flipnote view after durable local create/index work |
 | Edit art/metadata | `studio_apply({server, channel, object, epochId, nonce, body})` | Updated flipnote view |
 | Edit sidebar entry | `studio_apply_index({server, channel, epochId, nonce, body})` | Updated Index view |
+| Edit a Score in bulk | `studio_apply_batch({server, channel, object, epochId, objectKind:"score", operations:[{nonce, body}, …]})` | Updated Score view after ONE transaction (one server snapshot, one scan, one publication window, one event) for 1..64 operations, 256 KiB of bodies in all. Each operation keeps its own nonce, so an exact retry of the batch reseals accepted items. Not atomic: a refused item names itself ("item k of n"), the items before it are saved. Score only. |
 | Publish pixels | `publish_pix({server, bytesB64})` | `{cid: string, bytes: number}` after validated PIX persistence/promotion |
 | Fetch referenced blob | `request_blob_bounded({server, cid, maxBytes})` | `{bytes_b64: string, bytes: number}` or `null` if unavailable |
 | List recovery versions | `studio_recovery_list({server, channel, object?})` | Metadata for at most two retained versions plus one staged version; omit `object` for the Index |
@@ -312,6 +313,13 @@ Implemented bodies:
 - Score: `set_patch`, `remove_patch`, `set_cell`, `clear_cell`, and `set_header` for
   `title`/`bpm`/`bpb`/`steps`. Supply `objectKind:"score"` throughout its native path.
   The saved typed wrapper, rather than an Index hint or overlapping body grammar, binds the family.
+  A note cell may carry `vol` (1..100, percent of its recipe's level); absent means full level and
+  is never rewritten to 100. A build before `vol` rejects a body or checkpoint carrying it as
+  malformed, and under the existing fail-closed admission rule that rejection pauses that build's
+  Studio sync for the whole server (the "sync paused" banner, reasserted by every further `vol`
+  operation) until an explicit Studio access; it looks like corruption from there. A group editing
+  volumes must therefore run this build or newer before anyone authors one. The value rides the
+  exported take's note-on as `v` and the engine scales the recipe's oscillator mix, not its envelope.
 
 ## Save and retry
 
@@ -345,7 +353,12 @@ empty epoch-zero Index view without creating a file. Ordinary reads establish th
 background watch.
 
 Success means durable **local, provisional** metadata, not remote delivery or owner settlement.
-Native busy/locked errors are ordinary refusal paths; do not spin or force-unlock storage.
+Native busy/locked errors are ordinary refusal paths; do not spin or force-unlock storage. The
+exact text `Studio storage busy; retry the same request` (and `Studio actor busy; retry`) is raised
+before a request executes, so nothing was written: the session repeats such a request as is, at
+most five times with pauses of 40, 80, 160, 320 and 640 ms (`studio-busy.ts`), and a Save that
+still ends on it is shown as known not written, not uncertain. Any other native error after the
+request crossed the fence stays uncertain.
 
 ## Read model: adapt it, do not cast it to the fixture root
 

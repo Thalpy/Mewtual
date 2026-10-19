@@ -8,6 +8,8 @@
 // projection (studio-store.ts); when Studio save/load lands, the same operations go out through
 // `EncryptedDoc::edit_domain_gated` and the projection is replaced by the materialized document.
 
+import { JAM_NOTE_VOLUME_MAX, JAM_NOTE_VOLUME_MIN } from "./jam-contract.ts";
+
 // --- Document tags (catcoms-wire DocType; stable, append-only) --------------------------------
 export const DOC_TYPE_STUDIO_INDEX = 15;
 export const DOC_TYPE_STUDIO_OBJECT = 16;
@@ -171,7 +173,14 @@ export const SCORE_MAX_CELLS = 4096;
 export const SCORE_MAX_PATCHES = 64;
 
 /** Authored sixteenth-step length; absence preserves the original one-step draft bytes. */
-export type ScoreCell = { k: "n"; p: string; len?: number } | { k: "d"; pad: number };
+/**
+ * A note's optional `vol` is its authored level, 1..100 percent of the recipe's own level; absent
+ * means full level and is never rewritten to 100 (like an absent `len` is never rewritten to 1).
+ * Additive `jam-score:v1` field: a build before it refuses a body or checkpoint carrying it.
+ */
+export type ScoreCell = { k: "n"; p: string; len?: number; vol?: number } | { k: "d"; pad: number };
+export const SCORE_VOLUME_MIN = JAM_NOTE_VOLUME_MIN;
+export const SCORE_VOLUME_MAX = JAM_NOTE_VOLUME_MAX;
 /** Body schema mirrored by Rust ScoreOp. Backend admission and causal validation remain required. */
 export type ScoreOp =
   | { op: "set_cell"; step: number; row: number; value: ScoreCell }

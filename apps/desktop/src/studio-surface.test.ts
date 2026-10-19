@@ -42,7 +42,7 @@ const { default: StudioFaultControls } = await import("./StudioFaultControls.sve
 const { default: ServerStudioSettings } = await import("./ServerStudioSettings.svelte");
 const { mount, unmount, flushSync } = await import("svelte");
 
-function mountStudio(ipc: FakeIpc, extra: Partial<{ audioActions: import("./studio-audio.ts").StudioAudioActions; patchLibrary: readonly { name: string; patch: import("./jam-contract.ts").JamPatch }[]; patchShelves: readonly { name: string; patch: import("./jam-contract.ts").JamPatch; shelf: "preset" | "mine" | "share" }[]; onpostPixa: (bytes: Uint8Array, server: number) => Promise<void> }> = {}) {
+function mountStudio(ipc: FakeIpc, extra: Partial<{ audioActions: import("./studio-audio.ts").StudioAudioActions; patchLibrary: readonly { name: string; patch: import("./jam-contract.ts").JamPatch }[]; patchShelves: readonly { name: string; patch: import("./jam-contract.ts").JamPatch; shelf: "preset" | "mine" | "share" }[]; onpostPixa: (bytes: Uint8Array, server: number) => Promise<void>; onpostScore: (take: import("./jam-contract.ts").JamTake, server: number) => Promise<void> }> = {}) {
   state.useStudioIpc(ipc);
   const notices: string[] = [];
   const target = document.createElement("div");
@@ -333,7 +333,9 @@ test("UI-003: a sidebar row rendered while a create is in flight changes when th
     await settled();
     const row = () => target.querySelector(".studio-obj.pending");
     assert.match(row()?.textContent ?? "", /creating…/, "the pending row is on screen while the create is held");
-    create.reject(new Error("Studio actor busy; retry"));
+    // A refusal after the request crossed native's final fence: the create may have committed.
+    // (A pre-execution refusal such as "Studio actor busy" is now repeated or shown as not written.)
+    create.reject(new Error("Studio request cancelled; its local save may have completed"));
     await settled();
     assert.equal(ipc.calls.filter((c) => c.cmd === "studio_create").length, 1);
     assert.match(row()?.textContent ?? "", /create uncertain · retry in the editor/, "the same keyed row shows the new status");
@@ -366,12 +368,13 @@ test("UI-003: a pending frame's thumbnail rendered while its publish is in fligh
     assert.ok(pendingThumb(), "the pending thumbnail is on screen while the publish is held");
     assert.equal(pendingThumb()?.querySelector(".ix")?.textContent, "…");
     assert.equal(pendingThumb()?.querySelector(".fr.pending.uncertain"), null);
-    publish.reject(new Error("Studio storage busy; retry the same request"));
+    // A withheld result, not a pre-execution refusal: the publication may have completed.
+    publish.reject(new Error("outcome=uncertain; the publication may have completed, but its result could not be delivered; retry exactly"));
     await settled();
     assert.equal(pendingThumb()?.querySelector(".ix")?.textContent, "?", "the same thumbnail now says the save is uncertain");
     assert.ok(pendingThumb()?.querySelector(".fr.pending.uncertain"));
     assert.match(m.text(), /save uncertain/);
-    assert.match(m.text(), /Studio storage busy/);
+    assert.match(m.text(), /may have completed/);
   } finally {
     m.done();
   }
@@ -1182,5 +1185,23 @@ test("G6-UI-003: Score loop is an explicit transport toggle, off by default, and
     play(); await settled(50); assert.deepEqual(loops, [false]);
     toggle.click(); flushSync(); assert.equal(toggle.getAttribute("aria-pressed"), "true");
     play(); await settled(50); assert.deepEqual(loops, [false, true]);
+  } finally { m.done(); }
+});
+
+test("a score posts to chat through its own attachment callback with the take the share button would seal", async () => {
+  const ipc = fakeIpc();
+  const score = { kind: "score", title: null, bpm: null, bpb: null, steps: null, cells: {}, patches: {}, readiness: { cells: {}, patches: {}, headerConflicts: false } };
+  ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ kind: "score", title: "music" }) } })));
+  ipc.on("studio_read", () => ({ ...ordinaryView(score), group: "deadbeef" }));
+  const posted: { server: number; events: number }[] = [];
+  const m = mountStudio(ipc, { onpostScore: async (take, server) => { posted.push({ server, events: take.events.length }); } });
+  try {
+    await settled(); state.studio.selected = OBJ; flushSync(); await settled(400);
+    const post = m.target.querySelector<HTMLButtonElement>("[data-score-post]")!;
+    assert.ok(post, "the composer offers post to chat when the host can attach");
+    assert.equal(post.disabled, false);
+    post.click(); await settled(300);
+    assert.deepEqual(posted, [{ server: SERVER, events: 0 }]);
+    assert.equal(m.count("publish_pixa"), 0);
   } finally { m.done(); }
 });

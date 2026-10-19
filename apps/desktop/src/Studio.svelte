@@ -64,7 +64,7 @@
 
   let { me, server, channel, nameOf, colorOf, adapt = true, onnotice, claims = null, claimActions = null,
     patchLibrary = [], patchShelves = [], libraryCount = 0, serverName = "", onsavePatch, onsharePatch,
-    audioActions = null, audioState = { state: "stopped", elapsedMs: 0 }, onshareScore, onsharePixa, onpostPixa } = $props<{
+    audioActions = null, audioState = { state: "stopped", elapsedMs: 0 }, onshareScore, onsharePixa, onpostPixa, onpostScore, onnavigate } = $props<{
     me: string;
     server: number | null;
     channel: string;
@@ -93,6 +93,11 @@
     onshareScore?: (take: JamTake, server: number) => Promise<void>;
     onsharePixa?: (bytes: Uint8Array, server: number) => Promise<void>;
     onpostPixa?: (bytes: Uint8Array, server: number) => Promise<void>;
+    /// Attach the score's .jamtake to the chat composer, the way a flipnote's .pixa is posted.
+    onpostScore?: (take: JamTake, server: number) => Promise<void>;
+    /// Called the moment this surface decides to navigate to another document (the Music tab's
+    /// open/create), before the departure Save can wait: see StudioNav's prop of the same name.
+    onnavigate?: () => void;
   }>();
 
   // Built once per mount (state may be written during init, never inside a derived); the
@@ -765,12 +770,12 @@
   // --- Sound: audition and the soundfont popup ---------------------------------------------------
   /// Play one note of a recipe through the Studio's own audio session. No second synth path: the
   /// note is a one-event take, so it inherits the session's gesture, scope and Deafen gates.
-  function auditionSound(patch: JamPatch, note: number, durationMs: number) {
+  function auditionSound(patch: JamPatch, note: number, durationMs: number, volume: number | undefined = undefined) {
     if (!audioActions) { onnotice("audio playback is unavailable on this surface", "warn"); return; }
     const group = view?.group;
     if (!group) { onnotice("reopen this flipnote before auditioning: its group is not known yet", "warn"); return; }
     let playback;
-    try { playback = auditionPlayback({ group, exporter: me }, patch, note, durationMs); } catch (e) { onnotice(reason(e), "warn"); return; }
+    try { playback = auditionPlayback({ group, exporter: me }, patch, note, durationMs, volume); } catch (e) { onnotice(reason(e), "warn"); return; }
     // Raised before start: the session reports "preparing"/"playing" for this note and the
     // editor must already know it is not document playback when that lands.
     auditioning = true;
@@ -842,7 +847,10 @@
     // successful OS save; the native GIF route above deliberately has a different result.
     mediaReceipt = `Download started: ${filename}`;
   }
-  async function downloadMedia(share = false) {
+  /// Prepare the open document's package once and hand it where asked: a browser download, the
+  /// server share (score only) or the chat composer. The preparation is checked against the
+  /// document and session it started from before any callback sees it.
+  async function downloadMedia(how: "download" | "share" | "post" = "download") {
     if (mediaBusy || !objectId) return;
     if (!commit()) return;
     const object = objectId, gen = session.generation, target = session.scope; mediaBusy = true;
@@ -850,12 +858,13 @@
       if (isScore) {
         const take = await session.prepareScoreTake(object);
         if (gen !== session.generation || objectId !== object || !target) throw new Error("the export target changed");
-        if (share) { if (!onshareScore) throw new Error("sharing is unavailable on this surface"); await onshareScore(take, target.server); }
+        if (how === "share") { if (!onshareScore) throw new Error("sharing is unavailable on this surface"); await onshareScore(take, target.server); }
+        else if (how === "post") { if (!onpostScore) throw new Error("Chat attachments are unavailable."); await onpostScore(take, target.server); }
         else browserDownload(new TextEncoder().encode(JSON.stringify(take)), "Mewtual-score.jamtake", JAM_TAKE_MIME);
       } else {
         const bytes = await session.prepareFlipnotePixa(object);
         if (gen !== session.generation || objectId !== object || !target) throw new Error("The flipnote changed. Try again.");
-        if (share) {
+        if (how === "post") {
           if (!onpostPixa) throw new Error("Chat attachments are unavailable.");
           await onpostPixa(bytes, target.server);
         } else browserDownload(bytes, "Mewtual-flipnote.pixa", "application/x-mewtual-pixa");
@@ -1344,7 +1353,7 @@
           onop={(op) => guard(() => session.applyScoreOp(objectId, op))} onaddpatch={addStudioPatch}
           onplay={audioActions ? toggleStudioPlay : undefined} onstop={() => audioActions?.stop()} {playing} positionMs={playing ? audioState.elapsedMs : null}
           {loop} onloop={(next) => { loop = next; }} onaudition={audioActions ? auditionSound : undefined} onnew={openSoundfont}
-          onexport={() => downloadMedia()} onshare={onshareScore ? () => downloadMedia(true) : undefined} {mediaBusy}
+          onexport={() => downloadMedia()} onshare={onshareScore ? () => downloadMedia("share") : undefined} onpost={onpostScore ? () => downloadMedia("post") : undefined} {mediaBusy}
           history={scoreHistory} onnotice={(text, kind) => onnotice(text, kind === "error" ? "error" : "info")} />
       {/key}
     </div>
@@ -1384,7 +1393,7 @@
       <button type="button" class="st-btn" onclick={() => void session.save().catch(e => onnotice(reason(e), "warn"))}>Save</button>
       <span class="grow"></span>
       <button type="button" class="st-btn" disabled={!audioActions} onclick={toggleStudioPlay}>{playing ? "stop" : "play"}</button>
-      <button type="button" class="st-btn" title="Attach this flipnote to a chat message" disabled={mediaBusy || playing || !onpostPixa} onclick={() => downloadMedia(true)}>
+      <button type="button" class="st-btn" title="Attach this flipnote to a chat message" disabled={mediaBusy || playing || !onpostPixa} onclick={() => downloadMedia("post")}>
         <svg viewBox="0 0 16 16" style="width: 11px; height: 11px"><path d="M2 8l12-6-4 12-2.5-4.5z"></path></svg>
         Post to chat
       </button>
@@ -1613,8 +1622,8 @@
             <StudioMusic model={model.sound} frameCount={frames.length} fps={model.fps} tracks={musicTracks} {patchLibrary} {who} {tint}
               readonlyReason={playing ? "Stop playback before editing" : readOnlyWhy}
               onlink={(id) => guard(() => session.linkScore(objectId, id))}
-              onopen={(id) => { void session.navigate(() => { session.open(id); studio.selected = id; }).catch(e => onnotice(reason(e), "warn")); }}
-              oncreate={() => { void session.navigate(() => { const id = session.createScore("New music track"); session.open(id, { read: false }); studio.selected = id; }).catch(e => onnotice(reason(e), "warn")); }} />
+              onopen={(id) => { onnavigate?.(); void session.navigate(() => { session.open(id); studio.selected = id; }).catch(e => onnotice(reason(e), "warn")); }}
+              oncreate={() => { onnavigate?.(); void session.navigate(() => { const id = session.createScore("New music track"); session.open(id, { read: false }); studio.selected = id; }).catch(e => onnotice(reason(e), "warn")); }} />
           {:else}
             <!-- History reads top to bottom as one story: what this flipnote is, the immutable
                  versions it has been saved as, the retained edits recovery can bring back, the

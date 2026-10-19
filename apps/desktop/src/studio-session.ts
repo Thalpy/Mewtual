@@ -24,6 +24,7 @@
 //   reference whenever something changed.
 
 import { PixError, decodePix } from "./pix.ts";
+import { busyRetrying, isPreExecutionRefusal } from "./studio-busy.ts";
 import { workingFlipnote, workingScore, workingIndex, workingSlot } from "./studio-working.ts";
 import { encodeStudioDraft, validateDraftOperation, type StudioDraft } from "./studio-draft.ts";
 import { validateJamPatch } from "./jam-patch.ts";
@@ -70,6 +71,9 @@ import {
   recoveryRestorePointer,
   requestBlobBounded,
   studioApply,
+  studioApplyBatch,
+  STUDIO_APPLY_BATCH_MAX,
+  STUDIO_APPLY_BATCH_MAX_BYTES,
   studioApplyIndex,
   studioCreate,
   studioList,
@@ -424,11 +428,14 @@ export class StudioSession {
   get mediaGeneration(): number { return this.mediaEpoch; }
 
   constructor(opts: SessionOptions) {
-    this.ipc = opts.ipc;
+    this.schedule = opts.schedule ?? ((fn, ms) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); });
+    // Every native call of this session repeats a storage-busy refusal a bounded number of times
+    // before reporting it (studio-busy.ts); the generation check ends a repeat that a reset or
+    // scope change has orphaned. The timer seam is the session's own, so tests drive the pauses.
+    this.ipc = busyRetrying(opts.ipc, this.schedule, () => this.generation);
     this.me = opts.me;
     this.now = opts.now ?? (() => Date.now());
     this.newId = opts.newId ?? (() => randomElementId());
-    this.schedule = opts.schedule ?? ((fn, ms) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); });
     this.maxFetches = opts.maxFetches ?? 2;
     this.cacheBytesCap = opts.blobCacheBytes ?? BLOB_CACHE_BYTES;
     this.autosaveMs = opts.autosaveMs ?? 0;
@@ -1898,9 +1905,33 @@ export class StudioSession {
           await this.landed(s.object, view, docRead);
         }
       } else if (s.kind === "apply") {
-        const view = await studioApply(this.ipc, target, s.request);
-        if (!this.current(gen)) return;
-        await this.landed(s.object, view, docRead);
+        const batch = this.batchable(s);
+        if (batch.length) {
+          // The members share this record's lane, epoch and authoring binding, so the admission
+          // this record passed above covers them. Each still counts its own attempt: a lock
+          // snapshot taken now must restore every member as an interrupted delivery, and a later
+          // retry of any member must not skip admission, exactly as for the first record.
+          for (const r of batch) { r.status = "inflight"; r.attempts++; }
+          this.notify();
+          try {
+            const view = await studioApplyBatch(this.ipc, target, { object: s.object, epochId: s.request.epochId,
+              operations: [s, ...batch].map((r) => ({ nonce: r.request.nonce, body: r.request.body })) });
+            if (!this.current(gen)) return;
+            await this.landed(s.object, view, docRead);
+            for (const r of batch) this.finish(r);
+          } catch (e) {
+            // One native outcome for the whole batch: every member settles the same way `s`
+            // does below (known not written for a pre-execution refusal, otherwise uncertain,
+            // since native may have written the items before the one it names).
+            if (!this.current(gen)) return;
+            for (const r of batch) this.settleFailure(r, e);
+            throw e;
+          }
+        } else {
+          const view = await studioApply(this.ipc, target, s.request);
+          if (!this.current(gen)) return;
+          await this.landed(s.object, view, docRead);
+        }
       } else if (s.kind === "applyIndex") {
         const view = await studioApplyIndex(this.ipc, target, s.request);
         if (!this.current(gen)) return;
@@ -1928,10 +1959,42 @@ export class StudioSession {
     }
   }
 
+  /**
+   * The queued Score edits that travel with `s` in one native transaction: the records after it
+   * in its lane, in order, while each is an ordinary Score Apply against the same epoch with the
+   * same authoring binding, released for sending, and the batch stays inside native's count and
+   * byte bounds. Gathering stops at the first record that does not qualify, so the lane's order
+   * is kept exactly. A lone edit still travels as `studio_apply`, which also keeps every
+   * single-edit expectation (and test) unchanged. Flipnote and Index edits never batch: their
+   * native admission inspects each body (blob custody, link evidence) one request at a time.
+   */
+  private batchable(s: Extract<SaveEntry, { kind: "apply" }>): Extract<SaveEntry, { kind: "apply" }>[] {
+    const out: Extract<SaveEntry, { kind: "apply" }>[] = [];
+    if (s.request.objectKind !== "score") return out;
+    // Only a first delivery has just passed admission on the members' behalf. An exact retry
+    // skips admission on purpose, and a member riding with it would skip the "history changed"
+    // check it gets alone, losing its known-not-written outcome. A retried record travels alone.
+    if (s.attempts !== 1) return out;
+    const lane = laneOf(s);
+    let bytes = utf8Length(s.request.body), after = false;
+    for (const r of this.records) {
+      if (r === s) { after = true; continue; }
+      if (!after || laneOf(r) !== lane) continue;
+      if (r.kind !== "apply" || r.status !== "queued" || r.request.objectKind !== "score" || r.request.epochId !== s.request.epochId
+        || (this.autosaveMs !== 0 && !this.eligible.has(r.id)) || this.restoredHeld.has(r.id) || !sameBinding(r.binding, s.binding)) break;
+      bytes += utf8Length(r.request.body);
+      if (out.length + 1 >= STUDIO_APPLY_BATCH_MAX || bytes > STUDIO_APPLY_BATCH_MAX_BYTES) break;
+      out.push(r);
+    }
+    return out;
+  }
+
   private settleFailure(s: SaveEntry, e: unknown): void {
-    // Typed Flow-S refusals and pre-Apply epoch refusals prove this attempt did not write. Native
-    // errors remain uncertain because they may have crossed a final delivery fence after commit.
-    const noWrite = e instanceof OverlayNoWrite;
+    // Typed Flow-S refusals and pre-Apply epoch refusals prove this attempt did not write, and so
+    // do native's two pre-execution refusals (storage busy, actor busy: raised before the request
+    // reached the vault). Other native errors remain uncertain because they may have crossed a
+    // final delivery fence after commit.
+    const noWrite = e instanceof OverlayNoWrite || isPreExecutionRefusal(e);
     const earlierAttemptWasUncertain = s.mayHaveCommitted;
     if (!noWrite) s.mayHaveCommitted = true;
     s.status = s.mayHaveCommitted ? "uncertain" : "blocked";
@@ -2510,6 +2573,16 @@ function choicesForContent(content: StudioContent, mode: RecoveryMode): { choice
 
 function laneOf(s: SaveRecord): string {
   return s.kind === "applyIndex" ? "index" : s.object ?? "index";
+}
+
+/** Two records were authored against the same view (or both without one, in the immediate seam). */
+function sameBinding(a: SaveRecord["binding"], b: SaveRecord["binding"]): boolean {
+  if (!a || !b) return !a && !b;
+  return a.epochId === b.epochId && a.awaiting === b.awaiting && a.phase === b.phase;
+}
+
+function utf8Length(text: string): number {
+  return new TextEncoder().encode(text).length;
 }
 
 const jobKey = (generation: number, cid: Hex64, bytes: number) => `${generation}:${cid}:${bytes}`;

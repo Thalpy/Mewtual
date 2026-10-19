@@ -22,7 +22,7 @@
   // lost editing context or a cell that changed under it before release.
   import { onDestroy, tick, untrack, type Snippet } from "svelte";
   import { JAM_MET_BPM_MIN, JAM_MET_BPM_MAX, JAM_MET_BPB_MIN, JAM_MET_BPB_MAX, type JamPatch } from "./jam-contract.ts";
-  import { SCORE_MAX_CELLS, SCORE_MAX_STEPS, SCORE_MAX_PATCHES, SCORE_ROWS, canonicalJson, type ScoreCell, type ScoreOp } from "./studio-contract.ts";
+  import { SCORE_MAX_CELLS, SCORE_MAX_STEPS, SCORE_MAX_PATCHES, SCORE_ROWS, SCORE_VOLUME_MAX, SCORE_VOLUME_MIN, canonicalJson, type ScoreCell, type ScoreOp } from "./studio-contract.ts";
   import type { ScoreModel } from "./studio-native.ts";
   import { groupShelves, instrumentName, libraryKey, rackLabel, samePatch, waveGlyph, type LibraryItem } from "./studio-sound-ui.ts";
   import {
@@ -59,12 +59,15 @@
     positionMs?: number | null;
     loop?: boolean;
     onloop?: (loop: boolean) => void;
-    /** Play one note through the host, which gates Deafen; absent hides auditioning. */
-    onaudition?: (patch: JamPatch, note: number, durationMs: number) => void;
+    /** Play one note through the host, which gates Deafen; absent hides auditioning. The level is
+     *  the note's authored volume (1..100), so a placed or adjusted note sounds as it will play. */
+    onaudition?: (patch: JamPatch, note: number, durationMs: number, volume?: number) => void;
     /** Open the soundfont popup, seeded with the chosen recipe if any. */
     onnew?: (startFrom: JamPatch | null) => void;
     onexport?: () => void;
     onshare?: () => void;
+    /** Attach the score's take to a chat message; absent hides the button. */
+    onpost?: () => void;
     mediaBusy?: boolean;
     /** The host's history rail, rendered under the inspector's history tab. */
     history?: Snippet;
@@ -72,7 +75,7 @@
   };
   let {
     model, readonlyReason, loading, error, patchLibrary, library = [], who = (id: string) => id.slice(0, 8), tint = () => "var(--muted)",
-    onop, onaddpatch, onplay, onstop, playing = false, positionMs = null, loop = false, onloop, onaudition, onnew, onexport, onshare,
+    onop, onaddpatch, onplay, onstop, playing = false, positionMs = null, loop = false, onloop, onaudition, onnew, onexport, onshare, onpost,
     mediaBusy = false, history, onnotice,
   }: Props = $props();
 
@@ -85,6 +88,7 @@
   let mode = $state<"note" | "drum">("note");
   let patch = $state(""); // chosen recipe id; "" means the first active one
   let hold = $state(SCORE_DEFAULT_HOLD); // the last deliberately chosen length
+  let volume = $state(SCORE_VOLUME_MAX); // the last deliberately chosen level, for new notes
   let snap = $state(SCORE_DEFAULT_HOLD); // placement unit in steps
   let pad = $state(0);
   let scaleKind = $state<ScoreScaleKind>("chromatic");
@@ -131,7 +135,10 @@
   onDestroy(() => { alive = false; if (tapTimer) clearTimeout(tapTimer); });
 
   // --- derived views -----------------------------------------------------------------------------
-  const blocked = $derived(loading || !model || !!readonlyReason);
+  // A re-read of a score already on screen (the echo of an own Save, a remote edit) must not take
+  // the grid away: the working projection keeps every queued edit, and a later readback corrects
+  // anything the author got ahead of. Only the first read, with nothing to show, blocks input.
+  const blocked = $derived((loading && !model) || !model || !!readonlyReason);
   const size = $derived(cardWidth >= SCORE_WIDE_CARD_PX ? SCORE_WIDE_PAGE_STEPS : SCORE_PAGE_STEPS);
   const extent = $derived(model ? scoreExtent(model) : SCORE_PAGE_STEPS);
   const pages = $derived(Math.max(1, Math.ceil(extent / size)));
@@ -253,7 +260,7 @@
   function cellLabel(step: number, row: number): string {
     const key = `${step}:${row}`, cell = model?.cells[key], held = holds.get(key);
     const base = `${scorePitch(row)}, ${stepLabel(step)}`;
-    if (cell) return `${base}: ${cell.k === "d" ? PAD_NAMES[cell.pad] : `${nameOf(cell.p)}, ${cell.len ?? 1} step${(cell.len ?? 1) === 1 ? "" : "s"}`}`;
+    if (cell) return `${base}: ${cell.k === "d" ? PAD_NAMES[cell.pad] : `${nameOf(cell.p)}, ${cell.len ?? 1} step${(cell.len ?? 1) === 1 ? "" : "s"}${cell.vol === undefined ? "" : `, ${cell.vol}%`}`}`;
     if (held) return `${base}: ${nameOf(held.p)} continues${held.others.length ? ` (${held.others.length} more here)` : ""}`;
     return `${base}: empty`;
   }
@@ -322,18 +329,19 @@
     if (blocked) return false;
     try { return onop(make()) !== false; } catch (cause) { onnotice(message(cause), "error"); return false; }
   }
-  function audition(id: string, row: number, len: number) {
+  /** One note through the host at the level it is (or will be) written with. */
+  function audition(id: string, row: number, len: number, level = SCORE_VOLUME_MAX) {
     const descriptor = model?.patches[id];
     if (!onaudition || !descriptor || !model) return;
-    onaudition(descriptor, SCORE_ROW_BASE_NOTE + row, Math.max(1, scoreDurationMs(len, model.bpm)));
+    onaudition(descriptor, SCORE_ROW_BASE_NOTE + row, Math.max(1, scoreDurationMs(len, model.bpm)), level);
   }
   /** `remember` keeps `len` as the next default: a length the author chose, not one the end or a neighbour forced. */
   function place(step: number, row: number, len: number, recipe = selectedPatch, remember = true) {
     if (!model) return;
-    const entry = mode === "drum" ? { mode: "drum" as const, pad: scorePadForRow(row) ?? pad } : { mode: "note" as const, patch: recipe, len };
+    const entry = mode === "drum" ? { mode: "drum" as const, pad: scorePadForRow(row) ?? pad } : { mode: "note" as const, patch: recipe, len, volume };
     if (!send(() => scoreCellOperation(model!, step, row, entry))) return;
     selected = `${step}:${row}`;
-    if (entry.mode === "note") { if (remember) hold = len; audition(entry.patch, row, len); }
+    if (entry.mode === "note") { if (remember) hold = len; audition(entry.patch, row, len, entry.volume); }
   }
   function erase(step: number, row: number) {
     if (!model) return;
@@ -378,9 +386,10 @@
     if (!blocked) erase(step, row);
   }
   function pointerDownCell(event: PointerEvent, step: number, row: number) {
-    // A new primary press ends the memory of a cancelled one; a secondary button does not, so a
-    // chord cannot slip the cancelled press's click past the swallow.
-    if (event.button === 0) cancelledPress = null;
+    // The cancelled press is forgotten only when ITS pointer presses again (a mouse keeps one
+    // pointer id, so its next primary press is that). Another pointer's press, a chord button or a
+    // second touch must not revive it: its release is still coming and must still be swallowed.
+    if (event.button === 0 && event.pointerId === cancelledPress) cancelledPress = null;
     if (event.button !== 0 || blocked || !model || tool !== "place" || drag) return;
     const key = `${step}:${row}`, cell = model.cells[key], held = holds.get(key);
     // The last cell of a note starts a resize of that note.
@@ -446,7 +455,9 @@
       if (note?.k !== "n" || note.p !== gesture.patch || (note.len ?? 1) !== gesture.original) { onnotice("that note changed while you were resizing it", "info"); return; }
       if (len === gesture.original) { dragged = false; return; } // no change: the click selects
       const [s, r] = gesture.onset.split(":").map(Number);
-      if (send(() => scoreCellOperation(model!, s, r, { mode: "note", patch: note.p, len }))) { selected = gesture.onset; hold = len; }
+      // A resize rewrites the whole cell, so the note's level travels with it (review H1: a drag
+      // that dropped `vol` silently reset the note to full volume).
+      if (send(() => scoreCellOperation(model!, s, r, { mode: "note", patch: note.p, len, volume: note.vol ?? SCORE_VOLUME_MAX }))) { selected = gesture.onset; hold = len; }
       return;
     }
     // Release revalidates what pointer down saw: the start must still be free of any note and
@@ -484,16 +495,29 @@
   function setHold(next: number) {
     hold = Math.max(1, Math.min(SCORE_MAX_STEPS, Math.round(next) || 1));
   }
+  // The selected panel rewrites one field of a note at a time; the others travel unchanged, so a
+  // longer hold keeps its level and a quieter note keeps its hold and recipe.
   function resizeSelected(delta: number) {
     if (!model || !selected || selectedCell?.k !== "n") return;
     const [step, row] = selected.split(":").map(Number), cell = selectedCell;
     const len = Math.max(1, (cell.len ?? 1) + delta);
-    if (send(() => scoreCellOperation(model!, step, row, { mode: "note", patch: cell.p, len }))) hold = len;
+    if (send(() => scoreCellOperation(model!, step, row, { mode: "note", patch: cell.p, len, volume: cell.vol ?? SCORE_VOLUME_MAX }))) hold = len;
   }
   function reassignSelected(recipe: string) {
     if (!model || !selected || selectedCell?.k !== "n" || !recipe || recipe === selectedCell.p) return;
     const [step, row] = selected.split(":").map(Number), cell = selectedCell;
-    if (send(() => scoreCellOperation(model!, step, row, { mode: "note", patch: recipe, len: cell.len ?? 1 }))) audition(recipe, row, cell.len ?? 1);
+    if (send(() => scoreCellOperation(model!, step, row, { mode: "note", patch: recipe, len: cell.len ?? 1, volume: cell.vol ?? SCORE_VOLUME_MAX }))) audition(recipe, row, cell.len ?? 1, cell.vol ?? SCORE_VOLUME_MAX);
+  }
+  function setVolume(next: number) {
+    volume = Math.max(SCORE_VOLUME_MIN, Math.min(SCORE_VOLUME_MAX, Math.round(next) || SCORE_VOLUME_MAX));
+  }
+  /** Rewrite the selected note at `next` percent; the level is remembered for the next placement and heard at once. */
+  function setVolumeSelected(next: number) {
+    if (!model || !selected || selectedCell?.k !== "n") return;
+    const [step, row] = selected.split(":").map(Number), cell = selectedCell;
+    const level = Math.max(SCORE_VOLUME_MIN, Math.min(SCORE_VOLUME_MAX, Math.round(next) || SCORE_VOLUME_MAX));
+    if (level === (cell.vol ?? SCORE_VOLUME_MAX)) return;
+    if (send(() => scoreCellOperation(model!, step, row, { mode: "note", patch: cell.p, len: cell.len ?? 1, volume: level }))) { volume = level; audition(cell.p, row, cell.len ?? 1, level); }
   }
   function useAlternative(item: ScoreDiagnostic, index: number) {
     send(() => scoreDiagnosticOperation(model!, item, index));
@@ -611,8 +635,9 @@
     {/if}
     <span class="grow"></span>
     <button type="button" class="st-tg" class:on={scaleOn} aria-pressed={scaleOn} data-score-scale-toggle title="scale view [s] · folds rows outside the scale; notes there stay" onclick={toggleScale}><i></i><span class="micro">{scaleOn ? `${SCORE_ROOTS[scaleRoot]} ${scaleKind}` : "scale view"}</span></button>
+    {#if onpost}<button type="button" class="st-btn primary" data-score-post disabled={mediaBusy || playing || !model?.ready} title={model?.ready ? "attach this score to a chat message" : "fix the flagged items first"} onclick={onpost}><svg viewBox="0 0 16 16" class="ico" aria-hidden="true"><path d="M2 8l12-6-4 12-2.5-4.5z"></path></svg>post to chat</button>{/if}
     {#if onexport}<button type="button" class="st-btn" disabled={mediaBusy || playing || !model?.ready} title={model?.ready ? "save this score as a .jamtake file" : "fix the flagged items first"} onclick={onexport}>download .jamtake</button>{/if}
-    {#if onshare}<button type="button" class="st-btn primary" disabled={mediaBusy || playing || !model?.ready} title={model?.ready ? "put a .jamtake of this score in the server share" : "fix the flagged items first"} onclick={onshare}>share</button>{/if}
+    {#if onshare}<button type="button" class="st-btn" disabled={mediaBusy || playing || !model?.ready} title={model?.ready ? "put a .jamtake of this score in the server share" : "fix the flagged items first"} onclick={onshare}>share</button>{/if}
   </div>
 
   {#if error}<div class="st-banner danger" role="alert">{error}</div>{/if}
@@ -705,6 +730,13 @@
                 <span class="micro">{holdName(hold)}</span>
               </div>
               <div class="st-opt">
+                <span class="lb">volume</span>
+                <button type="button" class="st-tile" aria-label="Quieter placement" disabled={volume <= SCORE_VOLUME_MIN} onclick={() => setVolume(volume - 10)}>−</button>
+                <input class="st-input num" type="number" min={SCORE_VOLUME_MIN} max={SCORE_VOLUME_MAX} step="1" aria-label="Placement volume" title="how loud a placed note plays, as a percentage of its recipe; the selected panel changes one note" value={volume} oninput={(e) => setVolume(Number(e.currentTarget.value))} disabled={blocked} />
+                <button type="button" class="st-tile" aria-label="Louder placement" disabled={volume >= SCORE_VOLUME_MAX} onclick={() => setVolume(volume + 10)}>＋</button>
+                <span class="micro">%</span>
+              </div>
+              <div class="st-opt">
                 <span class="lb">snap</span>
                 {#each SCORE_SNAPS as unit (unit)}
                   <button type="button" class="st-tile txt" class:on={snap === unit} aria-pressed={snap === unit} data-score-snap={unit} title="a click lands on the nearest {snapName(unit)} boundary" onclick={() => { snap = unit; }}>{snapName(unit)}</button>
@@ -791,6 +823,13 @@
                   <button type="button" class="st-tile" aria-label="Lengthen this note" disabled={blocked || sStep + (selectedCell.len ?? 1) >= model.steps} onclick={() => resizeSelected(1)}>＋</button>
                   <span class="grow"></span>
                   <button type="button" class="st-tile" aria-label="Clear this note" title="clear" disabled={blocked} onclick={() => clearKey(selected!)}>×</button>
+                </div>
+                <div class="st-opt">
+                  <span class="lb">volume</span>
+                  <button type="button" class="st-tile" aria-label="Quieter" disabled={blocked || (selectedCell.vol ?? SCORE_VOLUME_MAX) <= SCORE_VOLUME_MIN} onclick={() => setVolumeSelected((selectedCell?.k === "n" ? selectedCell.vol ?? SCORE_VOLUME_MAX : SCORE_VOLUME_MAX) - 10)}>−</button>
+                  <input class="st-input num" type="number" min={SCORE_VOLUME_MIN} max={SCORE_VOLUME_MAX} step="1" aria-label="Volume of this note" title="how loud this note plays, as a percentage of its recipe" value={selectedCell.vol ?? SCORE_VOLUME_MAX} disabled={blocked} onchange={(e) => setVolumeSelected(Number(e.currentTarget.value))} />
+                  <button type="button" class="st-tile" aria-label="Louder" disabled={blocked || (selectedCell.vol ?? SCORE_VOLUME_MAX) >= SCORE_VOLUME_MAX} onclick={() => setVolumeSelected((selectedCell?.k === "n" ? selectedCell.vol ?? SCORE_VOLUME_MAX : SCORE_VOLUME_MAX) + 10)}>＋</button>
+                  <span class="micro">%</span>
                 </div>
               {:else if selectedCell?.k === "d"}
                 <div class="st-opt">
@@ -911,6 +950,7 @@
               <li><i class="ok"></i><span>step = {scoreDurationMs(1, model.bpm)} ms at {model.bpm} bpm · {Object.values(model.cells).filter((c) => c.k === "n").length} notes · {Object.values(model.cells).filter((c) => c.k === "d").length} hits</span></li>
             </ul>
             <div class="acts">
+              {#if onpost}<button type="button" class="st-btn primary" disabled={mediaBusy || playing || !model.ready} onclick={onpost}>post to chat</button>{/if}
               {#if onexport}<button type="button" class="st-btn" disabled={mediaBusy || playing || !model.ready} onclick={onexport}>download .jamtake</button>{/if}
               {#if onshare}<button type="button" class="st-btn" disabled={mediaBusy || playing || !model.ready} onclick={onshare}>share</button>{/if}
             </div>

@@ -113,6 +113,12 @@ export type JamNoteInput = Readonly<{
    * re-attacking. Live playing never sets it.
    */
   ageMs?: number;
+  /**
+   * The authored level of this one note as a 0..1 multiplier on the recipe's own oscillator
+   * levels. A score note's `vol` (percent) arrives as `vol / 100` through the archival plan;
+   * absent, and for live playing always, the voice plays the recipe as designed.
+   */
+  level?: number;
 }>;
 
 export type JamNoteOffInput = Readonly<{
@@ -687,7 +693,8 @@ export class JamEngine {
       return this.drumWithDeadline({ callId: archival.plan.take.call, channel, sessionNonce: lane.sn, sequence: event.sequence, pad: event.note, remote: true },
         { patches: archival.patches, part: lane.src }, this.nowMs() + JAM_KIT[event.note].tailMs - ageMs);
     }
-    const result = this.noteOnWithHold({ channel, sequence: event.sequence, note: event.note, wave: event.wave!, ageMs, remote: true },
+    const result = this.noteOnWithHold({ channel, sequence: event.sequence, note: event.note, wave: event.wave!, ageMs, remote: true,
+      ...(event.level === undefined ? {} : { level: event.level }) },
       event.patch === undefined ? undefined : { patches: archival.patches, index: event.patch }, event.holdMs! - ageMs);
     if (sfx && !result.ok) {
       this.removeChannel(channel); archival.channels.delete(event.lane); archival.sfxChannels--;
@@ -720,7 +727,8 @@ export class JamEngine {
   ): JamPlayResult {
     if (
       this.disposed || !isMidiNote(input.note) || !isLegacyWave(input.wave) || !validSequence(input.sequence) ||
-      (input.ageMs !== undefined && (!Number.isFinite(input.ageMs) || input.ageMs < 0))
+      (input.ageMs !== undefined && (!Number.isFinite(input.ageMs) || input.ageMs < 0)) ||
+      (input.level !== undefined && !(Number.isFinite(input.level) && input.level >= 0 && input.level <= 1))
     ) {
       return { ok: false, reason: "invalid" };
     }
@@ -1326,12 +1334,16 @@ export class JamEngine {
     }
 
     const levelSum = patch.o.reduce((sum, osc) => sum + osc.l, 0);
+    // An authored note level scales the oscillator mix, not the envelope: attack, decay and
+    // release keep their shape and the note is simply quieter, which is what a dynamic marking
+    // means. Validated 0..1 at admission; absent is the recipe as designed.
+    const noteLevel = input.level ?? 1;
     for (const descriptor of patch.o) {
       const oscillator = ctx.createOscillator();
       nodes.push(oscillator);
       sources.push(oscillator);
       params.push(oscillator.frequency, oscillator.detune);
-      const level = trackedGain(ctx, nodes, levelSum > 0 ? descriptor.l / levelSum : 0);
+      const level = trackedGain(ctx, nodes, levelSum > 0 ? (descriptor.l / levelSum) * noteLevel : 0);
       params.push(level.gain);
       oscillator.type = PATCH_OSC_WAVES[descriptor.w];
       oscillator.frequency.setValueAtTime(noteHz(input.note + descriptor.t), at);

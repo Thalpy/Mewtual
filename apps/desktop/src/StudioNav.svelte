@@ -10,11 +10,16 @@
   import { reason, type KnownView, type SaveRecord } from "./studio-session.ts";
   import { base64ToBytes, type NativeExpiry } from "./studio-native.ts";
 
-  let { me, server, channel, onopen, onnotice } = $props<{
+  let { me, server, channel, onopen, onnavigate, onnotice } = $props<{
     me: string;
     server: number | null;
     channel: string;
     onopen: () => void;
+    /// Called the moment a document navigation is decided, before its departure Save can wait.
+    /// The app counts these as routes: an App route (Back, a channel, a server) that was already
+    /// waiting on its own Save then sees itself superseded and does nothing. Calling it only when
+    /// the navigation lands (`onopen`) would be too late: the older route may land first.
+    onnavigate?: () => void;
     onnotice?: (text: string, kind: "info" | "warn" | "error") => void;
   }>();
 
@@ -188,6 +193,7 @@
   }
 
   async function open(id: string) {
+    onnavigate?.();
     try {
       await session.navigate(() => { session.open(id); studio.selected = id; onopen(); });
     } catch (e) { onnotice?.(reason(e), "warn"); }
@@ -196,6 +202,7 @@
   async function newFlipnote() {
     if (!session.scope) return;
     if (indexView?.awaitingTenureReceipt) { onnotice?.("read-only preview: the current owner has not confirmed this channel's history yet", "warn"); return; }
+    onnavigate?.();
     try {
       await session.navigate(() => {
       const n = (model?.entries.length ?? 0) + (model?.overflow.length ?? 0) + 1;
@@ -220,6 +227,7 @@
   }
   async function newScore() {
     if (!session.scope) return;
+    onnavigate?.();
     try { await session.navigate(() => { const id = session.createScore(`score ${(model?.entries.filter((e) => e.kind === "score").length ?? 0) + 1}`); session.open(id, { read: false }); studio.selected = id; onopen(); }); }
     catch (e) { onnotice?.(reason(e), "warn"); }
   }

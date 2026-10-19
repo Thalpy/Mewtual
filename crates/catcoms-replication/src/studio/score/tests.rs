@@ -38,7 +38,7 @@ fn shared_score_vectors_roundtrip_all_variants_and_boundaries() {
     let vectors = vectors();
     assert_eq!(vectors["version"], 1);
     let cases = vectors["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 16);
+    assert_eq!(cases.len(), 18);
     for row in cases {
         let bytes = row["body"].as_str().unwrap().as_bytes();
         let op = ScoreOp::decode(bytes).unwrap();
@@ -84,6 +84,67 @@ fn optional_length_is_not_silently_normalized_or_coerced() {
         ScoreOp::decode(&canonical(&last).unwrap()).is_err(),
         "hold cannot extend beyond format step 256"
     );
+}
+
+#[test]
+fn optional_volume_is_bounded_and_not_silently_normalized() {
+    let quiet = ScoreOp::decode(&body("note_volume")).unwrap();
+    let full = ScoreOp::decode(&body("note_volume_hold")).unwrap();
+    assert!(matches!(
+        quiet,
+        ScoreOp::SetCell {
+            value: ScoreCell::Note {
+                len: None,
+                volume: Some(1),
+                ..
+            },
+            ..
+        }
+    ));
+    // An explicit 100 is retained as written, exactly like an explicit length of 1.
+    assert!(matches!(
+        full,
+        ScoreOp::SetCell {
+            step: 8,
+            row: 12,
+            value: ScoreCell::Note {
+                len: Some(4),
+                volume: Some(100),
+                ..
+            },
+        }
+    ));
+    assert_ne!(ScoreOp::decode(&body("note_legacy")).unwrap(), quiet);
+    for invalid in [
+        json!(0),
+        json!(101),
+        json!(256),
+        json!(1.5),
+        json!("60"),
+        Value::Null,
+        json!(-1),
+    ] {
+        let mut value: Value = serde_json::from_slice(&body("note_volume")).unwrap();
+        value["value"]["vol"] = invalid.clone();
+        assert!(
+            ScoreOp::decode(&canonical(&value).unwrap()).is_err(),
+            "{invalid}"
+        );
+    }
+    // The in-memory constructor cannot smuggle an out-of-range volume past the codec either.
+    for volume in [0, 101] {
+        assert!(ScoreOp::SetCell {
+            step: 0,
+            row: 0,
+            value: ScoreCell::Note {
+                patch: [0; 32],
+                len: None,
+                volume: Some(volume),
+            },
+        }
+        .encode()
+        .is_err());
+    }
 }
 
 #[test]
@@ -193,6 +254,7 @@ fn score_numeric_types_and_static_ranges_are_strict() {
             value: ScoreCell::Note {
                 patch: [0; 32],
                 len: Some(0),
+                volume: None,
             },
         },
         ScoreOp::SetCell {
@@ -201,6 +263,25 @@ fn score_numeric_types_and_static_ranges_are_strict() {
             value: ScoreCell::Note {
                 patch: [0; 32],
                 len: Some(1),
+                volume: None,
+            },
+        },
+        ScoreOp::SetCell {
+            step: 0,
+            row: 0,
+            value: ScoreCell::Note {
+                patch: [0; 32],
+                len: None,
+                volume: Some(0),
+            },
+        },
+        ScoreOp::SetCell {
+            step: 0,
+            row: 0,
+            value: ScoreCell::Note {
+                patch: [0; 32],
+                len: None,
+                volume: Some(101),
             },
         },
         ScoreOp::SetCell {
@@ -392,7 +473,8 @@ fn score_debug_redacts_notes_patches_and_titles() {
             "{:?}",
             ScoreCell::Note {
                 patch: [9; 32],
-                len: Some(4)
+                len: Some(4),
+                volume: Some(70),
             }
         ),
         "ScoreCell { .. }"

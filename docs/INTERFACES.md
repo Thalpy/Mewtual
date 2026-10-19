@@ -1186,6 +1186,7 @@ nonce and complete request across retries; do not generate another operation on 
 | `studio_create` | `object`, `nonce`, `title`, `createdAtMs` | Saved Flipnote view. Creates its title then puts the Index entry with actual full author and unrecorded expiry. |
 | `studio_apply` | `object`, `epochId`, `nonce`, `body` | Updated Flipnote view. `body` is the canonical JSON **string**, not an Automerge change or object. |
 | `studio_apply_index` | `epochId`, `nonce`, `body` | Updated Index view using canonical IndexOp JSON string. |
+| `studio_apply_batch` | `object`, `epochId`, `objectKind:"score"`, `operations:[{nonce, body}, …]` | Updated Score view after ONE transaction for 1..64 Score operations (256 KiB of bodies in all, distinct nonces). Each item is its own signed operation, so an exact retry reseals accepted items. Not atomic: a refused item names itself ("item k of n") and the items before it are saved. Score targets only. |
 
 Create's `createdAtMs` must be a nonnegative JS-safe integer. Both complete operation envelopes
 must fit the existing 64 KiB limit, not just their title/body alone. Create currently targets
@@ -4132,8 +4133,10 @@ The four `on`/`ask` combinations:
 `studioPatchUnion`. Inputs are resolved export views, not native admission capabilities.
 Score input is `{id,bpm,bpb,steps,patches,cells}`: object id is 32 lowercase hex, headers use
 the creative design ranges, cell keys are canonical `step:row`, and values are exactly
-`{k:"n",p:<patch id>,len?:<sixteenth steps>}` or `{k:"d",pad:0..9}`. Note length is 1 through
-the remaining score steps; absent `len` preserves the original one-step draft. Same-row note
+`{k:"n",p:<patch id>,len?:<sixteenth steps>,vol?:1..100}` or `{k:"d",pad:0..9}`. Note length is 1 through
+the remaining score steps; absent `len` preserves the original one-step draft. `vol` is the note's
+authored level in percent of its recipe; absent means full level and is kept absent (the exported
+take's note-on carries it as `v`). Same-row note
 overlap refuses rather than silently shortening authored holds. Patch keys must equal the existing
 jam recipe hashes. Up to 4096 cells and 64 recipes are accepted. Cells beyond the requested score length
 refuse; the connected native projection consumer refuses unresolved overflow/conflicts before

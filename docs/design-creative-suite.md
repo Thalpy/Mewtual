@@ -432,7 +432,7 @@ steps at sixteenth-note resolution. A scale is an editor view.
 ```
 { v:1, kind:"score", id, channel, epoch, title, bpm:40..240, bpb:1..8, steps:1..256,
   patches: { <patch id>: <jam-patch:v1 descriptor> },        at most 64 entries
-  cells:   { "<step>:<row>": {k:"n", p:<patch id>, len?:<sixteenth steps>} | {k:"d", pad:0..9} } }
+  cells:   { "<step>:<row>": {k:"n", p:<patch id>, len?:<sixteenth steps>, vol?:1..100} | {k:"d", pad:0..9} } }
 ```
 
 Caps: 64 patches and 4096 filled cells (the review measured 473,903 bytes for the maximal export

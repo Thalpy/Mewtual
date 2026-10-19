@@ -8467,6 +8467,12 @@
   let studioEndClose: (() => void) | null = null;
   let restoredStudioDraft: string | null = null;
   let studioNavigation = 0;
+  // A Studio document navigation (sidebar open, new flipnote, the Music tab's open/create) is a
+  // route like any other and claims the counter the moment it is decided, before its departure
+  // Save can wait. An App route (Back, a channel, a server) that was already waiting on its own
+  // Save then finds the counter moved and does nothing, instead of landing on top of the newer
+  // choice; the Studio surfaces call this through their `onnavigate` prop.
+  function noteStudioNavigation() { studioNavigation++; }
   async function saveStudioForNavigation(request = ++studioNavigation): Promise<boolean> {
     const generation = uiStateLoadGeneration;
     try { await studioSave?.(); return request === studioNavigation && generation === uiStateLoadGeneration && !locked; }
@@ -13401,6 +13407,25 @@
     if (!current()) throw new Error("Flipnote saved in Files. Open it there to share.");
     await appendToDraft(fileMarker(name, cid, true));
     toast("Flipnote attached. Press Send to post it.", "ok", 5000);
+  }
+  /// The score's counterpart of postStudioPixa: the same jukebox-compatible .jamtake the share
+  /// button seals, uploaded to this member's embed folder and attached to the composer draft
+  /// exactly as the Files pane's own "Post to chat" attaches a file. Every await re-checks the
+  /// channel, server, view and navigation claim it started under.
+  async function postStudioScore(take: JamTake, server: number): Promise<void> {
+    const channel = cur?.active, generation = postStudioGeneration;
+    const studioCurrent = studioClaimNavigation?.() ?? (() => true);
+    const current = () => !locked && uiStateReady && !windowCloseInFlight && studioCurrent() && generation === postStudioGeneration && activeServerId === server && cur?.active === channel && view === "studio";
+    if (!channel || !current()) throw new Error("Open the score’s channel before posting.");
+    const name = `Mewtual-score${JAM_TAKE_EXT}`;
+    const cid = await addSharedFile(new File([JSON.stringify(take)], name, { type: JAM_TAKE_MIME }), myEmbedFolder, name, JAM_TAKE_MIME);
+    if (!current()) throw new Error("Score saved in Files. Open it there to share.");
+    await refreshFiles();
+    if (!current()) throw new Error("Score saved in Files. Open it there to share.");
+    await studioSave?.();
+    if (!current()) throw new Error("Score saved in Files. Open it there to share.");
+    await appendToDraft(fileMarker(name, cid, true));
+    toast("Score attached. Press Send to post it.", "ok", 5000);
   }
   $effect(() => {
     // Reading these values makes every navigation/session/call ABA edge observable; no frame
@@ -24339,7 +24364,7 @@
     <button class="ghost small ctx-action" disabled={finishedTransfers === 0} onclick={clearFinishedTransfers}>Clear finished</button>
   {:else if view === "studio"}
     {#if StudioNav}
-      <StudioNav me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} onopen={() => (view = "studio")} onnotice={studioNotice} />
+      <StudioNav me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} onopen={() => (view = "studio")} onnavigate={noteStudioNavigation} onnotice={studioNotice} />
     {:else}
       <h3><span>Studio</span></h3>
       <div class="studio-loading" role="status" aria-live="polite">
@@ -27312,7 +27337,7 @@
           </div>
         {:else if view === "studio"}
           {#if StudioSurface}
-            <StudioSurface me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} nameOf={nameOfIdentity} colorOf={colorOfIdentity} onnotice={studioNotice} claims={studioClaimScope ? drawClaimSnapshot : null} claimActions={studioClaimActions} patchLibrary={studioPatchLibrary} patchShelves={studioPatchShelves} libraryCount={jamSaved.length} serverName={cur?.name ?? ""} onsavePatch={saveStudioPatch} onsharePatch={shareStudioPatch} audioActions={studioAudioActions} audioState={studioAudioState} onshareScore={shareStudioScore} onsharePixa={shareStudioPixa} onpostPixa={postStudioPixa} />
+            <StudioSurface me={myIdentity} server={activeServerId} channel={cur?.active ?? ""} nameOf={nameOfIdentity} colorOf={colorOfIdentity} onnotice={studioNotice} claims={studioClaimScope ? drawClaimSnapshot : null} claimActions={studioClaimActions} patchLibrary={studioPatchLibrary} patchShelves={studioPatchShelves} libraryCount={jamSaved.length} serverName={cur?.name ?? ""} onsavePatch={saveStudioPatch} onsharePatch={shareStudioPatch} audioActions={studioAudioActions} audioState={studioAudioState} onshareScore={shareStudioScore} onsharePixa={shareStudioPixa} onpostPixa={postStudioPixa} onpostScore={postStudioScore} onnavigate={noteStudioNavigation} />
           {:else}
             <h2>Studio</h2>
             <div class="studio-loading wide" role="status" aria-live="polite">

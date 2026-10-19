@@ -3,7 +3,7 @@
 import { PATCH_OSC_WAVES, TAKE_ID_MAX_BYTES, type JamPatch, type JamTake, type JamTakeEvent } from "./jam-contract.ts";
 import { jamPatchId, validateJamPatch } from "./jam-patch.ts";
 import { validateJamTake } from "./jam-recorder.ts";
-import { FLIPNOTE_MAX_PATCHES, hex, SCORE_MAX_STEPS, SCORE_ROWS, SCORE_MAX_CELLS, type ScoreCell } from "./studio-contract.ts";
+import { FLIPNOTE_MAX_PATCHES, hex, SCORE_MAX_STEPS, SCORE_ROWS, SCORE_MAX_CELLS, SCORE_VOLUME_MAX, SCORE_VOLUME_MIN, type ScoreCell } from "./studio-contract.ts";
 export { SCORE_MAX_STEPS, SCORE_ROWS, SCORE_MAX_CELLS } from "./studio-contract.ts";
 
 /** A resolved export view. Conflicts, overflow and native authority must be handled by its caller. */
@@ -31,7 +31,7 @@ export type StudioPatchUnion = Readonly<{ ids: string[]; patches: JamPatch[] }>;
  */
 export type ScorePlayback = Readonly<{ take: JamTake; gridMs: number }>;
 type PatchTable = Map<string, JamPatch>;
-type Cell = { step: number; row: number; value: { k: "n"; p: string; len: number } | { k: "d"; pad: number } };
+type Cell = { step: number; row: number; value: { k: "n"; p: string; len: number; vol?: number } | { k: "d"; pad: number } };
 type ScoreSnapshot = { id: string; bpm: number; bpb: number; steps: number; patches: PatchTable; cells: Cell[] };
 const encoder = new TextEncoder();
 
@@ -127,12 +127,16 @@ function snapshotScore(input: unknown): ScoreSnapshot {
     if (!integer(step, 0, source.steps - 1) || !integer(row, 0, SCORE_ROWS - 1)) fail("cell outside score");
     const value = record(values[key]);
     if (value.k === "n") {
-      exact(value, Object.hasOwn(value, "len") ? ["k", "p", "len"] : ["k", "p"]);
+      exact(value, ["k", "p", ...(Object.hasOwn(value, "len") ? ["len"] : []), ...(Object.hasOwn(value, "vol") ? ["vol"] : [])]);
       const patch = id(value.p, 64);
       const len = Object.hasOwn(value, "len") ? value.len : 1;
       if (!integer(len, 1, source.steps - step)) fail("note length outside score");
       if (!patches.has(patch)) fail("cell patch missing");
-      cells.push({ step, row, value: { k: "n", p: patch, len } });
+      // The authored level is carried, never defaulted in: an absent `vol` stays absent so the
+      // take event for a legacy note is byte-identical to what it was before levels existed.
+      const vol = Object.hasOwn(value, "vol") ? value.vol : undefined;
+      if (vol !== undefined && !integer(vol, SCORE_VOLUME_MIN, SCORE_VOLUME_MAX)) fail("note volume outside 1..100");
+      cells.push({ step, row, value: { k: "n", p: patch, len, ...(vol === undefined ? {} : { vol }) } });
     } else if (value.k === "d") {
       exact(value, ["k", "pad"]);
       if (!integer(value.pad, 0, 9)) fail("invalid drum pad");
@@ -188,7 +192,7 @@ async function scoreTake(score: ScoreSnapshot, ctx: StudioExportContext, union: 
       // `p` selects the full recipe in the existing engine. Its required legacy fallback follows
       // the first oscillator, making the byte representation deterministic for every recipe.
       const w = PATCH_OSC_WAVES[score.patches.get(value.p)!.o[0].w];
-      pending.push({ ms, order: 1, row, event: { ms, lane: 0, n: row + 60, on: 1, w, p: indices.get(value.p)!, q: 0 } });
+      pending.push({ ms, order: 1, row, event: { ms, lane: 0, n: row + 60, on: 1, w, p: indices.get(value.p)!, q: 0, ...(value.vol === undefined ? {} : { v: value.vol }) } });
       const off = scoreStepMs(step + value.len, score.bpm) - 1;
       pending.push({ ms: off, order: 0, row, event: { ms: off, lane: 0, n: row + 60, on: 0, q: 0 } });
     }

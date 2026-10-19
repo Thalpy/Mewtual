@@ -1,7 +1,7 @@
 // Pure Score composer transitions. Native admission remains the authority; these guards keep
 // ordinary clicks from knowingly creating an unexportable score and never trim retained work.
 import { JAM_KIT, JAM_MET_BPB_MAX, JAM_MET_BPB_MIN, JAM_MET_BPM_MAX, JAM_MET_BPM_MIN } from "./jam-contract.ts";
-import { SCORE_MAX_CELLS, SCORE_MAX_STEPS, SCORE_ROWS, type ScoreCell, type ScoreOp } from "./studio-contract.ts";
+import { SCORE_MAX_CELLS, SCORE_MAX_STEPS, SCORE_ROWS, SCORE_VOLUME_MAX, SCORE_VOLUME_MIN, type ScoreCell, type ScoreOp } from "./studio-contract.ts";
 import type { IndexSource, ScoreModel, ScoreCellIssues, Valued } from "./studio-native.ts";
 import { scoreStepMs } from "./studio-export.ts";
 
@@ -60,7 +60,8 @@ export const SCORE_ISSUE_LABELS: Readonly<Record<keyof ScoreCellIssues, string>>
   count: "over cap", extent: "past the end", recipe: "no recipe", overlap: "overlaps", conflict: "conflict",
 };
 
-export type ScoreEntry = { mode: "note"; patch: string; len: number } | { mode: "drum"; pad: number } | { mode: "clear" };
+/** A note entry's `volume` is 1..100; omitted or 100 writes no `vol`, the format's full level. */
+export type ScoreEntry = { mode: "note"; patch: string; len: number; volume?: number } | { mode: "drum"; pad: number } | { mode: "clear" };
 
 /** Clear stays available beyond a shrunken header, at capacity, and with missing recipes. */
 export function scoreCellOperation(model: ScoreModel, step: number, row: number, entry: ScoreEntry): ScoreOp {
@@ -74,13 +75,17 @@ export function scoreCellOperation(model: ScoreModel, step: number, row: number,
   }
   if (!/^[0-9a-f]{64}$/.test(entry.patch) || !Object.hasOwn(model.patches, entry.patch)) throw new Error("Choose an active score recipe. A queued recipe is not available until its save is read back.");
   if (!integer(entry.len, 1, model.steps - step)) throw new Error("The authored hold must fit the remaining sixteenth steps. No note is shortened automatically.");
+  if (entry.volume !== undefined && !integer(entry.volume, SCORE_VOLUME_MIN, SCORE_VOLUME_MAX)) throw new Error(`Volume is ${SCORE_VOLUME_MIN} to ${SCORE_VOLUME_MAX}.`);
   for (const [key, cell] of Object.entries(model.cells)) {
     const [otherStep, otherRow] = key.split(":").map(Number);
     if (cell.k === "n" && otherRow === row && otherStep !== step && otherStep < step + entry.len && step < otherStep + (cell.len ?? 1)) {
       throw new Error("This hold overlaps another note at the same pitch. Clear or shorten that note first.");
     }
   }
-  return { op: "set_cell", step, row, value: { k: "n", p: entry.patch, len: entry.len } };
+  // Full level is the format's absent value: the editor authors the smallest body that means
+  // what was chosen, so a note at 100 stays byte-identical to one placed before levels existed.
+  const vol = entry.volume === undefined || entry.volume === SCORE_VOLUME_MAX ? {} : { vol: entry.volume };
+  return { op: "set_cell", step, row, value: { k: "n", p: entry.patch, len: entry.len, ...vol } };
 }
 
 export function scoreHeaderOperation(field: "title" | "bpm" | "bpb" | "steps", input: string): ScoreOp {
@@ -352,5 +357,6 @@ export function scoreDiagnosticOperation(model: ScoreModel, item: ScoreDiagnosti
   if (item.kind === "header") return scoreHeaderOperation(item.key as "title" | "bpm" | "bpb" | "steps", String(chosen.value));
   if (item.kind === "patch") return chosen.value === null ? { op: "remove_patch", patch: item.key } : { op: "set_patch", patch: item.key, descriptor: chosen.value };
   const [step, row] = item.key.split(":").map(Number), value = chosen.value as ScoreCell | null;
-  return scoreCellOperation(model, step, row, value === null ? { mode: "clear" } : value.k === "d" ? { mode: "drum", pad: value.pad } : { mode: "note", patch: value.p, len: value.len ?? 1 });
+  return scoreCellOperation(model, step, row, value === null ? { mode: "clear" } : value.k === "d" ? { mode: "drum", pad: value.pad }
+    : { mode: "note", patch: value.p, len: value.len ?? 1, ...(value.vol === undefined ? {} : { volume: value.vol }) });
 }

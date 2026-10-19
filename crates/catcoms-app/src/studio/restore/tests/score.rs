@@ -130,6 +130,7 @@ fn score_restore_recipe_first_current_extent_headers_and_unknown_sources() {
         value: ScoreCell::Note {
             patch: hash,
             len: Some(8),
+            volume: None,
         },
     };
     let old = build(

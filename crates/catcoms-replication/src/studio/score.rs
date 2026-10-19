@@ -25,11 +25,29 @@ pub const SCORE_MAX_PATCHES: usize = 64;
 
 /// A cell contains only musical content. Protocol provenance belongs to its enclosing record.
 /// Absent length retains the original one-step draft representation; it is not rewritten to 1.
+/// Absent volume likewise means full level (100) and is never rewritten to it: `vol` is an
+/// additive `jam-score:v1` field (1..=100, percent of the recipe's own level) that a note may
+/// carry; a cell without it is byte-identical to one authored before the field existed. A peer
+/// older than this field rejects a body or checkpoint that carries it as malformed, and that
+/// rejection pauses the old peer's Studio sync for the whole server until an explicit access
+/// (the fail-closed admission rule), so every member of a group editing volumes must run this
+/// build or newer before anyone authors one (see docs/HANDOVER.md).
 #[derive(Clone, PartialEq, Eq)]
 pub enum ScoreCell {
-    Note { patch: ContentId, len: Option<u16> },
-    Drum { pad: u8 },
+    Note {
+        patch: ContentId,
+        len: Option<u16>,
+        volume: Option<u8>,
+    },
+    Drum {
+        pad: u8,
+    },
 }
+
+/// Inclusive bounds of an authored note volume; 0 would be a silent note, which is a cleared one.
+/// The renderer mirrors them as `SCORE_VOLUME_MIN`/`MAX` in `studio-contract.ts`.
+pub(crate) const SCORE_VOLUME_MIN: u8 = 1;
+pub(crate) const SCORE_VOLUME_MAX: u8 = 100;
 
 impl std::fmt::Debug for ScoreCell {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -40,15 +58,21 @@ impl std::fmt::Debug for ScoreCell {
 impl ScoreCell {
     fn value(&self, step: u16) -> Result<Value, ReplError> {
         match self {
-            Self::Note { patch, len } => {
+            Self::Note { patch, len, volume } => {
                 // The caller first bounds step, making this subtraction safe. This is the
                 // format maximum, NOT the current score's header length or overlap policy.
                 if len.is_some_and(|len| !(1..=SCORE_MAX_STEPS - step).contains(&len)) {
                     return Err(ReplError::Malformed);
                 }
+                if volume.is_some_and(|v| !(SCORE_VOLUME_MIN..=SCORE_VOLUME_MAX).contains(&v)) {
+                    return Err(ReplError::Malformed);
+                }
                 let mut value = json!({"k":"n", "p":hex(patch)});
                 if let Some(len) = len {
                     value["len"] = (*len).into();
+                }
+                if let Some(volume) = volume {
+                    value["vol"] = (*volume).into();
                 }
                 Ok(value)
             }
@@ -71,6 +95,11 @@ impl ScoreCell {
                     .map(|_| {
                         u16::try_from(unsigned(cell, "len")?).map_err(|_| ReplError::Malformed)
                     })
+                    .transpose()?,
+                // Range is enforced by the exact re-encode every decode performs (`value`).
+                volume: cell
+                    .get("vol")
+                    .map(|_| u8::try_from(unsigned(cell, "vol")?).map_err(|_| ReplError::Malformed))
                     .transpose()?,
             }),
             "d" => Ok(Self::Drum {

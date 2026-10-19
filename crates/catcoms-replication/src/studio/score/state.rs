@@ -413,7 +413,7 @@ impl ScoreProjection {
                 conflict: !slot.register.conflicts.is_empty(),
                 ..ScoreCellIssues::default()
             };
-            if let ScoreCell::Note { patch, len } = cell {
+            if let ScoreCell::Note { patch, len, .. } = cell {
                 let end = *step + len.unwrap_or(1); // static validation proved global extent.
                 issues.extent |= end > self.effective_steps();
                 issues.recipe = !admitted_patches.contains(patch);

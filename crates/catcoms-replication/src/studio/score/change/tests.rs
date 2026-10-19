@@ -43,6 +43,7 @@ fn note(step: u16, row: u8, len: Option<u16>) -> ScoreOp {
         value: ScoreCell::Note {
             patch: patch().id(),
             len,
+            volume: None,
         },
     }
 }
@@ -288,7 +289,8 @@ fn score_cells_and_recipes_are_reusable_after_observed_removal() {
         p.cells[&(0, 0)].value(),
         Some(&ScoreCell::Note {
             patch: patch().id(),
-            len: Some(4)
+            len: Some(4),
+            volume: None,
         })
     );
     assert!(p.cells[&(0, 0)].register.conflicts.is_empty());
@@ -462,6 +464,36 @@ fn score_exact_expansion_rejects_omitted_duplicate_and_cross_key_predecessors() 
         &merged
     )
     .is_err());
+}
+
+#[test]
+fn score_snapshot_and_projection_carry_an_authored_volume_unchanged() {
+    let base = edit(&empty(), &set_patch(), 1, 1);
+    let quiet = ScoreCell::Note {
+        patch: patch().id(),
+        len: Some(2),
+        volume: Some(60),
+    };
+    let doc = edit(
+        &base,
+        &ScoreOp::SetCell {
+            step: 0,
+            row: 0,
+            value: quiet.clone(),
+        },
+        2,
+        2,
+    );
+    let p = read(&doc);
+    assert_eq!(p.cells[&(0, 0)].value(), Some(&quiet));
+    assert!(p.readiness().unwrap().ready());
+    let bytes = p
+        .encode_snapshot(crate::epoch::MAX_RECOVERY_SNAPSHOT_BYTES)
+        .unwrap();
+    assert_eq!(
+        ScoreProjection::decode_snapshot(&logical(), CHANNEL, 0, &bytes).unwrap(),
+        p
+    );
 }
 
 #[test]

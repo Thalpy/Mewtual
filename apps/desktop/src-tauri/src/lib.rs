@@ -16564,6 +16564,7 @@ pub fn run() {
             studio::studio_create,
             studio::studio_apply,
             studio::studio_apply_index,
+            studio::studio_apply_batch,
             studio::recovery::studio_recovery_list,
             studio::fault::studio_fault_read,
             studio::fault::studio_fault_repair,

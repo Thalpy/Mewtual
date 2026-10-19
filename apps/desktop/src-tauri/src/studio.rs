@@ -616,6 +616,76 @@ pub(crate) async fn studio_apply_index(
     .await
 }
 
+/// One renderer-supplied member of a batched Score Apply; the same shape a lone Apply sends.
+#[derive(serde::Deserialize)]
+pub(crate) struct StudioBatchOperationArgs {
+    nonce: String,
+    body: String,
+}
+
+/// Several Score edits as one actor visit (`StudioRequest::ApplyBatch`). The count is bounded
+/// before any body is decoded, and every body meets the same per-operation cap as `studio_apply`;
+/// `validate()` then applies the batch's own byte bound, nonce distinctness and Score-only rule.
+fn apply_batch_request(
+    channel: &str,
+    object: &str,
+    object_kind: Option<&str>,
+    epoch_id: &str,
+    operations: Vec<StudioBatchOperationArgs>,
+) -> Result<StudioRequest, String> {
+    use catcoms_app::studio::{StudioBatchOperation, STUDIO_BATCH_MAX_OPERATIONS};
+    if operations.is_empty() || operations.len() > STUDIO_BATCH_MAX_OPERATIONS {
+        return Err(format!(
+            "batched Apply holds 1 to {STUDIO_BATCH_MAX_OPERATIONS} operations"
+        ));
+    }
+    let target = recovery::target_with_kind(channel, Some(object), object_kind)?;
+    let operations = operations
+        .into_iter()
+        .map(|operation| {
+            if operation.body.len() > 64 * 1024 {
+                return Err("Studio body exceeds 64 KiB".to_string());
+            }
+            Ok(StudioBatchOperation {
+                nonce: id(&operation.nonce)?,
+                body: operation.body.into_bytes(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let request = StudioRequest::ApplyBatch {
+        target,
+        epoch_id: u128::from_be_bytes(id(epoch_id)?),
+        operations,
+    };
+    request.validate().map_err(|e| e.to_string())?;
+    Ok(request)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn studio_apply_batch(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    object: String,
+    epoch_id: String,
+    object_kind: Option<String>,
+    operations: Vec<StudioBatchOperationArgs>,
+) -> Result<Option<Value>, String> {
+    invoke(
+        &state,
+        server,
+        apply_batch_request(
+            &channel,
+            &object,
+            object_kind.as_deref(),
+            &epoch_id,
+            operations,
+        )?,
+    )
+    .await
+}
+
 // This bridge representation intentionally retains all conflict/deletion/overflow evidence.
 // It is not the old fixture's lossy root or a synthetic "settled" label. Expiry is discriminated:
 // absent, never and timestamp zero remain three different values at this boundary.
@@ -701,10 +771,14 @@ fn projection_content(projection: &StudioProjection) -> Result<Value, String> {
         StudioProjection::Score(p) => {
             let ready = p.readiness().map_err(|e| e.to_string())?;
             let cell = |v: &ScoreCell| match v {
-                ScoreCell::Note { patch, len } => {
+                ScoreCell::Note { patch, len, volume } => {
                     let mut value = json!({"k":"n","p":hex::encode(patch)});
                     if let Some(len) = len {
                         value["len"] = json!(len);
+                    }
+                    // Absent means full level; the renderer must not read a missing key as 0.
+                    if let Some(volume) = volume {
+                        value["vol"] = json!(volume);
                     }
                     value
                 }

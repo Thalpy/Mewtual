@@ -10,7 +10,7 @@
 // on both and is never the read-only discriminator.
 
 import type { NativeInvoker } from "./native-download.ts";
-import { PIX_MAX_BYTES, SCORE_MAX_STEPS, SCORE_ROWS, type ScoreCell, type FlipnoteOp } from "./studio-contract.ts";
+import { PIX_MAX_BYTES, SCORE_MAX_STEPS, SCORE_ROWS, SCORE_VOLUME_MAX, SCORE_VOLUME_MIN, type ScoreCell, type FlipnoteOp } from "./studio-contract.ts";
 import { PIXA_MAX_BYTES } from "./pixa.ts";
 import type { JamPatch } from "./jam-contract.ts";
 import { validateJamPatch } from "./jam-patch.ts";
@@ -615,12 +615,20 @@ function closedDataList(value: unknown, what: string): unknown[] {
 function scoreCell(v: unknown, what: string, step: number): ScoreCell {
   const r = closedDataRecord(v, what), keys = Object.keys(r).sort().join(",");
   if (r.k === "n") {
-    if (keys !== "k,p" && keys !== "k,len,p") fail(`${what} has unknown note fields`);
+    if (keys !== "k,p" && keys !== "k,len,p" && keys !== "k,p,vol" && keys !== "k,len,p,vol") fail(`${what} has unknown note fields`);
     const p = hex64(r.p, `${what}.p`);
-    if (!("len" in r)) return { k: "n", p };
-    const len = count(r.len, `${what}.len`);
-    if (len < 1 || len > SCORE_MAX_STEPS - step) fail(`${what}.len is outside its global extent`);
-    return { k: "n", p, len };
+    const cell: ScoreCell = { k: "n", p };
+    if ("len" in r) {
+      const len = count(r.len, `${what}.len`);
+      if (len < 1 || len > SCORE_MAX_STEPS - step) fail(`${what}.len is outside its global extent`);
+      cell.len = len;
+    }
+    if ("vol" in r) {
+      const vol = count(r.vol, `${what}.vol`);
+      if (vol < SCORE_VOLUME_MIN || vol > SCORE_VOLUME_MAX) fail(`${what}.vol is outside ${SCORE_VOLUME_MIN}..${SCORE_VOLUME_MAX}`);
+      cell.vol = vol;
+    }
+    return cell;
   }
   if (r.k === "d" && keys === "k,pad") {
     const pad = count(r.pad, `${what}.pad`);
@@ -1195,6 +1203,23 @@ export async function studioApply<K extends StudioObjectKind = "flipnote">(ipc: 
   const raw = await ipc.invoke<unknown>("studio_apply", { server: target.server, channel: target.channel, object: req.object, epochId: req.epochId, nonce: req.nonce, body: req.body, ...objectKindArgs(req.objectKind) });
   if (raw === null || raw === undefined) fail("studio_apply returned nothing");
   return parseObjectView(raw, req.objectKind);
+}
+
+/** Native's bounds for one batched Score Apply (`StudioRequest::ApplyBatch`): operations and body bytes. */
+export const STUDIO_APPLY_BATCH_MAX = 64;
+export const STUDIO_APPLY_BATCH_MAX_BYTES = 256 * 1024;
+export type ApplyBatchRequest = { object: Hex32; epochId: Hex32; operations: readonly { nonce: Hex32; body: string }[] };
+/// Several Score edits in ONE native transaction (one durable server snapshot, one storage scan,
+/// one publication window, one update event) instead of one of each per edit. Every operation
+/// keeps its own nonce, so an exact retry of the whole batch is as safe as retrying each edit:
+/// accepted items are recognised and resealed, never applied twice. The batch is not atomic; an
+/// item native refuses leaves the items before it saved, and the error names it. Score only.
+export async function studioApplyBatch(ipc: StudioIpc, target: StudioTargetArgs, req: ApplyBatchRequest): Promise<ScoreView> {
+  if (req.operations.length < 1 || req.operations.length > STUDIO_APPLY_BATCH_MAX) fail(`studio_apply_batch holds 1 to ${STUDIO_APPLY_BATCH_MAX} operations`);
+  const raw = await ipc.invoke<unknown>("studio_apply_batch", { server: target.server, channel: target.channel, object: req.object, epochId: req.epochId,
+    objectKind: "score", operations: req.operations.map((o) => ({ nonce: o.nonce, body: o.body })) });
+  if (raw === null || raw === undefined) fail("studio_apply_batch returned nothing");
+  return parseScoreView(raw);
 }
 
 export type ApplyIndexRequest = { epochId: Hex32; nonce: Hex32; body: string };

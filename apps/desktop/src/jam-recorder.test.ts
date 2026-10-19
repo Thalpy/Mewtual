@@ -360,3 +360,15 @@ test("participant commitments bind group, take, call, device and every reconnect
   assert.match(commitment.laneEventLogHash, /^[0-9a-f]{64}$/);
   await assert.rejects(() => jamParticipantCommitment("0".repeat(64), take, 0), /take id does not match/);
 });
+
+test("a note-on may carry an authored level 1..100, which the validator keeps and bounds", () => {
+  const base: JamTake = { v: 1, group: "group", call: "call", met: { bpm: 120, bpb: 4 }, parts: ["a".repeat(64)],
+    lanes: [{ src: 0, sn: "a".repeat(16) }], patches: [], events: [] };
+  const on = (extra: Record<string, unknown>) => ({ ...base, events: [{ ms: 0, lane: 0, n: 60, on: 1, w: "sine", q: 0, ...extra }] });
+  const quiet = validateJamTake(on({ v: 35 }));
+  assert.ok(quiet.ok); assert.deepEqual(quiet.take.events[0], { ms: 0, lane: 0, n: 60, on: 1, w: "sine", q: 0, v: 35 });
+  const plain = validateJamTake(on({}));
+  assert.ok(plain.ok); assert.equal("v" in plain.take.events[0], false, "an absent level stays absent");
+  for (const v of [0, 101, 1.5, "60", null]) assert.equal(validateJamTake(on({ v })).ok, false, String(v));
+  assert.equal(validateJamTake({ ...base, events: [{ ms: 0, lane: 0, n: 60, on: 0, q: 0, v: 50 }] }).ok, false, "a note-off has no level");
+});

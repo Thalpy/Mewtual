@@ -162,7 +162,7 @@ Object.assign(globalThis, { MouseEvent: w.MouseEvent, Event: w.Event, MutationOb
 const { default: ScoreEditor } = await import("./ScoreEditor.svelte");
 const { mount, unmount, flushSync } = await import("svelte");
 type Surface = ReturnType<typeof surface>;
-function surface(m: ScoreModel, options: { readonlyReason?: string; loading?: boolean; onaddpatch?: () => Promise<string>; onaudition?: (patch: JamPatch, note: number, durationMs: number) => void; playing?: boolean; positionMs?: number | null; loop?: boolean } = {}) {
+function surface(m: ScoreModel, options: { readonlyReason?: string; loading?: boolean; onaddpatch?: () => Promise<string>; onaudition?: (patch: JamPatch, note: number, durationMs: number, level?: number) => void; playing?: boolean; positionMs?: number | null; loop?: boolean; onpost?: () => void } = {}) {
   const target = document.createElement("div"); document.body.appendChild(target);
   const ops: unknown[] = [], notices: string[] = [], loops: boolean[] = [];
   const instance = mount(ScoreEditor, { target, props: {
@@ -170,6 +170,7 @@ function surface(m: ScoreModel, options: { readonlyReason?: string; loading?: bo
     library: [{ name: "SYNTH", patch: PATCH, shelf: "preset" }, { name: "OTHER", patch: { ...PATCH, o: [{ w: 1, t: 0, c: 0, l: 80 }] }, shelf: "mine" }],
     onop: (op: unknown) => { ops.push(op); }, onnotice: (text: string) => { notices.push(text); }, onaddpatch: options.onaddpatch ?? (async () => PATCH_ID),
     onaudition: options.onaudition, playing: options.playing ?? false, positionMs: options.positionMs ?? null, loop: options.loop ?? false, onloop: (v: boolean) => { loops.push(v); },
+    onpost: options.onpost,
   } }); flushSync();
   return { target, ops, notices, loops,
     click(selector: string) { const button = target.querySelector<HTMLButtonElement>(selector); assert.ok(button, selector); button.click(); flushSync(); },
@@ -508,7 +509,8 @@ test("keyboard navigation keeps DOM focus with the selection across a page bound
 test("dragging a note's last cell resizes it, remembers the length, and the inspector reassigns its recipe", async () => {
   const other = "c".repeat(64);
   const m = model(); m.steps = 16; m.patches[other] = { ...PATCH, o: [{ w: 1, t: 0, c: 0, l: 80 }] }; m.patchSlots[other] = slot(m.patches[other]);
-  m.cells["2:5"] = { k: "n", p: PATCH_ID, len: 3 }; m.cellSlots["2:5"] = slot<ScoreCell>(m.cells["2:5"]);
+  // The note carries a level: every rewrite below (drag-resize, reassign) must keep it.
+  m.cells["2:5"] = { k: "n", p: PATCH_ID, len: 3, vol: 60 }; m.cellSlots["2:5"] = slot<ScoreCell>(m.cells["2:5"]);
   const heard: string[] = [];
   const ui = surface(m, { onaudition: (patch) => heard.push(patch.o[0].w === 1 ? "other" : "synth") });
   const pointer = (type: string, target: EventTarget, init: PointerEventInit = {}) => { target.dispatchEvent(new w.PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, button: 0, ...init })); flushSync(); };
@@ -521,13 +523,13 @@ test("dragging a note's last cell resizes it, remembers the length, and the insp
     pointer("pointerdown", ui.cell("4:5")); under = ui.cell("7:5"); pointer("pointermove", window);
     assert.ok(ui.cell("6:5").classList.contains("drag"));
     pointer("pointerup", window);
-    assert.deepEqual(ui.ops, [{ op: "set_cell", step: 2, row: 5, value: { k: "n", p: PATCH_ID, len: 6 } }]);
+    assert.deepEqual(ui.ops, [{ op: "set_cell", step: 2, row: 5, value: { k: "n", p: PATCH_ID, len: 6, vol: 60 } }], "a drag-resize keeps the note's level");
     assert.match(ui.target.querySelector(".micro.hi")!.textContent!, /6 \/ 16$/, "the resized length is the new remembered hold");
     pointer("pointerdown", ui.cell("4:5")); pointer("pointerup", window);
     assert.equal(ui.ops.length, 1, "a release without movement is not a resize");
     ui.click('[data-score-cell="3:5"]');
     ui.change('[aria-label="Recipe for this note"]', other);
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 2, row: 5, value: { k: "n", p: other, len: 3 } });
+    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 2, row: 5, value: { k: "n", p: other, len: 3, vol: 60 } });
     assert.deepEqual(heard, ["other"], "a reassigned note is auditioned with its new sound");
   } finally { doc.elementFromPoint = original; await ui.done(); }
 });
@@ -769,4 +771,88 @@ test("compiled transport shows the playhead, follows it across pages and exposes
     assert.equal(ui.target.querySelectorAll(".sc-ov").length, 64);
     ui.click('[aria-label="Go to step 50"]'); assert.ok(ui.cell("49:0"));
   } finally { await ui.done(); }
+});
+
+test("another pointer's press does not revive a cancelled press: its own release is still swallowed", async () => {
+  const m = model(); m.steps = 16;
+  const ui = surface(m);
+  const pointer = (type: string, target: EventTarget, init: PointerEventInit = {}) => { target.dispatchEvent(new w.PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, button: 0, ...init })); flushSync(); };
+  try {
+    pointer("pointerdown", ui.cell("2:5"));
+    ui.cell("2:5").focus(); ui.cell("2:5").dispatchEvent(new w.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); flushSync();
+    // A second finger (pointer 2) presses and releases elsewhere while the first is still held.
+    pointer("pointerdown", ui.cell("6:5"), { pointerId: 2 }); pointer("pointerup", window, { pointerId: 2 }); ui.cell("6:5").click(); flushSync();
+    assert.equal(ui.ops.length, 1, "the second pointer's own tap is an ordinary click");
+    // The first pointer's release and completion click are still the cancelled press's.
+    pointer("pointerup", window); ui.cell("2:5").click(); flushSync();
+    assert.equal(ui.ops.length, 1, "the cancelled press placed nothing");
+    pointer("pointerdown", ui.cell("4:5")); pointer("pointerup", window); ui.cell("4:5").click(); flushSync();
+    assert.equal(ui.ops.length, 2, "the same pointer's next press works normally");
+  } finally { await ui.done(); }
+});
+
+test("a re-read of a score already on screen does not lock the grid; only a first read with nothing to show does", async () => {
+  const m = model(); m.steps = 16;
+  const ui = surface(m, { loading: true });
+  try {
+    assert.equal(ui.cell("3:3").disabled, false);
+    assert.match(ui.target.textContent ?? "", /reading/);
+    ui.click('[data-score-cell="3:3"]');
+    assert.equal(ui.ops.length, 1, "an edit is accepted while the echo of a save is being read back");
+  } finally { await ui.done(); }
+  const empty = surface(null as unknown as ScoreModel, { loading: true });
+  try { assert.equal(empty.target.querySelectorAll("[data-score-cell]").length, 0); } finally { await empty.done(); }
+});
+
+test("post to chat is offered only with a host callback and only for a ready score", async () => {
+  const m = model(); m.steps = 16;
+  const without = surface(m);
+  try { assert.equal(without.target.querySelector("[data-score-post]"), null); } finally { await without.done(); }
+  let posted = 0;
+  const ui = surface(m, { onpost: () => { posted++; } });
+  try {
+    const post = ui.target.querySelector<HTMLButtonElement>("[data-score-post]")!;
+    assert.ok(post); assert.equal(post.disabled, false);
+    post.click(); flushSync(); assert.equal(posted, 1);
+  } finally { await ui.done(); }
+  const unready = model(); unready.steps = 16; unready.ready = false;
+  const blocked = surface(unready, { onpost: () => { posted++; } });
+  try { assert.equal(blocked.target.querySelector<HTMLButtonElement>("[data-score-post]")!.disabled, true); } finally { await blocked.done(); }
+});
+
+test("a note's volume is edited in the selected panel, remembered for the next placement and carried by resize", async () => {
+  const m = model(); m.steps = 16; m.cells["0:0"] = { k: "n", p: PATCH_ID, len: 2 };
+  const heard: number[] = [];
+  const ui = surface(m, { onaudition: (_patch, _note, _ms, level) => heard.push(level ?? -1) });
+  try {
+    ui.click('[data-score-cell="0:0"]');
+    ui.change('[aria-label="Volume of this note"]', "60");
+    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 0, row: 0, value: { k: "n", p: PATCH_ID, len: 2, vol: 60 } });
+    assert.equal(heard.at(-1), 60, "the change is heard at the new level");
+    // Placement uses the remembered level; a full level writes no field at all.
+    ui.click('[data-score-cell="4:1"]');
+    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 4, row: 1, value: { k: "n", p: PATCH_ID, len: SCORE_DEFAULT_HOLD, vol: 60 } });
+    assert.equal(heard.at(-1), 60, "a placed note auditions at the level it was written with");
+    ui.input('[aria-label="Placement volume"]', "100");
+    ui.click('[data-score-cell="8:1"]');
+    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 8, row: 1, value: { k: "n", p: PATCH_ID, len: SCORE_DEFAULT_HOLD } });
+    // Out-of-range input falls back to full level: the next placement writes no field.
+    ui.input('[aria-label="Placement volume"]', "0");
+    ui.click('[data-score-cell="12:1"]');
+    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 12, row: 1, value: { k: "n", p: PATCH_ID, len: SCORE_DEFAULT_HOLD } });
+  } finally { await ui.done(); }
+  // A note that already carries a level: the steppers move it by ten, and a resize keeps it.
+  const quiet = model(); quiet.steps = 16; quiet.cells["0:0"] = { k: "n", p: PATCH_ID, len: 2, vol: 60 };
+  const panel = surface(quiet);
+  try {
+    panel.click('[data-score-cell="0:0"]');
+    assert.equal((panel.target.querySelector('[aria-label="Volume of this note"]') as HTMLInputElement).value, "60");
+    panel.click('[aria-label="Louder"]');
+    assert.deepEqual(panel.ops.at(-1), { op: "set_cell", step: 0, row: 0, value: { k: "n", p: PATCH_ID, len: 2, vol: 70 } });
+    panel.click('[aria-label="Quieter"]');
+    assert.deepEqual(panel.ops.at(-1), { op: "set_cell", step: 0, row: 0, value: { k: "n", p: PATCH_ID, len: 2, vol: 50 } });
+    panel.click('[aria-label="Lengthen this note"]');
+    assert.deepEqual(panel.ops.at(-1), { op: "set_cell", step: 0, row: 0, value: { k: "n", p: PATCH_ID, len: 3, vol: 60 } }, "a longer hold keeps the note's level");
+    assert.ok(panel.target.querySelector('[data-score-cell="0:0"]')?.getAttribute("aria-label")?.includes("60%"), "the cell names its level");
+  } finally { await panel.done(); }
 });

@@ -99,14 +99,28 @@ fn get_optional<T>(
         _ => Err(ReplError::Malformed),
     }
 }
+/// The note's optional fields travel as one presence byte: bit 0 is `len`, bit 1 is `vol`. A
+/// snapshot written before volumes existed used plain 0/1 here, which this reads unchanged; a
+/// build before volumes reads a snapshot with bit 1 set as malformed (the documented floor).
+const CELL_HAS_LEN: u8 = 1;
+const CELL_HAS_VOLUME: u8 = 2;
 fn put_cell(cell: &ScoreCell, e: &mut Writer) -> Result<(), ReplError> {
     match cell {
-        ScoreCell::Note { patch, len } => {
+        ScoreCell::Note { patch, len, volume } => {
             e.byte(0)?;
             e.bytes(patch)?;
-            e.byte(u8::from(len.is_some()))?;
+            e.byte(
+                u8::from(len.is_some()) * CELL_HAS_LEN
+                    + u8::from(volume.is_some()) * CELL_HAS_VOLUME,
+            )?;
             if let Some(len) = len {
                 e.integer(u64::from(*len))?;
+            }
+            if let Some(volume) = volume {
+                if !(SCORE_VOLUME_MIN..=SCORE_VOLUME_MAX).contains(volume) {
+                    return Err(ReplError::Malformed);
+                }
+                e.byte(*volume)?;
             }
             Ok(())
         }
@@ -120,12 +134,25 @@ fn get_cell(d: &mut Decoder<'_>) -> Result<ScoreCell, ReplError> {
     match d.get_u8().map_err(malformed)? {
         0 => {
             let patch = array(d)?;
-            let len = match d.get_u8().map_err(malformed)? {
-                0 => None,
-                1 => Some(get_u16(d)?),
-                _ => return Err(ReplError::Malformed),
+            let present = d.get_u8().map_err(malformed)?;
+            if present & !(CELL_HAS_LEN | CELL_HAS_VOLUME) != 0 {
+                return Err(ReplError::Malformed);
+            }
+            let len = if present & CELL_HAS_LEN != 0 {
+                Some(get_u16(d)?)
+            } else {
+                None
             };
-            Ok(ScoreCell::Note { patch, len })
+            let volume = if present & CELL_HAS_VOLUME != 0 {
+                let volume = d.get_u8().map_err(malformed)?;
+                if !(SCORE_VOLUME_MIN..=SCORE_VOLUME_MAX).contains(&volume) {
+                    return Err(ReplError::Malformed);
+                }
+                Some(volume)
+            } else {
+                None
+            };
+            Ok(ScoreCell::Note { patch, len, volume })
         }
         1 => Ok(ScoreCell::Drum {
             pad: d.get_u8().map_err(malformed)?,

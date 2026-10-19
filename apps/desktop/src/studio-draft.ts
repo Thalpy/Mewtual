@@ -45,8 +45,8 @@ export function validateDraftOperation(value: unknown, family: "index" | "flipno
   if (op === "set_cell" || op === "clear_cell") {
     if (!int(v.step, 0, 255) || !int(v.row, 0, 24)) fail();
     if (op === "set_cell") {
-      const cell = obj(v.value); exact(cell, cell.k === "n" ? ["k", "p", "len"] : ["k", "pad"]);
-      if (cell.k === "n" ? !hex(cell.p, 64) || (cell.len !== undefined && !int(cell.len, 1, 256)) : cell.k !== "d" || !int(cell.pad, 0, 9)) fail();
+      const cell = obj(v.value); exact(cell, cell.k === "n" ? ["k", "p", "len", "vol"] : ["k", "pad"]);
+      if (cell.k === "n" ? !hex(cell.p, 64) || (cell.len !== undefined && !int(cell.len, 1, 256)) || (cell.vol !== undefined && !int(cell.vol, 1, 100)) : cell.k !== "d" || !int(cell.pad, 0, 9)) fail();
     }
   }
   if (op === "set_header") {

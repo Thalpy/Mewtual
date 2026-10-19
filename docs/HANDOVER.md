@@ -1,5 +1,103 @@
 # Mewtual; Handover
 
+## Score composer: busy spam, batched saves, note volume, post to chat (2026-10-19, branch `score-composer-2`)
+
+**Storage-busy spam.** With one person editing, the composer kept raising "Studio storage busy;
+retry the same request" save cards and the "Index draft status could not be read" banner. The
+refusal is native `authorize()` (`apps/desktop/src-tauri/src/studio.rs`) losing a `try_lock` once
+the actor has advertised Ready; the holder, when nobody else is online, is the app's own
+bookkeeping: the full server snapshot native seals after every studio save (`persist_server`),
+the UI-continuity write, a chat read. Each holds a guard for tens to hundreds of milliseconds and
+the renderer's follow-up reads and the next autosave land inside that window. The fix is a session
+seam, `apps/desktop/src/studio-busy.ts`: every native call of the Studio session repeats a
+storage-busy refusal with the byte-identical request after pauses of 40, 80, 160, 320 and 640 ms
+(the session's own timer seam, so tests drive it), and stops when the session generation moves.
+Because both native pre-execution refusals ("Studio storage busy; retry the same request",
+"Studio actor busy; retry") are raised before the request reaches the vault, a Save that still ends
+on one is now shown as known not written (re-authorable, discardable) instead of uncertain; every
+other native error keeps its uncertain classification. Two surface tests that used those texts as
+their "uncertain" vehicle now use a withheld-result text; that is the only test contract changed.
+
+**One transaction per autosave.** A score was saved one native transaction per placed note, and
+each transaction is a full server snapshot seal, a storage scan, a publication window and an
+update event. New `StudioRequest::ApplyBatch` (`crates/catcoms-app/src/studio.rs`) applies 1..64
+Score operations (256 KiB of bodies in all, distinct nonces, Score targets only) in one
+transaction through the same `apply` closure; every item is its own signed operation, so an exact
+retry of the whole batch reseals accepted items. It is not atomic: an item refused after earlier
+items were written leaves those durable, and the error names "item k of n". The Tauri command is
+`studio_apply_batch`; the session's `batchable()` gathers the queued, released, same-lane,
+same-epoch, same-binding Score edits behind the running one and sends them together (a lone edit
+still goes as `studio_apply`, which keeps every single-edit expectation). A refused batch settles
+every member alike; each card's retry resends its own item exactly. Tests:
+`crates/catcoms-app/src/studio/tests/batch.rs`, `studio-score-batch.test.ts`.
+
+**Editing while a save is read back.** `ScoreEditor.svelte` no longer treats a re-read of a score
+already on screen as read-only; only a first read with nothing to show blocks input. The working
+projection keeps the queued edits and the next readback corrects anything the author got ahead of.
+
+**Per-note volume.** `jam-score:v1` note cells gained an optional `vol` (1..100, percent of the
+recipe's level; absent means full level and is never rewritten to 100, like an absent `len`).
+Rust: `ScoreCell::Note { volume }` in `catcoms-replication/src/studio/score.rs` with encode-side
+range checks, the snapshot's presence byte (bit 0 `len`, bit 1 `vol`; old 0/1 bytes read
+unchanged), the bridge's cell JSON, two new shared vectors (18 in all). Frontend: the contract,
+native parser, draft validator, `scoreCellOperation` (writes `vol` only when it is not 100),
+export (`vol` rides the take note-on as `v`), take validator (closed key sets), archival plan
+(`level` 0..1), engine (`JamNoteInput.level`, multiplied into the recipe's oscillator mix, never
+the envelope), audition, and the composer (a placing-section level remembered for new notes, and
+quieter/louder steppers plus a number field in the selected panel; resize and reassign carry the
+level). **Compatibility floor:** a build before this one rejects a body or checkpoint carrying
+`vol` as malformed, and under the existing fail-closed admission rule that rejection pauses the old
+build's Studio sync for the whole server (the "sync paused" banner, reasserted by every further
+`vol` operation and by a checkpoint seed with the new presence bit) until an explicit Studio
+access; to its user it looks like corruption. A group editing volumes must therefore run this build
+or newer before anyone authors one; a score without volumes is byte-identical to before. Older take
+players likewise reject a note-on with `v`. Whether to ship the volume controls one release after
+the decoders (the codec and snapshot side is independent of the UI) is a product call left open.
+
+**Post to chat.** The composer offers "post to chat" (`data-score-post`) when the host can attach:
+`Studio.svelte` gained `onpostScore` and `downloadMedia("download" | "share" | "post")`;
+`App.svelte` `postStudioScore` mirrors `postStudioPixa` (upload to the member's embed folder,
+refresh, save the Studio, append the file marker to the draft; every await re-checks channel,
+server, view and the navigation claim).
+
+**Review findings (eb411f1).** P2: a Studio document navigation now announces itself through a
+new `onnavigate` prop (StudioNav `open`/`newFlipnote`/`newScore`, the Music tab's open/create) the
+moment it is decided, before its departure Save can wait; App's `noteStudioNavigation` bumps the
+`studioNavigation` counter, so an App route already waiting on its own Save finds itself
+superseded. `studio-navigation-token.test.ts` pins the wiring statically (it caught the sidebar's
+"new score" path). P3: a cancelled press is forgotten only when its own pointer presses again, so
+a second finger's tap cannot revive it (test added).
+
+**Verification.** `cargo check -p catcoms-app`; `cargo check` of the `src-tauri` workspace;
+`cargo test -p catcoms-replication score`; `cargo test -p catcoms-app --lib studio::tests::batch`
+(3/3); `cargo fmt --all`; `cargo clippy -p catcoms-app -p catcoms-replication --all-targets
+--all-features -- -D warnings`; `scripts/check-no-ambient.sh`; focused frontend files
+(`studio-busy`, `studio-score-batch`, `studio-navigation-token`, `studio-score`,
+`studio-score-session`, `studio-buffer`, `studio-session`, `score-editor`, `studio-surface`,
+`jam-recorder`, `jam-archival-plan`); `npm run check`; `npm run build`. The complete backend and
+frontend suites, `test:startup` and `test:flows` were not run this round (user instruction);
+`cargo deny check` was not run (no dependency change).
+
+**Review.** This round's read-only adversarial review found no blocker. Its high finding is
+fixed: a drag-resize rewrote the cell without its level, silently resetting a quieter note to full
+volume (now carried, pinned in the drag-resize test). Its medium is fixed: batch members only ride
+with a first delivery, because an exact retry skips admission on purpose and a member riding with
+it would have lost its "history changed" refusal (pinned in `studio-score-batch.test.ts`). The
+compatibility consequence above and the `studio_apply_batch` row in `docs/INTERFACES.md` are its
+other two findings. Recorded follow-ups: a refused batch settles every member uncertain although
+native applies in order and stops, so a structured refusal carrying the item index would let the
+items after it stay known-not-written; a 64-item batch materialises the projection and scans the
+log per item under one actor custody, so measure before keeping 64 as the default (16 would still
+remove most of the per-save cost) and note that packets past the two-second publication window
+rely on catch-up; items saved before a refused one are durable but unpublished until retried.
+Test gaps it lists: a lock snapshot during an in-flight batch, a binding or byte-bound split, a
+discard refused for an inflight member, a nonce reused across a single Apply and a batch item.
+
+**Residual.** The busy refusal still surfaces once the bounded repeats are spent (a wedged vault
+is reported, not hidden). A refused batch is retried one card at a time. Flipnote and Index edits
+do not batch (their admission inspects each body). The loop-at-bar/engine milestone and note
+move/undo are unchanged from the entry below.
+
 ## Score composer: third review, green CI, studio loading (2026-10-18, PR #49)
 
 The third external review (PR #49 head `8568250e`) reported six findings; all are fixed here:

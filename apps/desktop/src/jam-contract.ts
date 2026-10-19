@@ -333,7 +333,16 @@ export interface JamTakeNoteOn {
   w: LegacyWave;
   p?: number; // index into patches
   q: number; // gaps are surfaced, never silently smoothed
+  /**
+   * Authored level of this one note, 1..100 percent of the recipe's own level; absent is full
+   * level. A score note's `vol` travels here unchanged, so an exported take plays the composer's
+   * dynamics. Live performances never carry it; an older player ignores nothing, it rejects the
+   * event, so a take with levels needs this build or newer.
+   */
+  v?: number;
 }
+export const JAM_NOTE_VOLUME_MIN = 1;
+export const JAM_NOTE_VOLUME_MAX = 100;
 export interface JamTakeNoteOff {
   ms: number;
   lane: number;
