@@ -92,6 +92,10 @@ pub struct CryptoAction {
     scope: Scope,
     call: CallLease,
     authority: CryptoAuthority,
+    // Identity only, never progress custody. The pending authority independently observes this
+    // irreversible chain lease; fixed historical results do not own a live Workflow.
+    chain: Option<CallLease>,
+    chain_epoch: Option<u64>,
     // Lock order is Engine -> payload. An input lease clones its Arc under this mutex and
     // releases the guard before any engine operation. Actual payload/credit drops occur after
     // releasing BOTH locks, so downstream destructors cannot reenter an action fence.
@@ -142,6 +146,18 @@ impl CryptoAction {
     }
     pub fn uses_resources(&self, resources: &Arc<Resources>) -> bool {
         Arc::ptr_eq(&self.resources, resources)
+    }
+    pub(super) fn uses_chain(&self, chain: &CallLease) -> bool {
+        self.chain
+            .as_ref()
+            .is_some_and(|original| original.is_same(chain))
+    }
+    pub(super) fn check_chain_epoch(&self, epoch: u64) -> Result<(), VoiceError> {
+        if self.chain_epoch.is_none_or(|original| original == epoch) {
+            Ok(())
+        } else {
+            Err(VoiceError::Unauthorized)
+        }
     }
     pub fn engine_bytes(&self) -> usize {
         self.engine_bytes
@@ -278,6 +294,9 @@ pub(super) struct PreparedAction {
     payload: Credit,
     slot: slots::Slot,
     issue: Option<super::negotiation::ActionIssue>,
+    chain_issue: Option<super::chain::RowIssue>,
+    chain: Option<CallLease>,
+    chain_epoch: Option<u64>,
 }
 
 pub(super) struct Allocation {
@@ -285,6 +304,7 @@ pub(super) struct Allocation {
     pub scope: Scope,
     pub call: CallLease,
     pub budget: ByteBudget,
+    pub history: Option<super::chain::PreparedHistory>,
     pub payload_bytes: usize,
     pub engine_bytes: usize,
 }
@@ -313,6 +333,7 @@ impl ActionQueue {
             scope,
             call,
             budget,
+            history,
             payload_bytes,
             engine_bytes,
         } = allocation;
@@ -320,35 +341,82 @@ impl ActionQueue {
             return Err(VoiceError::Capacity);
         }
         let serial = self.serial.checked_add(1).ok_or(VoiceError::Capacity)?;
-        let slot = match &budget {
-            ByteBudget::Exchange { exchange, .. } => exchange.action_slot(&self.slots)?,
-            _ => self.slots.charge(1)?,
+        if let Some(history) = &history {
+            history
+                .issue
+                .validate(&resources, &self.slots, scope, &call, key, &budget)?;
+        } else if matches!(budget, ByteBudget::Workflow(_)) {
+            return Err(VoiceError::Scope);
+        }
+        let slot = if history.is_some() {
+            // The row and slot are consumed together below; this branch is handled separately
+            // to avoid temporarily allocating an ordinary slot under full protected pressure.
+            None
+        } else {
+            Some(match &budget {
+                ByteBudget::Exchange { exchange, .. } => exchange.action_slot(&self.slots)?,
+                _ => self.slots.charge(1)?,
+            })
         };
-        let (record, payload, issue) = match &budget {
-            ByteBudget::Exchange { exchange, stage } => {
-                if !exchange.uses_resources(&resources, scope.group) {
-                    return Err(VoiceError::Scope);
+        let (record, payload, issue, slot, chain_issue, chain, chain_epoch) = if let Some(history) =
+            history
+        {
+            let chain = history.issue.lease();
+            let epoch = history.issue.epoch();
+            let payload = budget.charge(
+                &resources,
+                scope.group,
+                payload_bytes,
+                ResourceKind::Retained,
+            )?;
+            (
+                history.record,
+                payload,
+                None,
+                history.slot,
+                Some(history.issue),
+                Some(chain),
+                Some(epoch),
+            )
+        } else {
+            let (record, payload, issue) = match &budget {
+                ByteBudget::Exchange { exchange, stage } => {
+                    if !exchange.uses_resources(&resources, scope.group) {
+                        return Err(VoiceError::Scope);
+                    }
+                    let (record, payload, issue) = exchange.prepare_action_credits(
+                        *stage,
+                        RECORD_BYTES + CONFIRM_BYTES,
+                        payload_bytes,
+                    )?;
+                    (record, payload, Some(issue))
                 }
-                let (record, payload, issue) = exchange.prepare_action_credits(
-                    *stage,
-                    RECORD_BYTES + CONFIRM_BYTES,
-                    payload_bytes,
-                )?;
-                (record, payload, Some(issue))
-            }
-            ByteBudget::Ordinary | ByteBudget::Reserved(_) | ByteBudget::ReservedLane { .. } => {
-                // These closed variants have no phase/workflow custody on retained charges.
-                // Their existing conserved partition is safe; Exchange is deliberately handled
-                // above before any phase owner can be attached. A future Workflow variant must
-                // supply independently prepared history rather than enter this branch.
-                let bytes = payload_bytes
-                    .checked_add(RECORD_BYTES + CONFIRM_BYTES)
-                    .ok_or(VoiceError::Bounds)?;
-                let mut record =
-                    budget.charge(&resources, scope.group, bytes, ResourceKind::Retained)?;
-                let payload = record.split_retained(payload_bytes)?;
-                (record, payload, None)
-            }
+                ByteBudget::Ordinary
+                | ByteBudget::Reserved(_)
+                | ByteBudget::ReservedLane { .. } => {
+                    // These closed variants have no phase/workflow custody on retained charges.
+                    // Their existing conserved partition is safe; Exchange is deliberately handled
+                    // above before any phase owner can be attached. Workflow instead requires
+                    // independently prepared fixed history in the preceding branch.
+                    let bytes = payload_bytes
+                        .checked_add(RECORD_BYTES + CONFIRM_BYTES)
+                        .ok_or(VoiceError::Bounds)?;
+                    let mut record =
+                        budget.charge(&resources, scope.group, bytes, ResourceKind::Retained)?;
+                    let payload = record.split_retained(payload_bytes)?;
+                    (record, payload, None)
+                }
+                ByteBudget::Workflow(_) => unreachable!("workflow requires prepared fixed history"),
+            };
+            (
+                record,
+                payload,
+                issue,
+                slot.expect("ordinary/exchange slot"),
+                None,
+                None,
+                None,
+            )
         };
         self.serial = serial; // Abandoned preparation burns identity, never permits resurrection.
         Ok(PreparedAction {
@@ -363,15 +431,25 @@ impl ActionQueue {
             payload,
             slot,
             issue,
+            chain_issue,
+            chain,
+            chain_epoch,
         })
     }
 
-    fn publish(
-        &mut self,
+    fn build(
         prepared: PreparedAction,
         input: Input,
         authority: CryptoAuthority,
-    ) -> Arc<CryptoAction> {
+    ) -> (
+        Key,
+        Arc<CryptoAction>,
+        Option<super::negotiation::ActionIssue>,
+    ) {
+        assert!(
+            prepared.chain_issue.is_none(),
+            "chain row commits through its own publication fence"
+        );
         let input_tag = tag(&prepared, &input);
         let (operation, output_bytes) = match &input {
             Input::Derive(_) => (CryptoOperation::Derive, 0),
@@ -390,6 +468,8 @@ impl ActionQueue {
             scope: prepared.scope,
             call: prepared.call,
             authority,
+            chain: prepared.chain,
+            chain_epoch: prepared.chain_epoch,
             input: Mutex::new(Some(Arc::new(ActionPayload {
                 input,
                 _credit: prepared.payload,
@@ -405,14 +485,46 @@ impl ActionQueue {
             _record: prepared.record,
             _slot: prepared.slot,
         });
-        if let Some(issue) = prepared.issue {
+        (prepared.key, action, prepared.issue)
+    }
+    fn publish(
+        &mut self,
+        prepared: PreparedAction,
+        input: Input,
+        authority: CryptoAuthority,
+    ) -> Arc<CryptoAction> {
+        let (key, action, issue) = Self::build(prepared, input, authority);
+        if let Some(issue) = issue {
             issue.publish();
         }
         assert!(
-            self.actions.insert(prepared.key, action.clone()).is_none(),
+            self.actions.insert(key, action.clone()).is_none(),
             "native action uniqueness"
         );
         action
+    }
+    /// Chain derivation prepares all fallible state before its irreversible role issue. The
+    /// BTreeMap insertion still uses the allocator, as ordinary publication does; capacity and
+    /// all recoverable errors are prepaid, not a promise to survive process allocation failure.
+    pub(super) fn publish_chain_derive(
+        &mut self,
+        mut prepared: PreparedAction,
+        input: PairSetup,
+        authority: CryptoAuthority,
+    ) -> Result<Arc<CryptoAction>, VoiceError> {
+        let issue = prepared.chain_issue.take().ok_or(VoiceError::Scope)?;
+        let (key, action, exchange_issue) = Self::build(prepared, Input::Derive(input), authority);
+        assert!(
+            exchange_issue.is_none(),
+            "chain and Exchange cannot share action allocation"
+        );
+        issue.publish(|| {
+            assert!(
+                self.actions.insert(key, action.clone()).is_none(),
+                "native action uniqueness"
+            );
+            action
+        })
     }
     pub(super) fn publish_derive(
         &mut self,
@@ -622,6 +734,7 @@ mod tests {
             scope: Scope::for_group(b"queue test", Some([1; 32]), 44),
             call: call.clone(),
             budget: ByteBudget::Ordinary,
+            history: None,
             payload_bytes: 320,
             engine_bytes: 4544,
         }

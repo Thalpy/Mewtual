@@ -1,5 +1,44 @@
 # Chat, files and voice implementation evidence
 
+## Inactive native confirmation capacity (19 October, isolated continuation)
+
+`prepare_crypto_chain` protects twelve local fixed history rows/slots, a provisional96 KiB
+confirmation-only variable envelope, one Crypto and two Forward lanes. Only derivation uses
+its role row currently. The exact native pair permanently stamps successful preparation;
+close cannot reset it. Plan and consumption bind actual resources/slots, scope/epoch, both
+join/key identities, pair pin/generation, role and original deadline. A first derive result
+checks the captured epoch even without another factory call. Exact past results remain
+metadata-only and recoverable before current pending checks.
+
+One weak process/group Workflow index remains busy through actual variable input/engine/lower
+custody after End. History and idle row issues do not own Workflow. Close revokes the separate
+pending chain lease, releases unused rows/bytes/lanes, and visits weakly registered actions
+outside control/history locks. Proven unstarted input retires; admitted uncertain work stays
+charged until actual settlement. The shared fixed2 KiB binding/control metadata owner stays
+charged through its actual last control, row issue or Workflow owner, without pinning progress.
+Runtime housekeeping closes idle expired/ended plans even without an active UI/actor grant.
+
+All287 focused voice cases pass15.48s (`target/communication-v2-chain-voice-2.log`), including
+ten chain cases and four LocalJoin integration cases; strict affected all-target/all-feature
+Clippy passes31.02s (`target/communication-v2-chain-clippy.log`). The first actual broader run
+had286 pass/one failed: the membership fixture removed the local member too, so the existing
+owned gate correctly refused before the intended remote-pair revocation. The fixture now
+keeps the local member and removes only the peer, exercising the engine-fence path directly.
+No production check/assertion was weakened or test skipped.
+
+An earlier filtered command used a shared-target fingerprint whose dependency records still
+pointed to the sibling checkpoint worktree and matched zero new cases. It is not evidence for
+this slice. Refreshing only affected local artifact fingerprint files forced the actual
+continuation build; its first nine chain cases and the final287 voice cases passed. No target
+cleanup or dependency rebuild was used to hide a failure. Review identified and corrected the
+fixed-metadata lifetime and direct epoch-check gaps described above.
+
+Complete continuation validation remains separate/in progress. This is not native/browser
+registration readiness, protected confirmation-operation factories, atomic encrypted intake,
+measured SDP phase transfer, live V2 dispatch/RTC, media relay or physical acceptance. The new
+media candidate section also records the mux pre-allocation/retained-copy boundary that must be
+resolved before enabling a production relay; no replacement mux profile is selected.
+
 ## Prepared confirmation binding (19 October, disabled continuation)
 
 Candidate/attempt binding and the original pair deadline are now installed in `PreparedInbound`

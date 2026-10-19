@@ -73,6 +73,7 @@ impl RecordedResult {
             output_tag: self.output_tag,
             outcome: self.result.outcome,
             retired: !action.call.is_live()
+                || action.chain.as_ref().is_some_and(|chain| !chain.is_live())
                 || !binding.pair.is_live()
                 || binding
                     .attempt

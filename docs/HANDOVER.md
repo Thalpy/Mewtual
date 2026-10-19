@@ -1,5 +1,18 @@
 # Mewtual; Handover
 
+## Inactive V2 confirmation capacity (2026-10-19, isolated continuation)
+
+LocalJoin now prepays twelve fixed local rows/slots plus a confirmation-only96 KiB Workflow;
+only derivation consumes a protected row. It permanently stamps the native pair and binds exact
+process/slot owners, epoch and both endpoint identities. End/expiry fences pending effects and
+releases unused capacity; real input/engine/lower owners retain their charges. Closed handles
+keep their shared2 KiB fixed metadata priced independently, without holding group progress busy.
+All287 focused voice cases and strict affected Clippy pass. Review found and corrected premature
+fixed-metadata release and a direct first-result epoch bypass. Current complete continuation
+checks are separate from the already pushed80927a85/b249bc71 checkpoint evidence below.
+Native/browser protected registration, atomic confirmation intake, measured SDP/IPC transfer,
+live dispatch/RTC, member media relay and physical acceptance remain open.
+
 ## Prepared confirmation binding (2026-10-19, disabled continuation)
 
 Confirmation candidates/attempts and original pair deadlines are bound before replay/token

@@ -43,6 +43,7 @@ struct Counts {
     bytes: usize,
     slots: [usize; SLOT_KINDS],
     exchange: std::sync::Weak<super::negotiation::Exchange>,
+    workflow: std::sync::Weak<super::chain::Workflow>,
 }
 #[derive(Default)]
 struct State {
@@ -153,6 +154,9 @@ pub enum ByteBudget {
     #[default]
     Ordinary,
     Reserved(Arc<Reservation>),
+    /// Inactive native confirmation plan. Only native factories can obtain this owner; fixed
+    /// action history must use its separately prepared rows, never this variable budget.
+    Workflow(Arc<super::chain::Workflow>),
     Exchange {
         exchange: Arc<super::negotiation::Exchange>,
         stage: super::negotiation::Stage,
@@ -175,6 +179,7 @@ impl ByteBudget {
     ) -> Result<Credit, VoiceError> {
         match self {
             Self::Ordinary => resources.charge(group, bytes, kind),
+            Self::Workflow(workflow) => workflow.charge(resources, group, bytes, kind),
             Self::Exchange { exchange, stage } => {
                 if !exchange.uses_resources(resources, group) {
                     return Err(VoiceError::Scope);
@@ -218,6 +223,42 @@ impl ByteBudget {
 }
 
 impl Resources {
+    /// One progress owner per process/group, including retired actual input/engine/lower loans.
+    /// Do not upgrade/drop an old owner under the pool lock: its destructor reenters this pool.
+    pub(crate) fn install_workflow(
+        &self,
+        group: [u8; 32],
+        workflow: &Arc<super::chain::Workflow>,
+    ) -> Result<(), VoiceError> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let counts = state
+            .groups
+            .get_mut(&group)
+            .expect("prepaid workflow group");
+        if counts.workflow.strong_count() != 0 {
+            return Err(VoiceError::Capacity);
+        }
+        counts.workflow = Arc::downgrade(workflow);
+        Ok(())
+    }
+    /// Quiet process housekeeping needs no active UI/actor grant. Clone bounded weak indices
+    /// under the pool lock, then enter control/action/reservation locks only after releasing it.
+    pub(crate) fn collect_workflows(&self, mono: u64) {
+        let workflows: Vec<_> = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .groups
+            .values()
+            .map(|counts| counts.workflow.clone())
+            .collect();
+        for workflow in workflows
+            .into_iter()
+            .filter_map(|workflow| workflow.upgrade())
+        {
+            workflow.collect_expired(mono);
+        }
+    }
     pub(crate) fn register_exchange(
         &self,
         group: [u8; 32],

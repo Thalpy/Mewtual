@@ -202,6 +202,7 @@ impl Runtime {
             .cloned()
             .collect();
         let now = self.clock.monotonic_ms();
+        self.resources.collect_workflows(now);
         for group in groups {
             group.source.collect_expired();
             group.helper.collect_expired();

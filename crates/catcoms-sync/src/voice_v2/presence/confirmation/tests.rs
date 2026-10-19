@@ -250,6 +250,280 @@ fn hello(f: &mut Fixture) -> (CryptoFlight, SignedObject) {
 }
 
 #[test]
+fn prepared_chain_is_same_pair_idempotent_and_close_cannot_reset_it() {
+    let mut f = fixture();
+    let before = f.pool.counts();
+    let chain = f
+        .low
+        .join
+        .prepare_crypto_chain(f.id, &ca(&f.low.context, &f.low.lease), &f.clock)
+        .unwrap();
+    let after = f.pool.counts();
+    assert!(after.0 > before.0);
+    let again = f
+        .low
+        .join
+        .prepare_crypto_chain(f.id, &ca(&f.low.context, &f.low.lease), &f.clock)
+        .unwrap();
+    assert!(Arc::ptr_eq(&chain, &again));
+    assert_eq!(f.pool.counts(), after);
+    assert_eq!(f.low.join.confirmations.pairs[&f.id].starts, 0);
+    chain.close();
+    assert_eq!(
+        f.pool.counts(),
+        (before.0 + 2048, before.1),
+        "closed fixed metadata stays charged"
+    );
+    assert!(f
+        .low
+        .join
+        .prepare_crypto_chain(f.id, &ca(&f.low.context, &f.low.lease), &f.clock)
+        .is_err());
+    assert!(f
+        .low
+        .join
+        .derivation_action(
+            f.id,
+            &ca(&f.low.context, &f.low.lease),
+            Arc::new(f.clock),
+            ByteBudget::Ordinary
+        )
+        .is_err());
+}
+
+#[test]
+fn prepared_chain_derive_uses_protected_capacity_and_refuses_replacement_or_other_join() {
+    let mut f = fixture();
+    let chain = f
+        .low
+        .join
+        .prepare_crypto_chain(f.id, &ca(&f.low.context, &f.low.lease), &f.clock)
+        .unwrap();
+    assert!(f
+        .high
+        .join
+        .chain_derivation_action(
+            f.id,
+            &chain,
+            &ca(&f.high.context, &f.high.lease),
+            Arc::new(f.clock.clone())
+        )
+        .is_err());
+    // Fill ordinary bytes and all unreserved action slots. The native factory must borrow the
+    // plan's fixed row, not take another ordinary slot/byte before reaching its reserve.
+    let slots = f.low.join.ledger.action_slots();
+    let ordinary_slots = slots.charge(20).unwrap();
+    let pressure = f
+        .pool
+        .charge(
+            f.low.context.scope.group,
+            256 * 1024 - f.pool.counts().0,
+            ResourceKind::Retained,
+        )
+        .unwrap();
+    let action = f
+        .low
+        .join
+        .chain_derivation_action(
+            f.id,
+            &chain,
+            &ca(&f.low.context, &f.low.lease),
+            Arc::new(f.clock.clone()),
+        )
+        .unwrap();
+    let again = f
+        .low
+        .join
+        .chain_derivation_action(
+            f.id,
+            &chain,
+            &ca(&f.low.context, &f.low.lease),
+            Arc::new(f.clock.clone()),
+        )
+        .unwrap();
+    assert!(Arc::ptr_eq(&action, &again));
+    let used = f.pool.counts();
+    action.admit_engine(action.engine_bytes()).unwrap();
+    assert_eq!(
+        f.pool.counts(),
+        used,
+        "engine uses its prepaid lane and bytes"
+    );
+    assert!(f
+        .low
+        .join
+        .derivation_action(
+            f.id,
+            &ca(&f.low.context, &f.low.lease),
+            Arc::new(f.clock.clone()),
+            ByteBudget::Ordinary
+        )
+        .is_err());
+    f.low.context.epoch += 1;
+    assert!(f
+        .low
+        .join
+        .chain_derivation_action(
+            f.id,
+            &chain,
+            &ca(&f.low.context, &f.low.lease),
+            Arc::new(f.clock.clone())
+        )
+        .is_err());
+    assert!(f
+        .low
+        .join
+        .prepare_crypto_chain(f.id, &ca(&f.low.context, &f.low.lease), &f.clock)
+        .is_err());
+    assert!(!action.is_pending());
+    action.settle_engine();
+    drop((pressure, ordinary_slots));
+}
+
+#[test]
+fn ordinary_derivation_cannot_be_adopted_and_chain_retirement_does_not_reenter_result_fence() {
+    let mut f = fixture();
+    let action = f
+        .low
+        .join
+        .derivation_action(
+            f.id,
+            &ca(&f.low.context, &f.low.lease),
+            Arc::new(f.clock.clone()),
+            ByteBudget::Ordinary,
+        )
+        .unwrap();
+    assert!(f
+        .low
+        .join
+        .prepare_crypto_chain(f.id, &ca(&f.low.context, &f.low.lease), &f.clock)
+        .is_err());
+    action.retire_if_unstarted();
+
+    let mut f = fixture();
+    let chain = f
+        .low
+        .join
+        .prepare_crypto_chain(f.id, &ca(&f.low.context, &f.low.lease), &f.clock)
+        .unwrap();
+    let action = f
+        .low
+        .join
+        .chain_derivation_action(
+            f.id,
+            &chain,
+            &ca(&f.low.context, &f.low.lease),
+            Arc::new(f.clock.clone()),
+        )
+        .unwrap();
+    action.admit_engine(action.engine_bytes()).unwrap();
+    let local = f.low.context.local;
+    let not_member = |candidate: DeviceId| candidate == local;
+    let stale = Authority {
+        context: &f.low.context,
+        lease: &f.low.lease,
+        member: &not_member,
+    };
+    // This enters pair_current while Engine is held. It must only revoke the pair pin;
+    // housekeeping, outside Engine, subsequently closes/retire unused preparation.
+    assert!(f
+        .low
+        .join
+        .commit_derivation_result(&action, action.output_tag(&[]).unwrap(), &stale, &f.clock)
+        .is_err());
+    f.pool.collect_workflows(f.clock.monotonic_ms());
+    assert!(action.with_pending(|| Ok(())).is_err());
+    action.settle_engine();
+    assert!(chain.prepare_derive().is_err());
+}
+
+#[test]
+fn prepared_chain_first_derive_result_rejects_epoch_change_without_another_factory_call() {
+    let mut f = fixture();
+    let chain = f
+        .low
+        .join
+        .prepare_crypto_chain(f.id, &ca(&f.low.context, &f.low.lease), &f.clock)
+        .unwrap();
+    let action = f
+        .low
+        .join
+        .chain_derivation_action(
+            f.id,
+            &chain,
+            &ca(&f.low.context, &f.low.lease),
+            Arc::new(f.clock.clone()),
+        )
+        .unwrap();
+    action.admit_engine(action.engine_bytes()).unwrap();
+    f.low.context.epoch += 1;
+    assert!(f
+        .low
+        .join
+        .commit_derivation_result(
+            &action,
+            action.output_tag(&[]).unwrap(),
+            &ca(&f.low.context, &f.low.lease),
+            &f.clock
+        )
+        .is_err());
+    assert!(action.terminal_status().receipt.is_none());
+    assert!(action
+        .recover_result(&[], action.output_tag(&[]).unwrap())
+        .unwrap()
+        .is_none());
+    // Neither a failed first effect nor current epoch data can replenish the reserved row.
+    assert!(chain.prepare_derive().is_err());
+    action.settle_engine();
+    chain.close();
+
+    let mut f = fixture();
+    let chain = f
+        .low
+        .join
+        .prepare_crypto_chain(f.id, &ca(&f.low.context, &f.low.lease), &f.clock)
+        .unwrap();
+    let action = f
+        .low
+        .join
+        .chain_derivation_action(
+            f.id,
+            &chain,
+            &ca(&f.low.context, &f.low.lease),
+            Arc::new(f.clock.clone()),
+        )
+        .unwrap();
+    action.admit_engine(action.engine_bytes()).unwrap();
+    let receipt = f
+        .low
+        .join
+        .commit_derivation_result(
+            &action,
+            action.output_tag(&[]).unwrap(),
+            &ca(&f.low.context, &f.low.lease),
+            &f.clock,
+        )
+        .unwrap();
+    action.settle_engine();
+    action.acknowledge_result(&receipt).unwrap();
+    f.low.context.epoch += 1;
+    let recovered = f
+        .low
+        .join
+        .commit_derivation_result(
+            &action,
+            receipt.output_tag,
+            &ca(&f.low.context, &f.low.lease),
+            &f.clock,
+        )
+        .unwrap();
+    assert!(
+        recovered.same_transition(&receipt),
+        "current epoch cannot erase exact past result metadata"
+    );
+}
+
+#[test]
 fn native_action_repeated_registration_and_pull_share_one_engine_fence() {
     let mut f = fixture();
     let action = f

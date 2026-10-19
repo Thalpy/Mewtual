@@ -108,6 +108,40 @@ sustained media/file load. Expired audio is dropped rather than replayed after a
 
 ## Remaining acceptance
 
+### Required mesh-stream and mux boundary (19 October source review)
+
+The application buffer limit cannot stand in for a mux memory bound. The pinned default
+`libp2p-yamux 0.47.0` selects `yamux 0.13.10`: its frame parser permits a 1 MiB body allocation
+before stream/window validation, streams start with 256 KiB receive credit, and the default
+512-stream configuration permits a 1 GiB aggregate auto-tuned receive window. Individual tiny
+frames also retain allocation/deque metadata beyond payload credit. A 2 KiB application read
+or write limit therefore does not establish a 512 KiB total connection envelope.
+
+The source boundaries are `yamux-0.13.10/src/frame/io.rs` (frame allocation),
+`src/connection.rs` and `src/connection/stream/flow_control.rs` (validation and window growth),
+and `src/chunks.rs` (retained chunks). Outgoing writes copy into mux-owned vectors and use a
+bounded command channel; application byte custody does not follow that copy automatically.
+`Stream::poll_flush`/close does not acknowledge remote delivery or complete buffer retirement.
+Closing marks stream state closed but can leave receive buffers held by an external stream.
+
+Before adding an enabled relay, select and review an explicit bounded mux configuration or
+adapter, then calculate payload, parser, tiny-frame metadata, queued write copies, scratch and
+retained stream owners together. Public setters on this pinned libp2p-yamux wrapper select its
+legacy 0.12 implementation; they do not configure the private default 0.13 backend. Switching
+profiles requires compatibility, pre-allocation and load evidence. No replacement profile or
+dependency is selected here.
+
+The stream primitive must also capture one authenticated `ConnectionId`, not the existing
+aggregate per-peer connection lease. That aggregate deliberately survives another path opening
+to the same peer. A new exact lease must revoke on that connection's close/handler retirement;
+it cannot adopt a replacement connection or dial an address. Exact handler notifications can
+be discarded after connection loss, so request/credit retirement must travel in an owned drop
+guard through notification and negotiation. Late streams must close under the original lease,
+cancellation and deadline. Incoming and outgoing queues need finite peer/process limits and
+nonblocking admission. The connection envelope remains charged until actual connection
+termination and the last outstanding stream/buffer owner retire. The reviewed stream/mux
+boundary remains an implementation prerequisite, separate from the passing feasibility probe.
+
 Replace the fixture bridge with actual permitted native A–B–C paths and block direct A–C.
 Prove selected relay candidates, generated audio decode, jam/drawing, exact traffic counters,
 wrong-destination/call/group refusal, fingerprint substitution refusal, expiry/End/lock/removal,

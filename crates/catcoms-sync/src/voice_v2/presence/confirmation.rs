@@ -44,6 +44,9 @@ pub(super) struct Pair {
     action: Option<Action>,
     established: bool,
     retired: bool,
+    // Permanent preparation stamp, including after close. Removing it would let the same pair
+    // recreate candidate/operation capacity. The closed handle owns no idle progress capacity.
+    chain: Option<Arc<super::super::chain::PreparedChain>>,
     _credit: Credit,
 }
 struct Action {
@@ -58,6 +61,9 @@ struct Action {
 impl Drop for Pair {
     fn drop(&mut self) {
         self.pin.revoke();
+        if let Some(chain) = &self.chain {
+            chain.close();
+        }
     }
 }
 impl Confirmations {
@@ -81,6 +87,9 @@ impl Confirmations {
         {
             pair.pin.revoke();
             pair.retired = true;
+            if let Some(chain) = &pair.chain {
+                chain.close();
+            }
         }
     }
 }
@@ -251,6 +260,149 @@ fn apply_action(pair: &mut Pair, prepared: PreparedActionChange, ledger: &Packet
     pair.action = Some(prepared.action);
 }
 impl LocalJoin {
+    fn chain_binding(
+        &self,
+        handshake: Nonce,
+        authority: &Authority<'_>,
+    ) -> super::super::chain::Binding {
+        let pair = &self.confirmations.pairs[&handshake];
+        super::super::chain::Binding {
+            scope: self.scope,
+            epoch: authority.context.epoch,
+            local: self.local,
+            local_join: self.key.join,
+            local_key: self.key.key_ref,
+            handshake,
+            peer: pair.binding.peer,
+            peer_join: pair.binding.join,
+            peer_key: pair.binding.key_ref,
+            generation: pair.generation,
+            call: self.lease.clone(),
+            pair: pair.pin.clone(),
+            deadline: pair.deadline,
+            low: pair.low,
+        }
+    }
+
+    /// Prepare inactive native confirmation capacity for one proven pair. Repeated live calls
+    /// return the same owner; after close this exact pair cannot prepare again. No readiness,
+    /// packet, candidate debit, signing, engine permit or browser capacity is granted here.
+    pub fn prepare_crypto_chain(
+        &mut self,
+        handshake: Nonce,
+        authority: &Authority<'_>,
+        clock: &dyn Clock,
+    ) -> Result<Arc<super::super::chain::PreparedChain>, VoiceError> {
+        self.pair_current(handshake, authority, clock)?;
+        let binding = self.chain_binding(handshake, authority);
+        let slots = self.ledger.action_slots();
+        if let Some(chain) = &self.confirmations.pairs[&handshake].chain {
+            if chain.matches(&binding, &self.resources, &slots, clock.monotonic_ms()) {
+                return Ok(chain.clone());
+            }
+            chain.close();
+            return Err(VoiceError::Unauthorized);
+        }
+        // An ordinary action cannot be adopted into a prepaid chain with a different fence.
+        if self.actions.get(Key::Derive(handshake)).is_some() {
+            return Err(VoiceError::Unauthorized);
+        }
+        let chain = super::super::chain::PreparedChain::new(
+            self.resources.clone(),
+            binding.clone(),
+            slots.clone(),
+        )?;
+        self.confirmations
+            .pairs
+            .get_mut(&handshake)
+            .expect("current pair")
+            .chain = Some(chain.clone());
+        let current = self.pair_current(handshake, authority, clock);
+        if let Err(error) = current {
+            chain.close();
+            return Err(error);
+        }
+        if !chain.matches(
+            &self.chain_binding(handshake, authority),
+            &self.resources,
+            &slots,
+            clock.monotonic_ms(),
+        ) {
+            chain.close();
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(chain)
+    }
+
+    /// First consumer of the inactive plan: exact derivation with separately prepaid history
+    /// and variable input. All fallible preparation precedes permanent row publication. Native
+    /// callers must still reserve their own registry/browser continuation before readiness.
+    pub fn chain_derivation_action(
+        &mut self,
+        handshake: Nonce,
+        chain: &Arc<super::super::chain::PreparedChain>,
+        authority: &Authority<'_>,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Arc<CryptoAction>, VoiceError> {
+        self.pair_current(handshake, authority, clock.as_ref())?;
+        if self.confirmations.pairs[&handshake]
+            .chain
+            .as_ref()
+            .is_none_or(|original| !Arc::ptr_eq(original, chain))
+            || !chain.matches(
+                &self.chain_binding(handshake, authority),
+                &self.resources,
+                &self.ledger.action_slots(),
+                clock.monotonic_ms(),
+            )
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let key = Key::Derive(handshake);
+        if let Some(action) = self.actions.get(key) {
+            return if action.uses_chain(&chain.lease()) {
+                Ok(action)
+            } else {
+                Err(VoiceError::Unauthorized)
+            };
+        }
+        let (payload_bytes, engine_bytes) =
+            crypto_actions::derive_bytes(self.confirmations.pairs[&handshake].transcript.len())?;
+        let (history, budget) = chain.prepare_derive()?;
+        let prepared = self.actions.prepare(
+            key,
+            Allocation {
+                resources: self.resources.clone(),
+                scope: self.scope,
+                call: self.lease.clone(),
+                budget,
+                history: Some(history),
+                payload_bytes,
+                engine_bytes,
+            },
+        )?;
+        let pending = self
+            .pair_derivation_authority(handshake, authority, clock.clone())?
+            .with_pending(chain.lease())?;
+        let setup = self.pair_setup(handshake, authority, clock.as_ref())?;
+        // Clock/membership callbacks above may retire the plan. Repeat native checks before
+        // the row fence, then perform only prepaid infallible publication under that fence.
+        self.pair_current(handshake, authority, clock.as_ref())?;
+        if !chain.matches(
+            &self.chain_binding(handshake, authority),
+            &self.resources,
+            &self.ledger.action_slots(),
+            clock.monotonic_ms(),
+        ) {
+            return Err(VoiceError::Unauthorized);
+        }
+        let action = self
+            .actions
+            .publish_chain_derive(prepared, setup, pending)?;
+        chain.register_action(&action);
+        Ok(action)
+    }
+
     /// Publish one continuing native derive identity for the actual proven pair. Repeated pull
     /// or HMR cannot manufacture another engine fence or reset the pair's original deadline.
     pub fn derivation_action(
@@ -261,6 +413,9 @@ impl LocalJoin {
         budget: ByteBudget,
     ) -> Result<Arc<CryptoAction>, VoiceError> {
         self.pair_current(handshake, authority, clock.as_ref())?;
+        if self.confirmations.pairs[&handshake].chain.is_some() {
+            return Err(VoiceError::Unauthorized);
+        }
         let key = Key::Derive(handshake);
         if let Some(action) = self.actions.get(key) {
             return Ok(action);
@@ -274,6 +429,7 @@ impl LocalJoin {
                 scope: self.scope,
                 call: self.lease.clone(),
                 budget,
+                history: None,
                 payload_bytes,
                 engine_bytes,
             },
@@ -308,6 +464,7 @@ impl LocalJoin {
                 scope: self.scope,
                 call: self.lease.clone(),
                 budget,
+                history: None,
                 payload_bytes,
                 engine_bytes,
             },
@@ -346,6 +503,7 @@ impl LocalJoin {
                 scope: self.scope,
                 call: self.lease.clone(),
                 budget,
+                history: None,
                 payload_bytes,
                 engine_bytes,
             },
@@ -573,6 +731,9 @@ impl LocalJoin {
             return Err(VoiceError::Unauthorized);
         };
         action.with_result(&[], claimed_tag, || {
+            // History above remains recoverable after an epoch change. First effects still
+            // require the epoch captured by this plan, even without another prepare/pull.
+            action.check_chain_epoch(authority.context.epoch)?;
             self.pair_current(setup.handshake, authority, clock)?;
             let mut binding = self.result_binding(setup.handshake, u64::MAX, u64::MAX);
             binding.attempt = None;
@@ -629,6 +790,12 @@ impl LocalJoin {
     }
     pub(super) fn collect_confirmations(&mut self, clock: &dyn Clock) {
         for (id, pair) in &mut self.confirmations.pairs {
+            if clock.monotonic_ms() >= pair.deadline || !self.lease.is_live() || !pair.pin.is_live()
+            {
+                if let Some(chain) = &pair.chain {
+                    chain.close();
+                }
+            }
             if !pair.retired
                 && (!self.lease.is_live()
                     || !pair.pin.is_live()
@@ -732,6 +899,7 @@ impl LocalJoin {
                 action: None,
                 established: false,
                 retired: false,
+                chain: None,
                 _credit: credit,
             },
         );
@@ -753,6 +921,8 @@ impl LocalJoin {
         if !(authority.member)(pair.binding.peer) {
             pair.pin.revoke();
             pair.retired = true;
+            // This check also runs inside an action's first-result Engine fence. Revoke only
+            // the pin here; quiet collection closes unused chain capacity outside that fence.
             self.ledger.retire_handshake(&handshake);
         }
         if pair.retired || !pair.pin.is_live() {

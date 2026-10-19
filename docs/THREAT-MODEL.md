@@ -2,6 +2,24 @@
 
 ## Voice terminal history checkpoint (19 October, Rust only)
 
+The inactive confirmation plan is capacity only. Its twelve fixed local rows/slots and 96 KiB
+variable envelope cannot authorize an engine, signed packet, browser continuation or RTC effect.
+Successful preparation is permanently stamped in the native pair, including after close;
+unpublished row abandonment returns only that original unused row. Publication consumes its
+identity irreversibly. Exact Resources/Slots owners, scope/epoch, local/remote join/key, call/pair
+pin/generation, role and original deadline prevent cross-owner adoption. A first derive result
+checks the captured epoch under its existing engine fence; historical lookup stays independent.
+An irreversible chain lease also fences already-admitted pending effects after close.
+
+One weak group Workflow index counts actual input/engine/lower custody across End. History and
+closed control metadata do not hold it strongly. The shared fixed metadata owner retains its
+plain 2 KiB charge until the last actual control/row/workflow owner drops. Quiet collection
+snapshots weak indices before entering control/action locks; close visits engine fences only
+after releasing control/history locks. `pair_current` inside first-result processing only
+revokes the pair pin; collection closes unused capacity outside that engine fence. Only derive
+uses protected rows currently; native/browser registration, complete confirmation/SDP intake,
+phase/copy accounting and live V2 remain open.
+
 Past accepted and closed-rejected action results remain metadata after End and actual engine
 settlement. Exact output recovery rehashes bytes; a separate terminal-status snapshot permits
 receipt cleanup after those browser bytes have been destroyed. Status is not output validation

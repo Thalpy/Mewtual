@@ -2,6 +2,17 @@
 
 ## Voice action history checkpoint (19 October, Rust only)
 
+`LocalJoin::prepare_crypto_chain` returns an opaque inactive native plan for one proven pair.
+It reserves twelve local fixed rows/slots, a confirmation-only 96 KiB variable envelope and
+work lanes. Repeated live preparation returns the same owner; after close that pair cannot
+prepare again. Only `chain_derivation_action` consumes a protected row in this revision.
+Preparation grants no network/engine/browser/RTC readiness, candidate/origin debit or packet.
+`PreparedChain::close` revokes pending action eligibility, releases unused capacity and retires
+proven unstarted actions. Uncertain admitted work and actual input readers remain charged.
+Closed handles/row issues retain their shared 2 KiB fixed metadata charge through last drop,
+independently of the group progress owner. Exact history remains recoverable; a first derive
+result independently checks the captured epoch even without another prepare or pull.
+
 `CryptoAction::recover_result(bytes,tag)` rehashes the exact bounded engine output and returns
 only a previously recorded receipt. `terminal_status()` instead returns one action-fence snapshot
 of actual settlement and optional receipt, without requiring browser output that End may have

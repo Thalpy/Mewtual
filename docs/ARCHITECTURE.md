@@ -148,6 +148,16 @@ the bounded rendezvous drain retain separate waits; this is not a universal late
 
 ## Voice V2 foundation in progress (2026-10-18)
 
+An inactive native confirmation plan now protects twelve fixed local history rows/slots and a
+provisional 96 KiB variable envelope, one Crypto lane and two Forward lanes. Only derivation
+consumes a protected row so far. One weak process/group Workflow index remains occupied through
+actual input/engine/lower custody after End; fixed history and retained closed control metadata
+stay independently charged without pinning progress. LocalJoin permanently stamps successful
+preparation per pair, including after close. Original resources/slots, scope/epoch, both join/key
+identities, pair pin/generation, role and deadline bind the plan. Fresh native authority is still
+required at consumption and first effects. Process housekeeping closes unused capacity outside
+resource and action locks. This is not whole-chain/native/browser readiness or live dispatch.
+
 The reviewed [V2 decision](communication-recovery/VOICE-SIGNALLING-V2.md) is being implemented
 as separate foundation modules; live calls still use legacy signalling. Strict signed objects
 and route roles live in `catcoms-sync::voice_v2`;

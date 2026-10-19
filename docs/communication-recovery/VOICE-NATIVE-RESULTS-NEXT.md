@@ -71,7 +71,19 @@ unpublished; history/input compaction never re-arms it. Proven unstarted retirem
 input and the lender. Actual final settlement without any terminal result also drops input,
 since no first result can pass that permanent fence; installed terminal results still require
 their exact ACK. Existing input readers preserve their original buffers and credit. This does
-not implement the Workflow, protected confirmation rows or browser readiness described below.
+not by itself implement the complete protected chain or browser readiness described below.
+
+The following inactive native prerequisite now prepays twelve local fixed rows/slots and a
+provisional confirmation-only 96 KiB Workflow, with one Crypto and two Forward lanes. Only
+`chain_derivation_action` uses its row so far; the other eleven remain protected, not exposed
+as readiness. LocalJoin binds exact owners/identities and permanently latches preparation for
+that pair. Close returns unused capacity, fences pending effects and retires proven unstarted
+actions without refunding actual admitted engines or readers. Fixed history and shared 2 KiB
+control metadata stay charged independently; neither holds the weak group Workflow index busy
+after actual variable custody drains. Quiet Runtime collection closes expired/ended plans.
+This is no native/browser continuation reservation, atomic encrypted intake or SDP phase transfer.
+The whole-chain design requirements below remain open; do not stack this provisional reserve
+onto the existing SDP reserve and call their combined footprint admitted.
 
 The next small prerequisite binds each prepared incoming confirmation to its actual Hello
 sequence floor or attempt and original pair deadline before ledger publication. Final admission
