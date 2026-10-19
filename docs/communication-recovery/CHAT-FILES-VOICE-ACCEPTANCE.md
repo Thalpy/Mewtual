@@ -5,6 +5,30 @@ are implemented and exercised; live V2, production member media relay, combined 
 independent physical audio/network acceptance are not complete. The dated sections distinguish
 current runtime paths from inactive prerequisites and experiments.
 
+## Packaged IPC platform experiment (19 October)
+
+The disposable Windows harness at `experiments/loopback-ipc` passed its actual packaged
+WebView2 run on `Edg/155.0.4283.62`. Main/restricted/remote WebViews exercise real generated
+Tauri ACLs. After injected successful bootstrap reply loss, stock fallback consumed the second
+and last process-lifetime fixture grant; a third call and hard refresh refused another grant.
+CSP denied the unlisted listener before it received any request. The wrong-CORS listener
+received its expected request but the browser withheld its reply. The healthy fixed GET passed.
+Two ordinary preflights were seen; zero Private Network Access preflights were observed, so no
+PNA permission result is claimed. Peak active workers were three, under the shared four-position
+cap that persists through completed-task collection.
+
+The runner waited for native worker drain, process exit, captured-output EOF and owned-profile
+cleanup before publishing ignored evidence. A second real run injected cleanup failure and
+correctly failed without printing success or replacing the prior record. Three Rust tests and
+two Node tests pass. Read-only adversarial re-review has no remaining finding. The probe uses
+only generated fixture material and fixed replies, with no account or application payload.
+
+Logs: `communication-loopback-probe-native.log`, `communication-loopback-probe-cleanup-fault.log`,
+`communication-loopback-probe-unit.log` and `communication-loopback-child-output-tests.log` in
+the isolated loopback checkout's `target/`. This standalone workspace preserves pinned native
+registry versions and changes no production manifest, command, CSP or wire format. Authenticated
+framing, takeover protection, complete copy custody and production V2 integration remain open.
+
 ## Gate7 integration validation (19 October)
 
 Gate7 `e9998678` is integrated with the communication branch, preserving the incoming video,

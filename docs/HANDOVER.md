@@ -1,5 +1,16 @@
 # Mewtual; Handover
 
+## Packaged IPC feasibility probe (2026-10-19)
+
+The standalone loopback experiment passes on actual packaged Windows WebView2 with normal
+browser security: secure app origin, exact CSP listener, CORS rejection, restricted/remote ACL
+denial and finite stock-bootstrap fallback across reply loss and refresh. Native drain, output
+EOF and temporary-profile cleanup precede any success record; an actual cleanup-fault check
+correctly refuses publication. Three Rust and two Node unit tests pass, with no remaining
+read-only review finding. See the communication acceptance ledger and experiment README.
+No Private Network Access preflight occurred on this configuration. Authenticated binary
+framing, takeover protection, production action IPC, live V2 and media relay remain unfinished.
+
 ## Gate7 UI integration with communication recovery (2026-10-19)
 
 The communication branch integrates Gate7's video editor, native file drops, readability and

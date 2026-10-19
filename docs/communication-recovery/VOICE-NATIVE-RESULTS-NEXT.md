@@ -1,5 +1,21 @@
 # Next voice milestone: native result recovery
 
+## Packaged loopback platform probe (19 October, experiment only)
+
+The standalone `experiments/loopback-ipc` harness now passes on actual packaged Windows
+WebView2 `Edg/155.0.4283.62`, without browser-security bypass flags. It checks secure
+`http://tauri.localhost`, an exact numeric-loopback CSP addition before window creation,
+actual restricted/remote ACL denials, CORS rejection and stock Tauri bootstrap fallback after
+an injected lost successful reply. Two process-lifetime fixture grants remain exhausted after
+hard refresh. Native workers drain, captured output reaches EOF and the owned temporary profile
+is removed before the runner records success. An actual cleanup-fault run refuses publication.
+
+The observed two preflights did not request Private Network Access; its permission behavior is
+therefore untested. Authenticated binary framing, port-takeover resistance, production action
+authority and complete native/framework/browser copy accounting are still absent. This is
+platform feasibility evidence for a candidate, not selection or activation of production IPC.
+Live V2 and the remaining native/browser/RTC gates below stay disabled/open.
+
 ## Unpublished token and origin transaction prerequisite (19 October, inactive)
 
 `PacketLedger::validate_prepared_inbound` finishes fallible ledger/time checks and lends an
