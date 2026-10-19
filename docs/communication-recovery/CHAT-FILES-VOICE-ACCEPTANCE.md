@@ -5,6 +5,32 @@ are implemented and exercised; live V2, production member media relay, combined 
 independent physical audio/network acceptance are not complete. The dated sections distinguish
 current runtime paths from inactive prerequisites and experiments.
 
+## Validated checkpoint 3691bd25 (19 October)
+
+All required complete checks have now passed for this checkpoint:
+
+| Check | Result |
+| --- | --- |
+| `cargo test --all --all-features -j2 -- --test-threads=4` | 3,033 passed, zero failed, 24 existing ignored, 56 target summaries; exit 0 |
+| `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml -j2 -- --test-threads=4` | 427 library + 5 ACL passed; main/doc targets passed |
+| `npm --prefix apps/desktop test` | 1,903 passed |
+| Root strict Clippy, all targets/features | Passed in 38.89s |
+| Root/native formatting, ambient-dependency gate, `cargo deny check` | Passed; existing dependency-duplication warnings remain |
+| Native check and debug build (`--no-default-features`) | Passed |
+| Svelte static check and production build | Passed; zero static errors/warnings, existing build chunk-size warning |
+| Actual native startup and ten rendered Edge flows | Passed |
+
+The root command ran on the frozen native continuation worktree's Rust source at `c569b3c9`;
+`3691bd25` adds browser code/docs without changing that Rust source. Its log is
+`target/communication-v2-continuation-root-full.log` in `communication-live-v2-worktree`, alongside
+`communication-v2-continuation-root-clippy.log`. Native and browser logs are listed in their
+dated sections below. The root result was summed from the completed command after exit 0;
+no running test, stale shared-target binary or zero-match filter is counted as passing evidence.
+
+The new atomic-confirmation intake work is a separate uncommitted continuation and is not covered
+by this checkpoint. Live V2, production media relay, combined rollout and independent physical
+audio/network acceptance remain open. Green checkpoint tests do not complete those packages.
+
 ## Inactive protected browser derivation (19 October, isolated continuation)
 
 Broker v5 shares one closed action driver across derivation and confirmation. Its opaque key
@@ -50,9 +76,9 @@ Actual native startup also passes with the same20-second marker deadline
 All ten actual rendered Edge flows pass (`target/communication-protected-browser-rendered-flows.log`).
 All91 focused crypto/confirmation/derive cases pass1.35s
 (`target/communication-protected-browser-focused-final.log`). The same Rust/native source was
-already checked by the427+5 complete native run below; the complete root run remains on its
-frozen native continuation source while this browser slice is validated separately. No test
-sources were changed in that running Rust worktree.
+already checked by the427+5 complete native run below; the complete root run subsequently passed
+on its frozen native continuation source. No test sources were changed in that running Rust
+worktree. The checkpoint summary above records the final completed result.
 
 ## Inactive native confirmation capacity (19 October, isolated continuation)
 
@@ -87,7 +113,7 @@ continuation build; its first nine chain cases and the final287 voice cases pass
 cleanup or dependency rebuild was used to hide a failure. Review identified and corrected the
 fixed-metadata lifetime and direct epoch-check gaps described above.
 
-Complete continuation validation remains separate/in progress. This is not native/browser
+Complete continuation validation passed at the checkpoint above. This is not native/browser
 registration readiness, protected confirmation-operation factories, atomic encrypted intake,
 measured SDP phase transfer, live V2 dispatch/RTC, media relay or physical acceptance. The new
 media candidate section also records the mux pre-allocation/retained-copy boundary that must be
@@ -106,7 +132,8 @@ remain. Native `cargo check` passes51.40s and the debug build with `--no-default
 continuation worktree). The first sandboxed startup attempt timed out at its unchanged20-second
 bound with no marker; an unchanged normal-desktop-access rerun passes2.34s
 (`target/communication-v2-continuation-startup{-2,}.log`). Both results are retained. Complete
-root validation is still in progress; no root completion is inferred from the other gates.
+root validation subsequently passed at the checkpoint above. The earlier startup timeout and
+passing unchanged rerun both remain part of the record.
 
 The first frontend command had1859 passes and one occupied-port harness failure: app dependency
 prebundling used the original20s deadline before Vite tried its strict-port listen. That test now

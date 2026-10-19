@@ -1,5 +1,18 @@
 # Mewtual; Handover
 
+## Validated communication checkpoint 3691bd25 (2026-10-19)
+
+Complete root testing passes 3,033 cases with zero failures and 24 existing ignored; complete
+native testing passes 427 library + 5 ACL cases; complete frontend testing passes 1,903 cases.
+Strict all-target/all-feature Clippy, formatting, ambient-dependency and deny checks pass.
+Native check/build/startup, Svelte/build and ten rendered flows pass. The communication
+acceptance ledger records exact logs, prior corrected failures and what each check establishes.
+
+Live V2 and production media relay remain disabled/unimplemented. Protected confirmation intake,
+native/browser copy transport, agreed helpers, SDP/RTC dispatch and combined/physical acceptance
+still need completion. The atomic-intake work after this checkpoint is separate and not part of
+its validation. Only one physical desktop is available.
+
 ## Inactive protected browser derivation (2026-10-19)
 
 Broker v5 now gives derivation the same continuing native-action/result lifecycle as confirmation.
@@ -11,7 +24,7 @@ Protected keys refuse ordinary crypto/confirmation fallback; original deadlines 
 cannot rearm the pair. All91 focused crypto/confirmation/derive cases and the complete1903-case
 frontend suite pass; Svelte, production build, ten rendered flows and real native startup pass.
 Read-only re-review has no remaining findings. The complete root run for the unchanged Rust
-continuation is still in progress; the complete native427+5 run passed. The communication ledger
+continuation and the complete native427+5 run passed. The communication ledger
 records the exact scope and logs, including the earlier corrected failures.
 
 Production native action registration/IPC, protected confirmation/SDP consumers, atomic encrypted
