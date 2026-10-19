@@ -16,6 +16,7 @@ import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { editableContainer, editedFileName, type VideoEditorResult } from "./video-export.ts";
 import { pushToTalkEvent, type PushToTalkSettings } from "./push-to-talk.ts";
+import { carriesFiles } from "./drop-guard.ts";
 
 const source = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
 
@@ -40,16 +41,23 @@ type Scripted = {
   upload?: (file: File, name: string, state: State) => Promise<void>;
 };
 type State = Record<string, unknown> & {
-  scope: string; epoch: number; draft: string; uploads: Array<[string, string]>; reviews: string[];
-  toasts: string[]; locked: boolean; uploading: boolean;
+  scope: string; epoch: number; draft: string; statusDraft: string; uploads: Array<[string, string]>;
+  folders: string[]; reviews: Array<[string, string]>; toasts: string[]; locked: boolean; uploading: boolean;
+  sends: number; sentTexts: string[]; statusPosts: number; folder: string; wikiPage: string; wikiBody: string[];
+  replyingTo: string; sending: boolean; statusPosting: boolean;
 };
 
 /** What App's rescope effect does on every scope change: a new key and a new epoch. */
 function move(s: State, scope: string) { s.scope = scope; s.epoch++; }
 
+/** The real App functions under test, each with its real review and posting helpers. */
+const UNDER_TEST = ["embedMedia", "wikiEmbed", "uploadFile", "videoReviewPlan", "reviewForUpload", "composerState", "postFromComposer"];
+
 function harness(script: Scripted = {}) {
   const state: State = {
-    scope: "open|1|1:general", epoch: 1, draft: "", uploads: [], reviews: [], toasts: [], locked: false, uploading: false,
+    scope: "open|1|1:general", epoch: 1, draft: "", statusDraft: "", uploads: [], folders: [], reviews: [], toasts: [],
+    locked: false, uploading: false, sends: 0, sentTexts: [], statusPosts: 0, folder: "photos", wikiPage: "Home", wikiBody: [],
+    replyingTo: "", sending: false, statusPosting: false,
   };
   let cid = 0;
   const scope = {
@@ -59,30 +67,51 @@ function harness(script: Scripted = {}) {
     get locked() { return state.locked; },
     get uploading() { return state.uploading; }, set uploading(v: boolean) { state.uploading = v; },
     get draft() { return state.draft; }, set draft(v: string) { state.draft = v; },
-    statusDraft: "",
+    get statusDraft() { return state.statusDraft; }, set statusDraft(v: string) { state.statusDraft = v; },
+    get folder() { return state.folder; },
+    get activeWikiPage() { return state.wikiPage; },
+    insertIntoWikiBody: (text: string) => { state.wikiBody.push(text); },
     myEmbedFolder: "embeds/me",
     webCodecsAvailable: () => true,
     editableContainer, editedFileName,
     chanKey: () => state.scope,
     saveDraftFor: () => {},
     refreshFiles: async () => {},
+    get replyingTo() { return state.replyingTo; },
+    get sending() { return state.sending; },
+    get statusPosting() { return state.statusPosting; },
+    // App's contract for both: refuse while one is out; otherwise mark it out before the first
+    // await, send what is in the composer, and clear the mark when it settles.
+    send: () => {
+      if (state.sending) return Promise.resolve();
+      state.sending = true; state.sends++; state.sentTexts.push(state.draft);
+      return Promise.resolve().then(() => { state.sending = false; });
+    },
+    postStatus: () => {
+      if (state.statusPosting) return Promise.resolve();
+      state.statusPosting = true; state.statusPosts++;
+      return Promise.resolve().then(() => { state.statusPosting = false; });
+    },
     toast: (text: string) => { state.toasts.push(text); return state.toasts.length; },
     updateToast: (_id: number, text: string) => { state.toasts.push(text); },
-    reviewVideo: async (file: File) => {
-      state.reviews.push(file.name);
+    reviewVideo: async (file: File, _position: unknown, _scope: string, context: string) => {
+      state.reviews.push([file.name, context]);
       return script.review ? script.review(file, state) : { kind: "original" as const };
     },
-    addSharedFile: async (file: File, _folder: string, name: string) => {
+    addSharedFile: async (file: File, folder: string, name: string) => {
       state.uploads.push([file.name, name]);
+      state.folders.push(folder);
       if (script.upload) await script.upload(file, name, state);
       return `cid${++cid}`;
     },
   };
-  const js = stripTypeScriptTypes(functionText("embedMedia"), { mode: "strip" }).trim();
-  const { embedMedia } = new Function("state", `with (state) { const embedMedia = (${js}); return { embedMedia }; }`)(scope) as {
-    embedMedia: (target: "chat" | "status", items: { file: File; name: string }[]) => Promise<void>;
+  const parts = UNDER_TEST.map((name) => `const ${name} = (${stripTypeScriptTypes(functionText(name), { mode: "strip" }).trim()});`);
+  const fns = new Function("state", `with (state) { ${parts.join("\n")} return { ${UNDER_TEST.join(", ")} }; }`)(scope) as {
+    embedMedia: (target: "chat" | "status", items: { file: File; name: string }[], asIs?: boolean) => Promise<void>;
+    wikiEmbed: (files: File[] | null, asIs?: boolean) => Promise<void>;
+    uploadFile: (files: File[] | null, asIs?: boolean) => Promise<void>;
   };
-  return { state, embedMedia };
+  return { state, ...fns };
 }
 
 const items = (...files: File[]) => files.map((file) => ({ file, name: file.name }));
@@ -90,7 +119,7 @@ const items = (...files: File[]) => files.map((file) => ({ file, name: file.name
 test("an untouched video and an image both upload and attach in order", async () => {
   const { state, embedMedia } = harness();
   await embedMedia("chat", items(video("a.mp4"), image("b.png")));
-  assert.deepEqual(state.reviews, ["a.mp4"], "only the video is reviewed");
+  assert.deepEqual(state.reviews, [["a.mp4", "chat"]], "only the video is reviewed, as a chat attachment");
   assert.deepEqual(state.uploads, [["a.mp4", "a.mp4"], ["b.png", "b.png"]]);
   assert.equal(state.draft, "![a.mp4](cid:cid1) ![b.png](cid:cid2)");
   assert.equal(state.uploading, false);
@@ -116,7 +145,7 @@ test("moving channel during an upload attaches nothing to the new channel and st
   });
   await embedMedia("chat", items(video("a.mp4"), video("b.mp4"), image("c.png")));
   assert.deepEqual(state.uploads.map(([n]) => n), ["a.mp4"], "nothing after the move is uploaded");
-  assert.deepEqual(state.reviews, ["a.mp4"], "nothing after the move is reviewed");
+  assert.deepEqual(state.reviews.map(([n]) => n), ["a.mp4"], "nothing after the move is reviewed");
   assert.equal(state.draft, "", "the shared file is not attached to the channel now on screen");
   assert.ok(state.toasts.some((t) => /Shared a\.mp4, not attached/.test(t)));
   assert.ok(state.toasts.some((t) => /2 files were not attached/.test(t)));
@@ -151,6 +180,218 @@ test("a round trip away and back during an upload still stops the batch", async 
   assert.equal(state.scope, "open|1|1:general");
   assert.deepEqual(state.uploads.map(([n]) => n), ["a.png"]);
   assert.equal(state.draft, "");
+});
+
+// --- Shift: as is, without the editor ------------------------------------------------------------
+
+test("Shift skips the editor for the whole batch in every upload path", async () => {
+  const chat = harness();
+  await chat.embedMedia("chat", items(video("a.mp4"), image("b.png")), true);
+  assert.deepEqual(chat.state.reviews, []);
+  assert.deepEqual(chat.state.uploads.map(([n]) => n), ["a.mp4", "b.png"]);
+
+  const wiki = harness();
+  await wiki.wikiEmbed([video("a.mp4")], true);
+  assert.deepEqual(wiki.state.reviews, []);
+  assert.deepEqual(wiki.state.wikiBody, ["![a.mp4](cid:cid1)"]);
+
+  const files = harness();
+  await files.uploadFile([video("a.mp4")], true);
+  assert.deepEqual(files.state.reviews, []);
+  assert.deepEqual(files.state.uploads.map(([n]) => n), ["a.mp4"]);
+});
+
+// --- Post now ------------------------------------------------------------------------------------
+
+test("post now attaches the video and then sends the chat message", async () => {
+  const { state, embedMedia } = harness({ review: async () => ({ kind: "original", post: true }) });
+  state.draft = "look at this";
+  await embedMedia("chat", items(video("a.mp4")));
+  assert.deepEqual(state.sentTexts, ["look at this ![a.mp4](cid:cid1)"], "attached, then sent");
+  assert.ok(state.toasts.some((t) => /Attached a\.mp4, sending/.test(t)));
+});
+
+test("post now sends nothing that was typed while the video uploaded", async () => {
+  const { state, embedMedia } = harness({
+    review: async () => ({ kind: "original", post: true }),
+    upload: async (_file, _name, s) => { s.draft = "hang on, I meant to say"; },
+  });
+  state.draft = "look at this";
+  await embedMedia("chat", items(video("a.mp4")));
+  assert.equal(state.sends, 0, "a different message is not sent on the person's behalf");
+  assert.equal(state.draft, "hang on, I meant to say ![a.mp4](cid:cid1)", "the video is still attached");
+  assert.ok(state.toasts.some((t) => /not sent: the message changed while it uploaded/.test(t)));
+});
+
+test("post now does not send when the reply target changed while the video uploaded", async () => {
+  const { state, embedMedia } = harness({
+    review: async () => ({ kind: "original", post: true }),
+    upload: async (_file, _name, s) => { s.replyingTo = "msg-42"; },
+  });
+  await embedMedia("chat", items(video("a.mp4")));
+  assert.equal(state.sends, 0);
+});
+
+test("post now says so when a send already under way refuses it", async () => {
+  const { state, embedMedia } = harness({
+    review: async () => ({ kind: "original", post: true }),
+    upload: async (_file, _name, s) => { s.sending = true; },
+  });
+  await embedMedia("chat", items(video("a.mp4")));
+  assert.equal(state.sends, 0);
+  assert.ok(state.toasts.some((t) => /not sent yet: press Send when ready/.test(t)));
+});
+
+test("post now from the announcement composer posts the announcement", async () => {
+  const edited = new File([new Uint8Array(2)], "x", { type: "video/mp4" });
+  const { state, embedMedia } = harness({ review: async () => ({ kind: "edited", file: edited, post: true }) });
+  await embedMedia("status", items(video("a.mp4")));
+  assert.equal(state.statusDraft, "![a.mp4](cid:cid1)");
+  assert.equal(state.statusPosts, 1);
+  assert.equal(state.sends, 0);
+});
+
+test("an ordinary attach does not send", async () => {
+  const { state, embedMedia } = harness();
+  await embedMedia("chat", items(video("a.mp4")));
+  assert.equal(state.sends, 0);
+});
+
+test("post now does not send once the person has moved on", async () => {
+  const { state, embedMedia } = harness({
+    review: async () => ({ kind: "original", post: true }),
+    upload: async (_file, _name, s) => { move(s, "open|1|1:random"); },
+  });
+  await embedMedia("chat", items(video("a.mp4")));
+  assert.equal(state.sends, 0, "nothing is sent into the channel now on screen");
+});
+
+// --- Wiki and Files ------------------------------------------------------------------------------
+
+test("a wiki video goes through the editor as a wiki embed and lands under its page", async () => {
+  const edited = new File([new Uint8Array(2)], "x", { type: "video/mp4" });
+  const { state, wikiEmbed } = harness({ review: async () => ({ kind: "edited", file: edited }) });
+  await wikiEmbed([new File([new Uint8Array(4)], "tour.mov", { type: "video/quicktime" }), image("map.png")]);
+  assert.deepEqual(state.reviews, [["tour.mov", "wiki"]]);
+  assert.deepEqual(state.folders, ["wiki/Home", "wiki/Home"]);
+  assert.deepEqual(state.wikiBody, ["![tour.mp4](cid:cid1)", "![map.png](cid:cid2)"]);
+});
+
+test("a wiki upload finishing after the page changed is shared but not inserted elsewhere", async () => {
+  const { state, wikiEmbed } = harness({ upload: async (_file, _name, s) => { s.wikiPage = "Other"; } });
+  await wikiEmbed([image("a.png"), image("b.png")]);
+  assert.deepEqual(state.folders, ["wiki/Home"], "the next file is not uploaded");
+  assert.deepEqual(state.wikiBody, []);
+  assert.ok(state.toasts.some((t) => /Shared a\.png, not embedded: the page changed/.test(t)));
+  assert.ok(state.toasts.some((t) => /1 file was not embedded/.test(t)));
+});
+
+test("a wiki page change while the editor is open counts the reviewed file as not embedded", async () => {
+  // A rename or delete of the page lands while the person edits: no scope change closed the
+  // editor, so nothing else reports this file.
+  const { state, wikiEmbed } = harness({
+    review: async (_file, s) => { s.wikiPage = "Renamed"; return { kind: "original" }; },
+  });
+  await wikiEmbed([video("a.mp4"), image("b.png")]);
+  assert.deepEqual(state.uploads, []);
+  assert.ok(state.toasts.some((t) => /2 files were not embedded: the page changed/.test(t)), state.toasts.join(" | "));
+});
+
+test("a Files video goes through the editor and every file lands in the folder it was dropped into", async () => {
+  const { state, uploadFile } = harness({ upload: async (_file, _name, s) => { s.folder = "elsewhere"; } });
+  await uploadFile([video("clip.mp4"), image("b.png")]);
+  assert.deepEqual(state.reviews, [["clip.mp4", "files"]]);
+  assert.deepEqual(state.folders, ["photos", "photos"], "the folder open when the files were dropped");
+});
+
+test("a skipped Files video is not shared and the rest still are", async () => {
+  const { state, uploadFile } = harness({ review: async () => ({ kind: "skip" }) });
+  await uploadFile([video("clip.mp4"), image("b.png")]);
+  assert.deepEqual(state.uploads.map(([n]) => n), ["b.png"]);
+});
+
+// --- postStatus re-entry -------------------------------------------------------------------------
+
+test("an announcement is posted once even when post now and Enter overlap, and new typing survives", async () => {
+  let release: () => void = () => {};
+  const posted: string[] = [];
+  const scope = {
+    statusDraft: "news ![a.mp4](cid:1)", activeServerId: 1, statusPosting: false, error: "",
+    invokeDebugged: async (_cmd: string, args: { text: string }) => {
+      posted.push(args.text);
+      await new Promise<void>((r) => { release = r; });
+    },
+    errorText: String,
+  };
+  const js = stripTypeScriptTypes(functionText("postStatus"), { mode: "strip" }).trim();
+  const { postStatus } = new Function("state", `with (state) { const postStatus = (${js}); return { postStatus }; }`)(scope) as { postStatus: () => Promise<void> };
+  const first = postStatus();
+  assert.equal(scope.statusPosting, true, "marked out before the first await");
+  await postStatus(); // Enter while the first is out
+  assert.deepEqual(posted, ["news ![a.mp4](cid:1)"]);
+  scope.statusDraft = "next announcement";
+  release();
+  await first;
+  assert.equal(scope.statusPosting, false);
+  assert.equal(scope.statusDraft, "next announcement", "text typed meanwhile is not cleared");
+});
+
+// --- Wiring the tests above cannot reach ---------------------------------------------------------
+// These are source pins, in the style of the other App audits: each names one connection that, if
+// dropped, would leave every behavioural test green while the feature silently stops working.
+
+test("the drop handlers leave a text or link drop to the field and take files with their Shift", () => {
+  const calls: Array<[string, unknown]> = [];
+  const scope = {
+    carriesFiles, dragOver: true,
+    embedFiles: (target: string, files: unknown, asIs: boolean) => { calls.push([`embed:${target}`, asIs]); },
+    wikiEmbed: (files: unknown, asIs: boolean) => { calls.push(["wiki", asIs]); },
+    uploadFile: (files: unknown, asIs: boolean) => { calls.push(["files", asIs]); return Promise.resolve(); },
+    pickEventImage: () => { calls.push(["event", null]); return Promise.resolve(); },
+  };
+  const names = ["onComposerDrop", "onWikiDrop", "onFilesDrop", "onEventDrop"];
+  const parts = names.map((name) => `const ${name} = (${stripTypeScriptTypes(functionText(name), { mode: "strip" }).trim()});`);
+  const handlers = new Function("state", `with (state) { ${parts.join("\n")} return { ${names.join(", ")} }; }`)(scope) as
+    Record<string, (...args: unknown[]) => void>;
+  const drop = (types: string[], shiftKey = false) => {
+    const e = { defaultPrevented: false, shiftKey, dataTransfer: { types, files: [] }, preventDefault() { e.defaultPrevented = true; }, stopPropagation() {} };
+    return e;
+  };
+  for (const [name, args] of [["onComposerDrop", ["chat"]], ["onWikiDrop", []], ["onFilesDrop", []], ["onEventDrop", []]] as const) {
+    const text = drop(["text/plain"]);
+    handlers[name](...args, text);
+    assert.equal(text.defaultPrevented, false, `${name} cancelled a text drop the field should insert`);
+  }
+  assert.deepEqual(calls, [], "no upload path ran for a text drop");
+  const file = drop(["Files"], true);
+  handlers.onComposerDrop("chat", file);
+  assert.equal(file.defaultPrevented, true);
+  assert.deepEqual(calls, [["embed:chat", true]]);
+});
+
+test("every drop zone passes Shift through, and takes files only", () => {
+  assert.match(functionText("onComposerDrop"), /embedFiles\(target, e\.dataTransfer\?\.files \?\? null, e\.shiftKey\)/);
+  assert.match(functionText("onFilesDrop"), /uploadFile\(e\.dataTransfer\?\.files \?\? null, e\.shiftKey\)/);
+  assert.match(functionText("onWikiDrop"), /wikiEmbed\(e\.dataTransfer\?\.files \?\? null, e\.shiftKey\)/);
+  const zones = [...source.matchAll(/ondragover=\{([^\n]*)\}\n/g)].map((m) => m[1]);
+  const fileZones = zones.filter((z) => !z.includes("draggedNameEffect"));
+  assert.ok(fileZones.length >= 7, `found ${fileZones.length} file drop zones`);
+  for (const zone of fileZones) assert.match(zone, /acceptFileDrag/, `a drop zone accepts more than files: ${zone}`);
+  assert.match(functionText("acceptFileDrag"), /if \(!carriesFiles\(e\)\) return;/);
+});
+
+test("every upload picker reads Shift from its label and hands it to its upload path", () => {
+  const pickers = [...source.matchAll(/<label[^>]*use:shiftPick=\{uploadIntent\}[^>]*>[\s\S]*?<\/label>/g)].map((m) => m[0]);
+  assert.equal(pickers.length, 4, "chat, announcements, wiki and Files");
+  for (const target of ['embedFiles("chat"', 'embedFiles("status"', "wikiEmbed(", "uploadFile("]) {
+    const picker = pickers.find((p) => p.includes(target));
+    assert.ok(picker, `no Shift-aware picker for ${target}`);
+    assert.match(picker!, /uploadIntent\.takePick\(\)/, `${target} ignores the Shift reading`);
+  }
+});
+
+test("the drop guard is installed on the window", () => {
+  assert.match(source, /\$effect\(\(\) => installFileDropGuard\(window, document\)\);/);
 });
 
 /** App's real `videoEditorPassKey` with push-to-talk bound to `key` and a call in progress. */

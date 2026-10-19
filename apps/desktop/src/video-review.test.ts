@@ -15,8 +15,8 @@ function queue() {
 test("a second request waits for the open review instead of closing it", async () => {
   const { q, shown } = queue();
   const answers: Array<[string, VideoEditorResult]> = [];
-  void q.request(file("a.mp4"), { index: 1, count: 1 }, "s").then((r) => answers.push(["a", r]));
-  void q.request(file("b.mp4"), { index: 1, count: 1 }, "s").then((r) => answers.push(["b", r]));
+  void q.request(file("a.mp4"), { index: 1, count: 1 }, "s", "chat").then((r) => answers.push(["a", r]));
+  void q.request(file("b.mp4"), { index: 1, count: 1 }, "s", "chat").then((r) => answers.push(["b", r]));
   assert.deepEqual(shown, ["a.mp4"], "only the first editor is shown");
   assert.equal(q.waiting, 1);
   const first = q.current!;
@@ -33,8 +33,8 @@ test("a second request waits for the open review instead of closing it", async (
 test("an answer from an editor that is no longer open is ignored", async () => {
   const { q } = queue();
   const answers: VideoEditorResult[] = [];
-  void q.request(file("a.mp4"), { index: 1, count: 2 }, "s").then((r) => answers.push(r));
-  void q.request(file("b.mp4"), { index: 2, count: 2 }, "s").then((r) => answers.push(r));
+  void q.request(file("a.mp4"), { index: 1, count: 2 }, "s", "chat").then((r) => answers.push(r));
+  void q.request(file("b.mp4"), { index: 2, count: 2 }, "s", "chat").then((r) => answers.push(r));
   const a = q.current!;
   q.finish(a.id, { kind: "skip" });
   const edited = new File([new Uint8Array(2)], "a.mp4", { type: "video/mp4" });
@@ -49,11 +49,11 @@ test("an answer from an editor that is no longer open is ignored", async () => {
 test("a scope change settles the open review and every waiting one bound elsewhere as skip", async () => {
   const { q, shown } = queue();
   const answers: Array<[string, VideoEditorResult]> = [];
-  void q.request(file("a.mp4"), { index: 1, count: 2 }, "old").then((r) => answers.push(["a", r]));
-  void q.request(file("b.mp4"), { index: 2, count: 2 }, "old").then((r) => answers.push(["b", r]));
-  void q.request(file("c.mp4"), { index: 1, count: 1 }, "new").then((r) => answers.push(["c", r]));
+  void q.request(file("a.mp4"), { index: 1, count: 2 }, "old", "wiki").then((r) => answers.push(["a", r]));
+  void q.request(file("b.mp4"), { index: 2, count: 2 }, "old", "wiki").then((r) => answers.push(["b", r]));
+  void q.request(file("c.mp4"), { index: 1, count: 1 }, "new", "chat").then((r) => answers.push(["c", r]));
   const result = q.rescope("new");
-  assert.deepEqual(result, { closedOpen: true, dropped: 1 });
+  assert.deepEqual(result, { closedOpen: true, closedContext: "wiki", dropped: 1 }, "the closed editor's context words its message");
   await settle();
   assert.deepEqual(answers, [["a", { kind: "skip" }], ["b", { kind: "skip" }]]);
   assert.equal(q.current?.file.name, "c.mp4", "a review bound to the new scope opens next");
@@ -62,8 +62,8 @@ test("a scope change settles the open review and every waiting one bound elsewhe
 
 test("a scope change that matches the open review changes nothing", () => {
   const { q, shown } = queue();
-  void q.request(file("a.mp4"), { index: 1, count: 1 }, "s");
-  assert.deepEqual(q.rescope("s"), { closedOpen: false, dropped: 0 });
+  void q.request(file("a.mp4"), { index: 1, count: 1 }, "s", "chat");
+  assert.deepEqual(q.rescope("s"), { closedOpen: false, closedContext: null, dropped: 0 });
   assert.equal(q.current?.file.name, "a.mp4");
   assert.deepEqual(shown, ["a.mp4"], "no remount");
 });
@@ -71,9 +71,9 @@ test("a scope change that matches the open review changes nothing", () => {
 test("every opening gets a fresh id, even for the same file", () => {
   const { q } = queue();
   const same = file("a.mp4");
-  void q.request(same, { index: 1, count: 1 }, "s");
+  void q.request(same, { index: 1, count: 1 }, "s", "chat");
   const first = q.current!.id;
   q.finish(first, { kind: "skip" });
-  void q.request(same, { index: 1, count: 1 }, "s");
+  void q.request(same, { index: 1, count: 1 }, "s", "chat");
   assert.notEqual(q.current!.id, first);
 });

@@ -7,6 +7,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { deferred } from "./studio-testkit.ts";
 import { OutputTooLargeError, ExportCanceledError, type VideoEditorResult, type VideoProbe } from "./video-export.ts";
 import type { VideoEdit } from "./video-edit.ts";
@@ -40,6 +41,7 @@ const READY: VideoProbe = { ok: true, duration: 10, width: 1920, height: 1080, h
 const TRACK_WIDTH = 1000;
 
 type Options = {
+  context?: "chat" | "status" | "wiki" | "files";
   passKey?: (e: KeyboardEvent) => boolean;
   probe?: (file: Blob) => Promise<VideoProbe>;
   exporter?: (file: File, edit: VideoEdit, options: { capBytes: number; signal?: AbortSignal; onProgress?: (f: number) => void }) => Promise<File>;
@@ -62,6 +64,9 @@ async function harness(options: Options = {}) {
       position: { index: 1, count: 2 },
       onfinish: (result: VideoEditorResult) => { results.push(result); },
       ...(options.passKey ? { passKey: options.passKey } : {}),
+      // Files by default: a plain upload, so the generic tests read results without `post`. The
+      // posting contexts have their own tests.
+      context: options.context ?? "files",
       probe: options.probe ?? (async () => READY),
       exporter: async (f: File, edit: VideoEdit, o: { capBytes: number; signal?: AbortSignal; onProgress?: (n: number) => void }) => {
         exports.push({ edit, capBytes: o.capBytes, signal: o.signal });
@@ -116,7 +121,7 @@ test("an unreadable video offers the original or nothing, and the original obeys
   const big = await harness({ probe: async () => ({ ok: false, reason: "nope" }), capBytes: 100, size: 2048 });
   try {
     assert.equal(big.action("upload-original")!.disabled, true, "an over-limit original cannot be sent");
-    big.click("skip");
+    big.click("close");
     assert.deepEqual(big.results, [{ kind: "skip" }]);
   } finally { await big.destroy(); }
 });
@@ -210,6 +215,9 @@ test("the blade cuts where the timeline is clicked, and Escape leaves blade mode
     assert.equal(h.action("blade")!.getAttribute("aria-pressed"), "false");
     assert.equal(h.results.length, 0, "the first Escape only left blade mode");
     h.key("Escape");
+    assert.ok(h.action("discard"), "the second asks before throwing the cut away");
+    assert.equal(h.results.length, 0);
+    h.click("discard");
     assert.deepEqual(h.results, [{ kind: "skip" }]);
   } finally { await h.destroy(); }
 });
@@ -338,7 +346,7 @@ test("unmounted mid-export, it aborts the export and answers skip once, never th
 
 test("an editor that already answered says nothing more when it is unmounted", async () => {
   const h = await harness();
-  h.click("skip");
+  h.click("close");
   await h.destroy();
   await settle();
   assert.deepEqual(h.results, [{ kind: "skip" }]);
@@ -471,6 +479,113 @@ test("focus returns to where it started even when the next queued editor opened 
   composer.remove();
 });
 
+// --- The one action, and leaving -------------------------------------------------------------------
+
+test("the footer has exactly one action, worded for where the video is going", async () => {
+  for (const [context, word] of [["chat", "post now"], ["status", "post now"], ["wiki", "embed"], ["files", "upload"]] as const) {
+    const h = await harness({ context });
+    try {
+      const buttons = [...h.target.querySelectorAll<HTMLButtonElement>("footer button")];
+      assert.deepEqual(buttons.map((b) => b.dataset.action), ["upload"], `${context}: one button, no "don't upload", no "as is"`);
+      assert.equal(buttons[0].textContent!.trim(), word);
+      assert.ok(buttons[0].classList.contains("primary"));
+    } finally { await h.destroy(); }
+  }
+});
+
+test("post now on an untouched clip sends the original bytes and asks the host to post", async () => {
+  const h = await harness({ context: "chat" });
+  try {
+    h.click("upload");
+    assert.deepEqual(h.results, [{ kind: "original", post: true }]);
+    assert.equal(h.exports.length, 0, "no re-render without edits");
+  } finally { await h.destroy(); }
+});
+
+test("post now on an edit exports first, then hands back the re-encode to post", async () => {
+  const h = await harness({ context: "chat" });
+  try {
+    h.key("o");
+    h.key("Enter", { ctrlKey: true });
+    await settle();
+    assert.equal(h.exports.length, 1);
+    assert.equal(h.results.length, 1);
+    const [result] = h.results;
+    assert.equal(result.kind, "edited");
+    assert.equal(result.kind === "edited" && result.post, true);
+  } finally { await h.destroy(); }
+});
+
+test("the wiki and Files upload without posting, from the button or Ctrl+Enter", async () => {
+  for (const context of ["wiki", "files"] as const) {
+    const h = await harness({ context });
+    try {
+      h.key("Enter", { ctrlKey: true });
+      assert.deepEqual(h.results, [{ kind: "original" }], context);
+    } finally { await h.destroy(); }
+  }
+});
+
+test("closing an untouched clip leaves at once; with edits it asks first", async () => {
+  const clean = await harness();
+  try {
+    clean.click("close");
+    assert.deepEqual(clean.results, [{ kind: "skip" }], "nothing to lose, nothing to ask");
+  } finally { await clean.destroy(); }
+
+  const h = await harness();
+  try {
+    h.key("ArrowRight", { shiftKey: true });
+    h.key("s"); // a cut alone is work worth asking about
+    h.click("close");
+    assert.equal(h.results.length, 0);
+    assert.ok(h.target.querySelector('[role="alertdialog"]'), "the question is shown");
+    await settle();
+    assert.equal(document.activeElement, h.action("keep-editing"), "the safe answer has focus");
+    h.click("keep-editing");
+    assert.equal(h.target.querySelector('[role="alertdialog"]'), null);
+    assert.equal(h.cuts(), 1, "the work is still there");
+    h.click("close");
+    h.click("discard");
+    assert.deepEqual(h.results, [{ kind: "skip" }]);
+  } finally { await h.destroy(); }
+});
+
+test("while the discard question is up, Escape keeps editing and editing keys do nothing", async () => {
+  const h = await harness();
+  try {
+    h.key("ArrowRight", { shiftKey: true });
+    h.key("s");
+    h.key("Escape");
+    assert.ok(h.action("discard"));
+    h.key("Delete");
+    h.key("s");
+    assert.deepEqual(h.pieces(), [false, false], "nothing changed behind the question");
+    h.key("Escape");
+    assert.equal(h.action("discard"), null, "Escape answers 'keep editing'");
+    assert.equal(h.results.length, 0);
+  } finally { await h.destroy(); }
+});
+
+test("the Keybinds page lists every key the editor handles", async () => {
+  const { VIDEO_EDITOR_SHORTCUTS } = await import("./video-editor-ui.ts");
+  const listed = VIDEO_EDITOR_SHORTCUTS.map((s) => `${s.keys} ${s.action}`).join("\n");
+  const source = readFileSync(new URL("./VideoEditor.svelte", import.meta.url), "utf8");
+  const handled = new Set([...source.matchAll(/\bkey === "([^"]+)"/g)].map((m) => m[1]));
+  // How each handled key is written on the Keybinds page. Tab (focus trap) and Backspace (a
+  // second Delete) are deliberately not listed.
+  const shown: Record<string, string> = {
+    " ": "Space", Escape: "Esc", ArrowLeft: "←", ArrowRight: "→", Home: "Home", End: "End", Delete: "Delete",
+    Enter: "Ctrl+Enter", b: "B", s: "S", i: "I", o: "O", m: "M", z: "Ctrl+Z", y: "Ctrl+Y",
+  };
+  const unlisted = new Set(["Tab", "Backspace"]);
+  for (const key of handled) {
+    if (unlisted.has(key)) continue;
+    assert.ok(shown[key], `the editor handles "${key}" but the test has no spelling for it: add one and list it`);
+    assert.ok(listed.includes(shown[key]), `"${shown[key]}" is handled by the editor but missing from the Keybinds page`);
+  }
+});
+
 test("after a cancel, upload waits until the cancelled export has wound down", async () => {
   const first = deferred<File>();
   let calls = 0;
@@ -503,6 +618,7 @@ test("the close button cancels a running export rather than leaving", async () =
     assert.equal(h.state(), "ready");
     assert.equal(h.results.length, 0);
     h.click("close");
+    h.click("discard"); // the trim is work to lose, so leaving asks first
     assert.deepEqual(h.results, [{ kind: "skip" }]);
   } finally { await h.destroy(); }
 });

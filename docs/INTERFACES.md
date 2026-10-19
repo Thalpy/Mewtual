@@ -4119,26 +4119,50 @@ Remote confirmations and automated retention/eviction are not part of this inter
 
 ### Pre-upload video editing (frontend only)
 
-`embedMedia` in App.svelte sends each video whose declared type is `video/mp4`, `video/quicktime`
-or `video/webm` (`editableContainer`) through `reviewVideo(file, position, scope)` before upload,
-one at a time, when the WebView has WebCodecs (`webCodecsAvailable`). Other files, and every file
-in a WebView without WebCodecs, upload exactly as before. No native command is added or changed.
+`embedMedia` (chat and announcement composers), `wikiEmbed` and `uploadFile` (Files tab) in
+App.svelte send each video whose declared type is `video/mp4`, `video/quicktime` or `video/webm`
+(`editableContainer`) through `reviewForUpload` → `reviewVideo(file, position, scope, context)`
+before upload, one at a time, when the WebView has WebCodecs (`webCodecsAvailable`) and the batch
+was not started with Shift (`asIs`: Shift+drop, or Shift+click on the picker label via the
+`shiftPick` action; see `upload-intent.ts`, which also explains why paste has no Shift form).
+Other files, and every file in a WebView without WebCodecs, upload exactly as before. No native
+command is added or changed; the main window's `dragDropEnabled` is `false` so file drops reach
+the page, `installFileDropGuard(window, document)` handles drops outside every zone (see the threat
+model; its iframe rule and the `.shift-pick` rule are in `drag-drop.css`, imported by `main.ts`,
+never inline), every file drop zone's `dragover` is `acceptFileDrag` (files only, effect `copy`),
+and every drop handler returns early on a drop that carries no files.
 
+- `VideoEditorContext` is `"chat" | "status" | "wiki" | "files"`, required on both the editor and
+  `VideoReviewQueue.request`. `editorWords(context)` gives the editor's ONE action ("post now" in
+  chat and announcements, "embed" in the wiki, "upload" in Files), its past tense for messages, and
+  `posts`: whether that action also sends. There is no separate attach, "as is" or "don't upload";
+  leaving is the ×/Esc, which asks "Discard this clip?" when anything was trimmed, removed or cut.
+- A result with `post: true` makes `embedMedia` snapshot the composer (`composerState`: text, and
+  for chat the reply target) when the editor answers, attach the file, and then call
+  `postFromComposer` only if the composer is unchanged; that runs `send()` or `postStatus()` and
+  reports whether a send actually started (each sets its in-flight flag before its first await).
+  Every outcome has its own toast: sending, "not sent: the message changed", "not sent yet".
+  `postStatus()` now refuses re-entry (`statusPosting`) and clears the box only if it still holds
+  what was posted.
+- `VIDEO_EDITOR_SHORTCUTS` (`video-editor-ui.ts`) is the Keybinds page's "Video editor" list.
 - `VideoEditor.svelte` props: `file`, `capBytes` (the server's `fileSizeLimit`, else the 1 GiB
-  protocol ceiling), optional `position` ("2 of 3"), `onfinish(result)`, `passKey(e)` (keys the
-  modal lets through to the app: App passes Lock and push-to-talk), and test seams
+  protocol ceiling), optional `position` ("2 of 3"), `context`, `onfinish(result)`, `passKey(e)`
+  (keys the modal lets through to the app: App passes Lock and push-to-talk), and test seams
   `probe`/`exporter`/`thumbnails`. `onfinish` fires exactly once; an editor unmounted before it
   answered answers `skip` on its way out.
-- `VideoEditorResult` (`video-export.ts`): `{kind:"original"}` uploads the picked bytes unchanged;
-  `{kind:"edited", file}` uploads a re-encode named `editedFileName(name, container)` with type
-  `video/mp4` or `video/webm`; `{kind:"skip"}` uploads nothing for that file.
+- `VideoEditorResult` (`video-export.ts`): `{kind:"original", post?}` uploads the picked bytes
+  unchanged; `{kind:"edited", file, post?}` uploads a re-encode named
+  `editedFileName(name, container)` with type `video/mp4` or `video/webm`; `{kind:"skip"}` uploads
+  nothing for that file.
 - `VideoReviewQueue` (`video-review.ts`) is the host side: one editor open at a time, later
   requests wait their turn (they never close the open one), `finish(id, result)` ignores any id
   but the open review's, and `rescope(scope)` settles every review bound to an old scope as
-  `skip`. App mounts the editor in a keyed `{#each}` so each instance answers under its own id.
-- `embedMedia` binds a batch to `videoEditorScope` (lock state, server, channel) and to
-  `videoScopeEpoch` (bumped on every scope change, so a round trip away and back still counts),
-  and checks both before every item, after every review and after every upload. Once either has
+  `skip`, reporting the closed editor's context for the message. App mounts the editor in a keyed
+  `{#each}` so each instance answers under its own id.
+- `embedMedia`, `wikiEmbed` and `uploadFile` bind a batch to `videoEditorScope` (lock state, server,
+  channel) and to `videoScopeEpoch` (bumped on every scope change, so a round trip away and back
+  still counts); the wiki batch also to its page and the Files batch to its folder. Each checks
+  before every item, after every review and after every upload. Once anything has
   changed, nothing more is reviewed or uploaded and nothing is attached to the composer now on
   screen; toasts say so (not on lock), including for queued reviews dropped by the change.
   Mouse back/forward buttons do nothing while an editor is open.

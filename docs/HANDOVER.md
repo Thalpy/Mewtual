@@ -27,6 +27,83 @@ fail when its fix was removed. Headless-Edge fixture shots with accent `#6b0f0f`
 `#e2a83d` (unchanged). Known limit: accent-coloured TEXT on the dark grounds (links, the rail
 monogram) is still low-contrast under a very dark accent; that is a separate change.
 
+## Video editor everywhere, Shift to skip it, one "post now" action, native file drops (2026-10-19)
+
+Follow-up to the entry below, asked for by the user:
+
+- **Wiki and Files** uploads now send videos through the editor too (`wikiEmbed`, `uploadFile`),
+  bound like `embedMedia` to `videoEditorScope`/`videoScopeEpoch`. The wiki batch is also bound to
+  its page (a late upload is shared under that page but not inserted into another), and a Files
+  batch to the folder it was dropped into (it used to read the current folder per file).
+- **Shift skips the editor**: Shift+drop on any zone, and Shift+click on a 📎/share picker label.
+  `upload-intent.ts` (`ShiftIntent`, `shiftPick` action) explains why each gesture is read where it
+  is; a reading is used once, so a cancelled Shift+pick cannot leak. Paste has no Shift form:
+  Ctrl+Shift+V is "paste as plain text" in the webview and very likely carries no image or file at
+  all, so it was removed rather than advertised. A pasted video skips editing in one click anyway.
+- **One action** (the user found attach / attach as is / post now / don't upload confusing): the
+  footer has a single button, also Ctrl+Enter. In chat and announcements it is "post now", which
+  attaches and then calls the composer's own `send()` / `postStatus()` with all their guards, and
+  not if the person has moved on or the composer changed; in the wiki it is "embed" and in Files
+  "upload". An untouched clip goes up as its original bytes with no re-render. The ×/Esc leaves,
+  asking "Discard this clip?" first when anything was trimmed, removed or cut (an in-card dialog,
+  focus on "keep editing", Esc answers keep editing). Wording comes from `editorWords`.
+- **Keybinds page** gains a "Video editor" section rendered from `VIDEO_EDITOR_SHORTCUTS`; a test
+  fails if the editor handles a key the list does not show.
+- **Native drops**: the main window now sets `"dragDropEnabled": false`. With Tauri's default, on
+  Windows it swallowed every file dropped on the window, so none of the page's drop zones fired in
+  the real app (the earlier Edge check used a synthetic in-page drop and could not see that).
+  `drop-guard.ts` then handles what a browser would otherwise do with outside drops: nothing
+  dropped outside a zone navigates the webview, and while files are dragged over the window no
+  embedded third-party frame can receive them. Every file zone's `dragover` is now
+  `acceptFileDrag` (files only, effect `copy`), so text dragged into a composer is the field's own.
+
+Adversarial review of this round (no blocker): two highs, both fixed. "Post now" sent whatever was
+in the composer when the upload FINISHED, so text typed meanwhile went out with the video; it now
+snapshots the composer (text and reply target) when the editor answers and only sends if that is
+unchanged, else attaches and says it did not send. And Ctrl+Shift+V was removed (see above).
+Mediums fixed: the Files label is not text-selectable (Shift+click there extended a selection
+instead of opening the picker); files dragged over an embed no longer reach the embedded site;
+"post now" reports a send that could not start, and `postStatus()` refuses re-entry and keeps text
+typed meanwhile; the App wiring (Shift on every zone and picker, the guard, the zones) is pinned by
+tests. Lows fixed: a wiki page change during a review is counted; scope-change messages use the
+right word per place; the guard leaves editable fields' text drops and visible file inputs' file
+drops alone, and also stops links dropped from other apps; `context` is required.
+
+A re-review of those fixes found one more high, fixed: the embed shield was a `<style>` built at
+runtime, which the SHIPPED app would refuse. Tauri nonces the inline `<style>` in `index.html` and
+adds the nonce to `style-src`, and with a nonce present the browser ignores `'unsafe-inline'`; dev,
+jsdom and the fixture have no CSP, so nothing showed it. The rule (and the Files label's
+`user-select`) now live in `drag-drop.css`, loaded by `main.ts`, and a test fails on any runtime
+`<style>` in production modules. The same CSP fact means inline `style="..."` ATTRIBUTES are inert in
+production too; `docs/design-livery-customisation-safety.md` assumes otherwise, which is worth a
+look from that workstream. Also fixed from it: drop handlers cancelled text drops into the
+composer and wiki editor (they now ignore non-file drops); the guard treated any `<input>` (a
+checkbox, a read-only field) as a text drop target, letting a dropped link navigate the window;
+the shield lifted after 400 ms of silence, which a still hover can exceed (now: drop, dragend, the
+next pointer event, or a 3 s safety); a drag whose source node was removed could leave the
+in-page flag stuck; in-page file drags were not shielded; Shift on a click inside a label's child.
+
+Verification: unit tests for the intent tracker, the action, the drop guard and the iframe shield
+(`upload-intent.test.ts`, which also pins the window setting); App's real `embedMedia`,
+`wikiEmbed`, `uploadFile`, `videoReviewPlan`, `reviewForUpload`, `composerState`,
+`postFromComposer` and `postStatus` under scripted scope and composer changes, plus source pins for
+the wiring (`video-embed-flow.test.ts`); and the buttons, contexts and the Keybinds list in
+`video-editor.test.ts`. Post-now sending, the composer snapshot, the `postStatus` re-entry guard,
+the Files folder binding, the Keybinds list check, the text-drop exemption and the discard question
+were each confirmed to fail when broken.
+`test:startup` passes with the new window setting. `test:flows` as written could not pass while the
+machine was saturated by other agents' cargo jobs: its 20 s Vite wait expired (Vite's first
+transform of `main.ts` took 14 s). A temporary copy with only the Vite and fixture waits raised
+passed all nine scenarios; the copy was deleted.
+NOT verified: a real OS drag into the running app, or whether `shiftKey` is set on such a drop.
+
+Known limits: "post now" in a multi-file batch sends as soon as that file is attached, so files
+after it go into the next message. A drag that enters the window directly over an embed is not
+shielded. Wiki and Files batches also stop on a plain channel switch (their destination is
+server-wide, but the scope key includes the channel), which is more cautious than it needs to be.
+Now that OS drops reach the page, file-drop code that never ran on Windows is live: non-media files
+dropped on a composer become attachments, and a dropped folder fails as an upload.
+
 ## Pre-upload video editor (2026-10-19)
 
 A video dropped, picked or pasted into the chat or status composer now opens a small editor

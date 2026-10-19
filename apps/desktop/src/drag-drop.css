@@ -1,0 +1,22 @@
+/*
+ * Rules for dragging files into the app (drop-guard.ts, upload-intent.ts).
+ *
+ * These live in a stylesheet, not a <style> made at runtime and not a style="" attribute: the
+ * production webview's CSP gets a Tauri nonce added to `style-src` (it nonces the inline <style> in
+ * index.html), and once a nonce is present the browser ignores 'unsafe-inline'. A runtime <style>
+ * or an inline style attribute would then be silently refused in the shipped app while working in
+ * development and in every test. A stylesheet loaded from the app's own origin is always allowed.
+ */
+
+/* While files are dragged over the window, no embedded third-party frame may receive them: the
+   drop lands on this page instead (see drop-guard.ts for when the attribute is set and cleared). */
+html[data-file-drag] iframe {
+  pointer-events: none !important;
+}
+
+/* An upload picker that reads Shift from its label: a Shift+click on selectable text extends the
+   selection, and the browser then never forwards the click to the file input. */
+.shift-pick {
+  user-select: none;
+  -webkit-user-select: none;
+}

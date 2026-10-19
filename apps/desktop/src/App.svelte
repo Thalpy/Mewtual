@@ -255,8 +255,13 @@
   import PixaCanvas from "./PixaCanvas.svelte";
   import PixaViewer from "./PixaViewer.svelte";
   import VideoEditor from "./VideoEditor.svelte";
-  import { editableContainer, editedFileName, webCodecsAvailable, type VideoEditorResult } from "./video-export.ts";
+  import {
+    editableContainer, editedFileName, webCodecsAvailable, type VideoEditorContext, type VideoEditorResult,
+  } from "./video-export.ts";
   import { VideoReviewQueue, type OpenReview, type ReviewPosition } from "./video-review.ts";
+  import { VIDEO_EDITOR_SHORTCUTS, editorWords } from "./video-editor-ui.ts";
+  import { ShiftIntent, shiftPick } from "./upload-intent.ts";
+  import { carriesFiles, installFileDropGuard } from "./drop-guard.ts";
   import { draftAttachments, removeDraftAttachment } from "./draft-attachments.ts";
   import ServerStudioSettings from "./ServerStudioSettings.svelte";
   import { PixaPreviewManager, type PixaPreviewScope } from "./pixa-preview.ts";
@@ -8412,16 +8417,24 @@
       error = String(e);
     }
   }
+  // One announcement post at a time: Enter and the video editor's "post now" can otherwise both
+  // post the same text while the first is still out. Set before the first await, so a caller can
+  // tell from it whether its own call started a post (see `postFromComposer`).
+  let statusPosting = false;
   async function postStatus() {
     const text = statusDraft.trim();
-    if (!text || activeServerId === null) return;
+    if (!text || activeServerId === null || statusPosting) return;
+    statusPosting = true;
     // Kept until the invoke returns, not cleared on the way in: a member posting into a feed that
     // is closed to them is now refused natively, and clearing first would take the words with it.
+    // Cleared only if it is still what was posted: text typed meanwhile is the next announcement.
     try {
       await invokeDebugged("post_status", { server: activeServerId, text });
-      statusDraft = "";
+      if (statusDraft.trim() === text) statusDraft = "";
     } catch (e) {
       error = errorText(e);
+    } finally {
+      statusPosting = false;
     }
   }
   // Who may post here. The read rides the feed document, so a policy someone else changed arrives
@@ -10381,20 +10394,50 @@
 
   // Embed media into the open wiki page: upload under wiki/<page>/, insert a marker at the caret.
   // Each file gets a live toast (uploading -> embedded / failed) so nothing happens silently.
-  async function wikiEmbed(fileList: FileList | null) {
+  //
+  // Videos go through the editor first unless `asIs` (Shift held through the drop or the pick).
+  // The batch is bound to the page it was started on and to `videoEditorScope`, like
+  // `embedMedia`: a file uploaded after the person moved on is shared under the page it was meant
+  // for, but not inserted into whatever page is open now.
+  async function wikiEmbed(fileList: FileList | null, asIs = false) {
     if (!fileList || fileList.length === 0 || activeServerId === null || !activeWikiPage) return;
+    const files = Array.from(fileList);
+    const review = videoReviewPlan(files, asIs);
+    const page = activeWikiPage;
+    const scope = videoEditorScope;
+    const epoch = videoScopeEpoch;
+    const here = () => videoEditorScope === scope && videoScopeEpoch === epoch && activeWikiPage === page;
+    let abandoned = 0;
     uploading = true;
     try {
-      for (const file of Array.from(fileList)) {
-        const tid = toast(`Uploading ${file.name}…`, "info", 0);
-        try {
-          const cid = await addSharedFile(file, `wiki/${activeWikiPage}`);
-          const alt = file.name.replace(/[[\]]/g, " ");
-          insertIntoWikiBody(`![${alt}](cid:${cid})`);
-          updateToast(tid, `Embedded ${file.name} · save the page to publish`, "ok", 5000);
-        } catch (e) {
-          updateToast(tid, `Upload of ${file.name} failed: ${e}`, "err", 9000);
+      for (let i = 0; i < files.length; i++) {
+        if (!here()) { abandoned = files.length - i; break; }
+        const reviewed = await reviewForUpload(files[i], files[i].name, review(files[i]), scope, "wiki");
+        if (!here()) {
+          // A scope change closed the editor and the rescope effect reported this file; a page
+          // change alone (a rename or delete landing meanwhile) did not, so count it here.
+          const reported = videoEditorScope !== scope || videoScopeEpoch !== epoch;
+          abandoned = files.length - i - (reported && reviewed === null ? 1 : 0);
+          break;
         }
+        if (!reviewed) continue;
+        const { upload, uploadName } = reviewed;
+        const tid = toast(`Uploading ${uploadName}…`, "info", 0);
+        try {
+          const cid = await addSharedFile(upload, `wiki/${page}`, uploadName);
+          if (!here()) {
+            updateToast(tid, `Shared ${uploadName}, not embedded: the page changed`, "info", 7000);
+            continue;
+          }
+          const alt = uploadName.replace(/[[\]]/g, " ");
+          insertIntoWikiBody(`![${alt}](cid:${cid})`);
+          updateToast(tid, `Embedded ${uploadName} · save the page to publish`, "ok", 5000);
+        } catch (e) {
+          updateToast(tid, `Upload of ${uploadName} failed: ${e}`, "err", 9000);
+        }
+      }
+      if (abandoned > 0 && !locked) {
+        toast(`${abandoned} file${abandoned === 1 ? " was" : "s were"} not embedded: the page changed`, "info", 7000);
       }
       await refreshFiles();
     } finally {
@@ -10402,10 +10445,12 @@
     }
   }
   function onWikiDrop(e: DragEvent) {
+    // Text or a link dropped on the editor is the field's own native drop; only files are ours.
+    if (!carriesFiles(e)) return;
     e.preventDefault();
     e.stopPropagation();
     dragOver = false;
-    wikiEmbed(e.dataTransfer?.files ?? null);
+    wikiEmbed(e.dataTransfer?.files ?? null, e.shiftKey);
   }
   async function saveWikiPage() {
     if (!activeWikiPage || activeServerId === null) return;
@@ -10814,19 +10859,40 @@
     }
   }
 
-  // Share a file into the Files-tab's current folder.
-  async function uploadFile(fileList: FileList | null) {
+  // Share a file into the Files-tab's current folder. Videos go through the editor first unless
+  // `asIs` (Shift held through the drop or the pick).
+  //
+  // The batch is bound to the folder it was dropped into and to `videoEditorScope`, as
+  // `embedMedia` is: a review can take minutes, and a file should not land in whichever folder or
+  // server happens to be open by the time it uploads.
+  async function uploadFile(fileList: FileList | null, asIs = false) {
     if (!fileList?.length || activeServerId === null) return;
+    const files = Array.from(fileList);
+    const review = videoReviewPlan(files, asIs);
+    const into = folder;
+    const scope = videoEditorScope;
+    const epoch = videoScopeEpoch;
+    const here = () => videoEditorScope === scope && videoScopeEpoch === epoch;
+    let abandoned = 0;
     uploading = true;
     try {
-      for (const file of Array.from(fileList)) {
-        const tid = toast(`Sharing ${file.name}…`, "info", 0);
+      for (let i = 0; i < files.length; i++) {
+        if (!here()) { abandoned = files.length - i; break; }
+        const reviewed = await reviewForUpload(files[i], files[i].name, review(files[i]), scope, "files");
+        // A review the scope change closed was reported by the rescope effect; count the rest.
+        if (!here()) { abandoned = files.length - i - (reviewed === null ? 1 : 0); break; }
+        if (!reviewed) continue;
+        const { upload, uploadName } = reviewed;
+        const tid = toast(`Sharing ${uploadName}…`, "info", 0);
         try {
-          await addSharedFile(file, folder);
-          updateToast(tid, `Shared ${file.name}`, "ok");
+          await addSharedFile(upload, into, uploadName);
+          updateToast(tid, `Shared ${uploadName}`, "ok");
         } catch (e) {
-          updateToast(tid, `Sharing ${file.name} failed: ${e}`, "err", 9000);
+          updateToast(tid, `Sharing ${uploadName} failed: ${e}`, "err", 9000);
         }
+      }
+      if (abandoned > 0 && !locked) {
+        toast(`${abandoned} file${abandoned === 1 ? " was" : "s were"} not shared: you moved elsewhere`, "info", 7000);
       }
       await refreshFiles();
     } finally {
@@ -10835,12 +10901,14 @@
   }
 
   function onFilesDrop(e: DragEvent) {
+    if (!carriesFiles(e)) return;
     e.preventDefault();
     dragOver = false;
-    void uploadFile(e.dataTransfer?.files ?? null);
+    void uploadFile(e.dataTransfer?.files ?? null, e.shiftKey);
   }
 
   function onEventDrop(e: DragEvent) {
+    if (!carriesFiles(e)) return;
     e.preventDefault();
     dragOver = false;
     void pickEventImage(e.dataTransfer?.files ?? null);
@@ -10849,9 +10917,9 @@
   // Embed media (image/video/audio) into the chat/status composer: upload under this
   // member's embed folder, then insert a `![name](cid:HEX)` marker into the draft for the
   // shared renderer to resolve inline. Non-media files are shared as plain attachments.
-  async function embedFiles(target: "chat" | "status", fileList: FileList | null) {
+  async function embedFiles(target: "chat" | "status", fileList: FileList | null, asIs = false) {
     if (!fileList) return;
-    await embedMedia(target, Array.from(fileList).map((file) => ({ file, name: file.name })));
+    await embedMedia(target, Array.from(fileList).map((file) => ({ file, name: file.name })), asIs);
   }
 
   // Embed media that already knows what it wants to be called. A picked or dropped file brings its
@@ -10865,12 +10933,13 @@
   // have, nothing more is reviewed or uploaded, and nothing lands in the draft now on screen,
   // which belongs to somewhere else. `addSharedFile` reads the active server when it is called,
   // so the check must come right before that call, with no await in between.
-  async function embedMedia(target: "chat" | "status", items: { file: File; name: string }[]) {
+  //
+  // `asIs` (Shift held through the drop or the picker click) skips the editor for the batch.
+  // "Post now" in the editor sends the message (or posts the announcement) as soon as that file is
+  // attached; files after it in the batch then attach to the emptied composer as usual.
+  async function embedMedia(target: "chat" | "status", items: { file: File; name: string }[], asIs = false) {
     if (items.length === 0 || activeServerId === null) return;
-    // Videos are reviewed one at a time, in the order they were picked; "2 of 3" counts only them.
-    const editing = webCodecsAvailable();
-    const videoCount = editing ? items.filter(({ file }) => editableContainer(file.type) !== null).length : 0;
-    let videoIndex = 0;
+    const review = videoReviewPlan(items.map(({ file }) => file), asIs);
     const scope = videoEditorScope;
     // The epoch catches a round trip (channel A, B, then A again, or a lock and unlock) that the
     // key alone would miss: the batch was still interrupted, and its context may have changed.
@@ -10882,21 +10951,17 @@
       for (let i = 0; i < items.length; i++) {
         if (!here()) { abandoned = items.length - i; break; }
         const { file, name } = items[i];
-        let upload = file;
-        let uploadName = name;
-        const container = editing ? editableContainer(file.type) : null;
-        if (container) {
-          const result = await reviewVideo(file, { index: ++videoIndex, count: videoCount }, scope);
-          // A lock or a server or channel switch while the editor was open (or while this review
-          // waited its turn) settled it as a skip. That file is counted in the rescope effect's
-          // message; count only the ones after it.
-          if (!here()) { abandoned = items.length - i - 1; break; }
-          if (result.kind === "skip") continue;
-          if (result.kind === "edited") {
-            upload = result.file;
-            uploadName = editedFileName(name, container);
-          }
-        }
+        const reviewed = await reviewForUpload(file, name, review(file), scope, target);
+        // A lock or a server or channel switch while the editor was open (or while this review
+        // waited its turn) settled it as a skip. That file is counted in the rescope effect's
+        // message; count only the ones after it.
+        if (!here()) { abandoned = items.length - i - (reviewed === null ? 1 : 0); break; }
+        if (!reviewed) continue;
+        const { upload, uploadName, post } = reviewed;
+        // "Post now" means the message as it stood when the person pressed it. The upload can take
+        // a while, and the composer stays usable meanwhile: anything typed (or a reply target
+        // changed) in that time is a different message, which must not be sent on their behalf.
+        const pressed = post ? composerState(target) : "";
         const tid = toast(`Uploading ${uploadName}…`, "info", 0);
         try {
           const cid = await addSharedFile(upload, myEmbedFolder, uploadName);
@@ -10905,12 +10970,21 @@
             updateToast(tid, `Shared ${uploadName}, not attached: you moved to another channel`, "info", 7000);
             continue;
           }
+          const unchanged = post && composerState(target) === pressed;
           // Brackets in the alt would break the `![alt](cid:…)` marker parse: strip them.
           const alt = uploadName.replace(/[[\]]/g, " ");
           const marker = `![${alt}](cid:${cid})`;
           if (target === "chat") { draft = draft ? `${draft} ${marker}` : marker; saveDraftFor(chanKey()); }
           else statusDraft = statusDraft ? `${statusDraft} ${marker}` : marker;
-          updateToast(tid, `Attached ${uploadName}`, "ok");
+          if (!post) {
+            updateToast(tid, `Attached ${uploadName}`, "ok");
+          } else if (!unchanged) {
+            updateToast(tid, `Attached ${uploadName}, not sent: the message changed while it uploaded`, "info", 7000);
+          } else if (postFromComposer(target)) {
+            updateToast(tid, `Attached ${uploadName}, sending`, "ok");
+          } else {
+            updateToast(tid, `Attached ${uploadName}, not sent yet: press Send when ready`, "info", 7000);
+          }
         } catch (e) {
           updateToast(tid, `Upload of ${uploadName} failed: ${e}`, "err", 9000);
         }
@@ -10938,20 +11012,72 @@
   const VIDEO_EDITOR_FALLBACK_CAP = 1024 * 1024 * 1024;
   // Bumped by the effect below every time `videoEditorScope` changes; see `embedMedia`.
   let videoScopeEpoch = 0;
-  function reviewVideo(file: File, position: ReviewPosition, scope: string): Promise<VideoEditorResult> {
-    return videoReviews.request(file, position, scope);
+  function reviewVideo(file: File, position: ReviewPosition, scope: string, context: VideoEditorContext): Promise<VideoEditorResult> {
+    return videoReviews.request(file, position, scope, context);
   }
+  // Which files of a batch go through the editor, and each one's "2 of 3" among them. None do with
+  // `asIs` (Shift), or in a window without WebCodecs, where every file uploads as it always did.
+  function videoReviewPlan(files: File[], asIs: boolean): (file: File) => ReviewPosition | null {
+    const reviewable = (file: File) => !asIs && webCodecsAvailable() && editableContainer(file.type) !== null;
+    const count = files.filter(reviewable).length;
+    let index = 0;
+    return (file) => reviewable(file) ? { index: ++index, count } : null;
+  }
+  // What a reviewed file uploads as, and whether "post now" asked for an immediate send.
+  type ReviewedUpload = { upload: File; uploadName: string; post: boolean };
+  // The composer as "post now" sees it: its text, and for chat the message being replied to.
+  function composerState(target: "chat" | "status"): string {
+    return target === "chat" ? `${replyingTo}\u0000${draft}` : statusDraft;
+  }
+  // Send the composer as its own Send does, and report whether a send actually started. Both
+  // sends set their in-flight flag before their first await, so reading it straight after the call
+  // tells a started send from one their own guards refused (a send already under way, a lock, the
+  // pending-message manager open).
+  function postFromComposer(target: "chat" | "status"): boolean {
+    if (target === "chat") {
+      const wasSending = sending;
+      void send();
+      return !wasSending && sending;
+    }
+    const wasPosting = statusPosting;
+    void postStatus();
+    return !wasPosting && statusPosting;
+  }
+  // One file's way to its upload: through the editor when `position` says it is reviewed, else
+  // unchanged. Null means the person chose not to upload it. An edited file takes its container's
+  // name (`clip.mov` re-encoded is `clip.mp4`).
+  async function reviewForUpload(
+    file: File,
+    name: string,
+    position: ReviewPosition | null,
+    scope: string,
+    context: VideoEditorContext,
+  ): Promise<ReviewedUpload | null> {
+    const container = editableContainer(file.type);
+    if (!position || !container) return { upload: file, uploadName: name, post: false };
+    const result = await reviewVideo(file, position, scope, context);
+    if (result.kind === "skip") return null;
+    if (result.kind === "edited") return { upload: result.file, uploadName: editedFileName(name, container), post: result.post === true };
+    return { upload: file, uploadName: name, post: result.post === true };
+  }
+  // Shift held through a picker click (the drop event carries its own `shiftKey`; paste has no
+  // Shift form); see upload-intent.ts for why each gesture is read where it is.
+  const uploadIntent = new ShiftIntent();
+  // With Tauri's own drop handling off (tauri.conf.json), drops from outside reach the page as a
+  // browser's would: nothing dropped outside a zone may navigate the window, and no file may be
+  // released into an embedded third-party frame. See drop-guard.ts.
+  $effect(() => installFileDropGuard(window, document));
   $effect(() => {
     const scope = videoEditorScope;
     untrack(() => {
       videoScopeEpoch++;
-      const { closedOpen, dropped } = videoReviews.rescope(scope);
+      const { closedOpen, closedContext, dropped } = videoReviews.rescope(scope);
       const lost = (closedOpen ? 1 : 0) + dropped;
       // Not on lock: the lock screen is its own explanation, and a toast would sit behind it.
       if (lost === 0 || scope.startsWith("locked")) return;
-      toast(closedOpen && dropped === 0
-        ? "The video you were editing was not attached: you moved to another channel"
-        : `${lost} videos were not attached: you moved to another channel`, "info", 7000);
+      toast(closedOpen && dropped === 0 && closedContext
+        ? `The video you were editing was not ${editorWords(closedContext).done}: you moved elsewhere`
+        : `${lost} videos were not added: you moved elsewhere`, "info", 7000);
     });
   });
   // Keys the editor lets through to the app although it is modal: Lock, which must work from
@@ -10966,10 +11092,24 @@
     return pushToTalkEvent(pushToTalk, { code: e.code, typing: false, inCall });
   }
 
+  // Every file drop zone's dragover. A zone takes files only: accepting any drag would swallow text
+  // or a link dragged into the composer or the wiki editor, which their own fields handle natively.
+  // The effect is pinned to "copy" so the source app (Explorer, a browser) never treats the drop as
+  // a move of its file.
+  function acceptFileDrag(e: DragEvent) {
+    if (!carriesFiles(e)) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+    dragOver = true;
+  }
+
+  // Shift held as the files land: attach them as they are, without the video editor.
   function onComposerDrop(target: "chat" | "status", e: DragEvent) {
+    // Text or a link dropped on the composer is the textarea's own native drop; only files are ours.
+    if (!carriesFiles(e)) return;
     e.preventDefault();
     dragOver = false;
-    embedFiles(target, e.dataTransfer?.files ?? null);
+    embedFiles(target, e.dataTransfer?.files ?? null, e.shiftKey);
   }
 
   // Paste a screenshot or a media file straight into the composer, the same way dropping one in
@@ -22148,7 +22288,7 @@
               class:dragging={draggedNameEffect === active.id}
               role="group"
               aria-label={`${definition?.label ?? active.id} effect settings`}
-              ondragover={(e) => e.preventDefault()}
+              ondragover={(e) => { if (draggedNameEffect) e.preventDefault(); }}
               ondrop={(e) => { e.preventDefault(); dropNameEffect(active.id); }}
             >
               <div class="fx-settings-head">
@@ -24569,9 +24709,9 @@
         <li><button onclick={() => enterFolder(sub)}>▸ {sub}</button></li>
       {/each}
     </ul>
-    <label class="upload-btn">
+    <label class="upload-btn shift-pick" title="Share a file here (Shift+click: videos as is, without the editor)" use:shiftPick={uploadIntent}>
       {uploading ? "Uploading…" : "＋ Share a file here"}
-      <input type="file" multiple disabled={uploading} onchange={(e) => { uploadFile(e.currentTarget.files); e.currentTarget.value = ''; }} />
+      <input type="file" multiple disabled={uploading} onchange={(e) => { uploadFile(e.currentTarget.files, uploadIntent.takePick()); e.currentTarget.value = ''; }} />
     </label>
     <form class="new-folder" onsubmit={(e) => { e.preventDefault(); const n = newFolder.trim(); if (n) { enterFolder(n); newFolder = ''; } }}>
       <input bind:value={newFolder} placeholder="＋ new folder…" />
@@ -26352,7 +26492,7 @@
             onloadcapture={chatMediaSettled}
             onpointermove={(e) => (logPointer = { x: e.clientX, y: e.clientY })}
             onpointerleave={() => (logPointer = null)}
-            ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+            ondragover={acceptFileDrag}
             ondragleave={() => (dragOver = false)}
             ondrop={(e) => onComposerDrop("chat", e)}
           >
@@ -26657,7 +26797,7 @@
             <form
               class="composer"
               class:drag-over={dragOver}
-              ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+              ondragover={acceptFileDrag}
               ondragleave={() => (dragOver = false)}
               ondrop={(e) => onComposerDrop("chat", e)}
               onsubmit={(e) => { e.preventDefault(); send(); }}
@@ -26671,14 +26811,14 @@
                 aria-expanded={showInsert && insertTarget === "chat"}
                 onclick={() => toggleInsert("chat")}
               >{@render icoPlus()}</button>
-              <label class="attach" title="Attach image / video / audio">
+              <label class="attach shift-pick" title="Attach image / video / audio (Shift+click: videos as is, without the editor)" use:shiftPick={uploadIntent}>
                 📎
                 <input
                   type="file"
                   accept="image/*,video/*,audio/*"
                   multiple
                   disabled={uploading}
-                  onchange={(e) => { embedFiles("chat", e.currentTarget.files); e.currentTarget.value = ''; }}
+                  onchange={(e) => { embedFiles("chat", e.currentTarget.files, uploadIntent.takePick()); e.currentTarget.value = ''; }}
                 />
               </label>
               <div class="composer-entry">
@@ -27101,7 +27241,7 @@
           <ul
             class="file-list tab-pane"
             class:drag-over={dragOver}
-            ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+            ondragover={acceptFileDrag}
             ondragleave={() => (dragOver = false)}
             ondrop={onFilesDrop}
           >
@@ -27244,19 +27384,19 @@
             <form
               class="composer"
               class:drag-over={dragOver}
-              ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+              ondragover={acceptFileDrag}
               ondragleave={() => (dragOver = false)}
               ondrop={(e) => onComposerDrop("status", e)}
               onsubmit={(e) => { e.preventDefault(); postStatus(); }}
             >
-              <label class="attach" title="Attach image / video / audio">
+              <label class="attach shift-pick" title="Attach image / video / audio (Shift+click: videos as is, without the editor)" use:shiftPick={uploadIntent}>
                 📎
                 <input
                   type="file"
                   accept="image/*,video/*,audio/*"
                   multiple
                   disabled={uploading}
-                  onchange={(e) => { embedFiles("status", e.currentTarget.files); e.currentTarget.value = ''; }}
+                  onchange={(e) => { embedFiles("status", e.currentTarget.files, uploadIntent.takePick()); e.currentTarget.value = ''; }}
                 />
               </label>
               {@render textEffectButton("announcement", "Announcement text effects")}
@@ -27301,7 +27441,7 @@
           <div
             class="wiki"
             class:drag-over={dragOver}
-            ondragover={(e) => { if (activeWikiPage) { e.preventDefault(); dragOver = true; } }}
+            ondragover={(e) => { if (activeWikiPage) acceptFileDrag(e); }}
             ondragleave={() => (dragOver = false)}
             ondrop={onWikiDrop}
           >
@@ -27421,10 +27561,10 @@
                         {@render insertPanel()}
                       {/if}
                     </div>
-                    <label class="wiki-tb wiki-tb-attach" title="Upload an image / video / audio and embed it at the caret">
+                    <label class="wiki-tb wiki-tb-attach shift-pick" title="Upload an image / video / audio and embed it at the caret (Shift+click: videos as is, without the editor)" use:shiftPick={uploadIntent}>
                       📎 attach
                       <input type="file" accept="image/*,video/*,audio/*" multiple disabled={uploading}
-                        onchange={(e) => { wikiEmbed(e.currentTarget.files); e.currentTarget.value = ''; }} />
+                        onchange={(e) => { wikiEmbed(e.currentTarget.files, uploadIntent.takePick()); e.currentTarget.value = ''; }} />
                     </label>
                     <span class="wiki-tb-spacer"></span>
                     <button class="wiki-tb wide" class:active={wikiPreview} title="Live preview beside the editor" onclick={() => (wikiPreview = !wikiPreview)}>preview</button>
@@ -27434,7 +27574,7 @@
                     class="wiki-edit"
                     class:split={wikiPreview}
                     class:drag-over={dragOver}
-                    ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+                    ondragover={acceptFileDrag}
                     ondragleave={() => (dragOver = false)}
                     ondrop={onWikiDrop}
                   >
@@ -27563,7 +27703,7 @@
             <form
               class="event-form"
               class:drag-over={dragOver}
-              ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+              ondragover={acceptFileDrag}
               ondragleave={() => (dragOver = false)}
               ondrop={onEventDrop}
               onsubmit={(e) => { e.preventDefault(); createEvent(); }}
@@ -29821,6 +29961,16 @@
                   <li><kbd>Esc</kbd><span>Close the topmost thing, one layer at a time</span></li>
                 </ul>
               </section>
+              <!-- The pre-upload video editor's keys, from the same list the editor's tests check
+                   against its real key handling (video-editor-ui.ts). -->
+              <section class="set-section" data-keybinds="video-editor">
+                <h3>Video editor</h3>
+                <ul class="stx-keys">
+                  {#each VIDEO_EDITOR_SHORTCUTS as shortcut (shortcut.keys)}
+                    <li><kbd>{shortcut.keys}</kbd><span>{shortcut.action}</span></li>
+                  {/each}
+                </ul>
+              </section>
               <section class="set-section text-fx-keybinds">
                 <div class="text-fx-keybind-head">
                   <div>
@@ -30757,7 +30907,7 @@
          answer is therefore always filed under its own id; a late answer from an instance being
          torn down cannot be taken as the next review's (the queue ignores a stale id). -->
     {#each videoEditor ? [videoEditor] : [] as open (open.id)}
-      <VideoEditor file={open.file} capBytes={fileSizeLimit?.limit ?? VIDEO_EDITOR_FALLBACK_CAP} position={open.position}
+      <VideoEditor file={open.file} capBytes={fileSizeLimit?.limit ?? VIDEO_EDITOR_FALLBACK_CAP} position={open.position} context={open.context}
         passKey={videoEditorPassKey} onfinish={(result) => videoReviews.finish(open.id, result)} />
     {/each}
 

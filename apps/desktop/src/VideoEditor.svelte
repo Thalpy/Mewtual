@@ -18,11 +18,15 @@
    * be uploaded. The whole editing model lives in `video-edit.ts`; this component is presentation,
    * pointer and key handling, and the lifecycle around the probe and the export.
    *
-   * Outcomes go to `onfinish` exactly once (see `VideoEditorResult`):
-   * - "upload" on an untouched edit hands back `original`, so declining to edit costs no quality
-   *   and no re-encode;
-   * - "upload" on a real edit runs the export and hands back the new file as `edited`;
-   * - "don't upload", the close button and Escape hand back `skip`.
+   * Outcomes go to `onfinish` exactly once (see `VideoEditorResult`). There is one action button
+   * (also Ctrl+Enter); its word depends on `context` ("post now", "embed", "upload"; see
+   * `editorWords`), and in the chat and announcement composers its result carries `post`, so the
+   * host sends straight away:
+   * - on an untouched edit it hands back `original`, so not editing costs no quality and no
+   *   re-encode;
+   * - on a real edit it runs the export and hands back the new file as `edited`;
+   * - the close button and Escape hand back `skip`, after asking "Discard this clip?" when there
+   *   is work to lose (anything trimmed, removed or cut).
    *
    * The backdrop deliberately does not dismiss: a stray click outside the card would throw away
    * every cut. While an export runs, Escape cancels the export instead of closing.
@@ -38,8 +42,9 @@
   } from "./video-edit.ts";
   import {
     ExportCanceledError, FILMSTRIP_MAX_TILES, OutputTooLargeError, exportEditedVideo, filmstrip, probeVideo,
-    type VideoEditorResult,
+    type VideoEditorContext, type VideoEditorResult,
   } from "./video-export.ts";
+  import { editorWords } from "./video-editor-ui.ts";
 
   /** The host/editor contract; the host is written against exactly this. */
   type Props = {
@@ -49,6 +54,11 @@
     capBytes: number;
     /** "2 of 3" when several files were picked at once; omitted for a single file. */
     position?: { index: number; count: number };
+    /**
+     * Where the video is going: decides the wording and whether "post now" is offered. Required,
+     * so a new call site cannot forget it and quietly offer "post now" where nothing can be sent.
+     */
+    context: VideoEditorContext;
     /**
      * Called exactly once with the outcome; the host then unmounts the editor. An editor unmounted
      * before it answered (the host's branch went away, say) answers `skip` on its way out, so the
@@ -66,7 +76,7 @@
     thumbnails?: typeof filmstrip;
   };
   let {
-    file, capBytes, position, onfinish, passKey = () => false,
+    file, capBytes, position, context, onfinish, passKey = () => false,
     probe = probeVideo, exporter = exportEditedVideo, thumbnails = filmstrip,
   }: Props = $props();
 
@@ -102,6 +112,9 @@
    * side by side competing for the same hardware coders.
    */
   let draining = $state(false);
+  /** The "Discard this clip?" question is showing (see `closeRequest`). */
+  let confirmingDiscard = $state(false);
+  let keepButton = $state<HTMLButtonElement | null>(null);
   /** Filmstrip tiles as they arrive; `null` until a tile is decoded. */
   let tiles = $state.raw<(CanvasImageSource | null)[]>([]);
 
@@ -160,12 +173,15 @@
     formatBytes(file.size),
   ].filter(Boolean).join(" · "));
   const uploadDisabled = $derived(!editing || draining || kept.length === 0 || (unedited && originalTooBig));
+  const words = $derived(editorWords(context));
+  /** Work that closing would throw away: anything trimmed, removed, or cut. */
+  const dirty = $derived(edit !== null && (!unedited || edit.cuts.length > 0));
   const uploadTitle = $derived(
     kept.length === 0 ? "Nothing is kept"
       : draining ? "Finishing the cancelled export"
       : unedited && originalTooBig ? `Over this server's ${formatBytes(capBytes)} limit: trim it to fit`
-      : unedited ? "Upload the original video"
-      : "Upload the edited video (re-encoded)",
+      : unedited ? `${words.Verb} the original video`
+      : `${words.Verb} the edited video (re-encoded)`,
   );
 
   // --- Lifecycle --------------------------------------------------------------------------------
@@ -408,9 +424,15 @@
   }
 
   // --- Export -----------------------------------------------------------------------------------
+  /**
+   * The one action: post (embed, upload) what the edit keeps. Where it posts (chat, announcements)
+   * the result carries `post`, and the host sends straight away. An untouched edit goes up as the
+   * original bytes, with no re-encode.
+   */
   async function upload() {
     if (!edit || !editing || uploadDisabled) return;
-    if (unedited) { finish({ kind: "original" }); return; }
+    const post = words.posts;
+    if (unedited) { finish(post ? { kind: "original", post: true } : { kind: "original" }); return; }
     pause();
     bladeMode = false; bladeAt = null;
     const controller = new AbortController();
@@ -428,7 +450,7 @@
       // A cancel, a close or a newer export already moved on; this result belongs to none of them.
       if (exportAbort !== controller || finished) return;
       exportAbort = null;
-      finish({ kind: "edited", file: result });
+      finish(post ? { kind: "edited", file: result, post: true } : { kind: "edited", file: result });
     } catch (error) {
       if (exportAbort !== controller || finished) return;
       exportAbort = null;
@@ -457,10 +479,25 @@
     draining = true;
     void exportSettled.then(() => { if (!destroyed) draining = false; });
   }
-  /** The close button means Escape: during an export it cancels the export rather than leaving. */
+  /** The original bytes, when the editor cannot open the file or the export failed. Never re-encodes. */
+  function sendOriginal() {
+    if (originalTooBig || finished) return;
+    finish(words.posts ? { kind: "original", post: true } : { kind: "original" });
+  }
+  /**
+   * The ×, and Escape once nothing else claims it. During an export it cancels the export rather
+   * than leaving; with work on the timeline it asks before throwing that away; otherwise it leaves.
+   */
   function closeRequest() {
-    if (phase === "exporting") cancelExport();
-    else finish({ kind: "skip" });
+    if (phase === "exporting") { cancelExport(); return; }
+    if (dirty && (phase === "ready" || phase === "failed")) { askDiscard(); return; }
+    finish({ kind: "skip" });
+  }
+  async function askDiscard() {
+    confirmingDiscard = true;
+    // The safe answer takes focus, so a stray Enter keeps the work.
+    await tick();
+    keepButton?.focus();
   }
   function backToEditing() { if (phase === "failed") { message = ""; messageTip = ""; phase = "ready"; } }
 
@@ -478,11 +515,15 @@
     if (e.key === "Tab") { trapTab(e); return; }
     if (e.key === "Escape") {
       e.preventDefault();
-      if (phase === "exporting") cancelExport();
+      if (confirmingDiscard) { confirmingDiscard = false; card?.focus(); }
+      else if (phase === "exporting") cancelExport();
       else if (bladeMode) { bladeMode = false; bladeAt = null; }
-      else finish({ kind: "skip" });
+      else closeRequest();
       return;
     }
+    // While the discard question is up, only its buttons act (Enter and Space press the focused
+    // one natively); no editing key may change the clip behind it.
+    if (confirmingDiscard) return;
     const target = e.target as HTMLElement | null;
     const onButton = !!target && (target.tagName === "BUTTON" || target.tagName === "INPUT");
     const mod = e.ctrlKey || e.metaKey;
@@ -496,6 +537,7 @@
     let handled = true;
     if (mod && key === "z") { if (e.shiftKey) redoStep(); else undoStep(); }
     else if (mod && key === "y") redoStep();
+    else if (mod && key === "Enter") void upload();
     else if (mod || e.altKey) handled = false;
     else if (key === "ArrowLeft") nudge(-(e.shiftKey ? NUDGE_LARGE : NUDGE));
     else if (key === "ArrowRight") nudge(e.shiftKey ? NUDGE_LARGE : NUDGE);
@@ -669,16 +711,32 @@
       {#if phase === "failed"}
         <button type="button" class="st-btn ghost" data-action="back-to-edit" onclick={backToEditing}>back to editing</button>
       {/if}
+      <!-- One action, as the user asked: post (or embed, or upload) what is on the timeline. An
+           untouched clip goes up as its original bytes, with no re-encode. Leaving is the ×/Esc,
+           which asks first when there is work to lose. -->
       {#if phase === "unavailable" || phase === "failed"}
-        <button type="button" class="st-btn" data-action="upload-original" disabled={originalTooBig}
-          title={originalTooBig ? `Over this server's ${formatBytes(capBytes)} limit` : "Upload the original video"}
-          onclick={() => finish({ kind: "original" })}>upload unedited</button>
-      {/if}
-      <button type="button" class="st-btn ghost" data-action="skip" disabled={phase === "exporting"} onclick={() => finish({ kind: "skip" })}>don't upload</button>
-      {#if phase !== "unavailable" && phase !== "failed"}
-        <button type="button" class="st-btn primary" data-action="upload" disabled={uploadDisabled} title={uploadTitle} onclick={upload}>upload</button>
+        <button type="button" class="st-btn primary" data-action="upload-original" disabled={originalTooBig}
+          title={originalTooBig ? `Over this server's ${formatBytes(capBytes)} limit` : `${words.Verb} the original video`}
+          onclick={sendOriginal}>{phase === "failed" ? `${words.action} original` : words.action}</button>
+      {:else}
+        <button type="button" class="st-btn primary" data-action="upload" disabled={uploadDisabled} title={uploadTitle} onclick={() => upload()}>
+          {#if words.posts}<svg viewBox="0 0 16 16" class="ol" aria-hidden="true"><path d="M2 8h10M8.5 4.5 12 8l-3.5 3.5"></path></svg>{/if}{words.action}</button>
       {/if}
     </footer>
+
+    {#if confirmingDiscard}
+      <!-- Inside the card, so the dialog's focus trap and key isolation still hold; no browser
+           confirm(), which would block the whole window. -->
+      <div class="ve-confirm" role="alertdialog" aria-modal="true" aria-label="Discard this clip?">
+        <div class="ve-confirm-box">
+          <h3>Discard this clip?</h3>
+          <div class="ve-confirm-actions">
+            <button type="button" class="st-btn" data-action="keep-editing" bind:this={keepButton} onclick={() => (confirmingDiscard = false)}>keep editing</button>
+            <button type="button" class="st-btn danger" data-action="discard" onclick={() => finish({ kind: "skip" })}>discard</button>
+          </div>
+        </div>
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -710,6 +768,7 @@
   .st-btn { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--r); background: var(--bg-elev); color: var(--text-2); font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; cursor: pointer; }
   .st-btn.ghost { background: transparent; border-color: var(--border-soft); color: var(--muted); }
   .st-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); padding: 0 16px; }
+  .st-btn svg.ol { width: 12px; height: 12px; margin-left: -4px; }
   .st-btn:disabled { opacity: 0.45; cursor: default; }
   .st-btn.x { width: 26px; padding: 0; justify-content: center; flex: none; }
   .st-btn.x svg { width: 12px; height: 12px; }
@@ -791,6 +850,14 @@
   .bar span { display: block; height: 100%; background: var(--accent); }
 
   .alert { margin: 0; padding: 8px 14px; border-top: 1px solid var(--warn-brd); background: var(--warn-dim); color: var(--warn); font-size: 0.78rem; }
+
+  /* "Discard this clip?": a small panel over the dimmed card, inside it so focus stays trapped. */
+  .card { position: relative; }
+  .ve-confirm { position: absolute; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; background: color-mix(in oklab, var(--bg-0) 62%, transparent); }
+  .ve-confirm-box { display: flex; flex-direction: column; gap: 14px; padding: 18px 20px; min-width: 280px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); box-shadow: 0 12px 32px color-mix(in oklab, var(--bg-0) 60%, transparent); }
+  .ve-confirm-box h3 { margin: 0; font-size: 0.95rem; font-weight: 600; color: var(--text); }
+  .ve-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  .st-btn.danger { background: var(--danger-dim); border-color: var(--danger-brd); color: var(--danger-hi); }
 
   /* Footer */
   .foot { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-top: 1px solid var(--border); background: var(--bg-elev); }

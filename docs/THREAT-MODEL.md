@@ -2,9 +2,11 @@
 
 ## Pre-upload video editing boundary (2026-10-19)
 
-A video added to the chat or status composer opens `VideoEditor.svelte` before upload. This is a
-sender-side product feature with no protocol, wire or native change: the result is an ordinary
-`File` that goes through the existing `begin_file_upload` path, limits and magic-byte check.
+A video added to the chat or announcement composer, a wiki page or the Files tab opens
+`VideoEditor.svelte` before upload, unless Shift was held through the drop or the picker click.
+This is a sender-side product feature with no protocol, wire or native-command change: the result
+is an ordinary `File` that goes through the existing `begin_file_upload` path, limits and
+magic-byte check.
 
 What the honest sender's client guarantees:
 
@@ -34,11 +36,48 @@ What the honest sender's client guarantees:
   container's alpha flag (Chrome's recorder sets that on opaque canvas captures too). A file whose
   alpha only starts later fails at export, closed, with the generic message.
 
+File drops (2026-10-19, follow-up): the main window now sets `dragDropEnabled: false`, so files
+dropped from the OS reach the page's drop zones as HTML5 drops (with Tauri's default, wry handled
+drops natively and switched external drops off for the whole webview). Three browser defaults come
+with that, and `drop-guard.ts` closes each for drags that start outside the page:
+
+- a file dropped outside every zone would navigate the webview to it; a link dropped anywhere
+  that is not a text field would be followed (there is no back button in this window). An
+  unaccepted `dragover` gets the drop effect `none` and the `drop` has its default prevented.
+  Only enabled, writable text-entry fields keep their native text drop, and visible
+  `<input type=file>` controls their native file drop; every other control (a checkbox, a slider,
+  a read-only field) is guarded like the page, since the engine's fallback there is to navigate;
+- a file released over an embedded third-party player (the `frame-src` sites) would be delivered
+  to that site's page. While files are dragged over the window (from outside or from within the
+  page) every iframe has `pointer-events: none`, so the drop lands on this page beneath it: in the
+  chat that is the chat's own drop zone, which attaches it there; elsewhere it is refused. The
+  rule is in `drag-drop.css`, a stylesheet loaded from the app's origin, because the shipped CSP
+  carries a Tauri nonce in `style-src` that makes the browser ignore `'unsafe-inline'`: a
+  `<style>` made at runtime or a `style=""` attribute would be refused in production while
+  working in development and every test. The shield lifts on drop or dragend, on the first pointer
+  event after the drag (none fire during one), or after 3 s with no drag event; it does not lift
+  on a short silence, since `dragover` may come only every ~550 ms or only on movement.
+  **Not covered**: a drag that enters the window directly over an iframe without crossing this
+  page first is seen only by that frame;
+- the drop zones accept file drags only, with the effect pinned to `copy`, and their drop handlers
+  ignore anything that is not files, so text dropped on a composer or the wiki editor is the
+  field's own native drop, and the source app never sees a "move".
+
+The page receives only a dropped file's name and contents, never its path (Tauri's handler used to
+deliver full paths, though nothing listened). Nothing native listened for Tauri's drag-drop events.
+Whether a real OS drag reaches the zones, and whether `shiftKey` is set on such a drop, has not been
+exercised by any automated check; unit tests pin the configuration, the guard, the shield and that
+no production module builds a runtime `<style>`.
+
 What it does not claim:
 
-- An **unedited** upload (the person pressed Upload without trimming or removing anything, or the
-  editor was unavailable and they chose "upload unedited") sends the original bytes, metadata
-  included, exactly as before this feature existed.
+- An **unedited** upload sends the original bytes, metadata included, exactly as before this
+  feature existed. That covers the editor's one action on an untouched clip, the original-file
+  button when the editor cannot open a file or an export failed, and anything added with Shift.
+- "Post now" sends the composer only if it still holds what it held when the editor answered
+  (text and reply target; for an edited clip that is after the export, while the modal blocked
+  typing); otherwise the video is attached and nothing is sent. It is the composer's own send, with
+  its own guards, not a separate path.
 - Nothing here is enforced against a modified client or verifiable by recipients: they receive a
   normal video and cannot tell whether, or how, it was edited. The original stays on the sender's
   disk; the editor never touches it.

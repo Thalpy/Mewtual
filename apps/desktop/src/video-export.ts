@@ -42,15 +42,26 @@ export type VideoContainer = "mp4" | "webm";
 /**
  * What the editor hands back to the host, exactly once per opening.
  *
- * - `original`: upload the picked file's own bytes (nothing was edited, or editing was not
- *   possible and the person chose to send it anyway).
+ * - `original`: upload the picked file's own bytes (nothing was edited, editing was not possible,
+ *   or the person chose "as is" to set their edits aside).
  * - `edited`: upload `file` instead; it is a fresh re-encode named for its container.
  * - `skip`: upload nothing for this file.
+ *
+ * `post` is set by "post now": once this file is attached, the host sends the message (or posts
+ * the announcement) straight away instead of leaving it in the composer. Only offered where there
+ * is something to send; see `VideoEditorContext`.
  */
 export type VideoEditorResult =
-  | { kind: "original" }
-  | { kind: "edited"; file: File }
+  | { kind: "original"; post?: boolean }
+  | { kind: "edited"; file: File; post?: boolean }
   | { kind: "skip" };
+
+/**
+ * Where the upload is going, which decides the editor's wording and whether "post now" exists:
+ * the chat and status composers attach and can post at once; a wiki page embeds at the caret and
+ * the Files tab only shares, and neither has a message to send.
+ */
+export type VideoEditorContext = "chat" | "status" | "wiki" | "files";
 
 /**
  * Declared types the editor will open, and the container each is written as. QuickTime becomes

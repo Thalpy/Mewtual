@@ -16,7 +16,7 @@
  *   longer current settles as `skip`, whether it is open or still waiting; nothing is left pending
  *   for a batch to hang on.
  */
-import type { VideoEditorResult } from "./video-export.ts";
+import type { VideoEditorContext, VideoEditorResult } from "./video-export.ts";
 
 export type ReviewPosition = { readonly index: number; readonly count: number };
 
@@ -27,6 +27,8 @@ export type OpenReview = {
   readonly position: ReviewPosition;
   /** The host's scope key when the review was requested. */
   readonly scope: string;
+  /** Where the upload is going (wording, and whether "post now" is offered). */
+  readonly context: VideoEditorContext;
 };
 
 type Pending = OpenReview & { resolve: (result: VideoEditorResult) => void };
@@ -55,9 +57,9 @@ export class VideoReviewQueue {
   }
 
   /** Ask for a review of `file`, bound to `scope`. Resolves once, with the person's answer or `skip`. */
-  request(file: File, position: ReviewPosition, scope: string): Promise<VideoEditorResult> {
+  request(file: File, position: ReviewPosition, scope: string, context: VideoEditorContext): Promise<VideoEditorResult> {
     return new Promise((resolve) => {
-      this.#waiting.push({ id: ++this.#seq, file, position, scope, resolve });
+      this.#waiting.push({ id: ++this.#seq, file, position, scope, context, resolve });
       if (!this.#open) this.#advance();
     });
   }
@@ -80,13 +82,15 @@ export class VideoReviewQueue {
    * Reports whether an OPEN editor was closed (the person may have been mid-edit, which is worth
    * telling them) and how many waiting requests were dropped.
    */
-  rescope(scope: string): { closedOpen: boolean; dropped: number } {
+  rescope(scope: string): { closedOpen: boolean; closedContext: VideoEditorContext | null; dropped: number } {
     let closedOpen = false;
+    let closedContext: VideoEditorContext | null = null;
     const open = this.#open;
     if (open && open.scope !== scope) {
       this.#open = null;
       open.resolve(SKIP);
       closedOpen = true;
+      closedContext = open.context;
     }
     let dropped = 0;
     this.#waiting = this.#waiting.filter((pending) => {
@@ -96,7 +100,7 @@ export class VideoReviewQueue {
       return false;
     });
     if (closedOpen) this.#advance();
-    return { closedOpen, dropped };
+    return { closedOpen, closedContext, dropped };
   }
 
   #advance() {
@@ -107,5 +111,5 @@ export class VideoReviewQueue {
 
 /** The mountable fields only: the resolver never leaves this module. */
 function publicView(pending: Pending): OpenReview {
-  return { id: pending.id, file: pending.file, position: pending.position, scope: pending.scope };
+  return { id: pending.id, file: pending.file, position: pending.position, scope: pending.scope, context: pending.context };
 }
