@@ -49,6 +49,23 @@ otherwise block on History while Group/Policy are held. No engine, Clock or nati
 under that final fence. Focused verification passes289 voice tests and strict sync Clippy; full
 combined validation remains required before handoff of this continuation.
 
+Read-only composition review selects high-side `ConfirmHello` as the first protected consumer;
+low-side start/Hello encryption and Proof/Finish must remain refused until their role consumers
+exist. Current `HistoryState` has only a derive row, and ordinary confirmation packet preparation
+still charges ordinary capacity. The consumer needs three candidate lanes independent of
+`pair.starts`, each retaining its Hello-decrypt/Proof-encrypt/Finish-decrypt claims, plus a private
+exact-chain preparation path for both retained packet/event copies. A malformed admitted Hello
+spends its candidate even when no confirmation nonce was accepted. An issuer/MessageId/hash
+admission cache must precede replay/token preparation, including after terminal rejection.
+
+Keep the prepared row, inactive action, token transaction and credited receipt in **outer mutable
+owners**. Lend only borrows into Group -> Policy -> try-History; take them inside the successful
+unit origin publication closure. Capturing those owners by move is unsafe even with an infallible
+apply body: quota refusal drops the unused closure under the locks, and RowIssue destruction
+reenters History. All refusal destruction must run after those guards return. Admission receipts
+bind original call/pair/chain/room/member/epoch/lifetime, independently of consumed token and
+accepted-Hello sequence gates, so a valid delayed ACK survives its successful transition.
+
 ## Browser derivation prerequisite (19 October, inactive)
 
 The surviving broker v5 now has a shared closed derive/confirmation driver. Its opaque key
