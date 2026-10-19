@@ -25,6 +25,10 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
+    // Tauri owns native-source rebuilds. Watching this tree also follows a shared Cargo
+    // target junction, traversing build artifacts and reacting to every native test/build.
+    // Refuse it before traversal; frontend sources and their HMR stay observed normally.
+    watch: { ignored: ["**/src-tauri", "**/src-tauri/**"] },
   },
   build: {
     outDir: "dist",

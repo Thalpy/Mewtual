@@ -1,5 +1,25 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Upload batch and asynchronous UI ownership (19 October)
+
+`canStartUpload` admits one review/upload batch of at most32 files. Pick/drop/paste paths check
+before converting a FileList; the admitted batch sets `uploading` before its first await and owns
+it until its actual finally, including across lock/close. The generic `VideoReviewQueue` has a
+separate16-request total cap (open plus waiting); overflow immediately resolves `skip` without
+retaining a request. App's earlier admission provides the visible busy/size refusal.
+
+Chat, announcement, wiki and Files upload continuations retain the original UI-session generation
+and require unlocked, ready and no close in flight before uploading, attaching or reporting a
+completion. Wiki attachment additionally requires the original `wikiPane()` identity. The review
+scope includes session, close and readiness; native close also retires reviews synchronously before
+the first Save await, so abandoning a close cannot revive an earlier batch.
+
+`leaveServer` captures the UI-session generation before its Save gate and stores an exact operation
+object once native leave starts. A completion may clear only its own operation and may change
+trust/server/Studio state only in its original session. Moving between views alone does not cancel
+an authorized background-server leave. Announcement results similarly fence both their session and
+original view before clearing matching text or presenting an error. No wire or persistence change.
+
 ## Browser protected derivation contract (19 October, inactive)
 
 `VoiceCryptoBroker.createJoinKeyHandle` creates an opaque, non-extractable-key handle on that
@@ -387,13 +407,50 @@ nothing is left, so nothing is saved first. Records held for any other document 
 so opening a restored document never requires its own held work to save. Restored work is sent
 only by explicit Save or retry, or by leaving its own document. That document's departure Save
 awaits its own lane first. Only then does it release, without awaiting, its records in the shared
-Index lane. One worker serves every lane, so releasing them earlier would let a slow Index receipt
-gate the document's Save and the navigation. The most recently started Save still awaited has its
-records go ahead of other lanes' runnable heads. Known limit: a record already being delivered still holds the one
-worker, so a departure (or Create) waits for an Index delivery already running until it answers or
-the 10 s refusal. Such a delivery can come from a deadline, an earlier departure or a sidebar
-retry. The departure's records stay retained and are sent after it. A separate Index-lane worker
-would remove this and is a follow-up needing a concurrency design review.
+Index lane.
+
+Two save workers run at once (`SAVE_WORKERS`), at most one per lane, with each lane's records
+still in queue order. A document lane and the shared Index lane can therefore both be in flight,
+so a departure's document Save (including an edit made while leaving) does not wait on its own
+Index half's receipt. Workers are not reserved per lane: two other lanes, such as a Create and
+another document's Save, can hold both, and the next Save then waits for one of them to answer.
+The most recently started Save still awaited has its records go ahead of other lanes' runnable
+heads, but it does not preempt a save already in flight. A record taken by a worker is marked
+synchronously, because it stays `queued` through its admission read, so no second worker takes it.
+
+This is renderer scheduling only. The server's actor runs Studio operations one at a time, so an
+Index operation that is slow inside the actor still delays the document's Save there. More
+workers would buy nothing natively and would compete for the bridge's four shared inline slots.
+Every Studio IPC call holds one of those slots for its round trip, as do blob fetches, chat inline
+downloads and the native receiver's passes.
+
+Three native refusals are raised before execution, that is before the execution lease is
+transferred to the actor, so the operation never runs and nothing of it can have been written. (The
+actor may already have signalled Ready, as it always has in the storage-busy case, but it receives
+no lease and so does not execute.)
+
+- "Studio actor busy; retry": the 5 s rendezvous was lost.
+- "too many inline downloads are already active": the slot pool was full.
+- "Studio storage busy; retry the same request": `authorize`'s locks were busy before the lease
+  was sent.
+
+`nativeNoWrite` classifies exactly these. A queued Save, or the plain document or Index read
+(`refreshDoc`, `refreshIndex`), refused this way is resent automatically, the same request after
+250, 500 and 1000 ms, without counting the visit unless an earlier attempt was already uncertain
+(see below). The overlay, recovery, fault and blob reads are
+not resent; a refusal there shows as their ordinary read error until the next refresh. The
+backoffs total 1.75 s, but "Studio actor busy" itself arrives only after its 5 s rendezvous, so a
+Save refused that way four times takes about 22 s and a departure's 10 s timeout reports it as
+still saving. Only when the resends are used up does the Save settle. It settles as not written
+only when no earlier attempt of it was uncertain. It then stays uncounted, so the member's retry is
+admitted afresh against the current history, and reauthor is available subject to the record
+kind's usual restrictions. A record whose earlier attempt was uncertain (it failed after dispatch,
+and the member retried its exact request) stays uncertain, keeps its original request and cannot
+be reauthored. Later refusals cannot show what that first attempt did. Every other native error
+stays uncertain, including the few rarer refusals that also precede the lease (a server change
+before commit, a cancelled request, a lease-send expiry); that errs toward "may have committed".
+`studio-native-no-write.test.ts` pins all three texts to their single pre-execution sites in the
+Rust sources.
 A partial departure Save leaves the shared five-second deadline running for uncovered records.
 `saveBeforeLeaving()` (leaving the Studio, a channel, a server or the window) still covers every
 record. Before a first delivery, admission reads a record's document when no view of it is held
@@ -420,8 +477,8 @@ saved. A successful awaited Save is a snapshot, not a reservation of the next mi
 the gate's deferred callback and every App continuation recheck current ownership and close
 immediately before changing flags. A navigation call made
 without a route after an await is a new action of its own; `studio-exit-routes.test.ts` lists the
-few such calls (a completed join, leaving a server, channel reconciliation, a lost moderation
-permission) with their reasons, and every other one carries its function's route.
+few such calls (a completed join, channel reconciliation, a lost moderation permission) with their
+reasons, and every other one carries its function's route.
 
 In App, `switchView(v, route?)`, `switchServer(id, committed?, route?)`, `switchTo(id, keepSearch?,
 route?)`, `openWikiPage(name, opts?, route?)` and `openStatusRef(id, route?)` take the action's
@@ -443,6 +500,53 @@ when its navigation action has retired; it cannot relabel a replacement page or 
 rename result after lock/server replacement. Channel-open completions likewise check the original
 unlocked scope and current route before adding to the current sidebar or displaying an error.
 
+A server whose native session has ended accepts no Studio Save, so moving off it never waits on
+one. App's `serverGone(id, left)` handles both a leave and a closure:
+
+1. It retires the Studio's scope for that server without saving (`StudioSession.retireServer`).
+2. It takes a forced edge to no server.
+3. It begins a fresh `switchServer` to the next server. With the scope retired, that switch has
+   nothing to save.
+
+`server-closed` arrives through `serverClosed(id)`. The stopping actor emits it before
+`leave_server` returns, so while that server's leave is in flight (`leavingServers`) the event
+only records itself, and the leave's outcome decides:
+
+- If `leave_server` succeeds, it is a leave (`left`).
+- If it fails after the actor stopped, it is a closure.
+
+Otherwise the event is a closure.
+
+A closure keeps the server's unsaved records as a restored draft (`keep`, the same encoding lock
+uses), and an interrupted delivery comes back uncertain. The draft waits until that channel is
+open again. A lock does not restart a stopped actor: the node stays online and the next unlock
+lists the server again, still stopped. In practice, then, the draft waits until Mewtual restarts,
+and it is persisted in the continuity snapshot until then. Like any waiting draft it refuses new
+Studio edits meanwhile. The Studio sidebar shows it (`StudioSession.waitingDraft`) with an armed
+discard (`discardWaitingDraft()`), which also frees a draft whose channel was deleted.
+
+A leave drops the server's records, along with any waiting restored draft for it, which could
+never install. A toast names the server and says which happened, including a stroke that could not
+be kept ("partial").
+
+`leaveServer` settles first. With unsaved Studio work for that server, it runs the Save gate
+(`route.scope()`) while the actor can still take it. If that Save refuses, so does the leave; if a
+newer action retires the attempt, a toast says the leave was cancelled. With a restored draft for
+that server still waiting for its channel, it refuses and asks the member to save or discard the
+draft there. A draft App holds before the Studio loads is matched by its `scope.server`. Neither
+`leaveServer` nor `serverGone` touches the session while locked, and a leave error never replaces
+the lock screen's message.
+
+During a window close, `serverGone` still retires the scope: the close's input hold is kept, and a
+snapshot the close takes afterwards carries the kept draft. If the close is abandoned, the app is
+on no server, not the removed one. When a lock's continuity capture fails, the lock still proceeds
+and the lock screen keeps the "latest Studio edits could not be saved" warning (`error`).
+
+`preparePixa` (Play, `.pixa` download, Post, a published version, GIF export) captures the
+working model and, in the same turn, each of its frames' unsaved PIX. It then prepares from those,
+so an autosave receipt landing during a frame read cannot turn a `draft:` placeholder into a CID
+lookup.
+
 Studio's editor renders a document's retained requests whatever its read state: with no model
 (read error, absent, still reading), attention records keep their exact retry and armed discard
 beside the read error. Restored queued records awaiting an explicit Save
@@ -452,8 +556,9 @@ that document's records, so other documents' restored work stays held and anothe
 failure cannot refuse it. "That document's records" is `affectedObject(s) === id`, which also
 drives `pendingFor(id)` and the sidebar's held rows. An ordinary Index record names the entry as
 `object`. A Closing or Unconfirmed Index record keeps the channel Index as its native target
-(`object: null`, unchanged) and names the entry in `op.object`. Both halves of a rename are
-therefore one document's work on every route. The Index lane is shared, so one of these Index
+(`object: null`, unchanged) and names the entry in `op.object`; an Index recovery record of one
+entry names it in `edit.choice.id`. Both halves of a rename are therefore one document's work on
+every route. The Index lane is shared, so one of these Index
 records can sit behind another document's failed, uncertain or restored-held Index record. The
 Save then refuses at once and names that record ("waits behind an unsaved edit (…)"); what could
 run was released and still runs. Leaving a document also releases, without awaiting, its records
@@ -4451,6 +4556,70 @@ after selection publication, preserving global intent/allowance and revoking old
 Completed projections remain bound to the committed winner. Old exact-only records are not enriched.
 See the file contract for migration, directory barriers, execution ceilings and current resume limits.
 Remote confirmations and automated retention/eviction are not part of this interface.
+
+### Pre-upload video editing (frontend only)
+
+`embedMedia` (chat and announcement composers), `wikiEmbed` and `uploadFile` (Files tab) in
+App.svelte send each video whose declared type is `video/mp4`, `video/quicktime` or `video/webm`
+(`editableContainer`) through `reviewForUpload` → `reviewVideo(file, position, scope, context)`
+before upload, one at a time, when the WebView has WebCodecs (`webCodecsAvailable`) and the batch
+was not started with Shift (`asIs`: Shift+drop, or Shift+click on the picker label via the
+`shiftPick` action; see `upload-intent.ts`, which also explains why paste has no Shift form).
+Other files, and every file in a WebView without WebCodecs, upload exactly as before. No native
+command is added or changed; the main window's `dragDropEnabled` is `false` so file drops reach
+the page, `installFileDropGuard(window, document)` handles drops outside every zone (see the threat
+model; its iframe rule and the `.shift-pick` rule are in `drag-drop.css`, imported by `main.ts`,
+never inline), every file drop zone's `dragover` is `acceptFileDrag` (files only, effect `copy`),
+and every drop handler returns early on a drop that carries no files.
+
+- `VideoEditorContext` is `"chat" | "status" | "wiki" | "files"`, required on both the editor and
+  `VideoReviewQueue.request`. `editorWords(context)` gives the editor's ONE action ("post now" in
+  chat and announcements, "embed" in the wiki, "upload" in Files), its past tense for messages, and
+  `posts`: whether that action also sends. There is no separate attach, "as is" or "don't upload";
+  leaving is the ×/Esc, which asks "Discard this clip?" when anything was trimmed, removed or cut.
+- A result with `post: true` makes `embedMedia` snapshot the composer (`composerState`: text, and
+  for chat the reply target) when the editor answers, attach the file, and then call
+  `postFromComposer` only if the composer is unchanged; that runs `send()` or `postStatus()` and
+  reports whether a send actually started (each sets its in-flight flag before its first await).
+  Every outcome has its own toast: sending, "not sent: the message changed", "not sent yet".
+  `postStatus()` now refuses re-entry (`statusPosting`) and clears the box only if it still holds
+  what was posted.
+- `VIDEO_EDITOR_SHORTCUTS` (`video-editor-ui.ts`) is the Keybinds page's "Video editor" list.
+- `VideoEditor.svelte` props: `file`, `capBytes` (the server's `fileSizeLimit`, else the 1 GiB
+  protocol ceiling), optional `position` ("2 of 3"), `context`, `onfinish(result)`, `passKey(e)`
+  (keys the modal lets through to the app: App passes Lock and push-to-talk), and test seams
+  `probe`/`exporter`/`thumbnails`. `onfinish` fires exactly once; an editor unmounted before it
+  answered answers `skip` on its way out.
+- `VideoEditorResult` (`video-export.ts`): `{kind:"original", post?}` uploads the picked bytes
+  unchanged; `{kind:"edited", file, post?}` uploads a re-encode named
+  `editedFileName(name, container)` with type `video/mp4` or `video/webm`; `{kind:"skip"}` uploads
+  nothing for that file.
+- `VideoReviewQueue` (`video-review.ts`) is the host side: one editor open at a time, later
+  requests wait their turn (they never close the open one), `finish(id, result)` ignores any id
+  but the open review's, and `rescope(scope)` settles every review bound to an old scope as
+  `skip`, reporting the closed editor's context for the message. App mounts the editor in a keyed
+  `{#each}` so each instance answers under its own id.
+- `embedMedia`, `wikiEmbed` and `uploadFile` bind a batch to `videoEditorScope` (lock state, server,
+  channel) and to `videoScopeEpoch` (bumped on every scope change, so a round trip away and back
+  still counts); the wiki batch also to its page and the Files batch to its folder. Each checks
+  before every item, after every review and after every upload. Once anything has
+  changed, nothing more is reviewed or uploaded and nothing is attached to the composer now on
+  screen; toasts say so (not on lock), including for queued reviews dropped by the change.
+  Mouse back/forward buttons do nothing while an editor is open.
+- The editor is modal at z-index 59: below the call bar, incoming-call prompt and floating call
+  stage (60), above ordinary overlays. It keeps focus (a backdrop press, focus landing outside,
+  and focus dropping to `<body>` when a focused control is disabled all return it), yields focus
+  to the next queued editor, suppresses context menus over itself, and stops every key except
+  those `passKey` lets through. App's `videoEditorPassKey` passes Ctrl/Cmd+L and an unmodified
+  push-to-talk press only; the editor `preventDefault`s a passed unmodified key so it cannot also
+  press a focused button.
+- `video-edit.ts` is the pure model (cuts, removed pieces, trim handles, undo/redo, the export
+  plan and per-frame/per-chunk mapping). `video-export.ts` owns the Mediabunny pipeline:
+  `probeVideo`, `filmstrip`, `exportEditedVideo`, and `CappedBytes`. The export rejects with
+  `ExportCanceledError`, `OutputTooLargeError`, or an `Error` whose message is a sentence for the
+  person; library errors are replaced by a generic sentence and kept on `cause`.
+- Mediabunny (MPL-2.0, pinned 1.61.3) is imported dynamically, so it is a separate chunk loaded
+  only when an editor opens. See the threat model's pre-upload video editing boundary.
 
 ## 13. Call identity and Flipnote frame claims  *(Gate 5; desktop WebRTC; docs/GATE5-DESIGN.md)*
 

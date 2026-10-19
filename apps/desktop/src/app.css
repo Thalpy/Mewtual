@@ -21,7 +21,8 @@
   --accent: #977df2;
   --accent-hi: #ab95f5;                                   /* hover     */
   --accent-dim: color-mix(in oklab, var(--accent) 16%, var(--panel)); /* tint bg */
-  --on-accent: #131218;   /* text on a solid accent background    */
+  --on-accent: #131218;   /* text on a solid accent background; a dark custom
+                             accent swaps it to white (accent-ink.ts) */
 
   /* semantic; constant across presets; these colours have jobs */
   --ok: #5ec96e;          /* presence · connected · encrypted     */
@@ -36,6 +37,10 @@
   --danger-dim: color-mix(in oklab, var(--danger) 14%, var(--panel));
   --danger-brd: color-mix(in oklab, var(--danger) 40%, var(--panel));
   --transfer: #4f9cf8;    /* bytes actively moving                */
+  /* Dark text on a solid --ok/--warn/--danger fill (some red badges use plain #fff instead).
+     Fixed like those colours: borrowing --on-accent, which follows a custom or livery accent and
+     can turn white, sank a gold badge or a red Leave under a dark accent. */
+  --on-signal: #131218;
 
   /* type */
   --ui: "Segoe UI", system-ui, -apple-system, sans-serif;
@@ -3797,11 +3802,18 @@ button.primary:hover:not(:disabled) {
   border-radius: 999px;
   border: 1px solid var(--border);
   background: var(--panel);
+  /* A chip is a <button>: without its own ink it inherits --on-accent, the accent's near-black,
+     and the count and the "+" vanished into the panel. */
+  color: var(--text);
   font-size: 0.8rem;
   line-height: 1.5;
   cursor: pointer;
 }
+/* `button:hover` (0,1,1) would repaint the chip in --accent-hi under its --text ink; keep the
+   chip's own ground and let the brightness lift be the hover. `.reaction.mine` comes later at
+   equal specificity, so a chip of mine keeps its accent tint. */
 .reaction:hover {
+  background: var(--panel);
   filter: brightness(1.25);
 }
 .reaction.mine {
@@ -5549,6 +5561,7 @@ button.call-start {
 }
 .call-hangup {
   background: var(--danger);
+  color: var(--on-signal);
 }
 .call-hangup:hover {
   background: var(--danger-hi);
@@ -7016,13 +7029,15 @@ button.you-panel:hover {
   border-radius: 0 0 var(--r) var(--r);
 }
 .piano-key:hover { border-color: var(--accent); }
-.piano-key:hover:not(.sharp) { background: #fffefa; }
+/* Not while held: the ivory hover out-specifies `.held`, so a key pressed with the mouse lost its
+   lit ground and kept only the held ink, which is white under a dark accent. */
+.piano-key:hover:not(.sharp):not(.held) { background: #fffefa; }
 .piano-key.sharp:hover { background: linear-gradient(#3f3d47, #1d1c23); }
 /* Held = sounding right now; the key stays lit for exactly as long as the note is recorded. */
 .piano-key.held,
 .piano-key.sharp.held {
   background: var(--accent);
-  color: var(--bg-0);
+  color: var(--on-accent);
   border-color: var(--accent);
   box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.28);
   transform: translateY(1px);
@@ -8852,12 +8867,12 @@ button.stage-act.on:hover {
 button.stage-leave {
   background: var(--danger);
   border-color: var(--danger);
-  color: var(--on-accent);
+  color: var(--on-signal);
 }
 button.stage-leave:hover {
   background: var(--danger-hi);
   border-color: var(--danger-hi);
-  color: var(--on-accent);
+  color: var(--on-signal);
 }
 
 /* Device pickers: two compact rows; OUT is absent where setSinkId is. */
@@ -9571,7 +9586,7 @@ button.focus-leave,
 button.focus-leave:hover {
   background: var(--danger);
   border-color: var(--danger);
-  color: var(--on-accent);
+  color: var(--on-signal);
 }
 
 /* Docked drawer: the same snippet the stage renders, held to a readable width in a wide window. */
@@ -12493,7 +12508,7 @@ label.space-file input {
 .sidebar-mod { width: 100%; min-height: 34px; justify-content: flex-start; padding: 0 9px; }
 .sidebar-mod .ico { width: 16px; height: 16px; }
 .sidebar-mod span { flex: 1; text-align: left; }
-.sidebar-mod b { min-width: 18px; padding: 1px 5px; border-radius: 999px; background: var(--warn); color: var(--on-accent); font: 0.62rem var(--mono); text-align: center; }
+.sidebar-mod b { min-width: 18px; padding: 1px 5px; border-radius: 999px; background: var(--warn); color: var(--on-signal); font: 0.62rem var(--mono); text-align: center; }
 .sidebar-ops { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin-top: 5px; }
 .sidebar-ops button { min-width: 0; min-height: 38px; flex-direction: column; gap: 1px; padding: 3px; font-size: 0.62rem; }
 .sidebar-ops .ico { width: 15px; height: 15px; }
@@ -12561,7 +12576,7 @@ a:hover .mod-node { filter: brightness(1.35); }
 .warned-collapse:hover { background: color-mix(in srgb, var(--warn-dim) 75%, var(--bg-elev)); }
 .warned-collapse > span:last-child { display: flex; flex-direction: column; gap: 1px; }
 .warned-collapse small { color: var(--muted); }
-.warned-mark { display: grid; place-items: center; flex: 0 0 22px; height: 22px; border-radius: 50%; background: var(--warn); color: var(--on-accent); font: 800 .75rem var(--mono); }
+.warned-mark { display: grid; place-items: center; flex: 0 0 22px; height: 22px; border-radius: 50%; background: var(--warn); color: var(--on-signal); font: 800 .75rem var(--mono); }
 .warning-banner { display: flex; gap: 5px; width: 100%; margin: 0 0 6px; padding: 5px 7px; border: 0; border-left: 2px solid var(--warn); background: var(--warn-dim); color: var(--text-2); text-align: left; }
 .warning-banner span { margin-left: auto; color: var(--muted); font-size: .62rem; }
 .community-votes { margin: 8px 14px 0; border: 1px solid var(--warn); background: color-mix(in srgb, var(--warn-dim) 42%, var(--panel)); }

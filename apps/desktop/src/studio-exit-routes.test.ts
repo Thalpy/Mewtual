@@ -9,8 +9,9 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { fileURLToPath } from "node:url";
-import { deferred } from "./studio-testkit.ts";
+import { CHANNEL, ME, SERVER, deferred, fakeIpc, flipnoteContent, id32, indexContent, ordinaryView, settle } from "./studio-testkit.ts";
 import { createStudioExit } from "./studio-exit.ts";
+import { decodeStudioDraft } from "./studio-draft.ts";
 
 // Git may check out CRLF on Windows. Audit logical source lines identically on both platforms;
 // every guard, forced-edge count and negative probe below remains unchanged.
@@ -107,7 +108,7 @@ test("every App route away from the Studio asks the exit gate before changing th
 // inside the callee, so the site audit above cannot see these.
 const LATE_FRESH_ACTIONS: Record<string, string> = {
   "pairJoinAll:switchServer": "a join the member started has completed; showing the joined server is its result (switchServer saves the Studio first)",
-  "leaveServer:switchServer": "membership already ended; moving off the removed server is forced",
+  "leaveServer:serverGone": "the native leave ended the server's session; moving off it is forced, and its fresh switch has no Studio work of that server left to save",
   "refreshChannels:switchTo": "the active channel vanished from the listing; reconciliation is forced",
   "refreshRoles:switchView": "the moderation surface's permission was lost; leaving it is forced",
   "handleRichClick:openStatusRef": "the status-chip branch begins its own action; the earlier awaits are the wikilink branch's",
@@ -116,7 +117,8 @@ const LATE_FRESH_ACTIONS: Record<string, string> = {
 test("no navigation call after an await takes a fresh claim unless it is a stated new action", () => {
   const declarations = [...source.matchAll(/\n {2}(?:async )?function (\w+)\(/g)].map(m => ({ name: m[1], start: m.index!, end: source.indexOf("\n  }\n", m.index!) }));
   const found: string[] = [];
-  for (const m of source.matchAll(/\b(switchView|switchServer|switchTo|openWikiPage|openStatusRef)\(/g)) {
+  // serverGone starts a fresh switchServer synchronously, so a call to it after an await is one too.
+  for (const m of source.matchAll(/\b(switchView|switchServer|switchTo|openWikiPage|openStatusRef|serverGone)\(/g)) {
     if (/function\s*$/.test(source.slice(m.index! - 12, m.index!))) continue; // the declaration itself
     const fn = declarations.filter(f => f.start < m.index! && f.end > m.index!).at(-1);
     if (!fn) continue;
@@ -133,10 +135,10 @@ test("no navigation call after an await takes a fresh claim unless it is a state
 
 test("forced edges are few, explicit and each carries its reason", () => {
   const forced = sites().filter(s => s.how === "forced");
-  // Lock (group, clearServerView, unready, locked), leaving the last server (group,
-  // clearServerView), that server closing natively (group, clearServerView), and the vault change
-  // restarting its own first step after a failed attempt (already off the Studio).
-  assert.equal(forced.length, 9, forced.map(s => `App.svelte:${s.line} ${s.text}`).join("\n"));
+  // Lock (group, clearServerView, unready, locked), a server's native session ending (serverGone,
+  // for a leave or a closure: group, clearServerView), and the vault change restarting its own
+  // first step after a failed attempt (already off the Studio).
+  assert.equal(forced.length, 7, forced.map(s => `App.svelte:${s.line} ${s.text}`).join("\n"));
   for (const s of forced) {
     const lineStart = source.lastIndexOf("\n", s.at - 1) + 1;
     const marked = commentAbove(lineStart) + source.slice(lineStart, source.indexOf("\n", s.at));
@@ -478,10 +480,10 @@ function productionWikiActions() {
     unlockedViewCurrent: (gen: number, server: number | null) => !state.locked && gen === state.viewGeneration && server === state.activeServerId,
     invokeDebugged: async (cmd: string, args: Record<string, unknown>) => { calls.push({ cmd, args }); return { value: await pending.promise }; },
     invoke: async (cmd: string, args: Record<string, unknown>) => { calls.push({ cmd, args }); if (cmd === "get_wiki_history") return history.promise; await pending.promise; },
-    refreshWiki: async () => {}, toast: () => {},
+    refreshWiki: async () => {}, toast: (_text: string) => {},
   };
-  const app = production<{ saveWikiPage: () => Promise<void>; deleteWikiPage: (name: string) => Promise<void>; setWikiPageFormat: (fmt: string) => Promise<void>; openWikiHistory: () => Promise<void> }>(
-    ["wikiPane", "wikiPaneCurrent", "saveWikiPage", "deleteWikiPage", "setWikiPageFormat", "openWikiHistory"], state);
+  const app = production<{ saveWikiPage: () => Promise<void>; deleteWikiPage: (name: string) => Promise<void>; setWikiPageFormat: (fmt: string) => Promise<void>; openWikiHistory: () => Promise<void>; restoreWikiRev: (rev: string) => Promise<void> }>(
+    ["wikiPane", "wikiPaneCurrent", "saveWikiPage", "deleteWikiPage", "setWikiPageFormat", "openWikiHistory", "restoreWikiRev"], state);
   const openPage = (page: string, body: string) => { state.activeWikiPage = page; state.wikiPaneSerial++; state.wikiBody = body; state.wikiDirty = true; };
   const switchServer = (id: number) => { state.activeServerId = id; state.viewGeneration++; };
   return { state, app, calls, openPage, switchServer, answer: async (ok: boolean) => { pending.resolve(ok); await flush(); }, history };
@@ -543,6 +545,14 @@ test("wiki save, delete, format and history act only on the page and server they
   await fmt.answer(false); await formatting;
   const set = fmt.calls.find(c => c.cmd === "set_wiki_format")!;
   assert.deepEqual([set.args.server, set.args.name], [1, "N"]); assert.deepEqual(fmt.state.wikiMeta, {}, "B's page metadata is untouched");
+
+  // Restoring X's revision, then opening Y before the reply: the toast names X, Y's history stays.
+  const restore = productionWikiActions(); const toasts: string[] = []; restore.state.toast = (text: string) => { toasts.push(text); };
+  restore.state.showWikiHistory = true;
+  const restoring = restore.app.restoreWikiRev("r1"); restore.openPage("Y", "y"); restore.state.showWikiHistory = true;
+  await restore.answer(false); await restoring;
+  assert.deepEqual(restore.calls[0].args, { server: 1, page: "X", rev: "r1" });
+  assert.match(toasts[0], /Restored "X"/); assert.equal(restore.state.showWikiHistory, true, "Y's open history is not closed by X's restore");
 
   // History read for X lands nowhere once the pane moved on, or behind a lock.
   for (const move of ["page", "lock"] as const) {
@@ -677,4 +687,263 @@ test("a wiki open loses permission if a newer action or close lands after its fi
     assert.equal(f.state.view, "chat"); assert.equal(f.state.wikiBody, "studio was here");
     assert.equal(f.state.activeWikiPage, ""); assert.equal(f.state.wikiPaneSerial, 0);
   }
+});
+
+/** A `with` scope for a large App function whose other dependencies do not matter to the test: the
+ * named state wins, then real globals, and any other name is an inert stub that can be called,
+ * read through or assigned to. A stub is not thenable and converts to 0 (`x += 1` stays numeric). */
+function inertScope(state: Record<string, unknown>): Record<string, unknown> {
+  const stub: unknown = new Proxy(function () {}, {
+    get: (_t, p) => p === Symbol.toPrimitive ? () => 0 : p === "then" ? undefined : stub,
+    apply: () => stub, set: () => true,
+  });
+  return new Proxy(state, {
+    has: () => true,
+    get: (t, p) => typeof p === "string" && p in t ? t[p] : p === Symbol.unscopables ? undefined
+      : p in globalThis ? (globalThis as Record<PropertyKey, unknown>)[p] : stub,
+    set: (t, p, v) => { if (typeof p === "string") t[p] = v; return true; },
+  });
+}
+
+// Review of d2548a37, P3: lock assigned the "latest Studio edits could not be saved" warning, then
+// its own later `error = ""` erased it, so the member was never told. This runs the whole production
+// lockScreen with a capture that fails, as a full draft queue makes it.
+test("lock keeps its warning that the latest Studio edits could not be captured", async () => {
+  const { captureLockContinuity } = await import("./window-close.ts");
+  for (const failing of [true, false]) {
+    let submitted: unknown = "unset", resets = 0;
+    const state = {
+      locked: false, error: "an earlier message", uiStateReady: true, inboxIdle: undefined,
+      uiStateSaveTimer: undefined, inboxTimer: undefined, newsAggregateTimer: undefined, inCall: false,
+      captureLockContinuity,
+      continuityJson: () => { if (failing) throw new Error("Too many unsaved edits"); return "{}"; },
+      nativeVaultLock: { begin: (json: unknown) => { submitted = json; return Promise.resolve({}); } },
+      studioReset: () => { resets++; },
+    };
+    const scope = inertScope(state);
+    production<{ lockScreen: () => void }>(["lockScreen"], scope).lockScreen();
+    assert.equal(state.locked, true); assert.equal(resets, 1, "the Studio was cleared");
+    if (failing) {
+      assert.equal(submitted, null, "the lock went ahead without the snapshot");
+      assert.match(state.error, /^Locked, but the latest Studio edits could not be saved: .*Too many unsaved edits/);
+    } else {
+      assert.equal(submitted, "{}"); assert.equal(state.error, "", "an ordinary lock clears the old message");
+    }
+  }
+});
+
+// Review of d2548a37, P2 1: leaving a server, or that server closing natively, moved off it through
+// switchServer's Save gate after its actor had stopped. The Save could not land, so the app stayed
+// selected on the removed server and the Studio stayed scoped to it. This runs the production
+// leaveServer and serverGone over the real Studio session, studio-state and exit gate; the native
+// leave stops the actor and emits `server-closed` before it returns, as lib.rs does.
+const OTHER = SERVER + 1, DOC = id32(1);
+async function productionServerRemoval(opts: { applyFails?: boolean; whileLeaving?: () => void; leaveFailsAfterStop?: boolean; reply?: Promise<void> } = {}) {
+  const st = await import("./studio-state.svelte.ts");
+  const ipc = fakeIpc(), calls: string[] = [], toasts: string[] = [];
+  let stopped = false;
+  ipc.on("studio_list", () => ({ ...ordinaryView(indexContent()), group: "deadbeef" }));
+  ipc.on("studio_read", () => ({ ...ordinaryView(flipnoteContent({ frames: [] })), group: "deadbeef" }));
+  ipc.on("studio_apply", () => {
+    calls.push("studio_apply");
+    if (stopped) throw "server is not running"; // the stopped actor: nothing can land
+    if (opts.applyFails) throw "Studio transaction expired, cancelled or server stopped";
+    return ordinaryView(flipnoteContent({ fps: 7, frames: [] }));
+  });
+  st.useStudioIpc(ipc, 5000);
+  const session = st.ensureStudio(ME);
+  st.setStudioScope(SERVER, CHANNEL); session.flush(); session.open(DOC); await settle(8);
+  const state = {
+    servers: [{ id: SERVER, name: "Alpha" }, { id: OTHER, name: "Beta" }], activeServerId: SERVER as number | null, view: "studio",
+    windowCloseInFlight: false, locked: false, uiStateReady: true, uiStateLoadGeneration: 1, inCall: false, callServer: null, error: "", fileTrustPolicies: {},
+    restoredStudioDraft: null as string | null, leavingServers: new Map<number, { session: number; closed: boolean }>(),
+    leaveVoice: () => {}, saveUiStateImmediately: async () => {}, beginViewSwitch: () => {},
+    toast: (text: string) => { toasts.push(text); },
+    clearServerView: () => { state.view = "chat"; },
+    studioWork: st.studioWork, retireStudioServer: st.retireStudioServer, studioHasWork: st.studioHasPending,
+    studioExit: createStudioExit({ onStudio: () => state.view === "studio", hasWork: st.studioHasPending, closing: () => false,
+      claim: st.claimStudioNavigation, save: async () => { try { await st.saveStudio(); return true; } catch (e) { toasts.push(String(e)); return false; } } }),
+    // switchServer's production gate (pinned by the switchServer test above), then its commit.
+    switchServer: async (id: number) => {
+      if (state.windowCloseInFlight) return false;
+      const route = state.studioExit.begin();
+      if ((!route.current() || st.studioHasPending()) && !(await route.scope())) return false;
+      state.activeServerId = id; state.view = "chat"; return true;
+    },
+    invoke: async (cmd: string) => {
+      calls.push(cmd); assert.equal(cmd, "leave_server");
+      opts.whileLeaving?.();
+      stopped = true; app.serverClosed(SERVER); // the stopping actor's event, before leave_server returns
+      if (opts.reply) await opts.reply;
+      if (opts.leaveFailsAfterStop) throw "could not remove the server's registry entry";
+    },
+  };
+  const app = production<{ serverGone: (id: number, left: boolean) => void; serverClosed: (id: number) => void; leaveServer: (id: number) => Promise<void> }>(
+    ["restoredDraftServer", "serverGone", "serverClosed", "leaveServer"], state);
+  return { st, session, state, calls, toasts, app, stop: () => { stopped = true; } };
+}
+
+test("a removed server is moved off without a Save to its stopped actor, and the Studio scope follows", async () => {
+  assert.match(source, /listen<\{ server: number \}>\("server-closed", \(e\) => serverClosed\(e\.payload\.server\)\)/,
+    "the event takes the same path; a leave in flight decides it");
+  const { disposeStudio } = await import("./studio-state.svelte.ts");
+  try {
+    // A voluntary leave saves the unsent edit while the actor can still take it, then leaves.
+    const leave = await productionServerRemoval();
+    leave.session.setFps(DOC, 7);
+    await leave.app.leaveServer(SERVER); await settle(8);
+    assert.deepEqual(leave.calls, ["studio_apply", "leave_server"], "saved first, and nothing sent after the stop");
+    assert.equal(leave.state.activeServerId, OTHER); assert.deepEqual(leave.state.servers.map(s => s.id), [OTHER]);
+    assert.deepEqual([leave.session.scope, leave.session.saves.length, leave.st.studioDraftSnapshot()], [null, 0, null]);
+    assert.deepEqual(leave.toasts, []);
+    leave.st.setStudioScope(OTHER, CHANNEL); // the Studio's scope effect on the next server: no refusal
+    assert.equal(leave.session.scope?.server, OTHER);
+
+    // An edit made while the native leave runs cannot be saved anywhere: it is dropped and said so.
+    const during = await productionServerRemoval({ whileLeaving: () => during.session.setFps(DOC, 9) });
+    await during.app.leaveServer(SERVER); await settle(8);
+    assert.deepEqual(during.calls, ["leave_server"]);
+    assert.equal(during.state.activeServerId, OTHER);
+    assert.deepEqual([during.session.scope, during.session.saves.length, during.st.studioDraftSnapshot()], [null, 0, null]);
+    assert.equal(during.toasts.length, 1); assert.match(during.toasts[0], /^You left Alpha, .*discarded/);
+
+    // A server closed under the session: no Save is attempted, and the edit is kept for its channel.
+    const closed = await productionServerRemoval();
+    closed.session.setFps(DOC, 7); closed.stop();
+    closed.app.serverClosed(SERVER); await settle(8);
+    assert.deepEqual(closed.calls, [], "nothing was sent to the stopped actor");
+    assert.equal(closed.state.activeServerId, OTHER); assert.equal(closed.state.view, "chat");
+    assert.deepEqual([closed.session.scope, closed.session.saves.length], [null, 0]);
+    const kept = decodeStudioDraft(closed.st.studioDraftSnapshot()!);
+    assert.deepEqual([kept.scope.server, kept.scope.channel, kept.records.length], [SERVER, CHANNEL, 1]);
+    assert.match(closed.toasts.join("; "), /^Alpha stopped\. Its unsaved Studio edits are kept and come back when you open their channel after Mewtual restarts/);
+    closed.st.setStudioScope(OTHER, CHANNEL); await settle(8); // the next server's Studio is not refused
+    assert.equal(closed.session.scope?.server, OTHER);
+    closed.st.setStudioScope(SERVER, CHANNEL); await settle(8); // the server is back (Mewtual restarted)
+    const [held] = closed.session.saves;
+    assert.equal(closed.session.saves.length, 1); assert.equal(closed.session.awaitsExplicitSave(held.id), true, "back, held for an explicit Save");
+
+    // A Save that cannot land before the leave refuses the leave: nothing is left, nothing moves.
+    const refused = await productionServerRemoval({ applyFails: true });
+    refused.session.setFps(DOC, 7);
+    await refused.app.leaveServer(SERVER); await settle(8);
+    assert.deepEqual(refused.calls, ["studio_apply"]); assert.equal(refused.state.activeServerId, SERVER);
+    assert.equal(refused.state.servers.length, 2); assert.equal(refused.session.saves.length, 1);
+
+    // A restored draft for that server waits for its channel; the leave refuses until it is settled.
+    const restored = await productionServerRemoval();
+    restored.session.setFps(DOC, 7);
+    const json = restored.st.studioDraftSnapshot()!;
+    restored.session.reset(); restored.st.restoreStudioDraft(json); restored.st.setStudioScope(OTHER, CHANNEL); await settle(8);
+    restored.state.activeServerId = OTHER;
+    await restored.app.leaveServer(SERVER); await settle(8);
+    assert.deepEqual(restored.calls, [], "not left"); assert.equal(restored.state.servers.length, 2);
+    assert.match(restored.toasts.join("; "), /restored Studio edits/);
+    assert.equal(restored.st.studioDraftSnapshot(), json, "the draft is untouched");
+  } finally { disposeStudio(); }
+});
+
+test("an old leave reply cannot retire replacement Studio state or another session's leave operation", async () => {
+  const { disposeStudio } = await import("./studio-state.svelte.ts");
+  try {
+    for (const failed of [false, true]) {
+      for (const replacement of [false, true]) {
+        const reply = deferred<void>();
+        const h = await productionServerRemoval({ reply: reply.promise, leaveFailsAfterStop: failed });
+        const leaving = h.app.leaveServer(SERVER);
+        await settle(4);
+        assert.deepEqual(h.calls, ["leave_server"]);
+        h.state.locked = true; h.state.uiStateLoadGeneration++;
+        h.session.reset();
+        h.state.locked = false; h.state.uiStateLoadGeneration++;
+        h.st.setStudioScope(SERVER, CHANNEL); h.session.open(DOC); await settle(8);
+        h.session.setFps(DOC, 11);
+        h.state.error = "replacement session";
+        h.state.fileTrustPolicies = { [SERVER]: "replacement policy" };
+        const draft = h.st.studioDraftSnapshot();
+        const next = { session: h.state.uiStateLoadGeneration, closed: false };
+        if (replacement) h.state.leavingServers.set(SERVER, next);
+        reply.resolve(); await leaving; await settle(4);
+        assert.equal(h.state.activeServerId, SERVER, "old completion cannot force navigation");
+        assert.deepEqual(h.state.servers.map(s => s.id), [SERVER, OTHER]);
+        assert.equal(h.state.error, "replacement session");
+        assert.deepEqual(h.state.fileTrustPolicies, { [SERVER]: "replacement policy" });
+        assert.equal(h.st.studioDraftSnapshot(), draft, "new unsaved work is untouched");
+        assert.deepEqual(h.toasts, []);
+        if (replacement) assert.equal(h.state.leavingServers.get(SERVER), next, "original completion cannot delete a replacement operation");
+        else assert.equal(h.state.leavingServers.has(SERVER), false, "its own bookkeeping can retire");
+      }
+    }
+  } finally { disposeStudio(); }
+});
+
+test("an old pending leave cannot hide a server closure in the replacement unlocked session", async () => {
+  const { disposeStudio } = await import("./studio-state.svelte.ts");
+  const reply = deferred<void>();
+  try {
+    const h = await productionServerRemoval({ reply: reply.promise });
+    const leaving = h.app.leaveServer(SERVER); await settle(4);
+    h.state.uiStateLoadGeneration += 2; // lock, then unlock; old reply is still held
+    h.session.reset(); h.st.setStudioScope(SERVER, CHANNEL); h.session.open(DOC); await settle(8);
+    h.session.setFps(DOC, 13);
+    h.app.serverClosed(SERVER); await settle(4);
+    assert.equal(h.state.activeServerId, OTHER, "current closure is handled immediately");
+    assert.equal(h.session.scope, null);
+    const draft = h.st.studioDraftSnapshot();
+    assert.equal(decodeStudioDraft(draft!).scope.server, SERVER, "current unsaved work is retained");
+    const toasts = [...h.toasts];
+    reply.resolve(); await leaving; await settle(4);
+    assert.equal(h.st.studioDraftSnapshot(), draft); assert.deepEqual(h.toasts, toasts, "old reply remains inert");
+  } finally { reply.resolve(); disposeStudio(); }
+});
+
+// Re-review of the fix: the event's timing, a failed leave, a lock and a window close.
+test("a removed server stays coherent when the leave fails after the stop, the event is late, or a lock or close races it", async () => {
+  const { disposeStudio } = await import("./studio-state.svelte.ts");
+  try {
+    // leave_server failed after the actor stopped: still a member, so a closure, and the edit drawn
+    // during it is kept rather than discarded under a "You left" message.
+    const failed = await productionServerRemoval({ leaveFailsAfterStop: true, whileLeaving: () => failed.session.setFps(DOC, 9) });
+    await failed.app.leaveServer(SERVER); await settle(8);
+    assert.equal(failed.state.error, "could not remove the server's registry entry");
+    assert.equal(failed.state.activeServerId, OTHER); assert.deepEqual(failed.session.saves.length, 0);
+    assert.equal(decodeStudioDraft(failed.st.studioDraftSnapshot()!).scope.server, SERVER, "kept");
+    assert.equal(failed.toasts.length, 1); assert.match(failed.toasts[0], /^Alpha stopped\./);
+
+    // The event arriving after leave_server's response finds the server already gone.
+    const late = await productionServerRemoval();
+    late.state.invoke = async (cmd: string) => { late.calls.push(cmd); late.stop(); };
+    await late.app.leaveServer(SERVER); late.app.serverClosed(SERVER); await settle(8);
+    assert.equal(late.state.activeServerId, OTHER); assert.deepEqual(late.toasts, []);
+
+    // A lock during the native leave keeps the lock screen's own message, and the session alone.
+    const locking = await productionServerRemoval({ leaveFailsAfterStop: true });
+    locking.session.setFps(DOC, 7);
+    locking.state.invoke = async (cmd: string) => {
+      locking.calls.push(cmd); locking.stop();
+      locking.state.locked = true; locking.state.error = "Locked, but the latest Studio edits could not be saved: full";
+      locking.app.serverClosed(SERVER); throw "leave failed";
+    };
+    await locking.app.leaveServer(SERVER); await settle(8);
+    assert.equal(locking.state.error, "Locked, but the latest Studio edits could not be saved: full");
+    assert.deepEqual(locking.toasts, []);
+
+    // A server closing during a window close: the session's scope is retired and its edit kept for
+    // the close's snapshot; the app is on no server, never on the removed one, if the close fails.
+    const closing = await productionServerRemoval();
+    closing.session.setFps(DOC, 7); closing.stop(); closing.state.windowCloseInFlight = true;
+    closing.app.serverClosed(SERVER); await settle(8);
+    assert.equal(closing.state.activeServerId, null); assert.equal(closing.session.scope, null);
+    assert.equal(decodeStudioDraft(closing.st.studioDraftSnapshot()!).records.length, 1);
+
+    // App's own copy of a draft restored at unlock (the Studio not loaded yet) refuses only a leave
+    // of the server it belongs to.
+    const unloaded = await productionServerRemoval();
+    unloaded.session.setFps(DOC, 7);
+    const json = unloaded.st.studioDraftSnapshot()!; unloaded.session.reset();
+    unloaded.state.restoredStudioDraft = json;
+    await unloaded.app.leaveServer(SERVER); assert.deepEqual(unloaded.calls, [], "its server: refused");
+    unloaded.state.restoredStudioDraft = json.replace(`"server":${SERVER}`, `"server":${OTHER}`);
+    await unloaded.app.leaveServer(SERVER); assert.deepEqual(unloaded.calls, ["leave_server"], "another server's: left");
+  } finally { disposeStudio(); }
 });

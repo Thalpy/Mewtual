@@ -1,5 +1,19 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Gate7 upload and session replacement boundaries (19 October)
+
+Browser batch admission bounds retained user-selected File objects to one batch of at most32,
+with a separate16-request review-queue bound. These are renderer lifecycle bounds, not a byte
+bound on browser media decoders or the operating system. The native file limits remain independent.
+
+An earlier upload/review cannot insert into a reopened wiki pane, a replacement unlocked session,
+or a composer after close captured continuity. Currency uses the actual pane identity and original
+session generation, not equality of the visible page/server name. Close retires reviews before
+awaiting any save. Old leave-server responses cannot force-retire new Studio work, change trust
+settings, expose old errors or delete a replacement leave operation. Announcement completion uses
+the same session/close boundary. In-flight native transfers still have their own authority checks;
+discarding a browser continuation neither rolls back a shared file nor proves native cancellation.
+
 ## Inactive browser derivation boundary (19 October)
 
 The browser v5 plan binds the exact owner, broker-generated private-key handle, accepted local
@@ -362,6 +376,89 @@ tests do not prove browser-copy ownership, general SDP action integration or RTC
 Full-chain integrated progress and native/browser/RTC result recovery remain requirements.
 General Pair.open is not a live adapter path;
 SDP/ICE still need native current-offer receipts and charged dispatch/result ownership.
+
+## Pre-upload video editing boundary (2026-10-19)
+
+A video added to the chat or announcement composer, a wiki page or the Files tab opens
+`VideoEditor.svelte` before upload, unless Shift was held through the drop or the picker click.
+This is a sender-side product feature with no protocol, wire or native-command change: the result
+is an ordinary `File` that goes through the existing `begin_file_upload` path, limits and
+magic-byte check.
+
+What the honest sender's client guarantees:
+
+- **Removed time is absent from the uploaded bytes.** An edited video is decoded and re-encoded
+  from the kept frames only (`copy: false`); no packet is ever copied. A packet copy would have to
+  start on a key frame and so could carry seconds of cut footage into the file, hidden from a
+  player but present for anyone holding the bytes. A frame is encoded only for the part of its
+  display time inside a kept range: a frame wholly inside removed time is never encoded, and the
+  frame already on screen at a cut point (it began up to one frame earlier) opens the next range,
+  which is also what the preview shows there. Mediabunny's encoder-support probe encodes one frame
+  into a discarded null target that never reaches the output. Verified against real codecs in
+  headless Edge (MP4, MOV, WebM), not only in unit tests.
+- **Descriptive metadata is not carried into edited uploads.** The output container is written
+  fresh with an empty tag set (`tags: {}`), so the source's title, comment and the location or
+  device tags phone footage often carries are not copied. Checked end to end for title and
+  comment; other tag kinds rely on the muxer writing only what it is given.
+- **Output is bounded** by the server's upload limit (or the 1 GiB protocol ceiling while that is
+  unread): `CappedBytes` refuses to grow past it and the export stops. Assembling the final Blob
+  briefly holds about twice the output.
+- **Parsing surface.** Decoding uses the WebView's own decoders, as previewing does. Mediabunny's
+  JavaScript demuxer is new parsing surface on top of that; its worst case is a hung or crashed
+  page, not code execution outside the WebView. The editor opens the sender's own pick, but that
+  can be a video previously downloaded from a peer, so peer-authored bytes can reach it. Inbound
+  inline media and the native-decode rule for images are not changed by this path.
+- **Video with transparency is refused** before editing: Mediabunny would need blob-URL workers
+  for it, which the CSP blocks. The test is whether the first packet carries alpha data, not the
+  container's alpha flag (Chrome's recorder sets that on opaque canvas captures too). A file whose
+  alpha only starts later fails at export, closed, with the generic message.
+
+File drops (2026-10-19, follow-up): the main window now sets `dragDropEnabled: false`, so files
+dropped from the OS reach the page's drop zones as HTML5 drops (with Tauri's default, wry handled
+drops natively and switched external drops off for the whole webview). Three browser defaults come
+with that, and `drop-guard.ts` closes each for drags that start outside the page:
+
+- a file dropped outside every zone would navigate the webview to it; a link dropped anywhere
+  that is not a text field would be followed (there is no back button in this window). An
+  unaccepted `dragover` gets the drop effect `none` and the `drop` has its default prevented.
+  Only enabled, writable text-entry fields keep their native text drop, and visible
+  `<input type=file>` controls their native file drop; every other control (a checkbox, a slider,
+  a read-only field) is guarded like the page, since the engine's fallback there is to navigate;
+- a file released over an embedded third-party player (the `frame-src` sites) would be delivered
+  to that site's page. While files are dragged over the window (from outside or from within the
+  page) every iframe has `pointer-events: none`, so the drop lands on this page beneath it: in the
+  chat that is the chat's own drop zone, which attaches it there; elsewhere it is refused. The
+  rule is in `drag-drop.css`, a stylesheet loaded from the app's origin, because the shipped CSP
+  carries a Tauri nonce in `style-src` that makes the browser ignore `'unsafe-inline'`: a
+  `<style>` made at runtime or a `style=""` attribute would be refused in production while
+  working in development and every test. The shield lifts on drop or dragend, on the first pointer
+  event after the drag (none fire during one), or after 3 s with no drag event; it does not lift
+  on a short silence, since `dragover` may come only every ~550 ms or only on movement.
+  **Not covered**: a drag that enters the window directly over an iframe without crossing this
+  page first is seen only by that frame;
+- the drop zones accept file drags only, with the effect pinned to `copy`, and their drop handlers
+  ignore anything that is not files, so text dropped on a composer or the wiki editor is the
+  field's own native drop, and the source app never sees a "move".
+
+The page receives only a dropped file's name and contents, never its path (Tauri's handler used to
+deliver full paths, though nothing listened). Nothing native listened for Tauri's drag-drop events.
+Whether a real OS drag reaches the zones, and whether `shiftKey` is set on such a drop, has not been
+exercised by any automated check; unit tests pin the configuration, the guard, the shield and that
+no production module builds a runtime `<style>`.
+
+What it does not claim:
+
+- An **unedited** upload sends the original bytes, metadata included, exactly as before this
+  feature existed. That covers the editor's one action on an untouched clip, the original-file
+  button when the editor cannot open a file or an export failed, and anything added with Shift.
+- "Post now" sends the composer only if it still holds what it held when the editor answered
+  (text and reply target; for an edited clip that is after the export, while the modal blocked
+  typing); otherwise the video is attached and nothing is sent. It is the composer's own send, with
+  its own guards, not a separate path.
+- Nothing here is enforced against a modified client or verifiable by recipients: they receive a
+  normal video and cannot tell whether, or how, it was edited. The original stays on the sender's
+  disk; the editor never touches it.
+- Re-encoding is lossy and may change codec (QuickTime becomes MP4/H.264; WebM becomes VP9/Opus).
 
 ## Volatile Studio edits and orderly lock recovery (2026-10-18)
 

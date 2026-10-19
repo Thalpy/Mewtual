@@ -1,5 +1,31 @@
 # Mewtual; Handover
 
+## Gate7 UI integration with communication recovery (2026-10-19)
+
+The communication branch integrates Gate7's video editor, native file drops, readability and
+Studio save/retirement changes. Both sets of interface and security notes are retained. Uploads
+now admit one batch of at most32 files; additional drops/pastes receive a visible refusal before
+another batch retains files. The review queue independently caps its inventory at16 requests.
+
+Each batch follows its original unlocked UI session and refuses upload/attachment after close
+starts. Close synchronously retires reviews before any save or continuity snapshot. Wiki inserts
+also require the original pane identity, including when the same page name opens again. Old
+leave-server and announcement replies cannot change a replacement session's drafts, errors,
+file-trust settings or leave bookkeeping. Focused regressions demonstrated the corresponding
+failures before correction. This integration does not enable live V2 or production media relay.
+
+Vite excludes `src-tauri` before watcher traversal, including its shared Cargo-target junction.
+Tauri continues to own native rebuilds. The regression exercises the actual configured Vite
+watcher predicate; OS file-notification delivery and the historical F-drive activity are not
+established by that test. The test fixture opens no HMR WebSocket listener.
+
+Integration validation passes2,067 frontend cases,427 native library +5 ACL cases, Svelte0/0,
+production frontend build, native check/build/startup, ten standard browser flows and the separate
+private-download, retained-copy and Gate7 Studio/playback/close flows. The root Rust sources are
+identical to the previously fully tested3,033-pass checkpoint. The next unpublished native V2
+transaction prerequisite has its own complete root run in progress; this entry does not claim
+that continuation's validation. Existing production bundle-size warnings remain.
+
 ## Validated communication checkpoint 3691bd25 (2026-10-19)
 
 Complete root testing passes 3,033 cases with zero failures and 24 existing ignored; complete
@@ -359,6 +385,394 @@ tests until its result owner/IPC consumers are implemented; the general warnings
 intact. See [the revision ledger](communication-recovery/PR48-REVIEW-REVISION.md) for corrected
 actor/driver progress, provider rotation, the narrow native SDP resource contract and final branch
 verification. The wider native/browser/file/media acceptance remains outstanding.
+
+## Readable text on dark accents and member colours (2026-10-19)
+
+User report: a dark custom accent left near-black text on accent buttons (a dark red "EXPORT .WAV").
+`--on-accent` was fixed per preset while the accent can be any hex (personal appearance, a livery's
+`accent` or `--accent` token, the Livery preview), and member colours painted avatar initials,
+instrument pills, piano keys, jam pads and Studio sound-lane pills with hard-coded dark text.
+
+- `apps/desktop/src/accent-ink.ts` picks white when it out-contrasts the near-black ink (WCAG 2;
+  the flip is near luminance 0.19, `#797979` white / `#7a7a7a` dark). Every preset accent,
+  `ACCENT_CHOICES` and `NAME_COLORS` stays dark, so defaults are unchanged.
+- The root theme effect clears and re-derives `--on-accent` from the painted accent; the Livery
+  preview does the same for the draft (and pins Nightshade's ink so it cannot inherit the root's).
+  A livery still cannot set any ink: `--on-accent` is not an allow-listed token.
+- Member-colour boxes use `inkOn(colour)`. Text on the fixed `--ok/--warn/--danger` fills now uses
+  a new constant `--on-signal` (moderation badges, Leave and hang-up buttons), so a dark accent
+  cannot sink them.
+- Pre-existing bugs fixed on the way: reaction chips (`<button>`s on `--panel`) inherited the
+  accent ink, so their count and "+" were invisible in every preset, and hovering repainted them
+  `--accent-hi`; a natural piano key pressed with the mouse lost its held highlight to the ivory
+  hover rule.
+
+Verification: `accent-ink.test.ts` (unit tests, plus App's real theme `$effect` and
+`liveryDraftVars` and Studio's `tintInk` run from production text); each guard was confirmed to
+fail when its fix was removed. Headless-Edge fixture shots with accent `#6b0f0f` (white ink) and
+`#e2a83d` (unchanged). Known limit: accent-coloured TEXT on the dark grounds (links, the rail
+monogram) is still low-contrast under a very dark accent; that is a separate change.
+
+## Video editor everywhere, Shift to skip it, one "post now" action, native file drops (2026-10-19)
+
+Follow-up to the entry below, asked for by the user:
+
+- **Wiki and Files** uploads now send videos through the editor too (`wikiEmbed`, `uploadFile`),
+  bound like `embedMedia` to `videoEditorScope`/`videoScopeEpoch`. The wiki batch is also bound to
+  its page (a late upload is shared under that page but not inserted into another), and a Files
+  batch to the folder it was dropped into (it used to read the current folder per file).
+- **Shift skips the editor**: Shift+drop on any zone, and Shift+click on a 📎/share picker label.
+  `upload-intent.ts` (`ShiftIntent`, `shiftPick` action) explains why each gesture is read where it
+  is; a reading is used once, so a cancelled Shift+pick cannot leak. Paste has no Shift form:
+  Ctrl+Shift+V is "paste as plain text" in the webview and very likely carries no image or file at
+  all, so it was removed rather than advertised. A pasted video skips editing in one click anyway.
+- **One action** (the user found attach / attach as is / post now / don't upload confusing): the
+  footer has a single button, also Ctrl+Enter. In chat and announcements it is "post now", which
+  attaches and then calls the composer's own `send()` / `postStatus()` with all their guards, and
+  not if the person has moved on or the composer changed; in the wiki it is "embed" and in Files
+  "upload". An untouched clip goes up as its original bytes with no re-render. The ×/Esc leaves,
+  asking "Discard this clip?" first when anything was trimmed, removed or cut (an in-card dialog,
+  focus on "keep editing", Esc answers keep editing). Wording comes from `editorWords`.
+- **Keybinds page** gains a "Video editor" section rendered from `VIDEO_EDITOR_SHORTCUTS`; a test
+  fails if the editor handles a key the list does not show.
+- **Native drops**: the main window now sets `"dragDropEnabled": false`. With Tauri's default, on
+  Windows it swallowed every file dropped on the window, so none of the page's drop zones fired in
+  the real app (the earlier Edge check used a synthetic in-page drop and could not see that).
+  `drop-guard.ts` then handles what a browser would otherwise do with outside drops: nothing
+  dropped outside a zone navigates the webview, and while files are dragged over the window no
+  embedded third-party frame can receive them. Every file zone's `dragover` is now
+  `acceptFileDrag` (files only, effect `copy`), so text dragged into a composer is the field's own.
+
+Adversarial review of this round (no blocker): two highs, both fixed. "Post now" sent whatever was
+in the composer when the upload FINISHED, so text typed meanwhile went out with the video; it now
+snapshots the composer (text and reply target) when the editor answers and only sends if that is
+unchanged, else attaches and says it did not send. And Ctrl+Shift+V was removed (see above).
+Mediums fixed: the Files label is not text-selectable (Shift+click there extended a selection
+instead of opening the picker); files dragged over an embed no longer reach the embedded site;
+"post now" reports a send that could not start, and `postStatus()` refuses re-entry and keeps text
+typed meanwhile; the App wiring (Shift on every zone and picker, the guard, the zones) is pinned by
+tests. Lows fixed: a wiki page change during a review is counted; scope-change messages use the
+right word per place; the guard leaves editable fields' text drops and visible file inputs' file
+drops alone, and also stops links dropped from other apps; `context` is required.
+
+A re-review of those fixes found one more high, fixed: the embed shield was a `<style>` built at
+runtime, which the SHIPPED app would refuse. Tauri nonces the inline `<style>` in `index.html` and
+adds the nonce to `style-src`, and with a nonce present the browser ignores `'unsafe-inline'`; dev,
+jsdom and the fixture have no CSP, so nothing showed it. The rule (and the Files label's
+`user-select`) now live in `drag-drop.css`, loaded by `main.ts`, and a test fails on any runtime
+`<style>` in production modules. The same CSP fact means inline `style="..."` ATTRIBUTES are inert in
+production too; `docs/design-livery-customisation-safety.md` assumes otherwise, which is worth a
+look from that workstream. Also fixed from it: drop handlers cancelled text drops into the
+composer and wiki editor (they now ignore non-file drops); the guard treated any `<input>` (a
+checkbox, a read-only field) as a text drop target, letting a dropped link navigate the window;
+the shield lifted after 400 ms of silence, which a still hover can exceed (now: drop, dragend, the
+next pointer event, or a 3 s safety); a drag whose source node was removed could leave the
+in-page flag stuck; in-page file drags were not shielded; Shift on a click inside a label's child.
+
+Verification: unit tests for the intent tracker, the action, the drop guard and the iframe shield
+(`upload-intent.test.ts`, which also pins the window setting); App's real `embedMedia`,
+`wikiEmbed`, `uploadFile`, `videoReviewPlan`, `reviewForUpload`, `composerState`,
+`postFromComposer` and `postStatus` under scripted scope and composer changes, plus source pins for
+the wiring (`video-embed-flow.test.ts`); and the buttons, contexts and the Keybinds list in
+`video-editor.test.ts`. Post-now sending, the composer snapshot, the `postStatus` re-entry guard,
+the Files folder binding, the Keybinds list check, the text-drop exemption and the discard question
+were each confirmed to fail when broken.
+`test:startup` passes with the new window setting. `test:flows` as written could not pass while the
+machine was saturated by other agents' cargo jobs: its 20 s Vite wait expired (Vite's first
+transform of `main.ts` took 14 s). A temporary copy with only the Vite and fixture waits raised
+passed all nine scenarios; the copy was deleted.
+NOT verified: a real OS drag into the running app, or whether `shiftKey` is set on such a drop.
+
+Known limits: "post now" in a multi-file batch sends as soon as that file is attached, so files
+after it go into the next message. A drag that enters the window directly over an embed is not
+shielded. Wiki and Files batches also stop on a plain channel switch (their destination is
+server-wide, but the scope key includes the channel), which is more cautious than it needs to be.
+Now that OS drops reach the page, file-drop code that never ran on Windows is live: non-media files
+dropped on a composer become attachments, and a dropped folder fails as an upload.
+
+## Pre-upload video editor (2026-10-19)
+
+A video dropped, picked or pasted into the chat or status composer now opens a small editor
+before anything uploads: trim handles, a blade (B, or S to split at the playhead), remove or
+restore pieces (Delete), undo/redo, and a preview that skips everything that will not be sent.
+"Upload" on an untouched clip sends the original bytes; on an edit it re-encodes only the kept
+frames and uploads that. "Don't upload" (or Esc, or the close button) skips the file.
+
+- Files: `video-edit.ts` (pure model), `video-export.ts` (Mediabunny pipeline, probe, filmstrip,
+  `CappedBytes`), `video-review.ts` (`VideoReviewQueue`, the host's one-at-a-time review rules),
+  `VideoEditor.svelte` (modal), and in App.svelte `embedMedia`, `reviewVideo`, `videoReviews`,
+  `videoEditorScope`, `videoEditorPassKey`, the mouse back/forward guard in `onMouseNav`, and the
+  keyed `{#each}` mount beside the flipnote viewer.
+- New dependency: `mediabunny` 1.61.3 (MPL-2.0), exact-pinned, loaded by dynamic import.
+  `THIRD-PARTY-NOTICES.txt` is regenerated by the release script; it was not regenerated here.
+- Containers: MP4 and QuickTime export as MP4 (H.264/AAC where the WebView can encode them);
+  WebM exports as WebM (VP9/Opus). Ogg and AVI are not offered the editor and upload as before.
+- Security/privacy properties and non-claims are in THREAT-MODEL.md's "Pre-upload video editing
+  boundary"; the frontend contract is in INTERFACES.md's "Pre-upload video editing".
+
+Adversarial review (no blocker or high) found three mediums, all fixed: a second batch could
+close an open editor (now queued, answers filed by review id); the batch scope was only checked
+after a review, so a move during an upload could attach into the wrong channel (now checked
+before every item, after every review and after every upload); and focus could leave the modal
+by a backdrop press or the thumb buttons, handing app shortcuts back (backdrop press keeps focus,
+outside focus is returned, thumb buttons are ignored while editing). Lows fixed: undo/redo/split
+during a drag corrupted the history (any edit now ends the drag), lost pointer releases, transparent
+video (refused: it needs CSP-blocked workers), raw library errors (replaced by a sentence),
+Lock and push-to-talk swallowed by the modal (passed through), unmount without an answer
+(answers `skip`), cancel-then-upload overlap (upload waits for the cancelled export), and doc
+precision.
+
+A short re-review (again no blocker or high) found the focus fix incomplete: focus dropped to
+`<body>` with only a `focusout` when a focused button was disabled or removed, and the guard stole
+focus from App's selection context menu so Esc closed the editor instead. Fixed with a `focusout`
+recovery and by suppressing context menus over the editor. Its lows were fixed too: dropped
+queued reviews are now counted in the toast; focus hands off cleanly between queued editors (a
+test for that exposed, and now pins, a focus ping-pong between outgoing and incoming editors);
+push-to-talk passthrough ignores modifier combinations; a passed plain key cannot press a focused
+button; the editor sits at z-index 59 so an incoming call stays visible over it; and a scope epoch
+catches an away-and-back round trip during an upload.
+
+Verification: unit tests for the model (`video-edit.test.ts`), the exporter (`video-export.test.ts`,
+including a real library failure wrapped into a sentence), the review queue (`video-review.test.ts`),
+App's real `embedMedia` text under scripted scope changes (`video-embed-flow.test.ts`) and the
+mounted component (`video-editor.test.ts`). The once-only answer, late-export, key-isolation,
+undo-during-drag, focus-return and post-upload scope guards were each confirmed to fail when removed. The real codec
+path was checked once in headless Edge with a scratch script (not in the repo): generated MP4,
+MOV and WebM clips with a frame index drawn into every frame were cut at 0.5 s / 2 s / 3 s, and the
+decoded output held exactly the kept frames in order, no removed frame, matching audio length and
+no copied metadata tags. The size cap and cancel paths rejected cleanly. After the review, the same
+script also passed: rotated (90°) footage, a clip whose first frame is at 1.0 s (the preview
+element and the exporter agree on time), an opaque MediaRecorder WebM with no duration or cues
+(editable, exact range), and a recorder WebM with real alpha (refused up front).
+
+Known limits and follow-ups:
+
+- No automated real-codec test: Node has no WebCodecs, and `test:flows` does not cover video.
+  Porting the scratch check into `flow-check.mjs` would close that.
+- The Files tab and wiki uploads do not open the editor; only the chat and status composers do.
+- Export runs on the WebView's main thread through WebCodecs; long clips take a while. The
+  progress bar and Cancel are there, but there is no background export.
+- Preview playback can show up to one painted frame of removed time before it jumps; the export
+  never contains it.
+- The title bar's Back/Forward and the ticker stay clickable over the editor (they sit above it);
+  using them closes the editor with a toast saying the video was not attached. The call bar and
+  incoming-call prompt sit above it on purpose.
+- A status-composer upload counts as interrupted by a channel switch on the same server, which is
+  more cautious than it needs to be.
+- `uploading` is one boolean shared by every upload path, so two overlapping batches can clear it
+  early. This predates the editor.
+- The probe does not check that the sound can be ENCODED; a WebView without a usable audio encoder
+  fails at export with a clear message and the "upload unedited" way out.
+- `THIRD-PARTY-NOTICES.txt` records Mediabunny's MPL-2.0 text but no source location; MPL asks
+  that recipients be told where the source is (npm / GitHub). Worth adding to `gen-notices.mjs`.
+
+## PR #46 seventh review: removed servers, media capture, lock warning (2026-10-19)
+
+The review of `d2548a37` cleared the previous P3 and found two P2s and a P3 in the cumulative PR.
+
+- **P2, a removed server.** Leaving a server, or that server closing natively, moved off it
+  through switchServer's Save gate after its actor had stopped. With another server available,
+  the Save could not land: the app stayed selected on the removed server and later switches
+  refused. The Studio, now given an empty channel, threw "Save your Studio changes before changing
+  channels."
+  - App's new `serverGone(id, left)` handles both routes. `server-closed` goes through
+    `serverClosed`. During that server's own leave, the event only records itself and the
+    leave's outcome decides: success means a leave; failure after the stop means a closure.
+  - It retires that server's Studio scope without saving (`StudioSession.retireServer`). A closed
+    server's records are kept as a restored draft, the same encoding lock uses.
+  - A left server's records, and any waiting draft for it, are dropped. A toast names the server
+    and says which happened.
+  - It then takes a forced edge to no server and begins a fresh switch to the next one, which now
+    has nothing to save.
+  - `leaveServer` settles first: unsaved Studio work for that server is saved through the gate
+    while the actor can take it. A failed Save refuses the leave, and so does a restored draft
+    still waiting for that server's channel, with a message.
+- **P2, media preparation.** `preparePixa` looked each frame's unsaved pixels up in the live queue
+  across its awaits. An autosave receipt for a later frame, landing during an earlier frame's
+  read, removed the record, so the captured `draft:` placeholder was fetched as a CID ("cid is not
+  64 lowercase hex"). It now captures every frame's unsaved PIX in the same turn as the model,
+  before the first await.
+- **P3, lock warning.** Lock assigned the capture-failure warning, then its own later `error = ""`
+  erased it. The warning is now what that line assigns.
+
+Regressions:
+
+- **Removed server.** The production `leaveServer` and `serverGone` run over the real Studio
+  session, studio-state and exit gate, covering:
+  - a leave with an unsent edit (saved first, nothing sent after the stop);
+  - an edit made while leaving (dropped, with a toast);
+  - a closure (no Save; kept, and reinstalled as held when its channel reopens);
+  - a refused pre-leave Save (no leave);
+  - a waiting restored draft (no leave).
+
+  The test fails with the scope retire removed and with the pre-leave Save removed. A second test
+  covers:
+  - a leave that fails after the stop (kept, not "You left");
+  - an event arriving after the leave's response;
+  - a lock during the native leave (the lock message survives);
+  - a server closing during a window close (no server selected, edit kept);
+  - App's own copy of a restored draft.
+
+  That test fails with the lock guard on the error removed and when serverGone skips window close.
+- **Waiting-draft discard.** The mounted StudioNav shows a waiting draft for another server. Its
+  armed discard frees new edits and leaves nothing for the next lock.
+- **Media.** An autosave lands while the first frame's read is held. The test fails on the old
+  live lookup with the reviewer's exact error.
+- **Lock warning.** The whole production `lockScreen` runs with a failing capture, using an inert
+  `with` scope for its unrelated dependencies. It fails when `error` is cleared at the end.
+
+Contract changes in existing tests:
+
+- The route audit's forced-edge count drops from 9 to 7. Leaving the last server and the native
+  closure (two sites each) are now `serverGone`'s two sites.
+- `leaveServer:switchServer` in the late-fresh-claim list becomes `leaveServer:serverGone`. The
+  audit now treats `serverGone` as a navigation callee, because it starts a fresh switch
+  synchronously.
+- The waiting-draft refusal text now also points at the sidebar's discard.
+
+Adversarial review: no BLOCKER or HIGH. MEDIUM-1 is fixed: the first version told the member a
+closed server "reopens at the next unlock". It does not: a lock keeps the node online, and the
+next unlock lists the server again, still stopped. The wording now says "after Mewtual restarts",
+and the sidebar can discard the waiting draft. The LOWs are fixed too:
+- re-checks after awaits, and no leave error over the lock screen;
+- a failed leave treated as a closure;
+- window close no longer skipped;
+- the draft peek replacing a chunk load;
+- a toast for a superseded leave;
+- the "partial" outcome;
+- the audit callee.
+
+Residuals:
+
+- A closed server's kept draft refuses new Studio edits until its channel is open again, which in
+  practice is after Mewtual restarts, unless the member discards it in the sidebar.
+- A stopped server is listed again after a lock and unlock (native; it predates this PR). Opening
+  its Studio channel installs the kept draft as held records whose Save cannot land. Moving off
+  it then refuses until those are discarded, as for any server whose Saves fail. Taking a stopped
+  actor's server out of `running_servers`, or respawning it, is the native follow-up.
+- Edits drawn during the native leave itself are dropped; the toast says so.
+- A newer action retiring the pre-leave Save cancels the leave; a toast says so.
+- While a server's leave is in flight, its `server-closed` waits for `leave_server` to return. If
+  that stalls after the stop (a held persistence lock), the app stays on the stopped server until
+  it does. Switching away still works unless edits were drawn meanwhile. There is no JS timeout
+  fallback yet.
+- The waiting-draft row names neither the server nor the channel (the sidebar has no server
+  names). It does say when some kept edits may already have landed.
+
+Checks:
+
+- `npm --prefix apps/desktop test`: 1826/1826. This includes a parallel session's uncommitted
+  video-editor tests, which share this checkout.
+- `npm run check`: 0 errors and 0 warnings.
+- `npm run build`: passed.
+- `npm run test:flows`: 9/9 on a private port pair (`FLOW_PORT=5197`).
+  - On the default port it first failed with "visual fixture never became ready". The cause was a
+    cold Vite dependency re-optimisation after that session's new `mediabunny` dependency: the
+    fixture took 68 s against the harness's 90 s, and longer under cargo's load.
+  - Later runs also collided with a leftover dev server.
+  - Against a warmed server the flows all passed.
+- `scripts/check-no-ambient.sh`: passed.
+- `git diff --check`: clean.
+- `cargo test --all --all-features`: 2463 passed, 0 failed. Rust is unchanged.
+- `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`: 363 passed, 0 failed.
+
+## PR #46 fifth review: two save workers; follow-ups closed (2026-10-19)
+
+The review of `64fed24b` reproduced one P2, a timing variant of the departure-ordering finding.
+An edit made while a departure waited on an earlier receipt became eligible only in the drain's
+next round, so the one worker went to the queued Index half first and the departure timed out.
+The owner asked for "a handful" of save workers.
+
+The Studio now runs two (`SAVE_WORKERS`), one per lane at a time and in queue order within each
+lane. A document lane and the shared Index lane can therefore both be in flight, which removes
+that P2 and the single-worker limit the previous entry pinned. Three were built first, but
+an adversarial review showed they oversubscribe the bridge's four shared inline slots: saves, blob
+fetches, reads and the native receiver all hold one. That produced "too many inline downloads"
+refusals in ordinary use, and more would make it worse.
+
+- **Renderer scheduling only.** The server actor runs Studio operations one at a time, so an
+  operation slow inside the actor still delays the next one there. The native "latest request"
+  fence is per server and target, and one save per lane means one per target, so concurrent saves
+  never supersede each other.
+- **Pre-execution refusals are not writes.** The bridge's actor-busy, slot-pool-full and
+  storage-busy (`authorize`) refusals are raised before the execution lease is transferred, so
+  the operation never runs. The actor may already have signalled Ready (always so with
+  storage-busy), but it gets no lease. `nativeNoWrite` classifies exactly these as not written.
+  Queued Saves and the plain document and Index reads refused this way are resent automatically:
+  the same request, at 250/500/1000 ms. A visit is uncounted, and exhausted resends settle a Save
+  as not written so a retry is admitted afresh, only when no earlier attempt was uncertain. After
+  an uncertain post-dispatch failure and an exact retry, each visit counts and the record stays
+  uncertain, with its original request and no reauthor. All three texts are pinned to their
+  single sites in the Rust sources.
+- **One worker per record.** A record a worker has taken is marked synchronously (it stays
+  `queued` through its admission read), so no second worker takes it. Removing that guard fails
+  two existing tests.
+- **Recovery rail.** It now labels a not-written recovery apply as not written, not as uncertain
+  and "discarded".
+- **Restored Creates.** A restored, held Create reads "create not saved yet · open to save" in the
+  sidebar.
+
+Follow-ups closed:
+
+- An Index recovery record of one entry now counts for that entry's document (held row, Save,
+  indicators).
+- Restoring a wiki revision names the page it restored and closes only that pane's history.
+
+Regressions:
+
+- Edits made before and while leaving, with the Index receipt pending. Fails with one worker and
+  at `64fed24b`.
+- Lane exclusivity. It passes at `64fed24b` too, where one worker made it trivially true, and it
+  does not reach the `running` guard (that needs an admission read). It fails when the lane-head
+  rule is removed, which is what it pins.
+- The no-write classification and its source pins. They fail with the resends, the read retry or
+  the attempt revert removed.
+- Recovery-record affinity and the restore toast. Both fail at `64fed24b`.
+- Added after the review of `28b6ba28`, which cleared the P2 and raised only a documentation P3:
+  an uncertain post-dispatch failure, an exact retry, then each busy text exhausting its
+  resends. The record stays uncertain, keeps its request and cannot be reauthored. The test fails
+  if a pre-execution refusal clears the earlier uncertainty.
+
+Residuals (LOW, from the re-review; not fixed):
+
+- The overlay, recovery, fault and blob reads are not resent after a pre-dispatch refusal. A
+  refused overlay read shows its ordinary error, and a document with a local draft shows the plain
+  projection, until the next refresh.
+- "Studio actor busy" takes its 5 s rendezvous to arrive, so four refused sends outlast a
+  departure's 10 s timeout, which then reports the Save as still running.
+- Workers are not reserved per lane. Two other lanes (a Create and another document's Save) can
+  hold both, so an Index half, or a third document's Save, waits for one of them.
+- Rarer pre-lease refusals (server changed before commit, request cancelled, lease-send expiry)
+  are still classified uncertain. That is safe but pessimistic.
+- A retried read may run natively after a Save that started later, yet still count as the older
+  read. That Save's acknowledgement can briefly replace a slightly newer view; the next refresh
+  corrects it.
+
+Checks:
+
+- `npm --prefix apps/desktop test`: 1759/1759.
+- `npm run check`: 0 errors, 0 warnings.
+- `npm run build`: passed.
+- `npm run test:flows`: 9/9.
+- `scripts/check-no-ambient.sh`: passed.
+- `cargo test --all --all-features`: 2463 passed, 0 failed (Rust unchanged).
+- `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`: 363 passed, 0 failed.
+
+Adversarial review: HIGH-1 (three workers oversubscribed the slots) and HIGH-2 (storage-busy
+missed) are fixed, as are three MEDIUMs. The re-review found no BLOCKER, HIGH or MEDIUM issues.
+
+Tests changed because their contract changed:
+
+- `SAVE-001`, the frame test in `studio-session.test.ts`, the Create-retry test there, and the
+  pending-thumbnail `UI-003` used "busy" texts as examples of uncertain failures. Those texts are
+  now definite no-writes that are resent, so each uses a post-dispatch error to keep its own claim.
+- `SAVE-002` asserted a second lane stays queued "behind the one worker". It now fills both
+  workers and asserts that the cleared scope's worker cannot start the waiting third lane, while a
+  new-scope worker can. It pins that behaviour, not the token mechanism.
+- `UI-003` checks both outcomes. While doing so it exposed that a not-written Create showed
+  "creating…" in the sidebar; that now reads "create not written · retry in the editor".
+- The two departure tests from the previous round that pinned single-worker order and the
+  single-worker limit are replaced by the multi-worker contract above.
 ## PR #46 fourth review: departure ordering (2026-10-18)
 
 The review of `5bc43d2c` confirmed the rename-context and Index-half fixes, plus 14 extended wiki

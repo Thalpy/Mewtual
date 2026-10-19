@@ -44,6 +44,7 @@
   import PendingSendManager from "./PendingSendManager.svelte";
   import { PendingSendRetry } from "./pending-send-retry";
   import { ImageSrcCache } from "./image-src";
+  import { DARK_INK, inkOn, onAccentOverride } from "./accent-ink";
   import { pastedMedia, pastedName } from "./clipboard-media";
   import {
     confirmQuestion, confirmVerb, parseTally, placeMenu, tallyReaction, topReactions, typeaheadIndex,
@@ -255,6 +256,14 @@
   import { JamTakeSuppression } from "./jam-take-suppression.ts";
   import PixaCanvas from "./PixaCanvas.svelte";
   import PixaViewer from "./PixaViewer.svelte";
+  import VideoEditor from "./VideoEditor.svelte";
+  import {
+    editableContainer, editedFileName, webCodecsAvailable, type VideoEditorContext, type VideoEditorResult,
+  } from "./video-export.ts";
+  import { VideoReviewQueue, type OpenReview, type ReviewPosition } from "./video-review.ts";
+  import { VIDEO_EDITOR_SHORTCUTS, editorWords } from "./video-editor-ui.ts";
+  import { ShiftIntent, shiftPick } from "./upload-intent.ts";
+  import { carriesFiles, installFileDropGuard } from "./drop-guard.ts";
   import { draftAttachments, removeDraftAttachment } from "./draft-attachments.ts";
   import ServerStudioSettings from "./ServerStudioSettings.svelte";
   import { PixaPreviewManager, type PixaPreviewScope } from "./pixa-preview.ts";
@@ -1357,6 +1366,15 @@
     for (const [k, v] of Object.entries(liveryDraft.tokens)) {
       if (LIVERY_TOKENS.includes(k) && HEX_COLOR.test(v)) parts.push(`${k}:${v}`);
     }
+    // The ink on the accent follows the accent this preview paints. A valid `--accent` token is
+    // pushed after the draft accent, so it wins in the inline style and wins here too. A light
+    // accent still needs an explicit ink when the draft is Nightshade: with no data-preset the
+    // preview would otherwise inherit the root's ink, including a light-ink override made for the
+    // dark accent the app itself is wearing.
+    const tokenAccent = liveryDraft.tokens["--accent"] ?? "";
+    const ink = onAccentOverride(HEX_COLOR.test(tokenAccent) ? tokenAccent : accent);
+    if (ink) parts.push(`--on-accent:${ink}`);
+    else if (!liveryDraft.preset) parts.push(`--on-accent:${DARK_INK}`);
     const rad = LIVERY_RADIUS[liveryDraft.tokens["radius"] ?? ""];
     if (rad?.r) parts.push(`--r:${rad.r}`, `--r-lg:${rad.rlg}`);
     const font = LIVERY_FONTS[liveryDraft.tokens["font"] ?? ""];
@@ -1443,7 +1461,7 @@
       ? "off"
       : appearance.textEffects === "low" || reduced ? "low" : "full";
     set("text-effects", textEffects);
-    for (const t of [...LIVERY_TOKENS, "--r", "--r-lg", "--ui", "--livery-cursor"]) el.style.removeProperty(t);
+    for (const t of [...LIVERY_TOKENS, "--on-accent", "--r", "--r-lg", "--ui", "--livery-cursor"]) el.style.removeProperty(t);
     el.removeAttribute("data-livery-pattern");
     el.removeAttribute("data-livery-cursor");
     if (followLivery) {
@@ -1468,6 +1486,13 @@
       el.style.setProperty("--accent", accent);
       el.style.setProperty("--accent-hi", `color-mix(in oklab, ${accent} 80%, white)`);
     }
+    // Text on a solid accent follows the accent actually painted: the accent override, else a
+    // livery's own `--accent` token, else the preset's default. Each preset's near-black ink suits
+    // its default accent, but a custom or livery accent can be any hex, and a dark one left black
+    // text on a near-black button. Only a dark accent overrides; otherwise the preset's ink (cleared
+    // above along with the other inline tokens) stays in charge.
+    const ink = onAccentOverride(accent || (followLivery ? livery.tokens["--accent"] ?? "" : ""));
+    if (ink) el.style.setProperty("--on-accent", ink);
     // Scale the root rather than one chat token: menus, member names, dialogs and every other
     // rem-sized label now follow the same accessibility preference.
     const scale = Math.min(200, Math.max(70, appearance.scale || 100));
@@ -3930,6 +3955,7 @@
     }
   }
   let uploading = $state(false);
+  let windowCloseInFlight = $state(false);
   let folder = $state(""); // current folder in the Files tab
   let newFolder = $state(""); // new-folder name input
   let dragOver = $state(false); // composer drag-over highlight
@@ -6352,18 +6378,23 @@
 
   // Upload an image as a custom emoji `:code:` (stored under the "emoji" folder).
   async function addEmoji(fileList: FileList | null) {
-    const code = newEmojiCode.trim().toLowerCase().replace(/[^a-z0-9_+-]/g, "");
+    const originalCode = newEmojiCode;
+    const code = originalCode.trim().toLowerCase().replace(/[^a-z0-9_+-]/g, "");
     const file = fileList?.[0];
-    if (!code || !file || activeServerId === null) return;
+    if (!code || !file || !canStartUpload(1)) return;
+    const session = uiStateLoadGeneration, gen = viewGeneration, server = activeServerId;
+    const current = () => !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration && viewCurrent(gen, server);
     uploading = true;
     try {
       // Encode an optional size into the file name (`code~px`) so it's shared with everyone.
       const sz = Math.min(Math.max(newEmojiSize, 0), EMOJI_MAX_SIZE);
       await addSharedFile(file, "emoji", sz ? `${code}~${sz}` : code, file.type || "image/png");
-      newEmojiCode = "";
-      await refreshFiles();
+      if (current()) {
+        if (newEmojiCode === originalCode) newEmojiCode = "";
+        await refreshFiles();
+      }
     } catch (e) {
-      error = String(e);
+      if (current()) error = String(e);
     } finally {
       uploading = false;
     }
@@ -6568,7 +6599,6 @@
     stopStudioAudio();
     studioReset?.(); // and the studio's views, held pixels and unsaved strokes
     restoredStudioDraft = null;
-    if (studioCaptureError) error = studioCaptureError;
     servers = [];
     beginViewSwitch(); // a read still in flight must not land behind the lock
     // studio-exit: forced edge. Lock does not ask the Studio to save: studioSnapshot() above
@@ -6605,7 +6635,9 @@
     clearTimeout(uiStateSaveTimer);
     passphrase = "";
     revealPassphrase = false; // never leave a lock screen showing the next thing typed into it
-    error = "";
+    // The one message the lock screen keeps: the latest Studio edits could not be captured. Assigned
+    // here, after the reset, because assigning it earlier was cleared by this line (review of d2548a37).
+    error = studioCaptureError;
     syncIntent = false;
     locked = true; // studio-exit: forced edge (lock, as above)
   }
@@ -7290,31 +7322,109 @@
     }
   }
 
+  /// Servers whose native leave is in flight, each with whether its `server-closed` has arrived. The
+  /// stopping actor emits that event before leave_server returns, and only leave_server's outcome
+  /// says whether this was a leave, so the event waits for it (serverClosed).
+  const leavingServers = new Map<number, { session: number; closed: boolean }>();
+
+  /// The server a draft restored at unlock belongs to, read from App's copy without loading the
+  /// Studio chunk (studio-draft.ts's `scope.server`). Null when unreadable: such a draft fails to
+  /// restore at all, so it can never install, or block, anywhere.
+  function restoredDraftServer(): number | null {
+    try { const server = JSON.parse(restoredStudioDraft ?? "null")?.scope?.server; return typeof server === "number" ? server : null; }
+    catch { return null; }
+  }
+
   async function leaveServer(id: number) {
+    if (windowCloseInFlight || locked || !uiStateReady) return;
+    const session = uiStateLoadGeneration;
+    const current = () => !locked && uiStateReady && session === uiStateLoadGeneration;
+    if (leavingServers.get(id)?.session === session) return;
+    // The Studio's unsaved work for this server is settled while its actor can still take it.
+    // After leave_server nothing can, and serverGone drops whatever is left (review of d2548a37).
+    // A restored draft for it installs only when its channel opens, so that is where the member
+    // saves or discards it first. Before the Studio has loaded, App holds that draft itself.
+    const work = restoredStudioDraft ? (restoredDraftServer() === id ? { server: id, restored: true } : null) : studioWork?.() ?? null;
+    if (work?.server === id) {
+      if (work.restored) {
+        toast("Your restored Studio edits for this server are not saved yet. Open their channel in the Studio to save or discard them, then leave.", "warn", 8000);
+        return;
+      }
+      const route = studioExit.begin();
+      if (!(await route.scope())) {
+        // A refused Save has said why. A newer action (a click, a lock) retiring this one has not.
+        if (current() && !windowCloseInFlight && !route.current()) toast("Leaving the server was cancelled by a newer action. Leave again if you still want to.", "info", 5000);
+        return; // nothing has left
+      }
+    }
+    // A Save gate may have waited through lock/unlock. It cannot authorize a native leave in
+    // the replacement session, even if the same server is selected there again.
+    if (!current() || windowCloseInFlight || leavingServers.get(id)?.session === session) return;
     // Leaving a server is also a privacy boundary. End its independent WebRTC session before the
     // native request can hang or fail so a forgotten server can never retain a hot mic, display or
     // separately granted application-audio source.
     if (inCall && callServer === id) leaveVoice();
+    const operation = { session, closed: false };
+    leavingServers.set(id, operation);
     try {
       await invoke("leave_server", { server: id });
     } catch (e) {
+      const owns = leavingServers.get(id) === operation;
+      if (owns) leavingServers.delete(id);
+      if (!owns || !current()) return;
       error = String(e);
+      // The leave failed after the actor had stopped: still a member, but the server is gone from
+      // this session, so it is handled as a closure and its Studio edits are kept.
+      if (operation.closed) serverGone(id, false);
       return;
     }
+    // The operation object also fences bookkeeping: an old completion cannot remove a new
+    // session's leave of the same server or retire its Studio draft and file-trust policy.
+    const owns = leavingServers.get(id) === operation;
+    if (owns) leavingServers.delete(id);
+    if (!owns || !current()) return;
     const { [id]: _removedTrust, ...remainingTrust } = fileTrustPolicies;
     fileTrustPolicies = remainingTrust;
+    serverGone(id, true); // first, so the continuity saved next no longer carries its Studio work
     void saveUiStateImmediately();
+  }
+
+  /// `server-closed`: the server's actor stopped. During this server's own leave the leave decides
+  /// (it calls serverGone once it knows how leave_server ended); otherwise this is a closure.
+  function serverClosed(id: number) {
+    const operation = leavingServers.get(id);
+    if (operation?.session === uiStateLoadGeneration) { operation.closed = true; return; }
+    serverGone(id, false);
+  }
+
+  /// A server's native session ended: the member left it (`left`), or it closed under this session.
+  /// Its actor accepts nothing now, so moving off it is a forced edge that never waits on a Studio
+  /// Save to it. Before d2548a37's review this went through switchServer's Save gate, which refused
+  /// against the stopped actor and left the app selected on a server that no longer existed, with
+  /// the Studio still scoped to it. The Studio scope is retired first. A closed server's unsaved
+  /// edits are kept as a restored draft: a lock does not restart its actor, so they come back when
+  /// its channel opens after Mewtual restarts, and the Studio sidebar can discard them meanwhile. A
+  /// left server's are dropped, since leaveServer saved what it could beforehand. A later event for
+  /// a server already gone finds nothing to do.
+  function serverGone(id: number, left: boolean) {
+    const name = servers.find((s) => s.id === id)?.name || "A server";
     servers = servers.filter((s) => s.id !== id);
-    if (activeServerId === id) {
-      if (servers.length) switchServer(servers[0].id);
-      else {
-        beginViewSwitch();
-        // studio-exit: forced edge. Membership already ended above, so this is not a navigation
-        // the member can be held back from to finish a Studio Save.
-        activeServerId = null;
-        clearServerView(); // studio-exit: forced edge. Leaving the last one must not leave its messages on screen
-      }
-    }
+    // Lock already cleared all of this. A window close may be under way: the Studio keeps its
+    // input hold, and a snapshot the close takes later carries a kept draft. If the close is then
+    // abandoned the app is on no server, not on this one (switchServer refuses during a close).
+    if (locked) return;
+    const retired = retireStudioServer?.(id, !left) ?? "none";
+    if (retired === "kept" || retired === "partial") {
+      toast(`${name} stopped. Its unsaved Studio edits are kept and come back when you open their channel after Mewtual restarts; the Studio sidebar can discard them.${retired === "partial" ? " A stroke still being drawn could not be kept." : ""}`, "warn", 10000);
+    } else if (retired === "dropped") toast(left ? `You left ${name}, so Studio edits for it that were not saved were discarded.` : `${name} stopped, and its unsaved Studio edits could not be kept.`, "warn", 8000);
+    if (activeServerId !== id) return;
+    beginViewSwitch();
+    // studio-exit: forced edge. The server's native session ended, so nothing could accept a Studio Save, and its Studio scope was retired above.
+    activeServerId = null;
+    clearServerView(); // studio-exit: forced edge (server gone, as above). Its messages must not stay on screen
+    // A new action. With the scope retired there is nothing of this server to save; if the Studio
+    // still refuses for other work, the app stays coherently on no server rather than a dead one.
+    if (servers.length) void switchServer(servers[0].id);
   }
 
   async function addChannel() {
@@ -8431,16 +8541,26 @@
       error = String(e);
     }
   }
+  // One announcement post at a time: Enter and the video editor's "post now" can otherwise both
+  // post the same text while the first is still out. Set before the first await, so a caller can
+  // tell from it whether its own call started a post (see `postFromComposer`).
+  let statusPosting = false;
   async function postStatus() {
     const text = statusDraft.trim();
-    if (!text || activeServerId === null) return;
+    if (!text || activeServerId === null || statusPosting || locked || !uiStateReady || windowCloseInFlight) return;
+    const session = uiStateLoadGeneration, gen = viewGeneration, server = activeServerId;
+    const current = () => !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration && viewCurrent(gen, server);
+    statusPosting = true;
     // Kept until the invoke returns, not cleared on the way in: a member posting into a feed that
     // is closed to them is now refused natively, and clearing first would take the words with it.
+    // Cleared only if it is still what was posted: text typed meanwhile is the next announcement.
     try {
-      await invokeDebugged("post_status", { server: activeServerId, text });
-      statusDraft = "";
+      await invokeDebugged("post_status", { server, text });
+      if (current() && statusDraft.trim() === text) statusDraft = "";
     } catch (e) {
-      error = errorText(e);
+      if (current()) error = errorText(e);
+    } finally {
+      statusPosting = false;
     }
   }
   // Who may post here. The read rides the feed document, so a policy someone else changed arrives
@@ -8567,6 +8687,8 @@
   let studioRestore: ((json: string | null) => void) | null = null;
   let studioSave: (() => Promise<void>) | null = null;
   let studioHasWork: (() => boolean) | null = null;
+  let studioWork: (() => { server: number; restored: boolean } | null) | null = null;
+  let retireStudioServer: ((server: number, keep: boolean) => "none" | "kept" | "partial" | "dropped") | null = null;
   let studioClaimNavigation: (() => () => boolean) | null = null;
   let studioBeginClose: (() => void) | null = null;
   let studioEndClose: (() => void) | null = null;
@@ -8606,6 +8728,7 @@
       studioReset = st.resetStudio;
       studioSnapshot = st.studioDraftSnapshot; studioRestore = st.restoreStudioDraft;
       studioSave = st.saveStudio; studioHasWork = st.studioHasPending;
+      studioWork = st.studioWork; retireStudioServer = st.retireStudioServer;
       studioClaimNavigation = st.claimStudioNavigation;
       studioBeginClose = st.beginStudioClose; studioEndClose = st.endStudioClose;
       if (restoredStudioDraft) { studioRestore(restoredStudioDraft); restoredStudioDraft = null; }
@@ -10023,14 +10146,17 @@
 
   async function restoreWikiRev(revId: string) {
     if (activeServerId === null || !activeWikiPage) return;
+    // The restore names the page it was chosen for; after the await, the toast names that page and
+    // only that pane's history view closes (a newer page's history, or another server's, stays).
+    const pane = wikiPane(), { server, gen, page } = pane;
     try {
-      const queued = await invoke<boolean>("restore_wiki_page", { server: activeServerId, page: activeWikiPage, rev: revId });
-      showWikiHistory = false;
-      await refreshWiki();
+      const queued = await invoke<boolean>("restore_wiki_page", { server, page, rev: revId });
+      if (wikiPaneCurrent(pane)) showWikiHistory = false;
+      if (viewCurrent(gen, server)) await refreshWiki();
       if (queued) {
         toast(`Restore submitted for review: it publishes when approved, or automatically in ${wikiReviewDays} day${wikiReviewDays === 1 ? "" : "s"}`, "info", 6000);
       } else {
-        toast(`Restored "${activeWikiPage}" to the selected revision`, "ok", 4000);
+        toast(`Restored "${page}" to the selected revision`, "ok", 4000);
       }
     } catch (e) {
       toast(`Restore failed: ${e}`, "err", 9000);
@@ -10398,31 +10524,66 @@
 
   // Embed media into the open wiki page: upload under wiki/<page>/, insert a marker at the caret.
   // Each file gets a live toast (uploading -> embedded / failed) so nothing happens silently.
-  async function wikiEmbed(fileList: FileList | null) {
-    if (!fileList || fileList.length === 0 || activeServerId === null || !activeWikiPage) return;
+  //
+  // Videos go through the editor first unless `asIs` (Shift held through the drop or the pick).
+  // The batch is bound to the page it was started on and to `videoEditorScope`, like
+  // `embedMedia`: a file uploaded after the person moved on is shared under the page it was meant
+  // for, but not inserted into whatever page is open now.
+  async function wikiEmbed(fileList: FileList | null, asIs = false) {
+    if (!fileList || !activeWikiPage || !canStartUpload(fileList.length)) return;
+    const files = Array.from(fileList);
+    const review = videoReviewPlan(files, asIs);
+    const pane = wikiPane(), page = pane.page;
+    const session = uiStateLoadGeneration;
+    const sessionCurrent = () => !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration;
+    const scope = videoEditorScope;
+    const epoch = videoScopeEpoch;
+    // A page name can be opened again while a review waits. Only the original pane may receive it.
+    const here = () => sessionCurrent() && videoEditorScope === scope && videoScopeEpoch === epoch && wikiPaneCurrent(pane);
+    let abandoned = 0;
     uploading = true;
     try {
-      for (const file of Array.from(fileList)) {
-        const tid = toast(`Uploading ${file.name}…`, "info", 0);
+      for (let i = 0; i < files.length; i++) {
+        if (!here()) { abandoned = files.length - i; break; }
+        const reviewed = await reviewForUpload(files[i], files[i].name, review(files[i]), scope, "wiki");
+        if (!here()) {
+          // A scope change closed the editor and the rescope effect reported this file; a page
+          // change alone (a rename or delete landing meanwhile) did not, so count it here.
+          const reported = videoEditorScope !== scope || videoScopeEpoch !== epoch;
+          abandoned = files.length - i - (reported && reviewed === null ? 1 : 0);
+          break;
+        }
+        if (!reviewed) continue;
+        const { upload, uploadName } = reviewed;
+        const tid = toast(`Uploading ${uploadName}…`, "info", 0);
         try {
-          const cid = await addSharedFile(file, `wiki/${activeWikiPage}`);
-          const alt = file.name.replace(/[[\]]/g, " ");
+          const cid = await addSharedFile(upload, `wiki/${page}`, uploadName);
+          if (!here()) {
+            if (sessionCurrent()) updateToast(tid, `Shared ${uploadName}, not embedded: the page changed`, "info", 7000);
+            continue;
+          }
+          const alt = uploadName.replace(/[[\]]/g, " ");
           insertIntoWikiBody(`![${alt}](cid:${cid})`);
-          updateToast(tid, `Embedded ${file.name} · save the page to publish`, "ok", 5000);
+          updateToast(tid, `Embedded ${uploadName} · save the page to publish`, "ok", 5000);
         } catch (e) {
-          updateToast(tid, `Upload of ${file.name} failed: ${e}`, "err", 9000);
+          if (sessionCurrent()) updateToast(tid, `Upload of ${uploadName} failed: ${e}`, "err", 9000);
         }
       }
-      await refreshFiles();
+      if (abandoned > 0 && sessionCurrent()) {
+        toast(`${abandoned} file${abandoned === 1 ? " was" : "s were"} not embedded: the page changed`, "info", 7000);
+      }
+      if (sessionCurrent()) await refreshFiles();
     } finally {
       uploading = false;
     }
   }
   function onWikiDrop(e: DragEvent) {
+    // Text or a link dropped on the editor is the field's own native drop; only files are ours.
+    if (!carriesFiles(e)) return;
     e.preventDefault();
     e.stopPropagation();
     dragOver = false;
-    wikiEmbed(e.dataTransfer?.files ?? null);
+    wikiEmbed(e.dataTransfer?.files ?? null, e.shiftKey);
   }
   async function saveWikiPage() {
     if (!activeWikiPage || activeServerId === null) return;
@@ -10835,33 +10996,58 @@
     }
   }
 
-  // Share a file into the Files-tab's current folder.
-  async function uploadFile(fileList: FileList | null) {
-    if (!fileList?.length || activeServerId === null) return;
+  // Share a file into the Files-tab's current folder. Videos go through the editor first unless
+  // `asIs` (Shift held through the drop or the pick).
+  //
+  // The batch is bound to the folder it was dropped into and to `videoEditorScope`, as
+  // `embedMedia` is: a review can take minutes, and a file should not land in whichever folder or
+  // server happens to be open by the time it uploads.
+  async function uploadFile(fileList: FileList | null, asIs = false) {
+    if (!fileList || !canStartUpload(fileList.length)) return;
+    const files = Array.from(fileList);
+    const review = videoReviewPlan(files, asIs);
+    const into = folder;
+    const session = uiStateLoadGeneration;
+    const sessionCurrent = () => !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration;
+    const scope = videoEditorScope;
+    const epoch = videoScopeEpoch;
+    const here = () => sessionCurrent() && videoEditorScope === scope && videoScopeEpoch === epoch;
+    let abandoned = 0;
     uploading = true;
     try {
-      for (const file of Array.from(fileList)) {
-        const tid = toast(`Sharing ${file.name}…`, "info", 0);
+      for (let i = 0; i < files.length; i++) {
+        if (!here()) { abandoned = files.length - i; break; }
+        const reviewed = await reviewForUpload(files[i], files[i].name, review(files[i]), scope, "files");
+        // A review the scope change closed was reported by the rescope effect; count the rest.
+        if (!here()) { abandoned = files.length - i - (reviewed === null ? 1 : 0); break; }
+        if (!reviewed) continue;
+        const { upload, uploadName } = reviewed;
+        const tid = toast(`Sharing ${uploadName}…`, "info", 0);
         try {
-          await addSharedFile(file, folder);
-          updateToast(tid, `Shared ${file.name}`, "ok");
+          await addSharedFile(upload, into, uploadName);
+          if (sessionCurrent()) updateToast(tid, `Shared ${uploadName}`, "ok");
         } catch (e) {
-          updateToast(tid, `Sharing ${file.name} failed: ${e}`, "err", 9000);
+          if (sessionCurrent()) updateToast(tid, `Sharing ${uploadName} failed: ${e}`, "err", 9000);
         }
       }
-      await refreshFiles();
+      if (abandoned > 0 && sessionCurrent()) {
+        toast(`${abandoned} file${abandoned === 1 ? " was" : "s were"} not shared: you moved elsewhere`, "info", 7000);
+      }
+      if (sessionCurrent()) await refreshFiles();
     } finally {
       uploading = false;
     }
   }
 
   function onFilesDrop(e: DragEvent) {
+    if (!carriesFiles(e)) return;
     e.preventDefault();
     dragOver = false;
-    void uploadFile(e.dataTransfer?.files ?? null);
+    void uploadFile(e.dataTransfer?.files ?? null, e.shiftKey);
   }
 
   function onEventDrop(e: DragEvent) {
+    if (!carriesFiles(e)) return;
     e.preventDefault();
     dragOver = false;
     void pickEventImage(e.dataTransfer?.files ?? null);
@@ -10870,41 +11056,211 @@
   // Embed media (image/video/audio) into the chat/status composer: upload under this
   // member's embed folder, then insert a `![name](cid:HEX)` marker into the draft for the
   // shared renderer to resolve inline. Non-media files are shared as plain attachments.
-  async function embedFiles(target: "chat" | "status", fileList: FileList | null) {
-    if (!fileList) return;
-    await embedMedia(target, Array.from(fileList).map((file) => ({ file, name: file.name })));
+  async function embedFiles(target: "chat" | "status", fileList: FileList | null, asIs = false) {
+    // Refuse before Array.from retains an arbitrarily large FileList for a waiting batch.
+    if (!fileList || !canStartUpload(fileList.length)) return;
+    await embedMedia(target, Array.from(fileList).map((file) => ({ file, name: file.name })), asIs);
   }
 
   // Embed media that already knows what it wants to be called. A picked or dropped file brings its
   // own name; a pasted screenshot has no name of its own and is given one (see clipboard-media.ts).
-  async function embedMedia(target: "chat" | "status", items: { file: File; name: string }[]) {
-    if (items.length === 0 || activeServerId === null) return;
+  //
+  // A video the editor can open goes through it first (see `reviewVideo`): the person may trim it,
+  // cut pieces out, send it untouched, or not send it at all. Only what they confirm is uploaded.
+  //
+  // Every item is bound to where the batch started (`videoEditorScope`: lock state, server and
+  // channel). Reviews and uploads take time, and the person can move in the meantime. Once they
+  // have, nothing more is reviewed or uploaded, and nothing lands in the draft now on screen,
+  // which belongs to somewhere else. `addSharedFile` reads the active server when it is called,
+  // so the check must come right before that call, with no await in between.
+  //
+  // `asIs` (Shift held through the drop or the picker click) skips the editor for the batch.
+  // "Post now" in the editor sends the message (or posts the announcement) as soon as that file is
+  // attached; files after it in the batch then attach to the emptied composer as usual.
+  async function embedMedia(target: "chat" | "status", items: { file: File; name: string }[], asIs = false) {
+    if (!canStartUpload(items.length)) return;
+    const session = uiStateLoadGeneration;
+    const sessionCurrent = () => !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration;
+    const review = videoReviewPlan(items.map(({ file }) => file), asIs);
+    const scope = videoEditorScope;
+    // The epoch catches a round trip (channel A, B, then A again, or a lock and unlock) that the
+    // key alone would miss: the batch was still interrupted, and its context may have changed.
+    const epoch = videoScopeEpoch;
+    const here = () => sessionCurrent() && videoEditorScope === scope && videoScopeEpoch === epoch;
+    let abandoned = 0;
     uploading = true;
     try {
-      for (const { file, name } of items) {
-        const tid = toast(`Uploading ${name}…`, "info", 0);
+      for (let i = 0; i < items.length; i++) {
+        if (!here()) { abandoned = items.length - i; break; }
+        const { file, name } = items[i];
+        const reviewed = await reviewForUpload(file, name, review(file), scope, target);
+        // A lock or a server or channel switch while the editor was open (or while this review
+        // waited its turn) settled it as a skip. That file is counted in the rescope effect's
+        // message; count only the ones after it.
+        if (!here()) { abandoned = items.length - i - (reviewed === null ? 1 : 0); break; }
+        if (!reviewed) continue;
+        const { upload, uploadName, post } = reviewed;
+        // "Post now" means the message as it stood when the person pressed it. The upload can take
+        // a while, and the composer stays usable meanwhile: anything typed (or a reply target
+        // changed) in that time is a different message, which must not be sent on their behalf.
+        const pressed = post ? composerState(target) : "";
+        const tid = toast(`Uploading ${uploadName}…`, "info", 0);
         try {
-          const cid = await addSharedFile(file, myEmbedFolder, name);
+          const cid = await addSharedFile(upload, myEmbedFolder, uploadName);
+          if (!here()) {
+            // Shared where the batch started, but the composer on screen now belongs elsewhere.
+            if (sessionCurrent()) updateToast(tid, `Shared ${uploadName}, not attached: you moved to another channel`, "info", 7000);
+            continue;
+          }
+          const unchanged = post && composerState(target) === pressed;
           // Brackets in the alt would break the `![alt](cid:…)` marker parse: strip them.
-          const alt = name.replace(/[[\]]/g, " ");
+          const alt = uploadName.replace(/[[\]]/g, " ");
           const marker = `![${alt}](cid:${cid})`;
           if (target === "chat") { draft = draft ? `${draft} ${marker}` : marker; saveDraftFor(chanKey()); }
           else statusDraft = statusDraft ? `${statusDraft} ${marker}` : marker;
-          updateToast(tid, `Attached ${name}`, "ok");
+          if (!post) {
+            updateToast(tid, `Attached ${uploadName}`, "ok");
+          } else if (!unchanged) {
+            updateToast(tid, `Attached ${uploadName}, not sent: the message changed while it uploaded`, "info", 7000);
+          } else if (postFromComposer(target)) {
+            updateToast(tid, `Attached ${uploadName}, sending`, "ok");
+          } else {
+            updateToast(tid, `Attached ${uploadName}, not sent yet: press Send when ready`, "info", 7000);
+          }
         } catch (e) {
-          updateToast(tid, `Upload of ${name} failed: ${e}`, "err", 9000);
+          if (sessionCurrent()) updateToast(tid, `Upload of ${uploadName} failed: ${e}`, "err", 9000);
         }
       }
-      await refreshFiles();
+      if (abandoned > 0 && sessionCurrent()) {
+        toast(`${abandoned} file${abandoned === 1 ? " was" : "s were"} not attached: you moved to another channel`, "info", 7000);
+      }
+      if (sessionCurrent()) await refreshFiles();
     } finally {
       uploading = false;
     }
   }
 
+  // The pre-upload video editor (VideoEditor.svelte). `VideoReviewQueue` holds the rules: one
+  // editor at a time with later requests waiting their turn, answers accepted only from the editor
+  // they were asked of, and every request settled (as `skip` once its scope is gone).
+  let videoEditor = $state.raw<OpenReview | null>(null);
+  const videoReviews = new VideoReviewQueue((open) => { videoEditor = open; });
+  // One batch owns `uploading` until its real finally runs, including across lock and close.
+  // Do not reset it at those boundaries: an old completion must not release a newer batch.
+  const MAX_UPLOAD_BATCH_FILES = 32;
+  function canStartUpload(count: number): boolean {
+    if (count === 0 || activeServerId === null || locked || !uiStateReady || windowCloseInFlight) return false;
+    if (uploading) { toast("Wait for the current upload to finish before adding more files.", "info", 5000); return false; }
+    if (count > MAX_UPLOAD_BATCH_FILES) { toast(`Choose at most ${MAX_UPLOAD_BATCH_FILES} files at a time.`, "warn", 5000); return false; }
+    return true;
+  }
+  // Everything a review is bound to, as one primitive so the effect below only reruns when it
+  // actually changes. Reading `cur?.active` straight from an effect would rerun it whenever the
+  // server list is replaced, and that would close an editor mid-edit for nothing.
+  const videoEditorScope = $derived(`${locked ? "locked" : windowCloseInFlight ? "closing" : !uiStateReady ? "loading" : "open"}|${uiStateLoadGeneration}|${activeServerId ?? ""}|${chanKey() ?? ""}`);
+  // The protocol ceiling on a single file (catcoms-app MAX_FILE_BYTES); the cap the editor uses
+  // while this server's own limit has not been read. The native side enforces the real one.
+  const VIDEO_EDITOR_FALLBACK_CAP = 1024 * 1024 * 1024;
+  // Bumped by the effect below every time `videoEditorScope` changes; see `embedMedia`.
+  let videoScopeEpoch = 0;
+  function reviewVideo(file: File, position: ReviewPosition, scope: string, context: VideoEditorContext): Promise<VideoEditorResult> {
+    return videoReviews.request(file, position, scope, context);
+  }
+  // Which files of a batch go through the editor, and each one's "2 of 3" among them. None do with
+  // `asIs` (Shift), or in a window without WebCodecs, where every file uploads as it always did.
+  function videoReviewPlan(files: File[], asIs: boolean): (file: File) => ReviewPosition | null {
+    const reviewable = (file: File) => !asIs && webCodecsAvailable() && editableContainer(file.type) !== null;
+    const count = files.filter(reviewable).length;
+    let index = 0;
+    return (file) => reviewable(file) ? { index: ++index, count } : null;
+  }
+  // What a reviewed file uploads as, and whether "post now" asked for an immediate send.
+  type ReviewedUpload = { upload: File; uploadName: string; post: boolean };
+  // The composer as "post now" sees it: its text, and for chat the message being replied to.
+  function composerState(target: "chat" | "status"): string {
+    return target === "chat" ? `${replyingTo}\u0000${draft}` : statusDraft;
+  }
+  // Send the composer as its own Send does, and report whether a send actually started. Both
+  // sends set their in-flight flag before their first await, so reading it straight after the call
+  // tells a started send from one their own guards refused (a send already under way, a lock, the
+  // pending-message manager open).
+  function postFromComposer(target: "chat" | "status"): boolean {
+    if (target === "chat") {
+      const wasSending = sending;
+      void send();
+      return !wasSending && sending;
+    }
+    const wasPosting = statusPosting;
+    void postStatus();
+    return !wasPosting && statusPosting;
+  }
+  // One file's way to its upload: through the editor when `position` says it is reviewed, else
+  // unchanged. Null means the person chose not to upload it. An edited file takes its container's
+  // name (`clip.mov` re-encoded is `clip.mp4`).
+  async function reviewForUpload(
+    file: File,
+    name: string,
+    position: ReviewPosition | null,
+    scope: string,
+    context: VideoEditorContext,
+  ): Promise<ReviewedUpload | null> {
+    const container = editableContainer(file.type);
+    if (!position || !container) return { upload: file, uploadName: name, post: false };
+    const result = await reviewVideo(file, position, scope, context);
+    if (result.kind === "skip") return null;
+    if (result.kind === "edited") return { upload: result.file, uploadName: editedFileName(name, container), post: result.post === true };
+    return { upload: file, uploadName: name, post: result.post === true };
+  }
+  // Shift held through a picker click (the drop event carries its own `shiftKey`; paste has no
+  // Shift form); see upload-intent.ts for why each gesture is read where it is.
+  const uploadIntent = new ShiftIntent();
+  // With Tauri's own drop handling off (tauri.conf.json), drops from outside reach the page as a
+  // browser's would: nothing dropped outside a zone may navigate the window, and no file may be
+  // released into an embedded third-party frame. See drop-guard.ts.
+  $effect(() => installFileDropGuard(window, document));
+  $effect(() => {
+    const scope = videoEditorScope;
+    untrack(() => {
+      videoScopeEpoch++;
+      const { closedOpen, closedContext, dropped } = videoReviews.rescope(scope);
+      const lost = (closedOpen ? 1 : 0) + dropped;
+      // Not on lock: the lock screen is its own explanation, and a toast would sit behind it.
+      if (lost === 0 || !scope.startsWith("open|")) return;
+      toast(closedOpen && dropped === 0 && closedContext
+        ? `The video you were editing was not ${editorWords(closedContext).done}: you moved elsewhere`
+        : `${lost} videos were not added: you moved elsewhere`, "info", 7000);
+    });
+  });
+  // Keys the editor lets through to the app although it is modal: Lock, which must work from
+  // anywhere, and push-to-talk, so someone in a call can still speak while trimming a clip.
+  // Push-to-talk only matches its code, so a combination that merely contains that key (Ctrl+Z
+  // with push-to-talk on Z, Alt+Left with it on an arrow) stays with the editor: passed on, it
+  // would both skip the editor's own command and fire an app shortcut behind the dialog.
+  function videoEditorPassKey(e: KeyboardEvent): boolean {
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "l") return true;
+    const modifierKey = /^(Control|Alt|Meta|Shift|OS)/.test(e.code);
+    if ((e.ctrlKey || e.metaKey || e.altKey) && !modifierKey) return false;
+    return pushToTalkEvent(pushToTalk, { code: e.code, typing: false, inCall });
+  }
+
+  // Every file drop zone's dragover. A zone takes files only: accepting any drag would swallow text
+  // or a link dragged into the composer or the wiki editor, which their own fields handle natively.
+  // The effect is pinned to "copy" so the source app (Explorer, a browser) never treats the drop as
+  // a move of its file.
+  function acceptFileDrag(e: DragEvent) {
+    if (!carriesFiles(e)) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+    dragOver = true;
+  }
+
+  // Shift held as the files land: attach them as they are, without the video editor.
   function onComposerDrop(target: "chat" | "status", e: DragEvent) {
+    // Text or a link dropped on the composer is the textarea's own native drop; only files are ours.
+    if (!carriesFiles(e)) return;
     e.preventDefault();
     dragOver = false;
-    embedFiles(target, e.dataTransfer?.files ?? null);
+    embedFiles(target, e.dataTransfer?.files ?? null, e.shiftKey);
   }
 
   // Paste a screenshot or a media file straight into the composer, the same way dropping one in
@@ -10912,7 +11268,9 @@
   // default on those would swallow ordinary text pastes, and copying a region of a web page puts
   // an HTML flavour on the clipboard beside the picture.
   function onComposerPaste(target: "chat" | "status", e: ClipboardEvent) {
-    const media = pastedMedia(e.clipboardData?.files);
+    const files = e.clipboardData?.files;
+    if (files?.length && !canStartUpload(files.length)) { e.preventDefault(); return; }
+    const media = pastedMedia(files);
     if (!media.length) return;
     e.preventDefault();
     // One instant for the whole paste, so a multi-image paste keeps its clipboard order in the
@@ -15406,6 +15764,8 @@
     return m;
   });
   // A peer's chosen name colour, or the accent when their profile never set one.
+  // A member's colour can be any hex they picked, so text drawn on it takes its ink from inkOn
+  // (the accent fallback resolves to the accent's own ink).
   function instColor(key: string): string {
     return profiles[displayKey(key)]?.color?.trim() || "var(--accent-hi)";
   }
@@ -20644,7 +21004,6 @@
     (uiStateJson) => invoke<NativeVaultLockOutcome>("lock_session", { uiStateJson }),
   );
   let winMaximized = $state(false);
-  let windowCloseInFlight = $state(false);
   $effect(() => { if (!windowCloseInFlight) studioEndClose?.(); });
   // The first continuity failure leaves a confirmed-locked window open with a warning. Repeating
   // close is the user's explicit acknowledgement that exiting without that latest snapshot is OK.
@@ -20888,6 +21247,10 @@
           return;
         }
         windowCloseInFlight = true;
+        // Cancel review ownership immediately, before Studio/native close can await or snapshot.
+        // A refused close cannot revive an earlier batch even if the derived key returns to open.
+        videoScopeEpoch++;
+        videoReviews.rescope(videoEditorScope);
         if (!locked) {
           try { studioBeginClose?.(); await studioSave?.(); }
           catch (e) { windowCloseInFlight = false; if (!locked) error = String(e); return; }
@@ -21325,18 +21688,7 @@
       listen<{ server: number; caution: boolean }>("eclipse-changed", (e) => {
         if (e.payload.server === activeServerId) eclipseCaution = e.payload.caution;
       }),
-      listen<{ server: number }>("server-closed", (e) => {
-        servers = servers.filter((s) => s.id !== e.payload.server);
-        if (activeServerId === e.payload.server) {
-          if (servers.length) void switchServer(servers[0].id);
-          else {
-            beginViewSwitch();
-            // studio-exit: forced edge. The native server is gone; nothing could accept a Save.
-            activeServerId = null;
-            clearServerView(); // studio-exit: forced edge (server closed, as above)
-          }
-        }
-      }),
+      listen<{ server: number }>("server-closed", (e) => serverClosed(e.payload.server)),
     ];
     // Global keyboard shortcuts: Escape closes the top-most overlay/menu; Ctrl/Cmd+1–5 switch
     // tabs; Ctrl/Cmd+K opens the quick switcher.
@@ -21586,6 +21938,9 @@
     const onMouseNav = (e: MouseEvent) => {
       if (e.button !== 3 && e.button !== 4) return;
       e.preventDefault();
+      // The pre-upload video editor is modal: a thumb button must not navigate out from under it
+      // (which would close it and discard the edit).
+      if (videoEditor) return;
       if (e.button === 3) navBack();
       else navForward();
     };
@@ -21808,7 +22163,7 @@
   {#if p?.avatar}
     <img class="avatar" src={imgSrc(p.avatar)} alt="" />
   {:else}
-    <span class="avatar fallback" style={p?.color ? `background:${p.color}` : ""}>
+    <span class="avatar fallback" style={p?.color ? `background:${p.color};color:${inkOn(p.color)}` : ""}>
       {nameOf(fp).slice(0, 1).toUpperCase()}
     </span>
   {/if}
@@ -21858,7 +22213,7 @@
   {#if p?.avatar}
     <img class="avatar" src={imgSrc(p.avatar)} alt="" />
   {:else}
-    <span class="avatar fallback" style={p?.color ? `background:${p.color}` : ""}>
+    <span class="avatar fallback" style={p?.color ? `background:${p.color};color:${inkOn(p.color)}` : ""}>
       {callNameOf(fp).slice(0, 1).toUpperCase()}
     </span>
   {/if}
@@ -22033,7 +22388,7 @@
                 {#if ident.avatar}
                   <img class="avatar" src={imgSrc(ident.avatar)} alt="" />
                 {:else}
-                  <span class="avatar fallback" style={`background:${ident.color}`}>{(ident.name || ident.label).slice(0, 1).toUpperCase()}</span>
+                  <span class="avatar fallback" style={`background:${ident.color};color:${inkOn(ident.color)}`}>{(ident.name || ident.label).slice(0, 1).toUpperCase()}</span>
                 {/if}
                 <span class="id-text">
                   {@render styledName(ident.name || ident.label, ident.color, ident.font, ident.effect)}
@@ -22060,7 +22415,7 @@
         {#if pAvatar}
           <img class="avatar lg" src={imgSrc(pAvatar)} alt="" />
         {:else}
-          <span class="avatar lg fallback" style={`background:${pColor}`}>
+          <span class="avatar lg fallback" style={`background:${pColor};color:${inkOn(pColor)}`}>
             {(pName || displayName).slice(0, 1).toUpperCase()}
           </span>
         {/if}
@@ -22238,7 +22593,7 @@
               class:dragging={draggedNameEffect === active.id}
               role="group"
               aria-label={`${definition?.label ?? active.id} effect settings`}
-              ondragover={(e) => e.preventDefault()}
+              ondragover={(e) => { if (draggedNameEffect) e.preventDefault(); }}
               ondrop={(e) => { e.preventDefault(); dropNameEffect(active.id); }}
             >
               <div class="fx-settings-head">
@@ -22653,7 +23008,7 @@
           {#if pAvatar}
             <img class="avatar" src={imgSrc(pAvatar)} alt="" />
           {:else}
-            <span class="avatar fallback" style={`background:${pColor}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>
+            <span class="avatar fallback" style={`background:${pColor};color:${inkOn(pColor)}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>
           {/if}
         </span>
       </span>
@@ -22701,7 +23056,7 @@
           {#if pAvatar}
             <img class="avatar lg stx-pav" src={imgSrc(pAvatar)} alt="" />
           {:else}
-            <span class="avatar lg fallback stx-pav" style={`background:${pColor}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>
+            <span class="avatar lg fallback stx-pav" style={`background:${pColor};color:${inkOn(pColor)}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>
           {/if}
           <div class="stx-prof-body">
             <span class="stx-prof-name">{@render styledName(pName || displayName, pColor, pFont, pEffect)}</span>
@@ -22727,7 +23082,7 @@
         <div class="stx-pcap">MEMBER LIST · COMPACT</div>
         <div class="stx-member-preview">
           <span class="presence online">●</span>
-          {#if pAvatar}<img class="avatar" src={imgSrc(pAvatar)} alt="" />{:else}<span class="avatar fallback" style={`background:${pColor}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>{/if}
+          {#if pAvatar}<img class="avatar" src={imgSrc(pAvatar)} alt="" />{:else}<span class="avatar fallback" style={`background:${pColor};color:${inkOn(pColor)}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>{/if}
           <span class="stx-member-name">{@render styledName(pName || displayName, pColor, pFont, pEffect)}</span>
           <span class="you-badge">you</span>
         </div>
@@ -24084,7 +24439,7 @@
             type="button"
             class="jam-pad"
             class:hit={who === "me"}
-            style={who && who !== "me" ? `background:${instColor(who)};border-color:${instColor(who)};color:#131218` : ""}
+            style={who && who !== "me" ? `background:${instColor(who)};border-color:${instColor(who)};color:${inkOn(instColor(who))}` : ""}
             title={who && who !== "me" ? `${pad.name} · ${nameOf(who)}` : `${pad.name} (${padKeys[pad.id]})`}
             onpointerdown={() => jamPadHit(pad.id)}
           >
@@ -24107,7 +24462,7 @@
             class:sharp={PC_SHARP[pc]}
             class:held={callHeld.includes(note)}
             class:rheld={!!rfp}
-            style={rfp ? `background:${instColor(rfp)};border-color:${instColor(rfp)};color:#131218` : ""}
+            style={rfp ? `background:${instColor(rfp)};border-color:${instColor(rfp)};color:${inkOn(instColor(rfp))}` : ""}
             title={rfp ? `${noteName(note)} · ${nameOf(rfp)}` : noteName(note)}
             onpointerdown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); instNoteOn(note); }}
             onpointerup={() => instNoteOff(note)}
@@ -24118,7 +24473,7 @@
       {#if instEdges.below.length}
         <div class="inst-edge low">
           {#each instEdges.below.slice(0, 3) as ed (ed.note)}
-            <span class="inst-pill" style={`background:${instColor(ed.fp)};color:#131218`} title={`${nameOf(ed.fp)} is playing ${noteName(ed.note)}, below this register`}>
+            <span class="inst-pill" style={`background:${instColor(ed.fp)};color:${inkOn(instColor(ed.fp))}`} title={`${nameOf(ed.fp)} is playing ${noteName(ed.note)}, below this register`}>
               <svg class="inst-tri" viewBox="0 0 8 8" aria-hidden="true"><path d="M6.4 0.8 0.9 4l5.5 3.2z" fill="currentColor" /></svg>
               {noteName(ed.note)}
             </span>
@@ -24129,7 +24484,7 @@
       {#if instEdges.above.length}
         <div class="inst-edge high">
           {#each instEdges.above.slice(0, 3) as ed (ed.note)}
-            <span class="inst-pill" style={`background:${instColor(ed.fp)};color:#131218`} title={`${nameOf(ed.fp)} is playing ${noteName(ed.note)}, above this register`}>
+            <span class="inst-pill" style={`background:${instColor(ed.fp)};color:${inkOn(instColor(ed.fp))}`} title={`${nameOf(ed.fp)} is playing ${noteName(ed.note)}, above this register`}>
               {noteName(ed.note)}
               <svg class="inst-tri" viewBox="0 0 8 8" aria-hidden="true"><path d="M1.6 0.8 7.1 4l-5.5 3.2z" fill="currentColor" /></svg>
             </span>
@@ -24659,9 +25014,9 @@
         <li><button onclick={() => enterFolder(sub)}>▸ {sub}</button></li>
       {/each}
     </ul>
-    <label class="upload-btn">
+    <label class="upload-btn shift-pick" title="Share a file here (Shift+click: videos as is, without the editor)" use:shiftPick={uploadIntent}>
       {uploading ? "Uploading…" : "＋ Share a file here"}
-      <input type="file" multiple disabled={uploading} onchange={(e) => { uploadFile(e.currentTarget.files); e.currentTarget.value = ''; }} />
+      <input type="file" multiple disabled={uploading} onchange={(e) => { uploadFile(e.currentTarget.files, uploadIntent.takePick()); e.currentTarget.value = ''; }} />
     </label>
     <form class="new-folder" onsubmit={(e) => { e.preventDefault(); const n = newFolder.trim(); if (n) { enterFolder(n); newFolder = ''; } }}>
       <input bind:value={newFolder} placeholder="＋ new folder…" />
@@ -26442,7 +26797,7 @@
             onloadcapture={chatMediaSettled}
             onpointermove={(e) => (logPointer = { x: e.clientX, y: e.clientY })}
             onpointerleave={() => (logPointer = null)}
-            ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+            ondragover={acceptFileDrag}
             ondragleave={() => (dragOver = false)}
             ondrop={(e) => onComposerDrop("chat", e)}
           >
@@ -26747,7 +27102,7 @@
             <form
               class="composer"
               class:drag-over={dragOver}
-              ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+              ondragover={acceptFileDrag}
               ondragleave={() => (dragOver = false)}
               ondrop={(e) => onComposerDrop("chat", e)}
               onsubmit={(e) => { e.preventDefault(); send(); }}
@@ -26761,14 +27116,14 @@
                 aria-expanded={showInsert && insertTarget === "chat"}
                 onclick={() => toggleInsert("chat")}
               >{@render icoPlus()}</button>
-              <label class="attach" title="Attach image / video / audio">
+              <label class="attach shift-pick" title="Attach image / video / audio (Shift+click: videos as is, without the editor)" use:shiftPick={uploadIntent}>
                 📎
                 <input
                   type="file"
                   accept="image/*,video/*,audio/*"
                   multiple
                   disabled={uploading}
-                  onchange={(e) => { embedFiles("chat", e.currentTarget.files); e.currentTarget.value = ''; }}
+                  onchange={(e) => { embedFiles("chat", e.currentTarget.files, uploadIntent.takePick()); e.currentTarget.value = ''; }}
                 />
               </label>
               <div class="composer-entry">
@@ -27204,7 +27559,7 @@
           <ul
             class="file-list tab-pane"
             class:drag-over={dragOver}
-            ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+            ondragover={acceptFileDrag}
             ondragleave={() => (dragOver = false)}
             ondrop={onFilesDrop}
           >
@@ -27347,19 +27702,19 @@
             <form
               class="composer"
               class:drag-over={dragOver}
-              ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+              ondragover={acceptFileDrag}
               ondragleave={() => (dragOver = false)}
               ondrop={(e) => onComposerDrop("status", e)}
               onsubmit={(e) => { e.preventDefault(); postStatus(); }}
             >
-              <label class="attach" title="Attach image / video / audio">
+              <label class="attach shift-pick" title="Attach image / video / audio (Shift+click: videos as is, without the editor)" use:shiftPick={uploadIntent}>
                 📎
                 <input
                   type="file"
                   accept="image/*,video/*,audio/*"
                   multiple
                   disabled={uploading}
-                  onchange={(e) => { embedFiles("status", e.currentTarget.files); e.currentTarget.value = ''; }}
+                  onchange={(e) => { embedFiles("status", e.currentTarget.files, uploadIntent.takePick()); e.currentTarget.value = ''; }}
                 />
               </label>
               {@render textEffectButton("announcement", "Announcement text effects")}
@@ -27404,7 +27759,7 @@
           <div
             class="wiki"
             class:drag-over={dragOver}
-            ondragover={(e) => { if (activeWikiPage) { e.preventDefault(); dragOver = true; } }}
+            ondragover={(e) => { if (activeWikiPage) acceptFileDrag(e); }}
             ondragleave={() => (dragOver = false)}
             ondrop={onWikiDrop}
           >
@@ -27524,10 +27879,10 @@
                         {@render insertPanel()}
                       {/if}
                     </div>
-                    <label class="wiki-tb wiki-tb-attach" title="Upload an image / video / audio and embed it at the caret">
+                    <label class="wiki-tb wiki-tb-attach shift-pick" title="Upload an image / video / audio and embed it at the caret (Shift+click: videos as is, without the editor)" use:shiftPick={uploadIntent}>
                       📎 attach
                       <input type="file" accept="image/*,video/*,audio/*" multiple disabled={uploading}
-                        onchange={(e) => { wikiEmbed(e.currentTarget.files); e.currentTarget.value = ''; }} />
+                        onchange={(e) => { wikiEmbed(e.currentTarget.files, uploadIntent.takePick()); e.currentTarget.value = ''; }} />
                     </label>
                     <span class="wiki-tb-spacer"></span>
                     <button class="wiki-tb wide" class:active={wikiPreview} title="Live preview beside the editor" onclick={() => (wikiPreview = !wikiPreview)}>preview</button>
@@ -27537,7 +27892,7 @@
                     class="wiki-edit"
                     class:split={wikiPreview}
                     class:drag-over={dragOver}
-                    ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+                    ondragover={acceptFileDrag}
                     ondragleave={() => (dragOver = false)}
                     ondrop={onWikiDrop}
                   >
@@ -27666,7 +28021,7 @@
             <form
               class="event-form"
               class:drag-over={dragOver}
-              ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+              ondragover={acceptFileDrag}
               ondragleave={() => (dragOver = false)}
               ondrop={onEventDrop}
               onsubmit={(e) => { e.preventDefault(); createEvent(); }}
@@ -28625,7 +28980,7 @@
               {#if p?.avatar}
                 <img class="avatar lg" src={imgSrc(p.avatar)} alt="" />
               {:else}
-                <span class="avatar lg fallback" style={`background:${p?.color || "#4f8cff"}`}>{nameOf(fp).slice(0, 1).toUpperCase()}</span>
+                <span class="avatar lg fallback" style={`background:${p?.color || "#4f8cff"};color:${inkOn(p?.color || "#4f8cff")}`}>{nameOf(fp).slice(0, 1).toUpperCase()}</span>
               {/if}
               <div class="pc-id">
                 <div class="pc-name">{@render nameTag(fp)}</div>
@@ -29943,6 +30298,16 @@
                   <li><kbd>Esc</kbd><span>Close the topmost thing, one layer at a time</span></li>
                 </ul>
               </section>
+              <!-- The pre-upload video editor's keys, from the same list the editor's tests check
+                   against its real key handling (video-editor-ui.ts). -->
+              <section class="set-section" data-keybinds="video-editor">
+                <h3>Video editor</h3>
+                <ul class="stx-keys">
+                  {#each VIDEO_EDITOR_SHORTCUTS as shortcut (shortcut.keys)}
+                    <li><kbd>{shortcut.keys}</kbd><span>{shortcut.action}</span></li>
+                  {/each}
+                </ul>
+              </section>
               <section class="set-section text-fx-keybinds">
                 <div class="text-fx-keybind-head">
                   <div>
@@ -30873,6 +31238,15 @@
         </div>
       </div>
     {/if}
+
+    <!-- Keyed by review id: the editor reads its file once at mount, so every review gets a fresh
+         instance, and `open` stays that review's own object for as long as its instance lives. Its
+         answer is therefore always filed under its own id; a late answer from an instance being
+         torn down cannot be taken as the next review's (the queue ignores a stale id). -->
+    {#each videoEditor ? [videoEditor] : [] as open (open.id)}
+      <VideoEditor file={open.file} capBytes={fileSizeLimit?.limit ?? VIDEO_EDITOR_FALLBACK_CAP} position={open.position} context={open.context}
+        passKey={videoEditorPassKey} onfinish={(result) => videoReviews.finish(open.id, result)} />
+    {/each}
 
     {#if pixaViewer}
       <PixaViewer name={pixaViewer.file.name} pixa={pixaViewer.pixa} error={pixaViewer.error} bytes={pixaViewer.file.size}

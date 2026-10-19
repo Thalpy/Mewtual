@@ -314,34 +314,40 @@ test("UI-002: a pending read becomes the editor, a landed save changes the shown
 });
 
 test("UI-003: a sidebar row rendered while a create is in flight changes when that create goes uncertain", async () => {
-  const ipc = fakeIpc();
-  const create = deferred<unknown>();
-  ipc.on("studio_list", () => ordinaryView(indexContent()));
-  ipc.on("studio_create", () => create.promise);
-  ipc.on("publish_pix", () => ({ cid: id64(3), bytes: pixBytes(0).length }));
-  state.useStudioIpc(ipc);
-  const target = document.createElement("div");
-  document.body.appendChild(target);
-  const app = mount(StudioNav, { target, props: { me: ME, server: SERVER, channel: CHANNEL, onopen: () => {}, onnotice: () => {} } });
-  flushSync();
-  try {
-    await settled();
-    const button = target.querySelector<HTMLButtonElement>("button.studio-new");
-    assert.ok(button && !button.disabled, "the index landed and creating is offered");
-    button.click();
+  // A failure after dispatch may have committed: uncertain. The bridge's actor-busy refusal comes
+  // before dispatch, so it is truthfully "not written" (see nativeNoWrite), never "creating…".
+  for (const [error, label] of [["Studio transaction expired, cancelled or server stopped", /create uncertain · retry in the editor/], ["Studio actor busy; retry", /create not written · retry in the editor/]] as const) {
+    const ipc = fakeIpc();
+    const create = deferred<unknown>();
+    ipc.on("studio_list", () => ordinaryView(indexContent()));
+    ipc.on("studio_create", () => create.promise);
+    ipc.on("publish_pix", () => ({ cid: id64(3), bytes: pixBytes(0).length }));
+    state.useStudioIpc(ipc);
+    const target = document.createElement("div");
+    document.body.appendChild(target);
+    const app = mount(StudioNav, { target, props: { me: ME, server: SERVER, channel: CHANNEL, onopen: () => {}, onnotice: () => {} } });
     flushSync();
-    await settled();
-    const row = () => target.querySelector(".studio-obj.pending");
-    assert.match(row()?.textContent ?? "", /creating…/, "the pending row is on screen while the create is held");
-    create.reject(new Error("Studio actor busy; retry"));
-    await settled();
-    assert.equal(ipc.calls.filter((c) => c.cmd === "studio_create").length, 1);
-    assert.match(row()?.textContent ?? "", /create uncertain · retry in the editor/, "the same keyed row shows the new status");
-    assert.doesNotMatch(row()?.textContent ?? "", /creating…/);
-  } finally {
-    unmount(app);
-    target.remove();
-    state.disposeStudio();
+    try {
+      await settled();
+      const button = target.querySelector<HTMLButtonElement>("button.studio-new");
+      assert.ok(button && !button.disabled, "the index landed and creating is offered");
+      button.click();
+      flushSync();
+      await settled();
+      const row = () => target.querySelector(".studio-obj.pending");
+      assert.match(row()?.textContent ?? "", /creating…/, "the pending row is on screen while the create is held");
+      create.reject(new Error(error));
+      // A pre-dispatch refusal is resent automatically (250 + 500 + 1000 ms) before it settles.
+      const busy = error === "Studio actor busy; retry";
+      await settled(busy ? 2100 : 200);
+      assert.equal(ipc.calls.filter((c) => c.cmd === "studio_create").length, busy ? 4 : 1, "resent only when nothing was dispatched");
+      assert.match(row()?.textContent ?? "", label, `the same keyed row shows the new status (${error})`);
+      assert.doesNotMatch(row()?.textContent ?? "", /creating…/);
+    } finally {
+      unmount(app);
+      target.remove();
+      state.disposeStudio();
+    }
   }
 });
 
@@ -366,12 +372,13 @@ test("UI-003: a pending frame's thumbnail rendered while its publish is in fligh
     assert.ok(pendingThumb(), "the pending thumbnail is on screen while the publish is held");
     assert.equal(pendingThumb()?.querySelector(".ix")?.textContent, "…");
     assert.equal(pendingThumb()?.querySelector(".fr.pending.uncertain"), null);
-    publish.reject(new Error("Studio storage busy; retry the same request"));
+    // A failure after dispatch (a pre-dispatch "busy" refusal is a definite no-write, resent).
+    publish.reject(new Error("Studio transaction expired, cancelled or server stopped"));
     await settled();
     assert.equal(pendingThumb()?.querySelector(".ix")?.textContent, "?", "the same thumbnail now says the save is uncertain");
     assert.ok(pendingThumb()?.querySelector(".fr.pending.uncertain"));
     assert.match(m.text(), /save uncertain/);
-    assert.match(m.text(), /Studio storage busy/);
+    assert.match(m.text(), /Studio transaction expired/);
   } finally {
     m.done();
   }

@@ -5,6 +5,36 @@ are implemented and exercised; live V2, production member media relay, combined 
 independent physical audio/network acceptance are not complete. The dated sections distinguish
 current runtime paths from inactive prerequisites and experiments.
 
+## Gate7 integration validation (19 October)
+
+Gate7 `e9998678` is integrated with the communication branch, preserving the incoming video,
+upload/drop, readability and Studio save/closure work. Read-only adversarial review identified
+four medium lifecycle/boundedness gaps and one low emoji-completion gap in the incoming paths;
+all are corrected and re-reviewed with no remaining finding. New regressions cover wiki pane
+replacement, held close, lock/unlock, exact leave-operation replacement, current server closure
+while an older leave is pending, overlapping/oversized batches and bounded review teardown.
+
+Vite's native-tree watcher exclusion is checked against its actual configured Chokidar admission
+predicate. The test fixture disables its HMR WebSocket listener. This proves path admission,
+not OS notification delivery or the cause of earlier drive activity.
+
+Complete frontend:2,067 passed (`communication-gate7-integration-frontend-final-4.log`). Complete
+native:427 library +5 ACL passed (`communication-gate7-integration-native-full.log`,613.71s).
+Svelte has0 errors/0 warnings; production frontend build and native check/build/startup pass.
+Ten standard browser flows pass. Separate actual-render scenarios pass for private Download
+resume/Pause/Retry, retained-copy controls, and Gate7 inline playback/looping/Studio close.
+Their logs and900x640 screenshots are under the integration checkout's `target/`.
+
+The first browser harness attempt timed out while Vite prepared dependencies; a later kept-copy
+attempt timed out before app mount. Unchanged readiness/timeout retries passed; neither failed
+attempt reached its behavioral acceptance. Initial focused invocation omitted the Svelte preload;
+the corrected command passes. Intermediate close-fixture dependency and declaration-order
+failures were fixed without relaxing their assertions. Production bundle-size warnings remain.
+
+Root Rust source is unchanged from the3,033-pass full checkpoint below. The separately reviewed
+unpublished token/origin prerequisite is not part of this integration result. Live V2, production
+media relay and independent-network/audible acceptance remain open.
+
 ## Validated checkpoint 3691bd25 (19 October)
 
 All required complete checks have now passed for this checkpoint:

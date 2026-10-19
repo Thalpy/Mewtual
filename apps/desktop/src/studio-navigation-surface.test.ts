@@ -315,3 +315,36 @@ test("a document's Save sends only that document's restored edits; other documen
     assert.ok(!notices.some(n => /Could not confirm the save/.test(n)), notices.join("; "));
   } finally { for (const s of mounted) await unmount(s); disposeStudio(); target.remove(); }
 });
+
+// Re-review of the d2548a37 fix, MEDIUM 1: edits kept for a server that stopped wait for a channel
+// that cannot open until Mewtual restarts (a lock does not restart its actor), and while they wait
+// every new Studio edit is refused. The sidebar offers an armed discard, so the member is not stuck.
+test("the sidebar discards a restored draft still waiting for its channel, and edits are accepted again", async () => {
+  const ipc = fakeIpc(), notices: string[] = [];
+  ipc.on("studio_list", () => ({ ...ordinaryView(indexContent()), group: "deadbeef" }));
+  ipc.on("studio_read", () => ({ ...ordinaryView(flipnoteContent({ frames: [] })), group: "deadbeef" }));
+  useStudioIpc(ipc, 5000); const session = ensureStudio(ME);
+  const settle = async () => { for (let i = 0; i < 12; i++) { session.flush(); await new Promise(resolve => setImmediate(resolve)); flushSync(); } };
+  // A draft for another server, as a closure keeps it: one edit whose delivery was interrupted.
+  session.setScope({ server: SERVER + 1, channel: CHANNEL }); session.open(a); await settle();
+  ipc.on("studio_apply", () => { throw "Studio transaction expired, cancelled or server stopped"; });
+  session.setFps(a, 7); await session.save().catch(() => {});
+  assert.equal(session.saves[0].status, "uncertain");
+  const json = studioDraftSnapshot()!; resetStudio(); restoreStudioDraft(json);
+  const target = document.createElement("div"); document.body.append(target);
+  const nav = mount(StudioNav, { target, props: { me: ME, server: SERVER, channel: CHANNEL, onopen: () => {}, onnotice: (text: string) => notices.push(text) } }); flushSync();
+  try {
+    session.open(a); await settle();
+    const row = () => target.querySelector("[data-waiting-draft]");
+    assert.ok(row(), target.textContent!); assert.match(row()!.textContent!, /1 edit for another channel/);
+    assert.match(row()!.textContent!, /1 of them may already have been saved/, "discarding cannot undo what landed, and says so");
+    assert.throws(() => session.setFps(a, 8), /discard them in the Studio sidebar/, "edits wait on the draft");
+    const button = (text: string) => [...row()!.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === text)!;
+    button("discard restored edits…").click(); flushSync();
+    assert.equal(session.waitingDraft?.edits, 1, "arming discards nothing");
+    button("discard restored edits for real").click(); await settle();
+    assert.equal(session.waitingDraft, null); assert.equal(row(), null);
+    assert.equal(studioDraftSnapshot(), null, "nothing of it is kept for the next lock either");
+    session.setFps(a, 8); assert.equal(session.saves.length, 1, "new edits are accepted");
+  } finally { await unmount(nav); disposeStudio(); target.remove(); }
+});
