@@ -632,6 +632,7 @@ impl PacketLedger {
         Ok(())
     }
     /// Private-protocol transition after the role-specific three-flight confirmation succeeds.
+    #[cfg(test)]
     pub(super) fn establish(
         &mut self,
         handshake: &[u8; 32],
@@ -676,22 +677,24 @@ impl PacketLedger {
     }
     /// Opaque receipts are still revalidated against current native pair ownership before a
     /// protocol transition. A receipt captured before member removal/promotion cannot commit.
-    pub(super) fn receipt_current(
+    pub fn receipt_current(
         &self,
         receipt: &CommittedPacket,
         authority: &Authority<'_>,
         clock: &dyn Clock,
     ) -> Result<(), VoiceError> {
+        let monotonic = clock.monotonic_ms();
+        receipt.object.check_freshness(clock.now_ms())?;
         let pair = self.pair(&receipt.header().handshake, authority)?;
         if !receipt.local_lease.is_same(&self.lease)
             || !receipt.local_lease.is_live()
             || !receipt.pair_lease.is_same(&pair.live)
             || !receipt.pair_lease.is_live()
-            || clock.monotonic_ms() >= receipt.retire
+            || monotonic >= receipt.retire
         {
             return Err(VoiceError::Unauthorized);
         }
-        receipt.object.check_freshness(clock.now_ms())
+        Ok(())
     }
     pub(super) fn collect_expired(&mut self, clock: &dyn Clock) {
         self.prune(clock);
@@ -868,6 +871,18 @@ impl PacketLedger {
         }
         if ciphertext.len() != outgoing.ciphertext_bytes {
             return Err(VoiceError::Bounds);
+        }
+        // Native time/signer seams above may observe End or membership replacement. Recheck
+        // irreversible owners after their last sample and immediately before first signing.
+        self.pair(&outgoing.draft.header.handshake, authority)?;
+        if !outgoing.live.is_live()
+            || !outgoing.crypto.0.is_live()
+            || outgoing
+                .exchange
+                .as_ref()
+                .is_some_and(|exchange| !exchange.is_live())
+        {
+            return Err(VoiceError::Unauthorized);
         }
         let signed = outgoing.draft.seal(signer, ciphertext)?;
         let outgoing = self.outgoing.get_mut(&id).expect("checked reservation");
@@ -1295,11 +1310,16 @@ impl PacketLedger {
             .get(&prepared.token)
             .ok_or(VoiceError::Reservation)?;
         incoming.object.check_freshness(clock.now_ms())?;
+        let monotonic = clock.monotonic_ms();
+        // Clock/native seams can observe End while sampling time. Repeat current local and
+        // pair ownership AFTER those samples; no further clock or callback may separate this
+        // final owner check from the synchronous token-consumption transaction.
+        self.current(authority)?;
         if !prepared.pair.is_same(&pair.live)
             || !prepared.pair.is_live()
             || !prepared.token_owner.is_same(&incoming.token.0)
             || !prepared.token_owner.is_live()
-            || clock.monotonic_ms() >= prepared.retire
+            || monotonic >= prepared.retire
             || incoming
                 .confirmation
                 .as_ref()

@@ -28,6 +28,9 @@ pub const DB_KEY_LABEL: &str = "catcoms/db-key/v1";
 pub const MLS_SEAL_LABEL: &str = "catcoms/mls-seal/v1";
 /// HKDF label for the blob-at-rest key.
 pub const BLOB_KEY_LABEL: &str = "catcoms/blob/v1";
+/// V2 retained-transfer intent/budget authority, separate from the ordinary blob encryption
+/// oracle. Legacy retained manifests and chunk records keep their released blob key.
+pub const KEPT_METADATA_KEY_LABEL: &str = "mewtual/kept-metadata/v2";
 
 /// Errors from key derivation, sealing, or the key store.
 #[derive(Debug, Error)]
@@ -175,6 +178,11 @@ impl KeyHierarchy {
     /// The blob-at-rest key.
     pub fn blob_key(&self) -> Result<[u8; 32], KeystoreError> {
         self.dek.subkey(BLOB_KEY_LABEL)
+    }
+    /// Only closed native V2 retention journals/format barriers use this key. An ordinary blob
+    /// containing chosen journal bytes must never become a valid retained intent by file copying.
+    pub fn kept_metadata_key(&self) -> Result<[u8; 32], KeystoreError> {
+        self.dek.subkey(KEPT_METADATA_KEY_LABEL)
     }
 }
 
@@ -375,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn key_hierarchy_exposes_three_independent_subkeys() {
+    fn key_hierarchy_exposes_four_independent_subkeys() {
         let kh = KeyHierarchy::new(Dek::from_bytes([1u8; 32]));
         let db = kh.db_key().unwrap();
         let mls = kh.mls_seal_key().unwrap();
@@ -383,6 +391,17 @@ mod tests {
         assert_ne!(db, mls);
         assert_ne!(mls, blob);
         assert_ne!(db, blob);
+        let kept = kh.kept_metadata_key().unwrap();
+        assert_ne!(kept, blob);
+        assert_ne!(kept, db);
+        assert_ne!(kept, mls);
+        let sealed = seal(
+            &blob,
+            b"chosen journal plaintext",
+            &mut ChaCha20Rng::seed_from_u64(18),
+        )
+        .unwrap();
+        assert!(unseal(&kept, &sealed).is_err());
     }
 
     #[test]

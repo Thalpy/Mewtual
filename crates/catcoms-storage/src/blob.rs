@@ -20,27 +20,149 @@ use crate::StorageError;
 /// and promotes the whole set once its manifest is published, so an upload that never finishes
 /// leaves nothing in the store to account for. See [`put_staged`](BlobStore::put_staged).
 pub trait BlobStore {
+    /// Bind retention once to the actual MLS namespace/full native device before it can expose
+    /// saved bytes or mutate V2 ownership. Unsupported cache-only stores have no retained effects.
+    fn configure_keep_scope(&mut self, _scope: crate::kept::KeepScope) -> Result<(), StorageError> {
+        Ok(())
+    }
+    /// A failed immutable attachment must disable retained exposure as well as new admission.
+    /// Ordinary cache/upload storage remains usable. This handle can never clear that failure.
+    fn disable_retention(&mut self) {}
     /// Explicit local copies have a separate quota and ownership from fetched/uploaded cache
     /// bytes. Unsupported stores (especially memory/FIFO stores) never claim durable retention.
     fn kept_files(&self) -> crate::kept::KeptFiles {
         crate::kept::KeptFiles::default()
     }
     /// Reserve the complete exact plan before accepting any retained network bytes.
-    fn begin_keep(&mut self, _plan: crate::kept::KeepPlan) -> Result<u64, StorageError> {
+    fn begin_keep(
+        &mut self,
+        _plan: crate::kept::KeepPlan,
+    ) -> Result<crate::kept::KeepRun, StorageError> {
         Err(StorageError::Io(
             "kept copies require the encrypted disk store".into(),
         ))
     }
+    fn begin_keep_with_listing(
+        &mut self,
+        plan: crate::kept::KeepPlan,
+        _listing: [u8; 32],
+    ) -> Result<crate::kept::KeepRun, StorageError> {
+        self.begin_keep(plan)
+    }
+    /// Native-only original plans, for closed manifest/equivalence validation before a new run.
+    /// No current index lookup may enrich this saved set after restart or unlisting.
+    fn kept_saved_plans(&self, _cid: &Cid) -> Option<Vec<crate::kept::KeepPlan>> {
+        None
+    }
+    /// Reserve the entire original compatible candidate set before publishing the first intent.
+    /// Unsupported stores fail closed; silently retaining just one candidate loses resume authority.
+    fn begin_keep_variants(
+        &mut self,
+        _plans: Vec<crate::kept::KeepPlan>,
+        _selected: usize,
+        _listing: [u8; 32],
+    ) -> Result<crate::kept::KeepRun, StorageError> {
+        Err(StorageError::Malformed)
+    }
+    /// Whole-variant fallback preserves all durable budgets. It retires the exact old run before
+    /// publication; the optional result is a fresh run plus its saved exact plan, never an IPC grant.
+    fn fallback_keep(
+        &mut self,
+        _run: crate::kept::KeepRun,
+        _expected: &[u8; 32],
+        _tried: &[[u8; 32]],
+        _bad_current: bool,
+    ) -> Result<Option<(crate::kept::KeepRun, crate::kept::KeepPlan)>, StorageError> {
+        Err(StorageError::Malformed)
+    }
     /// Write only into the reservation selected by this process-local token.
-    fn put_keep(&mut self, _token: u64, _bytes: &[u8]) -> Result<(), StorageError> {
+    fn put_keep(
+        &mut self,
+        _token: crate::kept::KeepRun,
+        _bytes: &[u8],
+    ) -> Result<(), StorageError> {
         Err(StorageError::Malformed)
     }
     /// Called only after the application has verified the complete ordered plaintext CID.
-    fn finish_keep(&mut self, _token: u64) -> Result<(), StorageError> {
+    fn finish_keep(&mut self, _token: crate::kept::KeepRun) -> Result<(), StorageError> {
         Err(StorageError::Malformed)
     }
     /// Cancel this exact reservation. Failed cleanup must not refund its capacity.
-    fn abort_keep(&mut self, _token: u64) -> Result<(), StorageError> {
+    fn abort_keep(&mut self, _token: crate::kept::KeepRun) -> Result<(), StorageError> {
+        Err(StorageError::Malformed)
+    }
+    /// Runtime pause preserves the exact saved plan/progress/allowance. It invalidates only this
+    /// process run; explicit Cancel/release is a distinct durable Deleting transition.
+    fn pause_keep(&mut self, _token: crate::kept::KeepRun) -> Result<(), StorageError> {
+        Err(StorageError::Malformed)
+    }
+    /// Local user intent, separate from transient worker cancellation. The exact saved owner
+    /// and intent revision prevent delayed UI actions changing a replacement transfer. This never refills
+    /// allowance; an exhausted transfer requires its separate explicit Retry grant.
+    fn set_keep_paused(
+        &mut self,
+        _cid: &Cid,
+        _transfer: [u8; 32],
+        _expected_intent: u64,
+        _paused: bool,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::Malformed)
+    }
+    /// Suppress repeated unchanged deterministic integrity failures until an explicit Resume.
+    fn block_keep(&mut self, _run: crate::kept::KeepRun) -> Result<(), StorageError> {
+        Err(StorageError::Malformed)
+    }
+    fn keep_progress(&self, _cid: &Cid) -> Option<crate::kept::KeepProgress> {
+        None
+    }
+    /// Cheap exact-run fence; callers need not clone opaque manifest inventories per page.
+    fn keep_run_current(
+        &self,
+        _run: crate::kept::KeepRun,
+        _cid: &Cid,
+        _version: &[u8; 32],
+    ) -> bool {
+        false
+    }
+    /// Cheap possession hint for auto-resume without a connected source. Authentication still
+    /// occurs under a fresh run; this hint never makes partial bytes publicly serveable.
+    fn keep_plausibly_local(&self, _cid: &Cid) -> bool {
+        false
+    }
+    /// Metadata-only bounded scan; no manifest copying, disk reads, network or new reservation.
+    /// Returns a non-running resumable intent in CID order, wrapping after the previous turn.
+    fn automatic_keep_candidate(&self, _after: Option<Cid>) -> Option<Cid> {
+        None
+    }
+    /// Private partial bytes are readable only by their current opaque run, never blob service.
+    fn get_keep(
+        &self,
+        _token: crate::kept::KeepRun,
+        _cid: &Cid,
+        _max: usize,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        Err(StorageError::Malformed)
+    }
+    fn keep_work(
+        &mut self,
+        _token: crate::kept::KeepRun,
+        _network: Option<crate::kept::KeepNetworkWork>,
+        _mono: u64,
+    ) -> Result<crate::kept::KeepWork, StorageError> {
+        Err(StorageError::Malformed)
+    }
+    fn validate_keep_work(
+        &self,
+        _work: &crate::kept::KeepWork,
+        _mono: u64,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::Malformed)
+    }
+    fn retry_kept(
+        &mut self,
+        _cid: &Cid,
+        _request: crate::kept::KeepRetry,
+    ) -> Result<crate::kept::KeepRetryReceipt, StorageError> {
         Err(StorageError::Malformed)
     }
     /// Explicit local release; replicated expiry/unlisting never calls this operation.
@@ -55,6 +177,21 @@ pub trait BlobStore {
 
     /// Store `bytes`, returning their content address.
     fn put(&mut self, bytes: &[u8]) -> Result<Cid, StorageError>;
+
+    /// Prepare an opaque public held-blob read for an owned blocking worker. Native callers
+    /// must prepay BlobReadPlan::memory_bound(max_bytes) BEFORE preparation (memory stores take
+    /// a bounded snapshot), retain it through actual worker/result retirement and revalidate
+    /// the returned storage fence plus application authority before signing or storing anything.
+    /// Unsupported stores refuse; never fall back to an actor-blocking/unbounded get.
+    fn prepare_read_bounded(
+        &self,
+        _cid: &Cid,
+        _max_bytes: usize,
+    ) -> Result<crate::BlobReadPlan, StorageError> {
+        Err(StorageError::Io(
+            "background blob reads are unavailable".into(),
+        ))
+    }
 
     /// Fetch the bytes for `cid`, verifying their integrity. `None` if absent.
     fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>, StorageError>;
@@ -138,6 +275,7 @@ pub struct MemoryBlobStore {
     order: VecDeque<Cid>,
     total_bytes: usize,
     max_bytes: usize,
+    read_epoch: crate::blob_read::ReadEpoch,
 }
 
 impl Default for MemoryBlobStore {
@@ -160,6 +298,7 @@ impl MemoryBlobStore {
             order: VecDeque::new(),
             total_bytes: 0,
             max_bytes,
+            read_epoch: crate::blob_read::ReadEpoch::default(),
         }
     }
 
@@ -170,6 +309,7 @@ impl MemoryBlobStore {
             if let Some(old) = self.order.pop_front() {
                 if let Some(b) = self.blobs.remove(&old) {
                     self.total_bytes -= b.len();
+                    self.read_epoch.retire();
                 }
             }
         }
@@ -177,6 +317,18 @@ impl MemoryBlobStore {
 }
 
 impl BlobStore for MemoryBlobStore {
+    fn prepare_read_bounded(
+        &self,
+        cid: &Cid,
+        max: usize,
+    ) -> Result<crate::BlobReadPlan, StorageError> {
+        crate::BlobReadPlan::memory(
+            *cid,
+            max,
+            self.blobs.get(cid).map(Vec::as_slice),
+            self.read_epoch.guard(),
+        )
+    }
     fn put(&mut self, bytes: &[u8]) -> Result<Cid, StorageError> {
         let cid = Cid::of(bytes);
         if let Entry::Vacant(e) = self.blobs.entry(cid) {
@@ -211,6 +363,7 @@ impl BlobStore for MemoryBlobStore {
         if let Some(b) = self.blobs.remove(cid) {
             self.total_bytes -= b.len();
             self.order.retain(|c| c != cid);
+            self.read_epoch.retire();
             Ok(true)
         } else {
             Ok(false)
@@ -399,6 +552,7 @@ fn clear_staging_dir(dir: &Path) -> Result<usize, StorageError> {
 #[derive(Debug)]
 pub struct FsBlobStore {
     dir: PathBuf,
+    read_epoch: crate::blob_read::ReadEpoch,
 }
 
 impl FsBlobStore {
@@ -428,7 +582,10 @@ impl FsBlobStore {
     pub fn open(dir: impl AsRef<Path>) -> Result<Self, StorageError> {
         let dir = dir.as_ref().to_path_buf();
         create_blob_directory(&dir)?;
-        Ok(Self { dir })
+        Ok(Self {
+            dir,
+            read_epoch: crate::blob_read::ReadEpoch::default(),
+        })
     }
 
     fn path(&self, cid: &Cid) -> PathBuf {
@@ -437,6 +594,13 @@ impl FsBlobStore {
 }
 
 impl BlobStore for FsBlobStore {
+    fn prepare_read_bounded(
+        &self,
+        cid: &Cid,
+        max: usize,
+    ) -> Result<crate::BlobReadPlan, StorageError> {
+        crate::BlobReadPlan::plain(*cid, max, self.path(cid), self.read_epoch.guard())
+    }
     fn is_persistent(&self) -> bool {
         true
     }
@@ -483,6 +647,7 @@ impl BlobStore for FsBlobStore {
     }
 
     fn delete(&mut self, cid: &Cid) -> Result<bool, StorageError> {
+        self.read_epoch.retire();
         let path = self.path(cid);
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(true),
@@ -534,6 +699,7 @@ pub struct SealingBlobStore<R: CryptoRngCore> {
     dir: PathBuf,
     key: Zeroizing<[u8; 32]>,
     rng: R,
+    read_epoch: crate::blob_read::ReadEpoch,
 }
 
 impl<R: CryptoRngCore> SealingBlobStore<R> {
@@ -565,6 +731,7 @@ impl<R: CryptoRngCore> SealingBlobStore<R> {
             dir,
             key: Zeroizing::new(key),
             rng,
+            read_epoch: crate::blob_read::ReadEpoch::default(),
         })
     }
 
@@ -603,6 +770,19 @@ pub(crate) fn decode_sealed(bytes: &[u8]) -> Result<SealedBlob, StorageError> {
 }
 
 impl<R: CryptoRngCore> BlobStore for SealingBlobStore<R> {
+    fn prepare_read_bounded(
+        &self,
+        cid: &Cid,
+        max: usize,
+    ) -> Result<crate::BlobReadPlan, StorageError> {
+        crate::BlobReadPlan::sealed(
+            *cid,
+            max,
+            self.path(cid),
+            *self.key,
+            self.read_epoch.guard(),
+        )
+    }
     fn is_persistent(&self) -> bool {
         true
     }
@@ -663,6 +843,7 @@ impl<R: CryptoRngCore> BlobStore for SealingBlobStore<R> {
     }
 
     fn delete(&mut self, cid: &Cid) -> Result<bool, StorageError> {
+        self.read_epoch.retire();
         let path = self.path(cid);
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(true),

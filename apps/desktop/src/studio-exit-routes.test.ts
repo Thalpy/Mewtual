@@ -12,7 +12,9 @@ import { fileURLToPath } from "node:url";
 import { deferred } from "./studio-testkit.ts";
 import { createStudioExit } from "./studio-exit.ts";
 
-const source = readFileSync(fileURLToPath(new URL("./App.svelte", import.meta.url)), "utf8");
+// Git may check out CRLF on Windows. Audit logical source lines identically on both platforms;
+// every guard, forced-edge count and negative probe below remains unchanged.
+const source = readFileSync(fileURLToPath(new URL("./App.svelte", import.meta.url)), "utf8").replaceAll("\r\n", "\n");
 // Every flag write that can take the Studio off screen: the main pane's `view`, the inbox and DM
 // home (which replace that pane), the active group, and the top-level screens that replace the
 // whole layout (add server, vault change, the unready and locked states). Calls of clearServerView

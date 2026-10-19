@@ -59,6 +59,7 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 mod blob_fetch;
+pub mod file_service;
 mod member_finalization;
 mod member_maintenance;
 mod recovery_submission;
@@ -1093,17 +1094,29 @@ pub struct SyncStats {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryProgress {
     pub epoch: u64,
+    /// Prepared commit requests, including work refused/cancelled before network submission.
+    pub commit_requests: u64,
+    pub commit_bundles_served: u64,
+    pub commits_applied: u64,
+    /// Local scheduling observations, bounded by max_known_peers and sorted for diagnosis.
+    pub pex_waits: Vec<(PeerId, u64)>,
     pub connected_bound_sources: usize,
     pub queued_documents: usize,
     pub queued_membership: usize,
     pub pending_document: Option<(DocType, u128)>,
     pub pending_peer: Option<PeerId>,
     pub waiting_response: bool,
+    /// Original retained wait's first poll, not request preparation or remote receipt.
+    pub pending_wait_age_ms: Option<u64>,
+    pub pending_wait_limit_ms: Option<u64>,
+    pub pending_kind: Option<u8>,
     pub restore_sweep_owed: bool,
     pub document_version: u64,
     pub document_queued: bool,
     pub document_checked_sources: usize,
     pub document_cooling_sources: usize,
+    /// Remaining time on an already armed quiet wake; reading this never arms or renews it.
+    pub reconciliation_wake_in_ms: Option<u64>,
 }
 
 /// Deferred recovery work, performed on the next async drain in [`ChannelSync::run_once`]
@@ -2178,6 +2191,10 @@ pub enum SyncError {
     /// A blob-store error (content-addressed storage).
     #[error(transparent)]
     Storage(#[from] StorageError),
+    /// An accepted legacy/companion join may lack the stable file-wrap transfer. Metadata can
+    /// still converge, but attempting verification must not debit or poison a valid saved file.
+    #[error("The file encryption key is missing. Rejoin this server to download files.")]
+    FileKeyUnavailable,
     /// The requested document is not open here.
     #[error("document not open")]
     NoSuchDoc,
@@ -4198,6 +4215,9 @@ pub enum PostJoinDiscoveryEvent {
 }
 
 pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
+    // FIRST: its sole publisher must retire before transport, group or stores during Drop.
+    file_effects: file_service::scope::FileEffectOwners,
+    file_service: file_service::service::FileService,
     // Only this owner consumes next_event. Detached requests share outbound access without
     // moving MLS state, document authority, RNG, or the blob store out of the actor.
     transport: Arc<T>,
@@ -4354,6 +4374,10 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// bounded catch-up queue cannot hold them all. Neither field carries protocol authority.
     reconciliation_next_ms: u64,
     reconciliation_cursor: usize,
+    /// A newly authenticated endpoint may hold history absent from already checked sources.
+    /// Coalesce standing changes into one bounded rotating pass on the async owner; repeated
+    /// proofs of the same binding must not continuously reopen completed searches.
+    bound_source_reconciliation_owed: bool,
     /// Whether this process still owes its restored documents one whole-node catch-up sweep.
     ///
     /// Set by [`ChannelSync::restore`] when a snapshot brought documents back, and cleared by the
@@ -4398,6 +4422,8 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     catchup_inflight: Option<(CatchupTask, Option<PeerId>)>,
     pending_catchup: Option<recovery_wait::PendingCatchup>,
     recovery_turn: u8,
+    /// Shared notification admission order survives Busy passes and changes only on admission.
+    notification_receipt_turn: bool,
     /// `(document, peer)` to the elapsed time before which that peer is not worth asking about
     /// that document again. See [`CATCHUP_PEER_COOLDOWN_MS`].
     catchup_cooldowns: HashMap<(DocType, u128, PeerId), u64>,
@@ -4411,6 +4437,9 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// that source, not about the group, so it takes every eligible source saying it before the
     /// document is treated as caught up. Reset whenever the version moves.
     catchup_sources_checked: HashMap<(DocType, u128), (u64, BTreeSet<PeerId>)>,
+    /// Authenticated frontier hints can reopen an older completeness answer, at most once per
+    /// document/full member per cooldown. Peer rotation cannot replenish this bounded budget.
+    catchup_frontier_hints: HashMap<(DocType, u128, DeviceId), u64>,
     /// This node's identity as a catch-up *provider*, minted per runtime.
     ///
     /// A resume position means something only against the log that produced it: the same operation
@@ -4579,6 +4608,10 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// transport peer, because that is all we know before the response identifies its signer.
     /// Transient; bounded by `max_known_peers`.
     pex_next_eligible: HashMap<PeerId, u64>,
+    /// Quiet membership checks are independent of PEX health. One bounded rotating pass per
+    /// 30 seconds prevents command floods, and visits every surviving proven path fairly.
+    membership_poll_cursor: Option<PeerId>,
+    membership_poll_next: u64,
     /// Per-sending-**device** token bucket for `KIND_CALL_SIGNAL`: `(last_refill_ms, tokens)`.
     /// Voice signalling was the one authenticated member-to-member push with no rate limit at
     /// all, so one member could evict every other member's SDP and ICE before the actor drained
@@ -4688,6 +4721,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         rng.fill_bytes(&mut provider);
         let clock: Arc<dyn Clock + Send> = Arc::from(clock);
         let mut this = Self {
+            file_effects: file_service::scope::FileEffectOwners::default(),
+            file_service: file_service::service::FileService::default(),
             transport: Arc::new(transport),
             blob_fetch_instance: Arc::new(()),
             member_maintenance: member_maintenance::MaintenanceOwner::default(),
@@ -4753,6 +4788,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             catchup_queue: Vec::new(),
             reconciliation_next_ms: 0,
             reconciliation_cursor: 0,
+            bound_source_reconciliation_owed: false,
             first_proof_sweep_owed: false,
             delivery_receipt_outbox: VecDeque::new(),
             delivery_receipt_targets: VecDeque::new(),
@@ -4764,9 +4800,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             catchup_inflight: None,
             pending_catchup: None,
             recovery_turn: 0,
+            notification_receipt_turn: false,
             catchup_cooldowns: HashMap::new(),
             catchup_continuations: HashMap::new(),
             catchup_sources_checked: HashMap::new(),
+            catchup_frontier_hints: HashMap::new(),
             catchup_provider: provider,
             catchup_cursors: HashMap::new(),
             commit_chain_gap: None,
@@ -4814,6 +4852,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             pex_served_at: HashMap::new(),
             switchboard_offer_served_at: HashMap::new(),
             pex_next_eligible: HashMap::new(),
+            membership_poll_cursor: None,
+            membership_poll_next: 0,
             call_signal_budget: HashMap::new(),
             discovery_roots: BTreeMap::new(),
             address_cache: AddressCache::new(CacheConfig::default()),
@@ -5282,7 +5322,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
     /// Replace the blob store (default in-memory); e.g. with a persistent, sealing on-disk
     /// store (Phase 9h). Inject this right after construction, before any blob is added.
-    pub fn set_blob_store(&mut self, blobs: Box<dyn BlobStore + Send>) {
+    pub fn set_blob_store(&mut self, mut blobs: Box<dyn BlobStore + Send>) {
+        // The store factory knows only a filesystem namespace. Immutable retained authority
+        // comes from this actual MLS owner and full device, before any retained read or grant.
+        if let Err(error) = blobs.configure_keep_scope(catcoms_storage::kept::KeepScope {
+            group: self.group_id(),
+            device: self.device_id(),
+        }) {
+            blobs.disable_retention();
+            tracing::warn!(%error, "retained storage attachment refused; ordinary blob cache remains available");
+        }
         self.blobs = blobs;
     }
 
@@ -5296,17 +5345,163 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     pub fn kept_files(&self) -> catcoms_storage::kept::KeptFiles {
         self.blobs.kept_files()
     }
-    pub fn begin_keep(&mut self, plan: catcoms_storage::kept::KeepPlan) -> Result<u64, SyncError> {
+    pub fn begin_keep(
+        &mut self,
+        plan: catcoms_storage::kept::KeepPlan,
+    ) -> Result<catcoms_storage::kept::KeepRun, SyncError> {
+        if !self.has_file_key() {
+            return Err(SyncError::FileKeyUnavailable);
+        }
         Ok(self.blobs.begin_keep(plan)?)
     }
-    pub fn put_keep(&mut self, token: u64, bytes: &[u8]) -> Result<(), SyncError> {
+    pub fn put_keep(
+        &mut self,
+        token: catcoms_storage::kept::KeepRun,
+        bytes: &[u8],
+    ) -> Result<(), SyncError> {
         Ok(self.blobs.put_keep(token, bytes)?)
     }
-    pub fn finish_keep(&mut self, token: u64) -> Result<(), SyncError> {
+    pub fn finish_keep(&mut self, token: catcoms_storage::kept::KeepRun) -> Result<(), SyncError> {
         Ok(self.blobs.finish_keep(token)?)
     }
-    pub fn abort_keep(&mut self, token: u64) -> Result<(), SyncError> {
+    pub fn abort_keep(&mut self, token: catcoms_storage::kept::KeepRun) -> Result<(), SyncError> {
         Ok(self.blobs.abort_keep(token)?)
+    }
+    pub fn pause_keep(&mut self, token: catcoms_storage::kept::KeepRun) -> Result<(), SyncError> {
+        Ok(self.blobs.pause_keep(token)?)
+    }
+    /// Automatic work inherits an explicit saved Keep intent, never a replicated listing.
+    /// Current local MLS authority is checked before selecting or starting a native run.
+    pub fn block_keep(&mut self, run: catcoms_storage::kept::KeepRun) -> Result<(), SyncError> {
+        Ok(self.blobs.block_keep(run)?)
+    }
+    pub fn keep_progress(&self, cid: &Cid) -> Option<catcoms_storage::kept::KeepProgress> {
+        self.blobs.keep_progress(cid)
+    }
+    pub fn keep_run_current(
+        &self,
+        run: catcoms_storage::kept::KeepRun,
+        cid: &Cid,
+        version: &[u8; 32],
+    ) -> bool {
+        self.group.is_active()
+            && self.group.contains_device(&self.device.device_id())
+            && self.blobs.keep_run_current(run, cid, version)
+    }
+    pub fn automatic_keep_candidate(&self, after: Option<Cid>) -> Option<Cid> {
+        if !self.has_file_key()
+            || !self.group.is_active()
+            || !self.group.contains_device(&self.device.device_id())
+        {
+            return None;
+        }
+        self.blobs.automatic_keep_candidate(after)
+    }
+    pub fn keep_auto_source_available(&self, cid: &Cid) -> bool {
+        self.has_file_key()
+            && (self.member_peers.iter().any(|proof| {
+                proof.bound
+                    && self.group.contains_device(&proof.device)
+                    && self.peer_is_connected(proof.peer)
+            }) || self.blobs.keep_plausibly_local(cid))
+    }
+    pub fn set_keep_paused(
+        &mut self,
+        cid: &Cid,
+        transfer: [u8; 32],
+        expected_intent: u64,
+        paused: bool,
+    ) -> Result<(), SyncError> {
+        Ok(self
+            .blobs
+            .set_keep_paused(cid, transfer, expected_intent, paused)?)
+    }
+    pub fn get_keep(
+        &self,
+        token: catcoms_storage::kept::KeepRun,
+        cid: &Cid,
+        max: usize,
+    ) -> Result<Option<Vec<u8>>, SyncError> {
+        Ok(self.blobs.get_keep(token, cid, max)?)
+    }
+    pub fn begin_keep_with_listing(
+        &mut self,
+        plan: catcoms_storage::kept::KeepPlan,
+        listing: [u8; 32],
+    ) -> Result<catcoms_storage::kept::KeepRun, SyncError> {
+        if !self.group.is_active() || !self.group.contains_device(&self.device.device_id()) {
+            return Err(SyncError::Storage(catcoms_storage::StorageError::Malformed));
+        }
+        if !self.has_file_key() {
+            return Err(SyncError::FileKeyUnavailable);
+        }
+        Ok(self.blobs.begin_keep_with_listing(plan, listing)?)
+    }
+    /// Native original candidate custody; the app must revalidate all opaque manifests before
+    /// starting a saved run. This cannot add candidates from a newer replicated file listing.
+    pub fn kept_saved_plans(&self, cid: &Cid) -> Option<Vec<catcoms_storage::kept::KeepPlan>> {
+        self.blobs.kept_saved_plans(cid)
+    }
+    pub fn begin_keep_variants(
+        &mut self,
+        plans: Vec<catcoms_storage::kept::KeepPlan>,
+        selected: usize,
+        listing: [u8; 32],
+    ) -> Result<catcoms_storage::kept::KeepRun, SyncError> {
+        if !self.group.is_active() || !self.group.contains_device(&self.device.device_id()) {
+            return Err(SyncError::Storage(catcoms_storage::StorageError::Malformed));
+        }
+        if !self.has_file_key() {
+            return Err(SyncError::FileKeyUnavailable);
+        }
+        Ok(self.blobs.begin_keep_variants(plans, selected, listing)?)
+    }
+    /// Switching is a fresh local run, never a fresh persistent allowance or network authority.
+    pub fn fallback_keep(
+        &mut self,
+        run: catcoms_storage::kept::KeepRun,
+        expected: &[u8; 32],
+        tried: &[[u8; 32]],
+        bad_current: bool,
+    ) -> Result<
+        Option<(
+            catcoms_storage::kept::KeepRun,
+            catcoms_storage::kept::KeepPlan,
+        )>,
+        SyncError,
+    > {
+        if !self.has_file_key() {
+            return Err(SyncError::FileKeyUnavailable);
+        }
+        if !self.group.is_active() || !self.group.contains_device(&self.device.device_id()) {
+            return Err(SyncError::Storage(catcoms_storage::StorageError::Malformed));
+        }
+        Ok(self
+            .blobs
+            .fallback_keep(run, expected, tried, bad_current)?)
+    }
+    pub fn keep_work(
+        &mut self,
+        token: catcoms_storage::kept::KeepRun,
+        network: Option<catcoms_storage::kept::KeepNetworkWork>,
+    ) -> Result<catcoms_storage::kept::KeepWork, SyncError> {
+        let mono = self.clock.monotonic_ms();
+        Ok(self.blobs.keep_work(token, network, mono)?)
+    }
+    pub fn validate_keep_work(
+        &self,
+        work: &catcoms_storage::kept::KeepWork,
+    ) -> Result<(), SyncError> {
+        Ok(self
+            .blobs
+            .validate_keep_work(work, self.clock.monotonic_ms())?)
+    }
+    pub fn retry_kept(
+        &mut self,
+        cid: &Cid,
+        request: catcoms_storage::kept::KeepRetry,
+    ) -> Result<catcoms_storage::kept::KeepRetryReceipt, SyncError> {
+        Ok(self.blobs.retry_kept(cid, request)?)
     }
     pub fn forget_kept(&mut self, cid: &Cid) -> Result<(), SyncError> {
         Ok(self.blobs.forget_kept(cid)?)
@@ -5405,8 +5600,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     pub fn recovery_progress(&self, doc_type: DocType, doc_id: u128) -> RecoveryProgress {
         let version = self.doc_version(doc_type, doc_id);
         let task = CatchupTask::Doc { doc_type, doc_id };
+        let now = self.clock.monotonic_ms();
+        let mut pex_waits: Vec<_> = self
+            .pex_next_eligible
+            .iter()
+            .filter(|(_, until)| **until > now)
+            .map(|(peer, until)| (*peer, until.saturating_sub(now)))
+            .collect();
+        pex_waits.sort_unstable();
         RecoveryProgress {
             epoch: self.group.epoch(),
+            commit_requests: self.stats.commit_catchups_requested,
+            commit_bundles_served: self.stats.commits_served,
+            commits_applied: self.stats.commits_applied,
+            pex_waits,
             connected_bound_sources: self
                 .member_peers
                 .iter()
@@ -5432,6 +5639,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }),
             pending_peer: self.catchup_inflight.and_then(|(_, peer)| peer),
             waiting_response: self.pending_catchup.is_some(),
+            pending_wait_age_ms: self.pending_catchup.as_ref().and_then(|pending| {
+                pending
+                    .wait_started
+                    .get()
+                    .map(|started| now.saturating_sub(*started))
+            }),
+            pending_wait_limit_ms: self
+                .pending_catchup
+                .as_ref()
+                .map(|pending| pending.within_ms),
+            pending_kind: self.pending_catchup.as_ref().map(|pending| pending.kind),
             restore_sweep_owed: self.first_proof_sweep_owed,
             document_version: version,
             document_queued: self.catchup_queue.contains(&task),
@@ -5447,6 +5665,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     *kind == doc_type && *id == doc_id && **until > self.clock.monotonic_ms()
                 })
                 .count(),
+            reconciliation_wake_in_ms: (self.reconciliation_next_ms != 0
+                && self.reconciliation_source_available()
+                && Self::reconciliation_deadline(now).is_some())
+            .then(|| self.reconciliation_next_ms.saturating_sub(now)),
         }
     }
 
@@ -5674,16 +5896,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// local wakeups are coalesced, and a rotating cursor shares the existing queue capacity.
     pub fn schedule_reconciliation(&mut self) -> usize {
         let now = self.clock.monotonic_ms();
-        if now < self.reconciliation_next_ms
-            || !self.member_peers.iter().any(|proof| {
-                proof.bound
-                    && self.group.contains_device(&proof.device)
-                    && self.peer_is_connected(proof.peer)
-            })
+        let Some(next) = Self::reconciliation_deadline(now) else {
+            return 0;
+        };
+        if (!self.bound_source_reconciliation_owed && now < self.reconciliation_next_ms)
+            || !self.reconciliation_source_available()
         {
             return 0;
         }
-        self.reconciliation_next_ms = now.saturating_add(CATCHUP_PEER_COOLDOWN_MS);
+        self.reconciliation_next_ms = next;
+        self.bound_source_reconciliation_owed = false;
         let mut docs: Vec<_> = self.docs.keys().copied().collect();
         docs.sort_unstable_by_key(|(kind, id)| (*kind as u8, *id));
         let mut queued = 0;
@@ -5733,6 +5955,38 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
         }
         queued
+    }
+
+    /// One checked deadline rule governs explicit scheduling and the owned quiet wake. A clock
+    /// whose finite domain is exhausted cannot leave a saturating deadline perpetually due.
+    fn reconciliation_deadline(now: u64) -> Option<u64> {
+        now.checked_add(CATCHUP_PEER_COOLDOWN_MS)
+    }
+
+    fn reconciliation_source_available(&self) -> bool {
+        self.group.is_active()
+            && self.group.contains_device(&self.device.device_id())
+            && !self.docs.is_empty()
+            && self.member_peers.iter().any(|proof| {
+                proof.bound
+                    && self.group.contains_device(&proof.device)
+                    && self.peer_is_connected(proof.peer)
+            })
+    }
+
+    /// Arm only while the sole owner is waiting, not on UI/diagnostic reads. Once armed, a
+    /// cancelled owner poll cannot restart the 30-second interval. No source means no wake or
+    /// background request; an actual bound current member is required again at scheduling.
+    fn next_reconciliation_delay(&mut self) -> Option<u64> {
+        if !self.reconciliation_source_available() {
+            return None;
+        }
+        let now = self.clock.monotonic_ms();
+        let next = Self::reconciliation_deadline(now)?;
+        if self.reconciliation_next_ms == 0 {
+            self.reconciliation_next_ms = next;
+        }
+        Some(self.reconciliation_next_ms.saturating_sub(now))
     }
 
     /// Wake a quiet owner when a queued document has an eligible source again. Checked sources
@@ -6093,15 +6347,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // result, so draining at the top each tick makes delivery robust.
         self.drain_admit_result_outbox().await;
         self.drain_device_admit_outbox().await;
-        // A quiet recipient acknowledges a newly applied message on its next actor turn. Return
-        // after a successful queue submission so the tick stays bounded instead of doing work and
-        // then blocking for an unrelated inbound event.
-        if self.drain_delivery_receipt_outbox().await {
-            return Ok(true);
-        }
-        // Helper handlers only enqueue connected-only forwarding work. Draining it in a later
-        // actor turn prevents A->C->B cycles from nesting request waits across sole-owner actors.
-        self.queue_repair_outbox();
+        // Local driver ACKs must not precede inbound polling: a command can cancel this poll
+        // while an ACK is pending. Queue the signed receipt in the existing bounded owner pool;
+        // its retained future participates in normal response/event/submission rotation below.
+        // Receipts and helper forwards compete in one persistent bounded admission rotation.
+        // A denied pass cannot advance away from the class owed the next available slot.
+        self.queue_automatic_notifications();
         // Apply any routing-label rotation from a previous tick: subscribe the new
         // label's topics and drop the ones that aged out of the grandfather window.
         self.resync_if_needed().await;
@@ -6172,6 +6423,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 };
                 if data.len() > request_limit {
                     responder.respond(Bytes::new());
+                    return Ok(true);
+                }
+                if data.first() == Some(&catcoms_rt::FILE_SOURCE_KIND) {
+                    self.queue_file_source(from, &data, responder);
+                    return Ok(true);
+                }
+                if data.first() == Some(&catcoms_rt::FILE_BRIDGE_KIND) {
+                    self.queue_file_helper(from, &data, responder);
                     return Ok(true);
                 }
                 if data.first() == Some(&KIND_REGISTRY_PAGE) {
@@ -6800,6 +7059,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .member_peers
             .iter()
             .any(|proof| proof.peer == peer && proof.device == device);
+        let newly_bound = bound
+            && !self
+                .member_peers
+                .iter()
+                .any(|proof| proof.peer == peer && proof.device == device && proof.bound);
         if newly_proven {
             // "Authenticated", in the four-state vocabulary: a roster member answered at this
             // transport peer. `bound` says whether the exchange also proved the endpoint.
@@ -6863,6 +7127,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             self.member_peers.pop_front();
         }
         self.reconcile_voice_routes();
+        if newly_bound && !self.first_proof_sweep_owed && !self.docs.is_empty() {
+            // A connection edge before authentication could not aim a member-only sweep here.
+            // Only documents already open now can be owed this pass. Opening a later document
+            // has its own admission/queue path and must not inherit a stale background wake.
+            // The first-source restore latch is already spent, but this source can still hold
+            // unique history. Defer a coalesced bounded pass to the sole async recovery owner;
+            // never recurse into transport work or sweep on a repeated proof.
+            self.forget_source_answers(peer);
+            self.bound_source_reconciliation_owed = true;
+        }
         if bound && self.first_proof_sweep_owed {
             // The restore's outstanding sweep, discharged now that a source exists for it.
             //
@@ -6884,9 +7158,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // the join it was racing unserved. That is the same deadlock
             // `sweep_docs_on_reconnect`'s gate exists to prevent, reached one step later.
             //
-            // **Only once, and only after a restore.** See `first_proof_sweep_owed`. Sweeping on
-            // every new binding put a whole node's documents in front of the discovery and
-            // presence work of a session that had nothing older than itself to recover.
+            // The restore's immediate sweep is owed once. Later newly bound sources instead
+            // request the coalesced bounded rotating pass above, independent of this latch.
             self.first_proof_sweep_owed = false;
             self.sweep_docs_on_reconnect(peer);
         }
@@ -7981,8 +8254,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .push((address, route.endpoint));
         }
 
-        // Retention diversity is independent of per-pass socket work. Rotate even denied or
-        // failed peers before awaiting transport, so a fixed prefix cannot consume every pass.
+        // Retention diversity is independent of per-pass socket work. Only a real reservation
+        // advances the cursor. A cadence tick can precede the shared budget's window rollover;
+        // skipping denied peers then would align every refill with the same successful prefix.
         let mut candidates: Vec<_> = by_peer.into_iter().collect();
         if let Some(cursor) = self.local_reconnect_cursor {
             let start = candidates.partition_point(|(peer, _)| *peer <= cursor);
@@ -7995,7 +8269,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .into_iter()
             .take(catcoms_discovery::reconnect::MAX_RECONNECT_DIAL_PEERS_PER_PASS)
         {
-            self.local_reconnect_cursor = Some(peer);
             let endpoints: Vec<_> = routes
                 .iter()
                 .map(|(_, endpoint)| endpoint.clone())
@@ -8006,6 +8279,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             if permits.is_empty() {
                 continue;
             }
+            // Capture the considered turn before awaiting the transport, including ambiguous
+            // failures/suppression. Cancellation cannot repeatedly select the admitted prefix.
+            self.local_reconnect_cursor = Some(peer);
             let Ok(outcomes) = self
                 .transport
                 .dial_peer_permits(
@@ -8942,11 +9218,45 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.delivery_receipt_revision
     }
 
-    /// Send queued receipts only over an already-live member route. A receipt must never create a
-    /// socket, extend discovery authority or stall the actor on request/response; the recipient
-    /// either receives this best-effort push or causal evidence remains the fallback.
-    async fn drain_delivery_receipt_outbox(&mut self) -> bool {
-        let mut submitted = false;
+    /// Admit at most four notifications per local turn, alternating successful class owners.
+    /// Completion/event fairness cannot by itself stop one outbox taking every newly released
+    /// shared slot. Busy scans preserve the preferred class, so capacity-release timing cannot
+    /// repeatedly skip it. The other class may still proceed when the preferred one is ineligible.
+    fn queue_automatic_notifications(&mut self)
+    where
+        T: 'static,
+    {
+        for _ in 0..4 {
+            let admitted = if self.notification_receipt_turn {
+                if self.queue_delivery_receipt_outbox() {
+                    Some(true)
+                } else if self.queue_repair_outbox() {
+                    Some(false)
+                } else {
+                    None
+                }
+            } else if self.queue_repair_outbox() {
+                Some(false)
+            } else if self.queue_delivery_receipt_outbox() {
+                Some(true)
+            } else {
+                None
+            };
+            let Some(receipt) = admitted else {
+                break;
+            };
+            self.notification_receipt_turn = !receipt;
+        }
+    }
+
+    /// Admit best-effort receipts without waiting for a local driver ACK. They share the
+    /// finite recovery submission pool, original descriptor/member/connection gates and actual
+    /// lower custody. A queued receipt proves no remote delivery; only the authenticated receiver
+    /// can create receipt evidence. Unknown routes and capacity pressure preserve the small intent.
+    fn queue_delivery_receipt_outbox(&mut self) -> bool
+    where
+        T: 'static,
+    {
         let mut index = 0;
         for _ in 0..self.delivery_receipt_outbox.len() {
             let receipt = self.delivery_receipt_outbox[index];
@@ -8954,11 +9264,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 self.delivery_receipt_outbox.remove(index);
                 continue;
             }
-            let Some(peer) = self.transport_peer_of(&receipt.author) else {
+            let Some(reference) = self.descriptor_ref(receipt.author) else {
                 index += 1;
                 continue;
             };
-            if !self.connected_peers.contains(&peer) {
+            if !self.peer_is_connected(reference.peer) {
                 index += 1;
                 continue;
             }
@@ -8967,24 +9277,25 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 self.delivery_receipt_outbox.remove(index);
                 continue;
             };
-            match self
-                .transport
-                .notify_connected(peer, ProtocolId(RR_PROTOCOL), Bytes::from(request))
-                .await
-            {
+            let item = RepairOutboxItem {
+                target: reference.peer,
+                payload: request,
+                expires_at_ms: self.clock.now_ms().saturating_add(10_000),
+                required_refs: vec![reference],
+            };
+            match self.queue_recovery_notification(item) {
                 Ok(()) => {
                     self.delivery_receipt_outbox.remove(index);
-                    submitted = true;
+                    return true;
                 }
-                Err(_) => {
-                    index += 1;
-                }
+                Err(recovery_submission::Admission::Busy) => break,
+                Err(recovery_submission::Admission::Stale) => index += 1,
             }
         }
         while self.delivery_receipt_outbox.len() > MAX_DELIVERY_RECEIPT_OUTBOX {
             self.delivery_receipt_outbox.pop_front();
         }
-        submitted
+        false
     }
 
     /// Test-only: drive the live-connection set without a real transport (the in-memory transport
@@ -9954,7 +10265,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
     /// Detach automatic forwarding at a bounded local admission seam. A full pool keeps the
     /// original item/expiry queued; it never holds the group actor on a driver channel or peer.
-    fn queue_repair_outbox(&mut self)
+    fn queue_repair_outbox(&mut self) -> bool
     where
         T: 'static,
     {
@@ -9973,12 +10284,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 continue;
             }
             match self.queue_recovery_notification(item) {
-                Ok(()) | Err(recovery_submission::Admission::Stale) => {
+                Ok(()) => {
+                    self.repair_outbox.pop_front();
+                    return true;
+                }
+                Err(recovery_submission::Admission::Stale) => {
                     self.repair_outbox.pop_front();
                 }
                 Err(recovery_submission::Admission::Busy) => break,
             }
         }
+        false
     }
 
     /// Queue one connected-only probe and remember the exact result that may later be accepted.
@@ -10565,6 +10881,53 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         for peer in &chosen {
             self.note_pex_next_eligible(*peer, now.saturating_add(MIN_PEX_INTERVAL_MS));
         }
+        chosen
+    }
+
+    /// Select at most four connected, proven current-member sources independently of PEX
+    /// health. A failed record exchange must not suppress the released commit poll for five
+    /// minutes. This creates no dial/endpoint authority; each request authenticates afresh.
+    /// A sorted rotating cursor avoids permanently preferring a low peer ID. Only fixed scalar
+    /// scheduling state is retained, and a repeated caller cannot accelerate the 30-second pass.
+    pub fn take_membership_poll_targets(&mut self) -> Vec<PeerId> {
+        let now = self.clock.monotonic_ms();
+        if now < self.membership_poll_next {
+            return Vec::new();
+        }
+        let live: HashSet<_> = self
+            .transport
+            .connection_snapshot()
+            .into_iter()
+            .map(|row| row.peer)
+            .collect();
+        let mut peers: Vec<_> = self
+            .member_peers
+            .iter()
+            .filter(|proof| {
+                proof.bound
+                    && live.contains(&proof.peer)
+                    && self.proven_member_path(proof.device, proof.peer)
+            })
+            .map(|proof| proof.peer)
+            .collect();
+        peers.sort_unstable();
+        peers.dedup();
+        if peers.is_empty() {
+            return peers;
+        }
+        let start = self
+            .membership_poll_cursor
+            .map_or(0, |last| peers.partition_point(|peer| *peer <= last))
+            % peers.len();
+        let chosen: Vec<_> = peers
+            .iter()
+            .cycle()
+            .skip(start)
+            .take(peers.len().min(4))
+            .copied()
+            .collect();
+        self.membership_poll_cursor = chosen.last().copied();
+        self.membership_poll_next = now.saturating_add(30_000);
         chosen
     }
 
@@ -13527,6 +13890,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             answer.extend_from_slice(&empty);
             return self.sign_doc_catchup_answer(&req_pubkey, &req_auth, answer);
         }
+        self.note_catchup_frontier_hint(
+            from,
+            DeviceId::from_public_key_bytes(&req_pubkey),
+            req_auth.epoch,
+            doc_type,
+            doc_id,
+            &heads,
+        );
         // A cursor this node did not mint (a different peer's, or its own from before a restart)
         // names a position in somebody else's log. Starting over is the only safe reading: acting
         // on it would skip history the requester would then never be offered again.
@@ -16355,7 +16726,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mesh_reconnect_retains_three_peers_and_rotates_two_peer_dial_passes() {
+    async fn mesh_reconnect_retains_five_peers_and_rotates_four_peer_dial_passes() {
         let hub = Hub::new();
         let device = MlsDevice::generate().unwrap();
         let group = ServerGroup::create(&device).unwrap();
@@ -16371,7 +16742,7 @@ mod tests {
         node.snapshot().unwrap();
         node.publish_group_policy().unwrap();
         let mut routes = Vec::new();
-        for id in 2..=4 {
+        for id in 2..=6 {
             let device = MlsDevice::generate().unwrap();
             let invite = node.mint_invite([id; 16], 10_000, vec![]).unwrap();
             let joining = hub.join(PeerId::from_u64(id as u64));
@@ -16387,12 +16758,12 @@ mod tests {
             ));
         }
         node.set_local_reconnect_routes(routes.clone());
-        assert_eq!(node.local_reconnect_routes.len(), 3);
-        assert_eq!(node.dial_local_reconnect_routes().await, 2);
-        assert_eq!(node.transport.dialed.lock().unwrap().len(), 2);
+        assert_eq!(node.local_reconnect_routes.len(), 5);
+        assert_eq!(node.dial_local_reconnect_routes().await, 4);
+        assert_eq!(node.transport.dialed.lock().unwrap().len(), 4);
         // A native refresh of the same sealed hints must not reset the fair work cursor.
         node.set_local_reconnect_routes(routes);
-        assert!(node.dial_local_reconnect_routes().await <= 2);
+        assert!(node.dial_local_reconnect_routes().await <= 4);
         let dialed = node.transport.dialed.lock().unwrap();
         assert_eq!(
             dialed
@@ -16400,12 +16771,83 @@ mod tests {
                 .map(|(peer, _)| *peer)
                 .collect::<HashSet<_>>()
                 .len(),
-            3,
-            "the later peer gets a turn even while the first two keep failing"
+            5,
+            "the later peer gets a turn even while the first four keep failing"
         );
         assert!(dialed
             .iter()
             .all(|(_, routes)| routes.len() <= catcoms_rt::MAX_PEER_DIAL_BATCH));
+    }
+
+    #[tokio::test]
+    async fn mesh_reconnect_budget_denial_keeps_the_next_peers_turn_across_windows() {
+        use catcoms_discovery::reconnect::{
+            MAX_RECONNECT_DIAL_PEERS_PER_PASS, MAX_RECONNECT_PEERS,
+        };
+        use catcoms_discovery::{EndpointDialConfig, EndpointDialScheduler};
+        let hub = Hub::new();
+        let device = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&device).unwrap();
+        let clock = ManualClock::new(1_000);
+        let owner_peer = PeerId::from_u64(1);
+        let mut node = ChannelSync::new(
+            RecordingNet::new(hub.join(owner_peer)),
+            group,
+            device,
+            ChaCha20Rng::seed_from_u64(51),
+            Box::new(clock.clone()),
+        );
+        node.initialize_group_policy(GroupMode::PeerToPeer).unwrap();
+        node.snapshot().unwrap();
+        node.publish_group_policy().unwrap();
+        node.set_endpoint_dial_scheduler(EndpointDialScheduler::new_with_clock(
+            EndpointDialConfig {
+                server_limit: (MAX_RECONNECT_DIAL_PEERS_PER_PASS * 2) as u32,
+                ..EndpointDialConfig::default()
+            },
+            Arc::new(clock.clone()),
+        ));
+        let mut routes = Vec::new();
+        for id in 2..=(MAX_RECONNECT_PEERS as u8 + 1) {
+            let device = MlsDevice::generate().unwrap();
+            let invite = node.mint_invite([id; 16], 10_000, vec![]).unwrap();
+            let joining = hub.join(PeerId::from_u64(id as u64));
+            tokio::select! {
+                joined = request_join(&joining, owner_peer, &device, &invite) => { joined.unwrap(); },
+                _ = async { loop { node.run_once().await.unwrap(); } } => unreachable!(),
+            }
+            let peer = test_transport_peer(id);
+            stash_peer_record(&mut node, device.device_id(), *peer.as_bytes());
+            for transport in ["tcp/22487", "udp/22487/quic-v1"] {
+                routes.push((
+                    peer,
+                    test_peer_route(id, &format!("/ip4/192.168.1.{id}/{transport}")),
+                ));
+            }
+        }
+        node.set_local_reconnect_routes(routes.clone());
+        assert_eq!(
+            node.dial_local_reconnect_routes().await,
+            MAX_RECONNECT_DIAL_PEERS_PER_PASS
+        );
+        let last_admitted = node.local_reconnect_cursor;
+        // A real discovery tick can arrive at45s while the endpoint budget lasts60s. Denial
+        // must not skip the remaining peers and align every new window with the same prefix.
+        clock.advance_ms(45_000);
+        node.set_local_reconnect_routes(routes.clone());
+        assert_eq!(node.dial_local_reconnect_routes().await, 0);
+        assert_eq!(
+            node.local_reconnect_cursor, last_admitted,
+            "budget denial did not try those peers"
+        );
+        for _ in 0..MAX_RECONNECT_PEERS {
+            clock.advance_ms(45_000);
+            node.set_local_reconnect_routes(routes.clone());
+            node.dial_local_reconnect_routes().await;
+        }
+        assert_eq!(node.transport.dialed.lock().unwrap().iter().map(|(peer, _)| *peer)
+            .collect::<HashSet<_>>().len(), MAX_RECONNECT_PEERS,
+            "every authorized saved peer receives actual transport work despite intervening denied passes");
     }
 
     /// **F1, check 2.** A removed member's record naming a transport peer that a *current*
@@ -18323,15 +18765,16 @@ mod tests {
             "a first bound proof must queue every open document, not just the one being read"
         );
 
-        // And it is owed once. A later binding is ordinary session traffic, and putting a whole
-        // node's documents in front of it costs the tick that discovery and presence need.
+        // The immediate restore sweep is owed once. A later binding requests a coalesced pass
+        // on the async owner, rather than synchronously placing every document ahead of it.
         assert!(!alice.first_proof_sweep_owed);
         alice.catchup_queue.clear();
         alice.promote_member_peer_bound(PeerId::from_u64(9_996), ids[1], true);
         assert!(
             queued_docs(&alice).is_empty(),
-            "the restore's sweep is discharged, not repeated for every new source"
+            "the restore's immediate sweep is discharged; the owner drains later sources"
         );
+        assert!(alice.bound_source_reconciliation_owed);
     }
 
     #[tokio::test]
@@ -18490,7 +18933,11 @@ mod tests {
             .expect("a member can sign its own answer")
     }
 
-    fn prove_live_member(observer: &mut Member, peer: PeerId, device: DeviceId) {
+    pub(super) fn prove_live_member<T: MeshTransport, R: CryptoRngCore>(
+        observer: &mut ChannelSync<T, R>,
+        peer: PeerId,
+        device: DeviceId,
+    ) {
         observer.note_peer_connected(peer);
         // Bound, because this stands for a peer that has proved itself at this endpoint, which is
         // what every caller means by it. An unbound proof is the weaker thing a relayable exchange
@@ -18668,9 +19115,13 @@ mod tests {
         bob.on_gossip(from, &data);
         assert_eq!(bob.delivery_receipt_outbox.len(), 1);
         assert!(
-            bob.drain_delivery_receipt_outbox().await,
+            bob.queue_delivery_receipt_outbox(),
             "Bob submits the receipt without authoring a reply"
         );
+        let completed = futures::StreamExt::next(&mut bob.recovery_submissions.jobs)
+            .await
+            .unwrap();
+        bob.complete_recovery_submission(completed);
         let receipt = alice.transport.next_event().await.unwrap();
         let TransportEvent::Request {
             from,
@@ -21075,7 +21526,11 @@ mod tests {
             "catch-up must expose the same verified author/change metadata as live gossip"
         );
 
-        assert!(bob.drain_delivery_receipt_outbox().await);
+        assert!(bob.queue_delivery_receipt_outbox());
+        let completed = futures::StreamExt::next(&mut bob.recovery_submissions.jobs)
+            .await
+            .unwrap();
+        bob.complete_recovery_submission(completed);
         let receipt = alice.transport.next_event().await.unwrap();
         let TransportEvent::Request {
             from,
@@ -23750,6 +24205,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn quiet_membership_poll_recovers_a_missed_commit_despite_pex_backoff() {
+        let (_hub, mut alice, mut bob, _carol, ids) = group_with_a_missed_commit().await;
+        let alice_peer = alice.local_peer();
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        bob.note_pex_failure(alice_peer);
+        let next_pex = bob.pex_next_eligible[&alice_peer];
+        assert!(!bob.take_pex_targets().contains(&alice_peer));
+        assert!(
+            bob.take_membership_poll_targets().contains(&alice_peer),
+            "PEX failure must not suppress a connected authenticated membership source"
+        );
+        let pending = bob
+            .prepare_member_maintenance(alice_peer, MemberMaintenanceKind::Commits)
+            .unwrap()
+            .expect("connected source");
+        let (_cancel, receiver) = tokio::sync::watch::channel(false);
+        let (completed, served) = tokio::join!(
+            pending.execute(RequestCancellation::new(receiver, None)),
+            alice.run_once(),
+        );
+        served.unwrap();
+        assert!(bob.complete_member_maintenance(completed).unwrap());
+        assert_eq!(bob.epoch(), alice.epoch());
+        assert!(bob.contains_member(&ids[2]));
+        assert_eq!(
+            bob.pex_next_eligible[&alice_peer], next_pex,
+            "membership progress does not forgive the independent PEX failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_maintenance_capacity_hint_never_bypasses_commit_request_authentication() {
+        let (_hub, mut members, _) = build_members(2).await;
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let peer = bob.local_peer();
+        let rejected = alice.stats().requests_rejected;
+        assert!(alice
+            .handle_request(peer, &[KIND_COMMIT_CATCHUP, 0])
+            .is_empty());
+        let mut request = bob
+            .build_authed_request(KIND_COMMIT_CATCHUP, &encode_commit_catchup_req(0))
+            .unwrap()
+            .0;
+        *request.last_mut().unwrap() ^= 1;
+        assert!(alice.handle_request(peer, &request).is_empty());
+        assert_eq!(alice.stats().requests_rejected, rejected + 2);
+        assert_eq!(alice.stats().commits_served, 0);
+        let request = bob
+            .build_authed_request(KIND_COMMIT_CATCHUP, &encode_commit_catchup_req(0))
+            .unwrap()
+            .0;
+        assert!(!alice.handle_request(peer, &request).is_empty());
+        assert_eq!(alice.stats().commits_served, 1);
+    }
+
+    #[tokio::test]
+    async fn quiet_membership_poll_is_paced_fair_and_does_not_select_unbound_candidates() {
+        let (_hub, mut members, ids) = build_members(8).await;
+        let peers: Vec<_> = members.iter().map(Member::local_peer).collect();
+        let clock = ManualClock::new(1_000);
+        let alice = &mut members[0];
+        alice.clock = Arc::new(clock.clone());
+        for index in 1..8 {
+            prove_live_member(alice, peers[index], ids[index]);
+            alice.note_pex_failure(peers[index]);
+        }
+        alice
+            .member_peers
+            .iter_mut()
+            .find(|proof| proof.peer == peers[7])
+            .unwrap()
+            .bound = false;
+        let pex_backoff = alice.pex_next_eligible.clone();
+        let first = alice.take_membership_poll_targets();
+        assert_eq!(first.len(), 4);
+        assert!(alice.take_membership_poll_targets().is_empty());
+        clock.set_wall_ms(u64::MAX / 2);
+        assert!(
+            alice.take_membership_poll_targets().is_empty(),
+            "wall time cannot renew a poll"
+        );
+        clock.advance_ms(30_000);
+        let second = alice.take_membership_poll_targets();
+        assert_eq!(second.len(), 4);
+        let union: HashSet<_> = first.into_iter().chain(second).collect();
+        assert_eq!(union, peers[1..7].iter().copied().collect());
+        assert_eq!(alice.pex_next_eligible, pex_backoff);
+    }
+
+    #[tokio::test]
     async fn a_discovered_record_with_no_routable_address_is_dropped_whole() {
         // The path that actually dials in the shipping app. A rendezvous operator (or any member
         // able to register under the namespace) must not be able to point every member's dialer
@@ -25740,3 +26286,6 @@ mod tests {
         assert_eq!(node.join_attempts()[0].at_ms, 10_500);
     }
 }
+
+#[cfg(test)]
+mod kept_key_tests;

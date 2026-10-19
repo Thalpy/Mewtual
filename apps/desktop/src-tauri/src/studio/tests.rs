@@ -335,6 +335,7 @@ pub(super) async fn install(
     state.servers.lock().await.insert(
         7,
         ServerEntry {
+            files: keep_session::EntryOwner::new(),
             actor,
             instance,
             group_id,

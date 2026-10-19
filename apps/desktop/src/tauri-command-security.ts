@@ -266,7 +266,7 @@ export const TAURI_COMMAND_GROUPS = {
       "set_livery", "set_server_icon", "set_server_cursor", "set_server_banner", "set_member_badge",
       // Per-file local consent, reserved disk quota, full verification and native lock cancellation.
       // Forget only releases this device's separate copy; shared metadata grants no such authority.
-      "keep_file", "forget_kept_file",
+      "keep_file", "request_kept_file", "set_kept_paused", "forget_kept_file", "retry_kept_file",
       "delete_file", "set_file_expiry", "delete_event", "set_wiki_format", "delete_wiki_page",
       "rename_wiki_page", "set_wiki_review_days", "approve_wiki_edit", "reject_wiki_edit",
       "restore_wiki_page", "warn_message", "create_kick_case", "cast_kick_vote",

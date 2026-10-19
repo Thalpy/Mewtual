@@ -1748,15 +1748,23 @@ impl ServerStore {
         }
         let dir = self.dir.join("blobs").join(key);
         let store = SealingBlobStore::open(&dir, self.keys.blob_key()?, OsCryptoRng)?;
-        let inner = Box::new(catcoms_storage::kept::KeptBlobStore::open(
+        let mut inner = catcoms_storage::kept::KeptBlobStore::open(
             Box::new(store),
             dir.join("kept"),
             self.keys.blob_key()?,
+            self.keys.kept_metadata_key()?,
             OsCryptoRng,
-        ));
+        );
+        let group = hex::decode(key).unwrap_or_else(|_| key.as_bytes().to_vec());
+        // A full group has exactly one retained namespace on case-sensitive filesystems too.
+        // Legacy/test aliases still work as ordinary caches, but uppercase hex or an alias
+        // cannot mount a second retained quota under the same actual MLS group identity.
+        if hex::encode(&group) != key {
+            inner.disable_retention();
+        }
         Ok(Box::new(creative_references::ProtectedBlobs {
-            inner,
-            group: hex::decode(key).unwrap_or_else(|_| key.as_bytes().to_vec()),
+            inner: Box::new(inner),
+            group,
             protection: self.creative_protection.clone(),
         }))
     }
@@ -2383,6 +2391,30 @@ mod tests {
             .get(&cid)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn retained_namespace_has_one_canonical_full_group_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(97);
+        let store = ServerStore::open(dir.path(), b"canonical retention", &mut rng).unwrap();
+        let group = vec![0xab; 32];
+        let scope = catcoms_storage::kept::KeepScope {
+            group: group.clone(),
+            device: catcoms_crypto::DeviceId::from_bytes([1; 32]),
+        };
+        let mut canonical = store.blob_store(&hex::encode(&group)).unwrap();
+        canonical.configure_keep_scope(scope.clone()).unwrap();
+        assert!(canonical.kept_files().error.is_none());
+        for alias in [hex::encode_upper(&group), "legacy-alias".to_string()] {
+            let mut blobs = store.blob_store(&alias).unwrap();
+            assert!(blobs.configure_keep_scope(scope.clone()).is_err());
+            let cid = blobs.put(b"ordinary cache remains usable").unwrap();
+            assert!(blobs.get(&cid).unwrap().is_some());
+            assert!(blobs.kept_files().error.is_some());
+        }
+        let mut wrong_group = store.blob_store(&hex::encode([2; 32])).unwrap();
+        assert!(wrong_group.configure_keep_scope(scope).is_err());
     }
 
     #[test]

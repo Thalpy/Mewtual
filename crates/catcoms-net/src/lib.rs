@@ -34,6 +34,8 @@
 pub mod addr;
 pub mod admission;
 pub mod autonat_server;
+#[cfg(test)]
+mod bytes_codec_tests;
 pub mod fdlimit;
 pub mod infra_transport;
 pub mod join_reply;
@@ -81,7 +83,9 @@ use catcoms_rt::{
     Clock, ConnectionDirection, ConnectionFamily, ConnectionPath, ConnectionTransport,
     CryptoRngCore, DiscoveredPeer, MeshTransport, OsCryptoRng, PeerConnectionSnapshot, PeerId,
     ProtocolId, RendezvousRegistration, RequestCancellation, Responder, SharedRequestKeepalive,
-    SystemClock, Topic, TransportError, TransportEvent, MAX_PEER_DIAL_BATCH,
+    SystemClock, Topic, TransportError, TransportEvent, FILE_BRIDGE_KIND,
+    FILE_SERVICE_REQUEST_MAX_BYTES, FILE_SERVICE_RESPONSE_MAX_BYTES, FILE_SOURCE_KIND,
+    MAX_PEER_DIAL_BATCH,
 };
 use futures::stream::FuturesUnordered;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
@@ -111,7 +115,7 @@ mod event_dispatch;
 mod publication;
 
 /// Max request/response frame size.
-const MAX_FRAME: usize = 16 * 1024 * 1024;
+const MAX_FRAME: usize = catcoms_rt::MAX_REQUEST_RESPONSE_FRAME_BYTES;
 
 /// Cap on discovered records surfaced from a single rendezvous Discover response, so a
 /// hostile rendezvous cannot flood the never-dropping discovered queue (the higher
@@ -392,26 +396,66 @@ pub struct MeshObservationSnapshot {
 
 // ----- request/response codec ------------------------------------------------
 
-/// A minimal length-prefixed raw-bytes codec for request/response.
-#[derive(Clone, Default, Debug)]
-pub struct BytesCodec;
+/// Length-prefixed bytes with one request-class bound per actual substream, never per peer.
+///
+/// Pinned libp2p-request-response 0.29.0 `handler.rs` clones the base codec for EACH substream,
+/// then uses that same mutable clone for write_request/read_response (outbound) or
+/// read_request/write_response (inbound). The captured value prevents a malicious new-service
+/// reply allocating the released 16 MiB ceiling under a small page allowance. Dependency upgrades
+/// must preserve this ordering; the real TCP hostile-codec regression pins the actual handoff.
+/// This is transport capacity only: neither new kind is registered or authorized by this codec.
+#[derive(Clone, Debug)]
+pub struct BytesCodec {
+    response_max: usize,
+}
+impl Default for BytesCodec {
+    fn default() -> Self {
+        Self {
+            response_max: MAX_FRAME,
+        }
+    }
+}
+impl BytesCodec {
+    fn begin_request(&mut self, kind: Option<u8>) -> usize {
+        // Always reset, including empty/legacy requests. Value-only clone state cannot narrow
+        // another concurrent stream, and reusing a codec cannot inherit its preceding class.
+        if matches!(kind, Some(FILE_BRIDGE_KIND | FILE_SOURCE_KIND)) {
+            self.response_max = FILE_SERVICE_RESPONSE_MAX_BYTES;
+            FILE_SERVICE_REQUEST_MAX_BYTES
+        } else {
+            self.response_max = MAX_FRAME;
+            MAX_FRAME
+        }
+    }
+}
 
-async fn read_frame<T: AsyncRead + Unpin + Send>(io: &mut T) -> io::Result<Vec<u8>> {
+fn oversized_frame() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "frame too large")
+}
+async fn frame_length<T: AsyncRead + Unpin + Send>(io: &mut T, max: usize) -> io::Result<usize> {
     let mut len = [0u8; 4];
     io.read_exact(&mut len).await?;
     let n = u32::from_be_bytes(len) as usize;
-    if n > MAX_FRAME {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "frame too large",
-        ));
+    if n > max {
+        return Err(oversized_frame());
     }
+    Ok(n)
+}
+async fn read_frame<T: AsyncRead + Unpin + Send>(io: &mut T, max: usize) -> io::Result<Vec<u8>> {
+    let n = frame_length(io, max).await?;
     let mut buf = vec![0u8; n];
     io.read_exact(&mut buf).await?;
     Ok(buf)
 }
 
-async fn write_frame<T: AsyncWrite + Unpin + Send>(io: &mut T, data: &[u8]) -> io::Result<()> {
+async fn write_frame<T: AsyncWrite + Unpin + Send>(
+    io: &mut T,
+    data: &[u8],
+    max: usize,
+) -> io::Result<()> {
+    if data.len() > max {
+        return Err(oversized_frame());
+    }
     let len = u32::try_from(data.len())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame too large"))?;
     io.write_all(&len.to_be_bytes()).await?;
@@ -430,14 +474,29 @@ impl request_response::Codec for BytesCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        read_frame(io).await
+        self.begin_request(None);
+        let n = frame_length(io, MAX_FRAME).await?;
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        // Inspect only the fixed header and first kind byte before allocating. An untrusted
+        // new-kind sender cannot force a legacy-sized body allocation before classification.
+        let mut kind = [0u8; 1];
+        io.read_exact(&mut kind).await?;
+        if n > self.begin_request(Some(kind[0])) {
+            return Err(oversized_frame());
+        }
+        let mut request = vec![0; n];
+        request[0] = kind[0];
+        io.read_exact(&mut request[1..]).await?;
+        Ok(request)
     }
 
     async fn read_response<T>(&mut self, _: &StreamProtocol, io: &mut T) -> io::Result<Vec<u8>>
     where
         T: AsyncRead + Unpin + Send,
     {
-        read_frame(io).await
+        read_frame(io, self.response_max).await
     }
 
     async fn write_request<T>(
@@ -449,7 +508,8 @@ impl request_response::Codec for BytesCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
-        write_frame(io, &req).await
+        let max = self.begin_request(req.first().copied());
+        write_frame(io, &req, max).await
     }
 
     async fn write_response<T>(
@@ -461,7 +521,7 @@ impl request_response::Codec for BytesCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
-        write_frame(io, &resp).await
+        write_frame(io, &resp, self.response_max).await
     }
 }
 
@@ -557,7 +617,7 @@ impl MeshBehaviour {
             gossipsub::Config::default(),
         )?;
         let request_response = request_response::Behaviour::with_codec(
-            BytesCodec,
+            BytesCodec::default(),
             [(
                 StreamProtocol::new(RR_PROTOCOL),
                 request_response::ProtocolSupport::Full,
@@ -1216,6 +1276,13 @@ fn from_topic_hash(hash: &gossipsub::TopicHash) -> Topic {
 // ----- actor -----------------------------------------------------------------
 
 enum Command {
+    /// Test-only deterministic hold AFTER real terminal evidence, to inspect the actual pending
+    /// response table without relying on socket speed or preserving original application Bytes.
+    #[cfg(test)]
+    HoldInboundRetirement {
+        hold: bool,
+        observed: oneshot::Sender<usize>,
+    },
     Subscribe(Topic),
     Unsubscribe(Topic),
     Publish(Topic, Bytes),
@@ -3493,6 +3560,10 @@ struct Actor {
     // real-driver congestion regression deterministic without sleeps or a fake transport.
     #[cfg(test)]
     test_requests: watch::Sender<u64>,
+    #[cfg(test)]
+    test_hold_inbound_retirement: bool,
+    #[cfg(test)]
+    test_retired_inbound: HashSet<InboundRequestId>,
     /// Coalesced, present-time liveness/path table. Pre-actor admission and infrastructure waits
     /// observe this instead of consuming the sole ordered event stream that `ChannelSync` owns.
     connection_snapshot_tx: watch::Sender<Vec<PeerConnectionSnapshot>>,
@@ -3745,7 +3816,10 @@ impl Actor {
                         // Sender bytes and the lower serialized Vec coexist until ResponseSent.
                         // Refusal drops the lower channel honestly; retain initial custody until
                         // its actual InboundFailure, rather than recycling it at outer timeout.
-                        if pending.authority.authorized() {
+                        // This is final response admission, after the reply-wait lifetime
+                        // retired on receive. Group/native scope is an independent observer;
+                        // revocation after this synchronous boundary cannot recall the send.
+                        if pending.authority.authorized() && response.is_current() {
                             pending.response_credit = response.keepalive();
                             let _ = self.swarm.behaviour_mut().request_response.send_response(channel, response.data().to_vec());
                         }
@@ -4141,6 +4215,17 @@ impl Actor {
 
     fn handle_command(&mut self, cmd: Command) {
         match cmd {
+            #[cfg(test)]
+            Command::HoldInboundRetirement { hold, observed } => {
+                self.test_hold_inbound_retirement = hold;
+                let count = self.test_retired_inbound.len();
+                if !hold {
+                    for id in self.test_retired_inbound.drain() {
+                        self.inbound_req.remove(&id);
+                    }
+                }
+                let _ = observed.send(count);
+            }
             Command::Subscribe(topic) => {
                 tracing::debug!(topic = %hex::encode(topic.as_bytes()), "subscribe");
                 let _ = self
@@ -5141,8 +5226,13 @@ impl Actor {
                     else {
                         return;
                     };
-                    let Some(credit) = self.delivery_budget.charge(request.len(), Some(from))
-                    else {
+                    let Some(credit) = self.delivery_budget.charge_request(
+                        request.len(),
+                        from,
+                        request.first().copied(),
+                    ) else {
+                        tracing::trace!(?from, kind = ?request.first(), bytes = request.len(),
+                            "inbound request refused before application delivery");
                         return;
                     };
                     let (authority, terminal) =
@@ -5203,6 +5293,14 @@ impl Actor {
             )) => {
                 // Actual lower terminal evidence, not application timeout or receiver loss.
                 // Bytes/responder clones still retain independent shared custody after this.
+                #[cfg(test)]
+                if self.test_hold_inbound_retirement && self.inbound_req.contains_key(&request_id) {
+                    self.test_retired_inbound.insert(request_id);
+                    // Refused channels can emit terminal events without ever owning a table
+                    // row. Only real owned rows justify this finite test-retention allowance.
+                    assert!(self.test_retired_inbound.len() <= self.inbound_req.len());
+                    return;
+                }
                 self.inbound_req.remove(&request_id);
             }
             SwarmEvent::Behaviour(MeshBehaviourEvent::RequestResponse(
@@ -5502,6 +5600,8 @@ pub struct MeshService {
     test_event_tx: mpsc::Sender<TransportEvent>,
     #[cfg(test)]
     test_requests: watch::Receiver<u64>,
+    #[cfg(test)]
+    test_delivery_budget: Arc<event_dispatch::Budget>,
     connection_snapshot_rx: watch::Receiver<Vec<PeerConnectionSnapshot>>,
     connection_leases: Arc<std::sync::Mutex<HashMap<PeerId, catcoms_rt::ConnectionLease>>>,
     authenticated_route_rx: watch::Receiver<Vec<AuthenticatedDialRoute>>,
@@ -5549,6 +5649,7 @@ impl MeshService {
         let test_event_tx = event_tx.clone();
         #[cfg(test)]
         let (test_requests_tx, test_requests_rx) = watch::channel(0);
+        let delivery_budget = event_dispatch::Budget::shared();
         let (connection_snapshot_tx, connection_snapshot_rx) = watch::channel(Vec::new());
         let connection_owners = connection_leases::Owners::default();
         let connection_leases = connection_owners.table.clone();
@@ -5581,10 +5682,14 @@ impl MeshService {
             cmd_rx,
             event_tx,
             delivery: event_dispatch::Dispatcher::default(),
-            delivery_budget: event_dispatch::Budget::shared(),
+            delivery_budget: delivery_budget.clone(),
             inbound_req: HashMap::new(),
             #[cfg(test)]
             test_requests: test_requests_tx,
+            #[cfg(test)]
+            test_hold_inbound_retirement: false,
+            #[cfg(test)]
+            test_retired_inbound: HashSet::new(),
             connection_snapshot_tx,
             connection_leases: connection_owners,
             authenticated_route_tx,
@@ -5645,6 +5750,8 @@ impl MeshService {
             test_event_tx,
             #[cfg(test)]
             test_requests: test_requests_rx,
+            #[cfg(test)]
+            test_delivery_budget: delivery_budget,
             connection_snapshot_rx,
             connection_leases,
             authenticated_route_rx,
@@ -8972,6 +9079,477 @@ mod tests {
             Err(TransportError::Cancelled)
         ));
         drop(publisher);
+    }
+
+    /// Deterministically close a synthetic scope immediately after its receive-edge observation.
+    /// Checks one/two are queue/receive; check three is the real driver's final send boundary.
+    /// This fixture bookkeeping models a concurrent owner retirement between those boundaries,
+    /// without a blocking driver hook or a timing-dependent sleep.
+    #[derive(Debug)]
+    struct RetireAfterReplyReceive {
+        observations: AtomicUsize,
+        retire: bool,
+        retired: watch::Sender<bool>,
+    }
+    #[async_trait::async_trait]
+    impl catcoms_rt::RequestAuthority for RetireAfterReplyReceive {
+        fn authorized(&self) -> bool {
+            let observation = self.observations.fetch_add(1, Ordering::SeqCst);
+            if self.retire && observation >= 2 {
+                self.retired.send_replace(true);
+                false
+            } else {
+                true
+            }
+        }
+        async fn revoked(&self) {
+            // Register before rechecking the permanent retirement latch. Waiting must not
+            // itself consume one of the three synchronous observation slots in this fixture.
+            let mut retired = self.retired.subscribe();
+            while !*retired.borrow_and_update() {
+                if retired.changed().await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn actual_tcp_reply_scope_is_rechecked_after_receive_before_driver_send() {
+        async fn bounded<F: Future>(future: F) -> F::Output {
+            tokio::select! {
+                result = future => result,
+                _ = SystemClock.sleep(Duration::from_secs(3)) => panic!("response effect TCP phase timed out"),
+            }
+        }
+        let (server, id) =
+            MeshService::new_tcp(Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()), &[]).unwrap();
+        let (client, _) = MeshService::new_tcp(None, &[]).unwrap();
+        let client = Arc::new(client);
+        let address = bounded(server.next_listen_addr()).await.unwrap();
+        bounded(client.dial(format!("{address}/p2p/{id}").parse().unwrap()))
+            .await
+            .unwrap();
+        bounded(client.wait_for_peer_connected(server.local_peer()))
+            .await
+            .unwrap();
+        let target = server.local_peer();
+        let source = client.local_peer();
+        for kind in [0, 1, 2, 0] {
+            let client = client.clone();
+            let waiting = tokio::spawn(async move {
+                client
+                    .request_connected(target, ProtocolId(RR_PROTOCOL), Bytes::from_static(&[29]))
+                    .await
+            });
+            let (data, responder) = bounded(async {
+                loop {
+                    if let Some(TransportEvent::Request {
+                        data, responder, ..
+                    }) = server.next_event().await
+                    {
+                        break (data, responder);
+                    }
+                }
+            })
+            .await;
+            let effect = Arc::new(RetireAfterReplyReceive {
+                observations: AtomicUsize::new(0),
+                retire: kind == 2,
+                retired: watch::channel(false).0,
+            });
+            let retired = Arc::new(AtomicUsize::new(0));
+            #[derive(Debug)]
+            struct PageOwner {
+                drops: Arc<AtomicUsize>,
+            }
+            impl AsRef<[u8]> for PageOwner {
+                fn as_ref(&self) -> &[u8] {
+                    b"exact page"
+                }
+            }
+            impl Drop for PageOwner {
+                fn drop(&mut self) {
+                    self.drops.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            let page = Bytes::from_owner(PageOwner {
+                drops: retired.clone(),
+            });
+            let actual_copy = page.clone();
+            if kind == 0 {
+                responder.try_respond(page).unwrap();
+            } else {
+                responder
+                    .try_respond_with_authority(page, effect.clone())
+                    .unwrap();
+            }
+            let result = bounded(waiting).await.unwrap();
+            if kind == 2 {
+                assert!(
+                    matches!(result, Err(TransportError::NoResponse)),
+                    "retired scope escaped driver: {:?}",
+                    result.as_ref().map(|bytes| bytes.len())
+                );
+                assert_eq!(
+                    effect.observations.load(Ordering::SeqCst),
+                    3,
+                    "queue and receive succeeded before final refusal"
+                );
+                bounded(catcoms_rt::RequestAuthority::revoked(effect.as_ref())).await;
+            } else {
+                assert_eq!(result.unwrap().as_ref(), b"exact page");
+                assert!(
+                    if kind == 0 {
+                        effect.observations.load(Ordering::SeqCst) == 0
+                    } else {
+                        effect.observations.load(Ordering::SeqCst) >= 2
+                    },
+                    "healthy queue/receive and unchanged legacy path"
+                );
+            }
+            assert_eq!(
+                retired.load(Ordering::SeqCst),
+                0,
+                "an actual byte clone still owns source custody"
+            );
+            drop(actual_copy);
+            bounded(async {
+                while retired.load(Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+            assert_eq!(retired.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                server.test_delivery_budget.peer_counts(source),
+                [1, 0],
+                "actual request payload remains charged after refusal/success"
+            );
+            drop(data);
+            bounded(async {
+                while server.test_delivery_budget.peer_counts(source) != [0, 0] {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn actual_tcp_service_response_custody_survives_original_bytes_and_waiter_retirement() {
+        async fn bounded<F: Future>(future: F) -> F::Output {
+            tokio::select! {
+                result = future => result,
+                _ = SystemClock.sleep(Duration::from_secs(3)) => panic!("service response custody phase timed out"),
+            }
+        }
+        async fn hold(node: &MeshService, held: bool) -> usize {
+            let (observed, result) = oneshot::channel();
+            node.cmd_tx
+                .send(Command::HoldInboundRetirement {
+                    hold: held,
+                    observed,
+                })
+                .await
+                .unwrap();
+            result.await.unwrap()
+        }
+        #[derive(Debug)]
+        struct Owner(Arc<AtomicUsize>);
+        impl Drop for Owner {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        impl AsRef<[u8]> for Owner {
+            fn as_ref(&self) -> &[u8] {
+                b"source page"
+            }
+        }
+
+        let (server, id) =
+            MeshService::new_tcp(Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()), &[]).unwrap();
+        let (client, _) = MeshService::new_tcp(None, &[]).unwrap();
+        let client = Arc::new(client);
+        let address = bounded(server.next_listen_addr()).await.unwrap();
+        bounded(client.dial(format!("{address}/p2p/{id}").parse().unwrap()))
+            .await
+            .unwrap();
+        bounded(client.wait_for_peer_connected(server.local_peer()))
+            .await
+            .unwrap();
+        assert_eq!(bounded(hold(&server, true)).await, 0);
+        let target = server.local_peer();
+        let source = client.local_peer();
+        let sending = client.clone();
+        let waiting = tokio::spawn(async move {
+            sending
+                .request_connected(target, ProtocolId(RR_PROTOCOL), Bytes::from_static(&[30]))
+                .await
+        });
+        let (data, responder) = bounded(async {
+            loop {
+                if let Some(TransportEvent::Request {
+                    data, responder, ..
+                }) = server.next_event().await
+                {
+                    break (data, responder);
+                }
+            }
+        })
+        .await;
+        let bytes_drops = Arc::new(AtomicUsize::new(0));
+        let service_drops = Arc::new(AtomicUsize::new(0));
+        let effect = Arc::new(RetireAfterReplyReceive {
+            observations: AtomicUsize::new(0),
+            retire: false,
+            retired: watch::channel(false).0,
+        });
+        let work = responder.cancellation_authority();
+        responder
+            .try_respond_with_custody(
+                Bytes::from_owner(Owner(bytes_drops.clone())),
+                effect.clone(),
+                Arc::new(Owner(service_drops.clone())),
+            )
+            .unwrap();
+        let result = bounded(waiting).await.unwrap().unwrap();
+        assert_eq!(result.as_ref(), b"source page");
+        drop(result);
+        bounded(async {
+            while hold(&server, true).await == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(!work.authorized(), "reply waiter has already retired");
+        assert_eq!(
+            bytes_drops.load(Ordering::SeqCst),
+            1,
+            "original application Bytes really dropped after driver serialization"
+        );
+        assert_eq!(
+            service_drops.load(Ordering::SeqCst),
+            0,
+            "actual driver pending row still owns service credit"
+        );
+        // A second ADMITTED request fails without an application response. Holding its actual
+        // InboundFailure also preserves ownership. Further requests then refuse before any row
+        // exists; those unowned failure IDs must not accumulate in the test's held set.
+        let sending = client.clone();
+        let no_reply = tokio::spawn(async move {
+            sending
+                .request_connected(target, ProtocolId(RR_PROTOCOL), Bytes::from_static(&[30]))
+                .await
+        });
+        let failed = bounded(async {
+            loop {
+                if let Some(TransportEvent::Request { responder, .. }) = server.next_event().await {
+                    break responder;
+                }
+            }
+        })
+        .await;
+        drop(failed);
+        assert!(matches!(
+            bounded(no_reply).await.unwrap(),
+            Err(TransportError::NoResponse)
+        ));
+        bounded(async {
+            while hold(&server, true).await < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        for _ in 0..20 {
+            assert!(matches!(
+                bounded(client.request_connected(
+                    target,
+                    ProtocolId(RR_PROTOCOL),
+                    Bytes::from_static(&[30])
+                ))
+                .await,
+                Err(TransportError::NoResponse)
+            ));
+        }
+        assert_eq!(
+            bounded(hold(&server, true)).await,
+            2,
+            "unowned/refused terminal IDs have no retention allowance"
+        );
+        assert_eq!(service_drops.load(Ordering::SeqCst), 0);
+        drop((work, effect, data));
+        assert_eq!(server.test_delivery_budget.peer_counts(source), [2, 0]);
+        assert_eq!(bounded(hold(&server, false)).await, 2);
+        assert_eq!(
+            service_drops.load(Ordering::SeqCst),
+            1,
+            "actual pending owner retirement releases last service credit exactly once"
+        );
+        assert_eq!(server.test_delivery_budget.peer_counts(source), [0, 0]);
+    }
+
+    #[tokio::test]
+    async fn actual_tcp_maintenance_survives_ordinary_pressure_and_owners_retire_exactly() {
+        async fn bounded<F: Future>(label: &str, future: F) -> F::Output {
+            tokio::select! {
+                result = future => result,
+                _ = SystemClock.sleep(Duration::from_secs(3)) => panic!("TCP admission phase timed out: {label}"),
+            }
+        }
+        async fn request_event(node: &MeshService) -> (Bytes, Responder) {
+            loop {
+                if let Some(TransportEvent::Request {
+                    data, responder, ..
+                }) = node.next_event().await
+                {
+                    return (data, responder);
+                }
+            }
+        }
+        let (server, server_id) =
+            MeshService::new_tcp(Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()), &[]).unwrap();
+        let (client, _) = MeshService::new_tcp(None, &[]).unwrap();
+        let client = Arc::new(client);
+        let listen = bounded("listener", server.next_listen_addr())
+            .await
+            .unwrap();
+        client
+            .dial(format!("{listen}/p2p/{server_id}").parse().unwrap())
+            .await
+            .unwrap();
+        let target = server.local_peer();
+        let source = client.local_peer();
+        bounded("connection", client.wait_for_peer_connected(target))
+            .await
+            .unwrap();
+        let sender = client.clone();
+        let ordinary = tokio::spawn(async move {
+            sender
+                .request_connected(
+                    target,
+                    ProtocolId(RR_PROTOCOL),
+                    Bytes::from_static(&[19, 1]),
+                )
+                .await
+        });
+        let (held_data, held_reply) =
+            bounded("held ordinary request", request_event(&server)).await;
+        assert_eq!(&held_data[..], &[19, 1]);
+        assert_eq!(server.test_delivery_budget.peer_counts(source), [1, 0]);
+        let sender = client.clone();
+        let second = tokio::spawn(async move {
+            sender
+                .request_connected(target, ProtocolId(RR_PROTOCOL), Bytes::from_static(&[8, 2]))
+                .await
+        });
+        let (second_data, second_reply) =
+            bounded("second ordinary request", request_event(&server)).await;
+        assert_eq!(&second_data[..], &[8, 2]);
+        assert_eq!(server.test_delivery_budget.peer_counts(source), [2, 0]);
+        let refused = bounded(
+            "ordinary refusal",
+            client.request_connected(
+                target,
+                ProtocolId(RR_PROTOCOL),
+                Bytes::from_static(&[16, 2]),
+            ),
+        )
+        .await;
+        assert!(matches!(refused, Err(TransportError::NoResponse)));
+        assert_eq!(server.test_delivery_budget.peer_counts(source), [2, 0]);
+        let sender = client.clone();
+        let maintenance = tokio::spawn(async move {
+            sender
+                .request_connected(target, ProtocolId(RR_PROTOCOL), Bytes::from_static(&[2, 3]))
+                .await
+        });
+        let (data, reply) = bounded(
+            "maintenance while ordinary owner is held",
+            request_event(&server),
+        )
+        .await;
+        // Deliberately malformed application bytes: this proves capacity admission only. The
+        // authenticated native matrix separately proves actual MLS recovery over this lane.
+        assert_eq!(&data[..], &[2, 3]);
+        assert_eq!(server.test_delivery_budget.peer_counts(source), [2, 1]);
+        held_reply
+            .try_respond(Bytes::from_static(b"ordinary"))
+            .unwrap();
+        assert_eq!(
+            &bounded("ordinary response", ordinary)
+                .await
+                .unwrap()
+                .unwrap()[..],
+            b"ordinary"
+        );
+        assert_eq!(
+            server.test_delivery_budget.peer_counts(source),
+            [2, 1],
+            "a held payload retains its request class even after the actual response"
+        );
+        drop(held_data);
+        bounded("last ordinary payload retirement", async {
+            while server.test_delivery_budget.peer_counts(source) != [1, 1] {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let sender = client.clone();
+        let next = tokio::spawn(async move {
+            sender
+                .request_connected(
+                    target,
+                    ProtocolId(RR_PROTOCOL),
+                    Bytes::from_static(&[19, 4]),
+                )
+                .await
+        });
+        let (next_data, next_reply) =
+            bounded("next ordinary admission", request_event(&server)).await;
+        assert_eq!(&next_data[..], &[19, 4]);
+        assert_eq!(server.test_delivery_budget.peer_counts(source), [2, 1],
+            "one exact ordinary slot is reusable while the other ordinary and maintenance owners survive");
+        let refused = bounded(
+            "third ordinary still refused",
+            client.request_connected(
+                target,
+                ProtocolId(RR_PROTOCOL),
+                Bytes::from_static(&[16, 5]),
+            ),
+        )
+        .await;
+        assert!(matches!(refused, Err(TransportError::NoResponse)));
+        drop(next_data);
+        next_reply.try_respond(Bytes::new()).unwrap();
+        bounded("next ordinary response", next)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(second_data);
+        second_reply.try_respond(Bytes::new()).unwrap();
+        bounded("second ordinary response", second)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(data);
+        reply
+            .try_respond(Bytes::from_static(b"maintenance"))
+            .unwrap();
+        assert_eq!(
+            &bounded("maintenance response", maintenance)
+                .await
+                .unwrap()
+                .unwrap()[..],
+            b"maintenance"
+        );
+        bounded("all actual owners retired", async {
+            while server.test_delivery_budget.peer_counts(source) != [0, 0] {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
     }
 
     #[test]

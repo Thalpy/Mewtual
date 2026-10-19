@@ -6,6 +6,107 @@ use rand_core::SeedableRng;
 
 const HANDSHAKE: [u8; 32] = [9; 32];
 
+/// Deterministically models End being observed during the final native time sample. Time
+/// itself remains stable; the irreversible call owner changes through the normal lease seam.
+#[derive(Debug)]
+struct RevokingClock {
+    inner: ManualClock,
+    lease: CallLease,
+    reads: std::sync::atomic::AtomicUsize,
+    revoke_at: usize,
+}
+impl Clock for RevokingClock {
+    fn now_ms(&self) -> u64 {
+        self.inner.now_ms()
+    }
+    fn monotonic_ms(&self) -> u64 {
+        if self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 == self.revoke_at {
+            self.lease.revoke();
+        }
+        self.inner.monotonic_ms()
+    }
+    fn sleep(
+        &self,
+        duration: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        self.inner.sleep(duration)
+    }
+}
+
+#[test]
+fn final_time_sample_end_refuses_first_seal_without_signing() {
+    let mut f = fixture();
+    let draft = f.a.reserve(&f.clock, &mut f.rng).unwrap();
+    let clock = RevokingClock {
+        inner: f.clock.clone(),
+        lease: f.a.lease.clone(),
+        reads: std::sync::atomic::AtomicUsize::new(0),
+        revoke_at: 2,
+    };
+    assert_eq!(
+        f.a.ledger.submit(
+            draft.id,
+            &[9; 32],
+            &f.a.signer,
+            &authority(&f.a.context, &f.a.lease),
+            &clock
+        ),
+        Err(VoiceError::Unauthorized)
+    );
+    assert_eq!(clock.reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(f.a.ledger.outgoing[&draft.id].cached.is_none());
+}
+
+#[test]
+fn final_time_sample_end_refuses_open_without_consuming_token() {
+    let mut f = fixture();
+    let draft = f.a.reserve(&f.clock, &mut f.rng).unwrap();
+    let signed = f.a.submit(&draft, &[9; 32], &f.clock).unwrap();
+    let packet = f.c.admit(signed, &f.clock).unwrap();
+    let clock = RevokingClock {
+        inner: f.clock.clone(),
+        lease: f.c.lease.clone(),
+        reads: std::sync::atomic::AtomicUsize::new(0),
+        revoke_at: 2,
+    };
+    assert_eq!(
+        f.c.ledger
+            .commit_inbound(
+                packet.token,
+                &packet.aad,
+                packet.header.sequence,
+                &packet.ciphertext,
+                &authority(&f.c.context, &f.c.lease),
+                &clock
+            )
+            .err(),
+        Some(VoiceError::Unauthorized)
+    );
+    assert_eq!(clock.reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(f.c.ledger.incoming.contains_key(&packet.token));
+    assert!(f.c.ledger.incoming[&packet.token].token.0.is_live());
+}
+
+#[test]
+fn final_time_sample_end_refuses_an_affine_receipt() {
+    let mut f = fixture();
+    let draft = f.a.reserve(&f.clock, &mut f.rng).unwrap();
+    let signed = f.a.submit(&draft, &[9; 32], &f.clock).unwrap();
+    let packet = f.c.admit(signed, &f.clock).unwrap();
+    let receipt = f.c.commit(&packet, &f.clock).unwrap();
+    let clock = RevokingClock {
+        inner: f.clock.clone(),
+        lease: f.c.lease.clone(),
+        reads: std::sync::atomic::AtomicUsize::new(0),
+        revoke_at: 1,
+    };
+    assert_eq!(
+        f.c.ledger
+            .receipt_current(&receipt, &authority(&f.c.context, &f.c.lease), &clock),
+        Err(VoiceError::Unauthorized)
+    );
+}
+
 fn sdp_from(
     peer: &Endpoint,
     target: &Endpoint,

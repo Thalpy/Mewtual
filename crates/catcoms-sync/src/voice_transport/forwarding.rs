@@ -298,6 +298,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Weak rows stay counted while actual RouteGate owners exist. The separate lower Flight
     /// credit stays charged until real retirement even after route metadata has been released.
     pub(crate) fn reconcile_voice_routes(&mut self) {
+        // File reads have their own Root/member lifetime even when voice is never attached.
+        // This common observed-transition hook must precede every optional voice early return.
+        self.reconcile_file_effects();
+        self.reconcile_file_service_routes();
         self.reconcile_recovery_submissions();
         let gates: Vec<_> = self
             .voice_runtime

@@ -16,15 +16,47 @@ const DRIVER_RECORDS: usize = 320;
 const PROCESS_RECORDS: usize = 1024;
 const DRIVER_REQUESTS: usize = 16;
 const PROCESS_REQUESTS: usize = 64;
-const PEER_REQUESTS: usize = 2;
 const OVERHEAD: usize = 1024;
+
+/// Preserve the released two ordinary peer owners and reserve one additional maintenance
+/// owner. Reducing ordinary capacity instead would reject overlapping legacy SDP/ICE traffic.
+/// All aggregate request/byte/record caps still apply, including to the reserved owner.
+/// Background notifications/document/blob work cannot occupy the membership owner's slot.
+/// A tag is an untrusted capacity hint only; normal Root authentication still decides service.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum RequestClass {
+    Ordinary,
+    Maintenance,
+}
+impl RequestClass {
+    fn for_kind(kind: Option<u8>) -> Self {
+        match kind {
+            // Released MLS commit catch-up, PEX, role offer and member finalization. All four
+            // share one owner: using several tags never multiplies a peer's reserved capacity.
+            Some(2 | 4 | 12 | 26) => Self::Maintenance,
+            _ => Self::Ordinary,
+        }
+    }
+    fn index(self) -> usize {
+        match self {
+            Self::Ordinary => 0,
+            Self::Maintenance => 1,
+        }
+    }
+    fn limit(self) -> usize {
+        match self {
+            Self::Ordinary => 2,
+            Self::Maintenance => 1,
+        }
+    }
+}
 
 #[derive(Default)]
 struct Counts {
     bytes: usize,
     records: usize,
     requests: usize,
-    peers: HashMap<PeerId, usize>,
+    peers: HashMap<PeerId, [usize; 2]>,
 }
 #[derive(Default)]
 struct Pool(StdMutex<Counts>);
@@ -38,7 +70,7 @@ pub(super) struct Budget {
 pub(super) struct Credit {
     budget: Arc<Budget>,
     bytes: usize,
-    peer: Option<PeerId>,
+    peer: Option<(PeerId, RequestClass)>,
 }
 impl std::fmt::Debug for Budget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -51,6 +83,26 @@ impl std::fmt::Debug for Credit {
     }
 }
 impl Budget {
+    #[cfg(test)]
+    pub(super) fn peer_counts(&self, peer: PeerId) -> [usize; 2] {
+        self.counts
+            .lock()
+            .unwrap()
+            .peers
+            .get(&peer)
+            .copied()
+            .unwrap_or_default()
+    }
+    /// The first byte is only a capacity hint. Root still authenticates every request; a
+    /// maintenance tag can never grant membership, a response or a protocol effect.
+    pub(super) fn charge_request(
+        self: &Arc<Self>,
+        bytes: usize,
+        peer: PeerId,
+        kind: Option<u8>,
+    ) -> Option<Arc<Credit>> {
+        self.charge(bytes, Some((peer, RequestClass::for_kind(kind))))
+    }
     pub(super) fn shared() -> Arc<Self> {
         static POOL: OnceLock<Arc<Pool>> = OnceLock::new();
         Arc::new(Self {
@@ -64,7 +116,7 @@ impl Budget {
     pub(super) fn charge(
         self: &Arc<Self>,
         bytes: usize,
-        peer: Option<PeerId>,
+        peer: Option<(PeerId, RequestClass)>,
     ) -> Option<Arc<Credit>> {
         let bytes = bytes.checked_add(OVERHEAD)?;
         let mut process = self.pool.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -74,22 +126,51 @@ impl Budget {
             || driver.bytes > DRIVER_BYTES - bytes
             || driver.records >= DRIVER_RECORDS
             || process.records >= PROCESS_RECORDS
-            || peer.is_some_and(|peer| {
+            || peer.is_some_and(|(peer, class)| {
                 driver.requests >= DRIVER_REQUESTS
                     || process.requests >= PROCESS_REQUESTS
-                    || driver.peers.get(&peer).copied().unwrap_or(0) >= PEER_REQUESTS
+                    || driver
+                        .peers
+                        .get(&peer)
+                        .map_or(0, |counts| counts[class.index()])
+                        >= class.limit()
             })
         {
+            let held_bytes = driver.bytes;
+            let held_records = driver.records;
+            let held_requests = driver.requests;
+            let peer_requests = peer
+                .and_then(|(peer, _)| {
+                    driver
+                        .peers
+                        .get(&peer)
+                        .map(|counts| counts.iter().sum::<usize>())
+                })
+                .unwrap_or(0);
+            // Never invoke a subscriber while holding either accounting lock. These bounded
+            // local gauges distinguish capacity refusal from a missing connection or decoder
+            // failure without logging application bytes or changing any admission limit.
+            drop(driver);
+            drop(process);
+            tracing::trace!(
+                ?peer,
+                bytes,
+                held_bytes,
+                held_records,
+                held_requests,
+                peer_requests,
+                "application delivery capacity refused"
+            );
             return None;
         }
         process.bytes += bytes;
         driver.bytes += bytes;
         process.records += 1;
         driver.records += 1;
-        if let Some(peer) = peer {
+        if let Some((peer, class)) = peer {
             process.requests += 1;
             driver.requests += 1;
-            *driver.peers.entry(peer).or_default() += 1;
+            driver.peers.entry(peer).or_default()[class.index()] += 1;
         }
         Some(Arc::new(Credit {
             budget: self.clone(),
@@ -117,12 +198,12 @@ impl Drop for Credit {
         driver.bytes -= self.bytes;
         process.records -= 1;
         driver.records -= 1;
-        if let Some(peer) = self.peer {
+        if let Some((peer, class)) = self.peer {
             process.requests -= 1;
             driver.requests -= 1;
             let count = driver.peers.get_mut(&peer).expect("charged inbound peer");
-            *count -= 1;
-            if *count == 0 {
+            count[class.index()] -= 1;
+            if *count == [0; 2] {
                 driver.peers.remove(&peer);
             }
         }
@@ -411,6 +492,54 @@ mod tests {
     }
 
     #[test]
+    fn membership_reservation_preserves_the_released_two_ordinary_peer_owners() {
+        let budget = budget(&Arc::new(Pool::default()));
+        let peer = PeerId::from_u64(7);
+        let first = budget.charge_request(20, peer, Some(8)).unwrap();
+        let second = budget.charge_request(20, peer, Some(8)).expect(
+            "reserving membership progress must not reduce released overlapping legacy signal capacity",
+        );
+        let membership = budget.charge_request(20, peer, Some(2)).unwrap();
+        assert!(budget.charge_request(20, peer, Some(8)).is_none());
+        assert!(budget.charge_request(20, peer, Some(4)).is_none());
+        assert_eq!(counts(&budget).2, 3);
+        drop((first, second, membership));
+        assert_eq!(counts(&budget), (0, 0, 0));
+    }
+
+    #[test]
+    fn ordinary_pressure_cannot_occupy_the_reserved_maintenance_request_owner() {
+        let budget = budget(&Arc::new(Pool::default()));
+        let peer = PeerId::from_u64(7);
+        let ordinary = budget.charge_request(20, peer, Some(19)).unwrap();
+        let second = budget.charge_request(20, peer, Some(8)).unwrap();
+        assert!(
+            budget.charge_request(20, peer, Some(16)).is_none(),
+            "two ordinary owners must leave the reserved owner for maintenance"
+        );
+        let membership = budget.charge_request(20, peer, Some(2)).unwrap();
+        for kind in [2, 4, 12, 26] {
+            assert!(
+                budget.charge_request(20, peer, Some(kind)).is_none(),
+                "maintenance kinds share one owner, not one allowance per tag"
+            );
+        }
+        assert_eq!(
+            counts(&budget).2,
+            3,
+            "two ordinary plus one maintenance owner"
+        );
+        let retained = ordinary.clone();
+        drop(ordinary);
+        assert!(budget.charge_request(20, peer, Some(3)).is_none());
+        drop(retained);
+        assert!(budget.charge_request(20, peer, Some(3)).is_some());
+        assert!(budget.charge_request(20, peer, Some(4)).is_none());
+        drop((membership, second));
+        assert_eq!(counts(&budget), (0, 0, 0));
+    }
+
+    #[test]
     fn delivery_bytes_are_process_shared_and_driver_pressure_cannot_take_another_driver_share() {
         let pool = Arc::new(Pool::default());
         let a = budget(&pool);
@@ -422,7 +551,9 @@ mod tests {
         assert!(c.charge(0, None).is_none());
         assert_eq!(pool.0.lock().unwrap().bytes, PROCESS_BYTES);
         drop(first);
-        let requested = c.charge(MAX_FRAME, Some(PeerId::from_u64(1))).unwrap();
+        let requested = c
+            .charge_request(MAX_FRAME, PeerId::from_u64(1), Some(5))
+            .unwrap();
         let response = c.clone().retain(MAX_FRAME).unwrap();
         assert_eq!(counts(&c), (3 * MAX_FRAME + 2 * OVERHEAD, 2, 1));
         assert!(c.clone().retain(MAX_FRAME + 1).is_err());
@@ -439,21 +570,35 @@ mod tests {
         let drivers: Vec<_> = (0..5).map(|_| budget(&pool)).collect();
         for driver in drivers.iter().take(4) {
             for peer in 0..8 {
-                for _ in 0..2 {
-                    held.push(driver.charge(0, Some(PeerId::from_u64(peer))).unwrap());
+                for kind in [5, 2] {
+                    held.push(
+                        driver
+                            .charge_request(0, PeerId::from_u64(peer), Some(kind))
+                            .unwrap(),
+                    );
                 }
-                assert!(driver.charge(0, Some(PeerId::from_u64(peer))).is_none());
+                assert!(driver
+                    .charge_request(0, PeerId::from_u64(peer), Some(2))
+                    .is_none());
             }
             assert_eq!(counts(driver).2, 16);
-            assert!(driver.charge(0, Some(PeerId::from_u64(99))).is_none());
+            assert!(driver
+                .charge_request(0, PeerId::from_u64(99), Some(2))
+                .is_none());
         }
-        assert!(drivers[4].charge(0, Some(PeerId::from_u64(1))).is_none());
+        assert!(drivers[4]
+            .charge_request(0, PeerId::from_u64(1), Some(2))
+            .is_none());
         let actual = held.pop().unwrap();
         let waiter = actual.clone();
         drop(actual);
-        assert!(drivers[4].charge(0, Some(PeerId::from_u64(1))).is_none());
+        assert!(drivers[4]
+            .charge_request(0, PeerId::from_u64(1), Some(2))
+            .is_none());
         drop(waiter);
-        assert!(drivers[4].charge(0, Some(PeerId::from_u64(1))).is_some());
+        assert!(drivers[4]
+            .charge_request(0, PeerId::from_u64(1), Some(2))
+            .is_some());
         drop(held);
         assert_eq!(pool.0.lock().unwrap().requests, 0);
     }
@@ -465,13 +610,19 @@ mod tests {
         let owners = connection_leases::Owners::default();
         let peer = PeerId::from_u64(1);
         let ingress = lease(&owners, peer);
-        let initial = budget.charge(7, Some(peer)).unwrap();
+        let initial = budget.charge_request(7, peer, Some(5)).unwrap();
         let data = charged_bytes(Bytes::from_static(b"request"), initial.clone());
         let (authority, terminal) = IngressAuthority::new(ingress);
         let (responder, receiver) =
-            Responder::channel_owned(initial.clone(), authority, budget.clone());
+            Responder::channel_owned(initial.clone(), authority.clone(), budget.clone());
+        let reply_lifetime = responder.cancellation_authority();
         responder.try_respond(Bytes::from_static(b"reply")).unwrap();
         let response = receiver.recv_owned().await.unwrap();
+        assert!(!reply_lifetime.authorized());
+        assert!(
+            authority.authorized(),
+            "reply transfer must not revoke the driver's send gate"
+        );
         let actual_lower = response.keepalive().unwrap();
         let response_copy = response.data().clone();
         drop(response);
@@ -497,7 +648,7 @@ mod tests {
             let budget = budget(&pool);
             let owners = connection_leases::Owners::default();
             let peer = PeerId::from_u64(1);
-            let initial = budget.charge(0, Some(peer)).unwrap();
+            let initial = budget.charge_request(0, peer, Some(5)).unwrap();
             let (authority, terminal) = IngressAuthority::new(lease(&owners, peer));
             let (responder, receiver) =
                 Responder::channel_owned(initial.clone(), authority, budget.clone());

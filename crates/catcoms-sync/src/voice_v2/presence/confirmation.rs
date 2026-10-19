@@ -191,6 +191,19 @@ struct PreparedActionChange {
     action: Action,
     retire: Option<MessageId>,
 }
+enum PreparedConfirmation {
+    Hello {
+        action: Option<PreparedActionChange>,
+        low: Nonce,
+        high: Option<Nonce>,
+    },
+    Proof {
+        action: PreparedActionChange,
+        high: Nonce,
+    },
+    Finish,
+    Rejected(VoiceError),
+}
 fn prepare_action(
     pair: &Pair,
     kind: EncryptedKind,
@@ -217,15 +230,18 @@ fn prepare_action(
     if retire.is_some() {
         ledger.validate_establish(&pair.binding.handshake, authority)?;
     }
-    Ok(PreparedActionChange { action: Action {
-        serial,
-        kind,
-        plaintext: plaintext(kind, pair.binding.handshake, low, high),
-        draft: None,
-        signed: None,
-        created: 0,
-        live: RevocationOwner::default(),
-    }, retire })
+    Ok(PreparedActionChange {
+        action: Action {
+            serial,
+            kind,
+            plaintext: plaintext(kind, pair.binding.handshake, low, high),
+            draft: None,
+            signed: None,
+            created: 0,
+            live: RevocationOwner::default(),
+        },
+        retire,
+    })
 }
 fn apply_action(pair: &mut Pair, prepared: PreparedActionChange, ledger: &PacketLedger) {
     if let Some(id) = prepared.retire {
@@ -234,19 +250,6 @@ fn apply_action(pair: &mut Pair, prepared: PreparedActionChange, ledger: &Packet
     pair.action_serial = prepared.action.serial;
     pair.action = Some(prepared.action);
 }
-fn set_action(
-    pair: &mut Pair,
-    kind: EncryptedKind,
-    low: Nonce,
-    high: Option<Nonce>,
-    ledger: &PacketLedger,
-    authority: &Authority<'_>,
-) -> Result<(), VoiceError> {
-    let prepared = prepare_action(pair, kind, low, high, ledger, authority)?;
-    apply_action(pair, prepared, ledger);
-    Ok(())
-}
-
 impl LocalJoin {
     /// Publish one continuing native derive identity for the actual proven pair. Repeated pull
     /// or HMR cannot manufacture another engine fence or reset the pair's original deadline.
@@ -372,17 +375,26 @@ impl LocalJoin {
         clock: &dyn Clock,
     ) -> Result<SignedObject, VoiceError> {
         let result = self.submit_confirmation_result(
-            action, ciphertext, action.output_tag(ciphertext)?, signer, authority, clock,
+            action,
+            ciphertext,
+            action.output_tag(ciphertext)?,
+            signer,
+            authority,
+            clock,
         )?;
         if result.retired {
             return Err(VoiceError::Unauthorized);
         }
-        let CryptoInput::EncryptConfirmation(flight) = action.input() else { unreachable!() };
+        let CryptoInput::EncryptConfirmation(flight) = action.input() else {
+            unreachable!()
+        };
         self.pair_current(flight.handshake, authority, clock)?;
         let CryptoOutcome::Sealed { message, hash } = result.outcome else {
             return Err(VoiceError::Unauthorized);
         };
-        let signed = self.confirmations.pairs[&flight.handshake].action.as_ref()
+        let signed = self.confirmations.pairs[&flight.handshake]
+            .action
+            .as_ref()
             .and_then(|pending| pending.signed.as_ref())
             .filter(|signed| signed.id() == message && signed.hash() == hash)
             .ok_or(VoiceError::Reservation)?;
@@ -407,7 +419,7 @@ impl LocalJoin {
         let CryptoInput::EncryptConfirmation(flight) = action.input() else {
             return Err(VoiceError::Unauthorized);
         };
-        action.with_result(ciphertext, claimed_tag, clock, || {
+        action.with_result(ciphertext, claimed_tag, || {
             let signed = self.submit_confirmation(
                 FlightSubmission {
                     handshake: flight.handshake,
@@ -421,7 +433,10 @@ impl LocalJoin {
             )?;
             Ok(TerminalResult {
                 binding: self.result_binding(flight.handshake, u64::MAX, signed.expires()),
-                outcome: CryptoOutcome::Sealed { message: signed.id(), hash: signed.hash() },
+                outcome: CryptoOutcome::Sealed {
+                    message: signed.id(),
+                    hash: signed.hash(),
+                },
             })
         })
     }
@@ -437,8 +452,16 @@ impl LocalJoin {
         rng: &mut dyn CryptoRngCore,
     ) -> Result<(), VoiceError> {
         let result = self.commit_confirmation_result(
-            action, plaintext, action.output_tag(plaintext)?, authority, clock, rng,
+            action,
+            plaintext,
+            action.output_tag(plaintext)?,
+            authority,
+            clock,
+            rng,
         )?;
+        if result.retired {
+            return Err(VoiceError::Unauthorized);
+        }
         match result.outcome {
             CryptoOutcome::Opened => Ok(()),
             CryptoOutcome::Rejected(error) => Err(error),
@@ -463,7 +486,7 @@ impl LocalJoin {
         let CryptoInput::DecryptConfirmation(packet) = action.input() else {
             return Err(VoiceError::Unauthorized);
         };
-        action.with_result(plaintext, claimed_tag, clock, || {
+        action.with_result(plaintext, claimed_tag, || {
             self.commit_confirmation_terminal(
                 OpenedFlight {
                     token: packet.token,
@@ -483,10 +506,37 @@ impl LocalJoin {
         let pair = &self.confirmations.pairs[&handshake];
         ResultBinding {
             pair: pair.pin.clone(),
-            attempt: pair.attempt.0.clone(),
+            attempt: Some(pair.attempt.0.clone()),
             deadline: pair.deadline.min(deadline),
             expires: expires.saturating_add(CLOCK_SKEW_MS),
         }
+    }
+
+    /// Closed readiness marker for the original native-selected derivation. No key bytes are
+    /// accepted or returned. As with confirmation history, this is not a fresh pair/RTC grant.
+    /// Derivation belongs to the unchanged ECDH pair, independent of nonce-attempt replacement.
+    pub fn commit_derivation_result(
+        &mut self,
+        action: &CryptoAction,
+        claimed_tag: [u8; 32],
+        authority: &Authority<'_>,
+        clock: &dyn Clock,
+    ) -> Result<CryptoResultReceipt, VoiceError> {
+        if !action.belongs_to(self.scope, &self.lease) {
+            return Err(VoiceError::Unauthorized);
+        }
+        let CryptoInput::Derive(setup) = action.input() else {
+            return Err(VoiceError::Unauthorized);
+        };
+        action.with_result(&[], claimed_tag, || {
+            self.pair_current(setup.handshake, authority, clock)?;
+            let mut binding = self.result_binding(setup.handshake, u64::MAX, u64::MAX);
+            binding.attempt = None;
+            Ok(TerminalResult {
+                binding,
+                outcome: CryptoOutcome::Derived,
+            })
+        })
     }
 
     /// Derivation belongs to the unchanged native pair, independently of confirmation nonce
@@ -711,10 +761,7 @@ impl LocalJoin {
         }
         let mut nonce = [0; 32];
         rng.fill_bytes(&mut nonce);
-        // A fresh nonce supersedes pending old confirmation decrypts, but not the unchanged
-        // ECDH pair. Ordinary Hello -> Proof -> Finish progression retains this attempt owner.
-        pair.attempt = RevocationOwner::default();
-        set_action(
+        let prepared = prepare_action(
             pair,
             EncryptedKind::ConfirmHello,
             nonce,
@@ -722,6 +769,10 @@ impl LocalJoin {
             &self.ledger,
             authority,
         )?;
+        // A fresh nonce supersedes pending old confirmation decrypts, but not the unchanged
+        // ECDH pair. Ordinary Hello -> Proof -> Finish progression retains this attempt owner.
+        pair.attempt = RevocationOwner::default();
+        apply_action(pair, prepared, &self.ledger);
         pair.starts += 1;
         pair.low_nonce = Some(nonce);
         pair.high_nonce = None;
@@ -862,6 +913,7 @@ impl LocalJoin {
         // promotion below. An older candidate cannot publish Finish after a newer pair won.
         if kind == EncryptedKind::ConfirmFinish {
             self.promotion_current(handshake)?;
+            self.ledger.validate_establish(&handshake, authority)?;
         }
         let signed = self
             .ledger
@@ -875,7 +927,7 @@ impl LocalJoin {
             .expect("checked action")
             .signed = Some(signed.clone());
         if kind == EncryptedKind::ConfirmFinish {
-            self.promote(handshake, authority, clock)?;
+            self.apply_promotion(handshake);
         }
         Ok(signed)
     }
@@ -937,6 +989,22 @@ impl LocalJoin {
         clock: &dyn Clock,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<(), VoiceError> {
+        match self
+            .commit_confirmation_terminal(opened, authority, clock, rng)?
+            .outcome
+        {
+            CryptoOutcome::Opened => Ok(()),
+            CryptoOutcome::Rejected(error) => Err(error),
+            _ => unreachable!("closed confirmation outcome"),
+        }
+    }
+    fn commit_confirmation_terminal(
+        &mut self,
+        opened: OpenedFlight<'_>,
+        authority: &Authority<'_>,
+        clock: &dyn Clock,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<TerminalResult, VoiceError> {
         let OpenedFlight {
             token,
             aad,
@@ -947,32 +1015,95 @@ impl LocalJoin {
         if plaintext.len() > 512 || plaintext.len().checked_add(16) != Some(ciphertext.len()) {
             return Err(VoiceError::Bounds);
         }
-        let receipt = self
+        let prepared = self
             .ledger
-            .commit_inbound(token, aad, sequence, ciphertext, authority, clock)?;
-        self.accept_confirmation(receipt, plaintext, authority, clock, rng)
+            .validate_inbound_commit(token, aad, sequence, ciphertext, authority, clock)?;
+        let handshake = prepared.header.handshake;
+        self.pair_current(handshake, authority, clock)?;
+        let change = self.prepare_confirmation_change(&prepared, plaintext, authority, rng);
+        // Capacity is a proven local refusal BEFORE consumption or nonce/attempt changes.
+        // Closed malformed/unauthorized plaintext, however, consumes its exact token and is a
+        // retained terminal rejection, so losing that reply cannot create another transition.
+        let change = match change {
+            Ok(change) => change,
+            Err(VoiceError::Capacity) => return Err(VoiceError::Capacity),
+            Err(error) => PreparedConfirmation::Rejected(error),
+        };
+        self.pair_current(handshake, authority, clock)?;
+        self.ledger
+            .validate_inbound_owner(&prepared, authority, clock)?;
+        if matches!(change, PreparedConfirmation::Finish) {
+            self.promotion_current(handshake)?;
+            self.ledger.validate_establish(&handshake, authority)?;
+        }
+        let deadline = prepared.retire;
+        let expires = prepared.expires;
+        let hash = prepared.hash;
+        let sequence = prepared.header.sequence;
+        let _receipt = self.ledger.consume_validated_inbound(prepared);
+        // No fallible work follows this point. The action's result fence encloses consumption,
+        // state application and receipt installation; neither settlement nor a second commit
+        // can observe the intermediate state.
+        let outcome = match change {
+            PreparedConfirmation::Rejected(error) => CryptoOutcome::Rejected(error),
+            PreparedConfirmation::Hello { action, low, high } => {
+                let pair = self
+                    .confirmations
+                    .pairs
+                    .get_mut(&handshake)
+                    .expect("checked pair");
+                if let Some(action) = action {
+                    pair.attempt = RevocationOwner::default();
+                    apply_action(pair, action, &self.ledger);
+                    pair.low_nonce = Some(low);
+                    pair.high_nonce = high;
+                    pair.starts += 1; // prepared after the strict starts < 3 check
+                    pair.accepted_finish = None;
+                }
+                pair.hello.accept(sequence);
+                pair.accepted_hello = Some(hash);
+                CryptoOutcome::Opened
+            }
+            PreparedConfirmation::Proof { action, high } => {
+                let pair = self
+                    .confirmations
+                    .pairs
+                    .get_mut(&handshake)
+                    .expect("checked pair");
+                apply_action(pair, action, &self.ledger);
+                pair.high_nonce = Some(high);
+                pair.accepted_proof = Some(hash);
+                CryptoOutcome::Opened
+            }
+            PreparedConfirmation::Finish => {
+                self.apply_promotion(handshake);
+                self.confirmations
+                    .pairs
+                    .get_mut(&handshake)
+                    .expect("checked pair")
+                    .accepted_finish = Some(hash);
+                CryptoOutcome::Opened
+            }
+        };
+        Ok(TerminalResult {
+            binding: self.result_binding(handshake, deadline, expires),
+            outcome,
+        })
     }
-    fn accept_confirmation(
-        &mut self,
-        receipt: CommittedPacket,
+    fn prepare_confirmation_change(
+        &self,
+        prepared: &ValidatedInbound,
         bytes: &[u8],
         authority: &Authority<'_>,
-        clock: &dyn Clock,
         rng: &mut dyn CryptoRngCore,
-    ) -> Result<(), VoiceError> {
-        self.ledger.receipt_current(&receipt, authority, clock)?;
-        let header = receipt.header();
+    ) -> Result<PreparedConfirmation, VoiceError> {
+        let header = &prepared.header;
         let handshake = header.handshake;
-        self.pair_current(handshake, authority, clock)?;
         if !confirmation(header.kind) {
             return Err(VoiceError::Malformed);
         }
         let (low, high) = decode(bytes, header.kind, handshake)?;
-        let pair = self
-            .confirmations
-            .pairs
-            .get_mut(&handshake)
-            .expect("checked pair");
+        let pair = &self.confirmations.pairs[&handshake];
         match header.kind {
             EncryptedKind::ConfirmHello if !pair.low && !pair.established => {
                 pair.hello.candidate(header.sequence)?;
@@ -982,8 +1113,7 @@ impl LocalJoin {
                     }
                     let mut nonce = [0; 32];
                     rng.fill_bytes(&mut nonce);
-                    pair.attempt = RevocationOwner::default();
-                    set_action(
+                    let action = prepare_action(
                         pair,
                         EncryptedKind::ConfirmProof,
                         low,
@@ -991,13 +1121,17 @@ impl LocalJoin {
                         &self.ledger,
                         authority,
                     )?;
-                    pair.low_nonce = Some(low);
-                    pair.high_nonce = Some(nonce);
-                    pair.starts += 1;
-                    pair.accepted_finish = None;
+                    return Ok(PreparedConfirmation::Hello {
+                        action: Some(action),
+                        low,
+                        high: Some(nonce),
+                    });
                 }
-                pair.hello.accept(header.sequence);
-                pair.accepted_hello = Some(receipt.hash());
+                Ok(PreparedConfirmation::Hello {
+                    action: None,
+                    low,
+                    high: pair.high_nonce,
+                })
             }
             EncryptedKind::ConfirmProof if pair.low && !pair.established => {
                 if pair.low_nonce != Some(low)
@@ -1008,7 +1142,7 @@ impl LocalJoin {
                     return Err(VoiceError::Unauthorized);
                 }
                 let high = high.ok_or(VoiceError::Malformed)?;
-                set_action(
+                let action = prepare_action(
                     pair,
                     EncryptedKind::ConfirmFinish,
                     low,
@@ -1016,8 +1150,7 @@ impl LocalJoin {
                     &self.ledger,
                     authority,
                 )?;
-                pair.high_nonce = Some(high);
-                pair.accepted_proof = Some(receipt.hash());
+                Ok(PreparedConfirmation::Proof { action, high })
             }
             EncryptedKind::ConfirmFinish if !pair.low && !pair.established => {
                 if pair.low_nonce != Some(low)
@@ -1029,16 +1162,11 @@ impl LocalJoin {
                     return Err(VoiceError::Unauthorized);
                 }
                 self.promotion_current(handshake)?;
-                self.promote(handshake, authority, clock)?;
-                self.confirmations
-                    .pairs
-                    .get_mut(&handshake)
-                    .expect("checked pair")
-                    .accepted_finish = Some(receipt.hash());
+                self.ledger.validate_establish(&handshake, authority)?;
+                Ok(PreparedConfirmation::Finish)
             }
-            _ => return Err(VoiceError::Unauthorized),
+            _ => Err(VoiceError::Unauthorized),
         }
-        Ok(())
     }
     fn promotion_current(&self, handshake: Nonce) -> Result<(), VoiceError> {
         let pair = &self.confirmations.pairs[&handshake];
@@ -1052,15 +1180,8 @@ impl LocalJoin {
         }
         Ok(())
     }
-    fn promote(
-        &mut self,
-        handshake: Nonce,
-        authority: &Authority<'_>,
-        clock: &dyn Clock,
-    ) -> Result<(), VoiceError> {
-        self.pair_current(handshake, authority, clock)?;
-        self.promotion_current(handshake)?;
-        self.ledger.establish(&handshake, authority)?;
+    fn apply_promotion(&mut self, handshake: Nonce) {
+        self.ledger.establish_validated(&handshake);
         let peer = self.confirmations.pairs[&handshake].binding.peer;
         let generation = self.confirmations.pairs[&handshake].generation;
         for (id, pair) in &mut self.confirmations.pairs {
@@ -1079,7 +1200,6 @@ impl LocalJoin {
             .get_mut(&handshake)
             .expect("checked pair")
             .established = true;
-        Ok(())
     }
     pub fn pair_established(
         &mut self,

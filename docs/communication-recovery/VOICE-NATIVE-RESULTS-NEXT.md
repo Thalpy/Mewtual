@@ -1,15 +1,25 @@
 # Next voice milestone: native result recovery
 
-Design-review checkpoint, 18 October 2026. **Planned, not implemented or accepted.** Live V2,
+Design-review checkpoint, 18 October 2026; first slice implemented in the 19 October worktree,
+with focused verification and adversarial review in progress. **The milestone remains open.** Live V2,
 normal kind28 dispatch and general SDP action IPC remain disabled. This is the next small slice
 after the PR48 review corrections, rather than a claim that the communication programme is done.
 
 ## First slice: recover the exact native outcome
 
-The existing CryptoAction engine fence serializes first effects but retains no native terminal
-result. Confirmation currently consumes an incoming token before closed-result validation and
-transition. A lost accepted or rejected reply therefore needs history independent of pending
-token authority. Repeating ordinary token admission cannot supply that history.
+CryptoAction now retains a small terminal result under its existing prepaid record and engine
+fence. Accepted derivation/seal/open and closed-rejected confirmation results survive consumed
+tokens and actual engine settlement. Native recomputes SHA-256 over the exact bounded output,
+checks the claimed tag, and classifies exact history before pending eligibility. The result
+captures the original native clock and post-transition pair/attempt owners. Derivation history
+is independent of confirmation nonce replacement. Retired history grants no effect authority;
+the compatibility sign/commit wrappers reject it.
+
+Confirmation prepares closed validation, checked action serials, nonce replacement and promotion
+before consuming its incoming token, then applies and records the result without a fallible
+tail. Signing similarly validates promotion before signing. Original engine permits remain held
+until actual settlement. This implements only the inert Rust history slice; it does not enable
+native IPC, browser continuations, encrypted inbox admission, SDP result factories or RTC.
 
 Prepay terminal history on the same action owner and fence. Resolve the native-owned input,
 recompute the bounded output fingerprint, and compare the caller's claimed fingerprint. Classify

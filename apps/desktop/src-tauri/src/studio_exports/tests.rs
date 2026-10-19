@@ -161,6 +161,7 @@ async fn register_server(
     state.servers.lock().await.insert(
         12,
         ServerEntry {
+            files: keep_session::EntryOwner::new(),
             actor: actor.clone(),
             instance,
             group_id,

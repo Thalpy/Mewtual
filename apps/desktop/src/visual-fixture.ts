@@ -323,7 +323,7 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
         ],
       });
     case "get_kept_files":
-      return { supported: true, allocated_bytes: 0, limit_bytes: 1073741824, files: [], error: null };
+      return { supported: true, allocated_bytes: 0, limit_bytes: 1073741824, files: [], transfers: [], error: null };
     case "file_available":
       return true;
     case "get_file_usage":

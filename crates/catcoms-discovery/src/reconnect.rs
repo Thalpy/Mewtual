@@ -10,8 +10,10 @@ pub const MAX_RECONNECT_ROUTE_BYTES: usize = 512;
 pub const RECONNECT_ROUTE_WIRE_OVERHEAD: usize = 4 + 32 + 4;
 /// Includes the one-byte route count as well as every encoded route.
 pub const MAX_RECONNECT_SERIALIZED_ROUTE_BYTES: usize = 8 * 1024;
-/// Stored diversity does not increase the socket work permitted in any one discovery pass.
-pub const MAX_RECONNECT_DIAL_PEERS_PER_PASS: usize = 2;
+/// Cover four eligible saved peers per pass while retaining up to eight. At two endpoints per
+/// peer this can spend the existing eight-endpoint group window; process/prefix/endpoint gates
+/// still apply. Retention is not permission to bypass those independent execution limits.
+pub const MAX_RECONNECT_DIAL_PEERS_PER_PASS: usize = 4;
 /// The outbound observation ledger plus the previously retained set; not an unbounded scan.
 pub const MAX_RECONNECT_ROUTE_CANDIDATES: usize = catcoms_rt::MAX_CONNECTED_PEER_SNAPSHOT
     * catcoms_rt::MAX_PEER_DIAL_BATCH

@@ -539,3 +539,37 @@ fn transient_hold_exhaustion_refuses_admission_without_disturbing_existing_prote
     let readmitted = store.hold_creative_transient(group, BTreeSet::from([[200u8; 32]]));
     assert!(readmitted.is_ok(), "a released owner did not free its slot");
 }
+
+#[test]
+fn native_store_factory_delegates_bounded_owned_reads_and_their_storage_epoch() {
+    let root = tempfile::tempdir().unwrap();
+    let store = open(root.path());
+    let group = [7; 32];
+    let mut blobs = store.blob_store(&hex::encode(group)).unwrap();
+    blobs
+        .configure_keep_scope(catcoms_storage::kept::KeepScope {
+            group: group.to_vec(),
+            device: catcoms_crypto::DeviceId::from_bytes([8; 32]),
+        })
+        .unwrap();
+    let cid = blobs.put(b"owned read").unwrap();
+    let result = blobs
+        .prepare_read_bounded(&cid, 10)
+        .unwrap()
+        .run()
+        .unwrap()
+        .unwrap();
+    assert!(result.is_current());
+    assert_eq!(result.bytes(), b"owned read");
+    let private = blobs.put_staged(b"private staging").unwrap();
+    assert!(blobs
+        .prepare_read_bounded(&private, 15)
+        .unwrap()
+        .run()
+        .unwrap()
+        .is_none());
+    let waiting = blobs.prepare_read_bounded(&cid, 10).unwrap();
+    drop(blobs);
+    assert!(!result.is_current());
+    assert!(waiting.run().unwrap().is_none());
+}

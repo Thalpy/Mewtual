@@ -11,7 +11,36 @@ detached automatic submissions, pending mapping, provider rotation, announcement
 build and narrow SDP resource corrections. Those fixes have focused evidence and clear read-only
 reviews. The revision ledger records final suite results, including the failed full root sweep
 and complete affected-target reruns after its two test corrections. Earlier pending/running notes
-below are chronological checkpoints. These corrections do not enable live V2 or durable file resume.
+below are chronological checkpoints. Live V2 remains disabled. The 19 October durable Keep work
+below adds scoped resumable storage, paced automatic partial resume, persistent Pause/Resume and
+explicit Retry, but does not close file recovery.
+
+The latest19October checkpoint passes419 native tests and1849 frontend tests, static/build,
+browser-flow, native-startup and strict checks. Its root unfiltered command finishes all other
+targets with2906 passes and24 existing ignored cases, but exits101 after the single failing
+integration executable stalls in a one-turn serving fixture. A bounded reproduction confirms that
+fixture defect; the corrected complete target passes all30 cases on the original workspace
+feature graph. See the revision ledger's final verification table for exact commands and limits.
+There is no fresh successful unfiltered root run or new hosted-Linux result claimed. The additional
+production probe-target-starvation MEDIUM remains open alongside the programme gaps below.
+
+Current follow-up: hosted Linux acceptance remains unverified. The latest eight-case Windows
+recovery run passes all eight scenarios (277.63 s), including onward channel-directory discovery
+and hostile partition/restart exact signed-operation union. The reciprocal-frontier correction
+adds bounded reverse reconciliation and fences older empty completions; all 621 affected sync
+unit tests pass (113.85 s), with 18 focused recovery-wait cases. Earlier failed runs remain in
+the revision ledger. This is local evidence and does not relabel the earlier hosted failure.
+
+The final rendered retained-copy flow passes with exact command, lease and CAS identity oracles
+on a fresh fixture port. Its screenshot is `target/pr48-kept-copies.png` in the worktree. It uses
+mocked IPC and establishes no native persistence or audio property. A supported absent-key
+legacy admission/restore state now refuses Keep before reservation or worker admission; the
+root regression and all 24 affected actor tests pass. The first actor rebuild ran out of build
+space; removing only verified obsolete app incremental caches recovered 13.6 GiB and the retry
+passed. V4 whole-variant storage and worker integration pass40 retained-store and29 file-worker cases,
+including saved-set validation, unlisted restart, actual signed-response fallback, interrupted
+selection/commit and exhausted Retry history. Read-only re-review is clear. No current full-suite, live V2 or physical media
+acceptance is claimed for this WIP.
 
 | Package | Current state | Acceptance still required |
 | --- | --- | --- |
@@ -19,7 +48,7 @@ below are chronological checkpoints. These corrections do not enable live V2 or 
 | 1: connections and scheduling | Detached connected maintenance and automatic repair; bounded driver delivery; native router/call lifecycle corrections | Broader permitted alternate paths, integrated multi-group congestion latency and full acceptance |
 | 2: room/signalling | Reviewed v2 design; focused crypto, signed codec and native ownership implementation; no live V2 or forwarding enabled | Fresh endpoint sessions, confidentiality/forwarding enforcement, legacy isolation, topology and native evidence |
 | 3: chat recovery | Existing mechanisms remain; new work not accepted | Exact-union recovery and demonstrated gaps under the plan's topology/restart matrix |
-| 4: file recovery | Provider search rotates beyond absent/busy first-four candidates; existing explicit Keep remains; no resumable-store migration introduced | Reviewed durable states/budgets/migration, bridge recovery and crash/cancellation matrix |
+| 4: file recovery | Provider rotation, scoped resumable journal, saved whole-part progress, persistent allowance, automatic partial resume, user Pause/Resume and explicit Retry; integration checks in progress | Indirect service, external destination resume and complete native crash/cancellation/compatibility matrix |
 | 5A: existing TURN feasibility | No new native/audio observation | Forced relay candidate, audible/native reconnect and unavailable-path evidence |
 | 5B: media bridging | No relay implementation or new dependency selected | Architecture/key/authority review, physical-network/audio evidence and resource bounds |
 | 6: combined rollout | Not accepted | Combined named scenarios, versioned compatibility, no forbidden edges or downgrade |

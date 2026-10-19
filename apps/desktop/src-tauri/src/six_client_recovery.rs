@@ -96,6 +96,11 @@ struct Scenario {
 
 impl Scenario {
     fn new(reverse: bool) -> Self {
+        // Opt-in structured diagnostics keep the normal fixture quiet while making a failed
+        // stage reproducible without changing its schedule or manufacturing recovery work.
+        if std::env::var_os("RUST_LOG").is_some() {
+            catcoms_log::init_test();
+        }
         let clients: Vec<_> = (0..6)
             .map(|_| {
                 let mut net = new_server_net("", "", "");
@@ -152,7 +157,15 @@ impl Scenario {
     }
 
     async fn admit(&mut self) {
-        for index in 0..6 {
+        self.admit_prefix(6).await;
+    }
+
+    /// Admit actual members through the native production path. The transport adapter's
+    /// three-member check needs one unambiguous helper and one blocked target; admitting and
+    /// then closing extra members would leave their valid descriptors eligible for probing.
+    async fn admit_prefix(&mut self, count: usize) {
+        assert!(matches!(count, 3 | 6));
+        for index in 0..count {
             let state = mount(self.clients[index].root.path()).await;
             let transport =
                 Transport::new(index, &mut self.clients[index].net, self.rules.clone()).await;
@@ -250,8 +263,8 @@ impl Scenario {
         bounded("all original admissions become visible", async {
             loop {
                 let mut complete = true;
-                for index in ALL {
-                    complete &= self.online(*index).actor.members().await.len() == 6;
+                for index in 0..count {
+                    complete &= self.online(index).actor.members().await.len() == count;
                 }
                 if complete {
                     break;
@@ -262,7 +275,7 @@ impl Scenario {
         .await;
         // Higher numbered clients retain outbound evidence to the earlier listeners. This makes
         // 2->1/3->1 and 5->4/6->4 available without pretending an inbound connection proves a dial.
-        for source in 1..6 {
+        for source in 1..count {
             for target in 0..source {
                 if !forbidden(source, target) {
                     self.online(source)
@@ -273,14 +286,14 @@ impl Scenario {
                 }
             }
         }
-        self.wait_for_routes().await;
-        for index in ALL {
+        self.wait_for_routes(count).await;
+        for index in 0..count {
             assert_eq!(
-                self.online(*index).actor.group_mode().await.unwrap(),
+                self.online(index).actor.group_mode().await.unwrap(),
                 catcoms_app::GroupMode::PeerToPeer
             );
             assert!(
-                self.online(*index)
+                self.online(index)
                     .actor
                     .member_routes()
                     .await
@@ -292,13 +305,13 @@ impl Scenario {
         self.rules.assert_graph();
     }
 
-    async fn wait_for_routes(&self) {
+    async fn wait_for_routes(&self, count: usize) {
         let required = [(1, 0), (2, 0), (3, 0), (4, 3), (5, 3)];
         tokio::select! {
             _ = async {
                 loop {
                     let mut complete = true;
-                    for (source, target) in required {
+                    for (source, target) in required.into_iter().filter(|(source, target)| *source < count && *target < count) {
                         let net = network(&self.online(source).state).await;
                         complete &= net.reconnect_policy == ReconnectPolicy::MemberMesh && net.reconnect_routes.iter().any(|route| route.peer_id == *self.rules.peers[target].as_bytes());
                     }
@@ -308,7 +321,9 @@ impl Scenario {
             } => {},
             _ = SystemClock.sleep(Duration::from_secs(90)) => {
                 let mut actual = Vec::new();
-                for index in ALL { actual.push((*index + 1, network(&self.online(*index).state).await)); }
+                for index in 0..count {
+                    actual.push(self.recipient_diagnostic(index, channel_id("general"), &History::new()).await);
+                }
                 panic!("native workers did not retain authenticated bridge routes: {actual:?}");
             }
         }
@@ -482,6 +497,73 @@ impl Scenario {
             .await;
     }
 
+    /// Failure observations have their own short bound: an unresponsive actor must not turn a
+    /// ninety-second recovery failure into an unbounded diagnostic wait. Never print ServerNet;
+    /// it contains the transport identity seed. Routes are projected to fixture indexes and an
+    /// equality check against each actual listener, with no raw addresses or secret material.
+    async fn recipient_diagnostic(
+        &self,
+        index: usize,
+        channel: u128,
+        expected: &History,
+    ) -> String {
+        async fn observe<F: Future>(future: F) -> Option<F::Output> {
+            tokio::select! {
+                value = future => Some(value),
+                _ = SystemClock.sleep(Duration::from_millis(500)) => None,
+            }
+        }
+        let running = self.online(index);
+        // Independent observations distinguish a busy actor from sealed-store contention. One
+        // slow read cannot erase the useful state returned by the other bounded probes.
+        let (history, net, recovery, routes) = tokio::join!(
+            observe(running.history_in(channel)),
+            observe(network(&running.state)),
+            observe(
+                running
+                    .actor
+                    .recovery_progress(catcoms_wire::DocType::Channel, channel)
+            ),
+            observe(running.actor.member_routes()),
+        );
+        let history = history.map_or_else(|| "history actor/snapshot probe exceeded 500ms".to_owned(), |history| {
+            let missing_messages: Vec<_> = expected.messages.keys().filter(|id| !history.messages.contains_key(*id)).collect();
+            let unexpected_messages: Vec<_> = history.messages.keys().filter(|id| !expected.messages.contains_key(*id)).collect();
+            let changed_messages: Vec<_> = expected.messages.iter().filter(|(id, value)| history.messages.get(*id).is_some_and(|actual| actual != *value)).map(|(id, _)| id).collect();
+            let missing_operations: Vec<_> = expected.operations.keys().filter(|id| !history.operations.contains_key(*id)).map(hex::encode).collect();
+            let extra_operations: Vec<_> = history.operations.keys().filter(|id| !expected.operations.contains_key(*id)).map(hex::encode).collect();
+            format!("messages={} ops={} missing_messages={missing_messages:?} unexpected_messages={unexpected_messages:?} changed_messages={changed_messages:?} missing_operations={missing_operations:?} extra_operations={extra_operations:?}", history.messages.len(), history.operations.len())
+        });
+        let saved = net.map_or_else(
+            || "sealed network store probe exceeded 500ms".to_owned(),
+            |net| {
+                let targets: Vec<_> = net
+                    .reconnect_routes
+                    .iter()
+                    .map(|route| {
+                        let target = self
+                            .rules
+                            .peers
+                            .iter()
+                            .position(|peer| peer.as_bytes() == &route.peer_id);
+                        (
+                            target.map(|target| target + 1),
+                            target.is_some_and(|target| {
+                                route.address == self.address(target).to_string()
+                            }),
+                        )
+                    })
+                    .collect();
+                format!(
+                    "policy={:?} saved_targets_and_current_listener={targets:?}",
+                    net.reconnect_policy
+                )
+            },
+        );
+        format!("client={} {history} cadence_submitted_passes={} network={saved} recovery={recovery:?} routes={routes:?}",
+            index + 1, running.passes.load(Ordering::Acquire))
+    }
+
     async fn converge_in(&self, channel: u128, indices: &[usize], expected: &History, phase: &str) {
         eprintln!("six-client phase: {phase}");
         tokio::select! {
@@ -495,8 +577,17 @@ impl Scenario {
             } => {},
             _ = SystemClock.sleep(Duration::from_secs(90)) => {
                 let mut actual = Vec::new();
-                for index in indices { actual.push((*index + 1, self.online(*index).history_in(channel).await)); }
-                panic!("{phase} failed exact ID/author/text/original-signed-operation convergence; expected={expected:?}; actual={actual:?}");
+                for index in indices {
+                    // Keep the exact equality oracle above. Diagnostics identify the failed
+                    // recipient and scheduler state without dumping entire signed payloads.
+                    actual.push(self.recipient_diagnostic(*index, channel, expected).await);
+                }
+                let trace = {
+                    let trace = self.rules.trace.lock().unwrap();
+                    format!("received_kinds={:?}; connected_submissions={:?}; peer_dials={:?}", trace.received_kinds, trace.connected_submissions, trace.peer_dials)
+                }; // Release the diagnostic mutex before panic; secondary tasks retain usable logs.
+                panic!("{phase} failed exact ID/author/text/original-signed-operation convergence; expected_messages={} expected_ops={} recipients={actual:?}; {trace}",
+                    expected.messages.len(), expected.operations.len());
             }
         }
         self.rules.assert_graph();

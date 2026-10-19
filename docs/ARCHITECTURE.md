@@ -1,5 +1,21 @@
 # Mewtual; Architecture
 
+## Connected file source checkpoint (19 October)
+
+The native server actor installs an observing file-service attachment from its exact account/
+server-entry scope and current file actor generation. Kind30 is routed into a retained Root
+completion queue before any general request await. Authentication, current member/route/policy
+checks and signing stay on Root; only an affine bounded storage plan enters the blocking native
+executor. The source credit follows worker, pending metadata and actual response independently.
+File completions rotate as a fourth input in the existing owner selector. Final Present effects
+recheck captured scope, storage generation and the original two-second read deadline, excluding
+the reply wait that retires before a driver send. This source slice is separate from unfinished
+requester integration and complete indirect Keep acceptance. Helper29 now uses the same retained
+queue for one-hop source requests: its affine chain prepays all four lower attempts and five
+route records before admission. Original lower bytes, output bytes and actual driver sends own
+the same charge independently, including final-refusal paths. The selected A scope survives
+through final Found admission; unused sources do not retire the parent C scope.
+
 ## Congested network dispatch (PR 48 revision)
 
 The driver owns bounded application payload and lifecycle reconciliation queues; it never awaits
@@ -10,6 +26,18 @@ bounded detached jobs. Driver admission repeats ownership; completions return to
 for current retry/accounting effects. Notifications have local ACKs and driver-discarded replies.
 See [the interface contract](INTERFACES.md#congested-transport-delivery-and-automatic-repair-submissions-pr-48-revision)
 for precise bounds, generation ordering and the still-immediate reconnect/manual paths.
+
+Document anti-entropy also has an owned monotonic 30-second wake in the sync network wait.
+It revisits quiet connected sources after a completed search without requiring UI activity,
+gossip or a discovery edge. Caller cancellation preserves the deadline and pending requests.
+Only active local members with open documents and an actually connected bound current source
+arm it; one bounded due turn precedes normal fair input rotation. Queue, cooldown and source
+rotation bounds remain unchanged. See [the message trace](MESSAGE-FLOW.md).
+
+Automatic delivery receipts now share detached notification ownership with repair forwarding.
+One persistent admission turn alternates successful classes, capped at four new notifications per
+owner turn; capacity denial does not skip the owed class. Local ACK waits participate in owned
+response/event/submission polling. Neither scheduling nor an ACK is remote delivery evidence.
 
 ## Connected discovery maintenance (2026-10-18)
 
@@ -117,7 +145,11 @@ two fixed helpers. One local and one remote SDP of at most 8 KiB share one Offer
 initiator/responder role; crossed Offers refuse before admission. Packet, Source, verification,
 engine/action/result capacity loans retain actual custody. This is capacity enforcement, not
 completed SDP crypto-action factories or browser result delivery. Full-chain integrated progress
-and post-transition exact-result receipts remain requirements. Live Endpoint confirmation/presence wiring, native action IPC adapters, helper ingress
+remains a requirement. The inert native CryptoAction seam now retains small exact accepted and
+closed-rejected terminal receipts under the original engine fence, independently of consumed
+tokens and actual settlement. SHA-256 is recomputed over the native-input-selected bounded
+output; cached history uses the original clock and post-transition pair/attempt owners. History
+never grants fresh signalling or RTC authority. Live Endpoint confirmation/presence wiring, native action IPC adapters, helper ingress
 and UI V2/legacy separation are not yet enabled or accepted;
 the [communication ledger](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md) records the scope.
 
@@ -1190,3 +1222,45 @@ network tasks, projects conflicting first file-index lists consistently, and add
 copies. Kept-copy ownership never comes from replicated expiry. One exact manifest is reserved and
 verified before durable visibility; normal cache deletion cannot remove it. UI availability reports
 local evidence and leaves remote copies unconfirmed.
+New retained transfers use a purpose-key-separated sealed successor journal in `transfers-v2`,
+with full native group/device scope, private partial chunks, persistent prepaid execution allowance
+and explicit idempotent Retry. Resumable, Completed and Deleting are distinct durable states.
+Legacy pending remains cleanup-only behind a permanent format barrier. Actor workers reverify the
+saved prefix and whole plaintext before completion; queued network work carries its original
+deadline and revocable run owner. An actor-owned paced scheduler resumes saved partial intents
+under an exact native unlock generation; persistent user Pause, budget exhaustion and deterministic
+integrity stops remain distinct. V2 canonical bytes reconcile before explicit V3 consent migration.
+Completed checks retain cancelable inline leases. New V4 multi-variant intents reserve their whole
+original compatible set with per-candidate progress and a separate committed winner. Fallback
+publishes a selection under a fresh opaque run, resets whole-file hashing and preserves all global
+allowance/intent. Public retained service exposes only the committed winner. V2/V3 remain exact-only
+with unchanged bytes and charges. Focused integration checks/review are ongoing; indirect blob
+service and combined acceptance remain open.
+
+
+### Native full-source read custody (19 October)
+
+The future connected file service has a separate opaque read task, independent of voice runtime
+and small ciphertext page sizes. `SourceReadRuntime` reserves a fixed 40 MiB before bounded store
+preparation, with a single process-static pool limiting two actual reads/results total and one per
+full group. Replacing a Root, runtime or executor cannot create fresh capacity while old workers
+remain alive. A task moves both plan and affine credit into the app's `spawn_blocking` closure;
+a completion keeps its result and that same credit. No owned-result extraction bypass exists.
+
+Store/winner fences and exact CID verification survive this handoff. Future service must separately
+recheck original group/membership/request/native-session/deadline authority before signing and
+transfer any outgoing page into response custody before dropping source completion. The executor
+factory starts no work by itself. New request dispatch, helper service, source cache, replay/rate
+admission and actor integration remain unfinished; this is no indirect file acceptance claim.
+
+
+### Existing file work: actor and Root ownership
+
+Detached file requests now observe both their original actor generation and Root/member/policy
+generation. The actor retires before stop acknowledgement or a blocking close-event wait. A
+reversible freeze retires before native custody waits and resumes with a fresh generation; old
+local jobs, retries and completed responses cannot adopt it. Root observations retire on actual
+epoch/member/policy changes even without voice attached. Its sole publisher is the first Root
+field, so Drop ends it before transport/MLS/store fields. Neither observer owns those publishers.
+Actual lower accounting remains held through transport retirement. This supplies no bridge peer
+standing or native entry consent; those additional scopes remain separate.

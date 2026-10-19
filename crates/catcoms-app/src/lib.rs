@@ -55,7 +55,10 @@ use thiserror::Error;
 mod actor;
 pub mod creative;
 pub mod durable_chat;
+#[cfg(test)]
+mod file_bridge_search;
 mod file_resolution;
+pub mod file_source;
 mod moderation;
 pub mod pairing;
 pub mod registry_catchup;

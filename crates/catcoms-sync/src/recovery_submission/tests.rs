@@ -1,6 +1,9 @@
 use super::*;
 use crate::tests::{build_members, converge_and_publish_test_routes};
-use futures::{FutureExt, StreamExt};
+use catcoms_rt::{ManualClock, SharedRequestKeepalive};
+use futures::{Future, FutureExt, StreamExt};
+use rand_chacha::ChaCha20Rng;
+use rand_core::SeedableRng;
 
 #[derive(Debug)]
 struct ObservedPermit(Arc<AtomicBool>);
@@ -240,4 +243,235 @@ async fn submission_slots_remain_shared_until_actual_last_custody_retires() {
     assert!(waiting.reserve().is_some());
     drop((held_a, held_b));
     assert_eq!(capacity.slots.available_permits(), PROCESS_SUBMISSIONS);
+}
+
+/// The local notification ACK is deliberately slower than repeated sole-owner polls. Both
+/// notification seams share the gate, so the regression covers the released prefix and its
+/// detached replacement with identical transport behavior and genuine request/response bytes.
+struct HeldReceiptAck {
+    inner: catcoms_rt::MemNetwork,
+    release: watch::Receiver<bool>,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+#[async_trait::async_trait]
+impl MeshTransport for HeldReceiptAck {
+    fn local_peer(&self) -> PeerId {
+        self.inner.local_peer()
+    }
+    fn connection_snapshot(&self) -> Vec<catcoms_rt::PeerConnectionSnapshot> {
+        self.inner.connection_snapshot()
+    }
+    fn supports_connection_leases(&self) -> bool {
+        self.inner.supports_connection_leases()
+    }
+    fn connection_lease(&self, peer: PeerId) -> Option<catcoms_rt::ConnectionLease> {
+        self.inner.connection_lease(peer)
+    }
+    async fn subscribe(&self, topic: Topic) -> Result<(), TransportError> {
+        self.inner.subscribe(topic).await
+    }
+    async fn unsubscribe(&self, topic: Topic) -> Result<(), TransportError> {
+        self.inner.unsubscribe(topic).await
+    }
+    async fn publish(&self, topic: Topic, bytes: Bytes) -> Result<(), TransportError> {
+        self.inner.publish(topic, bytes).await
+    }
+    async fn request(
+        &self,
+        peer: PeerId,
+        protocol: ProtocolId,
+        bytes: Bytes,
+    ) -> Result<Bytes, TransportError> {
+        self.inner.request(peer, protocol, bytes).await
+    }
+    async fn request_cancellable(
+        &self,
+        peer: PeerId,
+        protocol: ProtocolId,
+        bytes: Bytes,
+        cancellation: RequestCancellation,
+    ) -> Result<Bytes, TransportError> {
+        self.inner
+            .request_cancellable(peer, protocol, bytes, cancellation)
+            .await
+    }
+    async fn next_event(&self) -> Option<TransportEvent> {
+        self.inner.next_event().await
+    }
+    async fn notify_connected(
+        &self,
+        peer: PeerId,
+        protocol: ProtocolId,
+        bytes: Bytes,
+    ) -> Result<(), TransportError> {
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        let mut release = self.release.clone();
+        while !*release.borrow() {
+            release
+                .changed()
+                .await
+                .map_err(|_| TransportError::Closed)?;
+        }
+        self.inner.notify_connected(peer, protocol, bytes).await
+    }
+    async fn notify_connected_cancellable(
+        &self,
+        peer: PeerId,
+        protocol: ProtocolId,
+        bytes: Bytes,
+        mut cancellation: RequestCancellation,
+    ) -> Result<(), TransportError> {
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        let mut release = self.release.clone();
+        while !*release.borrow() {
+            tokio::select! {
+                value = release.changed() => value.map_err(|_| TransportError::Closed)?,
+                _ = cancellation.cancelled() => return Err(TransportError::Closed),
+            }
+        }
+        self.inner
+            .notify_connected_cancellable(peer, protocol, bytes, cancellation)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn held_delivery_receipt_ack_cannot_starve_inbound_catchup_across_cancelled_owner_polls() {
+    use automerge::{transaction::Transactable, ROOT};
+    use std::task::Poll;
+    let (hub, mut members, ids) = build_members(2).await;
+    converge_and_publish_test_routes(&mut members);
+    let mut a = members.remove(0);
+    let mut b = members.remove(0);
+    a.open_channel(DocType::Channel, 912).await.unwrap();
+    b.open_channel(DocType::Channel, 912).await.unwrap();
+    let checkpoint = b.snapshot().unwrap();
+    let peer = b.local_peer();
+    drop(b);
+    let (_release, receiver) = watch::channel(false);
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut b = ChannelSync::restore(
+        &checkpoint,
+        HeldReceiptAck {
+            inner: hub.join(peer),
+            release: receiver,
+            calls: calls.clone(),
+        },
+        ChaCha20Rng::seed_from_u64(170),
+        Box::new(ManualClock::new(1_000)),
+    )
+    .unwrap();
+    b.recovery_submissions = Submissions::with_capacity(isolated_capacity());
+    crate::tests::prove_live_member(&mut b, a.local_peer(), ids[0]);
+    crate::tests::prove_live_member(&mut a, peer, ids[1]);
+    a.post(DocType::Channel, 912, |doc| {
+        doc.put(ROOT, "origin", "genuine signed operation")
+    })
+    .await
+    .unwrap();
+    let Some(TransportEvent::Gossip { from, data, .. }) = b.transport.next_event().await else {
+        panic!("actual live op")
+    };
+    b.on_gossip(from, &data);
+    assert_eq!(b.delivery_receipt_outbox.len(), 1);
+    b.post(DocType::Channel, 912, |doc| {
+        doc.put(ROOT, "reply", "only catchup may supply this")
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        a.transport.next_event().await,
+        Some(TransportEvent::Gossip { .. })
+    ));
+    let mut answer = None;
+    let mut catchup = Box::pin(a.request_catchup(peer, DocType::Channel, 912));
+    for _ in 0..32 {
+        if answer.is_none() {
+            if let Poll::Ready(value) =
+                futures::future::poll_fn(|cx| Poll::Ready(catchup.as_mut().poll(cx))).await
+            {
+                answer = Some(value);
+            }
+        }
+        let mut owner = Box::pin(b.run_once());
+        let _ = futures::future::poll_fn(|cx| Poll::Ready(owner.as_mut().poll(cx))).await;
+        drop(owner); // Model the next ready actor command cancelling this poll.
+    }
+    assert_eq!(
+        answer.unwrap().unwrap(),
+        1,
+        "receipt ACK must not hide the actual inbound request"
+    );
+    assert_eq!(
+        calls.load(Ordering::Acquire),
+        1,
+        "one retained submission, not re-created on every owner poll"
+    );
+}
+
+#[tokio::test]
+async fn receipts_and_repair_notifications_both_gain_admission_as_actual_slots_retire() {
+    use automerge::{transaction::Transactable, ROOT};
+    use std::task::Poll;
+    let (_hub, mut members, ids) = build_members(2).await;
+    converge_and_publish_test_routes(&mut members);
+    let mut a = members.remove(0);
+    let mut b = members.remove(0);
+    crate::tests::prove_live_member(&mut b, a.local_peer(), ids[0]);
+    a.open_channel(DocType::Channel, 913).await.unwrap();
+    b.open_channel(DocType::Channel, 913).await.unwrap();
+    a.post(DocType::Channel, 913, |doc| doc.put(ROOT, "one", 1))
+        .await
+        .unwrap();
+    let Some(TransportEvent::Gossip { from, data, .. }) = b.transport.next_event().await else {
+        panic!("real signed op")
+    };
+    b.on_gossip(from, &data);
+    let receipt = b.delivery_receipt_outbox.pop_front().unwrap();
+    b.catchup_queue.clear();
+    b.recovery_submissions = Submissions::with_capacity(isolated_capacity());
+    let mut lower_owners: Vec<SharedRequestKeepalive> = (0..LOCAL_SUBMISSIONS)
+        .map(|_| {
+            let original = b.recovery_submissions.reserve().unwrap();
+            let lower: SharedRequestKeepalive = original.clone();
+            drop(original); // Caller retirement cannot refund the sole remaining actual owner.
+            lower
+        })
+        .collect();
+    let mut receipt_admitted = 0;
+    let mut repair_admitted = 0;
+    for _ in 0..8 {
+        if b.delivery_receipt_outbox.is_empty() {
+            b.delivery_receipt_outbox.push_back(receipt);
+        }
+        if b.repair_outbox.is_empty() {
+            b.repair_outbox.push_back(RepairOutboxItem {
+                target: a.local_peer(),
+                payload: vec![0],
+                expires_at_ms: u64::MAX,
+                required_refs: vec![b.descriptor_ref(ids[0]).unwrap()],
+            });
+        }
+        assert_eq!(b.recovery_submissions.local.available_permits(), 0);
+        let mut full = Box::pin(b.run_once());
+        let _ = futures::future::poll_fn(|cx| Poll::Ready(full.as_mut().poll(cx))).await;
+        drop(full);
+        assert_eq!(
+            b.delivery_receipt_outbox.len(),
+            1,
+            "Busy preserves receipt intent"
+        );
+        assert_eq!(b.repair_outbox.len(), 1, "Busy preserves repair intent");
+        drop(lower_owners.pop().unwrap());
+        let mut owner = Box::pin(b.run_once());
+        let _ = futures::future::poll_fn(|cx| Poll::Ready(owner.as_mut().poll(cx))).await;
+        drop(owner);
+        receipt_admitted += usize::from(b.delivery_receipt_outbox.is_empty());
+        repair_admitted += usize::from(b.repair_outbox.is_empty());
+        // The real MemNetwork queued responder now holds any newly submitted Flight. Do not
+        // consume that remote request: each following iteration releases exactly one old owner.
+        assert_eq!(b.recovery_submissions.local.available_permits(), 0);
+    }
+    assert!(receipt_admitted > 0 && repair_admitted > 0,
+        "both classes need admission under replenished receipt traffic: receipts={receipt_admitted}, repairs={repair_admitted}");
 }

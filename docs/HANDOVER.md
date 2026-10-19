@@ -1,5 +1,80 @@
 # Mewtual; Handover
 
+## Communication follow-up in progress (2026-10-19)
+
+Native requested reads now retain their original account/exact registry-row scope through queued
+ranges, all chunks and final media/save publication. Whole jobs have separate4/actor,8/process
+custody before staging or durable Keep debit, independent of actual lower attempts. All40 worker
+regressions and the complete419-case native suite pass. The root sweep finished all other targets
+with2906 passes and24 existing ignored cases; its sole hung integration target is corrected and
+all30 affected cases pass on the original workspace feature graph. The revision ledger records
+that failed command, its bounded reproduction and the passing rerun, plus the other checks.
+This checkpoint does not complete C-side
+bridge/Keep, external destination resume, live V2, media relay or combined acceptance. Physical
+separate-network/audible checks remain open with only one available desktop.
+
+Checkpoint acceptance found an additional open recovery fairness issue: a stable first-ranked
+offline target can monopolize automatic indirect probes after negative replies. The adapter's
+receipt test now uses three actually admitted members so its sole helper and blocked target are
+unambiguous; this does not fix production target rotation. Keep the one-target/pass traffic
+contract when adding a retained bounded cursor and cover every eligible retained record. The
+revision ledger records the failed full native run and the required regression/follow-up.
+
+Latest file checkpoint: source30 and helper29 now dispatch behind native account/exact-entry,
+actor, Root/member/policy and strict bound-connection scope. This supersedes the earlier inert
+source statements below. The concrete native worker test passes with independent pending-metadata
+custody through panic. Expanded dispatch/deadline/lifecycle tests pass; source re-review is clear.
+All54 file-service cases pass, including four concurrent helper chains reaching a fourth source
+while12 earlier actual lower responders remain held. Helper review exposed a final-refusal buffer
+custody gap; original lower bytes and outgoing response input now independently own the same
+charge. The refusal/clone regressions pass and both ownership omissions execute red. Re-review
+has no remaining blocker/high/medium; the revision ledger records subsequent strict checks.
+Requester/Keep integration and end-to-end indirect Keep acceptance remain unfinished.
+
+The PR48 external review remains open. Current work is above `a41933f3`, preserving the separately
+merged Gate7 edits. See the [revision ledger](communication-recovery/PR48-REVIEW-REVISION.md) for
+current positive and negative evidence; the 18 October suite numbers below describe an older
+revision. The adapter now forwards cancellable automatic notifications, restored bound upgrades
+queue directory recovery, and SDP route metadata uses prepaid lower-work custody. Production-time
+fixtures exposed further connectivity/history failures. The latest reciprocal-frontier correction
+passes all eight local native scenarios and all 621 sync unit tests; earlier failed runs remain in
+the ledger. Hosted Linux green remains unverified.
+
+The inert V2 native seam now retains exact accepted/rejected terminal metadata with original
+ownership/deadline and actual engine custody. General action IPC, browser/RTC handoff, live V2
+dispatch and protocol isolation remain unfinished. The earlier statement below that all historical
+receipts are unimplemented is superseded only for this narrow native seam.
+
+Durable Keep implementation now has scoped sealed successor records, a separate metadata HKDF
+key, Resumable/Completed/Deleting ownership, private saved chunks, conservative persistent
+execution allowance and explicit idempotent Retry. Storage regressions and initial actor resume/
+cancellation tests pass; final integration checks are ongoing. New work never uses legacy pending,
+and the permanent format barrier prevents destructive downgrade. Automatic partial resume now has a paced actor wake and exact native unlock retirement; persistent
+Pause/Resume uses a separate intent CAS, and deterministic integrity failures stop automatic retry.
+V2 manual-only records require explicit Resume before V3 background consent. Completed checks
+retain Stop checking and an exhausted copy exposes Retry check. Focused checks/re-review are ongoing;
+V4 whole-variant fallback now has a separate immutable candidate journal and committed winner;
+the actual desktop store wrapper now delegates the V4 and bounded-read APIs. Its missing delegation
+was reproduced before correction; all 31 file-worker and 42 retained-store tests now pass. Six
+owned-read tests cover bounded metadata/buffers and current-store/winner fences. These are source-read
+primitives and a concrete bounded blocking executor, with mandatory request authority checked
+before preparation and actual read entry. They are not an active bridge. Reply-lifetime cancellation,
+pre-allocation transport caps for reserved kinds 29/30 and signed frame codecs have focused proof
+and clear slice reviews. The process-stable replay/rate policy passed eleven initial focused
+tests and review. Current Root/native/member authorization and source/helper service dispatch
+are now active as noted above; requester-side use and combined acceptance remain open. Actual
+lower custody remains separate.
+Existing file jobs now retain actor and Root/member/policy scopes, retiring before stop ACK/close
+waits and observed MLS removal; cancelled freeze resumes under a fresh generation. All35 file
+worker,30 file-service and2 shutdown-barrier cases pass, with strict sync/app Clippy and clear
+slice review. Native exact-entry/account composition for background Keep has clear static review
+and a passing native check plus all4 session and3 removal tests. This does not activate
+the connected file service or scope every external/manual native download command.
+Physical two-device audio/network acceptance cannot run: only this desktop is available. This
+does not block the remaining implementation or automated checks, and it does not count as audio
+or relay acceptance. The current full-sweep and corrected-target results are recorded above and
+in the revision ledger; earlier focused-only checkpoints are historical evidence.
+
 ## Communication implementation in progress (2026-10-18)
 
 PR 48's current review revision is tracked separately in

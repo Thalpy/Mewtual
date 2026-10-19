@@ -76,25 +76,29 @@ async fn observe_legacy_gap(scenario: &Scenario, bridge: usize) {
     )
     .await
     .unwrap());
-    bounded(
-        "connected bridge receives the original authenticated identity",
-        async {
-            loop {
-                if scenario
-                    .online(bridge)
-                    .call_signals
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|row| row.0 == author && row.1 == payload)
-                {
-                    break;
-                }
-                SystemClock.sleep(Duration::from_millis(20)).await;
+    let receipt = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if scenario
+                .online(bridge)
+                .call_signals
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|row| row.0 == author && row.1 == payload)
+            {
+                break;
             }
-        },
-    )
+            SystemClock.sleep(Duration::from_millis(20)).await;
+        }
+    })
     .await;
+    if receipt.is_err() {
+        let trace = scenario.rules.trace.lock().unwrap();
+        eprintln!("legacy voice receipt missing: bridge={bridge} received_kinds={:?} connected_submissions={:?}",
+            trace.received_kinds, trace.connected_submissions);
+        drop(trace);
+        panic!("connected bridge did not receive the original authenticated legacy voice identity");
+    }
     let bridge_receipt_ms = SystemClock.now_ms().saturating_sub(start);
 
     // A true result is local submission to the network worker. The blocked physical A-C edge

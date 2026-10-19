@@ -1,6 +1,48 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Connected file-source dispatch checkpoint (19 October)
+
+Kind30 now dispatches a bounded source read with `NativeFileService`: the native host supplies
+the original account/exact-entry cancellation and the actor supplies its current file generation.
+No attachment, inactive authenticated P2P policy, unbound sender or missing actual connection
+lease refuses service. The Root verifies immediate B and original C against their current MLS
+signature keys; only B needs the unique bound descriptor/Noise route. Forwarded C gains no route
+standing. Existing kinds5/27 and their direct-request authentication remain unchanged.
+
+The Root owns the pending proof/responder through cancellation of outer polls. Source completions
+have a fourth rotating turn alongside catch-up, events and recovery submissions. A prepared task
+exports the same opaque40MiB source reservation before native execution; task, deferred metadata,
+completion and actual lower response each retain it until their own retirement. A worker panic
+or timeout does not refund a still-owned response, and Root retirement does not refund a worker.
+Present replies retain the exact two-second read deadline and current storage fence at actual
+driver admission, independently of the reply-wait lifetime. Timeout/capacity responses are bounded
+signed Unavailable observations under the original eight-second scope; Absent describes a past
+read, not proof that the server has no copy. Helper29 also dispatches under the native/policy
+gates. It reserves one1MiB chain/full original C, at most4/group and8/process, plus a complete
+five-record route plan against128 slots/Root before nonce/work commit. Up to four named current
+sources are tried serially, with monotonic positions and exact selected-source key/signature
+checks. Final Found retains both parent C and selected A's two-second scope. Skipped, unsupported,
+invalid or temporary failures produce Unavailable unless a later source succeeds; only all
+actually checked signed Absent replies produce the helper's Absent observation. Original source
+Bytes clones and outgoing response inputs retain custody even when final admission refuses.
+Requester/Keep integration remains unfinished.
+
 ## Congested transport delivery and automatic repair submissions (PR 48 revision)
+
+`EncryptedDoc::knows_changes` performs read-only exact change lookup, including ancestors; it
+neither imports changes nor treats unknown hashes as valid operations. Sync uses it only after
+existing authenticated Since decoding (at most 512 hashes), for a best-effort reciprocal recovery
+hint on an already-held document. The 256-entry hint table binds document/full DeviceId, preserving
+its 30-second budget across transport identity changes. Original pending waits retain a dirty
+completeness bit through compatibility fallback; older replies cannot retire newer admitted work.
+No wire encoding, signed transcript, import validation or dial permission changes.
+
+Automatic delivery receipts use the same bounded detached submission owner as repair forwards.
+No local notification ACK precedes owned inbound/response polling. A persistent class turn changes
+only after successful admission, with four new notification admissions per owner turn; a Busy
+pass preserves intents and priority. Queue admission proves neither wire submission nor delivery.
+`RecoveryProgress.pending_kind`, `pending_wait_age_ms` and `pending_wait_limit_ms` are read-only
+first-poll observations of the retained catch-up wait, independent of its preparation and receipt.
 
 The production driver dispatches application events without awaiting the application sink inside
 its swarm handler. A 64-payload queue and at most 640 last-announced/latest-actual lifecycle rows
@@ -11,7 +53,15 @@ may coalesce away. Announced disconnect/empty paths precede replacement connect/
 inbound requests remain bound to their original driver connection lease.
 
 Declared payload/response custody is capped at 64 MiB/driver and 128 MiB/process, with 1024 bytes
-metadata allowance per record, 320/1024 records, and 16/64 inbound requests plus two per peer.
+metadata allowance per record, 320/1024 records, and 16/64 inbound requests. Each peer retains
+the released two ordinary owners plus one reserved owner shared by maintenance kinds 2/4/12/26.
+Ordinary requests include notifications and data recovery. A tag selects capacity only and cannot
+bypass the normal application authentication. Both classes retain their exact owner through
+actual payload/responder/lower retirement; neither is one allowance per message kind. This
+protects membership/finalization from two ordinary peer owners, not general request fairness.
+The per-peer count increases from two to three: six distinct Noise identities can occupy a
+driver's sixteen aggregate slots, compared with eight before. Aggregate request, byte and
+record limits remain unchanged; no delivery guarantee follows from local notification submission.
 Actual Bytes clones, responders, completed response futures and lower response sends retain their
 credits until last ownership ends. A legal 16 MiB request and its response copies fit. Overload
 drops/refuses a request honestly; it never invents an empty or signed successful response. These
@@ -71,6 +121,12 @@ ceiling and now have a 1024-record work ceiling before per-record allocation/app
 larger retained logs takes successive current-epoch polls. Empty/failed probes continue discovery.
 Actual epoch changes publish member/role/routing consequences even when roster count is unchanged.
 Two/four actual flights permit at most 32/64 MiB retained answers, plus bounded decoder scratch.
+Quiet membership selection is independent of PEX failure backoff. At most four currently
+connected, endpoint-bound current-member paths rotate in stable order every 30 monotonic
+seconds; a repeated command cannot accelerate it or forgive PEX failure. Poll-only work is
+autonomous, shares the existing flight/chain limits, and ends after Commits unless an explicit
+fresh finalization waiter exists. A pending new poll runs after the full chain's owed Offer;
+an upgrade past Commits preserves a full new discovery obligation.
 O(1) `peer_record_revision()` counts
 actual stored signed-descriptor changes and feeds `SnapshotNeeded`; ordinary liveness and exact
 duplicate descriptors do not increment it. The counter is ephemeral and adds no persistence field.
@@ -132,8 +188,11 @@ cached submit/source eligibility. Token consume/expiry closes pending decrypt. P
 the admitting confirmation attempt; Hello binds a stable native accepted-sequence floor, allowing
 a queued newer Hello to survive earlier progress. The final native commit repeats these checks.
 These are trusted Rust pending-work seams, not IPC or historical-result receipt authority.
-Historical receipts must be issued post-transition from the prepaid Endpoint queue and current
-attempt/OfferId, with their original packet deadlines. That integration remains unimplemented.
+The inert CryptoAction queue now stores small post-transition `CryptoResultReceipt` metadata:
+accepted derivation/seal/open or closed rejection, native SHA-256 output tag and retirement bit.
+Exact lookup precedes pending-token and engine-settlement checks. History captures the original
+clock, pair/attempt and deadlines; it creates no new dispatch authority. Endpoint/OfferId,
+continuation, native IPC and RTC integration remain unimplemented.
 
 The standalone browser broker v4 exposes registerConfirmation and an immutable attempt/inspect/
 retire handle. It retains exact owner/pair/action/version/native input and one computation across
@@ -152,8 +211,9 @@ permanently closes delayed admission, and first sign/closed-confirmation wrapper
 fence. End closes unstarted actions without refunding admitted work. A ByteBudget reservation may
 close unused bytes only; outstanding loans retain actual bytes/slots through their own release.
 The sync typed-action factories remain inert production Rust seams. The required VoiceConfirmationNative admitAction/commitConfirmation/
-settleAction interface is not implemented native IPC, and exact historical success/rejection
-receipts and pre-ingress queue/origin transactions remain outstanding. Never adapt through ordinary fresh-token
+settleAction interface is not implemented native IPC. Small exact historical success/rejection
+receipts exist in the inert Rust seam; pre-ingress queue/origin transactions and their complete
+browser/native handoff remain outstanding. Never adapt through ordinary fresh-token
 admission or general Pair.open. Native/WebView and SDP/ICE result-lease integration remain open.
 
 Main-window-only commands, not yet used by the live call UI:
@@ -565,6 +625,8 @@ pub enum ConnectionFamily { Ipv4, Ipv6, Dns, Memory, Unknown }
 pub enum ConnectionTransport { Tcp, QuicV1, WebSocket, CircuitRelay, Memory, Unknown }
 pub enum ConnectionDirection { Dialer, Listener }
 pub struct Responder;  fn respond(self, Bytes);  fn try_respond(self, Bytes) -> Result<(), TransportError>;
+    fn is_current(&self) -> bool;
+    fn cancellation_authority(&self) -> Arc<dyn RequestAuthority>; async fn cancelled(&self);
     fn channel() -> (Responder, ResponderRx);
     fn channel_owned(SharedRequestKeepalive, Arc<dyn RequestAuthority>, Arc<dyn ResponseBudget>) -> (Responder, ResponderRx);
 pub struct ResponderRx; async fn recv(self) -> Option<Bytes>; async fn recv_owned(self) -> Option<ResponderReply>;
@@ -1879,7 +1941,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   publish_self_record(addresses:Vec<String>, seq:u64) -> Result<()>;  ingest_peer_record(PeerDescriptor) -> bool;
   async request_pex(peer:PeerId) -> Result<usize>;  known_peer_records() -> Vec<PeerDescriptor>;  peer_record(&DeviceId) -> Option<&PeerDescriptor>;
   async request_pex_connected(peer:PeerId) -> Result<usize>; // same verification; never implicitly redial a temporary admission contact
-  schedule_reconciliation() -> usize; // paced, bounded sweep of open docs; preserves pending cursors/cooldowns
+  schedule_reconciliation() -> usize; // paced bounded sweep; owned run_once timer retries quiet docs every 30s; preserves pending cursors/cooldowns
   // Cross-session redial: newest roster-checked cached records are policy-ranked. Equal address
   // epochs retry with bounded monotonic exponential backoff+jitter; a newer signed seq or a live
   // connect/disconnect lifecycle resets the delay. Old public IPs are not unioned indefinitely.
@@ -2209,9 +2271,13 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
       restore**, because a session that founded or joined has nothing older than itself to
       recover, and a whole node's documents in front of its discovery and presence work costs
       those the ticks they converge in.
-      **Known gap.** A source that quietly advances while staying connected and never changing
-      standing is still not re-swept. Closing that needs a bounded periodic anti-entropy pass,
-      spread across documents and peers.
+      **Quiet sources are revisited.** The owned `run_once` wait retains a monotonic 30-second
+      reconciliation deadline across caller cancellation. A due timer schedules one bounded turn
+      before ready network input, then ordinary event/response/submission rotation resumes. It
+      requires active local membership, an open document and an actually connected bound current
+      member. Read-only diagnostics cannot arm or renew it. Existing source cooldowns, cursors,
+      pending request identities and queue limits remain authoritative; clock overflow disables
+      the timer rather than creating a perpetually ready loop.
       One member device holds at most one proof, and one transport peer at most one device, so a
       device cannot manufacture sweep obligations or evict honest proofs by answering from many
       identities.
@@ -4229,13 +4295,37 @@ complete_blob_fetch}` split one opaque authenticated attempt from actor-owned va
 ranges above `CHUNK_BYTES` are rejected before I/O. See [limits and lifecycle](design-file-reliability.md).
 
 The local-only `get_kept_files(server)`, `keep_file(server,cid,cancellation)` and
-`forget_kept_file(server,cid)` commands expose explicit device ownership. Keep claims a native
-`begin_inline_download` registration; lock/cancel signals the exact lease. Inventory returns bounded
+`forget_kept_file(server,cid)` commands expose explicit device ownership. The new
+`retry_kept_file(server,cid,transfer,expected_grant,request)` grants a fixed native allowance only
+to the exact exhausted transfer. Identities are canonical fixed-length lowercase hex; grants and
+receipts are canonical decimal u64 strings, never JavaScript Numbers. Retry/Forget serialize with
+actor replacement and reject result publication after an intervening UI lock request.
+`request_kept_file(server,cid)` returns after local background admission, not verification; inventory
+and FilesUpdated report progress. `set_kept_paused(server,cid,transfer,expected_intent,paused)`
+changes only persistent user intent with a checked decimal u64 revision (zero only for old V2).
+A same-value explicit command still advances intent; stale CAS refuses. The native unlock generation
+and irreversible watch token follow background work to actual lower admission. No frontend view
+owns this token and a later unlock cannot revive it. The existing completion-oriented `keep_file`
+remains for completed-copy checks with a native `begin_inline_download` lease; lock/Stop checking
+cancels that exact runtime lease without releasing saved ownership. Inventory returns bounded
 CID/version/checked rows plus conservative allocated bytes and a fixed local limit, never saved
-wrapped manifests or keys. Existing copies load unchecked and can be explicitly checked/repaired
+wrapped manifests or keys. A separate `transfers` projection reports exact CID/version, transfer
+identity, phase, whole-part counts, running/exhausted/user-paused/blocked flags, decimal intent
+and grant identities; partial progress is
+never projected as a completed copy. Existing copies load unchecked and can be explicitly checked/repaired
 from their saved manifest after unlisting. They do not enter `files()` or authorize media heads.
 The additive `BlobStore` keep methods fail closed on unsupported stores. `KeptBlobStore` reserves,
 verifies, flushes and separately owns copies; ordinary put/delete/staging target primary storage.
+New-format stores require immutable native `KeepScope { group, device }` before retained effects.
+Opaque process-local `KeepRun` and prepaid `KeepWork` never cross IPC. Pause invalidates a run while
+retaining sealed progress/allowance; explicit release records Deleting before cleanup. Exact Retry
+receipts are historical metadata and cannot manufacture a runtime run or refill an active grant.
+The native-only `kept_saved_plans`, `begin_keep_variants` and `fallback_keep` seams carry opaque
+original candidate ownership; they do not cross IPC. The app validates all saved manifests and
+the original set before starting work. A successful fallback returns a fresh exact run/plan only
+after selection publication, preserving global intent/allowance and revoking old lower effects.
+Completed projections remain bound to the committed winner. Old exact-only records are not enriched.
+See the file contract for migration, directory barriers, execution ceilings and current resume limits.
 Remote confirmations and automated retention/eviction are not part of this interface.
 
 ## 13. Call identity and Flipnote frame claims  *(Gate 5; desktop WebRTC; docs/GATE5-DESIGN.md)*
@@ -4486,3 +4576,157 @@ whose entries contain `{removed,register}`; `removed` is not inferred from raw s
 Exposing these core types alone grants no request/wire authority; the candidate's explicit native
 family/custody path is described above. Unsupported adapters refuse rather than falling back to art.
 
+
+
+### Owned bounded blob-read preparation (19 October)
+
+`BlobStore::prepare_read_bounded(cid, max_bytes)` returns a native-only `BlobReadPlan`. The caller
+must reserve `BlobReadPlan::memory_bound(max_bytes)` **before** preparation, retain that exact
+credit through actual blocking execution/result/page construction, and revalidate its own original
+request/group/lifecycle authority and `BlobReadResult::is_current()` before any signing or effect.
+Preparation does no disk I/O; `run(self)` performs bounded blocking read, at-rest opening and CID
+verification. Results expose only borrowed bytes and their current storage fence. No paths, keys,
+serialization or clone API escape to the caller. A sealed worker holds only its zeroizing native
+at-rest key, never MLS/device/file-wrap keys or a store borrow.
+
+Bounds: max 16 MiB, 33 captured sources (primary plus completed retained owners), compact 4096-byte
+path capacity, eight parent fences, aggregate resident snapshots at most the declared maximum.
+The explicit buffer/metadata ceiling is `4 * (max_bytes + 41) + 256 KiB`; it excludes allocator/OS
+and unrelated process overhead. An 8 MiB + 44-byte file chunk needs more than 32 MiB. Captured
+errors use a closed no-heap representation. Store/winner loss, deletion, poisoning and scope loss
+retire pending/result fences; private partial candidates never enter public preparation.
+`ProtectedBlobs` forwards this and all three V4 Keep methods through the native store factory.
+These primitives alone start no worker and enable no indirect service.
+
+`Responder::cancellation_authority` is transport reply lifetime only. Receiver Drop revokes it
+synchronously; `cancelled` also observes original ingress loss. Successful receive/transfer retires
+it BEFORE the network response send. Drivers retain their original ingress authority for that send
+and retain all actual request/response credits independently. It grants no membership or deadline;
+deferred service must compose those checks. Fire-and-forget notifications can have no receiver and
+must not be rejected by a blanket reply-lifetime filter.
+
+
+`catcoms_sync::file_service::read::SourceReadRuntime` adds actual capacity custody around that
+primitive: `new(Arc<dyn FileReadExecutor>)`, `prepare(group, &dyn BlobStore, &Cid, max_bytes, Arc<dyn RequestAuthority>)` and
+`start(FileReadTask) -> FileReadFuture`. All public runtime constructors reuse the process-static
+pool. It reserves 40 MiB before preparation, at most one per full group and two process-wide;
+`max_bytes` is at most 8 MiB + 44 bytes. `FileReadTask::run(self)` transfers the same affine owner
+to `FileReadCompletion`, whose result is borrowed only. The app executor factory
+`catcoms_app::file_source::runtime()` uses real `spawn_blocking` and retains the whole task even
+when the returned observer disappears. These APIs are native-only, never serialized or exposed
+as commands. They grant no membership/request/session authority and activate no new service.
+
+
+Transport now reserves `FILE_BRIDGE_KIND = 29`, `FILE_SOURCE_KIND = 30`,
+`FILE_SERVICE_REQUEST_MAX_BYTES = 2 KiB` and `FILE_SERVICE_RESPONSE_MAX_BYTES = 72 KiB` in
+`catcoms-rt`. These are capacity classification, not handler registration or forwarding authority.
+`BytesCodec` captures a value-only limit on each pinned libp2p request/response substream, resets
+it for every request (including empty/legacy), rejects new requests after at most header + kind,
+and rejects response lengths before allocation. Oversized writes fail before header output. Old
+5/27 and other legacy reads keep the 16 MiB limit; local writes above that existing peer-readable
+limit now fail earlier rather than writing a frame every released reader would reject. Unknown
+new kinds still receive ordinary empty refusal from an application without the handler.
+
+
+Source read authority is now mandatory before reservation/snapshot and at the actual worker read
+admission. Task/completion retain that same observing authority, without retaining its revocation
+publisher, Root/store or signing keys. `SourceReadError::Revoked` is distinct from absent/error
+storage. A completion retains its result and credit after revocation; `result()` is a checked
+borrow and may return Revoked, but cannot recall a previously returned borrow. Fresh checks at the
+actual signing/send edge remain mandatory. Already-admitted blocking I/O cannot be recalled.
+
+
+The native-only `file_service::wire` types define four v1 signature domains: original grant,
+one-hop delivery, source page and helper wrapper. **The normative v1 grant hash is BLAKE3 over
+the complete raw signed kind 29 frame**, including its tag, canonical body, requester key and
+signature. Changing this digest or its input is a wire compatibility change. Each response binds
+that hash; the source/helper body need not repeat its original fields. Canonical maximum complete
+sizes are 707, 893, 65,691 and 65,842 bytes respectively. Parsed fields are immutable borrowed views;
+parsing does not verify a signature or authorize current service. Explicit signature verification
+still does not establish current membership, binding, replay/rate admission or a file read intent.
+No new kind is dispatched. The proposal records the remaining activation requirements.
+
+
+### Connected file-service admission policy (inert)
+
+`AdmissionRuntime::process()` is the sole production constructor; full-device/group quotas and
+replay rows survive Root/executor replacement. `admit_ingress` spends actual authenticated
+sender precrypto capacity and returns an affine exact-frame/native-scope ticket. `verify` checks
+closed shapes and C/B signatures, not current membership. `preflight` reserves nothing; acquire
+actual resources and revalidate current native scope before atomic `commit`. Commit either debits
+all identities/aggregates and records the original nonce or changes none of those work rows.
+Ingress charges are separate. No refund follows an ambiguous handoff. Clock sampling, pruning
+and commit share one mutex; deadlines use this runtime's monotonic clock. Exact limits and
+restart semantics are in [the bridge proposal](communication-recovery/FILE-BRIDGE-NEXT.md).
+This API does not activate kinds 29/30 or grant Root/native/member/connection authority.
+
+
+### Final response effect authority
+
+`Responder::try_respond_with_authority(bytes, observer)` adds an optional native effect gate,
+checked before response capacity admission, at receive, and again by the real driver's final
+copy/send admission. `ResponderReply::is_current()` is independent of original transport ingress;
+drivers check both. `data`/`into_bytes` and custody transfer do not grant authorization. Legacy
+`try_respond` keeps its behavior. The final observer must exclude reply-lifetime cancellation: that
+wait lifetime ends when the driver receives the response, before network sending. Deferred work
+uses scope plus reply lifetime; final response uses scope alone. Revocation cannot recall an
+already admitted send or refund still-owned byte clones, lower requests or response copies.
+
+
+### Existing file-job lifecycle observers
+
+`ChannelSync::file_effect_authority()` captures an observing Root/member/policy generation and
+refuses inactive membership. It grants no manifest, destination, peer standing, execution budget
+or new bridge permission. Observed MLS/policy transitions retire old observers before optional
+voice returns; Root Drop closes its first-field publisher. Existing legacy direct reads retain
+their current compatibility eligibility. File jobs retain the same observer through local steps,
+retries, lower admission and completion.
+
+The actor adds its own unique generation, retired before stop acknowledgement, terminal event
+wait or freeze Ready/lease wait. Nonterminal freeze/ack cancellation issues a fresh generation,
+never restoring old work. Native background Keep attachment additionally composes the exact
+registry entry with the full account-generation cancellation object. Entry replacement/removal
+retires under the checked row guard, before a removed row is returned across later awaits;
+Drop is a backstop. This native attachment is not yet used by every external/manual download
+command or the unimplemented connected file service. Actual lower credits are separate from
+all these effect observers and remain owned until actual retirement.
+
+
+### Actual service-response capacity and source observation
+
+`Responder::try_respond_with_custody(bytes, effect, service_owner)` preserves both independent
+driver response capacity and prepaid service ownership through original Bytes clones and the
+actual native pending response. Bytes ownership alone would end at the driver's Vec copy.
+The explicit service owner grants no authorization, refunds or additional transport capacity.
+
+`FileReadCompletion::storage_is_current()` observes only a verified positive result's weak
+store/winner fence; no bytes, native permission or wake are supplied. It ignores work authority
+by design: reply receive retires that lifetime before final send. A sender must compose this
+storage observation with its independent native/Root/member/deadline gate, while retaining the
+whole completion as actual response custody. Missing/error false is not an absence assertion.
+
+The inert `HelperCapacity::process()` singleton reserves at most4/full group,8/process and1 per
+original full device/group. A non-Clone HelperChain mints at most four affine HelperAttempt
+tokens; timeout/source rotation cannot reset them. The eventual pending-request builder must
+consume each token once; exported keepalive is accounting only, never submission authority.
+`into_response_custody` consumes the outer chain and transfers the same credit. A1MiB charge
+covers a conditional944KiB explicit-buffer envelope; active-handler allocation auditing remains
+required. These APIs do not enable kinds29/30 or establish indirect file availability.
+
+
+### Requested native file-read ownership (19 October checkpoint)
+
+Native inline download, streamed save and media requests capture the authorization generation
+before their first authorization await and retain the exact registry-row/account observer across
+actor queueing and every chunk. `read_file_range_cancellable` carries that scope through
+`ReadFileRange`; the compatibility `read_file_range` wrapper has no native authority and is for
+non-native callers. Composition preserves the complete caller cancellation and identical lower
+keepalive. Local/network AEAD opening rechecks the original scope before storage admission.
+Media head/cache and final scheme response, saved-file inspection/reveal, and progress retain
+that original scope. A later unlock or registry replacement never authorizes old work. Refusal
+after a saved file was already published does not delete that verified file.
+
+Separate whole-job custody admits at most4 read jobs/actor and8/process, without waiting, before
+staging/head/range allocation or durable Keep run/debit. Sleeps and local/network continuations
+retain the owner until all job buffers retire. Actual lower attempts keep their independent4/8
+custody through real transport retirement; upper cancellation does not refund them.

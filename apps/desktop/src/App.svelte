@@ -1,7 +1,7 @@
 <script lang="ts">
   import { memberRole, identityForRoleLabel } from "./member-role.ts";
   import { invoke } from "@tauri-apps/api/core";
-  import { fileAvailability, keptCopyLabel, fileInventoryRequests, mutateFileInventory, type KeptFiles } from "./file-availability";
+  import { fileAvailability, keptCopyLabel, keptTransferLabel, keptAllocationCount, keptTransferRows, fileInventoryRequests, mutateFileInventory, type KeptFiles, type KeptTransfer } from "./file-availability";
   import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -3795,31 +3795,57 @@
   let keptFiles = $state<KeptFiles | null>(null);
   const fileInventoryGate = fileInventoryRequests();
   let keptTransfer = $state<{ server: number; cid: string; cancellation: string } | null>(null);
+  // A primitive identity survives Svelte's deep state proxies unchanged.
+  let keptMutation = $state<symbol | null>(null);
 
+  // View teardown clears only pending UI ownership. The native requested job belongs to the
+  // unlocked account session; explicit Pause below changes durable intent separately.
   function cancelKeptTransfer() {
     const transfer = keptTransfer;
     keptTransfer = null;
-    if (transfer) void invoke("cancel_inline_download", { cancellation: transfer.cancellation }).catch(() => {});
+    if (transfer?.cancellation) void invoke("cancel_inline_download", { cancellation: transfer.cancellation }).catch(() => {});
   }
   $effect(() => {
     if (keptTransfer && (locked || keptTransfer.server !== activeServerId)) untrack(cancelKeptTransfer);
   });
 
   async function keepFileHere(cid: string) {
-    const server = activeServerId;
-    const gen = viewGeneration;
-    if (server === null || locked || keptTransfer) return;
-    const transfer = { server, cid, cancellation: `keep-${crypto.randomUUID()}` };
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || keptTransfer || keptMutation) return;
+    const mutation = Symbol("kept admission");
+    keptMutation = mutation;
+    keptTransfer = { server, cid, cancellation: "" };
+    fileInventoryGate.invalidate();
+    try {
+      await mutateFileInventory(() => invoke("request_kept_file", { server, cid }), refreshFiles,
+        () => unlockedViewCurrent(gen, server));
+    } catch (e) {
+      if (unlockedViewCurrent(gen, server)) error = String(e);
+    } finally {
+      if (keptMutation === mutation) { keptMutation = null; keptTransfer = null; }
+    }
+  }
+
+  // Completed-copy checks keep their explicit cancelable runtime lease. Stopping a check
+  // never releases the saved copy, changes durable intent or creates automatic repair work.
+  async function checkKeptFile(cid: string) {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || keptTransfer || keptMutation) return;
+    const transfer = { server, cid, cancellation: `keep-check-${crypto.randomUUID()}` };
     keptTransfer = transfer;
     fileInventoryGate.invalidate();
     try {
+      const saved = keptFiles?.transfers.find(row => row.cid === cid && row.phase === "completed");
+      if (saved && (saved.user_paused || saved.blocked)) {
+        await invoke("set_kept_paused", { server, cid, transfer: saved.transfer, expectedIntent: saved.intent, paused: false });
+      }
+      if (keptTransfer?.cancellation !== transfer.cancellation || !unlockedViewCurrent(gen, server)) return;
       await invoke("begin_inline_download", { cancellation: transfer.cancellation });
       if (keptTransfer?.cancellation !== transfer.cancellation || !unlockedViewCurrent(gen, server)) {
         await invoke("cancel_inline_download", { cancellation: transfer.cancellation });
         return;
       }
       await invoke("keep_file", { server, cid, cancellation: transfer.cancellation });
-      if (unlockedViewCurrent(gen, server)) await refreshFiles();
     } catch (e) {
       if (keptTransfer?.cancellation === transfer.cancellation && unlockedViewCurrent(gen, server)) error = String(e);
     } finally {
@@ -3828,10 +3854,34 @@
     }
   }
 
+  async function setKeptPaused(copy: KeptTransfer, paused: boolean) {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || keptTransfer || keptMutation) return;
+    const mutation = Symbol("kept intent");
+    keptMutation = mutation;
+    fileInventoryGate.invalidate();
+    try {
+      await mutateFileInventory(() => invoke("set_kept_paused", {
+        server, cid: copy.cid, transfer: copy.transfer, expectedIntent: copy.intent, paused,
+      }), refreshFiles, () => unlockedViewCurrent(gen, server));
+      if (keptMutation === mutation) keptMutation = null;
+      if (!paused && unlockedViewCurrent(gen, server)) await keepFileHere(copy.cid);
+    } catch (e) {
+      if (unlockedViewCurrent(gen, server)) error = String(e);
+    } finally {
+      if (keptMutation === mutation) keptMutation = null;
+    }
+  }
+  async function resumeKeptFile(copy: KeptTransfer) {
+    await setKeptPaused(copy, false);
+  }
+
   async function forgetKeptFile(cid: string) {
     const server = activeServerId;
     const gen = viewGeneration;
-    if (server === null || locked || keptTransfer) return;
+    if (server === null || locked || keptTransfer || keptMutation) return;
+    const mutation = Symbol("kept mutation");
+    keptMutation = mutation;
     fileInventoryGate.invalidate();
     try {
       await mutateFileInventory(
@@ -3840,6 +3890,38 @@
       );
     } catch (e) {
       if (unlockedViewCurrent(gen, server)) error = String(e);
+    } finally {
+      if (keptMutation === mutation) keptMutation = null;
+    }
+  }
+  async function retryKeptFile(copy: KeptTransfer) {
+    const server = activeServerId;
+    const gen = viewGeneration;
+    if (server === null || locked || keptTransfer || keptMutation) return;
+    const mutation = Symbol("kept mutation");
+    keptMutation = mutation;
+    fileInventoryGate.invalidate();
+    // Native CAS binds this request to the saved transfer and exhausted grant. A lost reply
+    // cannot grant twice, even if a later inventory refresh or a new window retries the button.
+    const request = crypto.randomUUID().replaceAll("-", "");
+    try {
+      await mutateFileInventory(() => invoke("retry_kept_file", {
+        server, cid: copy.cid, transfer: copy.transfer, expectedGrant: copy.grant, request,
+      }), refreshFiles, () => unlockedViewCurrent(gen, server));
+      if (keptMutation === mutation) keptMutation = null;
+      if (unlockedViewCurrent(gen, server)) {
+        // Retry can migrate an older journal and change its explicit intent revision. Use the
+        // freshly read same native owner, never the pre-Retry projection or a replacement CID.
+        const current = keptFiles?.transfers.find(row => row.cid === copy.cid && row.transfer === copy.transfer);
+        if (current && !current.running && !current.exhausted) {
+          if (current.phase === "completed") await checkKeptFile(current.cid);
+          else if (current.phase === "paused") await resumeKeptFile(current);
+        }
+      }
+    } catch (e) {
+      if (unlockedViewCurrent(gen, server)) error = String(e);
+    } finally {
+      if (keptMutation === mutation) keptMutation = null;
     }
   }
   let uploading = $state(false);
@@ -11574,6 +11656,9 @@
 
   // The file info pane: click a file to inspect it (preview, availability, uploader, delete).
   let fileInfo = $state<UiFile | null>(null);
+  let fileInfoKeptCopy = $derived(keptFiles?.files.find((copy) => copy.cid === fileInfo?.cid));
+  let fileInfoKeptRecord = $derived(keptFiles?.transfers.find((copy) => copy.cid === fileInfo?.cid));
+  let fileInfoKeptTransfer = $derived(fileInfoKeptCopy ? undefined : fileInfoKeptRecord);
   let fileInfoAvail = $state<boolean | null>(null); // null = still checking
   let fileInfoPreview = $state<string>(""); // a data: URL for image/video/audio previews
   let fileInfoPreviewError = $state(false); // the preview fetch failed (so "Loading…" doesn't hang)
@@ -26992,17 +27077,30 @@
           </div>
           {#if keptFiles?.supported}
             <details class="kept-copies-panel">
-              <summary>Kept on this device ? {keptFiles.files.length}/32 ? {fmtSize(keptFiles.allocated_bytes)} of {fmtSize(keptFiles.limit_bytes)} allocated</summary>
+              <summary>Kept on this device · {keptAllocationCount(keptFiles)}/32 · {fmtSize(keptFiles.allocated_bytes)} of {fmtSize(keptFiles.limit_bytes)} allocated</summary>
               <p class="muted small">These encrypted copies survive ordinary cache cleanup and shared-list removal. Export still requires a shared listing. Releasing a copy frees its reserved storage; other cached bytes may remain.</p>
               {#if keptFiles.error}<p role="alert">{keptFiles.error}</p>{/if}
               {#each keptFiles.files as copy (copy.cid)}
+                {@const saved = keptFiles.transfers.find(row => row.cid === copy.cid)}
                 <div class="kept-copy-row">
-                  <span>{files.find((f) => f.cid === copy.cid)?.name ?? `${copy.cid.slice(0, 16)}? (unlisted)`} ? {keptCopyLabel(copy)}</span>
-                  <button class="ghost small" disabled={!!keptTransfer || !!keptFiles.error} onclick={() => keepFileHere(copy.cid)}>Check and repair</button>
-                  <button class="ghost small" disabled={!!keptTransfer || !!keptFiles.error} onclick={() => forgetKeptFile(copy.cid)}>Release kept copy</button>
+                  <span>{files.find((f) => f.cid === copy.cid)?.name ?? `${copy.cid.slice(0, 16)}… (unlisted)`} · {keptCopyLabel(copy)}</span>
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!keptFiles.error} onclick={() => saved?.exhausted ? retryKeptFile(saved) : checkKeptFile(copy.cid)}>{saved?.exhausted ? "Retry check" : "Check and repair"}</button>
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!keptFiles.error} onclick={() => forgetKeptFile(copy.cid)}>Release kept copy</button>
                 </div>
               {/each}
-              {#if keptTransfer}<button class="ghost small" onclick={cancelKeptTransfer}>Cancel keeping</button>{/if}
+              {#each keptTransferRows(keptFiles) as copy (copy.cid)}
+                <div class="kept-copy-row">
+                  <span>{files.find((file) => file.cid === copy.cid)?.name ?? copy.cid.slice(0, 16)} · {keptTransferLabel(copy)}</span>
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || copy.running || copy.phase === "deleting" || !!keptFiles.error}
+                    onclick={() => copy.exhausted ? retryKeptFile(copy) : resumeKeptFile(copy)}>{copy.exhausted ? "Retry" : "Resume"}</button>
+                  {#if copy.running || (!copy.user_paused && !copy.exhausted && !copy.blocked && copy.phase === "paused")}
+                    <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!keptFiles.error} onclick={() => setKeptPaused(copy, true)}>Pause</button>
+                  {/if}
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || copy.phase === "deleting" || !!keptFiles.error}
+                    onclick={() => forgetKeptFile(copy.cid)}>Cancel transfer</button>
+                </div>
+              {/each}
+              {#if keptTransfer?.cancellation}<button class="ghost small" onclick={cancelKeptTransfer}>Stop checking</button>{/if}
             </details>
           {/if}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -30769,12 +30867,16 @@
               </dd>
               <dt>Kept copy</dt>
               <dd>
-                <span>{keptCopyLabel(keptFiles?.files.find((copy) => copy.cid === fileInfo?.cid))}</span>
+                <span>{fileInfoKeptTransfer ? keptTransferLabel(fileInfoKeptTransfer) : keptCopyLabel(fileInfoKeptCopy)}</span>
                 {#if keptFiles?.supported && !keptFiles.error}
-                  <button class="ghost small" disabled={!!keptTransfer} onclick={() => fileInfo && keepFileHere(fileInfo.cid)}>
-                    {keptFiles.files.some((copy) => copy.cid === fileInfo?.cid) ? "Check and repair copy" : "Keep on this device"}
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!fileInfoKeptTransfer?.running || fileInfoKeptTransfer?.phase === "deleting"}
+                    onclick={() => fileInfoKeptCopy && fileInfo ? (fileInfoKeptRecord?.exhausted ? retryKeptFile(fileInfoKeptRecord) : checkKeptFile(fileInfo.cid)) : fileInfoKeptTransfer ? (fileInfoKeptTransfer.exhausted ? retryKeptFile(fileInfoKeptTransfer) : resumeKeptFile(fileInfoKeptTransfer)) : fileInfo && keepFileHere(fileInfo.cid)}>
+                    {fileInfoKeptCopy ? (fileInfoKeptRecord?.exhausted ? "Retry check" : "Check and repair copy") : fileInfoKeptTransfer?.exhausted ? "Retry" : fileInfoKeptTransfer ? "Resume" : "Keep on this device"}
                   </button>
-                  {#if keptTransfer?.cid === fileInfo.cid}<button class="ghost small" onclick={cancelKeptTransfer}>Cancel keeping</button>{/if}
+                  {#if keptTransfer?.cid === fileInfo.cid && keptTransfer.cancellation}<button class="ghost small" onclick={cancelKeptTransfer}>Stop checking</button>{/if}
+                  {#if fileInfoKeptTransfer && !fileInfoKeptTransfer.user_paused && !fileInfoKeptTransfer.exhausted && !fileInfoKeptTransfer.blocked && fileInfoKeptTransfer.phase === "paused"}
+                    <button class="ghost small" disabled={!!keptMutation || !!keptTransfer} onclick={() => fileInfoKeptTransfer && setKeptPaused(fileInfoKeptTransfer, true)}>Pause</button>
+                  {/if}
                   <p class="muted small">Stores a verified encrypted copy within this server's 1 GiB / 32-file limit. Checking may fetch missing chunks. Remote copies remain unconfirmed.</p>
                 {:else if keptFiles?.error}<p class="muted small">{keptFiles.error}</p>{/if}
               </dd>

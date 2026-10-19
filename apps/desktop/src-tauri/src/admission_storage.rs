@@ -412,6 +412,7 @@ mod tests {
         state.servers.lock().await.insert(
             1,
             ServerEntry {
+                files: keep_session::EntryOwner::new(),
                 actor: actor.clone(),
                 instance,
                 group_id,

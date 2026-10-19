@@ -11,6 +11,10 @@ use catcoms_rt::{
 pub(super) struct Trace {
     pub connections: BTreeSet<(usize, usize)>,
     pub received_requests: BTreeSet<(usize, usize)>,
+    pub received_kinds: BTreeMap<(usize, usize, u8), usize>,
+    pub connected_submissions: BTreeMap<(usize, usize, u8), (usize, bool, String)>,
+    /// Bounded by the six fixture identities; contains no routes, identity seeds or payloads.
+    pub peer_dials: BTreeMap<(usize, usize), (usize, String)>,
     pub completed_requests: BTreeSet<(usize, usize)>,
     /// Actual recovery notifications observed at the receiver's transport. Endpoint admission
     /// is checked separately through authenticated indirect-route evidence, never this counter.
@@ -204,10 +208,25 @@ impl MeshTransport for Transport {
         data: Bytes,
         mut cancellation: RequestCancellation,
     ) -> Result<Bytes, TransportError> {
+        let kind = data.first().copied().unwrap_or(0);
+        let cancelled_at_entry = cancellation.is_cancelled();
         let answer = self
             .inner
             .request_connected_cancellable(peer, proto, data, cancellation.clone())
             .await;
+        {
+            let mut trace = self.rules.trace.lock().unwrap();
+            let outcome = trace
+                .connected_submissions
+                .entry((self.index, self.rules.index(peer), kind))
+                .or_default();
+            outcome.0 += 1;
+            outcome.1 = cancelled_at_entry;
+            outcome.2 = match &answer {
+                Ok(bytes) => format!("ok {} bytes", bytes.len()),
+                Err(error) => format!("{error:?}"),
+            };
+        }
         tokio::select! {
             answer = self.completed(peer, answer) => answer,
             _ = cancellation.cancelled() => Err(TransportError::Cancelled),
@@ -263,7 +282,15 @@ impl MeshTransport for Transport {
         peer: PeerId,
         permits: Vec<BoxedDialPermit>,
     ) -> Result<Vec<DialSubmission>, TransportError> {
-        MeshTransport::dial_peer_permits(&self.inner, peer, permits).await
+        let outcome = MeshTransport::dial_peer_permits(&self.inner, peer, permits).await;
+        let mut trace = self.rules.trace.lock().unwrap();
+        let entry = trace
+            .peer_dials
+            .entry((self.index, self.rules.index(peer)))
+            .or_default();
+        entry.0 += 1;
+        entry.1 = format!("{outcome:?}");
+        outcome
     }
     async fn evict_peer(&self, peer: PeerId) -> Result<(), TransportError> {
         self.inner.evict_peer(peer).await
@@ -299,6 +326,12 @@ impl MeshTransport for Transport {
                     let mut trace = self.rules.trace.lock().unwrap();
                     let source = self.rules.index(*from);
                     trace.received_requests.insert((self.index, source));
+                    if let Some(kind) = data.first() {
+                        *trace
+                            .received_kinds
+                            .entry((self.index, source, *kind))
+                            .or_default() += 1;
+                    }
                     if let Some(kind @ (14..=17)) = data.first() {
                         trace.received_recovery.insert((self.index, source, *kind));
                     }
@@ -315,30 +348,47 @@ impl MeshTransport for Transport {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn automatic_recovery_notifications_reach_authenticated_tcp_endpoints() {
     let mut scenario = Scenario::new(false);
-    scenario.admit().await;
-    scenario.close(&[3, 4, 5]).await;
+    // Only these three devices are members. Closing three members of a six-member group would
+    // leave authenticated offline targets/helper witnesses in the ordinary recovery schedule,
+    // which does not establish receipt through the specific adapter path asserted below.
+    scenario.admit_prefix(3).await;
     let target = *scenario.rules.peers[2].as_bytes();
-    periodic_bounded("automatic authenticated indirect probe result", async {
-        loop {
-            if scenario
-                .online(1)
-                .actor
-                .member_routes()
-                .await
-                .iter()
-                .any(|route| {
-                    route.peer_id == Some(target)
-                        && route.indirect_health
-                            == catcoms_sync::IndirectRouteHealth::ReachableViaMember
-                        && route.indirect_witnesses > 0
-                })
-            {
-                break;
+    tokio::select! {
+        _ = async {
+            loop {
+                if scenario
+                    .online(1)
+                    .actor
+                    .member_routes()
+                    .await
+                    .iter()
+                    .any(|route| {
+                        route.peer_id == Some(target)
+                            && route.indirect_health
+                                == catcoms_sync::IndirectRouteHealth::ReachableViaMember
+                            && route.indirect_witnesses > 0
+                    })
+                {
+                    break;
+                }
+                SystemClock.sleep(Duration::from_millis(50)).await;
             }
-            SystemClock.sleep(Duration::from_millis(50)).await;
+        } => {},
+        _ = SystemClock.sleep(Duration::from_millis(PERIODIC_RECOVERY_MS)) => {
+            // These independent, bounded reads distinguish a missing connection, missing
+            // authenticated recovery work and missing result reconciliation. Never hold the
+            // trace mutex across the diagnostic actor awaits or print private network seeds.
+            let mut recipients = Vec::new();
+            for index in 0..3 {
+                recipients.push(scenario.recipient_diagnostic(index, channel_id("general"), &History::new()).await);
+            }
+            let trace = {
+                let trace = scenario.rules.trace.lock().unwrap();
+                format!("received_recovery={:?}; received_kinds={:?}; connections={:?}", trace.received_recovery, trace.received_kinds, trace.connections)
+            }; // Release before panic so background recorders do not add mutex-poison failures.
+            panic!("automatic authenticated indirect probe exceeded {PERIODIC_RECOVERY_MS} ms: recipients={recipients:?}; {trace}");
         }
-    })
-    .await;
+    }
     {
         let trace = scenario.rules.trace.lock().unwrap();
         assert!(

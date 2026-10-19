@@ -11,7 +11,6 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use tokio::sync::oneshot;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::transport::{
@@ -277,22 +276,15 @@ impl MeshTransport for MemNetwork {
         if !self.registration.lease.is_live() {
             return Err(TransportError::Closed);
         }
-        let (tx, rx) = oneshot::channel();
+        let (responder, rx) = Responder::channel();
         let event = TransportEvent::Request {
             from: self.local,
             proto,
             data,
-            responder: Responder {
-                authority: None,
-                response_budget: None,
-                reply: tx,
-                _keepalive: None,
-            },
+            responder,
         };
         self.hub.deliver(peer, event)?;
-        rx.await
-            .map(|reply| reply.into_bytes())
-            .map_err(|_| TransportError::NoResponse)
+        rx.recv().await.ok_or(TransportError::NoResponse)
     }
 
     async fn request_cancellable(
@@ -305,25 +297,21 @@ impl MeshTransport for MemNetwork {
         if !self.registration.lease.is_live() || cancellation.is_cancelled() {
             return Err(TransportError::Cancelled);
         }
-        let (reply, response) = oneshot::channel();
+        let (mut responder, response) = Responder::channel();
+        responder._keepalive = cancellation.keepalive();
         let event = TransportEvent::Request {
             from: self.local,
             proto,
             data,
             // The unbounded test inbox can outlive this waiting future just like libp2p's
             // outbound table. Keep accounting with the event/responder until it is handled.
-            responder: Responder {
-                authority: None,
-                response_budget: None,
-                reply,
-                _keepalive: cancellation.keepalive(),
-            },
+            responder,
         };
         self.hub.deliver(peer, event)?;
         tokio::select! {
             biased;
             _ = cancellation.cancelled() => Err(TransportError::Cancelled),
-            result = response => result.map(|reply| reply.into_bytes()).map_err(|_| TransportError::NoResponse),
+            result = response.recv() => result.ok_or(TransportError::NoResponse),
         }
     }
 
@@ -434,6 +422,54 @@ mod tests {
     fn bytes(s: &'static str) -> Bytes {
         Bytes::from_static(s.as_bytes())
     }
+    #[derive(Debug)]
+    struct ResponseEffect(tokio::sync::watch::Receiver<bool>);
+    #[async_trait]
+    impl crate::RequestAuthority for ResponseEffect {
+        fn authorized(&self) -> bool {
+            *self.0.borrow() && self.0.has_changed().is_ok()
+        }
+        async fn revoked(&self) {
+            let mut signal = self.0.clone();
+            while self.authorized() {
+                if signal.changed().await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_mem_reply_rechecks_effect_after_handler_handoff() {
+        use std::future::Future;
+        let hub = Hub::new();
+        let a = hub.join(PeerId::from_u64(1));
+        let b = hub.join(PeerId::from_u64(2));
+        for retire in [false, true] {
+            let mut waiting =
+                Box::pin(a.request(b.local_peer(), ProtocolId("reply-scope"), bytes("request")));
+            std::future::poll_fn(|cx| {
+                assert!(waiting.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            let TransportEvent::Request { responder, .. } = b.next_event().await.unwrap() else {
+                panic!("expected request")
+            };
+            let (owner, signal) = tokio::sync::watch::channel(true);
+            responder
+                .try_respond_with_authority(bytes("reply"), Arc::new(ResponseEffect(signal)))
+                .unwrap();
+            if retire {
+                drop(owner);
+            } else {
+                assert_eq!(waiting.await.unwrap(), bytes("reply"));
+                continue;
+            }
+            assert!(matches!(waiting.await, Err(TransportError::NoResponse)));
+        }
+    }
+
     #[tokio::test]
     async fn connection_lease_replacement_and_actual_last_handle_drop_are_irreversible() {
         let hub = Hub::new();
@@ -674,6 +710,55 @@ mod tests {
             "the queued request, not its cancelled waiter, owns the accounting lifetime"
         );
         responder.respond(bytes("late"));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn abandoned_request_retires_reply_authority_before_queued_event_is_consumed() {
+        #[derive(Debug)]
+        struct DropObserved(Arc<AtomicUsize>);
+        impl Drop for DropObserved {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        use std::future::Future;
+
+        let hub = Hub::new();
+        let a = hub.join(PeerId::from_u64(1));
+        let b = hub.join(PeerId::from_u64(2));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (_cancel, signal) = tokio::sync::watch::channel(false);
+        let cancellation =
+            RequestCancellation::new(signal, Some(Arc::new(DropObserved(drops.clone()))));
+        let mut request = Box::pin(a.request_cancellable(
+            b.local_peer(),
+            ProtocolId("deferred"),
+            bytes("request"),
+            cancellation,
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(request.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        // The original caller disappears before its peer even dequeues the event. No observer
+        // or forwarding task runs between this drop and the driver's synchronous gate check.
+        drop(request);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        let responder = match b.next_event().await {
+            Some(TransportEvent::Request { responder, .. }) => responder,
+            other => panic!("expected queued request, got {other:?}"),
+        };
+        let authority = responder.cancellation_authority();
+        assert!(!authority.authorized());
+        authority.revoked().await;
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            0,
+            "actual event still owns custody"
+        );
+        drop(responder);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 

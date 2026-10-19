@@ -120,6 +120,14 @@ impl Scenario {
         };
         if !complete {
             eprintln!("membership timeout: expected={member_indices:?} actual={rosters:?}");
+            eprintln!(
+                "membership transport kinds: {:?}",
+                self.rules.trace.lock().unwrap().received_kinds
+            );
+            eprintln!(
+                "membership connected submissions: {:?}",
+                self.rules.trace.lock().unwrap().connected_submissions
+            );
             for index in indices {
                 let actor = &self.online(*index).actor;
                 let query = tokio::select! {

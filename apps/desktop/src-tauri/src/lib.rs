@@ -63,6 +63,7 @@ mod discovery_timer;
 mod durable_chat;
 mod errors;
 mod group_policy;
+mod keep_session;
 mod leaving;
 mod media_decode;
 mod media_worker;
@@ -100,6 +101,9 @@ struct InterfaceRouteIdentity {
 /// One running server: its actor handle, the single-use invite to share (founder only), and
 /// its display name (kept here too so the registry can be re-sealed on disk, Phase 9f).
 struct ServerEntry {
+    /// Sole exact native file-work publisher. Removal/replacement explicitly retires it under
+    /// the row guard; Drop is a final unwind/registry-clear backstop.
+    files: keep_session::EntryOwner,
     actor: ServerActor,
     /// Exact native registry custody. Removal/replacement revokes detached voice work before
     /// waiting for the still-network-active actor to process any shutdown command.
@@ -410,6 +414,7 @@ impl Drop for InlineDownloadLeaseInner {
 /// on-disk store once the user has unlocked it with a passphrase (`None` = in-memory only).
 #[derive(Default)]
 struct AppState {
+    keep_session: StdMutex<Option<(u64, watch::Sender<bool>)>>,
     servers: Arc<Mutex<HashMap<u64, ServerEntry>>>,
     /// Monotonic process-local source for [`ServerEntry::instance`]. Wrapping would require more
     /// actor installations than the process can perform in its lifetime; zero has no special
@@ -481,7 +486,7 @@ struct AppState {
     session_lock_requested: AtomicBool,
     /// Every explicit lock invalidates work that began in an earlier UI authorization epoch.
     /// Long-running joins carry the captured value to both their reply event and durable commit.
-    ui_session_generation: AtomicU64,
+    ui_session_generation: Arc<AtomicU64>,
     /// Exact generation last committed by authenticated unlock. Publishing a newer lock
     /// generation closes IPC even if that thread stops before setting the separate request flag.
     ui_authorized_generation: AtomicU64,
@@ -3461,11 +3466,16 @@ async fn register_server(
             None
         }
     });
+    let files = keep_session::EntryOwner::new();
+    actor.set_keep_session(
+        keep_session::current(state, expected_generation).map(|account| files.scope(account)),
+    );
     // Exact row guard is already held. No await or fallible operation may separate the voice
     // registration CAS from publishing the native row that owns it.
     servers.insert(
         id,
         ServerEntry {
+            files,
             actor,
             instance,
             group_id,
@@ -9005,6 +9015,22 @@ struct UiKeptFile {
     manifest_version: String,
     checked: bool,
 }
+#[derive(Serialize)]
+struct UiKeptTransfer {
+    cid: String,
+    manifest_version: String,
+    transfer: String,
+    phase: &'static str,
+    verified_chunks: usize,
+    total_chunks: usize,
+    running: bool,
+    user_paused: bool,
+    blocked: bool,
+    intent: String,
+    exhausted: bool,
+    /// Decimal identity, never an imprecise JavaScript Number.
+    grant: String,
+}
 
 #[derive(Serialize)]
 struct UiKeptFiles {
@@ -9012,6 +9038,7 @@ struct UiKeptFiles {
     allocated_bytes: u64,
     limit_bytes: u64,
     files: Vec<UiKeptFile>,
+    transfers: Vec<UiKeptTransfer>,
     error: Option<String>,
 }
 
@@ -9030,6 +9057,28 @@ fn bridge_kept_files(view: catcoms_storage::kept::KeptFiles) -> UiKeptFiles {
             })
             .collect(),
         error: view.error,
+        transfers: view
+            .transfers
+            .into_iter()
+            .map(|transfer| UiKeptTransfer {
+                cid: transfer.plan.cid.to_hex(),
+                manifest_version: hex::encode(transfer.plan.version),
+                transfer: hex::encode(transfer.transfer),
+                phase: match transfer.phase {
+                    catcoms_storage::kept::KeepPhase::Resumable => "paused",
+                    catcoms_storage::kept::KeepPhase::Completed => "completed",
+                    catcoms_storage::kept::KeepPhase::Deleting => "deleting",
+                },
+                verified_chunks: transfer.verified_chunks,
+                total_chunks: transfer.plan.chunks.len(),
+                running: transfer.running,
+                user_paused: transfer.user_paused,
+                blocked: transfer.blocked,
+                intent: transfer.intent.to_string(),
+                exhausted: transfer.exhausted,
+                grant: transfer.grant.to_string(),
+            })
+            .collect(),
     }
 }
 
@@ -9070,17 +9119,20 @@ async fn keep_file(
     cid: String,
     cancellation: String,
 ) -> Result<(), String> {
+    let generation = keep_session::invocation_generation(&state).await?;
     let raw = kept_cid(&cid)?;
-    let generation = unlocked_ui_session_generation(&state).await?;
     let (lease, receiver) = claim_inline_download(&state, &cancellation)?;
     let (actor, instance) = actor_instance_of(&state, server).await?;
+    let origin = keep_session::for_actor(&state, server, &actor, generation)
+        .await
+        .ok_or_else(|| "The file read is no longer active.".to_string())?;
     drop(require_ui_session_generation(&state, generation).await?);
     actor
         .keep_file(
             raw,
-            Some(RequestCancellation::new(
-                receiver,
-                Some(lease.request_keepalive()),
+            Some(keep_session::bind_read(
+                origin,
+                RequestCancellation::new(receiver, Some(lease.request_keepalive())),
             )),
         )
         .await?;
@@ -9098,6 +9150,60 @@ async fn keep_file(
     Ok(())
 }
 
+/// Queue an explicitly requested saved copy and return after native admission. This response
+/// proves neither possession nor full verification; progress arrives through inventory/events.
+#[tauri::command]
+async fn request_kept_file(
+    state: State<'_, AppState>,
+    server: u64,
+    cid: String,
+) -> Result<(), String> {
+    let raw = kept_cid(&cid)?;
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    commit_kept_command(
+        &state,
+        server,
+        instance,
+        generation,
+        actor.request_kept_file(raw),
+    )
+    .await
+}
+
+/// Explicit user Pause/Resume changes only the saved intent revision. A late earlier command
+/// cannot pause a resumed/replacement run, and neither action replenishes execution allowance.
+#[tauri::command]
+async fn set_kept_paused(
+    state: State<'_, AppState>,
+    server: u64,
+    cid: String,
+    transfer: String,
+    expected_intent: String,
+    paused: bool,
+) -> Result<(), String> {
+    let raw = kept_cid(&cid)?;
+    let owner: [u8; 32] = kept_cid(&transfer)?
+        .try_into()
+        .map_err(|_| "invalid transfer identity")?;
+    let intent = expected_intent
+        .parse::<u64>()
+        .map_err(|_| "invalid transfer intent")?;
+    if intent.to_string() != expected_intent {
+        return Err("invalid transfer intent".into());
+    }
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    commit_kept_command(
+        &state,
+        server,
+        instance,
+        generation,
+        actor.set_kept_paused(raw, owner, intent, paused),
+    )
+    .await
+}
+
 /// Explicit local release only; unrelated cached chunks or replicated listings are unchanged.
 #[tauri::command]
 async fn forget_kept_file(
@@ -9107,9 +9213,114 @@ async fn forget_kept_file(
 ) -> Result<(), String> {
     let raw = kept_cid(&cid)?;
     let generation = unlocked_ui_session_generation(&state).await?;
-    let actor = actor_of(&state, server).await?;
-    let _commit = require_ui_session_generation(&state, generation).await?;
-    actor.forget_kept_file(raw).await
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    commit_kept_command(
+        &state,
+        server,
+        instance,
+        generation,
+        actor.forget_kept_file(raw),
+    )
+    .await
+}
+
+/// The shared UI commit guard orders short local retained-state mutations before a production
+/// same-ID actor replacement. Lock requests revoke the generation *before* waiting for that
+/// guard, so check the atomics again after the actor reply before exposing any stale result.
+async fn commit_kept_command<T>(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    generation: u64,
+    command: impl Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    let _commit = require_ui_session_generation(state, generation).await?;
+    if state
+        .servers
+        .lock()
+        .await
+        .get(&server)
+        .map(|entry| entry.instance)
+        != Some(instance)
+    {
+        return Err("server changed".into());
+    }
+    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::Acquire) != generation
+    {
+        return Err("the UI session changed while the operation was in progress".into());
+    }
+    let result = command.await;
+    if state
+        .servers
+        .lock()
+        .await
+        .get(&server)
+        .map(|entry| entry.instance)
+        != Some(instance)
+    {
+        return Err("server changed".into());
+    }
+    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::Acquire) != generation
+    {
+        return Err("the UI session changed while the operation was in progress".into());
+    }
+    result
+}
+
+fn kept_retry_request(
+    transfer: &str,
+    expected_grant: &str,
+    request: &str,
+) -> Result<catcoms_storage::kept::KeepRetry, String> {
+    fn fixed<const N: usize>(text: &str) -> Result<[u8; N], String> {
+        if text.len() != 2 * N
+            || !text
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err("invalid transfer identity".into());
+        }
+        hex::decode(text)
+            .map_err(|_| "invalid transfer identity".to_string())?
+            .try_into()
+            .map_err(|_| "invalid transfer identity".into())
+    }
+    let grant = expected_grant
+        .parse::<u64>()
+        .map_err(|_| "invalid transfer grant".to_string())?;
+    if grant == 0 || grant.to_string() != expected_grant {
+        return Err("invalid transfer grant".into());
+    }
+    Ok(catcoms_storage::kept::KeepRetry {
+        transfer: fixed(transfer)?,
+        expected_grant: grant,
+        request: fixed(request)?,
+    })
+}
+/// Explicit Retry only, under the actual unlocked session/actor. Browser identities can select
+/// an existing exhausted grant but cannot choose its allowance or create a new transfer owner.
+#[tauri::command]
+async fn retry_kept_file(
+    state: State<'_, AppState>,
+    server: u64,
+    cid: String,
+    transfer: String,
+    expected_grant: String,
+    request: String,
+) -> Result<String, String> {
+    let raw = kept_cid(&cid)?;
+    let request = kept_retry_request(&transfer, &expected_grant, &request)?;
+    let generation = unlocked_ui_session_generation(&state).await?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    let receipt = commit_kept_command(
+        &state,
+        server,
+        instance,
+        generation,
+        actor.retry_kept_file(raw, request),
+    )
+    .await?;
+    Ok(receipt.granted.to_string())
 }
 
 /// Cheap local presence only. This does not authenticate each chunk or prove remote availability.
@@ -9457,6 +9668,9 @@ async fn download_file(
         server,
         None,
     );
+    let generation = keep_session::invocation_generation(&state)
+        .await
+        .map_err(|error| op.fail(codes::SESSION_LOCKED, error))?;
     let raw = hex::decode(cid.trim())
         .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, format!("bad cid: {e}")))?;
     let progress_cancellation = cancellation.clone();
@@ -9480,6 +9694,9 @@ async fn download_file(
         .try_into()
         .map_err(|_| op.fail(codes::FILE_DOWNLOAD_FAILED, "bad cid length"))?;
     let actor = op.actor(&state, server).await?;
+    let origin = keep_session::for_actor(&state, server, &actor, generation)
+        .await
+        .ok_or_else(|| op.fail(codes::SESSION_LOCKED, "The file read is no longer active."))?;
     ensure_inline_download_not_cancelled(cancellation.as_ref())
         .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
     let (total, size) = actor.file_download_plan(raw.clone()).await.ok_or_else(|| {
@@ -9492,7 +9709,7 @@ async fn download_file(
         .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
     ensure_inline_download_not_cancelled(cancellation.as_ref())
         .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
-    require_unlocked_session(&state)
+    let plan_commit = keep_session::read_commit(&state, generation, &origin)
         .await
         .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     // The plan, before any bytes move. A download that stalls is one of these with no completion
@@ -9514,6 +9731,7 @@ async fn download_file(
         },
         op.trace,
     );
+    drop(plan_commit);
     let mut out = Vec::with_capacity(size as usize);
     let mut network_bytes_done = 0u64;
     for i in 0..total {
@@ -9521,23 +9739,34 @@ async fn download_file(
             .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
         // A transfer can outlive the click that started it. Do not return plaintext or continue
         // emitting file metadata after an explicit lock closes the webview session.
-        require_unlocked_session(&state)
-            .await
-            .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
-        let request_cancellation = cancellation.as_ref().map(|signal| {
-            RequestCancellation::new(
-                signal.clone(),
-                cancellation_lease
-                    .as_ref()
-                    .map(InlineDownloadLease::request_keepalive),
-            )
-        });
+        drop(
+            keep_session::read_commit(&state, generation, &origin)
+                .await
+                .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?,
+        );
+        let request_cancellation = cancellation
+            .as_ref()
+            .map(|signal| {
+                keep_session::bind_read(
+                    origin.clone(),
+                    RequestCancellation::new(
+                        signal.clone(),
+                        cancellation_lease
+                            .as_ref()
+                            .map(InlineDownloadLease::request_keepalive),
+                    ),
+                )
+            })
+            .or_else(|| Some(origin.clone()));
         let (chunk, provider) = actor
             .fetch_file_chunk_cancellable(raw.clone(), i, request_cancellation)
             .await
             .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
         ensure_inline_download_not_cancelled(cancellation.as_ref())
             .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
+        let _commit = keep_session::read_commit(&state, generation, &origin)
+            .await
+            .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
         if provider.is_some() {
             network_bytes_done = network_bytes_done.saturating_add(chunk.len() as u64);
         }
@@ -9584,15 +9813,17 @@ async fn download_file(
             "the reassembled file failed its integrity check",
         ));
     }
-    require_unlocked_session(&state)
-        .await
-        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+    drop(
+        keep_session::read_commit(&state, generation, &origin)
+            .await
+            .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?,
+    );
     ensure_inline_download_not_cancelled(cancellation.as_ref())
         .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
     let encoded = B64.encode(&out);
     ensure_inline_download_not_cancelled(cancellation.as_ref())
         .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
-    require_unlocked_session(&state)
+    let _commit = keep_session::read_commit(&state, generation, &origin)
         .await
         .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     op.succeeded("FILE.DOWNLOAD.COMPLETED");
@@ -10862,6 +11093,7 @@ fn bodyless_media_denial(code: http::StatusCode) -> http::Response<Vec<u8>> {
 async fn publish_media_response<F>(
     state: &AppState,
     generation: Option<u64>,
+    origin: Option<&RequestCancellation>,
     response: http::Response<Vec<u8>>,
     publish: F,
 ) where
@@ -10872,7 +11104,8 @@ async fn publish_media_response<F>(
         return;
     };
     match require_ui_session_generation(state, generation).await {
-        Ok(_commit) => publish(response),
+        Ok(_commit) if origin.is_none_or(|origin| !origin.is_cancelled()) => publish(response),
+        Ok(_) => publish(bodyless_media_denial(http::StatusCode::FORBIDDEN)),
         Err(_) => publish(bodyless_media_denial(http::StatusCode::FORBIDDEN)),
     }
 }
@@ -10957,6 +11190,19 @@ async fn serve_media(
     state: &AppState,
     path: &str,
     range: Option<String>,
+    expected_generation: u64,
+) -> (Option<(u64, RequestCancellation)>, http::Response<Vec<u8>>) {
+    let mut origin = None;
+    let response = serve_media_body(state, path, range, expected_generation, &mut origin).await;
+    (origin, response)
+}
+
+async fn serve_media_body(
+    state: &AppState,
+    path: &str,
+    range: Option<String>,
+    expected_generation: u64,
+    captured: &mut Option<(u64, RequestCancellation)>,
 ) -> http::Response<Vec<u8>> {
     let deny = |code: http::StatusCode| bodyless_media_denial(code);
     let Some((server, cid)) = parse_media_path(path) else {
@@ -10964,7 +11210,7 @@ async fn serve_media(
     };
     // The same boundary every native command sits behind: a locked vault serves no plaintext,
     // and a media element left in the DOM must not keep pulling bytes after an explicit lock.
-    let generation = match unlocked_ui_session_generation(state).await {
+    let generation = match keep_session::authorize_invocation(state, expected_generation).await {
         Ok(generation) => generation,
         Err(_) => return deny(http::StatusCode::FORBIDDEN),
     };
@@ -10974,6 +11220,10 @@ async fn serve_media(
     let Ok(actor) = actor_of(state, server).await else {
         return deny(http::StatusCode::NOT_FOUND);
     };
+    let Some(origin) = keep_session::for_actor(state, server, &actor, generation).await else {
+        return deny(http::StatusCode::FORBIDDEN);
+    };
+    *captured = Some((generation, origin.clone()));
     let Ok(raw) = hex::decode(&cid) else {
         return deny(http::StatusCode::BAD_REQUEST);
     };
@@ -10987,7 +11237,7 @@ async fn serve_media(
     // The head comes from the index rather than from chunk 0 for the same reason: reading a whole
     // chunk to learn a size and a mime put a second decrypt on every response and, because the
     // cache is small, evicted the chunk the player was actually reading.
-    let head = match media_head(state, &actor, server, &cid, &raw, generation).await {
+    let head = match media_head(state, &actor, server, &cid, &raw, generation, &origin).await {
         Some(head) => head,
         None => return deny(http::StatusCode::NOT_FOUND),
     };
@@ -11028,6 +11278,7 @@ async fn serve_media(
                 head.manifest_version,
                 index,
                 generation,
+                &origin,
             )
             .await
             {
@@ -11056,7 +11307,7 @@ async fn serve_media(
         // The same last authorization point the windowed path holds, for the same reason: no
         // plaintext crosses the scheme boundary if an explicit lock completed during the reads or
         // during the transcode, which is the longest await on this path.
-        let _response_commit = match require_ui_session_generation(state, generation).await {
+        let _response_commit = match keep_session::read_commit(state, generation, &origin).await {
             Ok(commit) => commit,
             Err(_) => return deny(http::StatusCode::FORBIDDEN),
         };
@@ -11088,6 +11339,7 @@ async fn serve_media(
         head.manifest_version,
         plan.index,
         generation,
+        &origin,
     )
     .await
     {
@@ -11101,7 +11353,7 @@ async fn serve_media(
     // This is the last authorization point and remains held through response construction. If an
     // explicit lock completed during either actor read, no plaintext crosses the scheme boundary;
     // if lock begins after this guard, it cannot complete until this response has been built.
-    let _response_commit = match require_ui_session_generation(state, generation).await {
+    let _response_commit = match keep_session::read_commit(state, generation, &origin).await {
         Ok(commit) => commit,
         Err(_) => return deny(http::StatusCode::FORBIDDEN),
     };
@@ -11169,6 +11421,7 @@ async fn media_head(
     cid: &str,
     raw: &[u8],
     generation: u64,
+    origin: &RequestCancellation,
 ) -> Option<MediaHead> {
     // Re-resolve the cheap index metadata on every request. The claimed plaintext CID is not a
     // trustworthy manifest identity until a full export hashes every byte, and another member may
@@ -11184,7 +11437,7 @@ async fn media_head(
             .cloned()
     };
     if let Some(hit) = cached {
-        let _commit = require_ui_session_generation(state, generation)
+        let _commit = keep_session::read_commit(state, generation, origin)
             .await
             .ok()?;
         return Some(hit);
@@ -11207,12 +11460,14 @@ async fn media_head(
         live.manifest_version,
         0,
         generation,
+        origin,
     )
     .await?;
     let mime = validated_inline_media_mime(&declared, &first)?;
-    media_head_put_for_generation(
+    media_head_put_for_read(
         state,
         generation,
+        Some(origin),
         MediaHead {
             server,
             cid: cid.to_string(),
@@ -11224,15 +11479,28 @@ async fn media_head(
     .await
 }
 
+#[cfg(test)]
 async fn media_head_put_for_generation(
     state: &AppState,
     generation: u64,
+    head: MediaHead,
+) -> Option<MediaHead> {
+    media_head_put_for_read(state, generation, None, head).await
+}
+
+async fn media_head_put_for_read(
+    state: &AppState,
+    generation: u64,
+    origin: Option<&RequestCancellation>,
     head: MediaHead,
 ) -> Option<MediaHead> {
     let _commit = require_ui_session_generation(state, generation)
         .await
         .ok()?;
     let mut heads = state.media_heads.lock().await;
+    if origin.is_some_and(RequestCancellation::is_cancelled) {
+        return None;
+    }
     heads.retain(|existing| existing.server != head.server || existing.cid != head.cid);
     heads.push(head);
     while heads.len() > MEDIA_HEAD_ENTRIES {
@@ -11260,31 +11528,45 @@ async fn media_chunk(
     manifest_version: [u8; 32],
     index: usize,
     generation: u64,
+    origin: &RequestCancellation,
 ) -> Option<Arc<Vec<u8>>> {
     let cached = {
         let mut cache = state.media_cache.lock().await;
         media_cache_take(&mut cache, server, cid, manifest_version, index)
     };
     if let Some(bytes) = cached {
-        let _commit = require_ui_session_generation(state, generation)
+        let _commit = keep_session::read_commit(state, generation, origin)
             .await
             .ok()?;
+        if origin.is_cancelled() {
+            return None;
+        }
         return Some(bytes);
     }
     let start = index as u64 * CHUNK_BYTES as u64;
     let range = actor
-        .read_file_range(raw.to_vec(), manifest_version, start, CHUNK_BYTES)
+        .read_file_range_cancellable(
+            raw.to_vec(),
+            manifest_version,
+            start,
+            CHUNK_BYTES,
+            Some(origin.clone()),
+        )
         .await
         .ok()?;
     // A read past the end is how the caller learns the file is shorter than it guessed; it is not
     // worth a cache entry.
     if range.bytes.is_empty() && start > 0 {
+        let _commit = keep_session::read_commit(state, generation, origin)
+            .await
+            .ok()?;
         return Some(Arc::new(Vec::new()));
     }
     let bytes = Arc::new(range.bytes);
-    media_cache_put_for_generation(
+    media_cache_put_for_read(
         state,
         generation,
+        Some(origin),
         MediaChunk {
             server,
             cid: cid.to_string(),
@@ -11297,15 +11579,28 @@ async fn media_chunk(
     .then_some(bytes)
 }
 
+#[cfg(test)]
 async fn media_cache_put_for_generation(
     state: &AppState,
     generation: u64,
+    chunk: MediaChunk,
+) -> bool {
+    media_cache_put_for_read(state, generation, None, chunk).await
+}
+
+async fn media_cache_put_for_read(
+    state: &AppState,
+    generation: u64,
+    origin: Option<&RequestCancellation>,
     chunk: MediaChunk,
 ) -> bool {
     let Ok(_commit) = require_ui_session_generation(state, generation).await else {
         return false;
     };
     let mut cache = state.media_cache.lock().await;
+    if origin.is_some_and(RequestCancellation::is_cancelled) {
+        return false;
+    }
     media_cache_put(&mut cache, chunk);
     true
 }
@@ -13017,9 +13312,19 @@ async fn reload_one(
             return Err(error);
         }
     };
+    let files = keep_session::EntryOwner::new();
+    if let Some(old) = servers.get(&record.id) {
+        old.files.retire();
+    }
+    // Restores remain inactive until the authenticated account unlock commits below. If this
+    // reload is within a live unlock, current() still checks that exact account generation.
+    actor.set_keep_session(
+        keep_session::current(state, expected_generation).map(|account| files.scope(account)),
+    );
     servers.insert(
         record.id,
         ServerEntry {
+            files,
             actor,
             instance,
             group_id,
@@ -14135,6 +14440,8 @@ async fn stream_download_to_disk(
     target: &[u8; 32],
     source: &mut impl SaveSource,
 ) -> Result<PathBuf, String> {
+    // Refuse a command retired during its earlier plan awaits before creating plaintext staging.
+    source.still_unlocked().await?;
     let (mut file, staging, path) = create_staged_download(downloads, name)?;
     let failed = |error: String| -> String {
         let _ = std::fs::remove_file(&staging);
@@ -14238,21 +14545,31 @@ struct ActorSaveSource<'a> {
     total: usize,
     size: u64,
     generation: u64,
+    origin: RequestCancellation,
 }
 
 impl SaveSource for ActorSaveSource<'_> {
     async fn chunk(&mut self, index: usize) -> Result<(Vec<u8>, Option<String>), String> {
-        self.actor.fetch_file_chunk(self.raw.clone(), index).await
+        self.actor
+            .fetch_file_chunk_cancellable(self.raw.clone(), index, Some(self.origin.clone()))
+            .await
     }
 
     async fn still_unlocked(&self) -> Result<(), String> {
         let generation_check = require_ui_session_generation(self.state, self.generation).await?;
         drop(generation_check);
+        if self.origin.is_cancelled() {
+            return Err("The file read is no longer active.".into());
+        }
         Ok(())
     }
 
     async fn publish_verified(&self, staging: &Path, final_path: &Path) -> Result<(), String> {
-        publish_download_for_generation(self.state, self.generation, staging, final_path).await
+        let _commit = require_ui_session_generation(self.state, self.generation).await?;
+        if self.origin.is_cancelled() {
+            return Err("The file read is no longer active.".into());
+        }
+        publish_staged_download(staging, final_path)
     }
 
     fn progress(
@@ -14262,23 +14579,26 @@ impl SaveSource for ActorSaveSource<'_> {
         network_bytes_done: u64,
         provider: Option<String>,
     ) {
-        let _ = self.app.emit(
-            "download-progress",
-            DownloadProgressEvt {
-                server: self.server,
-                cid: self.cid.clone(),
-                cancellation: None,
-                done,
-                total: self.total,
-                bytes_done,
-                bytes_total: self.size,
-                network_bytes_done,
-                provider,
-            },
-        );
+        keep_session::publish_progress(&self.origin, || {
+            let _ = self.app.emit(
+                "download-progress",
+                DownloadProgressEvt {
+                    server: self.server,
+                    cid: self.cid.clone(),
+                    cancellation: None,
+                    done,
+                    total: self.total,
+                    bytes_done,
+                    bytes_total: self.size,
+                    network_bytes_done,
+                    provider,
+                },
+            );
+        });
     }
 }
 
+#[cfg(test)]
 async fn publish_download_for_generation(
     state: &AppState,
     generation: u64,
@@ -14308,13 +14628,16 @@ async fn save_group_file(
     cid: String,
     name: String,
 ) -> Result<SavedFileResult, String> {
-    let generation = unlocked_ui_session_generation(&state).await?;
+    let generation = keep_session::invocation_generation(&state).await?;
     let raw = hex::decode(cid.trim()).map_err(|e| format!("bad cid: {e}"))?;
     let target: [u8; 32] = raw
         .clone()
         .try_into()
         .map_err(|_| "bad cid length".to_string())?;
     let actor = actor_of(&state, server).await?;
+    let origin = keep_session::for_actor(&state, server, &actor, generation)
+        .await
+        .ok_or_else(|| "The file read is no longer active.".to_string())?;
     let (total, size) = actor.file_download_plan(raw.clone()).await.ok_or_else(|| {
         "this file can't be downloaded; it isn't listed, or its reference is invalid".to_string()
     })?;
@@ -14341,17 +14664,49 @@ async fn save_group_file(
         total,
         size,
         generation,
+        origin,
     };
     let path =
         stream_download_to_disk(&downloads, &name, total, size, &target, &mut source).await?;
-    // Keep inspection and the OS reveal in the same initiating UI epoch as publication. If lock
-    // won after the rename guard was released, the verified file may remain in Downloads, but the
-    // stale command cannot inspect/reveal it or report success behind the lock screen.
-    let _commit = require_ui_session_generation(&state, generation).await?;
-    let content_validation = exported_media_validation(&path, &declared_mime);
-    let warning = reveal_path(&path)
+    finish_saved_read(
+        &state,
+        generation,
+        &source.origin,
+        &path,
+        &declared_mime,
+        exported_media_validation,
+        reveal_path,
+    )
+    .await
+}
+
+/// Post-publication inspection/reveal is still part of the ORIGINAL native invocation. Lock
+/// can publish its atomic generation during CPU/OS work even while the commit mutex is held.
+/// Recheck at each synchronous boundary; a file already renamed stays in Downloads on refusal.
+async fn finish_saved_read<I, R>(
+    state: &AppState,
+    generation: u64,
+    origin: &RequestCancellation,
+    path: &Path,
+    declared_mime: &str,
+    inspect: I,
+    reveal: R,
+) -> Result<SavedFileResult, String>
+where
+    I: FnOnce(&Path, &str) -> Option<String>,
+    R: FnOnce(&Path) -> Result<(), String>,
+{
+    let _commit = keep_session::read_commit(state, generation, origin).await?;
+    let content_validation = inspect(path, declared_mime);
+    if origin.is_cancelled() {
+        return Err("The file read is no longer active.".into());
+    }
+    let warning = reveal(path)
         .err()
         .map(|error| format!("The file was saved, but Downloads could not be opened: {error}"));
+    if origin.is_cancelled() {
+        return Err("The file read is no longer active.".into());
+    }
     Ok(SavedFileResult {
         path: path.to_string_lossy().into_owned(),
         displayed: warning.is_none(),
@@ -14598,6 +14953,13 @@ async fn finalize_unlock_session_with_voice(
         *resumable = false;
         state.session_lock_requested.store(true, Ordering::Release);
         return Err("unlock was superseded by a newer lock request; try again".into());
+    }
+    if let Some(session) = keep_session::current(state, expected_generation) {
+        for entry in state.servers.lock().await.values() {
+            entry
+                .actor
+                .set_keep_session(Some(entry.files.scope(session.clone())));
+        }
     }
     if reopening {
         // Reuse each running server's single discovery worker. A mounted unlock must not wait
@@ -14976,6 +15338,7 @@ fn register_ui_lock_request(state: &AppState) -> u64 {
         .fetch_add(1, Ordering::AcqRel)
         .wrapping_add(1);
     state.session_lock_requested.store(true, Ordering::Release);
+    keep_session::revoke(state);
     generation
 }
 
@@ -17155,14 +17518,22 @@ pub fn run() {
                 .get(http::header::RANGE)
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_string);
+            // Capture at synchronous request entry, before the spawned future can be delayed
+            // across lock/unlock. No async continuation may adopt a new session for this URI.
+            let expected_generation = handle
+                .state::<AppState>()
+                .ui_session_generation
+                .load(Ordering::Acquire);
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<AppState>();
                 // Capture authorization before any actor/disk await, then hold its native commit
                 // boundary through the synchronous responder publication. A stale response is
                 // replaced by a bodyless denial rather than escaping after explicit lock.
-                let generation = unlocked_ui_session_generation(&state).await.ok();
-                let response = serve_media(&state, &path, range).await;
-                publish_media_response(&state, generation, response, |response| {
+                let (scope, response) =
+                    serve_media(&state, &path, range, expected_generation).await;
+                let generation = scope.as_ref().map(|(generation, _)| *generation);
+                let origin = scope.as_ref().map(|(_, origin)| origin);
+                publish_media_response(&state, generation, origin, response, |response| {
                     responder.respond(response);
                 })
                 .await;
@@ -17263,7 +17634,10 @@ pub fn run() {
             file_available,
             get_kept_files,
             keep_file,
+            request_kept_file,
+            set_kept_paused,
             forget_kept_file,
+            retry_kept_file,
             delete_file,
             set_file_expiry,
             get_file_usage,
@@ -17432,12 +17806,140 @@ mod tests {
                 checked: false,
             }],
             error: None,
+            transfers: vec![catcoms_storage::kept::KeptTransfer {
+                plan: catcoms_storage::kept::KeepPlan {
+                    cid: catcoms_storage::Cid::of(b"partial"),
+                    version: [8; 32],
+                    manifest: b"secret partial wrapped keys".to_vec(),
+                    chunks: vec![(catcoms_storage::Cid::of(b"partial ciphertext"), 30)],
+                },
+                listing: [9; 32],
+                transfer: [10; 32],
+                phase: catcoms_storage::kept::KeepPhase::Resumable,
+                verified_chunks: 0,
+                running: false,
+                user_paused: true,
+                blocked: false,
+                intent: u64::MAX,
+                exhausted: true,
+                grant: u64::MAX,
+                remaining: catcoms_storage::kept::KeepAllowance {
+                    requests: 0,
+                    pages: 0,
+                    bytes: 0,
+                    slices: 0,
+                },
+            }],
         });
         let json = serde_json::to_value(value).unwrap();
         assert_eq!(json["files"][0]["checked"], false);
         assert_eq!(json["files"][0].as_object().unwrap().len(), 3);
         assert!(json["files"][0].get("manifest").is_none());
         assert!(!json.to_string().contains("secret"));
+        assert_eq!(json["transfers"][0]["phase"], "paused");
+        assert_eq!(json["transfers"][0]["grant"], u64::MAX.to_string());
+        assert_eq!(json["transfers"][0].as_object().unwrap().len(), 12);
+        assert!(json["transfers"][0].get("listing").is_none());
+        assert!(json["transfers"][0].get("remaining").is_none());
+    }
+
+    #[test]
+    fn kept_retry_input_requires_closed_canonical_identities_and_lossless_grants() {
+        let transfer = "ab".repeat(32);
+        let request = "cd".repeat(16);
+        let accepted = kept_retry_request(&transfer, &u64::MAX.to_string(), &request).unwrap();
+        assert_eq!(accepted.expected_grant, u64::MAX);
+        assert_eq!(accepted.transfer, [0xab; 32]);
+        for grant in [
+            "0",
+            "01",
+            "+1",
+            " 1",
+            "1 ",
+            "1.0",
+            "18446744073709551616",
+            "",
+        ] {
+            assert!(
+                kept_retry_request(&transfer, grant, &request).is_err(),
+                "{grant}"
+            );
+        }
+        for identity in [
+            "AB".repeat(32),
+            "ab".repeat(33),
+            "ab".repeat(31),
+            "../".repeat(22),
+            "é".repeat(32),
+        ] {
+            assert!(kept_retry_request(&identity, "1", &request).is_err());
+        }
+        assert!(kept_retry_request(&transfer, "1", &"CD".repeat(16)).is_err());
+        assert!(kept_retry_request(&transfer, "1", &"cd".repeat(17)).is_err());
+    }
+
+    #[tokio::test]
+    async fn kept_mutation_rejects_replaced_actor_and_reply_after_lock_request() {
+        use catcoms_rt::{Hub, PeerId};
+        use rand_chacha::ChaCha20Rng;
+        use rand_core::SeedableRng;
+        let root = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::default());
+        *state.store.lock().await =
+            Some(ServerStore::open(root.path(), b"kept test", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let server = Server::found(
+            Hub::new().join(PeerId::from_u64(72)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(72),
+            Box::new(ManualClock::new(1_000)),
+            "member",
+        )
+        .unwrap();
+        let group = server.group_id();
+        let device = server.device_id();
+        let (actor, mut events, task) = spawn(server);
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        state
+            .servers
+            .lock()
+            .await
+            .insert(7, snapshot_test_entry(2, actor.clone(), group, device));
+        let generation = unlocked_ui_session_generation(&state).await.unwrap();
+        let called = AtomicBool::new(false);
+        let error = commit_kept_command(&state, 7, 1, generation, async {
+            called.store(true, Ordering::Release);
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+        assert!(error.contains("server changed"));
+        assert!(
+            !called.load(Ordering::Acquire),
+            "a stale actor command was never polled"
+        );
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, deferred) = tokio::sync::oneshot::channel();
+        let pending_state = state.clone();
+        let pending = tokio::spawn(async move {
+            commit_kept_command(&pending_state, 7, 2, generation, async {
+                entered.send(()).unwrap();
+                deferred.await.unwrap();
+                Ok("native receipt")
+            })
+            .await
+        });
+        waiting.await.unwrap();
+        register_ui_lock_request(&state);
+        release.send(()).unwrap();
+        assert!(pending
+            .await
+            .unwrap()
+            .unwrap_err()
+            .contains("session changed"));
+        actor.shutdown().await;
+        task.await.unwrap();
+        drain.await.unwrap();
     }
 
     #[test]
@@ -19115,6 +19617,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn already_retired_stream_never_creates_staging_or_reports_initial_progress() {
+        let directory = tempfile::tempdir().unwrap();
+        let data = b"file".to_vec();
+        let mut source = ScriptedSave::new(vec![data.clone()]);
+        source.locked.set(true);
+        assert!(stream_download_to_disk(
+            directory.path(),
+            "file.bin",
+            1,
+            data.len() as u64,
+            Cid::of(&data).as_bytes(),
+            &mut source
+        )
+        .await
+        .is_err());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        assert_eq!(source.fetches.get(), 0);
+        assert!(source.progress.borrow().is_empty());
+    }
+
+    #[tokio::test]
     async fn explicit_lock_invalidates_a_blocked_join_before_its_commit() {
         use std::sync::atomic::AtomicBool;
 
@@ -19426,7 +19949,7 @@ mod tests {
             .body(b"must not escape".to_vec())
             .unwrap();
         let mut published = None;
-        publish_media_response(&state, Some(generation), plaintext, |response| {
+        publish_media_response(&state, Some(generation), None, plaintext, |response| {
             published = Some(response);
         })
         .await;
@@ -19442,7 +19965,7 @@ mod tests {
         assert!(stale_range.body().is_empty());
 
         let cid = Cid::of(b"locked media").to_hex();
-        let response = serve_media(&state, &format!("/1/{cid}"), None).await;
+        let (_, response) = serve_media(&state, &format!("/1/{cid}"), None, generation).await;
         assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
         assert!(response.body().is_empty());
     }
@@ -20844,6 +21367,7 @@ mod tests {
         device_id: DeviceId,
     ) -> ServerEntry {
         ServerEntry {
+            files: keep_session::EntryOwner::new(),
             actor,
             instance,
             group_id,
@@ -21785,6 +22309,7 @@ mod tests {
         state.servers.lock().await.insert(
             SERVER,
             ServerEntry {
+                files: keep_session::EntryOwner::new(),
                 actor: actor.clone(),
                 instance: INSTANCE,
                 group_id,
@@ -21969,6 +22494,7 @@ mod tests {
         let (new_actor, new_events, new_task) = spawn(replacement);
 
         let entry = |instance, actor: ServerActor| ServerEntry {
+            files: keep_session::EntryOwner::new(),
             actor,
             instance,
             group_id: replacement_group.clone(),
@@ -22097,6 +22623,7 @@ mod tests {
         let device_id = server.device_id();
         let (actor, events, task) = spawn(server);
         let entry = |instance| ServerEntry {
+            files: keep_session::EntryOwner::new(),
             actor: actor.clone(),
             instance,
             group_id: group_id.clone(),
@@ -22590,6 +23117,7 @@ mod tests {
             state.servers.lock().await.insert(
                 SERVER_ID,
                 ServerEntry {
+                    files: keep_session::EntryOwner::new(),
                     actor: restored.actor,
                     instance: state.next_server_instance.fetch_add(1, Ordering::Relaxed),
                     group_id: restored.group_id,

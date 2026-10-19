@@ -694,6 +694,8 @@ pub enum AppCommand {
         expected_manifest_version: [u8; 32],
         start: u64,
         max_len: usize,
+        /// Original native invoke/account/entry scope, captured before this command is queued.
+        cancel: Option<RequestCancellation>,
         reply: oneshot::Sender<Result<FileRange, String>>,
     },
     /// Whether the file's blob is already held locally (no network fetch needed to open it).
@@ -707,12 +709,28 @@ pub enum AppCommand {
         cancel: Option<RequestCancellation>,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    RequestKeptFile {
+        cid: Vec<u8>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    SetKeptPaused {
+        cid: Vec<u8>,
+        transfer: [u8; 32],
+        expected_intent: u64,
+        paused: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     KeptFiles {
         reply: oneshot::Sender<catcoms_storage::kept::KeptFiles>,
     },
     ForgetKeptFile {
         cid: Vec<u8>,
         reply: oneshot::Sender<Result<(), String>>,
+    },
+    RetryKeptFile {
+        cid: Vec<u8>,
+        request: catcoms_storage::kept::KeepRetry,
+        reply: oneshot::Sender<Result<catcoms_storage::kept::KeepRetryReceipt, String>>,
     },
     /// Remove a file from the shared index by content address (owner/admin only).
     DeleteFile {
@@ -1220,6 +1238,12 @@ pub enum AppEvent {
 /// A handle to a running server actor: send commands, run queries.
 #[derive(Debug, Clone)]
 pub struct ServerActor {
+    /// Host-issued native unlock authority. Older jobs retain their original token when this
+    /// value changes; a fresh unlock cannot revive an irreversibly cancelled request.
+    keep_session: tokio::sync::watch::Sender<Option<RequestCancellation>>,
+    /// Weak test observer cannot keep the event channel alive after the real actor retires.
+    #[cfg(test)]
+    test_events: mpsc::WeakSender<TracedEvent>,
     cmd_tx: CommandSender,
     studio_pending: tokio::sync::watch::Receiver<bool>,
     studio_preview_reset: tokio::sync::watch::Sender<bool>,
@@ -1232,6 +1256,12 @@ pub struct ServerActor {
 }
 
 impl ServerActor {
+    /// Process-local handle identity only. Native registry owners use this before lending an
+    /// exact entry observer; equal UI ids or cloned state are not proof of the same actor.
+    pub fn same_instance(&self, other: &Self) -> bool {
+        self.cmd_tx.tx.same_channel(&other.cmd_tx.tx)
+    }
+
     #[cfg(test)]
     pub(crate) async fn studio_preparation_pools_for_test(
         &self,
@@ -1339,6 +1369,9 @@ impl ServerActor {
     /// in flight without either adopting the other's trace.
     pub fn with_trace(&self, trace: u64) -> ServerActor {
         ServerActor {
+            keep_session: self.keep_session.clone(),
+            #[cfg(test)]
+            test_events: self.test_events.clone(),
             studio_pending: self.studio_pending.clone(),
             studio_preview_reset: self.studio_preview_reset.clone(),
             #[cfg(test)]
@@ -2796,6 +2829,20 @@ impl ServerActor {
         start: u64,
         max_len: usize,
     ) -> Result<FileRange, String> {
+        self.read_file_range_cancellable(cid, expected_manifest_version, start, max_len, None)
+            .await
+    }
+
+    /// Preserve the caller's ORIGINAL native account/entry generation through queueing, pages,
+    /// retries and route changes. A later unlock must never authorize an old queued range read.
+    pub async fn read_file_range_cancellable(
+        &self,
+        cid: Vec<u8>,
+        expected_manifest_version: [u8; 32],
+        start: u64,
+        max_len: usize,
+        cancel: Option<RequestCancellation>,
+    ) -> Result<FileRange, String> {
         let (reply, rx) = oneshot::channel();
         if self
             .cmd_tx
@@ -2804,6 +2851,7 @@ impl ServerActor {
                 expected_manifest_version,
                 start,
                 max_len,
+                cancel,
                 reply,
             })
             .await
@@ -2815,7 +2863,7 @@ impl ServerActor {
     }
 
     /// Explicitly reserve, fetch and verify one durable local copy, or check/repair its saved plan.
-    /// Cancellation abandons an unfinished reservation; completed copies require explicit release.
+    /// Runtime cancellation pauses durable work; explicit Cancel/release removes its ownership.
     pub async fn keep_file(
         &self,
         cid: Vec<u8>,
@@ -2829,6 +2877,42 @@ impl ServerActor {
         receiver
             .await
             .unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Native host only, after authenticated unlock/actor installation. The synchronous watch
+    /// avoids command backlog and wakes an idle owner; it supplies no durable execution budget.
+    pub fn set_keep_session(&self, session: Option<RequestCancellation>) {
+        self.keep_session.send_replace(session);
+    }
+    /// Return after local reservation/admission, not whole-file completion. Inventory/events
+    /// supply progress and verification; the caller's UI lifetime does not own this durable job.
+    pub async fn request_kept_file(&self, cid: Vec<u8>) -> Result<(), String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::RequestKeptFile { cid, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
+    }
+    pub async fn set_kept_paused(
+        &self,
+        cid: Vec<u8>,
+        transfer: [u8; 32],
+        expected_intent: u64,
+        paused: bool,
+    ) -> Result<(), String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::SetKeptPaused {
+                cid,
+                transfer,
+                expected_intent,
+                paused,
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
     }
 
     pub async fn kept_files(&self) -> catcoms_storage::kept::KeptFiles {
@@ -2853,6 +2937,24 @@ impl ServerActor {
         receiver
             .await
             .unwrap_or_else(|_| Err("server stopped".into()))
+    }
+    /// Explicit local CAS grant. Its receipt does not start a transfer, authorize export or
+    /// replenish anything on exact retry; the caller may separately resume the saved plan.
+    pub async fn retry_kept_file(
+        &self,
+        cid: Vec<u8>,
+        request: catcoms_storage::kept::KeepRetry,
+    ) -> Result<catcoms_storage::kept::KeepRetryReceipt, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::RetryKeptFile {
+                cid,
+                request,
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
     }
 
     /// Presence only, not an integrity scan or evidence of any remote copy.
@@ -3875,7 +3977,10 @@ where
 {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Envelope>(64);
     let (raw_events, event_rx) = mpsc::channel::<TracedEvent>(256);
+    #[cfg(test)]
+    let test_events = raw_events.downgrade();
     let event_tx = EventSink::new(raw_events);
+    let (keep_session, mut keep_sessions) = tokio::sync::watch::channel(None::<RequestCancellation>);
     let (studio_signal, studio_pending) = tokio::sync::watch::channel(false);
     let (studio_preview_reset, mut studio_preview_resets) = tokio::sync::watch::channel(false);
     #[cfg(test)]
@@ -3999,13 +4104,24 @@ where
         // coalesced here and revisited by an injected-clock timer even if the network goes idle.
         let mut delivery_dirty = HashSet::new();
         let mut file_transfers = file_transfers::FileTransfers::new();
+        let file_source_reads = crate::file_source::runtime();
         let mut maintenance = member_maintenance::Maintenance::new();
         let mut studio_preview_resets_open = true;
         // Startup persistence belongs to the host. Thereafter raw versions are independent of
         // the UI's change detector: an accepted signed operation can leave its projection equal.
         let mut snapshot_versions = SnapshotVersions::capture(&server);
         let mut ready_cursor = 0;
+        let mut keep_sessions_open = true;
         loop {
+            let keep_session = keep_sessions.borrow_and_update().clone();
+            // Current native account + exact entry scope comes from the host. Each source job
+            // captures it with this actor generation; healthy repeated attachments are harmless.
+            server.sync.set_native_file_service(keep_session.clone().map(|session| {
+                catcoms_sync::file_service::NativeFileService {
+                    reads: file_source_reads.clone(), session, actor: file_transfers.authority(),
+                }
+            }));
+            let automatic_keep_due = file_transfers.pump_automatic(&mut server, keep_session);
             server.collect_expired_voice();
             maintenance.pump(&mut server);
             // Check at the owner boundary, including after a command cancelled a sync tick that
@@ -4035,8 +4151,17 @@ where
             };
             // Anchor before the selector's first poll. Clock advancement during another turn
             // must not arm a fresh full relative interval after the original deadline elapsed.
-            let delivery_due = delivery_delay.map(|delay| wake_sampled_at.saturating_add(delay));
+            let delivery_due = match (delivery_delay.map(|delay| wake_sampled_at.saturating_add(delay)), automatic_keep_due) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (only, None) | (None, only) => only,
+            };
             let voice_wake = server.voice_housekeeping_wake();
+            let turn = {
+            let keep_session_changed = async {
+                if keep_sessions_open {
+                    if keep_sessions.changed().await.is_err() { keep_sessions_open = false; }
+                } else { std::future::pending::<()>().await; }
+            };
             let delivery_wake = async move {
                 let delivery = deadline::wait(delivery_clock, delivery_due);
                 let voice = async move {
@@ -4046,19 +4171,19 @@ where
                         std::future::pending::<()>().await;
                     }
                 };
-                tokio::pin!(delivery, voice);
+                tokio::pin!(delivery, voice, keep_session_changed);
                 // Both wakes enter the same fair turn; no clock-domain conversion or separate
                 // unbounded owner source is needed. Each future retains its absolute deadline.
                 std::future::poll_fn(|cx| {
-                    if delivery.as_mut().poll(cx).is_ready() {
+                    if delivery.as_mut().poll(cx).is_ready() || voice.as_mut().poll(cx).is_ready() {
                         std::task::Poll::Ready(())
                     } else {
-                        voice.as_mut().poll(cx)
+                        keep_session_changed.as_mut().poll(cx)
                     }
                 }).await;
             };
             tokio::pin!(delivery_wake);
-            let turn = fair::next(
+            fair::next(
                 &mut ready_cursor,
                 async {
                     if studio_preview_resets_open {
@@ -4086,7 +4211,8 @@ where
                 maintenance.next(),
                 server.sync_once(),
             )
-            .await;
+            .await
+            };
             match turn {
                 fair::Turn::Reset(reset) => {
                     event_tx.idle();
@@ -4818,9 +4944,10 @@ where
                         expected_manifest_version,
                         start,
                         max_len,
+                        cancel,
                         reply,
                     }) => {
-                        file_transfers.range(&mut server, cid, expected_manifest_version, start, max_len, reply);
+                        file_transfers.range_cancellable(&mut server, cid, expected_manifest_version, start, max_len, cancel, reply);
                     }
                     Some(AppCommand::FileAvailable { cid, reply }) => {
                         let avail = match <[u8; 32]>::try_from(cid.as_slice()) {
@@ -4832,7 +4959,24 @@ where
                     Some(AppCommand::KeepFile { cid, cancel, reply }) => {
                         file_transfers.keep(&mut server, cid, cancel, reply);
                     }
+                    Some(AppCommand::RequestKeptFile { cid, reply }) => {
+                        let session = keep_sessions.borrow().clone();
+                        let result = file_transfers.request_keep(&mut server, cid, session);
+                        let _ = reply.send(result);
+                        let _ = event_tx.send(AppEvent::FilesUpdated).await;
+                    }
+                    Some(AppCommand::SetKeptPaused { cid, transfer, expected_intent, paused, reply }) => {
+                        let result = cid.as_slice().try_into().map_err(|_| "bad content address".to_string())
+                            .and_then(|raw| server.sync.set_keep_paused(&Cid::from_bytes(raw), transfer, expected_intent, paused).map_err(|error| error.to_string()));
+                        let _ = reply.send(result);
+                        let _ = event_tx.send(AppEvent::FilesUpdated).await;
+                    }
                     Some(AppCommand::KeptFiles { reply }) => { let _ = reply.send(server.sync.kept_files()); }
+                    Some(AppCommand::RetryKeptFile { cid, request, reply }) => {
+                        let result = <[u8; 32]>::try_from(cid.as_slice()).map_err(|_| "bad content address".to_string())
+                            .and_then(|raw| server.sync.retry_kept(&Cid::from_bytes(raw), request).map_err(|error| error.to_string()));
+                        let _ = reply.send(result);
+                    }
                     Some(AppCommand::ForgetKeptFile { cid, reply }) => {
                         let result = <[u8; 32]>::try_from(cid.as_slice()).map_err(|_| "bad content address".to_string())
                             .and_then(|raw| server.sync.forget_kept(&Cid::from_bytes(raw)).map_err(|e| e.to_string()));
@@ -5271,7 +5415,11 @@ where
                         }
                         // Queued connected-only stages keep inbound requests and controls live
                         // while slow peers answer. Each stage prepares against fresh owner state.
-                        maintenance.discover(server.pex_targets());
+                        let record_targets = server.pex_targets();
+                        let poll_targets = server.sync.take_membership_poll_targets()
+                            .into_iter().filter(|peer| !record_targets.contains(peer)).collect();
+                        maintenance.discover(record_targets);
+                        maintenance.poll_membership(poll_targets);
                         // Fold current records before dialing. Detached PEX completions repeat
                         // this refresh when new records arrive during the same discovery pass.
                         server.cache_known_records();
@@ -5391,22 +5539,36 @@ where
                         let _ = reply.send(res);
                     }
                     Some(AppCommand::PrepareShutdown { ready }) => {
+                        // A frozen actor must not leave detached lower requests authorized while
+                        // native custody or the close decision waits. Cancellation resumes with
+                        // a NEW generation; saved Keep allowance and intent remain unchanged.
+                        file_transfers.retire();
                         if crate::shutdown::save_and_freeze(&mut server, ready).await {
                             let _ = event_tx.send(AppEvent::Closed).await;
                             break;
                         }
+                        file_transfers.resume();
                     }
                     Some(AppCommand::StopAndWait { stopped }) => {
                         // A timed-out request which is still queued must not later stop a live
                         // group unexpectedly. Once acknowledged this branch is terminal; close
                         // the command receiver before awaiting the UI event consumer.
-                        if stopped.send(()).is_ok() {
-                            cmd_rx.close();
-                            let _ = event_tx.send(AppEvent::Closed).await;
-                            break;
+                        if !stopped.is_closed() {
+                            // Revoke BEFORE send wakes the native close coordinator. A full
+                            // event sink may suspend us below, retaining the entire actor.
+                            file_transfers.retire();
+                            if stopped.send(()).is_ok() {
+                                cmd_rx.close();
+                                let _ = event_tx.send(AppEvent::Closed).await;
+                                break;
+                            }
+                            // The acknowledgement receiver raced with retirement. The actor
+                            // stays usable, but its old file effects are permanently retired.
+                            file_transfers.resume();
                         }
                     }
                     Some(AppCommand::Shutdown) | None => {
+                        file_transfers.retire();
                         let _ = event_tx.send(AppEvent::Closed).await;
                         break;
                     }
@@ -5418,7 +5580,11 @@ where
                 fair::Turn::File(completed) => {
                     event_tx.idle();
                     if let Some(completed) = completed {
+                        let cid = completed.kept_cid();
+                        let before = cid.and_then(|cid| server.sync.keep_progress(&cid));
                         file_transfers.complete(&mut server, completed);
+                        let after = cid.and_then(|cid| server.sync.keep_progress(&cid));
+                        if before != after { let _ = event_tx.send(AppEvent::FilesUpdated).await; }
                     }
                 },
                 fair::Turn::Maintenance(completed) => {
@@ -5691,6 +5857,7 @@ where
                         }
                     }
                     _ => {
+                        file_transfers.retire();
                         let _ = event_tx.send(AppEvent::Closed).await;
                         break;
                     }
@@ -5700,6 +5867,9 @@ where
     });
     (
         ServerActor {
+            keep_session,
+            #[cfg(test)]
+            test_events,
             studio_pending,
             studio_preview_reset,
             #[cfg(test)]
@@ -6676,6 +6846,8 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
         let actor = ServerActor {
+            keep_session: tokio::sync::watch::channel(None).0,
+            test_events: mpsc::channel::<TracedEvent>(1).0.downgrade(),
             studio_hints: tokio::sync::watch::channel(None).1,
             studio_pending: tokio::sync::watch::channel(false).1,
             studio_preview_reset: tokio::sync::watch::channel(false).0,
@@ -8059,6 +8231,7 @@ mod tests {
         let alice_peer = PeerId::from_u64(1);
         let alice_clock = ManualClock::new(1_000);
         let mut alice_srv = founder_with_clock(&hub, alice_peer, "alice", 1, &alice_clock);
+        let alice_device = alice_srv.device_id();
         alice_srv.subscribe_control().await.unwrap();
         alice_srv.open_channel(GENERAL).await.unwrap();
         alice_srv
@@ -8119,6 +8292,31 @@ mod tests {
         })
         .await
         .expect("Bob did not learn Carol's membership");
+
+        // Detached automatic receipts require a live member path proved by an authenticated
+        // exchange. A self-signed descriptor plus a connection indication is only a claim;
+        // neither establishes that Alice answered at that endpoint. Exercise the actual signed
+        // empty-channel catch-up before this timer test starts, rather than seeding a proof or
+        // weakening the notification gate. All receipts below still come from the real actors.
+        timeout(Duration::from_secs(10), async {
+            for recipient in [&mut bob_srv, &mut carol_srv] {
+                recipient.open_channel(GENERAL).await.unwrap();
+                recipient
+                    .request_channel_catchup(alice_peer, GENERAL)
+                    .await
+                    .unwrap();
+                assert!(
+                    recipient
+                        .sync
+                        .voice_bound_routes()
+                        .iter()
+                        .any(|route| route.peer == alice_peer && route.device == alice_device),
+                    "an empty/unsupported response cannot substitute for endpoint proof"
+                );
+            }
+        })
+        .await
+        .expect("recipient endpoint proof was not established");
 
         let (bob, mut bob_events, bob_handle) = spawn(bob_srv);
         bob.open_channel(GENERAL).await;

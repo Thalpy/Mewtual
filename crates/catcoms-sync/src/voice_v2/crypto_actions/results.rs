@@ -1,7 +1,6 @@
 //! Small historical results, prepaid with the native action. A receipt describes one past
 //! transition; it is never a permit to sign, deliver plaintext, send a packet or change RTC.
 use super::*;
-use catcoms_rt::Clock;
 use sha2::{Digest, Sha256};
 
 /// Closed native outcome. Signed bytes stay in the original packet ledger rather than a second
@@ -35,7 +34,7 @@ pub(super) struct RecordedResult {
 /// them. Pending-token/engine authority deliberately does not appear in this type.
 pub(crate) struct ResultBinding {
     pub pair: CallLease,
-    pub attempt: CallLease,
+    pub attempt: Option<CallLease>,
     pub deadline: u64,
     pub expires: u64,
 }
@@ -45,8 +44,9 @@ pub(crate) struct TerminalResult {
 }
 
 impl RecordedResult {
-    fn receipt(&self, action: &CryptoAction, clock: &dyn Clock) -> CryptoResultReceipt {
+    fn receipt(&self, action: &CryptoAction) -> CryptoResultReceipt {
         let binding = &self.result.binding;
+        let (monotonic, wall) = action.authority.history_time();
         CryptoResultReceipt {
             action: action.serial,
             input_tag: action.input_tag,
@@ -54,9 +54,12 @@ impl RecordedResult {
             outcome: self.result.outcome,
             retired: !action.call.is_live()
                 || !binding.pair.is_live()
-                || !binding.attempt.is_live()
-                || clock.monotonic_ms() >= binding.deadline
-                || clock.now_ms() > binding.expires,
+                || binding
+                    .attempt
+                    .as_ref()
+                    .is_some_and(|attempt| !attempt.is_live())
+                || monotonic >= binding.deadline
+                || wall > binding.expires,
         }
     }
 }
@@ -88,7 +91,6 @@ impl CryptoAction {
         &self,
         bytes: &[u8],
         claimed_tag: [u8; 32],
-        clock: &dyn Clock,
         commit: impl FnOnce() -> Result<TerminalResult, VoiceError>,
     ) -> Result<CryptoResultReceipt, VoiceError> {
         let output_tag = self.output_tag(bytes)?;
@@ -102,7 +104,7 @@ impl CryptoAction {
             if recorded.output_tag != output_tag {
                 return Err(VoiceError::RetryMismatch);
             }
-            return Ok(recorded.receipt(self, clock));
+            return Ok(recorded.receipt(self));
         }
         if engine.settled || engine.permit.is_none() || !self.authority.authorized() {
             return Err(VoiceError::Unauthorized);
@@ -115,7 +117,7 @@ impl CryptoAction {
             .terminal
             .as_ref()
             .expect("installed terminal result")
-            .receipt(self, clock))
+            .receipt(self))
     }
 }
 

@@ -30,6 +30,72 @@ const PROCESS_ATTEMPTS: usize = 8;
 /// and this is only a backstop for a driver that never reports one.
 const ATTEMPT_MS: u64 = catcoms_rt::REQUEST_TIMEOUT_MS + 2_000;
 const READ_MS: u64 = 60_000;
+/// One absolute owner deadline, not a new relative sleep for every command or network event.
+/// Providerless scans do not begin a run, read prefixes or debit durable execution slices.
+const AUTOMATIC_KEEP_MS: u64 = 30_000;
+
+/// One source of truth for Keep's requested page length and durable debit. A lying plaintext
+/// size cannot make a larger request spend one byte after reaching its declared ciphertext end.
+fn kept_ciphertext_bound(reference: &FileRef) -> Result<usize, String> {
+    if reference.size > CHUNK_BYTES as u64 {
+        return Err("chunk exceeds the file size limit".into());
+    }
+    Ok(catcoms_storage::padded_len(
+        reference.size as usize,
+        catcoms_storage::CHUNK_PAD_FLOOR,
+        CHUNK_BYTES,
+    ) + catcoms_storage::PAD_FOOTER_BYTES
+        + 40)
+}
+/// Validate opaque saved plans at the app boundary. Storage can authenticate its journal but
+/// cannot interpret FileManifest semantics; recompute every exact digest and ciphertext bound.
+fn kept_plan(
+    encoded: Vec<u8>,
+    cid: Cid,
+) -> Result<(catcoms_storage::kept::KeepPlan, crate::FileManifest), String> {
+    let manifest = crate::FileManifest::decode_or_legacy(&encoded).map_err(|e| e.to_string())?;
+    if manifest.plaintext_cid != cid || manifest.total_size > crate::MAX_FILE_BYTES as u64 {
+        return Err("kept manifest is inconsistent".into());
+    }
+    let chunks = manifest
+        .chunks
+        .iter()
+        .map(|reference| {
+            kept_ciphertext_bound(reference).map(|bound| (reference.ciphertext_cid, bound as u64))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let plan = catcoms_storage::kept::KeepPlan {
+        cid,
+        version: crate::file_manifest_version(&encoded),
+        manifest: encoded,
+        chunks,
+    };
+    Ok((plan, manifest))
+}
+
+fn kept_request_window(
+    reference: &FileRef,
+    paged: bool,
+    desired: usize,
+    staged: usize,
+) -> Result<(usize, u64), String> {
+    let bound = kept_ciphertext_bound(reference)?;
+    if paged {
+        let remaining = bound
+            .checked_sub(staged)
+            .filter(|remaining| *remaining != 0)
+            .ok_or("chunk exceeds its declared size")?;
+        let requested = desired.min(remaining);
+        if requested == 0 {
+            return Err("empty file request window".into());
+        }
+        Ok((requested, requested as u64))
+    } else {
+        // The legacy request carries only a CID; its local acceptance limit is not sent to the
+        // provider. Conservatively prepay a complete released frame, never the claimed size.
+        Ok((bound, catcoms_rt::MAX_REQUEST_RESPONSE_FRAME_BYTES as u64))
+    }
+}
 
 /// Exhausted-candidate rounds one chunk may spend before the read gives up.
 ///
@@ -67,11 +133,67 @@ fn process_slots() -> Arc<Semaphore> {
         .clone()
 }
 
+fn process_job_slots() -> Arc<Semaphore> {
+    static SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    SLOTS
+        .get_or_init(|| Arc::new(Semaphore::new(PROCESS_ATTEMPTS)))
+        .clone()
+}
+
+/// Whole-job capacity is independent of lower attempts. A job can retain staged bytes, range
+/// state or a source search while waiting behind a busy peer, without a network permit yet.
+/// This affine owner follows every continuation and is released only after that state drops.
+struct JobCustody {
+    _server: OwnedSemaphorePermit,
+    _process: OwnedSemaphorePermit,
+}
+
 #[derive(Debug)]
 struct AttemptAccounting {
     _server: OwnedSemaphorePermit,
     _process: OwnedSemaphorePermit,
     _caller: Option<SharedRequestKeepalive>,
+}
+
+/// The immutable prepaid deadline follows the request into the transport's own queue. Neither
+/// delayed first polling nor a pause/replacement may renew that authority; actual lower custody
+/// remains in AttemptAccounting until the transport retires, independently of this effect gate.
+#[derive(Debug)]
+struct FileRequestAuthority {
+    clock: Arc<dyn catcoms_rt::Clock + Send>,
+    deadline: u64,
+    keep: Option<catcoms_storage::kept::KeepWork>,
+    outer: Option<RequestCancellation>,
+    actor: watch::Receiver<bool>,
+    root: Arc<dyn catcoms_rt::RequestAuthority>,
+}
+#[async_trait::async_trait]
+impl catcoms_rt::RequestAuthority for FileRequestAuthority {
+    fn authorized(&self) -> bool {
+        *self.actor.borrow()
+            && self.actor.has_changed().is_ok()
+            && self.root.authorized()
+            && self.clock.monotonic_ms() < self.deadline
+            && self.keep.as_ref().is_none_or(|work| work.run_is_live())
+            && self
+                .outer
+                .as_ref()
+                .is_none_or(|cancel| !cancel.is_cancelled())
+    }
+    async fn revoked(&self) {
+        let mut outer = self.outer.clone();
+        let mut actor = self.actor.clone();
+        while self.authorized() {
+            let remaining = self.deadline.saturating_sub(self.clock.monotonic_ms());
+            tokio::select! {
+                _ = self.clock.sleep(Duration::from_millis(remaining)) => {},
+                _ = actor.changed() => {},
+                _ = self.root.revoked() => return,
+                _ = async { if let Some(work) = &self.keep { work.retired().await } else { std::future::pending::<()>().await } } => return,
+                _ = async { if let Some(cancel) = &mut outer { cancel.cancelled().await } else { std::future::pending::<()>().await } } => return,
+            }
+        }
+    }
 }
 
 /// Publish cancellation explicitly during abort/unwind, including while other sender clones
@@ -87,6 +209,7 @@ enum ReadReply {
     Chunk(oneshot::Sender<ChunkResult>),
     Range(oneshot::Sender<Result<FileRange, String>>),
     Keep(oneshot::Sender<Result<(), String>>),
+    AutomaticKeep,
 }
 
 impl ReadReply {
@@ -95,6 +218,7 @@ impl ReadReply {
             Self::Chunk(reply) => reply.is_closed(),
             Self::Range(reply) => reply.is_closed(),
             Self::Keep(reply) => reply.is_closed(),
+            Self::AutomaticKeep => false,
         }
     }
 
@@ -103,6 +227,7 @@ impl ReadReply {
             Self::Chunk(reply) => reply.closed().await,
             Self::Range(reply) => reply.closed().await,
             Self::Keep(reply) => reply.closed().await,
+            Self::AutomaticKeep => std::future::pending().await,
         }
     }
 
@@ -117,6 +242,7 @@ impl ReadReply {
             Self::Keep(reply) => {
                 let _ = reply.send(Err(error));
             }
+            Self::AutomaticKeep => {}
         }
     }
 }
@@ -131,10 +257,13 @@ struct RangeState {
 }
 
 struct KeepState {
-    token: u64,
+    token: catcoms_storage::kept::KeepRun,
     manifest: crate::FileManifest,
     hasher: catcoms_storage::CidHasher,
-    existing: bool,
+    plan_version: [u8; 32],
+    /// A whole-candidate turn can visit each original plan at most once. Restart preserves the
+    /// durable global allowance and bad-reference verdicts, not this ephemeral search cursor.
+    tried: Vec<[u8; 32]>,
 }
 
 pub(super) struct ReadJob {
@@ -144,6 +273,10 @@ pub(super) struct ReadJob {
     index: usize,
     deadline: u64,
     cancel: Option<RequestCancellation>,
+    /// Exact actor generation, including local steps and already-returned network completions.
+    actor: watch::Receiver<bool>,
+    /// Original Root/member/policy scope, never refreshed when an old job retries or resumes.
+    root: Arc<dyn catcoms_rt::RequestAuthority>,
     reply: ReadReply,
     range: Option<RangeState>,
     keep: Option<KeepState>,
@@ -191,23 +324,25 @@ pub(super) struct ReadJob {
     /// decryption failure or a changed manifest are all answers, not accidents: re-asking the
     /// same provider inside the same deadline cannot change them, and doing so would spin.
     retryable: bool,
+    // LAST: staged/range/search and reply metadata must retire before returning job capacity.
+    _job: JobCustody,
 }
 
 impl ReadJob {
     fn current<T: MeshTransport, R: CryptoRngCore>(&self, server: &Server<T, R>) -> bool {
-        !self.reply.is_closed()
+        *self.actor.borrow()
+            && self.actor.has_changed().is_ok()
+            && self.root.authorized()
+            && !self.reply.is_closed()
             && !self
                 .cancel
                 .as_ref()
                 .is_some_and(RequestCancellation::is_cancelled)
             && server.epoch() == self.epoch
-            && if self.keep.as_ref().is_some_and(|keep| keep.existing) {
+            && if let Some(keep) = &self.keep {
                 server
                     .sync
-                    .kept_files()
-                    .files
-                    .iter()
-                    .any(|copy| copy.plan.cid == self.cid && copy.plan.version == self.version)
+                    .keep_run_current(keep.token, &self.cid, &keep.plan_version)
             } else {
                 server
                     .file_head(&self.cid)
@@ -235,7 +370,7 @@ impl ReadJob {
             "file transfer failed"
         );
         if let Some(keep) = &self.keep {
-            let _ = server.sync.abort_keep(keep.token);
+            let _ = server.sync.pause_keep(keep.token);
         }
         self.reply.fail(error);
     }
@@ -270,6 +405,7 @@ impl ReadJob {
                 return Some(self);
             }
             if keep.hasher.cid() != self.cid {
+                let _ = server.sync.block_keep(keep.token);
                 self.fail(
                     server,
                     "kept file failed whole-file content verification".into(),
@@ -281,7 +417,7 @@ impl ReadJob {
                 .finish_keep(keep.token)
                 .map_err(|e| e.to_string());
             if result.is_err() {
-                let _ = server.sync.abort_keep(keep.token);
+                let _ = server.sync.pause_keep(keep.token);
             }
             if let ReadReply::Keep(reply) = self.reply {
                 let _ = reply.send(result);
@@ -333,13 +469,21 @@ pub(super) struct FinishedAttempt {
     /// Whether this attempt asked for a page or for the whole blob.
     paged: bool,
     result: Result<CompletedBlobFetch, String>,
+    /// Original prepaid execution slice. A new actor turn cannot renew it to accept an old
+    /// network result after pause, Retry, replacement or its original monotonic deadline.
+    keep_work: Option<catcoms_storage::kept::KeepWork>,
     // A timeout response may be queued while the actual request also remains in libp2p. Holding
     // this token in BOTH places bounds each ownership phase without prematurely refunding either.
     _accounting: SharedRequestKeepalive,
 }
 
 pub(super) struct FileTransfers {
+    /// Sole publisher: clones/handles/lower workers only observe this generation. Drop retires
+    /// it even if a transport continues to own the original request/accounting.
+    lifetime: watch::Sender<bool>,
     running: JoinSet<TransferStep>,
+    jobs: Arc<Semaphore>,
+    process_jobs: Arc<Semaphore>,
     slots: Arc<Semaphore>,
     process: Arc<Semaphore>,
     /// Providers with a bulk request already on the wire.
@@ -350,16 +494,147 @@ pub(super) struct FileTransfers {
     /// requests then compete with each other and with the gossip keeping the mapping alive.
     /// One bulk request per provider, `SERVER_ATTEMPTS` across providers.
     inflight: HashSet<PeerId>,
+    automatic_due: Option<u64>,
+    automatic_after: Option<Cid>,
+    /// Test-only causal boundary after real AEAD opening and before storage admission. No
+    /// production callback runs here; tests retire the original owner at this exact boundary.
+    #[cfg(test)]
+    before_storage_admission: Option<Box<dyn FnOnce() + Send>>,
+}
+
+/// Observes the SAME actor generation as outgoing reads. Neither a source task nor a native
+/// service attachment can keep the publisher alive or revive work after a cancelled freeze.
+#[derive(Debug)]
+struct ActorFileAuthority(watch::Receiver<bool>);
+#[async_trait::async_trait]
+impl catcoms_rt::RequestAuthority for ActorFileAuthority {
+    fn authorized(&self) -> bool {
+        *self.0.borrow() && self.0.has_changed().is_ok()
+    }
+    async fn revoked(&self) {
+        let mut live = self.0.clone();
+        while self.authorized() {
+            if live.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+impl TransferStep {
+    pub(super) fn kept_cid(&self) -> Option<Cid> {
+        let job = match self {
+            Self::Local(job) => job.as_ref(),
+            Self::Network(finished) => &finished.job,
+        };
+        job.keep.as_ref().map(|_| job.cid)
+    }
 }
 
 impl FileTransfers {
+    pub(super) fn authority(&self) -> Arc<dyn catcoms_rt::RequestAuthority> {
+        Arc::new(ActorFileAuthority(self.lifetime.subscribe()))
+    }
+
     pub(super) fn new() -> Self {
         Self {
+            lifetime: watch::channel(true).0,
             running: JoinSet::new(),
+            jobs: Arc::new(Semaphore::new(SERVER_ATTEMPTS)),
+            process_jobs: process_job_slots(),
             slots: Arc::new(Semaphore::new(SERVER_ATTEMPTS)),
             process: process_slots(),
             inflight: HashSet::new(),
+            automatic_due: None,
+            automatic_after: None,
+            #[cfg(test)]
+            before_storage_admission: None,
         }
+    }
+
+    fn admit_job(&self) -> Option<JobCustody> {
+        self.jobs
+            .clone()
+            .try_acquire_owned()
+            .ok()
+            .zip(self.process_jobs.clone().try_acquire_owned().ok())
+            .map(|(server, process)| JobCustody {
+                _server: server,
+                _process: process,
+            })
+    }
+
+    fn before_storage_admission(&mut self) {
+        #[cfg(test)]
+        if let Some(hook) = self.before_storage_admission.take() {
+            hook();
+        }
+    }
+
+    /// Retire synchronously BEFORE acknowledging stop or awaiting the close event consumer.
+    /// Do not drop/refund actual lower work here: captured observers invalidate its next effect,
+    /// while transport-held AttemptAccounting continues to own every real outstanding permit.
+    pub(super) fn retire(&self) {
+        self.lifetime.send_replace(false);
+    }
+
+    /// A cancelled freeze may resume this actor, but it must never revive old queued work.
+    /// Old jobs/completions retain the retired receiver; only new jobs capture this fresh owner.
+    pub(super) fn resume(&mut self) {
+        if !*self.lifetime.borrow() {
+            self.lifetime = watch::channel(true).0;
+        }
+    }
+
+    /// Revisit saved user intents independently of frontend views. The exact native session
+    /// token follows every lower request; a fresh unlock cannot revive an old queued run.
+    /// Cursor rotation includes unsuccessful choices so an absent first file cannot monopolize
+    /// this bounded scheduler. Expired clocks disable it rather than leaving a ready loop.
+    pub(super) fn pump_automatic<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        session: Option<RequestCancellation>,
+    ) -> Option<u64> {
+        let Some(session) = session.filter(|session| !session.is_cancelled()) else {
+            self.automatic_due = None;
+            return None;
+        };
+        let Some(cid) = server.sync.automatic_keep_candidate(self.automatic_after) else {
+            self.automatic_due = None;
+            return None;
+        };
+        let now = server.runtime_clock().monotonic_ms();
+        let next = now.checked_add(AUTOMATIC_KEEP_MS)?;
+        let due = *self.automatic_due.get_or_insert(next);
+        if now < due {
+            return Some(due);
+        }
+        self.automatic_due = Some(next);
+        self.automatic_after = Some(cid);
+        if server.sync.keep_auto_source_available(&cid) {
+            // Admission returns immediately; the local prefix and network response are still
+            // processed by the existing yielding/verification path with the original budget.
+            let _ = self.start_keep(
+                server,
+                cid.as_bytes().to_vec(),
+                Some(session),
+                ReadReply::AutomaticKeep,
+                true,
+            );
+        }
+        Some(next)
+    }
+
+    pub(super) fn request_keep<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        raw: Vec<u8>,
+        session: Option<RequestCancellation>,
+    ) -> Result<(), String> {
+        let session = session
+            .filter(|session| !session.is_cancelled())
+            .ok_or("the vault is locked")?;
+        self.start_keep(server, raw, Some(session), ReadReply::AutomaticKeep, false)
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -402,46 +677,112 @@ impl FileTransfers {
         cancel: Option<RequestCancellation>,
         reply: oneshot::Sender<Result<(), String>>,
     ) {
+        let _ = self.start_keep(server, raw, cancel, ReadReply::Keep(reply), false);
+    }
+
+    fn start_keep<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        raw: Vec<u8>,
+        cancel: Option<RequestCancellation>,
+        reply: ReadReply,
+        resume_existing: bool,
+    ) -> Result<(), String> {
+        let root = match server.sync.file_effect_authority() {
+            Ok(root) => root,
+            Err(error) => {
+                let error = error.to_string();
+                reply.fail(error.clone());
+                return Err(error);
+            }
+        };
         if reply.is_closed() {
-            return;
+            return Err("file keeping cancelled".into());
         }
         if cancel
             .as_ref()
             .is_some_and(RequestCancellation::is_cancelled)
         {
-            let _ = reply.send(Err("file keeping cancelled".into()));
-            return;
+            reply.fail("file keeping cancelled".into());
+            return Err("file keeping cancelled".into());
         }
+        if !server.sync.has_file_key() {
+            // Legacy absent-transfer state can recover valid metadata without its file key.
+            // Refuse before reservation/debit; this is not evidence the saved content is bad.
+            let error = catcoms_sync::SyncError::FileKeyUnavailable.to_string();
+            reply.fail(error.clone());
+            return Err(error);
+        }
+        // Refuse BEFORE starting/resuming a durable run or constructing its retained state.
+        // Busy is not a cancellation of an existing saved intent and creates no journal debit.
+        let Some(job_custody) = self.admit_job() else {
+            let error = "file transfers are busy; try again shortly".to_string();
+            reply.fail(error.clone());
+            return Err(error);
+        };
         let result = (|| {
             let cid = Cid::from_bytes(
                 raw.as_slice()
                     .try_into()
                     .map_err(|_| "bad content address".to_string())?,
             );
-            let existing = server
-                .sync
-                .kept_files()
-                .files
+            let inventory = server.sync.kept_files();
+            let existing = inventory
+                .transfers
                 .into_iter()
-                .find(|f| f.plan.cid == cid);
+                .filter(|transfer| transfer.phase != catcoms_storage::kept::KeepPhase::Deleting)
+                .map(|transfer| (transfer.plan, transfer.listing))
+                .chain(inventory.files.into_iter().map(|file| {
+                    let listing = file.plan.version;
+                    (file.plan, listing)
+                }))
+                .find(|(plan, _)| plan.cid == cid);
             // A user may explicitly check/repair their own saved manifest even after unlisting.
             // This local authority never enters files(), media heads, or replicated publication.
-            let (encoded, manifest, version, recheck) = if let Some(copy) = existing {
-                let manifest = crate::FileManifest::decode_or_legacy(&copy.plan.manifest)
-                    .map_err(|e| e.to_string())?;
-                if manifest.plaintext_cid != cid
-                    || crate::file_manifest_version(&copy.plan.manifest) != copy.plan.version
-                {
+            let (plan, manifest, listing, candidates) = if let Some((plan, listing)) = existing {
+                let (validated, manifest) = kept_plan(plan.manifest.clone(), cid)?;
+                if validated != plan {
                     return Err("kept manifest is inconsistent".into());
                 }
-                (copy.plan.manifest, manifest, copy.plan.version, true)
+                let saved = server
+                    .sync
+                    .kept_saved_plans(&cid)
+                    .ok_or("saved transfer changed")?;
+                if saved.is_empty() || saved.len() > file_resolution::MAX_MANIFEST_VARIANTS {
+                    return Err("Saved file details could not be verified.".into());
+                }
+                for (index, candidate) in saved.iter().enumerate() {
+                    let (validated, decoded) = kept_plan(candidate.manifest.clone(), cid)?;
+                    if &validated != candidate
+                        || !file_resolution::equivalent(&manifest, &decoded)
+                        || (index != 0 && saved[index - 1].version >= candidate.version)
+                    {
+                        return Err("Saved file details could not be verified.".into());
+                    }
+                }
+                // Old exact-only records may have chosen one member of an earlier set. They
+                // cannot reconstruct it after unlisting. V4 retained every candidate, so require
+                // the exact original set identity before spending any execution allowance.
+                if !saved.contains(&plan)
+                    || (saved.len() > 1
+                        && file_resolution::manifest_set_version(saved.iter().map(|p| p.version))
+                            != listing)
+                {
+                    return Err("Saved file details could not be verified.".into());
+                }
+                (plan, manifest, listing, None)
             } else {
+                if resume_existing {
+                    return Err("saved transfer changed".into());
+                }
                 let resolved = file_resolution::resolve(&server.files(), &cid)
                     .ok_or("no unambiguous file manifest in this server's index")?;
-                // Prefer one wholly local exact variant; a repaired upload may have a different
-                // encryption from the sorted first variant whose original holder is offline.
-                let chosen = resolved
+                let plans = resolved
                     .variants
+                    .iter()
+                    .map(|(entry, _)| kept_plan(entry.file_ref.clone(), cid))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let chosen = plans
                     .iter()
                     .position(|(_, manifest)| {
                         manifest
@@ -450,35 +791,22 @@ impl FileTransfers {
                             .all(|r| server.sync.has_blob(&r.ciphertext_cid))
                     })
                     .unwrap_or(0);
-                let (entry, manifest) = resolved.variants[chosen].clone();
-                (entry.file_ref, manifest, resolved.version, false)
+                let (plan, manifest) = plans[chosen].clone();
+                let candidates = (plans.len() > 1)
+                    .then(|| (plans.into_iter().map(|(p, _)| p).collect(), chosen));
+                (plan, manifest, resolved.version, candidates)
             };
-            let chunks = manifest
-                .chunks
-                .iter()
-                .map(|r| {
-                    let padded = catcoms_storage::padded_len(
-                        r.size as usize,
-                        catcoms_storage::CHUNK_PAD_FLOOR,
-                        CHUNK_BYTES,
-                    );
-                    (
-                        r.ciphertext_cid,
-                        padded as u64 + catcoms_storage::PAD_FOOTER_BYTES as u64 + 40,
-                    )
-                })
-                .collect();
-            let plan = catcoms_storage::kept::KeepPlan {
-                cid,
-                version: crate::file_manifest_version(&encoded),
-                manifest: encoded,
-                chunks,
-            };
-            let token = server.sync.begin_keep(plan).map_err(|e| e.to_string())?;
-            Ok::<_, String>((cid, version, token, manifest, recheck))
+            let plan_version = plan.version;
+            let token = if let Some((plans, selected)) = candidates {
+                server.sync.begin_keep_variants(plans, selected, listing)
+            } else {
+                server.sync.begin_keep_with_listing(plan, listing)
+            }
+            .map_err(|e| e.to_string())?;
+            Ok::<_, String>((cid, listing, token, manifest, plan_version))
         })();
         match result {
-            Ok((cid, version, token, manifest, recheck)) => {
+            Ok((cid, version, token, manifest, plan_version)) => {
                 let job = ReadJob {
                     cid,
                     version,
@@ -489,13 +817,16 @@ impl FileTransfers {
                         .monotonic_ms()
                         .saturating_add(READ_MS),
                     cancel,
-                    reply: ReadReply::Keep(reply),
+                    actor: self.lifetime.subscribe(),
+                    root,
+                    reply,
                     range: None,
                     keep: Some(KeepState {
                         token,
                         manifest,
                         hasher: catcoms_storage::CidHasher::new(),
-                        existing: recheck,
+                        plan_version,
+                        tried: vec![plan_version],
                     }),
                     candidates: None,
                     tried_providers: HashSet::new(),
@@ -508,12 +839,78 @@ impl FileTransfers {
                     page_size: catcoms_sync::MIN_BLOB_PAGE,
                     pages: 0,
                     paging: true,
+                    _job: job_custody,
                 };
                 self.yield_local(job);
+                Ok(())
             }
             Err(error) => {
-                let _ = reply.send(Err(error));
+                reply.fail(error.clone());
+                Err(error)
             }
+        }
+    }
+
+    /// A new candidate restarts the ENTIRE plaintext hash and exact chunk sequence. The saved
+    /// reservation, grant, intent and cancellation are unchanged; only storage can mint its new
+    /// opaque run after retiring the old lower-effect owner and publishing the selection.
+    fn fallback_or_fail<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        mut job: ReadJob,
+        bad_current: bool,
+        error: String,
+    ) {
+        let outcome = (|| -> Result<bool, String> {
+            let Some(keep) = job.keep.as_mut() else {
+                return Ok(false);
+            };
+            let Some((token, plan)) = server
+                .sync
+                .fallback_keep(keep.token, &keep.plan_version, &keep.tried, bad_current)
+                .map_err(|e| e.to_string())?
+            else {
+                return Ok(false);
+            };
+            // Install the new token first, so even a corrupt saved plan's rejection pauses its
+            // actual owner. Full saved-set validation already ran before admission and plans are immutable.
+            keep.token = token;
+            let (validated, manifest) = kept_plan(plan.manifest.clone(), job.cid)?;
+            if plan != validated || !file_resolution::equivalent(&keep.manifest, &manifest) {
+                return Err("Saved file details could not be verified.".into());
+            }
+            keep.plan_version = plan.version;
+            keep.tried.push(plan.version);
+            keep.manifest = manifest;
+            keep.hasher = catcoms_storage::CidHasher::new();
+            job.index = 0;
+            job.candidates = None;
+            job.tried_providers.clear();
+            job.rejected_variants.clear();
+            job.staged = Vec::new();
+            job.staged_cid = None;
+            job.page_size = catcoms_sync::MIN_BLOB_PAGE;
+            job.pages = 0;
+            job.paging = true;
+            job.rounds = 0;
+            job.retryable = false;
+            job.deadline = server
+                .runtime_clock()
+                .monotonic_ms()
+                .saturating_add(READ_MS);
+            Ok(true)
+        })();
+        match outcome {
+            Ok(true) => self.yield_local(job),
+            Ok(false) => {
+                if bad_current {
+                    if let Some(keep) = &job.keep {
+                        let _ = server.sync.block_keep(keep.token);
+                    }
+                }
+                job.fail(server, error);
+            }
+            Err(error) => job.fail(server, error),
         }
     }
 
@@ -528,13 +925,15 @@ impl FileTransfers {
         self.begin(server, cid, index, None, cancel, ReadReply::Chunk(reply));
     }
 
-    pub(super) fn range<T: MeshTransport + 'static, R: CryptoRngCore>(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn range_cancellable<T: MeshTransport + 'static, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
         cid: Vec<u8>,
         version: [u8; 32],
         start: u64,
         max_len: usize,
+        cancel: Option<RequestCancellation>,
         reply: oneshot::Sender<Result<FileRange, String>>,
     ) {
         if max_len > CHUNK_BYTES {
@@ -546,7 +945,7 @@ impl FileTransfers {
             cid,
             (start / CHUNK_BYTES as u64) as usize,
             Some((version, start, max_len)),
-            None,
+            cancel,
             ReadReply::Range(reply),
         );
     }
@@ -563,11 +962,22 @@ impl FileTransfers {
         if reply.is_closed() {
             return;
         }
+        if cancel
+            .as_ref()
+            .is_some_and(RequestCancellation::is_cancelled)
+        {
+            reply.fail("file download cancelled".into());
+            return;
+        }
         let Ok(raw) = <[u8; 32]>::try_from(raw.as_slice()) else {
             reply.fail("bad content address".into());
             return;
         };
         let cid = Cid::from_bytes(raw);
+        let Some(job_custody) = self.admit_job() else {
+            reply.fail("file transfers are busy; try again shortly".into());
+            return;
+        };
         let Some(head) = server.file_head(&cid) else {
             reply.fail("no unambiguous file manifest in this server's index".into());
             return;
@@ -599,6 +1009,13 @@ impl FileTransfers {
         } else {
             None
         };
+        let root = match server.sync.file_effect_authority() {
+            Ok(root) => root,
+            Err(error) => {
+                reply.fail(error.to_string());
+                return;
+            }
+        };
         let job = ReadJob {
             cid,
             version: head.manifest_version,
@@ -609,6 +1026,8 @@ impl FileTransfers {
                 .monotonic_ms()
                 .saturating_add(READ_MS),
             cancel,
+            actor: self.lifetime.subscribe(),
+            root,
             reply,
             range,
             keep: None,
@@ -623,6 +1042,7 @@ impl FileTransfers {
             page_size: catcoms_sync::MIN_BLOB_PAGE,
             pages: 0,
             paging: true,
+            _job: job_custody,
         };
         self.advance(server, job);
     }
@@ -642,9 +1062,20 @@ impl FileTransfers {
                 return;
             }
             if server.runtime_clock().monotonic_ms() >= job.deadline {
-                job.fail(server, "file download timed out".into());
+                self.fallback_or_fail(server, job, false, "file download timed out".into());
                 return;
             }
+            let local_work = if let Some(keep) = &job.keep {
+                match server.sync.keep_work(keep.token, None) {
+                    Ok(work) => Some(work),
+                    Err(error) => {
+                        job.fail(server, error.to_string());
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
             if job.candidates.is_none() {
                 let manifests = if let Some(keep) = &job.keep {
                     vec![keep.manifest.clone()]
@@ -670,9 +1101,35 @@ impl FileTransfers {
                     if job.rejected_variants.contains(&reference.encode()) {
                         continue;
                     }
-                    if let Some(ciphertext) = server.sync.get_blob(&reference.ciphertext_cid) {
+                    let retained = job.keep.as_ref().and_then(|keep| {
+                        server
+                            .sync
+                            .get_keep(
+                                keep.token,
+                                &reference.ciphertext_cid,
+                                catcoms_sync::MAX_BOUNDED_BLOB_BYTES,
+                            )
+                            .ok()
+                            .flatten()
+                    });
+                    if let Some(ciphertext) =
+                        retained.or_else(|| server.sync.get_blob(&reference.ciphertext_cid))
+                    {
                         if let Ok(bytes) = server.sync.open_file(&ciphertext, reference) {
+                            self.before_storage_admission();
+                            // Opening can race lock/removal on another thread. Check the SAME
+                            // original invocation after CPU work, before plaintext or storage.
+                            if !job.current(server) {
+                                job.fail(server, "file download cancelled".into());
+                                return;
+                            }
                             if let Some(keep) = &job.keep {
+                                if let Some(work) = &local_work {
+                                    if let Err(error) = server.sync.validate_keep_work(work) {
+                                        job.fail(server, error.to_string());
+                                        return;
+                                    }
+                                }
                                 if let Err(error) = server.sync.put_keep(keep.token, &ciphertext) {
                                     job.fail(server, error.to_string());
                                     return;
@@ -682,6 +1139,11 @@ impl FileTransfers {
                             break;
                         }
                         job.error = format!("chunk {} could not be decrypted", job.index);
+                        if job.keep.is_some() {
+                            let error = job.error.clone();
+                            self.fallback_or_fail(server, job, true, error);
+                            return;
+                        }
                         job.rejected_variants.insert(reference.encode());
                     } else {
                         missing.push(reference.clone());
@@ -795,7 +1257,7 @@ impl FileTransfers {
                     return;
                 }
                 let error = job.error.clone();
-                job.fail(server, error);
+                self.fallback_or_fail(server, job, false, error);
                 return;
             };
             let permits = self
@@ -835,6 +1297,25 @@ impl FileTransfers {
             // Paged by default; the whole-blob grammar is the fallback for a provider that
             // answered a page request with "I do not know this kind".
             let paged = job.paging;
+            let desired = job.page_size.min(server.sync.blob_page_ceiling(peer));
+            let (request_limit, prepaid_bytes) = if job.keep.is_some() {
+                match kept_request_window(&reference, paged, desired, job.staged.len()) {
+                    Ok(window) => window,
+                    Err(error) => {
+                        job.fail(server, error);
+                        return;
+                    }
+                }
+            } else {
+                (
+                    if paged {
+                        desired
+                    } else {
+                        catcoms_sync::MAX_BOUNDED_BLOB_BYTES
+                    },
+                    0,
+                )
+            };
             let prepared = if paged {
                 let offset = match u32::try_from(job.staged.len()) {
                     Ok(offset) => offset,
@@ -843,16 +1324,13 @@ impl FileTransfers {
                         return;
                     }
                 };
-                let size = job.page_size.min(server.sync.blob_page_ceiling(peer));
                 server
                     .sync
-                    .prepare_blob_page(peer, reference.ciphertext_cid, offset, size)
+                    .prepare_blob_page(peer, reference.ciphertext_cid, offset, request_limit)
             } else {
-                server.sync.prepare_blob_fetch(
-                    peer,
-                    reference.ciphertext_cid,
-                    catcoms_sync::MAX_BOUNDED_BLOB_BYTES,
-                )
+                server
+                    .sync
+                    .prepare_blob_fetch(peer, reference.ciphertext_cid, request_limit)
             };
             let request = match prepared {
                 Ok(request) => request,
@@ -862,25 +1340,60 @@ impl FileTransfers {
                 }
             };
             let clock = server.runtime_clock();
-            let duration = Duration::from_millis(
-                ATTEMPT_MS.min(job.deadline.saturating_sub(clock.monotonic_ms())),
-            );
+            // Capacity and authenticated preparation already succeeded. Debit persistent work
+            // before the first actual dispatch, keeping a proven local refusal free of spend.
+            let keep_work = if let Some(keep) = &job.keep {
+                match server.sync.keep_work(
+                    keep.token,
+                    Some(catcoms_storage::kept::KeepNetworkWork {
+                        bytes: prepaid_bytes,
+                        paged,
+                    }),
+                ) {
+                    Ok(work) => Some(work),
+                    Err(error) => {
+                        job.fail(server, error.to_string());
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            let execution_deadline = keep_work
+                .as_ref()
+                .map_or(job.deadline, |work| work.deadline().min(job.deadline));
+            let deadline = execution_deadline.min(clock.monotonic_ms().saturating_add(ATTEMPT_MS));
+            let authority = Arc::new(FileRequestAuthority {
+                clock: clock.clone(),
+                deadline,
+                keep: keep_work.clone(),
+                outer: job.cancel.clone(),
+                actor: job.actor.clone(),
+                root: job.root.clone(),
+            });
             tracing::debug!(
                 cid = ?job.cid,
                 chunk = job.index,
                 ?peer,
                 round = job.rounds,
-                budget_ms = duration.as_millis() as u64,
+                budget_ms = deadline.saturating_sub(clock.monotonic_ms()),
                 "requesting a file chunk from a provider"
             );
             self.inflight.insert(peer);
             // Construct the guard BEFORE spawn so aborting even an unpolled task sets the bit.
             let (signal, receiver) = watch::channel(false);
             let guard = CancelOnDrop(signal);
-            let cancellation = RequestCancellation::new(receiver, Some(accounting.clone()));
+            let cancellation = RequestCancellation::new(receiver, Some(accounting.clone()))
+                .with_authority(authority);
             self.running.spawn(async move {
                 let _guard = guard;
+                // First polling can occur after a queued actor step or a long executor stall.
+                // Recheck the original absolute deadline before even invoking the transport.
+                let duration = Duration::from_millis(deadline.saturating_sub(clock.monotonic_ms()));
                 let result = fetch_chunk_or_cancel(job.cancel.clone(), async {
+                    if cancellation.is_cancelled() {
+                        return Err(ATTEMPT_EXPIRED_ERROR.into());
+                    }
                     tokio::select! {
                         biased;
                         _ = job.reply.closed() => Err("download cancelled".into()),
@@ -895,6 +1408,7 @@ impl FileTransfers {
                     peer,
                     paged,
                     result,
+                    keep_work,
                     _accounting: accounting,
                 }))
             });
@@ -921,6 +1435,7 @@ impl FileTransfers {
             peer,
             paged,
             result,
+            keep_work,
             _accounting,
         } = finished;
         // Release the provider before any early return below: a job that fails its own
@@ -933,10 +1448,31 @@ impl FileTransfers {
             );
             return;
         }
+        if let Some(work) = &keep_work {
+            if let Err(error) = server.sync.validate_keep_work(work) {
+                let expired = matches!(
+                    error,
+                    catcoms_sync::SyncError::Storage(
+                        catcoms_storage::StorageError::KeepWorkExpired
+                    )
+                );
+                drop(_accounting);
+                if expired {
+                    self.fallback_or_fail(server, job, false, error.to_string());
+                } else {
+                    job.fail(server, error.to_string());
+                }
+                return;
+            }
+        }
         // A ready result can wait behind other actor work. Its original read deadline still
         // applies at commit time, rather than only while the worker was suspended on the wire.
         if server.runtime_clock().monotonic_ms() >= job.deadline {
-            job.fail(server, "file download timed out".into());
+            // A later prepaid slice does not extend this candidate's original quiet deadline.
+            // Retire it and try an owned alternative without importing the late reply; absence
+            // at this boundary is not evidence of a bad wrapped key or corrupt manifest.
+            drop(_accounting);
+            self.fallback_or_fail(server, job, false, "file download timed out".into());
             return;
         }
         if result
@@ -965,6 +1501,13 @@ impl FileTransfers {
             Ok(completed) if paged => {
                 match server.sync.authenticate_blob_page(completed) {
                     Ok(catcoms_sync::BlobPageOutcome::Page(page)) => {
+                        if job.keep.is_some()
+                            && kept_ciphertext_bound(&reference)
+                                .is_ok_and(|bound| page.total as usize > bound)
+                        {
+                            job.fail(server, "chunk exceeds its declared size".into());
+                            return;
+                        }
                         job.staged.extend_from_slice(&page.bytes);
                         job.pages = job.pages.saturating_add(1);
                         // A page that landed is evidence this link carries that much inside the
@@ -1051,6 +1594,19 @@ impl FileTransfers {
             Ok(Some((ciphertext, provider))) => {
                 match server.sync.open_file(&ciphertext, &reference) {
                     Ok(bytes) => {
+                        self.before_storage_admission();
+                        // CPU opening may outlive concurrent native lock/entry retirement.
+                        // This is storage admission; retirement AFTER it cannot recall I/O.
+                        if !job.current(server) {
+                            job.fail(server, "file download cancelled".into());
+                            return;
+                        }
+                        if let Some(work) = &keep_work {
+                            if let Err(error) = server.sync.validate_keep_work(work) {
+                                job.fail(server, error.to_string());
+                                return;
+                            }
+                        }
                         let stored = if let Some(keep) = &job.keep {
                             server.sync.put_keep(keep.token, &ciphertext)
                         } else {
@@ -1070,7 +1626,15 @@ impl FileTransfers {
                         }
                         return;
                     }
-                    Err(error) => job.error = error.to_string(),
+                    Err(error) => {
+                        job.error = error.to_string();
+                        if job.keep.is_some() {
+                            let error = job.error.clone();
+                            drop(_accounting);
+                            self.fallback_or_fail(server, job, true, error);
+                            return;
+                        }
+                    }
                 }
                 // A second provider cannot repair the exact authenticated ciphertext/key pair.
                 job.rejected_variants.insert(reference.encode());

@@ -299,6 +299,15 @@ impl EncryptedDoc {
         heads
     }
 
+    /// Whether every named change is already present, including non-head ancestors.
+    /// This is a bounded caller's retry hint check, not proof that an unknown hash exists.
+    /// It never imports bytes, traverses dependency closures or changes document state.
+    pub fn knows_changes(&self, hashes: &[[u8; 32]]) -> bool {
+        hashes
+            .iter()
+            .all(|hash| self.doc.get_change_by_hash(&ChangeHash(*hash)).is_some())
+    }
+
     /// What this node tells a serving peer it already holds, for an incremental catch-up: its
     /// automerge frontier plus the immediate ancestors of that frontier, deduplicated and capped
     /// at `max` (newest first, so a truncated list still describes the most useful part).
@@ -2082,6 +2091,27 @@ mod page_work_tests {
             .unwrap();
         assert_eq!(legacy.len(), 1);
         assert_eq!(next, None);
+    }
+
+    #[test]
+    fn known_change_hint_accepts_ancestors_and_rejects_unknown_hashes_without_mutation() {
+        let author = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&author).unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(915);
+        let mut doc = EncryptedDoc::new(DocType::Channel, 915, &author.device_id());
+        assert!(doc.knows_changes(&[]));
+        doc.edit(&author, &group, &mut rng, |doc| doc.put(ROOT, "count", 1))
+            .unwrap();
+        let ancestor = doc.heads();
+        doc.edit(&author, &group, &mut rng, |doc| doc.put(ROOT, "count", 2))
+            .unwrap();
+        let heads = doc.heads();
+        let count = doc.op_count();
+        assert!(doc.knows_changes(&ancestor));
+        assert!(doc.knows_changes(&heads));
+        assert!(!doc.knows_changes(&[[0xff; 32]]));
+        assert_eq!(doc.op_count(), count);
+        assert_eq!(doc.heads(), heads);
     }
 
     #[test]

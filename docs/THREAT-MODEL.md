@@ -1,6 +1,42 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Connected file-source activation checkpoint (19 October)
+
+Source kind30 requires current native account/exact entry, actor generation, Root membership/
+epoch/policy and explicit authenticated P2P permission. An unknown/unbound sender cannot spend
+an original requester's quota or start storage. Finite current-sender ingress debit precedes
+signature work; current C/B MLS keys, fixed helper, exact local source, full group/epoch, signed
+window and bounded freshness/replay/work checks precede read admission. A receives no claim of
+a direct C connection. The captured B descriptor/proof/actual connection incarnation cannot be
+refreshed by a replacement; native freeze/unlock likewise creates new work authority only.
+
+The source worker carries no Root, mutable store or signing key. A process-stable source credit
+is shared independently by the actual worker, pending metadata and final response. Cancellation
+and panic cannot recycle another owner's memory allowance. Only current positive storage plus
+native/Root/route scope and the exact two-second deadline authorize a Present send; reply receive
+does not cancel that independent final gate. Synchronous final admission is the boundary: later
+revocation cannot retract bytes already submitted. Signed negative replies establish observations,
+not global absence or durable remote custody. Helper29 now serves exactly one authorized hop,
+with one prepaid1MiB chain per original C/group,4/group and8/process. Its five route records are
+reserved before admission; four timed-out lower requests cannot strand a later admitted child
+or release the charge early. The selected source must equal the current named DeviceId AND
+captured MLS key, not merely any signer listed in the grant. Final Found keeps that A's original
+two-second scope and parent C scope, excluding reply lifetime. Lower bytes and output inputs
+retain independent same-credit owners across final refusal and cloning. No dial, recursion,
+URL fetch, cache write or file-wrap key crosses this worker. Requester/Keep and combined bridge
+acceptance remain unfinished; none of this implements live voice V2 or media relay.
+
 ## Congested driver and queued recovery boundary (PR 48 revision)
+
+A signed current-epoch Since requester can hint that a held document lacks its frontier. This
+cannot open a document, create membership/source proof, dial a peer or authorize imported data.
+Unknown hashes need not exist. At most one hint/document/full member is admitted each 30 seconds;
+256 retained entries refuse new identities when full after expiry pruning, and endpoint rotation
+cannot refill the same member's budget. Actual connectivity/local membership are required. Hints
+use the existing bounded recovery queue without evicting work; saturation can defer them until
+periodic reconciliation. A dirty bit on an older owned wait prevents stale empty completion from
+erasing newer admitted intent, even through legacy fallback or hint-table expiry. This adds bounded
+retry work chosen by authenticated members; it establishes no universal latency or congestion SLA.
 
 Application congestion cannot suspend swarm responses/connection revocation. Shared affine
 credits bound declared queued ingress/response custody (64 MiB/driver, 128 MiB/process), with
@@ -9,6 +45,19 @@ application memory. Rejected requests fail honestly; local gossip loss requests 
 reconciliation and grants no authentication or freshness evidence. Old queued input is never
 rebound to a same-peer replacement connection. Coalesced lifecycle events retain original issuer
 versus carrier distinction, and recovery wakes cannot be starved by path churn.
+
+The released two ordinary per-peer request owners are preserved, with one additional reserved
+maintenance owner for kinds 2/4/12/26. The tag is an untrusted capacity hint, not an identity
+or service grant; malformed and forged maintenance frames still fail normal Root checks.
+All driver/process byte, record and request totals remain unchanged. Classification remains
+charged through last actual payload/responder/lower ownership. This prevents ordinary traffic
+occupying the membership owner, but does not establish progress for every request under
+continuous competing notifications or bulk work; combined-load acceptance remains open.
+The three-owner peer bound is an explicit denial-of-service tradeoff: six Noise identities can
+fill a driver's sixteen total request slots, compared with eight at the old two-owner bound.
+All sixteen still require actual last ownership to retire. Two ordinary owners preserve released
+overlapping legacy signalling capacity, but neither classifies voice separately nor provides an
+ACK/retry delivery guarantee for that protocol. Aggregate bytes/records can also cause refusal.
 
 Automatic cached/reciprocal/probe work captures current Root, epoch/policy, descriptor and
 connected proof/lease authority before transport waits. Driver admission rechecks it; Root
@@ -24,6 +73,22 @@ Actual connected eligibility is separate from preference rank, and each chunk/ro
 authoritative. Different wrapped keys for the same ciphertext are authenticated independently;
 an opening failure rejects only the exact reference, including across retry rounds.
 
+Quiet document reconciliation uses one owned monotonic 30-second timer, gated by active local
+membership, open documents and an actual connected bound current member. It adds bounded
+periodic requests to an existing member, without adding dial or membership authority. It
+preserves source cooldowns, original request ownership and queue limits. Cancellation and ready
+incoming traffic cannot indefinitely postpone a due local turn; deadline overflow disables the
+wake. Diagnostics do not create work. This cadence reveals periodic activity to connected
+members and does not guarantee progress when every eligible source is unavailable or malicious.
+
+Automatic receipts cannot wait ahead of inbound event polling. Their detached jobs retain exact
+member/descriptor/connection/deadline authority and actual lower custody in the existing 32-group/
+64-process submission pool. A bounded persistent admission turn prevents receipt backlog from
+monopolizing each newly released slot ahead of repair forwards; this does not establish broader
+cross-group fairness or progress under all aggregate pressure. Busy intents remain queued, while
+admitted best-effort notifications may still fail. Only authenticated remote receipt changes
+confirmation evidence; local queue/ACK observations cannot do so.
+
 ## Detached discovery boundary (2026-10-18)
 
 Connected maintenance holds no mutable MLS/store owner while waiting on peers. Driver authority
@@ -34,6 +99,9 @@ subsequent replacement is irreversible. UI lock does not revoke ordinary authent
 PEX still proves a current member signed a request-bound response, not the transport endpoint's
 identity. No existing peer-bound authentication is relaxed and no private dial authority is added.
 Quiet discovery also polls the released membership-commit exchange before data reconciliation.
+Its independently paced rotating bound-member selection cannot be suppressed by PEX backoff.
+The selector creates no new dial authority and changes neither request authentication nor PEX
+health. Coalesced poll/full-discovery/finalization obligations share the existing bounded queue.
 Its exact request/nonce/epoch signature remains unbound endpoint evidence. Only existing MLS
 authorization applies commits; removed requesters fail the serving peer's current roster gate.
 Empty or failed probes cannot prove currency or suppress ordinary discovery. A separate 1024-
@@ -145,8 +213,13 @@ inert production Rust seams. That native model checks exact opaque Root action, 
 lease/scope/process-pool registration and idempotent actual engine admission. Settlement latches
 before a delayed admission, and first signing/closed-confirmation effects serialize against the
 same fence. End/lock/replacement cannot refund an admitted engine. The combined native queue
-retains at most 32 pending/terminal identities; it has no browser commands or historical result
-cache yet. A capacity reserve releases only unused bytes on close, preserving actual loans and
+retains at most 32 pending/terminal identities. Small terminal metadata now shares the action's
+prepaid record and fence: native hashes exact bounded returned bytes, stores accepted and closed
+rejected outcomes, and checks the original clock and post-transition owners on retry. A retired
+receipt remains historical metadata; compatibility effect APIs reject it. Closed validation and
+checked state preparation precede token consumption/signing, followed by infallible publication.
+This seam has no browser commands or complete continuation/result dispatch integration.
+A capacity reserve releases only unused bytes on close, preserving actual loans and
 slots; closing it is not evidence that a workflow or uncertain engine has completed.
 
 The narrow SDP foundation prepays 224 KiB, one Crypto lane, two Forward lanes, two continuation
@@ -161,7 +234,7 @@ it authenticates nothing and cannot skip signature, membership, scope, replay or
 Retryable affine ACK completions retain their original request/response/authority and repeat
 those checks; a busy reserved lane consumes no requester allowance. Native budget composition
 tests do not prove browser-copy ownership, general SDP action integration or RTC delivery.
-Full-chain integrated progress and native post-transition exact-result recovery remain requirements.
+Full-chain integrated progress and native/browser/RTC result recovery remain requirements.
 General Pair.open is not a live adapter path;
 SDP/ICE still need native current-offer receipts and charged dispatch/result ownership.
 
@@ -2005,6 +2078,124 @@ explicit Check and repair remains separate from media authorization and may use 
 manifest after unlisting. UI lock cancels native leases and prevents stale inventory/results from
 crossing the original session/actor-instance boundary. Remote copies remain unconfirmed.
 
+New V2 retained journals have a distinct HKDF metadata key, separate from ordinary blob/chunk
+sealing. The blob API accepts chosen plaintext; using its key for native intent would let an offline
+attacker copy a legitimately sealed chosen record into the transfer namespace. The dedicated key,
+full-group/DeviceId binding and canonical namespace prevent that substitution and quota aliases.
+An exact successor journal, conservative two-slot reservation and absorbing Deleting state prevent
+crash reconciliation from restoring an older grant or released copy. Legacy pending remains
+cleanup-only. Whole-vault rollback by an attacker controlling all persisted state is not prevented.
+
+Persistent Keep allowance is spent before dispatch; unused prepaid batches/slices are lost across
+restart. Exhaustion requires an explicit idempotent native Retry CAS. Immutable runtime deadlines
+and run revocation reach the transport admission seam, so delayed polling or same-CID replacement
+cannot renew queued work. Replies still require the original current actor, manifest and membership
+checks before storage. Directory barriers are exercised on this Windows desktop; injected failures
+and process reopen do not establish physical power-loss durability. Automatic partial Keep resume
+is scoped to a saved explicit intent and the exact unlocked native generation; lock retires old
+lower admission even before asynchronous cleanup. One absolute 30-second wake rotates candidates;
+providerless partial work does not spend slices or repeatedly hash a prefix. Persistent Pause and
+integrity stops require explicit Resume, and exhaustion requires its separate Retry grant. V2
+manual-only records remain effectively paused until explicit V3 migration; canonical old bytes
+and valid old pending successors are preserved. Separate intent CAS fences stale Pause/Resume
+without treating progress or budget grants as user order. Completed checks keep runtime stop
+controls. V4 whole-variant fallback owns its immutable original compatible set, private progress
+and separate committed winner. App admission/resume validates every saved plan, equivalence and
+set digest before work. Selection retires the old run before journal publication, restarts the
+whole plaintext hash and preserves all global budgets/intent. Actual lower permits retain their
+owners independently. Bad verdicts require failure to open exact authenticated ciphertext; missing
+keys refuse before admission and provider absence never excludes a candidate. Winner-only public
+service prevents partial alternative leakage. V4's own 400 KiB slots and 512-leaf rail do not
+reinterpret V2/V3 charges or enrich old saved plans. Indirect blob service remains unimplemented;
+focused V4 integration verification and review are in progress.
+
 These controls do not solve arbitrary inherited Automerge history allocation, Byzantine conflicting
 index claims, permanent remote availability, continuous local disk health, or all legacy actor waits.
 See [the detailed limits and follow-ups](design-file-reliability.md).
+
+
+### Owned file-source read and deferred reply boundaries (19 October)
+
+Bounded native read preparation captures only exact public storage sources and weak lifetime/
+committed-winner fences. It opens no disk file on the sole sync actor. Explicit limits cover path
+capacity, closed error metadata, snapshot capacity, source/parent counts and at-rest input/output;
+ordinary allocation/OS overhead is not a process-wide cap. Future service must prepay scratch before
+preparation, move that exact owner into actual blocking work and retain it with the result through
+actor revalidation/page construction. A timeout cannot cancel disk I/O or refund a still-live owner.
+A sealed worker retains a zeroizing native at-rest key; no MLS/device/file-wrap key or store borrow
+is needed. Staging/private candidates cannot be served. Store/winner/scope retirement suppresses
+stale results, but only a caller's fresh group/request checks can authorize a network signature.
+No bridge activation or aggregate worker bound follows from this primitive alone.
+
+Deferred reply authority now revokes synchronously on receiver Drop and follows original ingress.
+Actual lower-driver admission can check that same owner, avoiding an asynchronous cancellation
+propagation gap. This lifetime ends on response receive/transfer, not actual ResponseSent. Driver
+send authority and queued/lower/response accounting remain independent; cancellation grants no
+refund and exported lifetime grants no membership. Existing notification handling is unchanged.
+
+
+The native source executor now enforces actual task/result custody with 40 MiB explicit charges,
+one per full bounded group and two process-wide. Its pool survives runtime/executor replacement.
+The blocking closure retains the whole affine task across observer cancellation; result, error,
+absence and panic unwind release only actual ownership. Results cannot be extracted without their
+credit. This closes the worker-custody prerequisite, not service authorization. Root/request/
+native-session revalidation, bounded source/helper admission and outgoing page response custody
+remain required before activation. An independent transport frame limit is also necessary:
+application validation after a legacy-sized response allocation cannot justify a small page charge.
+
+
+Reserved file-service kinds 29/30 now have transport-enforced 2 KiB request and 72 KiB complete
+response frames. The codec inspects length and kind before new-request body allocation, and
+remembers the class on the actual request/response substream so even a malicious responder cannot
+force a legacy 16 MiB allocation. Limits are value-only per clone and reset for legacy/empty
+requests. The pinned libp2p handler must continue pairing write-request/read-response or
+read-request/write-response on that same clone. A real TCP hostile writer and concurrent legacy
+requests pin this dependency. This enables no helper/source handler or new membership authority.
+
+
+### Inert connected file-service admission (19 October)
+
+The process-stable policy accepts native scope observations only after the caller authenticates
+the actual immediate Noise sender. Precrypto limits charge that sender; a claimed original C
+cannot spend C's work budget without a valid original signature. A source separately verifies
+helper B and C and must still match both to current native membership. Immutable exact-frame
+tickets do not supply current standing or a connection for forwarded C. Work admission debits
+C, B and aggregate windows atomically; protective rows refuse capacity instead of evicting live
+identities. Root replacement, epoch changes and reconnect cannot reset process rows.
+
+Freshness is strictly below 20 seconds in either direction; replay rows last 40 monotonic seconds.
+Serialized clock sampling advances the wall high-water mark with monotonic time, so rollback
+cannot reopen an accepted grant at row expiry. Overflow/backward monotonic time and poisoned
+admission state fail closed. Large clock corrections can refuse otherwise healthy service.
+Process restart loses this service replay history; it is not durable exactly-once authorization
+and cannot refill the origin's separately persistent Keep allowance. No handler is active yet.
+Native entry/Root/membership/connection revocation, source hop deadlines, capacity custody and
+final response checks remain required integration boundaries.
+
+
+Optional final response authority now closes the queued-reply effect gap: the handler checks it
+before budgeting/queueing, the receiver checks it, and the real driver checks it together with
+original ingress immediately before copying/submitting. The last synchronous check defines
+admission; later retirement cannot retract the send. It must observe native/group/deadline scope
+without retaining its publisher or keys, and must exclude the already-retired reply-wait lifetime.
+Existing byte clones and actual lower custody remain charged after revocation. This seam alone
+activates no file handler or current membership authorization.
+
+
+Existing direct file workers now observe the sole actor generation and original Root/member/
+policy scope. This closes queued lower admission after observed MLS removal and after a stop
+acknowledgement while the actor is retained by a full close-event sink. Revocable effects are
+independent of actual lower credit custody. Reversible freeze and failed stop acknowledgement
+create new actor generations; old local jobs, retries and results retain the retired observer.
+Legacy direct provider permission remains unchanged. This Root scope does not cover strict
+bridge descriptor/proof/connection identity, native entry ownership, or a new service dispatch.
+
+
+Requested native reads additionally retain the original account generation and exact registry
+row through actor queueing, local and network decryption, multi-chunk media/download/save, and
+final plaintext publication. Generation capture precedes the first authorization await; a command
+waiting through lock/unlock cannot adopt the new generation. Post-AEAD storage admission and
+post-inspection/reveal checks observe the original authority synchronously. An already-admitted
+synchronous storage/OS action cannot be recalled; verified files already published are retained
+on subsequent refusal. Whole jobs (including peer-busy sleepers and staged range/search state)
+are separately bounded4/actor and8/process, not just at actual lower request admission.

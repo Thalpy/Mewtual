@@ -632,6 +632,7 @@ dependencies = [
  "rand_core 0.6.4",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "zeroize",
 ]
 
@@ -657,6 +658,8 @@ dependencies = [
  "libp2p",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
+ "sha2 0.10.9",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

@@ -21,6 +21,13 @@ impl StoppedServer {
         {
             return Err("The conversation changed while stopping; retry leaving it.".into());
         }
+        // The returned row can survive later disk/UI awaits. End its exact native file scope
+        // NOW under the same incarnation guard, rather than waiting for its destructor.
+        servers
+            .get(&self.server)
+            .expect("exact incarnation checked above")
+            .files
+            .retire();
         Ok(servers
             .remove(&self.server)
             .expect("exact incarnation checked above"))
@@ -54,12 +61,12 @@ pub(super) async fn stop_server(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use catcoms_rt::{Hub, ManualClock};
     use std::future::poll_fn;
 
-    fn running(
+    pub(crate) fn running(
         instance: u64,
     ) -> (
         ServerEntry,
@@ -80,6 +87,7 @@ mod tests {
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
         (
             ServerEntry {
+                files: keep_session::EntryOwner::new(),
                 actor,
                 instance,
                 group_id,
@@ -135,6 +143,36 @@ mod tests {
         old_drain.await.unwrap();
         new_task.await.unwrap();
         new_drain.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn exact_removal_retires_file_scope_before_the_returned_row_is_dropped() {
+        let state = AppState::default();
+        let (entry, task, drain) = running(914);
+        let account = keep_session::current(&state, 0).unwrap();
+        let captured = entry.files.scope(account.clone());
+        entry.actor.set_keep_session(Some(captured.clone()));
+        state.servers.lock().await.insert(1, entry);
+        let stopped = stop_server(&state, 1, &ManualClock::new(1000))
+            .await
+            .unwrap()
+            .unwrap();
+        let removed = stopped.remove(&mut *state.servers.lock().await).unwrap();
+        assert!(
+            captured.is_cancelled(),
+            "removed row is still retained here, but has no authority"
+        );
+        assert!(
+            !account.is_cancelled(),
+            "one server removal does not retire the whole account"
+        );
+        assert!(removed.files.scope(account.clone()).is_cancelled());
+        let replacement = keep_session::EntryOwner::new();
+        assert!(!replacement.scope(account).is_cancelled());
+        assert!(captured.is_cancelled());
+        drop(removed);
+        task.await.unwrap();
+        drain.await.unwrap();
     }
 
     #[tokio::test]

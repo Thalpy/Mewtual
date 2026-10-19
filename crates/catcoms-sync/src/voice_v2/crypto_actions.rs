@@ -170,6 +170,7 @@ impl CryptoAction {
     /// transaction. It must not await, reenter this action, or acquire a native Coordinator lock.
     /// Exact historical receipts need a separately authorized path; pending authority is consumed
     /// by a successful confirmation transition and is intentionally insufficient for that path.
+    #[cfg(test)]
     pub(crate) fn with_pending<T>(
         &self,
         commit: impl FnOnce() -> Result<T, VoiceError>,

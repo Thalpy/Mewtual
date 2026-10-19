@@ -80,8 +80,11 @@ struct Chain {
     peer: Arc<PeerCustody>,
     stage: Kind,
     discovery: bool,
+    /// Autonomous discovery can poll commits without also bypassing PEX's own backoff.
+    exchange_records: bool,
     waiters: Vec<Waiter>,
     pending_discovery: bool,
+    pending_membership: bool,
     superseded_retry: bool,
 }
 pub(super) struct Completion {
@@ -131,7 +134,10 @@ impl Maintenance {
         if let Some(chain) = self.chains.get_mut(&peer) {
             // A discovery tick overlapping an explicit finalization must not discard its PEX
             // obligation after target selection already charged the discovery interval.
-            chain.pending_discovery |= discovery && !chain.discovery;
+            chain.pending_discovery |= discovery
+                && (!chain.discovery || (!chain.exchange_records && chain.stage != Kind::Commits));
+            chain.pending_membership |= discovery && chain.stage != Kind::Commits;
+            chain.exchange_records |= discovery;
             if let Some(waiter) = waiter {
                 if chain.waiters.len() < MAX_WAITERS {
                     chain.waiters.push(waiter);
@@ -164,8 +170,10 @@ impl Maintenance {
                     Kind::Finalize
                 },
                 discovery,
+                exchange_records: discovery,
                 waiters: waiter.into_iter().collect(),
                 pending_discovery: false,
+                pending_membership: false,
                 superseded_retry: false,
             },
         );
@@ -174,6 +182,20 @@ impl Maintenance {
     pub(super) fn discover(&mut self, peers: Vec<PeerId>) {
         for peer in peers {
             self.enqueue(peer, true, None);
+        }
+    }
+    /// A quiet membership poll is autonomous even without an explicit UI waiter. Its terminal
+    /// stage never schedules PEX, so independent polling cannot forgive record-exchange backoff.
+    pub(super) fn poll_membership(&mut self, peers: Vec<PeerId>) {
+        for peer in peers {
+            if let Some(chain) = self.chains.get_mut(&peer) {
+                chain.pending_membership |= !chain.discovery || chain.stage != Kind::Commits;
+                continue;
+            }
+            self.enqueue(peer, true, None);
+            if let Some(chain) = self.chains.get_mut(&peer) {
+                chain.exchange_records = false;
+            }
         }
     }
     pub(super) fn finalize(&mut self, peer: PeerId, waiter: Waiter) {
@@ -229,9 +251,11 @@ impl Maintenance {
             self.queue.pop_front();
             let chain = self.chains.get_mut(&peer).expect("queued chain");
             if !chain.discovery && chain.waiters.iter().all(Waiter::is_closed) {
-                if chain.pending_discovery {
+                if chain.pending_discovery || chain.pending_membership {
                     chain.discovery = true;
+                    chain.exchange_records = chain.pending_discovery;
                     chain.pending_discovery = false;
+                    chain.pending_membership = false;
                     chain.stage = Kind::Commits;
                     chain.waiters.clear();
                 } else {
@@ -304,6 +328,8 @@ impl Maintenance {
         let Some(chain) = self.chains.get_mut(&peer) else {
             return;
         };
+        tracing::trace!(local = ?server.sync.local_peer(), ?peer, ?stage, ?result,
+            "member maintenance stage completed");
         debug_assert_eq!(chain.stage, stage);
         let superseded = matches!(result, Err(Failure::Superseded));
         let waiter_result = result
@@ -318,11 +344,13 @@ impl Maintenance {
             self.queue.push_back(peer);
             return;
         }
-        let next = match stage {
+        let mut next = match stage {
             // A quiet poll learns a gap without data traffic. Released empty replies are
             // ambiguous, and a failed/unsupported poll must not suppress PEX or mark it failed.
             Kind::Commits if superseded => None,
-            Kind::Commits => Some(Kind::Pex),
+            Kind::Commits if chain.exchange_records => Some(Kind::Pex),
+            Kind::Commits if !chain.waiters.is_empty() => Some(Kind::Finalize),
+            Kind::Commits => None,
             Kind::Pex if result.is_ok() => Some(Kind::Finalize),
             Kind::Pex => {
                 if !superseded {
@@ -335,10 +363,12 @@ impl Maintenance {
                     let _ = waiter.send(waiter_result.clone());
                 }
                 if chain.pending_discovery {
+                    chain.exchange_records = true;
                     chain.pending_discovery = false;
+                    chain.pending_membership = false;
                     chain.discovery = true;
                     Some(Kind::Commits)
-                } else if chain.discovery {
+                } else if chain.discovery && chain.exchange_records {
                     Some(Kind::Offer)
                 } else {
                     None
@@ -352,6 +382,14 @@ impl Maintenance {
             }
             Kind::Offer => None,
         };
+        if next.is_none() && chain.pending_membership && !superseded {
+            // A new tick after this chain's commit poll is a fresh obligation. Coalesce it
+            // once, then return to the same bounded queue without re-running backed-off PEX.
+            chain.pending_membership = false;
+            chain.discovery = true;
+            chain.exchange_records = false;
+            next = Some(Kind::Commits);
+        }
         if let Some(next) = next {
             chain.stage = next;
             self.queue.push_back(peer);
@@ -560,6 +598,104 @@ mod tests {
             assert_eq!(maintenance.chains[&peer].stage, Kind::Pex);
             assert_eq!(maintenance.queue.front(), Some(&peer));
         }
+    }
+
+    #[tokio::test]
+    async fn maintenance_poll_only_is_autonomous_and_does_not_start_pex() {
+        let hub = Hub::new();
+        let peer = PeerId::from_u64(2);
+        let _remote = hub.join(peer);
+        let mut server = Server::found(
+            hub.join(PeerId::from_u64(100)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(100),
+            Box::new(ManualClock::new(1_000)),
+            "test",
+        )
+        .unwrap();
+        let mut maintenance = Maintenance::with_capacity(Capacity::new(4));
+        maintenance.poll_membership(vec![peer]);
+        assert!(!maintenance.chains[&peer].exchange_records);
+        maintenance.pump(&mut server);
+        assert_eq!(maintenance.jobs.len(), 1, "no explicit waiter is needed");
+        // Finish through the same stage-selection function as the detached completion. The
+        // lower remains retained by its spawned job; removing a chain does not refund it.
+        maintenance.advance(peer, Kind::Commits, Ok(false), &mut server);
+        assert!(!maintenance.chains.contains_key(&peer));
+        assert!(maintenance.queue.is_empty());
+    }
+
+    #[test]
+    fn maintenance_poll_coalescing_preserves_fresh_membership_and_explicit_finalization() {
+        let peer = PeerId::from_u64(2);
+        let mut server = server();
+        let mut maintenance = Maintenance::with_capacity(Capacity::new(4));
+        maintenance.poll_membership(vec![peer]);
+        maintenance.discover(vec![peer]);
+        assert!(
+            maintenance.chains[&peer].exchange_records,
+            "in-flight commit can upgrade to PEX"
+        );
+        maintenance.queue.clear();
+        maintenance.advance(peer, Kind::Commits, Ok(false), &mut server);
+        maintenance.poll_membership(vec![peer]);
+        assert!(maintenance.chains[&peer].pending_membership);
+        for stage in [Kind::Pex, Kind::Finalize, Kind::Offer, Kind::Commits] {
+            maintenance.queue.clear();
+            maintenance.advance(peer, stage, Ok(false), &mut server);
+            if stage == Kind::Finalize {
+                assert_eq!(
+                    maintenance.chains[&peer].stage,
+                    Kind::Offer,
+                    "the full record chain completes its owed helper offer before the new poll"
+                );
+            }
+            if stage == Kind::Offer {
+                assert_eq!(maintenance.chains[&peer].stage, Kind::Commits);
+                assert!(!maintenance.chains[&peer].exchange_records);
+            }
+        }
+        assert!(!maintenance.chains.contains_key(&peer));
+
+        maintenance.poll_membership(vec![peer]);
+        let (reply, mut receiver) = oneshot::channel();
+        maintenance.finalize(peer, reply);
+        maintenance.queue.clear();
+        maintenance.advance(peer, Kind::Commits, Ok(true), &mut server);
+        assert_eq!(maintenance.chains[&peer].stage, Kind::Finalize);
+        assert!(
+            receiver.try_recv().is_err(),
+            "kind2 success is not a kind26 result"
+        );
+        maintenance.queue.clear();
+        maintenance.advance(peer, Kind::Finalize, Ok(false), &mut server);
+        assert!(!receiver.blocking_recv().unwrap().unwrap());
+        assert!(!maintenance.chains.contains_key(&peer));
+    }
+
+    #[test]
+    fn maintenance_full_discovery_after_poll_commit_and_during_finalize_is_not_lost() {
+        let peer = PeerId::from_u64(2);
+        let mut server = server();
+        let mut maintenance = Maintenance::with_capacity(Capacity::new(4));
+        maintenance.poll_membership(vec![peer]);
+        let (reply, receiver) = oneshot::channel();
+        maintenance.finalize(peer, reply);
+        maintenance.queue.clear();
+        maintenance.advance(peer, Kind::Commits, Ok(false), &mut server);
+        assert_eq!(maintenance.chains[&peer].stage, Kind::Finalize);
+        maintenance.discover(vec![peer]);
+        assert!(maintenance.chains[&peer].pending_discovery);
+        maintenance.queue.clear();
+        maintenance.advance(peer, Kind::Finalize, Ok(true), &mut server);
+        assert!(receiver.blocking_recv().unwrap().unwrap());
+        assert_eq!(maintenance.chains[&peer].stage, Kind::Commits);
+        assert!(maintenance.chains[&peer].exchange_records);
+        for stage in [Kind::Commits, Kind::Pex, Kind::Finalize, Kind::Offer] {
+            maintenance.queue.clear();
+            maintenance.advance(peer, stage, Ok(false), &mut server);
+        }
+        assert!(!maintenance.chains.contains_key(&peer));
     }
 
     #[test]

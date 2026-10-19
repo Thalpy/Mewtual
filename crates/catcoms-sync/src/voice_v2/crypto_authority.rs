@@ -79,6 +79,11 @@ pub struct CryptoAuthority {
 }
 redacted_debug!(CryptoAuthority);
 impl CryptoAuthority {
+    /// Historical results retain the original native clock, independently of pending token
+    /// authorization. A retry must not select a new clock or renew any original deadline.
+    pub(super) fn history_time(&self) -> (u64, u64) {
+        (self.clock.monotonic_ms(), self.clock.now_ms())
+    }
     pub(super) fn new(
         local: CallLease,
         pair: CallLease,

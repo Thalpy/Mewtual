@@ -246,6 +246,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 false
             };
             if gate.view != view || descriptor_changed || !self.peer_is_connected(gate.peer) {
+                tracing::trace!(local = ?self.local_peer(), peer = ?gate.peer,
+                    view_changed = gate.view != view, descriptor_changed,
+                    "member maintenance owner superseded");
                 gate.revoke();
             }
         }
