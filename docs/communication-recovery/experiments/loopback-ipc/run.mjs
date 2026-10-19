@@ -7,6 +7,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseDebuggerPort } from "../../../../apps/desktop/scripts/flow-processes.mjs";
 import { childOutputClosed } from "./child-output.mjs";
+import { keylessTakeover } from "./takeover.mjs";
 
 const ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const argument = process.argv.find(value => value.startsWith("--binary="));
@@ -18,7 +19,7 @@ const stop = new AbortController();
 const watchdog = setTimeout(() => stop.abort(), 90_000);
 const profile = await mkdtemp(join(tmpdir(), "mewtual-ipc-probe-"));
 const connections = [];
-let child, stdioClosed, exitCode = null, output = "", completed = false, failure = null, candidate = null;
+let child, stdioClosed, keyless, exitCode = null, output = "", completed = false, failure = null, candidate = null;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function bounded(operation, label, maximum = 5000) {
   let timer;
@@ -115,7 +116,8 @@ try {
   const restricted = all.find(surface => surface.result?.surface === "restricted");
   const remote = all.find(surface => surface.result?.surface === "remote");
   assert.ok(main && restricted && remote, "all three actual surfaces must finish");
-  assert.deepEqual(main.result, { surface: "main", packaged: true, secure: true, lost: true, exhausted: true, healthy: true, cspBlocked: true, corsBlocked: true });
+  assert.deepEqual(main.result, { surface: "main", packaged: true, secure: true, lost: true, exhausted: true, healthy: true, cspBlocked: true, corsBlocked: true,
+    encryptedMaximum: true, headerTamperRefused: true, bodyTamperRefused: true, replayRefused: true });
   assert.equal(restricted.result.denied, true); assert.equal(restricted.result.bridge, true);
   assert.equal(remote.result.denied, true); assert.equal(remote.result.bridge, true);
   const before = await main.cdp.eval("window.__TAURI_INTERNALS__.invoke('inspect').then(value => { window.__probeCounters = value; })");
@@ -126,14 +128,30 @@ try {
   assert.equal(counters.bootstrap_grants, 2, "lost reply used the second finite grant");
   assert.equal(counters.good_requests, 1); assert.equal(counters.wrong_cors_requests, 1);
   assert.equal(counters.blocked_requests, 0, "the CSP-denied listener received no request");
+  assert.equal(counters.frame_headers, 3, "only authenticated fresh frames spend native admission");
+  assert.equal(counters.frame_bodies, 2, "the corrupted body never reaches fixture execution");
+  assert.equal(counters.frame_replies, 2);
   assert.ok(counters.options >= 1 && counters.peak_active <= 4);
+  await main.cdp.send("Runtime.evaluate", { expression: "window.__TAURI_INTERNALS__.invoke('release_endpoint').then(origin => { window.__releasedOrigin = origin; })" });
+  let releasedOrigin;
+  while (!releasedOrigin && performance.now() < deadline) { releasedOrigin = await main.cdp.eval("window.__releasedOrigin ?? null"); if (!releasedOrigin) await sleep(25); }
+  assert.ok(releasedOrigin, "both actual native listeners must close before port replacement");
+  keyless = keylessTakeover(releasedOrigin); // own even a listener whose bind never becomes ready
+  await bounded(keyless.ready, "exact-port keyless replacement");
+  await main.cdp.send("Runtime.evaluate", { expression: "window.__probeTakeover().then(result => { window.__takeoverResult = result; }).catch(() => { window.__takeoverResult = { refused: false }; })" });
+  let takeover;
+  while (!takeover && performance.now() < deadline) { takeover = await main.cdp.eval("window.__takeoverResult ?? null"); if (!takeover) await sleep(25); }
+  assert.deepEqual(takeover, { refused: true, headerAuthenticationRefused: true }, "a fresh keyless reply must reach and fail HMAC verification");
+  const keylessStats = keyless.snapshot();
+  assert.equal(keylessStats.posts, 1); assert.equal(keylessStats.ciphertextBytes, 8208);
+  assert.equal(keylessStats.plaintextObserved, false); assert.equal(keylessStats.listenerError, false);
   await main.cdp.send("Page.reload", { ignoreCache: true });
   let refreshed;
   while (!refreshed && performance.now() < deadline) { refreshed = await main.cdp.eval("window.__probeResult?.refreshedRefusesBootstrap ?? false"); if (!refreshed) await sleep(50); }
   assert.equal(refreshed, true, "hard refresh cannot recreate fixture bootstrap allowance");
-  candidate = { phase: "packaged-origin-only", browser: debuggerInfo.browser, main: main.result,
+  candidate = { phase: "encrypted-framing-only", browser: debuggerInfo.browser, main: main.result,
     restricted: restricted.result, remote: remote.result, counters, refreshRefusesBootstrap: refreshed,
-    authenticatedBinaryFraming: false, productionIntegration: false };
+    authenticatedBinaryFraming: true, actualPortTakeoverTested: true, takeover: keylessStats, wholeCopyCustody: false, productionIntegration: false };
   await main.cdp.send("Runtime.evaluate", { expression: "void window.__TAURI_INTERNALS__.invoke('finish_probe')" }).catch(() => {});
   while (exitCode === null && performance.now() < deadline) await sleep(25);
   const closed = await bounded(stdioClosed, "native output closure");
@@ -146,6 +164,7 @@ try {
   clearTimeout(watchdog); stop.abort();
   for (const connection of connections) { try { connection.socket.close(); } catch { /* failed handshake is still owned and its child is stopped below */ } }
   if (child?.pid && exitCode === null) spawnSync("taskkill", ["/F", "/T", "/PID", String(child.pid)], { windowsHide: true, stdio: "ignore", timeout: 10_000 });
+  try { await keyless?.close(); } catch { if (!failure) failure = new Error("owned keyless listener cleanup failed"); }
   assert.equal(dirname(resolve(profile)), resolve(tmpdir()));
   assert.ok(basename(profile).startsWith("mewtual-ipc-probe-"));
   try { await rm(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }

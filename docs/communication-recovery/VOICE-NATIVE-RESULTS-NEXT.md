@@ -10,10 +10,22 @@ an injected lost successful reply. Two process-lifetime fixture grants remain ex
 hard refresh. Native workers drain, captured output reaches EOF and the owned temporary profile
 is removed before the runner records success. An actual cleanup-fault run refuses publication.
 
-The observed two preflights did not request Private Network Access; its permission behavior is
-therefore untested. Authenticated binary framing, port-takeover resistance, production action
-authority and complete native/framework/browser copy accounting are still absent. This is
-platform feasibility evidence for a candidate, not selection or activation of production IPC.
+The later fixture-only increment passes real WebCrypto/native AES-GCM framing at8192 plaintext
+bytes. A fixed header HMAC precedes body allocation; distinct grant seeds, directional keys,
+irreversible physical counters and one64-admission process allowance prevent counter rearming.
+Response HMAC/AEAD includes the exact original request header. Four header and two body positions
+persist through actual task collection; browser cancellation keeps its reader position until
+settlement. An independent keyless responder really replaces the closed native port and its
+fresh forged reply reaches/fails HMAC verification. Nine Rust and16 Node tests, strict fixture
+Clippy, actual packaged framing/takeover and terminal cleanup-fault checks pass, with no remaining
+read-only code-review finding.
+
+Neither run requested Private Network Access; its permission behavior is therefore untested.
+The additional standalone deny audit fails on existing pinned Tauri maintenance and quick-xml/
+plist advisories; no exemption was added. See the experiment README for exact reachability and
+logs. Production action authority, reservation/phase transfer and complete native/framework/
+browser copy accounting are still absent. This is candidate feasibility evidence, not selection
+or activation of production IPC.
 Live V2 and the remaining native/browser/RTC gates below stay disabled/open.
 
 ## Unpublished token and origin transaction prerequisite (19 October, inactive)

@@ -1,12 +1,14 @@
 //! Manual compatibility experiment, not production voice IPC or an application authority.
 //! It opens no vault and transports no SDP, identities or user files. Stock framework response
 //! copies and browser/network-service allocations are intentionally NOT claimed as bounded.
+mod framing;
 mod server;
 
 use catcoms_rt::{OsCryptoRng, RngCore};
 use serde::Serialize;
 use std::sync::{atomic::Ordering, Arc, Mutex};
 use tauri::{WebviewUrl, WebviewWindowBuilder};
+use zeroize::Zeroizing;
 
 #[cfg(not(feature = "custom-protocol"))]
 compile_error!("Build this experiment with --features custom-protocol to test embedded assets");
@@ -14,7 +16,7 @@ compile_error!("Build this experiment with --features custom-protocol to test em
 struct BootstrapState {
     attempts: u8,
     // Fixture material only. This is not a vault/controller/call or production engine permit.
-    secret: [u8; 32],
+    seeds: Zeroizing<[[u8; 32]; 2]>,
 }
 struct State {
     server: Arc<server::Service>,
@@ -25,9 +27,10 @@ struct Bootstrap {
     origin: String,
     blocked_origin: String,
     secret: [u8; 32],
+    grant: u8,
 }
 
-/// Two successful serialization attempts for the SAME fixture key. Their modeled 4KiB reply
+/// Two successful serialization attempts with DISTINCT fixture seeds. Their modeled 4KiB reply
 /// allowance is held until process exit; a lost reply never resets it. This does not measure
 /// internal COM/SDK copies, and rejection replies remain a stock framework limitation.
 #[tauri::command]
@@ -56,13 +59,26 @@ fn bootstrap(
     Ok(Bootstrap {
         origin: state.server.origin(),
         blocked_origin: state.server.blocked_origin(),
-        secret: bootstrap.secret,
+        secret: bootstrap.seeds[bootstrap.attempts as usize - 1],
+        grant: bootstrap.attempts,
     })
 }
 
 #[tauri::command]
 fn inspect(state: tauri::State<'_, State>) -> server::Snapshot {
     state.server.snapshot()
+}
+
+/// The fixture alone intentionally closes its listeners while keeping the browser alive.
+/// Production must retain its selected listener through process exit; this command is no app API.
+#[tauri::command]
+async fn release_endpoint(state: tauri::State<'_, State>) -> Result<String, &'static str> {
+    state.server.stop();
+    state.server.wait_closed().await;
+    if !state.server.drained() {
+        return Err("fixture workers did not drain");
+    }
+    Ok(state.server.origin())
 }
 
 #[tauri::command]
@@ -77,15 +93,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
     // Bind before constructing Context/windows and retain both listeners through process shutdown.
-    let (service, tasks) = runtime.block_on(server::Service::start())?;
-    let mut secret = [0; 32];
-    OsCryptoRng.fill_bytes(&mut secret);
+    let mut seeds = Zeroizing::new([[0; 32]; 2]);
+    for seed in seeds.iter_mut() {
+        OsCryptoRng.fill_bytes(seed);
+    }
+    let (service, tasks) = runtime.block_on(server::Service::start(&seeds))?;
     let state = State {
         server: service.clone(),
-        bootstrap: Mutex::new(BootstrapState {
-            attempts: 0,
-            secret,
-        }),
+        bootstrap: Mutex::new(BootstrapState { attempts: 0, seeds }),
     };
     let mut context = tauri::generate_context!();
     let csp = context
@@ -107,7 +122,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let remote = format!("{}/remote", service.origin()).parse()?;
     let app = tauri::Builder::default()
         .manage(state)
-        .invoke_handler(tauri::generate_handler![bootstrap, inspect, finish_probe])
+        .invoke_handler(tauri::generate_handler![
+            bootstrap,
+            inspect,
+            release_endpoint,
+            finish_probe
+        ])
         .setup(move |app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Mewtual IPC feasibility (no vault)")
@@ -159,21 +179,24 @@ mod tests {
     use tauri::ipc::Origin;
 
     #[test]
-    fn generated_acl_grants_bootstrap_only_to_main_local_origin() {
+    fn generated_acl_grants_commands_only_to_main_local_origin() {
         let mut context: tauri::Context = tauri::generate_context!();
         let authority = context.runtime_authority_mut();
-        let allowed = |label: &str, origin: &Origin| {
+        let allowed = |command: &str, label: &str, origin: &Origin| {
             authority
-                .resolve_access("bootstrap", label, label, origin)
+                .resolve_access(command, label, label, origin)
                 .is_some_and(|value| !value.is_empty())
         };
-        assert!(allowed("main", &Origin::Local));
-        assert!(!allowed("restricted", &Origin::Local));
-        assert!(!allowed(
-            "main",
-            &Origin::Remote {
-                url: "http://127.0.0.1:1".parse().unwrap()
-            }
-        ));
+        for command in ["bootstrap", "inspect", "release_endpoint", "finish_probe"] {
+            assert!(allowed(command, "main", &Origin::Local));
+            assert!(!allowed(command, "restricted", &Origin::Local));
+            assert!(!allowed(
+                command,
+                "main",
+                &Origin::Remote {
+                    url: "http://127.0.0.1:1".parse().unwrap()
+                }
+            ));
+        }
     }
 }

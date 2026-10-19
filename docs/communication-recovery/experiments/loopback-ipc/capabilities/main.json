@@ -2,5 +2,5 @@
   "identifier": "main",
   "description": "Only the disposable main probe surface may bootstrap its fixture channel or inspect counters.",
   "windows": ["main"],
-  "permissions": ["allow-bootstrap", "allow-inspect", "allow-finish-probe"]
+  "permissions": ["allow-bootstrap", "allow-inspect", "allow-release-endpoint", "allow-finish-probe"]
 }

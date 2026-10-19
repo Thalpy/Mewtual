@@ -7,6 +7,31 @@ current runtime paths from inactive prerequisites and experiments.
 
 ## Packaged IPC platform experiment (19 October)
 
+The subsequent encrypted-framing fixture also passes on actual packaged WebView2. Two8192-byte
+plaintext patterns round-trip through directional HKDF/HMAC/AES-GCM; altered header/body and exact
+replay refuse. The native process sees three authenticated admissions, two executed bodies and
+two replies. Distinct finite bootstrap seeds prevent browser-counter reset under one key. One
+64-admission ceiling covers both immutable slots; body EOF/timeout/bad AEAD never refunds it.
+Four header and two body positions remain held through actual completed-worker collection.
+
+An independent keyless responder then binds the exact native port after both listeners/workers
+drain. It receives one8208-byte ciphertext body without the8192-byte plaintext pattern and returns
+HTTP200 with a syntactically fresh forged reply. Browser diagnostics pin that its HMAC check
+actually ran and refused; stale-sequence refusal alone cannot pass the oracle. A forged maximum
+sequence also cannot advance the accepted reply floor. Actual native/keyless/profile/output
+cleanup precedes evidence. The final cleanup-fault run refuses publication and preserves the
+previous record. Logs: `communication-loopback-framing-takeover-native.log` and
+`communication-loopback-framing-cleanup-fault-final.log` in the probe checkout's `target/`.
+
+Nine Rust and16 Node tests pass, plus strict fixture Clippy/formatting and the packaged build.
+Review corrected input mutation across HMAC, stalled-read cancellation, dribble-renewable socket
+timeouts and a stale-reply false-positive oracle; regressions pin each. Final read-only re-review
+has no remaining code finding. The additional standalone deny audit **fails** on existing pinned
+Tauri maintenance and quick-xml/plist advisories, including with the Windows filter. No exemptions
+or package-version changes were added; the README records the source reachability observation.
+This audit follow-up, production action authority and full copy/phase custody remain open. These
+fixture results do not enable V2, establish RTC/media behavior or certify general confidentiality.
+
 The disposable Windows harness at `experiments/loopback-ipc` passed its actual packaged
 WebView2 run on `Edg/155.0.4283.62`. Main/restricted/remote WebViews exercise real generated
 Tauri ACLs. After injected successful bootstrap reply loss, stock fallback consumed the second
@@ -26,8 +51,9 @@ only generated fixture material and fixed replies, with no account or applicatio
 Logs: `communication-loopback-probe-native.log`, `communication-loopback-probe-cleanup-fault.log`,
 `communication-loopback-probe-unit.log` and `communication-loopback-child-output-tests.log` in
 the isolated loopback checkout's `target/`. This standalone workspace preserves pinned native
-registry versions and changes no production manifest, command, CSP or wire format. Authenticated
-framing, takeover protection, complete copy custody and production V2 integration remain open.
+registry versions and changes no production manifest, command, CSP or wire format. This paragraph
+records the earlier platform-only checkpoint; the later framing evidence above does not complete
+copy custody or production V2 integration.
 
 ## Gate7 integration validation (19 October)
 

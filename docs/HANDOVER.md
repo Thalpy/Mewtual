@@ -8,8 +8,13 @@ denial and finite stock-bootstrap fallback across reply loss and refresh. Native
 EOF and temporary-profile cleanup precede any success record; an actual cleanup-fault check
 correctly refuses publication. Three Rust and two Node unit tests pass, with no remaining
 read-only review finding. See the communication acceptance ledger and experiment README.
-No Private Network Access preflight occurred on this configuration. Authenticated binary
-framing, takeover protection, production action IPC, live V2 and media relay remain unfinished.
+The later fixture increment also passes8192-byte native/WebCrypto authenticated framing and
+actual keyless replacement at the old listener port, with the forged reply demonstrably rejected
+by HMAC. Nine Rust and16 Node tests, strict fixture Clippy and final cleanup-fault verification
+pass, with no remaining code-review finding. Its separate deny audit fails on existing pinned
+Tauri maintenance/quick-xml-plist advisories; no exemption is added. See the README for details.
+No Private Network Access preflight occurred. Production action IPC, complete copy/phase custody,
+live V2 and media relay remain unfinished; the harness changes no production listener or CSP.
 
 ## Gate7 UI integration with communication recovery (2026-10-19)
 
