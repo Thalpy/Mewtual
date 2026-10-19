@@ -26,6 +26,13 @@ no actual permit and no terminal result; a settled accepted/rejected action with
 not unstarted. Actual final settlement without a terminal result permanently excludes later
 first effects and can release input. No held reader or uncertain engine is refunded by End.
 
+Prepared confirmation ingress carries its actual native Hello floor/attempt and the original
+pair deadline through the final origin check into the retained token. The ledger requires a
+binding selected from the signed kind, so its generic application-only admission cannot publish
+an unbound confirmation. Replacement, a superseding Hello and expiry refuse before replay,
+serial or origin debit. This closes the token-binding seam only; full continuation/action/receipt
+prepayment and native/browser activation remain unimplemented and V2 dispatch stays disabled.
+
 ## Private download/export boundary (19 October, implementation in progress)
 
 Sealed Download ownership has its own domain and canonical random-ID directory, sharing the

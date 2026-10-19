@@ -878,6 +878,258 @@ fn prepared_ingress_serial_pair_and_end_fences_run_before_original_commit() {
     }
 }
 
+fn confirming_endpoints() -> (Endpoint, Endpoint, ManualClock) {
+    let pool = Arc::new(Resources::default());
+    let a = Endpoint::new(1, pool.clone());
+    let b = Endpoint::new(3, pool);
+    let (mut low, mut high) = if a.context.local < b.context.local {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    low.register(&high);
+    high.register(&low);
+    (low, high, ManualClock::new(1000))
+}
+
+fn confirmation_from(source: &Endpoint, target: &Endpoint, kind: EncryptedKind) -> SignedObject {
+    SignedObject::issue(
+        target.context.scope,
+        &source.signer,
+        [22; 32],
+        1000,
+        16_000,
+        Body::Encrypted {
+            header: EncryptedHeader {
+                target: target.context.local,
+                source_join: source.join,
+                target_join: target.join,
+                source_key_ref: source.key_ref,
+                target_key_ref: target.key_ref,
+                handshake: HANDSHAKE,
+                offer: None,
+                low_to_high: source.context.local < target.context.local,
+                kind,
+                sequence: 1,
+            },
+            ciphertext: vec![4; 32],
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn prepared_confirmation_candidate_attempt_and_deadline_refuse_before_origin_debit() {
+    use std::cell::Cell;
+    for (scenario, in_callback) in [
+        (0, false),
+        (1, false),
+        (2, false),
+        (0, true),
+        (1, true),
+        (2, true),
+    ] {
+        let (mut low, mut high, clock) = confirming_endpoints();
+        let hello = super::super::crypto_authority::SequenceGate::default();
+        let attempt = CallLease::default();
+        let (target, object, binding) = if scenario == 1 {
+            let object = confirmation_from(&high, &low, EncryptedKind::ConfirmProof);
+            (
+                &mut low,
+                object,
+                PendingConfirmation::Attempt(attempt.clone()),
+            )
+        } else {
+            let object = confirmation_from(&low, &high, EncryptedKind::ConfirmHello);
+            (
+                &mut high,
+                object,
+                PendingConfirmation::Hello(hello.candidate(1).unwrap()),
+            )
+        };
+        let deadline = clock.monotonic_ms() + 5000;
+        let prepared = target
+            .ledger
+            .prepare_inbound(object, &authority(&target.context, &target.lease), &clock)
+            .unwrap()
+            .bind_confirmation(binding, deadline)
+            .unwrap();
+        let invalidate = || match scenario {
+            0 => hello.accept(1),
+            1 => attempt.revoke(),
+            _ => {
+                clock.advance_ms(5000);
+            }
+        };
+        if !in_callback {
+            invalidate();
+        }
+        let debited = Cell::new(false);
+        let result = target.ledger.commit_prepared_inbound(
+            prepared,
+            &authority(&target.context, &target.lease),
+            &clock,
+            |admission| {
+                if in_callback {
+                    invalidate();
+                }
+                admission.check(&clock)?;
+                debited.set(true);
+                Ok(())
+            },
+        );
+        assert!(
+            result.is_err(),
+            "scenario {scenario}, in_callback {in_callback}"
+        );
+        assert!(!debited.get());
+        assert_eq!(target.ledger.pairs[&HANDSHAKE].replay.highest, 0);
+        assert_eq!(target.ledger.serial, 0);
+        assert!(target.ledger.incoming.is_empty());
+    }
+}
+
+#[test]
+fn generic_ingress_cannot_publish_unbound_confirmation_tokens_or_spend_origin_work() {
+    use std::cell::Cell;
+    for kind in [
+        EncryptedKind::ConfirmHello,
+        EncryptedKind::ConfirmProof,
+        EncryptedKind::ConfirmFinish,
+    ] {
+        let (mut low, mut high, clock) = confirming_endpoints();
+        let (target, object) = if kind == EncryptedKind::ConfirmProof {
+            let object = confirmation_from(&high, &low, kind);
+            (&mut low, object)
+        } else {
+            let object = confirmation_from(&low, &high, kind);
+            (&mut high, object)
+        };
+        let before = target.ledger.resources.counts();
+        assert!(target
+            .ledger
+            .admit_inbound(
+                object.clone(),
+                &authority(&target.context, &target.lease),
+                &clock,
+            )
+            .is_err());
+        let prepared = target
+            .ledger
+            .prepare_inbound(object, &authority(&target.context, &target.lease), &clock)
+            .unwrap();
+        let debited = Cell::new(false);
+        assert!(target
+            .ledger
+            .commit_prepared_inbound(
+                prepared,
+                &authority(&target.context, &target.lease),
+                &clock,
+                |_| {
+                    debited.set(true);
+                    Ok(())
+                },
+            )
+            .is_err());
+        assert!(!debited.get());
+        assert_eq!(target.ledger.serial, 0);
+        assert_eq!(target.ledger.pairs[&HANDSHAKE].replay.highest, 0);
+        assert!(target.ledger.incoming.is_empty());
+        assert_eq!(target.ledger.resources.counts(), before);
+    }
+}
+
+#[test]
+fn prepared_confirmation_publishes_original_binding_and_abandonment_consumes_nothing() {
+    let (low, mut high, clock) = confirming_endpoints();
+    let hello = super::super::crypto_authority::SequenceGate::default();
+    let object = confirmation_from(&low, &high, EncryptedKind::ConfirmHello);
+    let baseline = high.ledger.resources.counts();
+    let deadline = clock.monotonic_ms() + 5000;
+    let prepare = |high: &mut Endpoint| {
+        high.ledger
+            .prepare_inbound(
+                object.clone(),
+                &authority(&high.context, &high.lease),
+                &clock,
+            )
+            .unwrap()
+            .bind_confirmation(
+                PendingConfirmation::Hello(hello.candidate(1).unwrap()),
+                deadline,
+            )
+            .unwrap()
+    };
+    drop(prepare(&mut high));
+    assert_eq!(high.ledger.resources.counts(), baseline);
+    assert_eq!(high.ledger.serial, 0);
+    assert_eq!(high.ledger.pairs[&HANDSHAKE].replay.highest, 0);
+    let prepared = prepare(&mut high);
+    let event = high
+        .ledger
+        .commit_prepared_inbound(
+            prepared,
+            &authority(&high.context, &high.lease),
+            &clock,
+            |admission| admission.check(&clock),
+        )
+        .unwrap();
+    let incoming = &high.ledger.incoming[&event.token];
+    assert_eq!(incoming.retire, deadline);
+    assert!(incoming.confirmation.as_ref().unwrap().authorized());
+    assert!(high
+        .ledger
+        .incoming_crypto_authority(
+            &event,
+            &authority(&high.context, &high.lease),
+            Arc::new(clock.clone()),
+        )
+        .is_ok());
+    hello.accept(1);
+    assert!(!high.ledger.incoming[&event.token]
+        .confirmation
+        .as_ref()
+        .unwrap()
+        .authorized());
+    assert!(high
+        .ledger
+        .incoming_crypto_authority(
+            &event,
+            &authority(&high.context, &high.lease),
+            Arc::new(clock),
+        )
+        .is_err());
+}
+
+#[test]
+fn prepared_confirmation_cannot_bind_a_hello_floor_to_proof_or_application_data() {
+    let (mut low, high, clock) = confirming_endpoints();
+    let proof = confirmation_from(&high, &low, EncryptedKind::ConfirmProof);
+    let prepared = low
+        .ledger
+        .prepare_inbound(proof, &authority(&low.context, &low.lease), &clock)
+        .unwrap();
+    let hello = super::super::crypto_authority::SequenceGate::default();
+    assert!(prepared
+        .bind_confirmation(
+            PendingConfirmation::Hello(hello.candidate(1).unwrap()),
+            5000
+        )
+        .is_err());
+    assert_eq!(low.ledger.serial, 0);
+    let mut f = fixture();
+    let reserved = f.a.reserve(&f.clock, &mut f.rng).unwrap();
+    let signed = f.a.submit(&reserved, &[42; 32], &f.clock).unwrap();
+    let prepared =
+        f.c.ledger
+            .prepare_inbound(signed, &authority(&f.c.context, &f.c.lease), &f.clock)
+            .unwrap();
+    assert!(prepared
+        .bind_confirmation(PendingConfirmation::Attempt(CallLease::default()), 5000)
+        .is_err());
+    assert_eq!(f.c.ledger.serial, 0);
+}
+
 #[test]
 fn a_future_issued_remote_packet_retains_both_clock_skew_windows() {
     let mut f = fixture();

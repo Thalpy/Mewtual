@@ -1,5 +1,13 @@
 # Mewtual; Architecture
 
+## Prepared confirmation token binding (19 October, transport disabled)
+
+LocalJoin binds an incoming confirmation's actual Hello floor or attempt and original pair
+deadline into the affine preparation before replay/token publication. The same binding follows
+the final origin checks and retained token. Generic application admission refuses all three
+confirmation kinds without that binding. This grants no engine/action or continuation readiness;
+the larger native/browser reservation and atomic intake boundaries remain open.
+
 ## V2 action input retirement (19 October, transport disabled)
 
 Exchange-backed actions prepare fixed history bytes independently from variable input. Only

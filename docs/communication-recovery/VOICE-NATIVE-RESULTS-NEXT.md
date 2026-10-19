@@ -73,6 +73,13 @@ since no first result can pass that permanent fence; installed terminal results 
 their exact ACK. Existing input readers preserve their original buffers and credit. This does
 not implement the Workflow, protected confirmation rows or browser readiness described below.
 
+The next small prerequisite binds each prepared incoming confirmation to its actual Hello
+sequence floor or attempt and original pair deadline before ledger publication. Final admission
+checks require that binding, including on the generic ledger entry point, which now refuses
+confirmation packets. Revocation in the final origin callback leaves replay/token/serial unchanged.
+This is not the combined decrypt-action/continuation/endpoint-receipt transaction below; no new
+action or engine authority escapes preparation and normal encrypted intake remains disabled.
+
 Before exposure, prepay a finite number of metadata replies, including request-output copies,
 JSON framing, browser UTF-16/decoded metadata and acknowledgement state. Retain that capacity
 through explicit post-invoke retirement, independently of the serialized DTO: Tauri can move its

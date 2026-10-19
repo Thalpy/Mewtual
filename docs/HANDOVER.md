@@ -1,5 +1,13 @@
 # Mewtual; Handover
 
+## Prepared confirmation binding (2026-10-19, disabled continuation)
+
+Confirmation candidates/attempts and original pair deadlines are bound before replay/token
+publication. The ledger itself refuses unbound confirmation through generic admission. Final
+origin checks repeat the binding; replacement/expiry leave replay, serial and incoming rows
+unchanged.273 voice cases and strict affected Clippy pass; read-only re-review is clear. This
+does not compose complete native/browser continuation reservations or enable encrypted intake.
+
 ## V2 exchange/history separation (2026-10-19, disabled continuation)
 
 The isolated continuation separates fixed Exchange history from variable phase custody and

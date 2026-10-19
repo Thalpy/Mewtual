@@ -1,5 +1,24 @@
 # Chat, files and voice implementation evidence
 
+## Prepared confirmation binding (19 October, disabled continuation)
+
+Candidate/attempt binding and the original pair deadline are now installed in `PreparedInbound`
+before replay/token publication. Final admission checks require that binding for all three
+confirmation kinds; the generic application wrapper cannot publish an unbound confirming token.
+Higher accepted Hello, attempt replacement and original deadline expiry refuse before origin
+debit, replay, serial or incoming-row mutation, including when retirement occurs inside the final
+callback. Unpublished abandonment consumes no candidate and returns only its unused byte custody.
+
+All273 focused voice cases pass16.26s (`target/communication-v2-prepared-binding-voice.log`),
+including four new regressions. Strict affected all-target/all-feature Clippy passes16.92s
+(`target/communication-v2-prepared-binding-clippy.log`). Review found and fixed a generic-ledger
+bypass and added inside-callback retirement cases; short re-review has no remaining finding.
+The first focused compile caught two fixture mistakes (missing direction and a clock return
+type), both corrected. No tests were skipped. Full continuation validation is still separate
+from checkpoint80927a85's full run. This is token preparation only: typed complete-chain/native/
+browser reservations, unpublished decrypt action and endpoint receipt still need composition.
+No action/engine grant escapes this preparation and normal encrypted intake remains disabled.
+
 ## V2 exchange/history separation (19 October, isolated continuation)
 
 Fixed Exchange-backed action history no longer retains live phase custody. History and input

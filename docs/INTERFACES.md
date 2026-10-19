@@ -28,6 +28,13 @@ without live phase custody and consume one affine per-direction issue permit at 
 only unpublished abandonment returns it. These are disabled Rust ownership boundaries, not
 whole-chain/native IPC/browser readiness.
 
+Confirmation token admission now binds its native Hello floor or actual attempt and original
+pair deadline in `PreparedInbound` before replay/token publication. `InboundAdmission::check_at`
+requires that binding for all three confirmation kinds, including inside the final origin check.
+The generic `PacketLedger::admit_inbound` consequently refuses confirmation packets; native
+confirmation callers use LocalJoin's bound preparation. Preparation grants no action/engine,
+consumes no replay/candidate/origin allowance, and does not reserve a complete continuation chain.
+
 ## Private download commands (19 October, implementation in progress)
 
 `save_group_file(server,cid,name,resume?,expectedIntent?,operation?)` first acquires encrypted

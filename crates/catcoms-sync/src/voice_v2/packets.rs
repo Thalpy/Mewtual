@@ -82,6 +82,7 @@ struct Outgoing {
     _credit: Credit,
     exchange: Option<Arc<Exchange>>,
 }
+#[derive(Clone)]
 pub(super) enum PendingConfirmation {
     Attempt(CallLease),
     Hello(super::crypto_authority::SequenceAuthority),
@@ -186,12 +187,45 @@ pub struct PreparedInbound {
     admission: InboundAdmission,
     serial: u64,
 }
+impl PreparedInbound {
+    /// Bind the actual native candidate/attempt before the replay/token transaction. This is
+    /// still unpublished preparation: no caller can obtain an action or engine grant from it.
+    /// The same binding follows both final origin checks and the eventual retained token.
+    pub(super) fn bind_confirmation(
+        mut self,
+        confirmation: PendingConfirmation,
+        deadline: u64,
+    ) -> Result<Self, VoiceError> {
+        if !matches!(
+            (&confirmation, self.event.header.kind),
+            (PendingConfirmation::Hello(_), EncryptedKind::ConfirmHello)
+                | (
+                    PendingConfirmation::Attempt(_),
+                    EncryptedKind::ConfirmProof | EncryptedKind::ConfirmFinish
+                )
+        ) || self.incoming.confirmation.is_some()
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        // Neither a later candidate nor an extended packet expiry can renew the pair's
+        // original confirmation window. The prepared binding itself consumes no candidate.
+        self.incoming.retire = self.incoming.retire.min(deadline);
+        self.admission.deadline = self.admission.deadline.min(deadline);
+        self.admission.confirmation = Some(confirmation.clone());
+        self.incoming.confirmation = Some(confirmation);
+        Ok(self)
+    }
+}
 pub(crate) struct InboundAdmission {
     local: CallLease,
     pair: CallLease,
     expires: u64,
     deadline: u64,
     exchange: Option<Arc<Exchange>>,
+    confirmation: Option<PendingConfirmation>,
+    // Selected once from the native signed object's kind. The public application-only wrapper
+    // cannot accidentally publish a confirming token without LocalJoin's prepared binding.
+    confirmation_required: bool,
 }
 impl InboundAdmission {
     pub(crate) fn check(&self, clock: &dyn Clock) -> Result<(), VoiceError> {
@@ -202,6 +236,11 @@ impl InboundAdmission {
     pub(crate) fn check_at(&self, now: u64, mono: u64) -> Result<(), VoiceError> {
         if !self.local.is_live()
             || !self.pair.is_live()
+            || (self.confirmation_required && self.confirmation.is_none())
+            || self
+                .confirmation
+                .as_ref()
+                .is_some_and(|pending| !pending.authorized())
             || now > self.expires.saturating_add(CLOCK_SKEW_MS)
             || mono >= self.deadline
             || self
@@ -982,24 +1021,6 @@ impl PacketLedger {
             Ok(grant)
         }
     }
-    /// LocalJoin binds the actual admitting attempt or native Hello sequence floor before
-    /// publishing the token/event. A later factory call cannot adopt an old token under a new
-    /// attempt, nor substitute caller fields for its stored native candidate sequence.
-    pub(super) fn bind_incoming_confirmation(
-        &mut self,
-        token: u64,
-        confirmation: PendingConfirmation,
-    ) {
-        let incoming = self
-            .incoming
-            .get_mut(&token)
-            .expect("newly admitted confirmation token");
-        assert!(
-            incoming.confirmation.is_none(),
-            "confirmation attempt bound once"
-        );
-        incoming.confirmation = Some(confirmation);
-    }
     /// Exact native outgoing receipt, not a caller-supplied signature or a join-wide grant.
     /// Equality compares immutable fields without allocating canonical packet copies.
     pub(super) fn source_authority(
@@ -1066,6 +1087,8 @@ impl PacketLedger {
     }
     /// Original signature/route verification precedes this call. Replay is charged at admission,
     /// before UI decrypt; helper replacement and alternate connections cannot reset the window.
+    /// This generic wrapper admits application packets only. Confirmation requires LocalJoin's
+    /// actual prepared candidate/attempt binding; an unbound confirmation always refuses.
     pub fn admit_inbound(
         &mut self,
         object: SignedObject,
@@ -1163,6 +1186,13 @@ impl PacketLedger {
                 expires: object.expires,
                 deadline: retire.min(self.sdp_deadline(exchange.as_ref())?),
                 exchange: exchange.clone(),
+                confirmation: None,
+                confirmation_required: matches!(
+                    header.kind,
+                    EncryptedKind::ConfirmHello
+                        | EncryptedKind::ConfirmProof
+                        | EncryptedKind::ConfirmFinish
+                ),
             },
             incoming: Incoming {
                 object,

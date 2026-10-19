@@ -1018,8 +1018,18 @@ impl LocalJoin {
         } else {
             super::super::packets::PendingConfirmation::Attempt(pair.attempt.0.clone())
         };
-        let event = self.ledger.admit_inbound(object, authority, clock)?;
-        self.ledger.bind_incoming_confirmation(event.token, pending);
+        let deadline = pair.deadline;
+        let prepared = self
+            .ledger
+            .prepare_inbound(object, authority, clock)?
+            .bind_confirmation(pending, deadline)?;
+        // Binding and its original deadline are already in the prepared token. Final checks
+        // run before replay/serial publication; there is no temporarily unbound incoming row.
+        let event =
+            self.ledger
+                .commit_prepared_inbound(prepared, authority, clock, |admission| {
+                    admission.check(clock)
+                })?;
         Ok(ReceiveProgress::Decrypt(Box::new(event)))
     }
     /// Exact native tuple commit and closed confirmation transition form one actor turn. No bare
