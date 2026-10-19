@@ -39,18 +39,22 @@ every edit as unsent, and that a resend failing after dispatch leaves every memb
 counted attempt. `studio-busy.test.ts` checks that the wrapper's texts are on `NATIVE_NO_WRITE`, and
 `studio-navigation-token.test.ts` pins `return route.current();`.
 
-**Still open on this branch, from before the merge.** These fail identically at `9f519570` and pass
-at the Gate7 tip:
+**Open on this branch from before the merge; fixed by `[desync fixes]` (2026-10-19).** These
+failed identically at `9f519570` and passed at the Gate7 tip:
 
-- `studio_apply_batch` is registered in `apps/desktop/src-tauri/src/lib.rs` but is missing from
-  `apps/desktop/src-tauri/security/command-policy.json` and `apps/desktop/src-tauri/capabilities/main.json`. In the built app the permission
-  layer therefore probably refuses every batch (not confirmed in the native app). That refusal is
-  not a no-write text, so every member would settle uncertain. It fails two tests in
-  `tauri-command-security.test.ts`.
-- `busyRetrying` passes a non-literal command name to `invoke`, which the third
-  `tauri-command-security.test.ts` test forbids.
-- FETCH-002 (`studio-session-review.test.ts`) expects one blob request per explicit retry. The
-  wrapper repeats a storage-busy blob refusal, so the test sees 4 calls.
+- `studio_apply_batch` was registered in `apps/desktop/src-tauri/src/lib.rs` but missing from
+  `security/command-policy.json`, `capabilities/main.json` and the reviewed ledger
+  (`tauri-command-security.ts`). This was confirmed in the native app: Tauri refused every batch
+  with "studio_apply_batch not allowed. Command not found", before the command ran. Several Score
+  edits queued together therefore never saved, and each member settled uncertain. This was the
+  whole "desync" a person saw editing alone. All three now name it, and `tests/command_acl.rs`
+  resolves it for `main` through the real `RuntimeAuthority`.
+- `busyRetrying` forwards the command name its caller passed. `studio-busy.ts` is now a
+  sanctioned wrapper beside `diagnostics.ts` in `tauri-command-security.test.ts`. Its callers in
+  `studio-native.ts` still pass literals, and the scan still reads them.
+- FETCH-002 (`studio-session-review.test.ts`) expected one blob request per explicit retry. It now
+  lets the wrapper's repeats run out and pins the exact bounded count (one request plus
+  `STUDIO_BUSY_RETRY_MS.length` repeats).
 
 Verification of the resolution:
 

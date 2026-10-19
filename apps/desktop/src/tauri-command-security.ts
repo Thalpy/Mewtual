@@ -197,6 +197,12 @@ export const TAURI_COMMAND_GROUPS = {
       // operation bound, ids must be exactly 32 lowercase hex characters, and the channel must be
       // canonical decimal, so an id or a channel is never a way to address something else.
       "studio_create", "studio_apply", "studio_apply_index",
+      // Several Score edits in one actor visit. Each item is the same signed operation a lone
+      // `studio_apply` would carry, with the same 64 KiB body cap, so the batch grants no authority
+      // a sequence of single Applies lacks. Natively it is Score-only and bounded before any body is
+      // decoded (1 to 64 items, 256 KiB of bodies, distinct nonces). It is not atomic: an item that
+      // is refused names itself, and the items before it stay saved.
+      "studio_apply_batch",
       // Manual local-draft lifecycle. Archive adds lossless local evidence; release and disposal
       // can destroy it only with exact typed identities/confirmation; copy apply is re-planned
       // against current source and destination bytes. None grants owner, receipt or handoff

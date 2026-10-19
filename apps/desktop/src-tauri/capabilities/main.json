@@ -136,6 +136,7 @@
     "allow-studio-create",
     "allow-studio-apply",
     "allow-studio-apply-index",
+    "allow-studio-apply-batch",
     "allow-studio-overlay-archive",
     "allow-studio-overlay-archive-release",
     "allow-studio-overlay-copy-apply",
