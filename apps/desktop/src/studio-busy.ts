@@ -13,12 +13,19 @@
 // a write that was refused here never began, and an identical retry of an accepted write is
 // recognised by native as already done. The schedule is short on purpose: this is not a queue
 // for a wedged vault, and after the last pause the refusal surfaces exactly as before.
+//
+// This is the first of two layers. What surfaces after the last pause reaches the session, whose
+// Save worker and document/Index reads resend every native no-write refusal again after longer
+// backoffs (BUSY_BACKOFF_MS and resendLater in studio-session.ts). Which refusals count as "nothing
+// was written" is decided there, by `nativeNoWrite`, not here; studio-native-no-write.test.ts pins
+// its texts to their Rust sources, and studio-busy.test.ts checks this file's text is among them.
 
 import type { StudioIpc } from "./studio-native.ts";
 
 /** Exact native text; `authorize()` in src-tauri/src/studio.rs is its only producer. */
 export const STUDIO_STORAGE_BUSY = "Studio storage busy; retry the same request";
-/** The actor did not reach Ready inside native's bounded wait; raised before execution too. */
+/** The actor did not reach Ready inside native's bounded wait; raised before execution too, but
+ *  never repeated here (see busyRetrying). */
 export const STUDIO_ACTOR_BUSY = "Studio actor busy; retry";
 
 /** Pauses before each repeat, in order; their sum (1.24 s) bounds the longest silent wait. */
@@ -28,16 +35,6 @@ export const STUDIO_BUSY_RETRY_MS: readonly number[] = [40, 80, 160, 320, 640];
 export function nativeErrorText(e: unknown): string {
   if (e instanceof Error) return e.message;
   return typeof e === "string" ? e : String(e);
-}
-
-/**
- * Whether `e` is one of the two refusals native raises before a request executes. Nothing was
- * written for either, so a Save that ends on one is known not written (it may be re-authored or
- * discarded), unlike a transport failure after the request crossed the native fence.
- */
-export function isPreExecutionRefusal(e: unknown): boolean {
-  const text = nativeErrorText(e);
-  return text === STUDIO_STORAGE_BUSY || text === STUDIO_ACTOR_BUSY;
 }
 
 /**

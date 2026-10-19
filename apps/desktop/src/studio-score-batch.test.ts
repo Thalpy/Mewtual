@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { StudioSession } from "./studio-session.ts";
+import { decodeStudioDraft } from "./studio-draft.ts";
 import { STUDIO_APPLY_BATCH_MAX } from "./studio-native.ts";
 import { CHANNEL, ME, SERVER, deferred, fakeIpc, id32, indexContent, indexEntry, ordinaryView, settle } from "./studio-testkit.ts";
 
@@ -9,11 +10,12 @@ const object = id32(42);
 function scoreContent(cells: Record<string, unknown> = {}) {
   return { kind: "score", title: null, bpm: null, bpb: null, steps: null, cells, patches: {}, readiness: { cells: {}, patches: {}, headerConflicts: false } };
 }
-async function harness() {
+/** `group` gives the Index view a server group, which a lock snapshot (draftSnapshot) needs. */
+async function harness(group?: string) {
   const ipc = fakeIpc(), timers: (() => void)[] = []; let id = 100;
   const session = new StudioSession({ ipc, me: ME, now: () => 0, newId: () => id32(++id),
     schedule: (fn) => { timers.push(fn); return () => { const index = timers.indexOf(fn); if (index >= 0) timers.splice(index, 1); }; } });
-  ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [object]: indexEntry({ kind: "score", title: "score" }) } })));
+  ipc.on("studio_list", () => ({ ...ordinaryView(indexContent({ objects: { [object]: indexEntry({ kind: "score", title: "score" }) } })), ...(group ? { group } : {}) }));
   ipc.on("studio_read", () => ordinaryView(scoreContent()));
   await session.attach(); session.setScope({ server: SERVER, channel: CHANNEL });
   const sync = async () => { for (let pass = 0; pass < 3; pass++) { for (const fn of timers.splice(0)) fn(); await settle(3); } };
@@ -133,11 +135,69 @@ test("a batch refused before execution is known not written, and the lane keeps 
   for (let step = 1; step <= STUDIO_APPLY_BATCH_MAX + 2; step++) h.session.setScoreCell(object, step, 0, { k: "d", pad: 1 });
   const batches: number[] = [];
   h.ipc.on("studio_apply_batch", (args) => { batches.push((args as { operations: unknown[] }).operations.length); throw new Error("Studio storage busy; retry the same request"); });
-  first.resolve(ordinaryView(scoreContent())); await h.sync(); await h.sync(); await h.sync();
+  first.resolve(ordinaryView(scoreContent()));
+  for (let pass = 0; pass < 12; pass++) await h.sync(); // the wrapper's pauses, then the session's resends
   assert.equal(batches[0], STUDIO_APPLY_BATCH_MAX, "a batch never exceeds native's count bound");
+  assert.equal(batches.length, 4 * 6, "four session sends (one plus three resends), each repeated five times by the wrapper");
   assert.ok(batches.every((n) => n === STUDIO_APPLY_BATCH_MAX), "the busy refusal was repeated with the same batch");
   const blocked = h.session.saves.filter((s) => s.status === "blocked");
-  assert.equal(blocked.length, STUDIO_APPLY_BATCH_MAX, "every member is known not written");
+  assert.equal(blocked.length, STUDIO_APPLY_BATCH_MAX, "once the resends are used up, every member is known not written");
   assert.equal(h.session.saves.filter((s) => s.status === "queued").length, 2, "the overflow waits behind the lane");
   assert.ok(blocked.every((s) => s.mayHaveCommitted === false));
+  assert.ok(blocked.every((s) => s.attempts === 0), "a refused send is not a delivery: each retry is admitted afresh");
+});
+
+/**
+ * One lone edit lands, then a head and two members leave as one batch that native refuses before
+ * dispatch with actor busy. The IPC wrapper does not repeat that text, so the refusal reaches the
+ * session's resend at once and the head starts cooling. `answer` replaces the reply to later sends.
+ */
+async function refusedBatch(h: Awaited<ReturnType<typeof harness>>) {
+  const first = deferred<unknown>();
+  h.ipc.on("studio_apply", () => first.promise);
+  h.session.setScoreCell(object, 0, 0, { k: "d", pad: 1 }); await settle(3);
+  for (let step = 1; step <= 3; step++) h.session.setScoreCell(object, step, 0, { k: "d", pad: 2 });
+  const batches: { nonce: string; body: string }[][] = [];
+  let reply: () => unknown = () => { throw "Studio actor busy; retry"; }; // Tauri rejects with the bridge's bare string
+  h.ipc.on("studio_apply_batch", (args) => { batches.push((args as { operations: { nonce: string; body: string }[] }).operations); return reply(); });
+  first.resolve(ordinaryView(scoreContent())); await settle(8);
+  assert.equal(batches.length, 1, "the batch went out once and was refused");
+  return { batches, answer: (next: () => unknown) => { reply = next; } };
+}
+
+test("a batch refused before dispatch is resent whole: its members wait queued behind the head, never shown as failed", async () => {
+  // The members must ride the head's resend; settling them as not written would strand them as
+  // failed cards behind a head that is quietly sent again.
+  const h = await harness();
+  const { batches, answer } = await refusedBatch(h);
+  assert.deepEqual(h.session.saves.map((s) => s.status), ["queued", "queued", "queued"], "the head cools, its members wait behind it");
+  assert.ok(h.session.saves.every((s) => s.attempts === 0 && !s.mayHaveCommitted), "nothing counts as delivered");
+  answer(() => ordinaryView(scoreContent()));
+  await h.sync();
+  assert.equal(batches.length, 2, "the resend carried the batch again");
+  assert.deepEqual(batches[1], batches[0], "the same items, nonces and bodies");
+  assert.equal(h.calls("studio_apply").length, 1, "no member was split off as a lone apply");
+  assert.equal(h.session.saves.length, 0, "the whole batch landed");
+});
+
+test("a lock snapshot taken while a refused batch cools restores every edit as unsent", async () => {
+  // Nothing of the batch was delivered, so a restore must not offer any member as an interrupted
+  // delivery that "may have committed" (which would also disable reauthor). The decoder enforces
+  // the record invariants (an inflight or uncertain record needs a counted attempt).
+  const h = await harness("deadbeef");
+  await refusedBatch(h);
+  const draft = decodeStudioDraft(h.session.draftSnapshot()!);
+  assert.deepEqual(draft.records.map((r) => [r.status, r.attempts, r.mayHaveCommitted]), [["queued", 0, false], ["queued", 0, false], ["queued", 0, false]]);
+});
+
+test("a resent batch that fails after dispatch leaves every edit uncertain, each with its attempt counted", async () => {
+  // The resend crossed the fence this time, so native may have written any item before the one it
+  // names: every member settles uncertain, and the snapshot still decodes.
+  const h = await harness("deadbeef");
+  const { batches, answer } = await refusedBatch(h);
+  answer(() => { throw new Error("Studio transaction expired, cancelled or server stopped"); });
+  await h.sync();
+  assert.equal(batches.length, 2);
+  assert.deepEqual(h.session.saves.map((s) => [s.status, s.attempts >= 1, s.mayHaveCommitted]), [["uncertain", true, true], ["uncertain", true, true], ["uncertain", true, true]]);
+  assert.doesNotThrow(() => decodeStudioDraft(h.session.draftSnapshot()!));
 });

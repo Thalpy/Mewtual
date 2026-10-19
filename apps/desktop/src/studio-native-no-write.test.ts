@@ -9,6 +9,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { NATIVE_NO_WRITE, StudioSession, nativeNoWrite } from "./studio-session.ts";
+import { STUDIO_BUSY_RETRY_MS, STUDIO_STORAGE_BUSY } from "./studio-busy.ts";
 import { CHANNEL, ME, SERVER, fakeIpc, flipnoteContent, id32, indexContent, ordinaryView, settle } from "./studio-testkit.ts";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
@@ -63,8 +64,10 @@ test("the storage-busy refusal comes from authorize, which the renderer path cal
   assert.ok(authorizing > 0 && executing > authorizing, "authorize runs before the lease is handed to the actor");
 });
 
-/** A session on a fake clock: `runTimers` advances it 3 s in 50 ms steps, firing timers in due
- * order (the backoffs, 1.75 s in all, well before any 10 s Save deadline). */
+/** A session on a fake clock: `runTimers` advances it 3 s (by default) in 50 ms steps, firing timers
+ * in due order (the backoffs, 1.75 s in all, well before any 10 s Save deadline). The storage-busy
+ * text is also repeated inside every send by the IPC wrapper (busyRetrying, 1.24 s of pauses per
+ * send), so its exhaustion needs the longer `STORAGE_BUSY_MS` window and makes `SENDS * 6` calls. */
 function harness(autosaveMs = 0) {
   const ipc = fakeIpc(), object = id32(1), timers = new Set<{ due: number; fn: () => void }>();
   let epoch = id32(0xe1), now = 0;
@@ -72,8 +75,8 @@ function harness(autosaveMs = 0) {
   ipc.on("studio_read", () => ({ ...ordinaryView(flipnoteContent({ frames: [] }), { epochId: epoch }), group: "deadbeef" }));
   const session = new StudioSession({ ipc, me: ME, autosaveMs, now: () => now,
     schedule: (fn, ms) => { const timer = { due: now + ms, fn }; timers.add(timer); return () => { timers.delete(timer); }; } });
-  const runTimers = async () => {
-    for (const end = now + 3000; now < end;) {
+  const runTimers = async (ms = 3000) => {
+    for (const end = now + ms; now < end;) {
       now += 50;
       for (const timer of [...timers].sort((a, b) => a.due - b.due)) if (timers.has(timer) && timer.due <= now) { timers.delete(timer); timer.fn(); }
       await settle(2);
@@ -81,6 +84,14 @@ function harness(autosaveMs = 0) {
   };
   return { ipc, session, object, runTimers, rotate: () => { epoch = id32(0xe2); } };
 }
+/** One send plus three resends, at the session layer. */
+const SENDS = 4;
+/** The wrapper repeats only this text, five times per send. */
+const STORAGE_BUSY = STUDIO_STORAGE_BUSY;
+/** Native calls per session send of `error`. */
+const callsPerSend = (error: string) => error === STORAGE_BUSY ? 1 + STUDIO_BUSY_RETRY_MS.length : 1;
+/** Enough fake time for SENDS sends of storage-busy (about 6.7 s, more with 50 ms rounding). */
+const STORAGE_BUSY_MS = 10_000;
 
 test("a pre-dispatch refusal is resent automatically and lands without counting the visit", async () => {
   const h = harness(); let applies = 0;
@@ -99,11 +110,11 @@ test("exhausted resends settle as not written, uncounted; any other native error
     const h = harness();
     h.ipc.on("studio_apply", () => { throw error; }); // Tauri rejects with the bridge's string
     h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); h.session.open(h.object); await settle(8);
-    h.session.setFps(h.object, 7); await settle(8); await h.runTimers();
+    h.session.setFps(h.object, 7); await settle(8); await h.runTimers(error === STORAGE_BUSY ? STORAGE_BUSY_MS : undefined);
     const [record] = h.session.saves;
     assert.equal(record.status, expected, error); assert.equal(record.mayHaveCommitted, expected === "uncertain", error);
     assert.equal(record.attempts, expected === "blocked" ? 0 : 1, `${error}: a refused send is not a delivery`);
-    assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_apply").length, expected === "blocked" ? 4 : 1);
+    assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_apply").length, expected === "blocked" ? SENDS * callsPerSend(error) : 1, error);
     assert.equal(nativeNoWrite(error), expected === "blocked");
     h.session.reset();
   }
@@ -137,8 +148,8 @@ test("exhausted pre-execution refusals after an uncertain attempt leave the exac
     h.session.setFps(h.object, 7); await settle(8);
     const [first] = h.session.saves; // surfaces get copies, so read the record afresh after the retry
     assert.equal(first.status, "uncertain", `${busy}: the post-dispatch failure may have committed`);
-    h.session.retry(first.id); await settle(8); await h.runTimers();
-    assert.equal(applies, 5, `${busy}: the exact retry and its three resends were all refused`);
+    h.session.retry(first.id); await settle(8); await h.runTimers(busy === STORAGE_BUSY ? STORAGE_BUSY_MS : undefined);
+    assert.equal(applies, 1 + SENDS * callsPerSend(busy), `${busy}: the exact retry and its three resends were all refused`);
     const [record] = h.session.saves;
     assert.deepEqual([record.id, record.status, record.mayHaveCommitted], [first.id, "uncertain", true], busy);
     assert.ok(record.attempts >= 1, `${busy}: an uncertain record keeps a counted attempt, as the draft decoder requires`);

@@ -32,8 +32,11 @@ test("App wires the announcement to the counter its routes compare against", () 
   assert.match(app, /function noteStudioNavigation\(\) \{ studioNavigation\+\+; \}/);
   assert.match(app, /<StudioNav [^\n]*onnavigate=\{noteStudioNavigation\}/);
   assert.match(app, /<StudioSurface [^\n]*onnavigate=\{noteStudioNavigation\}/);
-  // The channel switch's final answer is the counter comparison: a Studio navigation during its
-  // read makes the switch report itself superseded, so its callers do not force the pane.
+  // The channel switch's final answer is its route's currency, and the route's claim compares the
+  // same counter (studio-exit.ts): a Studio navigation during its read makes the switch report
+  // itself superseded, so its callers do not force the pane.
   const switchTo = app.slice(app.indexOf("async function switchTo("), app.indexOf("\n  }\n", app.indexOf("async function switchTo(")));
-  assert.match(switchTo, /return studioRequest === studioNavigation;/);
+  assert.match(switchTo, /return route\.current\(\);/);
+  const claim = app.slice(app.indexOf("const studioExit = createStudioExit({"), app.indexOf("const releaseStudio = studioExit.release;"));
+  assert.match(claim, /const request = \+\+studioNavigation[^\n]*\n[^\n]*\n\s*return \(\) => request === studioNavigation/);
 });

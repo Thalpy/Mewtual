@@ -11,17 +11,21 @@ than picking one. Decisions a reader of either branch alone would not expect:
   document/Index reads, three resends over 1.75 s) sits on top and covers all three no-write texts.
   `nativeNoWrite` is the only "nothing was written" classifier. The branch's `isPreExecutionRefusal`
   is removed: it knew two of the three texts and missed the full inline-slot refusal. A Save that
-  stays storage-busy therefore makes 4 × 6 identical calls over about 6.7 s before it settles not
-  written. The overlay, recovery, fault and blob reads get the wrapper's repeats but no session
+  stays storage-busy therefore makes 4 × 6 calls of its request over about 6.7 s before it settles
+  not written. The overlay, recovery, fault and blob reads get the wrapper's repeats but no session
   resend.
 - **Batched Score saves ride the resend.** Before this, a batch refused before dispatch settled
   every member as not written while Gate7's outer catch quietly resent only the head, which
   stranded the members as failed cards behind it. While the head has resends left, the members
   now go back to queued behind it, uncounted, and travel with its resend. Once the resends are used
-  up, every member settles not written, as before.
+  up, every member settles not written, as before. This supersedes "a refused batch settles every
+  member alike" in the busy-spam entry below, for refusals made before dispatch.
 - **`switchTo` answers with its route.** The branch's `return studioRequest === studioNavigation`
   referenced a variable Gate7 had removed. Git merged it without a conflict, which would have broken
-  the build. It is now `return route.current()`, the same comparison in Gate7's route API.
+  the build. It is now `return route.current()`. That checks the same counter and is stricter: it
+  also checks the lock, the reload generation and the Studio session's navigation lease. That is
+  safe for every caller that uses the result: each one that starts in the Studio moves the surface
+  before the channel, and a search hit is only reachable from chat.
   `saveStudioForNavigation` is gone (Gate7 removed its callers). `noteStudioNavigation` stays: both
   Studio surfaces still announce document navigations through `onnavigate`.
 - **Score surface.** Gate7's `heldQueuedCard` renders beside `pendingSaves`. The tabs, loop and
@@ -30,8 +34,33 @@ than picking one. Decisions a reader of either branch alone would not expect:
 Test contracts changed by the composition: in `studio-native-no-write.test.ts`, the storage-busy
 cases of the two exhaustion tests now expect the wrapper's repeats inside every send.
 `studio-session.test.ts`'s "outlasts every pause" test now expects 24 calls. `studio-score-batch.test.ts`
-now checks that members ride the resend. `studio-busy.test.ts` checks that the wrapper's texts are on
-`NATIVE_NO_WRITE`, and `studio-navigation-token.test.ts` pins `return route.current();`.
+now checks that members ride the resend, that a lock snapshot taken while the head cools restores
+every edit as unsent, and that a resend failing after dispatch leaves every member uncertain with a
+counted attempt. `studio-busy.test.ts` checks that the wrapper's texts are on `NATIVE_NO_WRITE`, and
+`studio-navigation-token.test.ts` pins `return route.current();`.
+
+**Still open on this branch, from before the merge.** These fail identically at `9f519570` and pass
+at the Gate7 tip:
+
+- `studio_apply_batch` is registered in `apps/desktop/src-tauri/src/lib.rs` but is missing from
+  `apps/desktop/src-tauri/security/command-policy.json` and `apps/desktop/src-tauri/capabilities/main.json`. In the built app the permission
+  layer therefore probably refuses every batch (not confirmed in the native app). That refusal is
+  not a no-write text, so every member would settle uncertain. It fails two tests in
+  `tauri-command-security.test.ts`.
+- `busyRetrying` passes a non-literal command name to `invoke`, which the third
+  `tauri-command-security.test.ts` test forbids.
+- FETCH-002 (`studio-session-review.test.ts`) expects one blob request per explicit retry. The
+  wrapper repeats a storage-busy blob refusal, so the test sees 4 calls.
+
+Verification of the resolution:
+
+- `cargo test --all --all-features`: 2468 passed, 0 failed. No Rust differs from `9f519570`.
+- `npm test`: 1850 of 1854 passed. The 4 failures are exactly the ones listed above.
+- `npm run check`: 0 errors. `npm run build`: passed.
+- The `src-tauri` suite and `test:flows` were not run, because drive M: ran out of space mid-build.
+- An adversarial review found no blocker. It flagged the follow-ups above, plus two design
+  questions. A lock during the wrapper's pauses restores batch members as uncertain. A superseded
+  read keeps repeating beneath `unlessBusy`.
 
 ## Score composer: phrases, preview lengths, zoom (2026-10-19, branch `score-composer-2`)
 

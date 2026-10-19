@@ -267,8 +267,10 @@ const SAVE_WORKERS = 2;
 /// This is the second of two layers. Every call through `this.ipc` first repeats a storage-busy
 /// refusal itself (busyRetrying in studio-busy.ts: five quick repeats, 1.24 s of pauses), so only a
 /// storage-busy that outlasts those reaches this layer. A Save refused that way throughout makes
-/// 4 × 6 identical calls over about 6.7 s before it settles, still inside the departure timeout.
-/// The other two no-write texts are not repeated by that wrapper and arrive here at once.
+/// 4 × 6 calls of its request over about 6.7 s before it settles, inside the departure timeout
+/// unless a first-delivery admission read (no view of the document held) is refused the same way
+/// and adds as much again. The other two no-write texts are not repeated by that wrapper and
+/// arrive here at once.
 const BUSY_BACKOFF_MS = [250, 500, 1000];
 
 type BlobJob = {

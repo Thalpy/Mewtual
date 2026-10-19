@@ -353,12 +353,14 @@ empty epoch-zero Index view without creating a file. Ordinary reads establish th
 background watch.
 
 Success means durable **local, provisional** metadata, not remote delivery or owner settlement.
-Native busy/locked errors are ordinary refusal paths; do not spin or force-unlock storage. The
-exact text `Studio storage busy; retry the same request` (and `Studio actor busy; retry`) is raised
-before a request executes, so nothing was written: the session repeats such a request as is, at
-most five times with pauses of 40, 80, 160, 320 and 640 ms (`studio-busy.ts`), and a Save that
-still ends on it is shown as known not written, not uncertain. Any other native error after the
-request crossed the fence stays uncertain.
+Native busy/locked errors are ordinary refusal paths; do not spin or force-unlock storage. Three
+exact texts are raised before a request executes, so nothing was written (`nativeNoWrite` in
+`studio-session.ts`; see INTERFACES.md). They are `Studio storage busy; retry the same request`,
+`Studio actor busy; retry` and `too many inline downloads are already active`. Every session call
+repeats the storage-busy one as is, at most five times with pauses of 40, 80, 160, 320 and 640 ms
+(`studio-busy.ts`). The Save worker and the document/Index reads then resend any of the three up
+to three more times. A Save that still ends on one is shown as known not written, not uncertain.
+Any other native error after the request crossed the fence stays uncertain.
 
 ## Read model: adapt it, do not cast it to the fixture root
 

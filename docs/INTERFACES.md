@@ -49,11 +49,18 @@ no lease and so does not execute.)
 `nativeNoWrite` classifies exactly these. A queued Save, or the plain document or Index read
 (`refreshDoc`, `refreshIndex`), refused this way is resent automatically, the same request after
 250, 500 and 1000 ms, without counting the visit unless an earlier attempt was already uncertain
-(see below). The overlay, recovery, fault and blob reads are
-not resent; a refusal there shows as their ordinary read error until the next refresh. The
+(see below). Beneath that layer, every native call the Studio session makes first repeats a
+storage-busy refusal itself, with the identical request, five times after 40, 80, 160, 320 and
+640 ms (`busyRetrying`, `studio-busy.ts`). The other two texts are not repeated there. The overlay,
+recovery, fault and blob reads get only that storage-busy repeat and are not resent by the session.
+A refusal that outlasts it shows as their ordinary read error until the next refresh. The
 backoffs total 1.75 s, but "Studio actor busy" itself arrives only after its 5 s rendezvous, so a
 Save refused that way four times takes about 22 s and a departure's 10 s timeout reports it as
-still saving. Only when the resends are used up does the Save settle. It settles as not written
+still saving. A Save that stays storage-busy makes 4 × 6 calls of its request over about 6.7 s. Only
+when the resends are used up does the Save settle. A batched Score Save (`studio_apply_batch`)
+refused this way is resent whole: its members wait queued and uncounted behind the head, and
+settle with it only when the resends are used up. Each item keeps its nonce and body across the
+resends, but a resent batch can also carry edits queued while it waited. It settles as not written
 only when no earlier attempt of it was uncertain. It then stays uncounted, so the member's retry is
 admitted afresh against the current history, and reauthor is available subject to the record
 kind's usual restrictions. A record whose earlier attempt was uncertain (it failed after dispatch,

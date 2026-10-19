@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { STUDIO_ACTOR_BUSY, STUDIO_BUSY_RETRY_MS, STUDIO_STORAGE_BUSY, busyRetrying, isPreExecutionRefusal } from "./studio-busy.ts";
+import { STUDIO_ACTOR_BUSY, STUDIO_BUSY_RETRY_MS, STUDIO_STORAGE_BUSY, busyRetrying } from "./studio-busy.ts";
+import { NATIVE_NO_WRITE, nativeNoWrite } from "./studio-session.ts";
 import type { StudioIpc } from "./studio-native.ts";
 
 /** A bridge whose answers a test scripts per call, with the timers the wrapper asked for. */
@@ -60,10 +61,18 @@ test("a reset or scope change ends the repeats; other errors and the actor-busy 
   }
 });
 
-test("native's two pre-execution refusals are recognised by their exact text, as a string or an Error", () => {
-  assert.equal(isPreExecutionRefusal(STUDIO_STORAGE_BUSY), true);
-  assert.equal(isPreExecutionRefusal(new Error(STUDIO_ACTOR_BUSY)), true);
-  assert.equal(isPreExecutionRefusal(`${STUDIO_STORAGE_BUSY} (detail)`), false, "a prefix match could mistake a later fence for a refusal");
-  assert.equal(isPreExecutionRefusal(new Error("outcome=uncertain; the Save may have completed")), false);
-  assert.equal(isPreExecutionRefusal(null), false);
+test("the refusal this wrapper repeats is one the session classifies as never executed", () => {
+  // Repeating a request is only safe when its refusal proves nothing ran. The session's
+  // `nativeNoWrite` list is the one pinned to the Rust sources (studio-native-no-write.test.ts), so
+  // the text repeated here, and the actor-busy text named here, must both be on it.
+  assert.ok((NATIVE_NO_WRITE as readonly string[]).includes(STUDIO_STORAGE_BUSY));
+  assert.ok((NATIVE_NO_WRITE as readonly string[]).includes(STUDIO_ACTOR_BUSY));
+});
+
+test("pre-execution refusals are recognised by their exact text, as a string or an Error", () => {
+  assert.equal(nativeNoWrite(STUDIO_STORAGE_BUSY), true);
+  assert.equal(nativeNoWrite(new Error(STUDIO_ACTOR_BUSY)), true);
+  assert.equal(nativeNoWrite(`${STUDIO_STORAGE_BUSY} (detail)`), false, "a prefix match could mistake a later fence for a refusal");
+  assert.equal(nativeNoWrite(new Error("outcome=uncertain; the Save may have completed")), false);
+  assert.equal(nativeNoWrite(null), false);
 });
