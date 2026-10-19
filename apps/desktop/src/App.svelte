@@ -9918,14 +9918,17 @@
 
   async function restoreWikiRev(revId: string) {
     if (activeServerId === null || !activeWikiPage) return;
+    // The restore names the page it was chosen for; after the await, the toast names that page and
+    // only that pane's history view closes (a newer page's history, or another server's, stays).
+    const pane = wikiPane(), { server, gen, page } = pane;
     try {
-      const queued = await invoke<boolean>("restore_wiki_page", { server: activeServerId, page: activeWikiPage, rev: revId });
-      showWikiHistory = false;
-      await refreshWiki();
+      const queued = await invoke<boolean>("restore_wiki_page", { server, page, rev: revId });
+      if (wikiPaneCurrent(pane)) showWikiHistory = false;
+      if (viewCurrent(gen, server)) await refreshWiki();
       if (queued) {
         toast(`Restore submitted for review: it publishes when approved, or automatically in ${wikiReviewDays} day${wikiReviewDays === 1 ? "" : "s"}`, "info", 6000);
       } else {
-        toast(`Restored "${activeWikiPage}" to the selected revision`, "ok", 4000);
+        toast(`Restored "${page}" to the selected revision`, "ok", 4000);
       }
     } catch (e) {
       toast(`Restore failed: ${e}`, "err", 9000);

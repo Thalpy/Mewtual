@@ -19,13 +19,43 @@ nothing is left, so nothing is saved first. Records held for any other document 
 so opening a restored document never requires its own held work to save. Restored work is sent
 only by explicit Save or retry, or by leaving its own document. That document's departure Save
 awaits its own lane first. Only then does it release, without awaiting, its records in the shared
-Index lane. One worker serves every lane, so releasing them earlier would let a slow Index receipt
-gate the document's Save and the navigation. The most recently started Save still awaited has its
-records go ahead of other lanes' runnable heads. Known limit: a record already being delivered still holds the one
-worker, so a departure (or Create) waits for an Index delivery already running until it answers or
-the 10 s refusal. Such a delivery can come from a deadline, an earlier departure or a sidebar
-retry. The departure's records stay retained and are sent after it. A separate Index-lane worker
-would remove this and is a follow-up needing a concurrency design review.
+Index lane.
+
+Two save workers run at once (`SAVE_WORKERS`), at most one per lane, with each lane's records
+still in queue order. A document lane and the shared Index lane can therefore both be in flight,
+so a departure's document Save (including an edit made while leaving) does not wait on its own
+Index half's receipt. Workers are not reserved per lane: two other lanes, such as a Create and
+another document's Save, can hold both, and the next Save then waits for one of them to answer.
+The most recently started Save still awaited has its records go ahead of other lanes' runnable
+heads, but it does not preempt a save already in flight. A record taken by a worker is marked
+synchronously, because it stays `queued` through its admission read, so no second worker takes it.
+
+This is renderer scheduling only. The server's actor runs Studio operations one at a time, so an
+Index operation that is slow inside the actor still delays the document's Save there. More
+workers would buy nothing natively and would compete for the bridge's four shared inline slots.
+Every Studio IPC call holds one of those slots for its round trip, as do blob fetches, chat inline
+downloads and the native receiver's passes.
+
+Three native refusals are raised before a request reaches the actor, so nothing of it can have
+been written:
+
+- "Studio actor busy; retry": the 5 s rendezvous was lost.
+- "too many inline downloads are already active": the slot pool was full.
+- "Studio storage busy; retry the same request": `authorize`'s locks were busy before the lease
+  was sent.
+
+`nativeNoWrite` classifies exactly these. A queued Save, or the plain document or Index read
+(`refreshDoc`, `refreshIndex`), refused this way is resent automatically, the same request after
+250, 500 and 1000 ms, without counting the visit. The overlay, recovery, fault and blob reads are
+not resent; a refusal there shows as their ordinary read error until the next refresh. The
+backoffs total 1.75 s, but "Studio actor busy" itself arrives only after its 5 s rendezvous, so a
+Save refused that way four times takes about 22 s and a departure's 10 s timeout reports it as
+still saving. Only when the resends are used up does a Save settle as not written, still
+uncounted, so the member's retry is admitted afresh against the current history; reauthor stays
+available. Every other native error stays uncertain, including the few rarer refusals that also
+precede the lease (a server change before commit, a cancelled request, a lease-send expiry); that
+errs toward "may have committed". `studio-native-no-write.test.ts` pins all three texts to their
+single pre-dispatch sites in the Rust sources.
 A partial departure Save leaves the shared five-second deadline running for uncovered records.
 `saveBeforeLeaving()` (leaving the Studio, a channel, a server or the window) still covers every
 record. Before a first delivery, admission reads a record's document when no view of it is held
@@ -73,8 +103,9 @@ that document's records, so other documents' restored work stays held and anothe
 failure cannot refuse it. "That document's records" is `affectedObject(s) === id`, which also
 drives `pendingFor(id)` and the sidebar's held rows. An ordinary Index record names the entry as
 `object`. A Closing or Unconfirmed Index record keeps the channel Index as its native target
-(`object: null`, unchanged) and names the entry in `op.object`. Both halves of a rename are
-therefore one document's work on every route. The Index lane is shared, so one of these Index
+(`object: null`, unchanged) and names the entry in `op.object`; an Index recovery record of one
+entry names it in `edit.choice.id`. Both halves of a rename are therefore one document's work on
+every route. The Index lane is shared, so one of these Index
 records can sit behind another document's failed, uncertain or restored-held Index record. The
 Save then refuses at once and names that record ("waits behind an unsaved edit (…)"); what could
 run was released and still runs. Leaving a document also releases, without awaiting, its records

@@ -1,5 +1,95 @@
 # Mewtual; Handover
 
+## PR #46 fifth review: two save workers; follow-ups closed (2026-10-19)
+
+The review of `64fed24b` reproduced one P2, a timing variant of the departure-ordering finding.
+An edit made while a departure waited on an earlier receipt became eligible only in the drain's
+next round, so the one worker went to the queued Index half first and the departure timed out.
+The owner asked for "a handful" of save workers.
+
+The Studio now runs two (`SAVE_WORKERS`), one per lane at a time and in queue order within each
+lane. A document lane and the shared Index lane can therefore both be in flight, which removes
+that P2 and the single-worker limit the previous entry pinned. Three were built first, but
+an adversarial review showed they oversubscribe the bridge's four shared inline slots: saves, blob
+fetches, reads and the native receiver all hold one. That produced "too many inline downloads"
+refusals in ordinary use, and more would make it worse.
+
+- **Renderer scheduling only.** The server actor runs Studio operations one at a time, so an
+  operation slow inside the actor still delays the next one there. The native "latest request"
+  fence is per server and target, and one save per lane means one per target, so concurrent saves
+  never supersede each other.
+- **Pre-dispatch refusals are not writes.** The bridge's actor-busy, slot-pool-full and
+  storage-busy (`authorize`) refusals are raised before dispatch. `nativeNoWrite` classifies
+  exactly these as not written. Queued Saves and the plain document and Index reads refused this
+  way are resent automatically: the same request, at 250/500/1000 ms, with no attempt counted.
+  Only exhausted resends settle a Save as not written, still uncounted, so a retry is admitted
+  afresh. All three texts are pinned to their single sites in the Rust sources.
+- **One worker per record.** A record a worker has taken is marked synchronously (it stays
+  `queued` through its admission read), so no second worker takes it. Removing that guard fails
+  two existing tests.
+- **Recovery rail.** It now labels a not-written recovery apply as not written, not as uncertain
+  and "discarded".
+- **Restored Creates.** A restored, held Create reads "create not saved yet · open to save" in the
+  sidebar.
+
+Follow-ups closed:
+
+- An Index recovery record of one entry now counts for that entry's document (held row, Save,
+  indicators).
+- Restoring a wiki revision names the page it restored and closes only that pane's history.
+
+Regressions:
+
+- Edits made before and while leaving, with the Index receipt pending. Fails with one worker and
+  at `64fed24b`.
+- Lane exclusivity. It passes at `64fed24b` too, where one worker made it trivially true, and it
+  does not reach the `running` guard (that needs an admission read). It fails when the lane-head
+  rule is removed, which is what it pins.
+- The no-write classification and its source pins. They fail with the resends, the read retry or
+  the attempt revert removed.
+- Recovery-record affinity and the restore toast. Both fail at `64fed24b`.
+
+Residuals (LOW, from the re-review; not fixed):
+
+- The overlay, recovery, fault and blob reads are not resent after a pre-dispatch refusal. A
+  refused overlay read shows its ordinary error, and a document with a local draft shows the plain
+  projection, until the next refresh.
+- "Studio actor busy" takes its 5 s rendezvous to arrive, so four refused sends outlast a
+  departure's 10 s timeout, which then reports the Save as still running.
+- Workers are not reserved per lane. Two other lanes (a Create and another document's Save) can
+  hold both, so an Index half, or a third document's Save, waits for one of them.
+- Rarer pre-lease refusals (server changed before commit, request cancelled, lease-send expiry)
+  are still classified uncertain. That is safe but pessimistic.
+- A retried read may run natively after a Save that started later, yet still count as the older
+  read. That Save's acknowledgement can briefly replace a slightly newer view; the next refresh
+  corrects it.
+
+Checks:
+
+- `npm --prefix apps/desktop test`: 1759/1759.
+- `npm run check`: 0 errors, 0 warnings.
+- `npm run build`: passed.
+- `npm run test:flows`: 9/9.
+- `scripts/check-no-ambient.sh`: passed.
+- `cargo test --all --all-features`: 2463 passed, 0 failed (Rust unchanged).
+- `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`: 363 passed, 0 failed.
+
+Adversarial review: HIGH-1 (three workers oversubscribed the slots) and HIGH-2 (storage-busy
+missed) are fixed, as are three MEDIUMs. The re-review found no BLOCKER, HIGH or MEDIUM issues.
+
+Tests changed because their contract changed:
+
+- `SAVE-001`, the frame test in `studio-session.test.ts`, the Create-retry test there, and the
+  pending-thumbnail `UI-003` used "busy" texts as examples of uncertain failures. Those texts are
+  now definite no-writes that are resent, so each uses a post-dispatch error to keep its own claim.
+- `SAVE-002` asserted a second lane stays queued "behind the one worker". It now fills both
+  workers and asserts that the cleared scope's worker cannot start the waiting third lane, while a
+  new-scope worker can. It pins that behaviour, not the token mechanism.
+- `UI-003` checks both outcomes. While doing so it exposed that a not-written Create showed
+  "creating…" in the sidebar; that now reads "create not written · retry in the editor".
+- The two departure tests from the previous round that pinned single-worker order and the
+  single-worker limit are replaced by the multi-worker contract above.
+
 ## PR #46 fourth review: departure ordering (2026-10-18)
 
 The review of `5bc43d2c` confirmed the rename-context and Index-half fixes, plus 14 extended wiki

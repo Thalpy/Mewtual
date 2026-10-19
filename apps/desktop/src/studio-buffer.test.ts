@@ -329,42 +329,48 @@ test("with the worker free, leaving a document saves it, navigates, and only the
   h.session.reset();
 });
 
-// The departure's own record goes ahead of an Index record that an earlier deadline released and
-// that sits ahead of it in queue order (review of the 5bc43d2c fix, P4).
-test("a departure's Save is not overtaken by an Index record released earlier", async () => {
-  const h = await harness(), other = id32(9), titleAck = deferred<unknown>(), indexAck = deferred<unknown>();
-  const listed = () => ({ ...ordinaryView(indexContent({ objects: { [object]: indexEntry({ title: "initial" }) } })), group });
-  h.ipc.on("studio_list", listed); h.ipc.on("studio_apply_index", () => indexAck.promise);
-  let applies = 0; h.ipc.on("studio_apply", () => ++applies === 1 ? titleAck.promise : h.view());
-  await h.session.refreshIndex(); await settle(8);
-  h.session.setTitle(object, "renamed"); await h.tick(5000); // the deadline releases both halves
-  assert.equal(applies, 1, "the title Apply is in flight; the Index half waits for the worker");
-  h.session.setFps(object, 7); // a later edit of the document being left
-  const leaving = h.session.navigate(() => h.session.open(other)).then(() => "navigated", e => String(e));
-  titleAck.resolve(h.view());
-  const outcome = await Promise.race([leaving, settle(10).then(() => "still leaving")]);
-  assert.equal(outcome, "navigated", "the fps Save ran before the earlier-released Index half");
-  assert.deepEqual(h.ipc.calls.filter(c => c.cmd === "studio_apply" || c.cmd === "studio_apply_index").map(c => c.cmd), ["studio_apply", "studio_apply", "studio_apply_index"]);
-  indexAck.resolve(listed()); await settle(8); assert.equal(h.session.saves.length, 0);
-  h.session.reset();
+// Several save workers, one per lane at a time: an Index delivery in flight (from the deadline, an
+// earlier departure, or a sidebar retry) no longer holds a document's departure behind it. This
+// was the pinned single-worker limit, and the timing variant of the review of 64fed24b.
+test("a departure never waits on an Index delivery already in flight", async () => {
+  for (const edit of ["before leaving", "while leaving"] as const) {
+    const h = await harness(), other = id32(9), titleAck = deferred<unknown>(), indexAck = deferred<unknown>();
+    const listed = () => ({ ...ordinaryView(indexContent({ objects: { [object]: indexEntry({ title: "initial" }) } })), group });
+    h.ipc.on("studio_list", listed); h.ipc.on("studio_apply_index", () => indexAck.promise);
+    let applies = 0; h.ipc.on("studio_apply", () => ++applies === 1 ? titleAck.promise : h.view());
+    await h.session.refreshIndex(); await settle(8);
+    h.session.setTitle(object, "renamed"); await h.tick(5000); // the deadline releases both halves
+    assert.equal(h.session.saves.find(s => s.kind === "applyIndex")?.status, "inflight", `${edit}: the Index half runs on its own worker`);
+    if (edit === "before leaving") h.session.setFps(object, 7);
+    const leaving = h.session.navigate(() => h.session.open(other)).then(() => "navigated", e => String(e));
+    // Review of 64fed24b: an edit made while the departure waits on the title receipt joins the
+    // next round of the drain, and must not wait on the Index receipt either.
+    if (edit === "while leaving") { await settle(3); h.session.setFps(object, 7); }
+    titleAck.resolve(h.view());
+    const outcome = await Promise.race([leaving, settle(12).then(() => "still leaving")]);
+    assert.equal(outcome, "navigated", `${edit}: B opens while the Index receipt is still pending`);
+    assert.equal(h.session.doc?.object, other);
+    assert.equal(applies, 2, `${edit}: the title and the fps Save both landed`);
+    assert.deepEqual(h.session.saves.map(s => [s.kind, s.status]), [["applyIndex", "inflight"]], `${edit}: only the Index half is still out`);
+    indexAck.resolve(listed()); await settle(8); assert.equal(h.session.saves.length, 0);
+    h.session.reset();
+  }
 });
 
-// Known limit, pinned so a change to it is deliberate: one worker serves every lane. An Index
-// record that is already being delivered delays a departure until it answers (or until the 10 s
-// refusal), and the departure's records stay retained and are sent after it.
-test("known limit: a departure waits for an Index delivery already running", async () => {
-  const h = await harness(), other = id32(9), indexAck = deferred<unknown>();
-  const listed = () => ({ ...ordinaryView(indexContent({ objects: { [object]: indexEntry({ title: "initial" }) } })), group });
-  h.ipc.on("studio_list", listed); h.ipc.on("studio_apply_index", () => indexAck.promise);
-  await h.session.refreshIndex(); await settle(8);
-  h.session.setTitle(object, "renamed"); await h.tick(5000); // title lands, the Index half is in flight
-  assert.equal(h.session.saves.find(s => s.kind === "applyIndex")?.status, "inflight");
-  h.session.setFps(object, 7);
-  const leaving = h.session.navigate(() => h.session.open(other)).then(() => "navigated", e => String(e));
-  assert.equal(await Promise.race([leaving, settle(10).then(() => "still leaving")]), "still leaving");
-  indexAck.resolve(listed());
-  assert.equal(await leaving, "navigated", "the departure completes once the running delivery answers");
-  assert.equal(h.session.saves.length, 0);
+// Lane order holds with several workers: a lane never has two saves in flight, and its records
+// run in queue order, so a document's later edits wait for its earlier ones.
+test("several workers never run two saves of one lane at once", async () => {
+  const h = await harness(), acks: ReturnType<typeof deferred<unknown>>[] = [];
+  h.ipc.on("studio_apply", () => { const ack = deferred<unknown>(); acks.push(ack); return ack.promise; });
+  h.session.setTitle(object, "one"); h.session.setFps(object, 7); h.session.setTitle(object, "two");
+  void h.session.save().catch(() => {}); await settle(8);
+  assert.equal(acks.length, 1, "one document lane, one save in flight");
+  acks[0].resolve(h.view()); await settle(8);
+  assert.equal(acks.length, 2, "the next record of the lane went only after the first answered");
+  const bodies = h.ipc.calls.filter(c => c.cmd === "studio_apply").map(c => JSON.parse(String(c.args.body)).field);
+  assert.deepEqual(bodies, ["title", "fps"]);
+  for (const ack of acks.slice(1)) ack.resolve(h.view());
+  await settle(8); acks.at(-1)?.resolve(h.view()); await settle(8);
   h.session.reset();
 });
 
@@ -424,7 +430,10 @@ test("affectedObject names the document a record changes, whatever its native ta
     assert.equal(affectedObject(record({ kind: "overlayApply", object: null, op })), object, `a local-draft Index ${op.op}`);
   }
   assert.equal(affectedObject(record({ kind: "overlayApply", object: null, op: {} })), null, "an Index record about no one entry");
-  assert.equal(affectedObject(record({ kind: "recoveryApply", object: null })), null, "an Index recovery names no document here");
+  for (const kind of ["object", "objectTitle", "objectExpiry", "objectDeletion"]) {
+    assert.equal(affectedObject(record({ kind: "recoveryApply", object: null, edit: { choice: { kind, id: object, value: "00" } } })), object, `an Index recovery of one entry (${kind})`);
+  }
+  assert.equal(affectedObject(record({ kind: "recoveryApply", object: null, edit: { choice: { kind: "title", value: "00" } } })), null, "an Index recovery naming no entry");
 });
 
 // Adversarial review of 22e4ed77's fixes, M1: B's Save waited ten seconds and then said "try

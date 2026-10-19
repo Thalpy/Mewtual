@@ -354,10 +354,10 @@ function productionWikiActions() {
     unlockedViewCurrent: (gen: number, server: number | null) => !state.locked && gen === state.viewGeneration && server === state.activeServerId,
     invokeDebugged: async (cmd: string, args: Record<string, unknown>) => { calls.push({ cmd, args }); return { value: await pending.promise }; },
     invoke: async (cmd: string, args: Record<string, unknown>) => { calls.push({ cmd, args }); if (cmd === "get_wiki_history") return history.promise; await pending.promise; },
-    refreshWiki: async () => {}, toast: () => {},
+    refreshWiki: async () => {}, toast: (_text: string) => {},
   };
-  const app = production<{ saveWikiPage: () => Promise<void>; deleteWikiPage: (name: string) => Promise<void>; setWikiPageFormat: (fmt: string) => Promise<void>; openWikiHistory: () => Promise<void> }>(
-    ["wikiPane", "wikiPaneCurrent", "saveWikiPage", "deleteWikiPage", "setWikiPageFormat", "openWikiHistory"], state);
+  const app = production<{ saveWikiPage: () => Promise<void>; deleteWikiPage: (name: string) => Promise<void>; setWikiPageFormat: (fmt: string) => Promise<void>; openWikiHistory: () => Promise<void>; restoreWikiRev: (rev: string) => Promise<void> }>(
+    ["wikiPane", "wikiPaneCurrent", "saveWikiPage", "deleteWikiPage", "setWikiPageFormat", "openWikiHistory", "restoreWikiRev"], state);
   const openPage = (page: string, body: string) => { state.activeWikiPage = page; state.wikiPaneSerial++; state.wikiBody = body; state.wikiDirty = true; };
   const switchServer = (id: number) => { state.activeServerId = id; state.viewGeneration++; };
   return { state, app, calls, openPage, switchServer, answer: async (ok: boolean) => { pending.resolve(ok); await flush(); }, history };
@@ -393,6 +393,14 @@ test("wiki save, delete, format and history act only on the page and server they
   await fmt.answer(false); await formatting;
   const set = fmt.calls.find(c => c.cmd === "set_wiki_format")!;
   assert.deepEqual([set.args.server, set.args.name], [1, "N"]); assert.deepEqual(fmt.state.wikiMeta, {}, "B's page metadata is untouched");
+
+  // Restoring X's revision, then opening Y before the reply: the toast names X, Y's history stays.
+  const restore = productionWikiActions(); const toasts: string[] = []; restore.state.toast = (text: string) => { toasts.push(text); };
+  restore.state.showWikiHistory = true;
+  const restoring = restore.app.restoreWikiRev("r1"); restore.openPage("Y", "y"); restore.state.showWikiHistory = true;
+  await restore.answer(false); await restoring;
+  assert.deepEqual(restore.calls[0].args, { server: 1, page: "X", rev: "r1" });
+  assert.match(toasts[0], /Restored "X"/); assert.equal(restore.state.showWikiHistory, true, "Y's open history is not closed by X's restore");
 
   // History read for X lands nowhere once the pane moved on, or behind a lock.
   for (const move of ["page", "lock"] as const) {

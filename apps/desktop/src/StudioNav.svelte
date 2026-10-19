@@ -371,7 +371,7 @@
     <li>
       <button type="button" class="studio-obj pending" class:active={studio.selected === s.object} onclick={() => open(s.object)}>
         <span class="studio-obj-name"><span class="nm">{s.kind === "create" ? s.request.title : ""}</span></span>
-        <span class="studio-obj-meta"><span class="micro">{s.status === "uncertain" ? "create uncertain · retry in the editor" : "creating…"}</span></span>
+        <span class="studio-obj-meta"><span class="micro">{s.status === "uncertain" ? "create uncertain · retry in the editor" : s.status === "blocked" ? "create not written · retry in the editor" : session.awaitsExplicitSave(s.id) ? "create not saved yet · open to save" : "creating…"}</span></span>
       </button>
     </li>
   {/each}

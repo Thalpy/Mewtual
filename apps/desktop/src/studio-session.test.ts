@@ -1003,12 +1003,14 @@ test("a frame save publishes then applies with the view's epoch, and an uncertai
   const pix = pixBytes(3);
   h.ipc.on("publish_pix", (a) => ({ cid: id64(0xc3), bytes: base64ToBytes(String(a.bytesB64)).length }));
   let applies = 0;
-  h.ipc.on("studio_apply", () => { applies++; throw new Error("Studio storage busy; retry the same request"); });
+  // A failure after dispatch: uncertain. (The bridge's pre-dispatch "busy" refusals are definite
+  // no-writes since nativeNoWrite, and are resent automatically.)
+  h.ipc.on("studio_apply", () => { applies++; throw new Error("Studio transaction expired, cancelled or server stopped"); });
   h.session.saveFrame(OBJ, F1, pix);
   await h.sync();
   const rec = h.session.saves[0];
   assert.equal(rec.status, "uncertain");
-  assert.match(rec.error, /busy/);
+  assert.match(rec.error, /expired/);
   assert.ok(rec.kind === "frame");
   assert.deepEqual(rec.pix, pix, "the unsaved pixels stay on the record");
   assert.deepEqual(h.session.unsavedPix(OBJ, F1), pix);
@@ -1064,7 +1066,7 @@ test("create freezes object, nonce, title and timestamp; a retry after failure r
   h.ipc.on("studio_list", () => ordinaryView(indexContent()));
   h.session.setScope({ server: SERVER, channel: CHANNEL });
   await h.sync();
-  h.ipc.on("studio_create", () => { throw new Error("Studio actor busy; retry"); });
+  h.ipc.on("studio_create", () => { throw new Error("Studio transaction expired, cancelled or server stopped"); });
   const object = h.session.createFlipnote("moon cat");
   await h.sync();
   h.tick(5_000);
