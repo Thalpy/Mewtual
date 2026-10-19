@@ -118,6 +118,40 @@ under Copy, and exercises ordinary recipe recovery with exact retries and stale-
 It does not convert backups into PIXA, publication into peer custody, or test engines into
 audible hardware/platform evidence. Current UI obligations are in [GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md).
 
+## Studio save resend and the batch grant (2026-10-19, `[desync fixes]`)
+
+- **ACL (SEC-IPC-001).** `studio_apply_batch` was registered but ungranted, so the app manifest
+  denied it everywhere; that was the safe direction, but it broke every burst of Score edits. It is
+  now granted to `main` only (account-write). It carries no authority a sequence of `studio_apply`
+  calls lacks: each item is the same signed member operation under the same custody fence and 64 KiB
+  cap, natively bounded to 64 items and 256 KiB, Score-only, and not atomic.
+- **Automatic resend is replay of the member's own request, not new authority.** The renderer
+  resends a failed Save byte-identically (nonce, epoch, body) after a bounded backoff (seven
+  resends, about two minutes in all), and only for routes whose exact retry native recognises from
+  the retained signed envelope (Create, Apply, Index Apply, ordinary frames). Native still runs the
+  full membership, epoch and gate checks on every visit, so a resend cannot outlive a revoked member
+  or a closed epoch. Resends never cross a reset, lock or scope change. Restored work is never
+  resent before something the member did sends it (an explicit Save or retry, leaving its document
+  or the Studio, a channel change, or a post to chat). A refusal no resend can change (changed
+  history, retired epoch, a server or membership that is gone, an id that already exists) is never
+  resent, and the member's own Retry refuses it too. The amplification bound per failed record is
+  seven resends. Each resend can itself be repeated by the two busy layers beneath it (at most 4 x 6
+  calls) plus an admission read. At most one save is in flight per lane, and two in all.
+- **Design question, not resolved here:** an automatic resend can arrive up to about two minutes
+  after the edit, with no fresh admission check (an exact retry skips it by design). In a
+  multi-member document it can then overwrite a peer's newer value in the same epoch without the
+  member choosing to. A manual retry has always been able to do the same; the resend makes it
+  happen without a click. The member's working view showed their value throughout.
+- **One more "not written" classification.** "Not written" is what permits "Save as a new edit",
+  which mints a fresh nonce, so a wrong classification could apply an edit twice. Only native's
+  retired-epoch refusal is added, matched exactly, alone or as a batch's first item. Native raises
+  it before the intent barrier, and batch items are applied in order. A test pins the text, its
+  single producer, the ordering and the batch wrapper to the Rust sources. Anything else, including
+  a later batch item or a record whose earlier attempt was uncertain, stays uncertain.
+- **Leaving no longer waits for receipts.** Edits keep their full request on the queue (and in the
+  lock snapshot) until they land or the member discards them; the Studio does not change channel
+  while its queue holds work. Window close still waits for every receipt.
+
 ## Gate 6 enforcement checkpoint (2026-10-14; candidate at that date)
 
 The candidate connects typed Score and complete Flipnote sound state to the existing causal/P1,

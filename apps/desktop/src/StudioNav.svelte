@@ -3,7 +3,8 @@
   // known about each (design-creative-suite.md section 5, "Studio"), read from the connected
   // session's Index view. Overflow and deleted entries stay visible as what they are.
   import { untrack } from "svelte";
-  import { ensureStudio, setStudioScope, studio } from "./studio-state.svelte.ts";
+  import { ensureStudio, setStudioScope, studio, studioScopeWaiting } from "./studio-state.svelte.ts";
+  import { saveHeadline, saveProblemText } from "./studio-save-words.ts";
   import { PixRaster } from "./pix-canvas.ts";
   import { DEFAULT_PALETTE } from "./studio-store.ts";
   import { FLIPNOTE_H, FLIPNOTE_W } from "./studio-contract.ts";
@@ -26,9 +27,11 @@
   // At init, not in a derived: it writes shared state once, keyed on the identity at mount.
   // svelte-ignore state_referenced_locally
   const session = ensureStudio(me);
-  // Tracked on the props only; the scope change itself runs untracked (see studio-state).
+  // Tracked on the props, and on whether the switch is still waiting for the previous channel's
+  // edits to save (studio-state); the scope change itself runs untracked.
+  const scopeWaiting = $derived.by(() => { void studio.rev; return studioScopeWaiting(server, channel); });
   $effect(() => {
-    const s = server, c = channel;
+    const s = server, c = channel; void scopeWaiting;
     untrack(() => setStudioScope(s, c));
   });
 
@@ -42,10 +45,10 @@
     void studio.rev;
     return session.pendingFor(null).filter((s) => s.status === "blocked" || s.status === "uncertain");
   });
-  // Unsaved edits held for a document other than the one in the editor. Switching documents saves
-  // the document left, and sends (without awaiting) its Index records, which can show here until
-  // they land. A lock/unlock restore leaves work here, and so, until its deadline, does deleting a
-  // document whose edits are still queued. Their Save, Retry and discard controls live in that
+  // Unsaved edits held for a document other than the one in the editor. Switching documents sends
+  // the document left without waiting, so its edits show here ("saving") until they land, and stay
+  // ("not saved", "not confirmed") if one fails. A lock/unlock restore leaves work here, and so,
+  // until its deadline, does deleting a document whose edits are still queued. Their Save, Retry and discard controls live in that
   // document's own editor. Each row opens it, so those
   // controls stay one click away even for a document this list does not show (deleted from the
   // Index, or past an unread listing). Records are grouped by the document they change, so an
@@ -72,8 +75,11 @@
     return [...byObject].map(([object, saves]) => ({
       object,
       title: listed.find((e) => e.id === object)?.title || `untitled ${session.objectKind(object)}`,
-      status: saves.some((s) => s.status === "uncertain" || s.mayHaveCommitted) ? "save uncertain"
-        : saves.some((s) => s.status === "blocked") ? "save not written" : "unsaved edits",
+      // Sent and in flight, or waiting to be sent, reads "saving"; restored work that only an
+      // explicit Save sends reads "unsaved edits", as it is not moving on its own.
+      status: saves.some((s) => s.status === "uncertain" || s.mayHaveCommitted) ? "not confirmed"
+        : saves.some((s) => s.status === "blocked") ? "not saved"
+        : saves.some((s) => session.awaitsExplicitSave(s.id)) ? "unsaved edits" : "saving",
     }));
   });
   const heldPages = $derived(Math.max(1, Math.ceil(heldElsewhere.length / HELD_PAGE)));
@@ -246,28 +252,37 @@
 {#if indexError}
   <p class="studio-note danger">{indexError}</p>
 {/if}
+{#if scopeWaiting}
+  <!-- The session is still on the previous channel, sending its edits. Its list is not this
+       channel's, and a "new flipnote" here would land in the wrong channel, so nothing below shows. -->
+  <p class="studio-note" data-scope-wait>This list follows once your edits from the last channel are saved or discarded.</p>
+{:else}
 {#if indexAttention.length}
   {@const save = indexAttention[0]}
-  <div class="studio-index-draft warn">
-    <span><b>{save.status === "blocked" ? "index save not written" : "index save uncertain"}</b> · {save.label}</span>
-    <span class="micro wrap">{save.error}{#if save.status === "blocked"} · the backend confirmed that this attempt wrote nothing{/if} · your edit is retained and later Index saves wait behind it</span>
+  {@const retrying = save.status === "queued" || save.status === "inflight" || session.autoRetryAt(save.id) !== null}
+  <!-- Same words as the editor's banner (studio-save-words.ts); the exact native text is the tooltip. -->
+  <div class="studio-index-draft" class:warn={!retrying} title={save.error}>
+    <span><b>{saveHeadline(save.label, { retrying, uncertain: save.mayHaveCommitted, others: indexAttention.length - 1 })}</b></span>
+    <span class="micro wrap">{saveProblemText(save.error, save.mayHaveCommitted)}{retrying ? " Trying again on its own." : ""}</span>
     <span class="index-draft-actions">
-      {#if overlayRetryOf(save) !== "newTicket" && overlayRetryOf(save) !== "none"}
-        <button type="button" class="ghost small ctx-action" onclick={() => session.retry(save.id)}>{overlayRetryOf(save) === "afterExplicitAccess" ? "access, then retry index save" : "retry exact index save"}</button>
+      {#if session.canRetry(save.id)}
+        <button type="button" class="ghost small ctx-action" onclick={() => session.retry(save.id)}>{overlayRetryOf(save) === "afterExplicitAccess" ? "Reload and retry" : "Retry now"}</button>
       {/if}
-      <button type="button" class="ghost small ctx-action" disabled={overlayRetryOf(save) === "none" || !session.canReauthor(save.id)} onclick={() => session.reauthor(save.id)}>save index edit as new</button>
+      {#if overlayRetryOf(save) !== "none" && session.canReauthor(save.id)}
+        <button type="button" class="ghost small ctx-action" onclick={() => session.reauthor(save.id)}>Save as a new edit</button>
+      {/if}
       {#if indexSaveDiscardArmed === indexSaveKey}
-        <button type="button" class="ghost small ctx-action danger" onclick={() => indexSaveDiscardArmed === indexSaveKey && session.discard(save.id)}>discard index edit for real</button>
-        <button type="button" class="ghost small ctx-action" onclick={() => (indexSaveDiscardArmed = "")}>cancel</button>
+        <button type="button" class="ghost small ctx-action danger" onclick={() => indexSaveDiscardArmed === indexSaveKey && session.discard(save.id)}>Really discard?</button>
+        <button type="button" class="ghost small ctx-action" onclick={() => (indexSaveDiscardArmed = "")}>Cancel</button>
       {:else}
-        <button type="button" class="ghost small ctx-action" onclick={() => (indexSaveDiscardArmed = indexSaveKey)}>discard index edit…</button>
+        <button type="button" class="ghost small ctx-action" onclick={() => (indexSaveDiscardArmed = indexSaveKey)}>Discard</button>
       {/if}
     </span>
   </div>
 {/if}
 {#each heldElsewhere.slice(heldShown * HELD_PAGE, (heldShown + 1) * HELD_PAGE) as held (held.object)}
-  <div class="studio-index-draft warn" data-held-object={held.object}>
-    <span><b>{held.status}</b> · {held.title}</span>
+  <div class="studio-index-draft" class:warn={held.status !== "saving"} data-held-object={held.object}>
+    <span><b>{held.title}</b>: {held.status}</span>
     <span class="index-draft-actions"><button type="button" class="ghost small ctx-action" onclick={() => open(held.object)}>open</button></span>
   </div>
 {/each}
@@ -391,7 +406,7 @@
     <li>
       <button type="button" class="studio-obj pending" class:active={studio.selected === s.object} onclick={() => open(s.object)}>
         <span class="studio-obj-name"><span class="nm">{s.kind === "create" ? s.request.title : ""}</span></span>
-        <span class="studio-obj-meta"><span class="micro">{s.status === "uncertain" ? "create uncertain · retry in the editor" : s.status === "blocked" ? "create not written · retry in the editor" : session.awaitsExplicitSave(s.id) ? "create not saved yet · open to save" : "creating…"}</span></span>
+        <span class="studio-obj-meta"><span class="micro" title={s.status === "uncertain" || s.status === "blocked" ? "Open it to retry or discard" : session.awaitsExplicitSave(s.id) ? "Open it to save" : ""}>{s.status === "uncertain" ? "not confirmed" : s.status === "blocked" ? "not saved" : session.awaitsExplicitSave(s.id) ? "not saved yet" : "creating…"}</span></span>
       </button>
     </li>
   {/each}
@@ -419,6 +434,7 @@
 {/if}
 <button type="button" class="ghost small ctx-action studio-new" disabled={!indexView || !hasScope} onclick={newFlipnote}>+ new flipnote</button>
 <button type="button" class="ghost small ctx-action studio-new" disabled={!indexView || !hasScope} onclick={newScore}>+ new score</button>
+{/if}
 
 <style>
   .studio-nav .studio-obj {

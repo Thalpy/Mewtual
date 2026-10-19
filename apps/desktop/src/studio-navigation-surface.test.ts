@@ -16,7 +16,7 @@ const { mount, unmount, flushSync } = await import("svelte");
 const { default: Studio } = await import("./Studio.svelte");
 const { default: StudioNav } = await import("./StudioNav.svelte");
 const { default: StudioPlaybackHarness } = await import("../scripts/fixtures/StudioPlaybackHarness.svelte");
-const { ensureStudio, useStudioIpc, disposeStudio, studio, studioDraftSnapshot, resetStudio, restoreStudioDraft, saveStudio } = await import("./studio-state.svelte.ts");
+const { ensureStudio, useStudioIpc, disposeStudio, studio, studioDraftSnapshot, resetStudio, restoreStudioDraft, saveStudio, sendStudio, claimStudioNavigation, beginStudioClose, endStudioClose, setStudioScope } = await import("./studio-state.svelte.ts");
 const a = id32(1), b = id32(2), frame = id32(3), cid = id64(4);
 
 test("editor Play starts all six frames and frame-one sound again after stopping on frame three", async () => {
@@ -176,8 +176,9 @@ test("a restored queued or uncertain edit reopens through the sidebar and waits 
         assert.match(target.textContent!, /Unsaved changes/);
         button("Save")!.click(); flushSync(); await settle();
       } else {
-        assert.match(target.textContent!, /save uncertain/); assert.ok(button("discard"), "discard stays reachable");
-        button("retry same request")!.click(); flushSync(); await settle();
+        assert.match(target.textContent!, /Not confirmed: fps/); assert.ok(button("Discard"), "discard stays reachable");
+        assert.doesNotMatch(target.textContent!, /did not go through/, "an interrupted delivery may have landed; the words must not say it failed");
+        button("Retry now")!.click(); flushSync(); await settle();
         assert.deepEqual(applies().at(-1)!.args, applies()[0].args, "retry resends the exact interrupted request");
       }
       assert.equal(applies().length, sent + 1); assert.equal(session.saves.length, 0, notices.join("; "));
@@ -210,7 +211,7 @@ test("held work for a document the Index does not list is still one sidebar clic
     resetStudio(); restoreStudioDraft(json); mounted = surfaces(); flushSync(); await settle();
     assert.equal(target.querySelectorAll(".studio-obj").length, 0, "the Index lists nothing to click");
     const row = target.querySelector<HTMLElement>(`[data-held-object="${b}"]`);
-    assert.ok(row, target.textContent!); assert.match(row.textContent!, /unsaved edits · untitled flipnote/);
+    assert.ok(row, target.textContent!); assert.match(row.textContent!, /untitled flipnote: unsaved edits/);
     row.querySelector("button")!.click(); flushSync(); await settle();
     assert.equal(session.doc?.object, b, notices.join("; ")); assert.equal(studio.selected, b);
     assert.equal(ipc.calls.filter(c => c.cmd === "studio_apply").length, 0);
@@ -251,22 +252,22 @@ test("with the document read failing, restored queued and uncertain edits keep t
       choose("A"); await settle();
       assert.equal(session.doc?.object, a, notices.join("; ")); assert.match(target.textContent!, /could not read this flipnote: actor busy/);
       if (restored === "uncertain") {
-        assert.ok(within("[data-held-save]", "retry same request"), target.textContent!);
-        within("[data-held-save]", "discard")!.click(); flushSync(); within("[data-held-save]", "discard for real")!.click(); flushSync();
+        assert.ok(within("[data-held-save]", "Retry now"), target.textContent!);
+        within("[data-held-save]", "Discard")!.click(); flushSync(); within("[data-held-save]", "Really discard?")!.click(); flushSync();
       } else {
         assert.ok(within("[data-held-queued]", "Save"), target.textContent!);
         if (restored === "queued-discard") {
-          within("[data-held-queued]", "discard")!.click(); flushSync(); within("[data-held-queued]", "discard for real")!.click(); flushSync();
+          within("[data-held-queued]", "Discard")!.click(); flushSync(); within("[data-held-queued]", "Really discard?")!.click(); flushSync();
         } else {
           // Save cannot read the document either: refused as not written, and the refusal's own
           // retry and discard appear beside the read error rather than replacing it. A discard
           // armed before the Save does not carry over to the record's new state.
-          within("[data-held-queued]", "discard")!.click(); flushSync();
+          within("[data-held-queued]", "Discard")!.click(); flushSync();
           within("[data-held-queued]", "Save")!.click(); flushSync(); await settle();
           assert.equal(session.saves[0].status, "blocked"); assert.match(target.textContent!, /could not read this flipnote/);
-          assert.ok(within("[data-held-save]", "retry same request"), target.textContent!);
-          assert.equal(within("[data-held-save]", "discard for real"), undefined, "the earlier arming does not survive the status change");
-          within("[data-held-save]", "discard")!.click(); flushSync(); within("[data-held-save]", "discard for real")!.click(); flushSync();
+          assert.ok(within("[data-held-save]", "Retry now"), target.textContent!);
+          assert.equal(within("[data-held-save]", "Really discard?"), undefined, "the earlier arming does not survive the status change");
+          within("[data-held-save]", "Discard")!.click(); flushSync(); within("[data-held-save]", "Really discard?")!.click(); flushSync();
         }
       }
       await settle();
@@ -312,6 +313,137 @@ test("a document's Save sends only that document's restored edits; other documen
     const left = session.saves.map(s => [s.object, s.status]);
     assert.deepEqual(left, [[b, "queued"], [c, "uncertain"], [d, "queued"]]);
     assert.equal(session.awaitsExplicitSave(session.saves[0].id), true, "B is still held for its own action");
-    assert.ok(!notices.some(n => /Could not confirm the save/.test(n)), notices.join("; "));
+    assert.ok(!notices.some(n => /is not confirmed|was not saved|not saved yet/.test(n)), notices.join("; "));
   } finally { for (const s of mounted) await unmount(s); disposeStudio(); target.remove(); }
+});
+
+// [desync fixes]: leaving the Studio no longer waits for its saves. Opening the Studio again in
+// another channel before they have landed must not open that channel on top of them. The session
+// stays where its edits are, both surfaces say so and offer nothing that would write into the old
+// channel, and the switch happens by itself once the last edit lands.
+test("the Studio reopened in another channel waits for the last channel's saves, then switches by itself", async () => {
+  const ipc = fakeIpc(), pixels = pixBytes(), other = "77777777777777777", held = deferred<unknown>(), notices: string[] = [];
+  const view = () => ({ ...ordinaryView(flipnoteContent({ fps: 12, frames: [{ id: frame, cid, bytes: pixels.length }] })), group: "deadbeef" });
+  ipc.on("studio_list", args => ({ ...ordinaryView(indexContent({ objects: args.channel === CHANNEL ? { [a]: indexEntry({ title: "A" }) } : { [b]: indexEntry({ title: "B" }) } })), group: "deadbeef" }));
+  ipc.on("studio_read", view);
+  ipc.on("request_blob_bounded", () => ({ bytes: pixels.length, bytes_b64: b64(pixels) }));
+  ipc.on("studio_apply", () => held.promise);
+  useStudioIpc(ipc, 5000); const session = ensureStudio(ME);
+  const settle = async () => { for (let i = 0; i < 12; i++) { session.flush(); await new Promise(resolve => setImmediate(resolve)); flushSync(); } };
+  const target = document.createElement("div"); document.body.append(target);
+  const surfaces = (channel: string) => [
+    mount(StudioNav, { target, props: { me: ME, server: SERVER, channel, onopen: () => {}, onnotice: (text: string) => notices.push(text) } }),
+    mount(Studio, { target, props: { me: ME, server: SERVER, channel, nameOf: () => "member", colorOf: () => "#fff", onnotice: (text: string) => notices.push(text) } }),
+  ];
+  let mounted = surfaces(CHANNEL); flushSync();
+  try {
+    await settle(); session.open(a); studio.selected = a; flushSync(); await settle();
+    session.setFps(a, 7);
+    sendStudio(); await settle(); // what leaving the Studio does: hand off, never wait
+    assert.equal(ipc.calls.filter(c => c.cmd === "studio_apply").length, 1, "the edit was sent on leaving");
+    for (const s of mounted) await unmount(s);
+    mounted = surfaces(other); flushSync(); await settle();
+    assert.equal(session.scope?.channel, CHANNEL, "the session stays with its unsaved edit");
+    assert.equal(target.querySelectorAll("[data-scope-wait]").length, 2, `both surfaces say what they wait for: ${target.textContent}`);
+    assert.equal(target.querySelector(".studio-new"), null, "nothing is offered that would write into the old channel");
+    assert.equal(target.querySelectorAll(".studio-obj").length, 0, "the old channel's list is not shown as this one's");
+    assert.equal(target.querySelector(".st-canvas"), null, "no editor for the old channel's document");
+    // Review M2: an App route begun while the switch waits must not be retired by its arrival.
+    const appRoute = claimStudioNavigation();
+    held.resolve(view()); await settle();
+    assert.equal(session.scope?.channel, other, "switched by itself once the edit landed");
+    assert.equal(appRoute(), true, "the deferred switch left the member's own navigation alone");
+    assert.equal(target.querySelector("[data-scope-wait]"), null);
+    assert.ok([...target.querySelectorAll(".studio-obj .nm")].some(n => n.textContent === "B"), target.textContent!);
+    assert.deepEqual(notices, [], "nothing to read or press along the way");
+    // An immediate switch (nothing queued) is a navigation of its own and still retires older routes.
+    const older = claimStudioNavigation();
+    for (const s of mounted) await unmount(s);
+    mounted = surfaces(CHANNEL); flushSync(); await settle();
+    assert.equal(session.scope?.channel, CHANNEL); assert.equal(older(), false);
+  } finally { for (const s of mounted) await unmount(s); disposeStudio(); target.remove(); }
+});
+
+/** Two surfaces mounted on `channel`, over one fake bridge; `settle` collects what a flush throws. */
+function scopeHarness() {
+  const ipc = fakeIpc(), pixels = pixBytes(), notices: string[] = [], errors: unknown[] = [];
+  const view = () => ({ ...ordinaryView(flipnoteContent({ fps: 12, frames: [{ id: frame, cid, bytes: pixels.length }] })), group: "deadbeef" });
+  ipc.on("studio_list", args => ({ ...ordinaryView(indexContent({ objects: args.channel === CHANNEL ? { [a]: indexEntry({ title: "A" }) } : { [b]: indexEntry({ title: "B" }) } })), group: "deadbeef" }));
+  ipc.on("studio_read", view);
+  ipc.on("request_blob_bounded", () => ({ bytes: pixels.length, bytes_b64: b64(pixels) }));
+  useStudioIpc(ipc, 5000); const session = ensureStudio(ME);
+  const settle = async () => { for (let i = 0; i < 12; i++) { session.flush(); await new Promise(resolve => setImmediate(resolve)); try { flushSync(); } catch (e) { errors.push(e); } } };
+  const target = document.createElement("div"); document.body.append(target);
+  let mounted: ReturnType<typeof mount>[] = [];
+  const show = async (channel: string) => {
+    for (const s of mounted) await unmount(s);
+    mounted = [
+      mount(StudioNav, { target, props: { me: ME, server: SERVER, channel, onopen: () => {}, onnotice: (text: string) => notices.push(text) } }),
+      mount(Studio, { target, props: { me: ME, server: SERVER, channel, nameOf: () => "member", colorOf: () => "#fff", onnotice: (text: string) => notices.push(text) } }),
+    ];
+    flushSync(); await settle();
+  };
+  const button = (label: string) => [...target.querySelectorAll<HTMLButtonElement>("button")].find(n => n.textContent?.trim() === label);
+  const done = async () => { for (const s of mounted) await unmount(s); disposeStudio(); target.remove(); };
+  return { ipc, session, settle, target, show, button, done, view, notices, errors };
+}
+
+// Review L2: the last edit landing while the window close held the session made setScope throw
+// inside both surfaces' effects. Review M3: the wait panel said "Saving" when nothing was moving, and
+// offered Retry for edits a retry cannot move.
+test("the channel wait holds through a window close, and says when its edits need the member", async () => {
+  const other = "77777777777777777", held = deferred<unknown>(), h = scopeHarness();
+  const uncaught = (e: unknown) => h.errors.push(e); process.on("uncaughtException", uncaught);
+  try {
+    h.ipc.on("studio_apply", () => held.promise);
+    await h.show(CHANNEL); h.session.open(a); studio.selected = a; flushSync(); await h.settle();
+    h.session.setFps(a, 7); sendStudio(); await h.settle();
+    await h.show(other);
+    beginStudioClose();
+    held.resolve(h.view()); await h.settle(); // the edit lands while the close owns the session
+    assert.deepEqual(h.errors, [], "nothing throws inside the surfaces");
+    assert.equal(h.session.scope?.channel, CHANNEL, "no switch under a closing window");
+    // The surfaces do not even ask while closing (studioScopeWaiting); a direct ask is refused
+    // quietly too, rather than reaching setScope's closing refusal.
+    assert.equal(setStudioScope(SERVER, other), false);
+    endStudioClose(); await h.settle(); // the close was abandoned
+    assert.equal(h.session.scope?.channel, other, "the switch happens once the close lets go");
+    assert.equal(h.target.querySelector("[data-scope-wait]"), null);
+
+    // An edit native refuses for good: the wait names it and offers only what can move it.
+    h.ipc.on("studio_apply", () => { throw "Studio: edit belongs to a retired epoch"; });
+    h.session.open(b); studio.selected = b; flushSync(); await h.settle();
+    h.session.setFps(b, 5); sendStudio(); await h.settle();
+    await h.show(CHANNEL);
+    const panel = h.target.querySelector(".studio-empty[data-scope-wait]")?.textContent ?? "";
+    assert.match(panel, /Your edits from the last channel need you\./, panel);
+    assert.match(panel, /fps/, "the stuck edit is named");
+    assert.equal(h.button("Retry"), undefined, "a retry could not change a retired epoch, so it is not offered");
+    h.button("Discard")!.click(); flushSync(); h.button("Really discard?")!.click(); flushSync(); await h.settle();
+    assert.equal(h.session.scope?.channel, CHANNEL, "discarding the stuck edit let the switch happen");
+    assert.deepEqual(h.errors, []);
+  } finally { process.off("uncaughtException", uncaught); await h.done(); }
+});
+
+// Review M5: a lock snapshot restored for a channel that can no longer be opened refused every new
+// Studio edit, everywhere, with no way to let it go.
+test("a restored snapshot for another channel says so and can be discarded, which frees editing", async () => {
+  const other = "77777777777777777", h = scopeHarness();
+  try {
+    h.ipc.on("studio_apply", () => new Promise(() => {}));
+    await h.show(CHANNEL); h.session.open(a); studio.selected = a; flushSync(); await h.settle();
+    h.session.setFps(a, 7);
+    const json = studioDraftSnapshot()!;
+    resetStudio(); restoreStudioDraft(json);
+    await h.show(other); // the restored channel is not the one opened
+    assert.ok(h.target.querySelector("[data-restored-elsewhere]"), h.target.textContent!);
+    h.session.open(b); await h.settle();
+    assert.throws(() => h.session.setFps(b, 3), /restored Studio edits/, "new edits wait for the restored ones");
+    h.button("Discard them")!.click(); flushSync();
+    assert.ok(h.target.querySelector("[data-restored-elsewhere]"), "one click only arms the discard");
+    h.button("Really discard?")!.click(); flushSync(); await h.settle();
+    assert.equal(h.target.querySelector("[data-restored-elsewhere]"), null);
+    h.session.setFps(b, 3); assert.equal(h.session.saves.length, 1, "editing works again");
+    assert.equal(studioDraftSnapshot()?.includes(`"channel":"${CHANNEL}"`) ?? false, false, "the next lock does not carry the discarded snapshot");
+  } finally { await h.done(); }
 });

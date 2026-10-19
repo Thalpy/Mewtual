@@ -142,9 +142,9 @@ test("G7-UI: Closing FPS controls save locally and retain their exact request on
     state.studio.selected = OBJ; flushSync(); await settled(350);
     const fps = m.target.querySelector<HTMLInputElement>('label.st-chip input[type="number"]');
     assert.ok(fps && !fps.disabled); fps.value = "17"; fps.dispatchEvent(new Event("change", { bubbles: true })); await settled();
-    assert.equal(m.count("studio_closing_overlay_save"), 1); assert.match(m.text(), /local save not written/);
+    assert.equal(m.count("studio_closing_overlay_save"), 1); assert.match(m.text(), /Not saved: fps/);
     const first = ipc.calls.find(c => c.cmd === "studio_closing_overlay_save")!.args;
-    m.click("button.st-btn", "retry same request"); await settled();
+    m.click("button.st-btn", "Retry now"); await settled();
     assert.deepEqual(ipc.calls.filter(c => c.cmd === "studio_closing_overlay_save")[1].args, first);
     assert.equal(m.count("studio_closing_overlay_save_begin"), 1); assert.equal(m.count("studio_apply"), 0); assert.equal(m.count("studio_unconfirmed_overlay_save"), 0);
     m.click("button.st-itab", "history"); await settled(); assert.match(m.text(), /Updating shared history/);
@@ -316,7 +316,7 @@ test("UI-002: a pending read becomes the editor, a landed save changes the shown
 test("UI-003: a sidebar row rendered while a create is in flight changes when that create goes uncertain", async () => {
   // A failure after dispatch may have committed: uncertain. The bridge's actor-busy refusal comes
   // before dispatch, so it is truthfully "not written" (see nativeNoWrite), never "creating…".
-  for (const [error, label] of [["Studio transaction expired, cancelled or server stopped", /create uncertain · retry in the editor/], ["Studio actor busy; retry", /create not written · retry in the editor/]] as const) {
+  for (const [error, label] of [["Studio transaction expired, cancelled or server stopped", /not confirmed\s*$/], ["Studio actor busy; retry", /not saved\s*$/]] as const) {
     const ipc = fakeIpc();
     const create = deferred<unknown>();
     ipc.on("studio_list", () => ordinaryView(indexContent()));
@@ -377,8 +377,10 @@ test("UI-003: a pending frame's thumbnail rendered while its publish is in fligh
     await settled();
     assert.equal(pendingThumb()?.querySelector(".ix")?.textContent, "?", "the same thumbnail now says the save is uncertain");
     assert.ok(pendingThumb()?.querySelector(".fr.pending.uncertain"));
-    assert.match(m.text(), /save uncertain/);
-    assert.match(m.text(), /Studio transaction expired/);
+    assert.match(m.text(), /Not confirmed: new frame/);
+    // The exact native text is kept for diagnostics, in the banner's tooltip, not in its words.
+    assert.match(m.target.querySelector(".st-save")?.getAttribute("title") ?? "", /Studio transaction expired/);
+    assert.doesNotMatch(m.text(), /Studio transaction expired/);
   } finally {
     m.done();
   }
@@ -435,10 +437,11 @@ test("UI-004: an awaiting-tenure edit is visibly local-only and its retained dra
     await settled(500);
     assert.equal(m.count("studio_unconfirmed_overlay_save_begin"), 1);
     assert.equal(m.count("studio_unconfirmed_overlay_save"), 1);
-    assert.match(m.text(), /local save not written/);
-    assert.doesNotMatch(m.text(), /save uncertain/);
-    assert.match(m.text(), /backend confirmed that this attempt wrote nothing/);
-    m.click("button.st-btn", "retry same request");
+    assert.match(m.text(), /Not saved: fps/);
+    assert.doesNotMatch(m.text(), /Not confirmed/);
+    // Proven not written, so (and only so) it may be saved again as a new edit.
+    assert.match(m.text(), /Save as a new edit/);
+    m.click("button.st-btn", "Retry now");
     await settled(500);
     assert.equal(m.count("studio_unconfirmed_overlay_save"), 2);
     assert.match(m.text(), /local-only draft/);
@@ -510,12 +513,12 @@ test("UI-005: a local-only Index draft exposes export, archive, release and disp
     assert.match(m.text(), /local-only index draft/);
     state.ensureStudio(ME).setEntryExpiry(OBJ, { kind: "never" });
     await settled(300);
-    assert.match(m.text(), /index save not written/);
-    assert.match(m.text(), /backend confirmed that this attempt wrote nothing/);
-    m.click("retry exact index save");
+    assert.match(m.text(), /Not saved: expiry/);
+    assert.match(m.text(), /Save as a new edit/, "proven not written, so it may be saved again as a new edit");
+    m.click("Retry now");
     await settled(400);
     assert.equal(m.count("studio_unconfirmed_overlay_save"), 2);
-    assert.doesNotMatch(m.text(), /index save not written/);
+    assert.doesNotMatch(m.text(), /Not saved: expiry/);
 
     m.click("export index draft");
     await settled();
@@ -985,7 +988,7 @@ test("G6-UI-001: native Score composer routes real drum edits and retains exact 
     m.target.querySelector<HTMLButtonElement>('[data-score-cell="0:0"]')!.click(); flushSync(); await settled(300);
     const first = ipc.calls.find(c => c.cmd === "studio_apply")!.args;
     assert.equal(first.objectKind, "score"); assert.equal(JSON.parse(String(first.body)).op, "set_cell");
-    assert.match(m.text(), /save uncertain/); m.click("button", "retry same request"); await settled(300);
+    assert.match(m.text(), /Not confirmed: /); m.click("button", "Retry now"); await settled(300);
     assert.deepEqual(ipc.calls.filter(c => c.cmd === "studio_apply")[1].args, first);
     assert.match(m.text(), /history/); assert.equal(m.count("studio_recovery_list"), 1);
     assert.equal(m.count("publish_pix"), 0);

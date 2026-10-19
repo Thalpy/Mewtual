@@ -1,5 +1,92 @@
 # Mewtual; Handover
 
+## `[desync fixes]`: Studio saves resolve on their own, leaving never waits (2026-10-19, branch `score-composer-2`)
+
+**What the owner saw**, editing a Score alone: "studio_apply_batch not allowed. Command not found ·
+attempt 1 · your work is kept · 4 later saves wait behind it". "Retry same request" failed again,
+and placing notes quickly locked the Studio with "Could not confirm the save. Your edits are still
+here; retry before leaving."
+
+**Root cause: there was no desync.** `studio_apply_batch` was registered but ungranted (see the
+merge entry below), so Tauri refused every batch before it ran. A lone edit travels as
+`studio_apply` and saved. Several edits queued together travel as one batch, and each was then
+settled uncertain. Retrying one card cleared that card; the next showed the same error, which read
+as "retry fails again". Leaving waited for every card, so one uncertain card kept the member in the
+Studio. `fea4342e` grants the command.
+
+**So that the next failure of any kind does not block anyone** (the contract changes are in
+INTERFACES.md, top section):
+
+- Failed exact saves are resent on their own, about two minutes of bounded backoff, then they are
+  the member's. A retried record never rides a batch.
+- A document navigation, leaving the Studio, and posting to chat hand edits to the background Save
+  and go. App shows a progress toast that ends "Studio edits saved", or a warning that stays. The
+  Index half of a rename follows once the document half lands. Window close still waits.
+- The Studio waits to change channel while its queue holds the last channel's work, with a panel
+  in both surfaces, and switches by itself.
+- Play never asks about save status. Exports still do.
+- New `studio-save-words.ts` holds every word a person reads about a save. The native text moved to
+  the tooltip. New strings use no "·" (standing owner rule: no "·" or em dashes in UI text; the
+  existing ones are not purged yet).
+
+**Contract changes in tests** (each rewritten, none loosened): in `studio-buffer.test.ts`, the two
+navigation-ownership tests (no waiting window now exists to be superseded in), the departure
+Index-half ordering, "never waits on an Index delivery" (the "while leaving" variant had no window
+left) and the refused-departure test (now three endings: retried, slow receipt, discarded). One test
+in `studio-native-no-write.test.ts` stops its clock before the first automatic resend and asserts it.
+Copy assertions changed in `studio-surface.test.ts` and `studio-navigation-surface.test.ts`.
+
+**New tests:** `studio-auto-retry.test.ts` (the field report with the exact ACL text; exact resend
+timing; backoff and stop; lane order; Retry now replacing the due resend; reset cancelling;
+restored and immediate-seam exclusions; no batch around a possibly delivered edit; hand-off; Play
+vs take export; linked-score playback), `studio-save-words.test.ts` (including pinning the
+withheld-Save text to `studio.rs`), `studio-save-toast.test.ts` (App's tracker from its production
+text), and the scope wait at the end of `studio-navigation-surface.test.ts`. The key guards were
+checked by breaking them: the resend, the batch rule, playback, linked-score playback and the scope
+deferral each fail their tests when disabled.
+
+**Adversarial review.** No blocker or high finding. It verified that an exact resend cannot apply
+an edit twice for every covered kind, and that the ACL grant is narrow. Fixed from its findings:
+
+- A retry of a changed-history refusal used to skip admission, send the stale request and lose
+  "Save as a new edit". `retry` now refuses `NEEDS_DECISION` refusals, and `canRetry`/`needsDecision`
+  drive the buttons.
+- A deferred channel switch used to retire App routes begun while it waited. There is now a separate
+  `leaseGeneration`.
+- The wait panel now says "need you" when nothing is moving and lists the stuck edits.
+- The toast used to say "saved" after a discard. It now uses the `discarded` count.
+- A restored snapshot for an unreachable channel used to block Studio editing for good. There is now
+  a discard card.
+- A scope switch during a window close used to throw inside effects.
+- Stuck and uncertain wording claimed failure. Hotkeys acted on the hidden document. Deterministic
+  refusals (retired epoch, gone member, existing id, unknown channel) were resent for two minutes.
+- Doc overclaims about rename splitting and the amplification bound are corrected.
+
+The short re-review found no blocker or high finding, and confirmed those fixes. It raised two
+more mediums, both now fixed:
+
+- A first delivery refused in a retired epoch settled uncertain, so Discard was the only way out.
+  It is refused ahead of native's intent barrier, so it now settles not written (see THREAT-MODEL).
+- The wait panel's bulk "Save as new edits" re-saved changed-history edits unseen. It is removed;
+  such edits are reviewed in their own channel.
+
+Its lows are fixed too: the real native texts for a removed member and a deleted channel, "need
+you" whenever nothing will resend, and a hint on held cards.
+
+**Follow-ups:**
+- The wait panel cannot name the old channel.
+- Flipnote Play can refuse "the displayed source changed" while a linked Score's queued edit lands;
+  press Play again.
+- An in-flight save has no client-side timeout.
+- Retained local-draft Copy requests are not counted in `retainsWork`, so a deferred switch clears
+  them (pre-existing).
+- The review's design question, an automatic resend overwriting a peer's newer value without a
+  click, is recorded in THREAT-MODEL.md.
+
+**Limitations.** Window close refuses at the first failure even while a resend is due; close again
+a moment later. Local-draft (Unconfirmed/Closing) and recovery saves keep manual retry. After the
+backoff, a refusal that keeps coming back is shown, not hidden.
+
 ## Merge of Gate7 `d2548a37` into `score-composer-2` (2026-10-19)
 
 Both lines had fixed native "busy" refusals independently, so the merge composes them rather

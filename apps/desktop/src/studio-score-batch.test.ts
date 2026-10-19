@@ -77,7 +77,10 @@ test("a refused batch settles every member the same way and an exact retry resen
   h.session.setScoreCell(object, 0, 0, { k: "d", pad: 1 }); await settle(3);
   h.session.setScoreCell(object, 1, 0, { k: "d", pad: 2 });
   h.session.setScoreCell(object, 2, 0, { k: "d", pad: 3 });
-  h.ipc.on("studio_apply_batch", () => { throw new Error("Studio: batched Apply item 2 of 2 was refused (edit belongs to a retired epoch); the items before it are saved, so retry the same batch exactly or discard that item"); });
+  // The refusal reason is one a retry can act on. A retired epoch, which this used to name, is now
+  // the member's decision and `retry` refuses it ([desync fixes]; studio-auto-retry.test.ts),
+  // because native refuses the same request in a retired epoch every time.
+  h.ipc.on("studio_apply_batch", () => { throw new Error("Studio: batched Apply item 2 of 2 was refused (cell out of range); the items before it are saved, so retry the same batch exactly or discard that item"); });
   first.resolve(ordinaryView(scoreContent())); await h.sync();
   const members = h.session.saves;
   assert.equal(members.length, 2);

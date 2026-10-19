@@ -7777,6 +7777,37 @@ button.you-panel:hover {
   color: var(--text);
 }
 
+/* A toast that follows background work, such as the Studio's saves after leaving it: a thin bar
+   along the bottom edge fills from left to right as the work completes. */
+.toast.has-progress {
+  position: relative;
+  overflow: hidden;
+}
+
+.toast-bar {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  width: calc(var(--p, 0) * 100%);
+  background: var(--accent);
+  transition: width 0.2s ease-out;
+}
+
+.toast.ok .toast-bar {
+  background: var(--ok);
+}
+
+.toast.warn .toast-bar {
+  background: var(--warn);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast-bar {
+    transition: none;
+  }
+}
+
 @keyframes toast-in {
   from {
     opacity: 0;

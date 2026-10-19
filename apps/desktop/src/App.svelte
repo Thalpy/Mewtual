@@ -128,6 +128,7 @@
   import { soundcloudDeckUrl } from "./providers-audio";
   import { StudioAudioSession, type StudioAudioActions, type StudioAudioState } from "./studio-audio.ts";
   import { createStudioExit, type StudioRoute } from "./studio-exit.ts";
+  import { saveToast } from "./studio-save-words.ts";
   import { vimeoFrameUrl } from "./providers-video";
   import {
     CLOCK_SKEW_GRACE_MS, NO_READ_MARK, chatIsObserved, effectiveTs, readCeiling, readChannelChange,
@@ -8470,6 +8471,9 @@
   let studioSnapshot: (() => string | null) | null = null;
   let studioRestore: ((json: string | null) => void) | null = null;
   let studioSave: (() => Promise<void>) | null = null;
+  let studioSend: (() => void) | null = null;
+  let studioSaveTally: (typeof import("./studio-state.svelte.ts"))["studioSaveTally"] | null = null;
+  let onStudioChange: ((fn: () => void) => () => void) | null = null;
   let studioHasWork: (() => boolean) | null = null;
   let studioClaimNavigation: (() => () => boolean) | null = null;
   let studioBeginClose: (() => void) | null = null;
@@ -8501,14 +8505,68 @@
       return () => request === studioNavigation && generation === uiStateLoadGeneration && !locked && current();
     },
     // Supersession, lock and reload are the route's own current() check, made after this resolves.
+    // Leaving never waits for a Save receipt: every edit is handed to the background Save at once
+    // (studio-session.ts sendBeforeLeaving) and a toast follows those saves to the end. The gate's
+    // next `hasWork` then reads false, because nothing is left unhanded. Only a drawing that could
+    // not be staged (a full draft queue) keeps the member in the Studio, with the reason.
     save: async () => {
-      try { await studioSave?.(); return true; }
+      try { studioSend?.(); trackStudioSaves(); return true; }
       catch (e) { if (!locked) toast(String(e), "err", 6000); return false; }
     },
     exhausted: () => { if (!locked) toast("The Studio kept changing while it saved. Try again once you stop drawing.", "warn", 6000); },
   });
   const releaseStudio = studioExit.release;
   const leaveStudioThen = studioExit.leaveThen;
+  // The background-save toast: at most one, following the Studio session's queue after the member
+  // left the Studio, its bar running from the count at the start to zero (saveToast in
+  // studio-save-words.ts). It ends on "saved", or on a warning that stays when an edit will not
+  // save on its own. A lock or reset ends it silently: the queue was snapshotted, not saved, and
+  // "saved" would be untrue. Dismissing it hides the progress; only that warning comes back.
+  let stopStudioSaveWatch: (() => void) | null = null;
+  function trackStudioSaves() {
+    if (stopStudioSaveWatch || !studioSaveTally || !onStudioChange) return;
+    const start = studioSaveTally();
+    if (!start || start.tally.left === 0) return;
+    let total = start.tally.left, shown = "";
+    const first = saveToast(start.tally, total);
+    const id = toast(first.text, first.kind, 0, first.progress);
+    const update = () => {
+      const now = studioSaveTally?.();
+      if (!now || now.generation !== start.generation || locked) { stop(); dismissToast(id); return; }
+      total = Math.max(total, now.tally.left);
+      // A queue emptied by the member's own discards was not saved: end without a word.
+      const next = saveToast(now.tally, total, now.tally.discarded - start.tally.discarded), key = `${next.kind}:${next.text}:${next.progress}`;
+      if (next.dismiss) { stop(); dismissToast(id); return; }
+      if (next.done) stop();
+      if (key === shown) return; // session changes are frequent; redraw only what changed
+      shown = key;
+      const visible = toasts.some((t) => t.id === id);
+      if (!visible && !(next.done && next.kind === "warn")) return;
+      updateToast(id, next.text, next.kind, next.done && next.kind === "ok" ? 2500 : 0, next.progress);
+    };
+    // Coalesced to a microtask, like studio-state's revision bump: a session change can happen
+    // inside a Svelte effect, and the toast is App state that must not be written from there.
+    let queued = false;
+    const unsubscribe = onStudioChange(() => {
+      if (queued) return;
+      queued = true;
+      queueMicrotask(() => { queued = false; if (stopStudioSaveWatch === stop) update(); });
+    });
+    const stop = () => { unsubscribe(); stopStudioSaveWatch = null; };
+    stopStudioSaveWatch = stop;
+    update();
+  }
+  // Every route out of the Studio surface starts the toast while saves are outstanding, including
+  // saves already sent and retrying on their own, which leave the exit gate nothing to hand over
+  // (so its `save` never runs). trackStudioSaves keeps it to one at a time.
+  let viewLeftFrom: Tab | null = null;
+  $effect(() => {
+    const now = view;
+    untrack(() => {
+      if (viewLeftFrom === "studio" && now !== "studio" && !locked) trackStudioSaves();
+      viewLeftFrom = now;
+    });
+  });
   // How long the current load has been running, for the placeholder's readout: a module import
   // reports no progress, so the bar is indeterminate and the seconds say it is still moving.
   let studioLoadSeconds = $state(0);
@@ -8534,6 +8592,7 @@
       studioReset = st.resetStudio;
       studioSnapshot = st.studioDraftSnapshot; studioRestore = st.restoreStudioDraft;
       studioSave = st.saveStudio; studioHasWork = st.studioHasPending;
+      studioSend = st.sendStudio; studioSaveTally = st.studioSaveTally; onStudioChange = st.onStudioChange;
       studioClaimNavigation = st.claimStudioNavigation;
       studioBeginClose = st.beginStudioClose; studioEndClose = st.endStudioClose;
       if (restoredStudioDraft) { studioRestore(restoredStudioDraft); restoredStudioDraft = null; }
@@ -12129,27 +12188,29 @@
   }
 
   // --- toasts: visible feedback for otherwise-silent work (uploads, saves, renames) --------------
-  type Toast = { id: number; kind: "info" | "ok" | "warn" | "err"; text: string };
+  /** `progress` (0..1) draws a bar along the toast's bottom edge, for work that reports how far it is. */
+  type Toast = { id: number; kind: "info" | "ok" | "warn" | "err"; text: string; progress?: number };
   let toasts = $state<Toast[]>([]);
   let toastSeq = 0;
   const toastTimers = new Map<number, ReturnType<typeof setTimeout>>();
   /** Show a toast; `ms` 0 = sticky until updated/dismissed. Returns an id for updateToast. */
-  function toast(text: string, kind: Toast["kind"] = "info", ms = 3500): number {
+  function toast(text: string, kind: Toast["kind"] = "info", ms = 3500, progress: number | null = null): number {
     const id = ++toastSeq;
-    toasts = [...toasts, { id, kind, text }];
+    toasts = [...toasts, { id, kind, text, ...(progress === null ? {} : { progress }) }];
     if (ms > 0) toastTimers.set(id, setTimeout(() => dismissToast(id), ms));
     return id;
   }
-  /** Morph an existing toast in place (e.g. "Uploading…" -> "Embedded"). */
-  function updateToast(id: number, text: string, kind: Toast["kind"], ms = 3500) {
+  /** Morph an existing toast in place (e.g. "Uploading…" -> "Embedded"). A toast the member already
+   * dismissed comes back, which is right for a final outcome they still need to hear. */
+  function updateToast(id: number, text: string, kind: Toast["kind"], ms = 3500, progress: number | null = null) {
     const timer = toastTimers.get(id);
     if (timer) clearTimeout(timer);
     toastTimers.delete(id);
     if (!toasts.some((t) => t.id === id)) {
-      toast(text, kind, ms);
+      toast(text, kind, ms, progress);
       return;
     }
-    toasts = toasts.map((t) => (t.id === id ? { ...t, text, kind } : t));
+    toasts = toasts.map((t) => (t.id === id ? { id, kind, text, ...(progress === null ? {} : { progress }) } : t));
     if (ms > 0) toastTimers.set(id, setTimeout(() => dismissToast(id), ms));
   }
   function dismissToast(id: number) {
@@ -13488,8 +13549,9 @@
     await refreshFiles();
     if (!current()) throw new Error("Flipnote saved in Files. Open it there to share.");
     // appendToDraft opens Chat directly. Treat that transition like ordinary Studio navigation:
-    // preserve every working edit first, and recheck the shared navigation claim after the await.
-    await studioSave?.();
+    // hand every working edit to the background Save (a drawing that cannot be staged refuses here,
+    // before Chat opens), and recheck the shared navigation claim.
+    studioSend?.(); trackStudioSaves();
     if (!current()) throw new Error("Flipnote saved in Files. Open it there to share.");
     await appendToDraft(fileMarker(name, cid, true));
     toast("Flipnote attached. Press Send to post it.", "ok", 5000);
@@ -13508,7 +13570,7 @@
     if (!current()) throw new Error("Score saved in Files. Open it there to share.");
     await refreshFiles();
     if (!current()) throw new Error("Score saved in Files. Open it there to share.");
-    await studioSave?.();
+    studioSend?.(); trackStudioSaves(); // as postStudioPixa: hand off, never wait for receipts
     if (!current()) throw new Error("Score saved in Files. Open it there to share.");
     await appendToDraft(fileMarker(name, cid, true));
     toast("Score attached. Press Send to post it.", "ok", 5000);
@@ -30945,9 +31007,10 @@
           </div>
         {/if}
         {#each toasts as t (t.id)}
-          <div class="toast {t.kind}" role="status">
+          <div class="toast {t.kind}" class:has-progress={t.progress !== undefined} role="status">
             <span class="toast-text">{t.text}</span>
             <button class="toast-x" aria-label="Dismiss" title="Dismiss" onclick={() => dismissToast(t.id)}>✕</button>
+            {#if t.progress !== undefined}<span class="toast-bar" style="--p: {t.progress}" aria-hidden="true"></span>{/if}
           </div>
         {/each}
       </div>

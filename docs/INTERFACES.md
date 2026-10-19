@@ -1,5 +1,85 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Studio saves resolve on their own; navigation never waits for one (2026-10-19, `[desync fixes]`)
+
+This supersedes the "vetoed"/"must reach a definite receipt" wording in the departure section below.
+No IPC, wire or persistence format changes. The one native-facing change is the ACL grant:
+`studio_apply_batch` is now in `security/command-policy.json` (account-write, main),
+`capabilities/main.json` and the reviewed ledger. Before that, Tauri refused every batch with
+"studio_apply_batch not allowed. Command not found".
+
+- **Automatic exact resend.** A Save that failed (`uncertain` or `blocked`) is resent by
+  `StudioSession` itself after 1, 2, 4, 8, 15, 30 and 60 s (`AUTO_RETRY_MS`), through the same
+  `retry(id)` the member's "Retry now" uses: the same nonce, epoch and body, in lane order. It runs in
+  production only (`autosaveMs > 0`). It covers Create, document and Index Applies, and
+  ordinary-route frames. Some failures stay with the member: restored work until something sends it,
+  the local-draft and recovery routes, and refusals no resend can change (`NEEDS_DECISION`).
+  Restored work is sent by an explicit Save or retry, by leaving its document or the Studio, by a
+  channel change, or by a post to chat, and from then on it is resent like any other save. The
+  refusals that need a decision are "Shared history changed", "The server for these saved edits
+  changed", "edit belongs to a retired epoch", "object already exists", "already occurs in the
+  index", "Studio requires current membership", "local device is not a current member" and
+  "unknown Studio channel". `retry(id)` refuses those too, because an exact resend after a changed
+  history would skip admission and could then never be saved as a new edit. A new no-write class,
+  `NATIVE_REFUSED_BEFORE_WRITE`, covers two refusals that native makes ahead of its intent barrier,
+  so they settle known not written and can be saved as a new edit. One is exactly
+  "epoch studio: edit belongs to a retired epoch". The other is a batch whose first item met that
+  refusal. Any other wording, a later batch item, or a record already uncertain stays uncertain.
+  studio-native-no-write.test.ts pins the texts and the ordering to the Rust sources. `needsDecision(id)` and `canRetry(id)` tell surfaces whether to offer
+  Retry; "Save as a new edit" becomes the primary action when Retry is not offered. After the last
+  pause the record stays failed and is shown as the member's. `autoRetryAt(id)` (a `now()` timestamp or null) and `saveTally()`
+  (`{left, retrying, stuck}`) are display only. A reset, lock or scope change cancels every pending
+  resend. Exact resend is safe because native answers an operation it already holds as saved
+  (`validate_local_edit`'s held check), and a request refused before dispatch never ran.
+- **Batches.** A record that was already sent once (`attempts !== 0` or `mayHaveCommitted`) never
+  rides a batch, as head or member. A batch refused as a whole therefore resolves item by item.
+- **Leaving a document** (`navigate`) stages the drawing, releases that document's lane and
+  navigates at once. Its records in the shared Index lane (a rename's other half) are released once
+  that lane drains by landing. A discard that empties the lane leaves them held instead, so a
+  document navigation never splits a restored rename. Leaving the Studio still sends everything at
+  once, as `saveBeforeLeaving` did. An ordinary (not restored) Index half was always released by
+  the five-second deadline on its own. Either way the rename can then be split if its document half
+  fails for good; the Index title changes while the document header does not.
+- **Leaving the Studio** (`sendBeforeLeaving()`, studio-state `sendStudio()`) hands every record to
+  the background Save and returns. It throws only when the mounted drawing cannot be staged (the
+  draft queue is full); the route then stays. `hasUnsentWork()` (behind studio-state
+  `studioHasPending()`, the exit gate's `hasWork`) counts only queued records not yet released, so
+  once work is handed off the gate releases the route. App's exit host `save` now hands off and
+  starts `trackStudioSaves()`, a toast with a progress bar that ends "Studio edits saved", or warns
+  when an edit needs the member. A lock, a reset, or a queue emptied by the member's own discards
+  (`saveTally().discarded`) ends it silently, so an emptied queue is never claimed as saved. Any
+  change of view away from the Studio starts the toast while saves are outstanding, including saves
+  already sent and retrying, which leave the gate nothing to hand over. `postStudioPixa`/`postStudioScore` hand off the same way. Window close
+  still awaits every receipt (`saveBeforeLeaving`) and refuses at the first failure.
+- **Changing channel under queued work.** `setStudioScope` no longer changes scope while the session
+  `retainsWork`. It sends the queue and returns false. `studioScopeWaiting(server, channel)` drives a
+  `data-scope-wait` panel in both surfaces: the sidebar hides the old channel's list and its "new"
+  buttons, and the editor shows the count left and names the edits that will not save on their own,
+  with Retry (only where it can move them) and Discard. It has no bulk "save as a new edit": edits
+  the document changed under are reviewed in their own channel, never re-saved unseen. The surfaces re-ask on every change, and the switch happens when the last record lands.
+  That deferred switch (`setScope(scope, {deferred: true})`) does not advance the navigation lease
+  (`leaseGeneration`), so an App route begun while it waited is not retired by its arrival. Resets
+  and immediate switches still retire routes. A window close in progress (`closing`) also defers the
+  switch.
+- **A restored snapshot for another channel** (`pendingRestoredScope`) refuses every new edit until
+  its channel opens. The editor shows a card that says so, with `discardRestoredDraft()` behind a
+  confirmation, for a channel that can no longer be opened.
+- **Playback is never refused by save status.** `prepareScorePlayback(object)` defaults to playback;
+  `prepareScoreTake` (download, share, chat) passes `playback: false`. `prepareFlipnotePixa(object,
+  {playback})` defaults to false; Play passes true. Playback of a flipnote whose linked Score still
+  has queued edits builds the take from that Score's working projection. Exports still refuse while a
+  save of the document has failed ("This document has an edit that did not save…") or the linked
+  Score is still saving.
+- **Words.** `studio-save-words.ts` decides what a person reads: `saveProblemText(error, uncertain)`,
+  `saveHeadline(label, {retrying, uncertain, others})` ("Not confirmed yet: score recipe, 5 more
+  waiting", "Not saved: fps"), `retryText`, and `saveToast(tally, total, discardedSince)`. The exact
+  native text stays on the record and in the banner's tooltip. Buttons: "Retry now", "Reload and
+  retry", "Save as a new edit" (rendered only when allowed), "Discard" / "Really discard?". The
+  awaited-Save rejections are "A Studio edit is not saved yet (or not confirmed yet). The Studio is
+  trying again on its own.", "A Studio edit is not confirmed. Retry or discard it in the Studio."
+  and "A Studio edit was not saved. Retry or discard it in the Studio.". A stuck edit's words claim
+  neither saved nor failed ("needs you").
+
 ## Optional desktop invite refresh (2026-10-18)
 
 `get_invite(server)` returns `null` when there is no stored invite or this exact current device
@@ -12,6 +92,10 @@ Explicit `mint_invite_fresh` remains owner/admin gated, and join-time authorizat
 Roles on non-owner devices still have the existing published-roster freshness limitations.
 
 ## Studio departure scope, restored-work reach and App exit routes (2026-10-18)
+
+(Since 2026-10-19 a departure no longer waits for or is vetoed by its Save, and Index halves go
+when the document's lane drains: see the `[desync fixes]` section above. What follows still holds
+for which records a departure covers, lanes, workers and the exit gate's route ownership.)
 
 `StudioSession.navigate(action)` (sidebar and Music) saves only the document being left: records
 in that document's lane must reach a definite receipt or the open is vetoed. With no document open

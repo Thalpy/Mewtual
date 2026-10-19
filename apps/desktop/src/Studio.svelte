@@ -48,7 +48,8 @@
   import { paletteGroups, paletteColorLabel } from "./studio-palette.ts";
   import { base64ToBytes, type FrameConflictValue, type FrameView, type NativeExpiry, type RecoveryMode, type RecoveryVersion } from "./studio-native.ts";
   import { reason, type RecoveryItem, type SaveRecord } from "./studio-session.ts";
-  import { ensureStudio, setStudioScope, studio } from "./studio-state.svelte.ts";
+  import { ensureStudio, setStudioScope, studio, studioScopeWaiting } from "./studio-state.svelte.ts";
+  import { retryText, saveHeadline, saveProblemText } from "./studio-save-words.ts";
   import { frameClaimState, type ClaimView, type StudioClaimActions, type StudioClaimSnapshot } from "./draw-claims.ts";
   import ScoreEditor from "./ScoreEditor.svelte";
   import { scoreSelectionMemory } from "./score-selection.ts";
@@ -108,8 +109,13 @@
   const session = ensureStudio(me);
   // Imperative session calls run untracked: an effect must depend on what selects the work
   // (props, the selection), never on the revision the work itself bumps.
+  // While the previous channel's edits are still saving, the session stays on that channel and this
+  // surface shows their progress instead of an editor. `scopeWaiting` flips back once they have
+  // landed, which re-runs the effect and makes the switch.
+  const scopeWaiting = $derived.by(() => { void studio.rev; return studioScopeWaiting(server, channel); });
+  const waitTally = $derived.by(() => { void studio.rev; return scopeWaiting ? session.saveTally() : null; });
   $effect(() => {
-    const s = server, c = channel;
+    const s = server, c = channel; void scopeWaiting;
     untrack(() => setStudioScope(s, c));
   });
   // The sidebar selects; the surface follows the selection (and re-opens after a remount).
@@ -758,7 +764,8 @@
     auditioning = false; auditionRequest++;
     savedPreview = null;
     const object = objectId, kind = isScore ? "score" : "flipnote";
-    const prepare = () => kind === "score" ? session.prepareScorePlayback(object) : session.prepareFlipnotePixa(object);
+    // Play is local listening: it plays what is on screen, saved yet or not (see mediaSource).
+    const prepare = () => kind === "score" ? session.prepareScorePlayback(object) : session.prepareFlipnotePixa(object, { playback: true });
     const from = typeof offsetMs === "number" && Number.isFinite(offsetMs) && offsetMs > 0 ? Math.floor(offsetMs) : 0;
     claimAudio();
     // The App adapter resumes its existing context immediately, before prepare fetches/hashes.
@@ -952,6 +959,41 @@
     session.discard(s.id);
     if (s.kind === "frame" && s.frame === frameId) { rasterRef = ""; loadRaster(); }
   }
+  // How a failed save is moving: a countdown to its next automatic resend, "now" while it is being
+  // sent again, or nothing when only the member can move it. `tick` redraws the countdown each second.
+  function retryState(s: SaveRecord): { retrying: boolean; next: string } {
+    void tick; void studio.rev;
+    if (s.status === "queued" || s.status === "inflight") return { retrying: true, next: "Trying again now" };
+    const at = session.autoRetryAt(s.id);
+    return at === null ? { retrying: false, next: "" } : { retrying: true, next: retryText(at, session.now()) };
+  }
+  // While the Studio waits to switch channel: the previous channel's edits that will not save on
+  // their own. Retry and discard act on all of them at once, the discard behind one confirmation
+  // that lapses if that set changes.
+  function stuckRecords(): SaveRecord[] {
+    void studio.rev;
+    return session.saves.filter(s => (s.status === "blocked" || s.status === "uncertain") && session.autoRetryAt(s.id) === null);
+  }
+  const stuckArmKey = () => `stuck:${stuckRecords().map(armKey).join(",")}`;
+  // Only what a retry can move: a spent local-draft ticket or a changed history would be a no-op.
+  function retryStuck() { for (const s of stuckRecords()) if (session.canRetry(s.id)) retrySave(s); }
+  function discardStuck() {
+    const key = stuckArmKey();
+    if (discardArmed !== key) { discardArmed = key; return; }
+    discardArmed = "";
+    for (const s of stuckRecords()) {
+      session.discard(s.id);
+      if (s.kind === "frame" && s.frame === frameId) { rasterRef = ""; loadRaster(); } // as discardSave
+    }
+  }
+  // A lock snapshot restored for another channel (see StudioSession.pendingRestoredScope).
+  const restoredElsewhere = $derived.by(() => { void studio.rev; return session.pendingRestoredScope; });
+  const restoredArmKey = () => `restored:${restoredElsewhere?.server}:${restoredElsewhere?.channel}`;
+  function discardRestored() {
+    if (discardArmed !== restoredArmKey()) { discardArmed = restoredArmKey(); return; }
+    discardArmed = "";
+    session.discardRestoredDraft();
+  }
 
   // --- Index entry: expiry and deletion are Index operations ------------------------------------
   function setExpiry(e: NativeExpiry) { if (objectId) guard(() => session.setEntryExpiry(objectId, e)); }
@@ -1131,6 +1173,9 @@
 
   // --- Keys --------------------------------------------------------------------------------------
   function onKey(e: KeyboardEvent) {
+    // While the wait panel shows, the raster and document still belong to the last channel: an
+    // undo or a Play here would act on something not on screen.
+    if (scopeWaiting) return;
     const t = e.target as HTMLElement | null;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
     const k = e.key;
@@ -1177,17 +1222,24 @@
      typing in one of its inputs is exempt inside onKey. -->
 {#snippet pendingSaves()}
     {#if attention.length}
-      <div class="st-banner warn st-save">
-        <span><b>{attention[0].mayHaveCommitted || attention[0].status !== "blocked" ? "save uncertain" : "local save not written"}</b> · {attention[0].label}{#if attention.length > 1} · and {attention.length - 1} more{/if}</span>
-        <span class="micro wrap">{attention[0].error}{#if attention[0].status === "blocked" && !attention[0].mayHaveCommitted} · the backend confirmed that this attempt wrote nothing{:else if attention[0].epochChanged} · the document moved to a newer epoch since; a retry resends the original request and the backend decides{/if} · attempt {attention[0].attempts} · your work is kept{#if blockedCount} · {blockedCount} later {blockedCount === 1 ? "save waits" : "saves wait"} behind it{/if}</span>
-        {#if attention[0].status === "uncertain" || attention[0].status === "blocked"}<span class="st-card-acts">
-          {#if overlayRetryOf(attention[0]) !== "newTicket" && overlayRetryOf(attention[0]) !== "none"}
-            <button type="button" class="st-btn primary" onclick={() => retrySave(attention[0])}>{overlayRetryOf(attention[0]) === "afterExplicitAccess" ? "access, then retry same request" : "retry same request"}</button>
+      {@const head = attention[0]}
+      {@const motion = retryState(head)}
+      <!-- One line for what happened, one for why and what happens next. The exact native text stays
+           in the tooltip for diagnostics; the words come from studio-save-words.ts. A save the
+           session is resending on its own is shown quietly; one only the member can move is a warning. -->
+      <div class="st-banner st-save" class:warn={!motion.retrying} title={head.error}>
+        <span><b>{saveHeadline(head.label, { retrying: motion.retrying, uncertain: head.mayHaveCommitted, others: attention.length - 1 + blockedCount })}</b></span>
+        <span class="micro wrap">{saveProblemText(head.error, head.mayHaveCommitted)}{motion.next ? ` ${motion.next}.` : ""}</span>
+        {#if head.status === "uncertain" || head.status === "blocked"}<span class="st-card-acts">
+          <!-- Retry only where a resend can change the outcome; after a changed history the way
+               forward is a new edit (primary then), since the old request can no longer land. -->
+          {#if session.canRetry(head.id)}
+            <button type="button" class="st-btn primary" onclick={() => retrySave(head)}>{overlayRetryOf(head) === "afterExplicitAccess" ? "Reload and retry" : "Retry now"}</button>
           {/if}
-          {#if attention[0].kind === "frame" || attention[0].kind === "apply" || attention[0].kind === "applyIndex" || attention[0].kind === "overlayApply"}
-            <button type="button" class="st-btn" title="available only after the backend proved the old attempt wrote nothing" disabled={!!refusalFor(attention[0]) || overlayRetryOf(attention[0]) === "none" || !session.canReauthor(attention[0].id)} onclick={() => reauthorSave(attention[0])}>save again as a new edit</button>
+          {#if (head.kind === "frame" || head.kind === "apply" || head.kind === "applyIndex" || head.kind === "overlayApply") && !refusalFor(head) && overlayRetryOf(head) !== "none" && session.canReauthor(head.id)}
+            <button type="button" class="st-btn" class:primary={!session.canRetry(head.id)} onclick={() => reauthorSave(head)}>Save as a new edit</button>
           {/if}
-          <button type="button" class="st-btn ghost" onclick={() => discardSave(attention[0])}>{discardArmed === armKey(attention[0]) ? "discard for real" : "discard"}</button>
+          <button type="button" class="st-btn ghost" onclick={() => discardSave(head)}>{discardArmed === armKey(head) ? "Really discard?" : "Discard"}</button>
         </span>{/if}
       </div>
     {/if}
@@ -1198,14 +1250,15 @@
      retry identity and the armed discard are the same as in pendingSaves. -->
 {#snippet heldWork()}
         {#each attention.slice(0, 8) as s (s.id)}
-          <div class="st-card warn" data-held-save={s.id}>
-            <span>{s.label} · {s.mayHaveCommitted || s.status !== "blocked" ? "uncertain" : "not written"}</span>
-            <span class="micro wrap">{s.error}{#if session.blockedBehind(s.id)} · {session.blockedBehind(s.id)} later {session.blockedBehind(s.id) === 1 ? "save waits" : "saves wait"} behind it{/if}</span>
+          {@const motion = retryState(s)}
+          <div class="st-card" class:warn={!motion.retrying} data-held-save={s.id} title={s.error}>
+            <span>{saveHeadline(s.label, { retrying: motion.retrying, uncertain: s.mayHaveCommitted, others: session.blockedBehind(s.id) })}</span>
+            <span class="micro wrap">{saveProblemText(s.error, s.mayHaveCommitted)}{motion.next ? ` ${motion.next}.` : ""}{session.needsDecision(s.id) && session.canReauthor(s.id) ? " It can be saved as a new edit once this document loads." : ""}</span>
             {#if s.status === "uncertain" || s.status === "blocked"}<span class="st-card-acts">
-              {#if overlayRetryOf(s) !== "newTicket" && overlayRetryOf(s) !== "none"}
-                <button type="button" class="st-btn primary" onclick={() => retrySave(s)}>{overlayRetryOf(s) === "afterExplicitAccess" ? "access, then retry same request" : "retry same request"}</button>
+              {#if session.canRetry(s.id)}
+                <button type="button" class="st-btn primary" onclick={() => retrySave(s)}>{overlayRetryOf(s) === "afterExplicitAccess" ? "Reload and retry" : "Retry now"}</button>
               {/if}
-              <button type="button" class="st-btn ghost" onclick={() => discardSave(s)}>{discardArmed === armKey(s) ? "discard for real" : "discard"}</button>
+              <button type="button" class="st-btn ghost" onclick={() => discardSave(s)}>{discardArmed === armKey(s) ? "Really discard?" : "Discard"}</button>
             </span>{/if}
           </div>
         {/each}
@@ -1218,7 +1271,7 @@
         <span>{heldQueued.length} restored {heldQueued.length === 1 ? "edit" : "edits"} not saved yet · {heldQueued[0].label}</span>
         <span class="st-card-acts">
           <button type="button" class="st-btn primary" onclick={() => void session.saveDocument(objectId).catch(e => onnotice(reason(e), "warn"))}>Save</button>
-          <button type="button" class="st-btn ghost" onclick={() => discardSave(heldQueued[0])}>{discardArmed === armKey(heldQueued[0]) ? "discard for real" : "discard"}</button>
+          <button type="button" class="st-btn ghost" onclick={() => discardSave(heldQueued[0])}>{discardArmed === armKey(heldQueued[0]) ? "Really discard?" : "Discard"}</button>
         </span>
       </div>
     {/if}
@@ -1393,7 +1446,38 @@
 <svelte:window onkeydown={(e) => { if (rootEl && rootEl.contains(document.activeElement)) onKey(e); }} />
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 <div class="studio" bind:this={rootEl} role="application" aria-label="Studio editor" tabindex="0">
-  {#if !objectId || (!model && !doc)}
+  {#if restoredElsewhere}
+    <!-- A lock snapshot restored for a channel that is not this one. Until that channel opens, the
+         session refuses new edits everywhere; if it can no longer be opened, this is the way out. -->
+    <div class="st-card warn" data-restored-elsewhere>
+      <span>Unsaved edits from another channel are waiting. Open that channel to save them.</span>
+      <span class="st-card-acts">
+        <button type="button" class="st-btn ghost" onclick={discardRestored}>{discardArmed === restoredArmKey() ? "Really discard?" : "Discard them"}</button>
+      </span>
+    </div>
+  {/if}
+  {#if scopeWaiting}
+    <!-- The previous channel's edits are still saving. The session stays on that channel until they
+         land and then switches here by itself; the member only needs to act on an edit that will not
+         save on its own, and the words say which of the two this is. -->
+    {@const stuck = stuckRecords()}
+    <div class="studio-empty" data-scope-wait>
+      <!-- "Need you" once nothing will resend on its own: what is left queued behind a stuck edit
+           cannot run either. -->
+      <p>{waitTally && waitTally.stuck > 0 && waitTally.retrying === 0 ? "Your edits from the last channel need you." : "Saving your edits from the last channel."}</p>
+      {#if waitTally?.left}<p class="micro">{waitTally.left} left</p>{/if}
+      {#if stuck.length}
+        <p class="micro">{stuck.slice(0, 4).map(s => s.label).join(", ")}{stuck.length > 4 ? `, ${stuck.length - 4} more` : ""}</p>
+        <!-- No bulk "save as a new edit" here: the document changed under those edits, and saving them
+             again unseen could overwrite newer work. They are reviewed in their own channel. -->
+        {#if stuck.some(s => session.canReauthor(s.id))}<p class="micro">Edits the document changed under can be saved again from the last channel.</p>{/if}
+        <span class="st-card-acts">
+          {#if stuck.some(s => session.canRetry(s.id))}<button type="button" class="st-btn primary" onclick={retryStuck}>Retry</button>{/if}
+          <button type="button" class="st-btn ghost" onclick={discardStuck}>{discardArmed === stuckArmKey() ? "Really discard?" : "Discard"}</button>
+        </span>
+      {/if}
+    </div>
+  {:else if !objectId || (!model && !doc)}
     <div class="studio-empty">
       {#if !hasScope}
         <p class="muted">Open a channel to see its studio.</p>
@@ -1510,7 +1594,7 @@
               <div class="st-veil"><span>fetching {fmtKib(frameRec.bytes)}</span><span class="micro">bounded by the declared size · validated before it is shown</span></div>
             {/if}
           {:else if pendingHere}
-            <div class="st-veil soft"><span class="micro">{pendingHere.status === "uncertain" ? "this frame's save is uncertain · see the card above" : pendingHere.status === "blocked" ? "this frame was not written · see the card above" : "saving this frame…"}</span></div>
+            <div class="st-veil soft"><span class="micro">{pendingHere.status === "uncertain" ? "This frame's save is not confirmed yet." : pendingHere.status === "blocked" ? "This frame is not saved yet." : "Saving this frame…"}</span></div>
           {/if}
           <span class="st-readout left">{hover ? `${hover[0]},${hover[1]}` : ""}{#if tool === "shape"} · {shape}{/if}</span>
           <span class="st-readout right">layer · {LAYER_NAMES[layer]}{#if dirty} · unsaved{:else if rasterRef === "unsaved"} · saving{/if}</span>
@@ -1630,7 +1714,7 @@
             {/if}
             {#if pendingHere}
               <div class="st-card accent">
-                <span>New frame{#if pendingHere.mayHaveCommitted || pendingHere.status === "uncertain"} · save uncertain{:else if pendingHere.status === "blocked"} · not written{:else} · saving{/if}</span>
+                <span>New frame: {#if pendingHere.mayHaveCommitted || pendingHere.status === "uncertain"}not confirmed{:else if pendingHere.status === "blocked"}not saved{:else}saving{/if}</span>
                 <span class="micro it">it joins the timeline when the save lands</span>
               </div>
             {:else if frameRec}
@@ -1794,7 +1878,7 @@
           </button>
         {/each}
         {#each pendingInserts as s (s.id)}
-          <button type="button" class="st-thumb" class:cur={s.frame === frameId} onclick={() => openFrame(s.frame)} title={s.mayHaveCommitted || s.status === "uncertain" ? `save uncertain: ${s.error}` : s.status === "blocked" ? `save not written: ${s.error}` : "saving this new frame"}>
+          <button type="button" class="st-thumb" class:cur={s.frame === frameId} onclick={() => openFrame(s.frame)} title={s.mayHaveCommitted || s.status === "uncertain" ? `Not confirmed: ${saveProblemText(s.error, true)}` : s.status === "blocked" ? `Not saved: ${saveProblemText(s.error)}` : "Saving this new frame"}>
             <span class="ix">{s.status === "uncertain" || s.status === "blocked" ? "?" : "…"}</span>
             <span class="fr pending" class:uncertain={s.status === "uncertain" || s.status === "blocked"}>
               <canvas width="64" height="48" use:thumbBytes={{ bytes: s.pix, rev: studio.rev }}></canvas>
