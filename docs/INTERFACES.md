@@ -207,7 +207,14 @@ in that document's lane must reach a definite receipt or the open is vetoed. Wit
 nothing is left, so nothing is saved first. Records held for any other document keep their state,
 so opening a restored document never requires its own held work to save. Restored work is sent
 only by explicit Save or retry, or by leaving its own document. That document's departure Save
-awaits its own lane and releases, without awaiting, its records in the shared Index lane.
+awaits its own lane first. Only then does it release, without awaiting, its records in the shared
+Index lane. One worker serves every lane, so releasing them earlier would let a slow Index receipt
+gate the document's Save and the navigation. The most recently started Save still awaited has its
+records go ahead of other lanes' runnable heads. Known limit: a record already being delivered still holds the one
+worker, so a departure (or Create) waits for an Index delivery already running until it answers or
+the 10 s refusal. Such a delivery can come from a deadline, an earlier departure or a sidebar
+retry. The departure's records stay retained and are sent after it. A separate Index-lane worker
+would remove this and is a follow-up needing a concurrency design review.
 A partial departure Save leaves the shared five-second deadline running for uncovered records.
 `saveBeforeLeaving()` (leaving the Studio, a channel, a server or the window) still covers every
 record. Before a first delivery, admission reads a record's document when no view of it is held
