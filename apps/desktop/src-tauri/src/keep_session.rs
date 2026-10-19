@@ -501,6 +501,55 @@ mod read_tests {
     }
 
     #[tokio::test]
+    async fn private_download_cleanup_wait_cannot_return_success_into_a_retired_invocation() {
+        for edge in 0..3 {
+            let state = AppState::default();
+            let directory = tempfile::tempdir().unwrap();
+            *state.store.lock().await =
+                Some(ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap());
+            *state.session_resumable.lock().await = true;
+            let path = directory.path().join("already-published.bin");
+            std::fs::write(&path, b"verified file").unwrap();
+            let entry = EntryOwner::new();
+            let origin = entry.scope(current(&state, 0).unwrap());
+            let actor_current = std::cell::Cell::new(true);
+            let (cleanup_done, cleanup_wait) = tokio::sync::oneshot::channel();
+            let mut response = Box::pin(finish_download_response(
+                &state,
+                0,
+                &origin,
+                SavedFileResult {
+                    path: path.to_string_lossy().into_owned(),
+                    displayed: true,
+                    warning: None,
+                    content_validation: None,
+                },
+                || actor_current.get(),
+                async { cleanup_wait.await.map_err(|_| "cleanup stopped".into()) },
+            ));
+            std::future::poll_fn(|cx| {
+                assert!(response.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            match edge {
+                0 => {
+                    register_ui_lock_request(&state);
+                }
+                1 => entry.retire(),
+                _ => actor_current.set(false),
+            }
+            cleanup_done.send(()).unwrap();
+            assert!(response.await.is_err());
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                b"verified file",
+                "response refusal never unpublishes an already saved file"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn original_actor_row_cannot_be_replaced_under_a_queued_read() {
         let state = AppState::default();
         let (old, old_task, old_drain) = leaving::tests::running(941);

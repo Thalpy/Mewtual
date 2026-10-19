@@ -10,10 +10,13 @@ pub(super) const RECORD_LIMIT: usize = 80 * 1024;
 /// 360 KiB including the 40-byte disk seal. Old formats retain their 80 KiB slot charge.
 pub(super) const VARIANT_RECORD_LIMIT: usize = 400 * 1024;
 const RECORD_V4: &[u8] = b"mewtual/kept-transfer/v4";
+// Download is a distinct sealed purpose, never an upgrade of an existing Keep record. It reuses
+// the bounded V4 body but its original transfer identity also names the private Download owner.
+const RECORD_DOWNLOAD_V1: &[u8] = b"mewtual/download-transfer/v1";
 #[path = "variants.rs"]
 mod variants;
 use variants::Variants;
-pub(super) use variants::VARIANT_CHUNK_LIMIT;
+pub(super) use variants::{MAX_VARIANTS, VARIANT_CHUNK_LIMIT};
 const RECORD_V2: &[u8] = b"mewtual/kept-transfer/v2";
 pub(super) const RECORD_DOMAIN: &[u8] = b"mewtual/kept-transfer/v3";
 
@@ -25,6 +28,12 @@ pub(super) enum RecordEncoding {
     V2,
     V3,
     V4,
+    DownloadV1,
+}
+impl RecordEncoding {
+    pub(in crate::kept) fn has_variants(self) -> bool {
+        matches!(self, Self::V4 | Self::DownloadV1)
+    }
 }
 /// A restart spends the complete already-issued slice. Process-monotonic timestamps never go
 /// on disk and cannot turn into a fresh allowance when a different process mounts the vault.
@@ -145,6 +154,15 @@ pub(super) struct Record {
     pub variants: Option<Variants>,
 }
 impl Record {
+    pub(super) fn owner(&self) -> Owner {
+        match self.encoding {
+            RecordEncoding::DownloadV1 => Owner::Download(DownloadId::from_bytes(self.transfer)),
+            _ => Owner::Keep(self.plan.cid),
+        }
+    }
+    pub(super) fn public_retained(&self) -> bool {
+        !matches!(self.encoding, RecordEncoding::DownloadV1)
+    }
     pub(super) fn initial(
         scope: KeepScope,
         plan: KeepPlan,
@@ -182,7 +200,7 @@ impl Record {
             .checked_add(1)
             .ok_or(StorageError::Malformed)?;
         next.predecessor = self.digest();
-        if self.encoding != RecordEncoding::V4 {
+        if !self.encoding.has_variants() {
             next.encoding = RecordEncoding::V3;
         }
         if self.encoding == RecordEncoding::V2 {
@@ -204,7 +222,9 @@ impl Record {
         self.predecessor == [0; 32]
             && match self.encoding {
                 RecordEncoding::V2 => self.user_paused && self.intent == 0,
-                RecordEncoding::V3 | RecordEncoding::V4 => !self.user_paused && self.intent == 1,
+                RecordEncoding::V3 | RecordEncoding::V4 | RecordEncoding::DownloadV1 => {
+                    !self.user_paused && self.intent == 1
+                }
             }
             && !self.blocked
             && self.phase == KeepPhase::Resumable
@@ -224,7 +244,7 @@ impl Record {
         if self.revision == 0
             || match self.encoding {
                 RecordEncoding::V2 => !self.user_paused || self.intent != 0 || self.blocked,
-                RecordEncoding::V3 | RecordEncoding::V4 => {
+                RecordEncoding::V3 | RecordEncoding::V4 | RecordEncoding::DownloadV1 => {
                     self.intent == 0 || self.intent > self.revision
                 }
             }
@@ -233,7 +253,7 @@ impl Record {
             || (self.revision == 1 && !self.initial_fields_valid())
             || self.verified.len() != self.plan.chunks.len()
             || !self.remaining.at_most(self.initial_allowance())
-            || (self.encoding != RecordEncoding::V4
+            || (!self.encoding.has_variants()
                 && self.phase == KeepPhase::Completed
                 && self.verified.iter().any(|bit| !*bit))
             || self.last_retry.is_some_and(|receipt| {
@@ -260,7 +280,8 @@ impl Record {
                 .ok_or(StorageError::Malformed)?
             || next.predecessor != self.digest()
             || (self.encoding != RecordEncoding::V2 && next.encoding != self.encoding)
-            || (self.encoding == RecordEncoding::V2 && next.encoding == RecordEncoding::V4)
+            || (self.encoding == RecordEncoding::V2 && next.encoding.has_variants())
+            || next.owner() != self.owner()
             || if self.encoding == RecordEncoding::V2 && next.encoding == RecordEncoding::V2 {
                 // A process may upgrade while the old writer's exact successor is still in
                 // `next`. Recover that old-format debit/progress/deletion before migrating;
@@ -358,6 +379,7 @@ impl Record {
             RecordEncoding::V2 => RECORD_V2,
             RecordEncoding::V3 => RECORD_DOMAIN,
             RecordEncoding::V4 => RECORD_V4,
+            RecordEncoding::DownloadV1 => RECORD_DOWNLOAD_V1,
         })
         .expect("fixed domain");
         e.put_bytes(&self.scope.group).expect("bounded group");
@@ -414,10 +436,11 @@ impl Record {
             RECORD_V2 => RecordEncoding::V2,
             RECORD_DOMAIN => RecordEncoding::V3,
             RECORD_V4 => RecordEncoding::V4,
+            RECORD_DOWNLOAD_V1 => RecordEncoding::DownloadV1,
             _ => return Err(bad()),
         };
         if bytes.len() + 40
-            > if encoding == RecordEncoding::V4 {
+            > if encoding.has_variants() {
                 VARIANT_RECORD_LIMIT
             } else {
                 RECORD_LIMIT
@@ -517,8 +540,13 @@ impl Record {
         } else {
             false
         };
-        let variants = if encoding == RecordEncoding::V4 {
-            Some(Variants::decode(&mut d)?)
+        let variants = if encoding.has_variants() {
+            let minimum = if encoding == RecordEncoding::DownloadV1 {
+                1
+            } else {
+                2
+            };
+            Some(Variants::decode(&mut d, minimum)?)
         } else {
             None
         };

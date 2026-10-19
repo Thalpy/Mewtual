@@ -24,8 +24,11 @@ const CHUNK_LIMIT_BYTES: u64 = crate::CHUNK_PAD_CEILING as u64 + 44;
 const META: &str = "manifest";
 const PENDING: &str = "pending";
 const LEASE: &str = "lease.lock";
+mod downloads;
 mod persistence;
 mod record;
+use downloads::Owner;
+pub use downloads::{DownloadExportLease, DownloadId, DownloadRun, DownloadStatus, DownloadStore};
 use persistence::{Transfer, DELETING, FORMAT, FORMAT_CHARGE, TRANSFERS};
 pub use record::{
     KeepAllowance, KeepPhase, KeepRetry, KeepRetryReceipt, KeepScope, KEEP_EXECUTION_SLICE_MS,
@@ -261,6 +264,7 @@ struct Copy<R: CryptoRngCore> {
 }
 struct Active {
     token: KeepRun,
+    identity: Owner,
     plan: KeepPlan,
     /// Existing copies are checked in place; cancellation must not erase a committed copy.
     transfer: Option<usize>,
@@ -564,6 +568,7 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
         }
         for transfer in &self.transfers {
             if !transfer.poisoned
+                && transfer.record.public_retained()
                 && transfer.record.phase == KeepPhase::Completed
                 && transfer
                     .record
@@ -605,12 +610,29 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
         listing: [u8; 32],
         candidates: Option<(Vec<KeepPlan>, usize)>,
     ) -> Result<KeepRun, StorageError> {
+        let identity = Owner::Keep(plan.cid);
+        self.begin_owned(plan, listing, candidates, identity, None)
+    }
+
+    /// Keep and Download share the transaction engine, never its ownership selector. Only a
+    /// newly prepared Download record can create its private owner; resume cannot mint one.
+    fn begin_owned(
+        &mut self,
+        plan: KeepPlan,
+        listing: [u8; 32],
+        candidates: Option<(Vec<KeepPlan>, usize)>,
+        identity: Owner,
+        prepared: Option<record::Record>,
+    ) -> Result<KeepRun, StorageError> {
         self.ready()?;
         let scope = self.scope.clone().ok_or(StorageError::Malformed)?;
         plan.charge()?;
         if candidates.is_some()
-            && (self.copies.iter().any(|c| c.file.plan.cid == plan.cid)
-                || self.transfers.iter().any(|t| t.record.plan.cid == plan.cid))
+            && (self
+                .copies
+                .iter()
+                .any(|c| identity == Owner::Keep(c.file.plan.cid))
+                || self.transfers.iter().any(|t| t.record.owner() == identity))
         {
             // Existing exact-only ownership cannot silently acquire new candidates from a later
             // listing, even if its current row happens to resolve to an equivalent plaintext.
@@ -623,7 +645,7 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
         let transfer = if let Some(copy) = self
             .copies
             .iter_mut()
-            .find(|copy| copy.file.plan.cid == plan.cid)
+            .find(|copy| identity == Owner::Keep(copy.file.plan.cid))
         {
             if copy.file.plan != plan {
                 return Err(StorageError::Malformed);
@@ -633,7 +655,7 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
         } else if let Some(index) = self
             .transfers
             .iter()
-            .position(|transfer| transfer.record.plan.cid == plan.cid)
+            .position(|transfer| transfer.record.owner() == identity)
         {
             let transfer = &mut self.transfers[index];
             if transfer.poisoned
@@ -650,21 +672,43 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
                 return Err(StorageError::Io("this transfer is paused".into()));
             }
             if transfer.record.selected_is_winner() {
+                if !transfer.record.public_retained() {
+                    // Starting another private verification run invalidates previously issued
+                    // export observations, even when the saved winner itself is unchanged.
+                    transfer.read_epoch.retire();
+                }
                 transfer.checked = false;
             }
             Some(index)
         } else {
-            let record = match candidates {
-                Some((plans, selected)) => record::Record::initial_variants(
-                    scope.clone(),
-                    plans,
-                    selected,
-                    listing,
-                    &mut self.rng,
-                )?,
-                None => {
-                    record::Record::initial(scope.clone(), plan.clone(), listing, &mut self.rng)?
+            let record = if let Some(record) = prepared {
+                record.validate_initial()?;
+                if record.owner() != identity
+                    || record.scope != scope
+                    || record.plan != plan
+                    || record.listing != listing
+                {
+                    return Err(StorageError::Malformed);
                 }
+                record
+            } else if identity == Owner::Keep(plan.cid) {
+                match candidates {
+                    Some((plans, selected)) => record::Record::initial_variants(
+                        scope.clone(),
+                        plans,
+                        selected,
+                        listing,
+                        &mut self.rng,
+                    )?,
+                    None => record::Record::initial(
+                        scope.clone(),
+                        plan.clone(),
+                        listing,
+                        &mut self.rng,
+                    )?,
+                }
+            } else {
+                return Err(StorageError::Malformed);
             };
             let charge = record.charge()?;
             if self.copies.len() + self.transfers.len() >= KEPT_FILE_LIMIT
@@ -680,13 +724,13 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
                     > KEPT_BYTE_LIMIT
             {
                 return Err(StorageError::Io(
-                    "kept-copy storage limit reached (1 GiB or 32 files per server)".into(),
+                    "Saved file storage is full (1 GiB or 32 files per server).".into(),
                 ));
             }
             let created = (|| {
                 persistence::ensure_format(&self.dir, &scope, &self.metadata_key, &mut self.rng)?;
                 Transfer::create(
-                    self.dir.join(TRANSFERS).join(plan.cid.to_hex()),
+                    self.dir.join(TRANSFERS).join(identity.name()),
                     record,
                     *self.key,
                     *self.metadata_key,
@@ -707,6 +751,7 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
         };
         self.active = Some(Active {
             token,
+            identity,
             plan,
             transfer,
             seen: HashSet::new(),
@@ -716,11 +761,31 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
         Ok(token)
     }
 
+    fn transfer_state(&self, t: &Transfer<R>) -> KeptTransfer {
+        KeptTransfer {
+            plan: t.record.plan.clone(),
+            listing: t.record.listing,
+            transfer: t.record.transfer,
+            phase: t.record.phase,
+            verified_chunks: t.record.verified.iter().filter(|bit| **bit).count(),
+            running: self
+                .active
+                .as_ref()
+                .is_some_and(|active| active.identity == t.record.owner()),
+            user_paused: t.record.user_paused,
+            blocked: t.record.blocked,
+            intent: t.record.intent,
+            exhausted: t.record.exhausted,
+            grant: t.record.grant,
+            remaining: t.record.remaining,
+        }
+    }
+
     fn release_transfer(&mut self, index: usize) -> Result<(), StorageError> {
         if self
             .active
             .as_ref()
-            .is_some_and(|active| active.plan.cid != self.transfers[index].record.plan.cid)
+            .is_some_and(|active| active.identity != self.transfers[index].record.owner())
         {
             return Err(StorageError::Io("pause the active kept copy first".into()));
         }
@@ -734,10 +799,7 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
         // Invalidate runtime ownership before moving/removing any ciphertext. Late workers keep
         // their actual transport charges, but cannot mutate a replacement same-CID transfer.
         self.active = None;
-        let deleting = self
-            .dir
-            .join(DELETING)
-            .join(transfer.record.plan.cid.to_hex());
+        let deleting = self.dir.join(DELETING).join(transfer.record.owner().name());
         let cleanup = (|| {
             fs::rename(&transfer.path, &deleting).map_err(io)?;
             persistence::directory_barrier(&self.dir.join(TRANSFERS))?;
@@ -750,6 +812,87 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
         cleanup?;
         self.transfers.remove(index);
         Ok(())
+    }
+
+    fn retry_owned(
+        &mut self,
+        identity: Owner,
+        request: KeepRetry,
+    ) -> Result<KeepRetryReceipt, StorageError> {
+        self.ready()?;
+        let index = self
+            .transfers
+            .iter()
+            .position(|t| t.record.owner() == identity)
+            .ok_or(StorageError::Malformed)?;
+        if let Some(receipt) = self.transfers[index]
+            .record
+            .last_retry
+            .filter(|r| r.request == request)
+        {
+            return Ok(receipt); // History-only retry never needs to disturb today's active owner.
+        }
+        if self.active.is_some() {
+            return Err(StorageError::Io("Pause the active transfer first.".into()));
+        }
+        let transfer = &mut self.transfers[index];
+        let (next, receipt) = transfer.record.retry(request)?;
+        if next != transfer.record {
+            transfer.publish(next, &self.metadata_key, &mut self.rng)?;
+        }
+        Ok(receipt)
+    }
+
+    fn set_owned_paused(
+        &mut self,
+        identity: Owner,
+        owner: [u8; 32],
+        expected_intent: u64,
+        paused: bool,
+    ) -> Result<(), StorageError> {
+        self.ready()?;
+        let index = self
+            .transfers
+            .iter()
+            .position(|t| t.record.owner() == identity)
+            .ok_or(StorageError::Malformed)?;
+        let transfer = &self.transfers[index];
+        let phase_allows_intent = match transfer.record.phase {
+            KeepPhase::Resumable => true,
+            // Private export can be paused too. Public completed Keeps retain their existing
+            // check/repair contract; pausing them is a runtime Stop checking action instead.
+            KeepPhase::Completed => !paused || !transfer.record.public_retained(),
+            KeepPhase::Deleting => false,
+        };
+        if transfer.poisoned
+            || transfer.record.transfer != owner
+            || transfer.record.intent != expected_intent
+            || !phase_allows_intent
+        {
+            return Err(StorageError::Malformed);
+        }
+        if !paused && transfer.record.exhausted {
+            return Err(StorageError::KeepExhausted);
+        }
+        // Revoke the exact old runtime/export observer BEFORE a potentially failing write.
+        // Neither another owner of the same CID nor a later Resume can revive that observer.
+        if paused {
+            if self.active.as_ref().is_some_and(|a| a.identity == identity) {
+                self.active = None;
+            }
+            if !self.transfers[index].record.public_retained() {
+                self.transfers[index].read_epoch.retire();
+            }
+        }
+        let mut next = self.transfers[index].record.successor()?;
+        next.user_paused = paused;
+        if !paused {
+            next.blocked = false;
+        }
+        next.intent = expected_intent
+            .checked_add(1)
+            .ok_or(StorageError::Malformed)?;
+        self.transfers[index].publish(next, &self.metadata_key, &mut self.rng)
     }
 }
 
@@ -803,6 +946,12 @@ fn remove_copy(dir: &Path) -> Result<(), StorageError> {
 }
 
 impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
+    fn private_downloads(&self) -> Option<&dyn DownloadStore> {
+        Some(self)
+    }
+    fn private_downloads_mut(&mut self) -> Option<&mut dyn DownloadStore> {
+        Some(self)
+    }
     fn disable_retention(&mut self) {
         self.read_epoch.retire();
         self.scope = None;
@@ -841,7 +990,7 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
                     .file_name()
                     .and_then(|name| name.to_str())
                     .ok_or(StorageError::Malformed)?;
-                if Cid::from_hex(name).is_none_or(|cid| cid.to_hex() != name) {
+                if Owner::parse(name).is_none() {
                     return Err(StorageError::Malformed);
                 }
                 persistence::finish_deleting(&path)?;
@@ -852,12 +1001,16 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
             }
             let mut loaded = Vec::new();
             for path in paths {
-                let cid = path
+                let identity = path
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .and_then(Cid::from_hex)
+                    .and_then(Owner::parse)
                     .ok_or(StorageError::Malformed)?;
-                if self.copies.iter().any(|copy| copy.file.plan.cid == cid) {
+                if self
+                    .copies
+                    .iter()
+                    .any(|copy| identity == Owner::Keep(copy.file.plan.cid))
+                {
                     return Err(StorageError::Malformed);
                 }
                 loaded.push(Transfer::open(
@@ -933,7 +1086,11 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
             files.extend(
                 self.transfers
                     .iter()
-                    .filter(|t| !t.poisoned && t.record.phase == KeepPhase::Completed)
+                    .filter(|t| {
+                        !t.poisoned
+                            && t.record.public_retained()
+                            && t.record.phase == KeepPhase::Completed
+                    })
                     .map(|t| KeptFile {
                         plan: t.record.committed_plan().expect("completed winner").clone(),
                         checked: t.checked,
@@ -943,23 +1100,8 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
         let transfers = if bound {
             self.transfers
                 .iter()
-                .map(|t| KeptTransfer {
-                    plan: t.record.plan.clone(),
-                    listing: t.record.listing,
-                    transfer: t.record.transfer,
-                    phase: t.record.phase,
-                    verified_chunks: t.record.verified.iter().filter(|bit| **bit).count(),
-                    running: self
-                        .active
-                        .as_ref()
-                        .is_some_and(|active| active.plan.cid == t.record.plan.cid),
-                    user_paused: t.record.user_paused,
-                    blocked: t.record.blocked,
-                    intent: t.record.intent,
-                    exhausted: t.record.exhausted,
-                    grant: t.record.grant,
-                    remaining: t.record.remaining,
-                })
+                .filter(|t| t.record.public_retained())
+                .map(|t| self.transfer_state(t))
                 .collect()
         } else {
             Vec::new()
@@ -994,7 +1136,7 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
         let listing = self
             .transfers
             .iter()
-            .find(|t| t.record.plan.cid == plan.cid)
+            .find(|t| t.record.owner() == Owner::Keep(plan.cid))
             .map_or(plan.version, |t| t.record.listing);
         self.begin_with_listing(plan, listing)
     }
@@ -1011,7 +1153,9 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
         }
         self.transfers
             .iter()
-            .find(|t| t.record.plan.cid == *cid && t.record.phase != KeepPhase::Deleting)
+            .find(|t| {
+                t.record.owner() == Owner::Keep(*cid) && t.record.phase != KeepPhase::Deleting
+            })
             .map(|t| t.record.plans().cloned().collect())
             .or_else(|| {
                 self.copies
@@ -1070,6 +1214,7 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
         if let Some(token) = token {
             self.active = Some(Active {
                 token,
+                identity: self.transfers[index].record.owner(),
                 plan: plan.clone(),
                 transfer: Some(index),
                 seen: HashSet::new(),
@@ -1239,30 +1384,8 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
         cid: &Cid,
         request: KeepRetry,
     ) -> Result<KeepRetryReceipt, StorageError> {
-        self.ready()?;
-        let index = self
-            .transfers
-            .iter()
-            .position(|transfer| transfer.record.plan.cid == *cid)
-            .ok_or(StorageError::Malformed)?;
-        if let Some(receipt) = self.transfers[index]
-            .record
-            .last_retry
-            .filter(|receipt| receipt.request == request)
-        {
-            return Ok(receipt); // Metadata-only history is independent of today's active work.
-        }
-        if self.active.is_some() {
-            return Err(StorageError::Io("pause the active kept copy first".into()));
-        }
-        let transfer = &mut self.transfers[index];
-        let (next, receipt) = transfer.record.retry(request)?;
-        if next != transfer.record {
-            transfer.publish(next, &self.metadata_key, &mut self.rng)?;
-        }
-        Ok(receipt)
+        self.retry_owned(Owner::Keep(*cid), request)
     }
-
     fn put_keep(&mut self, token: KeepRun, bytes: &[u8]) -> Result<(), StorageError> {
         self.put_keep_with_barriers(token, bytes, flush, persistence::directory_barrier)
     }
@@ -1328,14 +1451,14 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
     fn keep_progress(&self, cid: &Cid) -> Option<KeepProgress> {
         self.transfers
             .iter()
-            .find(|transfer| transfer.record.plan.cid == *cid)
+            .find(|transfer| transfer.record.owner() == Owner::Keep(*cid))
             .map(|transfer| KeepProgress {
                 phase: transfer.record.phase,
                 verified_chunks: transfer.record.verified.iter().filter(|bit| **bit).count(),
                 running: self
                     .active
                     .as_ref()
-                    .is_some_and(|active| active.plan.cid == *cid),
+                    .is_some_and(|active| active.identity == Owner::Keep(*cid)),
                 user_paused: transfer.record.user_paused,
                 blocked: transfer.record.blocked,
                 exhausted: transfer.record.exhausted,
@@ -1354,7 +1477,7 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
                         running: self
                             .active
                             .as_ref()
-                            .is_some_and(|active| active.plan.cid == *cid),
+                            .is_some_and(|active| active.identity == Owner::Keep(*cid)),
                         user_paused: false,
                         blocked: false,
                         exhausted: false,
@@ -1365,6 +1488,7 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
         self.ready().is_ok()
             && self.active.as_ref().is_some_and(|active| {
                 active.token == run
+                    && active.identity == Owner::Keep(*cid)
                     && active.plan.cid == *cid
                     && active.plan.version == *version
                     && *active.owner.borrow()
@@ -1378,7 +1502,7 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
             && self
                 .transfers
                 .iter()
-                .find(|transfer| transfer.record.plan.cid == *cid)
+                .find(|transfer| transfer.record.owner() == Owner::Keep(*cid))
                 .is_some_and(|transfer| {
                     !transfer.poisoned
                         && transfer.record.plans().any(|plan| {
@@ -1398,6 +1522,7 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
                 .iter()
                 .filter(|transfer| {
                     !transfer.poisoned
+                        && transfer.record.public_retained()
                         && transfer.record.phase == KeepPhase::Resumable
                         && !transfer.record.user_paused
                         && !transfer.record.blocked
@@ -1417,52 +1542,7 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
         expected_intent: u64,
         paused: bool,
     ) -> Result<(), StorageError> {
-        self.ready()?;
-        let index = self
-            .transfers
-            .iter()
-            .position(|transfer| transfer.record.plan.cid == *cid)
-            .ok_or(StorageError::Malformed)?;
-        let transfer = &self.transfers[index];
-        // A completed check may explicitly Resume after an integrity stop, while user Pause
-        // belongs to unfinished transfers. Runtime Stop checking uses its inline run lease.
-        let phase_allows_intent = match transfer.record.phase {
-            KeepPhase::Resumable => true,
-            KeepPhase::Completed => !paused,
-            KeepPhase::Deleting => false,
-        };
-        if transfer.poisoned
-            || transfer.record.transfer != owner
-            || transfer.record.intent != expected_intent
-            || !phase_allows_intent
-        {
-            return Err(StorageError::Malformed);
-        }
-        if !paused && transfer.record.exhausted {
-            return Err(StorageError::KeepExhausted);
-        }
-        // Even a same-value explicit command advances intent: a newer Resume must fence an
-        // older held Pause after WebView remount. Replayed older CAS is a refusal, never a new
-        // effect. Progress/debit revisions remain independent of this explicit command order.
-        // Revoke queued lower admission even if the subsequent durable write fails. Such a
-        // failure poisons the journal and cannot leave an active worker using uncertain intent.
-        if paused
-            && self
-                .active
-                .as_ref()
-                .is_some_and(|active| active.plan.cid == *cid)
-        {
-            self.active = None;
-        }
-        let mut next = self.transfers[index].record.successor()?;
-        next.user_paused = paused;
-        if !paused {
-            next.blocked = false;
-        }
-        next.intent = expected_intent
-            .checked_add(1)
-            .ok_or(StorageError::Malformed)?;
-        self.transfers[index].publish(next, &self.metadata_key, &mut self.rng)
+        self.set_owned_paused(Owner::Keep(*cid), owner, expected_intent, paused)
     }
     fn abort_keep(&mut self, token: KeepRun) -> Result<(), StorageError> {
         let active = self
@@ -1483,7 +1563,7 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
         if let Some(index) = self
             .transfers
             .iter()
-            .position(|transfer| transfer.record.plan.cid == *cid)
+            .position(|transfer| transfer.record.owner() == Owner::Keep(*cid))
         {
             return self.release_transfer(index);
         }
@@ -1530,6 +1610,7 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
         // store.cids() or the shared transfer path to infer authority over private alternatives.
         for transfer in &self.transfers {
             if !transfer.poisoned
+                && transfer.record.public_retained()
                 && transfer
                     .record
                     .committed_plan()
@@ -1580,6 +1661,7 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
                     c.file.plan.chunks.iter().any(|(id, _)| id == cid) && c.store.has(cid)
                 }) || self.transfers.iter().any(|t| {
                     !t.poisoned
+                        && t.record.public_retained()
                         && t.record.phase == KeepPhase::Completed
                         && t.record
                             .committed_plan()
@@ -1597,7 +1679,10 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
                 cids.extend(c.store.cids());
             }
             for transfer in &self.transfers {
-                if !transfer.poisoned && transfer.record.phase == KeepPhase::Completed {
+                if !transfer.poisoned
+                    && transfer.record.public_retained()
+                    && transfer.record.phase == KeepPhase::Completed
+                {
                     // Uncommitted candidate chunks share the private directory, never its
                     // public address list. Only the committed winner's exact leaves are visible.
                     cids.extend(

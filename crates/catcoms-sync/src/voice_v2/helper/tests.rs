@@ -146,12 +146,119 @@ impl Fixture {
             &self.routes,
         )
     }
+    fn receipt(&self, envelope: Envelope) -> Result<HelperReceipt, VoiceError> {
+        let ticket = self
+            .actor
+            .admit_transport_verification(id(1), &envelope.encode())?;
+        self.helper.admit_verified(
+            &self.actor,
+            ticket,
+            envelope,
+            &self.context,
+            &self.room,
+            &self.routes,
+        )
+    }
     fn jobs(&self) -> Vec<ForwardJob> {
         self.helper.take_ready(&self.actor, &self.routes).unwrap()
     }
     fn update(&mut self, epoch: u64, seeds: &[u8]) {
         self.actor.sync_view(view(epoch, seeds)).unwrap();
         self.context.epoch = epoch;
+    }
+}
+
+#[test]
+fn voice_transport_helper_cached_receipt_keeps_first_actor_and_room_incarnations() {
+    for replacement in 0..2 {
+        let mut f = Fixture::new();
+        let envelope = f.targeted(76);
+        let receipt = f.receipt(envelope.clone()).unwrap();
+        let before = f.helper.counts();
+        assert!(receipt.authorized());
+        if replacement == 0 {
+            let (mut actor, registration) = f
+                .runtime
+                .prepare_actor(f.context.scope.group, id(2), &f.runtime.session_ticket())
+                .unwrap();
+            registration.register().unwrap();
+            actor
+                .sync_view(view(7, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))
+                .unwrap();
+            f.actor = actor;
+        } else {
+            f.room.lease.revoke();
+            f.room = RoomAuthority {
+                scope: f.context.scope,
+                lease: CallLease::default(),
+                custody: None,
+            };
+        }
+        assert!(!receipt.authorized());
+        assert_eq!(f.receipt(envelope).err(), Some(VoiceError::Unauthorized));
+        assert_eq!(
+            f.helper.counts(),
+            before,
+            "replacement cannot refill edges or attempts"
+        );
+    }
+}
+
+#[test]
+fn voice_transport_helper_cached_receipt_cannot_extend_first_short_permit() {
+    let f = Fixture::new();
+    let object = f.targeted(77).object().clone();
+    let first = RoutePermit::issue(&signer(1), &object, id(2), 1000, 2000).unwrap();
+    let receipt = f
+        .receipt(Envelope::ToHelper {
+            object: object.clone(),
+            permit: first,
+        })
+        .unwrap();
+    f.clock.advance_ms(6001); // Past first permit plus skew, while the original object is fresh.
+    assert!(!receipt.authorized());
+    let before = f.helper.counts();
+    let later = RoutePermit::issue(&signer(1), &object, id(2), 7001, 16_000).unwrap();
+    assert_eq!(
+        f.receipt(Envelope::ToHelper {
+            object,
+            permit: later
+        })
+        .err(),
+        Some(VoiceError::Unauthorized)
+    );
+    assert_eq!(f.helper.counts(), before);
+    assert!(
+        f.jobs().is_empty(),
+        "a later permit cannot revive first-permit work"
+    );
+}
+
+#[test]
+fn voice_transport_helper_room_receipt_has_original_authority_with_zero_or_partial_edges() {
+    for empty in [false, true] {
+        let mut f = Fixture::new();
+        if empty {
+            f.routes.clear();
+        }
+        let envelope = f.announcement(78, 1);
+        let receipt = f.receipt(envelope.clone()).unwrap();
+        assert_eq!(receipt.info().edges == 0, empty);
+        if !empty {
+            // A room admission is not an all-recipients delivery claim. Removing one edge
+            // must not invalidate custody for other targets (the queued reply's epoch/route
+            // gate is enforced separately by the actual transport response owner).
+            f.update(8, &[1, 2, 4, 5, 6, 7, 8, 9, 10]);
+            assert!(receipt.authorized());
+        }
+        f.room.lease.revoke();
+        assert!(!receipt.authorized());
+        f.room = RoomAuthority {
+            scope: f.context.scope,
+            lease: CallLease::default(),
+            custody: None,
+        };
+        assert_eq!(f.receipt(envelope).err(), Some(VoiceError::Unauthorized));
     }
 }
 
@@ -270,6 +377,64 @@ fn voice_transport_expiry_while_waiting_for_helper_lock_commits_no_origin_packet
         f.admit(f.announcement(100, 9)).err(),
         Some(VoiceError::RateLimited)
     );
+}
+
+#[test]
+fn voice_transport_original_request_retirement_while_waiting_for_helper_lock_refuses_new_and_cached_admission(
+) {
+    for cached in [false, true] {
+        let manual = Arc::new(ManualClock::new(1000));
+        let clock = Arc::new(IngressPauseClock {
+            inner: manual.clone(),
+            observed: Mutex::new(None),
+        });
+        let f = Fixture::on(Runtime::new(clock.clone()), manual, scope());
+        let packet = f.targeted(79);
+        if cached {
+            f.admit(packet.clone()).unwrap();
+        }
+        let before = f.helper.counts();
+        let (responder, receiver) = catcoms_rt::Responder::channel();
+        let original = responder.cancellation_authority();
+        let ticket = f
+            .actor
+            .admit_transport_verification(id(1), &packet.encode())
+            .unwrap()
+            .bind_request(original.clone())
+            .unwrap();
+        let held = f.helper.state.lock().unwrap();
+        let (entered, seen) = std::sync::mpsc::channel();
+        *clock.observed.lock().unwrap() = Some(entered);
+        std::thread::scope(|threads| {
+            let worker = threads.spawn(|| {
+                f.helper.admit_verified(
+                    &f.actor,
+                    ticket,
+                    packet.clone(),
+                    &f.context,
+                    &f.room,
+                    &f.routes,
+                )
+            });
+            seen.recv().unwrap();
+            drop(receiver);
+            assert!(!original.authorized());
+            drop(held);
+            assert_eq!(
+                worker.join().unwrap().err(),
+                Some(VoiceError::Unauthorized),
+                "cached={cached}"
+            );
+        });
+        assert_eq!(
+            f.helper.counts(),
+            before,
+            "canceled old ingress creates no original packet or fresh edge allowance"
+        );
+        // Fresh original ingress remains usable; cancellation did not burn origin eligibility.
+        f.admit(packet).unwrap();
+        drop(responder);
+    }
 }
 
 #[test]
@@ -557,7 +722,7 @@ async fn stale_queued_member_room_policy_lock_and_actor_effects_never_revive() {
 }
 
 #[test]
-fn helper_actor_replacement_keeps_cached_packet_and_origin_limits() {
+fn helper_actor_replacement_keeps_protection_but_refuses_fresh_custody_ack_for_retired_packet() {
     let mut f = Fixture::new();
     let packet = f.targeted(10);
     f.admit(packet.clone()).unwrap();
@@ -573,7 +738,12 @@ fn helper_actor_replacement_keeps_cached_packet_and_origin_limits() {
         .unwrap();
     f.actor = new;
     assert!(Arc::ptr_eq(&f.helper, &f.actor.helper().unwrap()));
-    assert!(f.admit(packet).unwrap().cached);
+    // Contract correction: retained bytes still protect the original identity/budget, but
+    // their first actor is retired. Returning a current HelperQueued receipt would falsely
+    // claim actionable custody under the new actor; a duplicate must now refuse.
+    let before = f.helper.counts();
+    assert_eq!(f.admit(packet).err(), Some(VoiceError::Unauthorized));
+    assert_eq!(f.helper.counts(), before);
     assert!(f.jobs().is_empty());
     // Fresh packet can use this actor; old immutable cache was not forgotten or re-forwarded.
     f.admit(f.targeted(11)).unwrap();

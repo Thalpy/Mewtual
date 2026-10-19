@@ -40,16 +40,22 @@ struct Registration {
 pub(crate) struct FileService {
     // Drop publishers BEFORE jobs/config; actual workers retain their separate accounting.
     active: Vec<Registration>,
+    pub(super) requesters: Vec<super::requester::Registration>,
+    // Shared across this Root's native reads, so parallel jobs cannot overwhelm B's bounded
+    // per-requester ingress window while traversing offline source batches.
+    pub(super) requester_ready: Vec<(DeviceId, u64)>,
     pub(crate) jobs: FuturesUnordered<BoxFuture<'static, Completion>>,
-    native: Option<NativeFileService>,
-    admission: Arc<AdmissionRuntime>,
-    routes: RoutePool,
+    pub(super) native: Option<NativeFileService>,
+    pub(super) admission: Arc<AdmissionRuntime>,
+    pub(super) routes: RoutePool,
     helpers: HelperCapacity,
 }
 impl Default for FileService {
     fn default() -> Self {
         Self {
             active: Vec::new(),
+            requesters: Vec::new(),
+            requester_ready: Vec::new(),
             jobs: FuturesUnordered::new(),
             native: None,
             admission: AdmissionRuntime::process(),
@@ -196,6 +202,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     pub(crate) fn reconcile_file_service_routes(&mut self) {
+        self.reconcile_file_requesters();
         self.file_service
             .active
             .retain(|row| row.scope.strong_count() != 0);

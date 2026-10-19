@@ -193,7 +193,7 @@ impl<R: CryptoRngCore> Transfer<R> {
         for record in current.iter().chain(next.iter()) {
             if record.scope != *scope
                 || path.file_name().and_then(|name| name.to_str())
-                    != Some(record.plan.cid.to_hex().as_str())
+                    != Some(record.owner().name().as_str())
             {
                 return Err(StorageError::Malformed);
             }
@@ -239,7 +239,7 @@ impl<R: CryptoRngCore> Transfer<R> {
         };
         if record.scope != *scope
             || path.file_name().and_then(|name| name.to_str())
-                != Some(record.plan.cid.to_hex().as_str())
+                != Some(record.owner().name().as_str())
         {
             return Err(StorageError::Malformed);
         }
@@ -272,9 +272,7 @@ impl<R: CryptoRngCore> Transfer<R> {
         hook: impl FnMut(WritePhase, &Path) -> Result<(), StorageError>,
     ) -> Result<Self, StorageError> {
         record.validate_initial()?;
-        if path.file_name().and_then(|name| name.to_str())
-            != Some(record.plan.cid.to_hex().as_str())
-        {
+        if path.file_name().and_then(|name| name.to_str()) != Some(record.owner().name().as_str()) {
             return Err(StorageError::Malformed);
         }
         fs::create_dir(&path).map_err(io)?;

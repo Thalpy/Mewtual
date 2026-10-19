@@ -93,8 +93,9 @@
     type StoredTone, type ToneOverride,
   } from "./notification-sounds";
   import {
-    completedDownload, downloadSavedNotice, guideSavedNotice, saveGroupFile, saveSpaceGuide,
+    completedDownload, downloadSavedNotice, guideSavedNotice, saveGroupFile, resumeGroupFile, saveSpaceGuide,
   } from "./native-download";
+  import { acceptSaveProgress, checkedPrivateDownloads, privateDownloadLabel, type PrivateDownload } from "./private-downloads";
   import {
     newVaultSecretError, vaultSecretChangeNotice, type VaultSecretChangeResult,
   } from "./vault-secret-change";
@@ -3793,6 +3794,10 @@
   // availability hint refreshed with the file list). This is stricter than `onlineMembers`.
   let hasPeers = $state(false);
   let keptFiles = $state<KeptFiles | null>(null);
+  let privateDownloads = $state<PrivateDownload[]>([]);
+  let privateDownloadBusy = $state<symbol | null>(null);
+  let privateDownloadSaves = $state<Record<string, symbol>>({});
+  let privateDownloadError = $state("");
   const fileInventoryGate = fileInventoryRequests();
   let keptTransfer = $state<{ server: number; cid: string; cancellation: string } | null>(null);
   // A primitive identity survives Svelte's deep state proxies unchanged.
@@ -7053,6 +7058,10 @@
     files = [];
     hasPeers = false;
     keptFiles = null;
+    privateDownloads = [];
+    privateDownloadError = "";
+    privateDownloadBusy = null;
+    privateDownloadSaves = {};
     fileInventoryGate.invalidate();
     cancelKeptTransfer();
     wikiPinned = new Set();
@@ -7834,10 +7843,11 @@
       // Wiki-pinned content addresses are derived fresh from the wiki on the backend each call: a
       // file embedded in a live page never drops out of circulation, whatever its expiry says. It
       // is a second round-trip, so it rides alongside the listing rather than after it.
-      const [listing, pinned, kept] = await Promise.allSettled([
+      const [listing, pinned, kept, savedDownloads] = await Promise.allSettled([
         invoke<{ files: UiFile[]; has_peers: boolean }>("get_files", { server }),
         invoke<string[]>("get_wiki_pinned_cids", { server }),
         invoke<KeptFiles>("get_kept_files", { server }),
+        invoke<unknown>("get_private_downloads", { server }).then(checkedPrivateDownloads),
       ]);
       if (!fileInventoryGate.current(request, unlockedViewCurrent(gen, server))) return; // another group's shared files
       // Applied independently: a failing pin lookup must not blank the listing it only decorates.
@@ -7849,6 +7859,8 @@
       }
       if (pinned.status === "fulfilled") wikiPinned = new Set(pinned.value);
       keptFiles = kept.status === "fulfilled" ? kept.value : null;
+      privateDownloads = savedDownloads.status === "fulfilled" ? savedDownloads.value : [];
+      privateDownloadError = savedDownloads.status === "fulfilled" ? "" : "Download progress could not be read. Open Transfers again to retry.";
     } catch (e) {
       if (fileInventoryGate.current(request, unlockedViewCurrent(gen, server))) error = String(e);
     }
@@ -8632,7 +8644,7 @@
     }
     view = v;
     if (v === "wiki") refreshWiki();
-    if (v === "files") refreshFiles(); // re-evaluate availability each time the tab opens
+    if (v === "files" || v === "downloads") refreshFiles(); // includes saved private progress after restart
     // The policy is read with the surface rather than with the server, because it is only ever
     // needed by the surface and a server switch already carries enough round-trips.
     if (v === "status") { refreshStatuses(); void refreshStatusPolicy(); } // a read that failed during the switch gets a retry here
@@ -11616,6 +11628,17 @@
     if (activeServerId === null) return;
     const server = activeServerId;
     const key = dlKey(server, f.cid);
+    if (saveInProgress(f.cid)) return;
+    const existing = privateDownloads.find(row => row.cid === f.cid);
+    if (existing) {
+      if (existing.status === "exhausted") { switchView("downloads"); return; }
+      await resumePrivateDownload(existing);
+      return;
+    }
+    const gen = viewGeneration;
+    const operation = `save-${crypto.randomUUID()}`;
+    error = "";
+    activeSaves[key] = operation;
     const started = Date.now();
     const held = Math.min(f.held, f.total);
     downloads[key] = {
@@ -11623,6 +11646,7 @@
       cid: f.cid,
       name: f.name,
       author: f.author,
+      operation,
       status: "queued",
       progress: f.total > 0 ? held / f.total : 0,
       done: held,
@@ -11637,20 +11661,86 @@
       ts: started,
     };
     try {
-      const saved = await saveGroupFile(invoke, server, f.cid, f.name);
-      if (downloads[key]) {
+      const saved = await saveGroupFile(invoke, server, f.cid, f.name, { operation });
+      if (!unlockedViewCurrent(gen, server)) return;
+      if (downloads[key]?.operation === operation) {
         Object.assign(downloads[key], completedDownload(downloads[key], saved, Date.now()));
       }
       const notice = downloadSavedNotice(f.name, saved);
       toast(notice.text, notice.kind, notice.ms);
-      refreshFiles(); // the file's chunks are now held locally: update its availability
+      refreshFiles();
     } catch (e) {
+      if (!unlockedViewCurrent(gen, server)) return;
       error = String(e);
-      if (downloads[key]) {
+      if (downloads[key]?.operation === operation) {
         downloads[key].status = "failed";
         downloads[key].error = String(e);
         downloads[key].updatedAt = Date.now();
       }
+    } finally {
+      if (activeSaves[key] === operation) delete activeSaves[key];
+      if (!unlockedViewCurrent(gen, server) && downloads[key]?.operation === operation) delete downloads[key];
+      if (unlockedViewCurrent(gen, server)) void refreshFiles();
+    }
+  }
+
+  async function resumePrivateDownload(row: PrivateDownload) {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || privateDownloadBusy || privateDownloadSaves[row.id] || saveInProgress(row.cid) || row.status === "receiving" || row.status === "removing") return;
+    const mutation = Symbol("private download");
+    error = "";
+    privateDownloadBusy = mutation;
+    privateDownloadSaves[row.id] = mutation;
+    fileInventoryGate.invalidate();
+    const operation = `save-${crypto.randomUUID()}`;
+    const key = dlKey(server, row.cid);
+    try {
+      if (row.status === "exhausted") {
+        await invoke("retry_private_download", { server, download: row.id, expectedGrant: row.grant,
+          request: crypto.randomUUID().replaceAll("-", "") });
+        if (!unlockedViewCurrent(gen, server)) return;
+      }
+      const name = filesByCid.get(row.cid)?.name ?? `download-${row.cid.slice(0, 12)}`;
+      const file = filesByCid.get(row.cid), started = Date.now();
+      activeSaves[key] = operation;
+      downloads[key] = { server, cid: row.cid, name, operation, author: file?.author ?? "",
+        status: "queued", progress: row.verifiedChunks / row.totalChunks, done: row.verifiedChunks,
+        total: row.totalChunks, heldBefore: row.verifiedChunks, bytesDone: 0, bytesTotal: file?.size ?? 0,
+        networkBytesDone: 0, speed: 0, lastRateAt: started, updatedAt: started, ts: started };
+      // Acquisition may wait for a member. Keep Pause/Remove available during that wait;
+      // this separate token blocks only a duplicate Save of this same native owner.
+      if (privateDownloadBusy === mutation) privateDownloadBusy = null;
+      const saved = await resumeGroupFile(invoke, server, row.cid, name, row.id, row.intent, operation);
+      if (!unlockedViewCurrent(gen, server)) return;
+      if (downloads[key]?.operation === operation) Object.assign(downloads[key], completedDownload(downloads[key], saved, Date.now()));
+      const notice = downloadSavedNotice(name, saved);
+      toast(notice.text, notice.kind, notice.ms);
+    } catch (e) {
+      if (unlockedViewCurrent(gen, server)) {
+        error = String(e);
+        if (downloads[key]?.operation === operation) Object.assign(downloads[key], { status: "failed", error: String(e), updatedAt: Date.now() });
+      }
+    } finally {
+      if (activeSaves[key] === operation) delete activeSaves[key];
+      if (!unlockedViewCurrent(gen, server) && downloads[key]?.operation === operation) delete downloads[key];
+      if (privateDownloadBusy === mutation) privateDownloadBusy = null;
+      if (privateDownloadSaves[row.id] === mutation) delete privateDownloadSaves[row.id];
+      if (unlockedViewCurrent(gen, server)) await refreshFiles();
+    }
+  }
+  async function changePrivateDownload(row: PrivateDownload, remove: boolean) {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || privateDownloadBusy) return;
+    const mutation = Symbol("private download intent");
+    privateDownloadBusy = mutation;
+    fileInventoryGate.invalidate();
+    try {
+      if (remove) await invoke("cancel_private_download", { server, download: row.id });
+      else await invoke("set_private_download_paused", { server, download: row.id, expectedIntent: row.intent, paused: true });
+    } catch (e) { if (unlockedViewCurrent(gen, server)) error = String(e); }
+    finally {
+      if (privateDownloadBusy === mutation) privateDownloadBusy = null;
+      if (unlockedViewCurrent(gen, server)) await refreshFiles();
     }
   }
 
@@ -11748,6 +11838,7 @@
     cid: string;
     name: string;
     author: string; // the uploader (the file's source)
+    operation: string; // native progress correlation, never an authority token
     provider?: string; // the live serving peer's fingerprint, when bytes came over the network
     status: "queued" | "waiting" | "downloading" | "verifying" | "done" | "failed";
     progress: number; // 0..1
@@ -11767,7 +11858,13 @@
   // Keyed by `${server}:${cid}` so a download is scoped to its server (the same content cid can
   // exist on two servers, and switching servers must not show the other's transfers).
   let downloads = $state<Record<string, DownloadInfo>>({});
+  // Actual invocation ownership is independent of historical display status. A completion in
+  // another view must retire its own busy token without publishing a stale path or notice.
+  let activeSaves = $state<Record<string, string>>({});
   const dlKey = (server: number, cid: string) => `${server}:${cid}`;
+  function saveInProgress(cid: string): boolean {
+    return activeServerId !== null && !!activeSaves[dlKey(activeServerId, cid)];
+  }
   type UploadInfo = {
     server: number;
     id: string;
@@ -21055,7 +21152,7 @@
           jukeFetch = fetchPhase(e.payload);
         }
         const d = downloads[dlKey(e.payload.server, e.payload.cid)];
-        if (!d) return; // only track explicitly-initiated downloads
+        if (!d || activeSaves[dlKey(e.payload.server, e.payload.cid)] !== d.operation || !acceptSaveProgress(d, e.payload)) return;
         const now = Date.now();
         if (e.payload.network_bytes_done > d.networkBytesDone) {
           d.speed = sampleRate(
@@ -27656,6 +27753,25 @@
         {:else if view === "downloads"}
           <h2>Transfers</h2>
           <div class="downloads-tab tab-pane">
+            {#if privateDownloadError}<p class="muted" role="status">{privateDownloadError}</p>{/if}
+            {#if privateDownloads.length}
+              <h3>Saved download progress</h3>
+              <p class="muted small">If a save was interrupted, check Downloads before saving again. Saving again creates another copy.</p>
+              <ul class="dl-list">
+                {#each privateDownloads as saved (saved.id)}
+                  <li class="dl-item">
+                    <b>{filesByCid.get(saved.cid)?.name ?? `File ${saved.cid.slice(0, 12)}`}</b>
+                    <span>{privateDownloadLabel(saved)} · {saved.verifiedChunks}/{saved.totalChunks} chunks</span>
+                    <div>
+                      <button disabled={!!privateDownloadBusy || !!privateDownloadSaves[saved.id] || saveInProgress(saved.cid) || saved.status === "receiving" || saved.status === "removing"}
+                        onclick={() => resumePrivateDownload(saved)}>{saved.status === "exhausted" ? "Retry download" : saved.status === "ready" ? "Save to Downloads" : "Resume download"}</button>
+                      {#if saved.status === "receiving"}<button disabled={!!privateDownloadBusy} onclick={() => changePrivateDownload(saved, false)}>Pause</button>{/if}
+                      <button class="ghost" disabled={!!privateDownloadBusy} onclick={() => changePrivateDownload(saved, true)}>Remove progress</button>
+                    </div>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
             <button class="transfer-health" onclick={() => switchView("storage")}>
               {@render icoStorage()}
               {#if storageHealth}

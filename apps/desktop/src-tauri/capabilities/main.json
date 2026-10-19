@@ -218,6 +218,10 @@
     "allow-save-jam-sheet",
     "allow-export-studio-gif",
     "allow-save-group-file",
+    "allow-get-private-downloads",
+    "allow-set-private-download-paused",
+    "allow-retry-private-download",
+    "allow-cancel-private-download",
 
     "allow-call-media-key",
     "allow-begin-inline-download",

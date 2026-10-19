@@ -8,6 +8,24 @@ peer lacks the file.
 
 ## Fetch scheduling
 
+Explicit native reads can now fall back to one consented connected member as a file helper after
+direct providers. The helper forwards at most four named current MLS sources per signed grant;
+it receives encrypted pages and no file key, and does not silently Keep them. Each page is at most
+64KiB. Helpers are discovered through bounded MLS catalog pages, not a truncated descriptor or
+connected-peer roster. At most four helpers by four exact encrypted variants retain independent
+positions. Local Busy leaves unstarted source coverage intact. A signed Unavailable advances
+fresh coverage first, then permits at most two bounded retry sweeps under the same read authority
+and remaining allowance. Local150ms helper pacing does not guarantee remote quota availability.
+An unsupported helper never falls back to forwarding a legacy whole-file request.
+
+Root reserves route custody before the actor spends durable Keep work, then commits the exact
+selection. A proven local preparation refusal spends no coverage. A post-debit refusal does not
+refund durable work. Ambiguous transport retry uses the same source batch with a fresh grant
+and debit; old route tickets and connection incarnations cannot become current again. Both
+successful and failed AEAD outcomes repeat original read/effect/work authority before durable
+storage or bad-candidate decisions. These paths do not yet establish the full native restart,
+bridge-replacement, load or physical-network acceptance matrix.
+
 `FetchFileChunk` and `ReadFileRange` prepare authenticated requests on the server actor, suspend
 only network I/O in tasks, and authenticate/open/store results back on the actor. Workers have no
 MLS owner, file keys, blob store or transport event consumer. A one-shot completion is bound to
@@ -180,13 +198,41 @@ retain their exact bytes, predecessor hashes and two 80 KiB slot charges. They a
 copies remain exact-only: there is no implicit enrichment from today's index or release/recreate
 migration. Unsupported readers refuse the V4 domain without deleting its saved state.
 
+## Private durable downloads
+
+Native Save first acquires encrypted data into a purpose-separated `mewtual/download-transfer/v1`
+record. Its immutable random transfer ID names a canonical `d-<id>` directory; Keep remains keyed
+by CID. Both purposes share the same 32-record/1 GiB reservation, deletion remnants, exclusive
+mount and persistent execution allowance. A same-CID Download cannot read, pause, release or
+change the Keep owner. Completed Download records never enter public `get`, `has`, CID enumeration
+or owned source-worker preparation. Only an exact mounted transfer-generation export lease can
+read their chunks, at the saved bound. Existing V2–V4 Keep bytes are unchanged; older CID-only
+readers refuse Download directories, making the retained store unavailable without deleting the
+private transfer. Ordinary cache remains separate. Returning to a current reader preserves spend.
+
+The native actor reuses bounded whole-file acquisition, including member bridging and whole-variant
+fallback. It revalidates every original saved manifest and whole plaintext CID before export.
+Restart preserves verified whole ciphertext chunks, Pause and spent budgets; it does not preserve
+an external plaintext offset or path. Explicit Resume captures fresh native/Root/actor/storage
+authority and a freshly resolved Downloads destination. Exhaustion requires a separate explicit
+CAS Retry grant. Repeated Save/provider search/reopen does not refill it. Download has no automatic
+startup acquisition/export scheduler. Four whole-export slots remain owned through queued plaintext
+results, writes and publication. Final publication is no-replace; cancellation removes staging only.
+
+Cleanup after publication is fenced to the exact exported generation, so it cannot erase a later
+run of the same record. A stop after publication but before cleanup/response may leave both the
+external file and encrypted progress. There is no exactly-once external publication receipt: the
+UI tells users to check Downloads before saving again, which may create another copy. Same-user
+staging mutation and abrupt native/physical-network acceptance remain outside current evidence.
+
 ## Remaining limits
 
 - Remote possession acknowledgements, automatic replication and holder-aware eviction are not
   implemented. A second device must explicitly keep/download a copy while a holder is reachable.
 - Legacy/V2/V3 exact-only copies cannot fall back to candidates they never saved. New V4
   whole-variant fallback is implemented with focused integration checks and review in progress.
-- Indirect authenticated file service and external destination resume remain separate unfinished work.
+- Indirect authenticated file service and private durable destination re-export have focused
+  native evidence. The combined crash/load/mixed-version matrix and physical acceptance remain open.
 - Unlisted kept copies can be checked, repaired, served by ciphertext CID and explicitly released,
   but standalone export still requires a shared listing. This is disclosed in the copy manager;
   independent recovery/export and server-leave cleanup remain follow-ups.

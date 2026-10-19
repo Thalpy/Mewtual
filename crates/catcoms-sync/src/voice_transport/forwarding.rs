@@ -49,6 +49,27 @@ struct RouteGate {
     // cancellation alone cannot refund custody. Flight has no back-edge to this RouteGate.
     _custody: SharedRequestKeepalive,
 }
+impl fmt::Debug for RouteGate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("VoiceRouteGate { .. }")
+    }
+}
+#[async_trait::async_trait]
+impl RequestAuthority for RouteGate {
+    fn authorized(&self) -> bool {
+        self.live.is_live() && self.connection.is_live()
+    }
+    async fn revoked(&self) {
+        if !self.authorized() {
+            return;
+        }
+        futures::future::select(
+            self.live.wait_revoked().boxed(),
+            self.connection.revoked().boxed(),
+        )
+        .await;
+    }
+}
 struct FlightAuthority {
     route: Arc<RouteGate>,
     packet: Arc<dyn RequestAuthority>,
@@ -294,6 +315,48 @@ impl<T: MeshTransport> PendingVoiceForward<T> {
     }
 }
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
+    /// Register an inbound reply's original route BEFORE packet/origin admission. The fixed
+    /// verification allowance covers this small metadata owner. Root control hooks retire it
+    /// for epoch/proof/descriptor/policy changes, while the driver owns connection retirement.
+    /// A later retry captures a new gate; it cannot repair this reply's original authority.
+    pub(crate) fn capture_voice_reply_route(
+        &mut self,
+        route: BoundRoute,
+        custody: SharedRequestKeepalive,
+    ) -> Result<Arc<dyn RequestAuthority>, VoiceError> {
+        let context = self.voice_v2_context(0)?;
+        let descriptor = peer_descriptor_hash(
+            self.peer_records
+                .get(&route.device)
+                .ok_or(VoiceError::Unauthorized)?,
+        );
+        let connection = self
+            .transport
+            .connection_lease(route.peer)
+            .filter(|lease| lease.is_live())
+            .ok_or(VoiceError::Unauthorized)?;
+        let voice = self
+            .voice_runtime
+            .as_mut()
+            .ok_or(VoiceError::Unauthorized)?;
+        voice.routes.active.retain(|gate| gate.strong_count() > 0);
+        if voice.routes.active.len() >= ROUTES {
+            return Err(VoiceError::Capacity);
+        }
+        let gate = Arc::new(RouteGate {
+            peer: route.peer,
+            device: route.device,
+            descriptor,
+            epoch: context.epoch,
+            policy: context.scope.policy,
+            live: CallLease::default(),
+            connection,
+            _custody: custody,
+        });
+        voice.routes.active.push(Arc::downgrade(&gate));
+        Ok(gate)
+    }
+
     /// Observe every real root/member/policy/descriptor/proof transition before another await.
     /// Weak rows stay counted while actual RouteGate owners exist. The separate lower Flight
     /// credit stays charged until real retirement even after route metadata has been released.

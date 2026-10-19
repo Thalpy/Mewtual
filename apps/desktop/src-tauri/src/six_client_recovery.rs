@@ -9,6 +9,7 @@ use rand_core::SeedableRng;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod chat_matrix;
+mod files;
 mod runtime;
 mod signed_history;
 mod transport;
@@ -132,6 +133,7 @@ impl Scenario {
             drop_gossip: AtomicBool::new(false),
             drop_next_call_signal: AtomicBool::new(false),
             delay_replies: AtomicBool::new(false),
+            file_reply: StdMutex::new(None),
             trace: StdMutex::new(Trace::default()),
         });
         let clock = SystemClock;
@@ -165,6 +167,10 @@ impl Scenario {
     /// three-member check needs one unambiguous helper and one blocked target; admitting and
     /// then closing extra members would leave their valid descriptors eligible for probing.
     async fn admit_prefix(&mut self, count: usize) {
+        self.admit_prefix_with_files(count, false).await;
+    }
+
+    async fn admit_prefix_with_files(&mut self, count: usize, files: bool) {
         assert!(matches!(count, 3 | 6));
         for index in 0..count {
             let state = mount(self.clients[index].root.path()).await;
@@ -240,6 +246,11 @@ impl Scenario {
             let device_id = server.device_id();
             self.clients[index].identity = Some((group_id.clone(), device_id));
             self.clients[index].generation += 1;
+            if files {
+                // The file scenario must use the same encrypted/retained native store factory
+                // as a real desktop, installed before any actor can create file bytes.
+                attach_blob_store(&state, &mut server).await;
+            }
             let (actor, events, task) = spawn(server);
             let restored = RestoredActor {
                 actor,

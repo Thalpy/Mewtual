@@ -55,8 +55,6 @@ use thiserror::Error;
 mod actor;
 pub mod creative;
 pub mod durable_chat;
-#[cfg(test)]
-mod file_bridge_search;
 mod file_resolution;
 pub mod file_source;
 mod moderation;
@@ -70,7 +68,9 @@ pub mod shutdown;
 pub mod store;
 pub mod studio;
 pub mod studio_exchange;
-pub use actor::{spawn, AppCommand, AppEvent, Envelope, ServerActor, Trace, TracedEvent};
+pub use actor::{
+    spawn, AppCommand, AppEvent, DownloadReady, Envelope, ServerActor, Trace, TracedEvent,
+};
 pub use moderation::{
     ModerationEvent, ModerationState, ModerationVote, MAX_MOD_EVIDENCE_BYTES, MAX_MOD_EVIDENCE_IDS,
     MAX_MOD_REASON_BYTES,

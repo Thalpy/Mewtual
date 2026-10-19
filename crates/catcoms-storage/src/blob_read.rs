@@ -30,8 +30,13 @@ impl ReadEpoch {
 #[derive(Clone)]
 pub(crate) struct ReadGuard(Vec<Weak<()>>);
 impl ReadGuard {
-    fn current(&self) -> bool {
+    pub(crate) fn current(&self) -> bool {
         self.0.iter().all(|epoch| epoch.strong_count() != 0)
+    }
+    /// Exact issuing generation, rather than merely some live store with equal saved metadata.
+    /// Private export must bind BOTH the mounted engine and its particular transfer instance.
+    pub(crate) fn issued_by(&self, epoch: &ReadEpoch) -> bool {
+        self.0.len() == 1 && self.0[0].ptr_eq(&Arc::downgrade(&epoch.0))
     }
     fn combine(&mut self, other: &Self) -> Result<(), StorageError> {
         // Native wrappers are bounded too; an accidentally recursive store cannot build an

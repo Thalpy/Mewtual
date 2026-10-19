@@ -913,10 +913,37 @@ pub(crate) struct IngressTicket {
     hash: [u8; 32],
     bytes: usize,
     deadline: u64,
+    clock: Arc<EffectiveClock>,
+    original_request: Option<Arc<dyn RequestAuthority>>,
     _credit: Arc<Credit>,
 }
 redacted_debug!(IngressTicket);
 impl IngressTicket {
+    /// Observe the original requester/actor/session/policy and absolute verification deadline
+    /// through an eventual reply send. This is not endpoint admission or byte custody; native
+    /// additionally captures an exact RouteGate for epoch/proof/descriptor/connection changes.
+    pub(crate) fn reply_authority(&self) -> Arc<VerificationReplyAuthority> {
+        Arc::new(VerificationReplyAuthority {
+            actor: self.actor.clone(),
+            member: self.member.clone(),
+            policy: self.policy.clone(),
+            clock: self.clock.clone(),
+            deadline: self.deadline,
+        })
+    }
+    /// Admission-only original driver lifetime. Do not carry this into a final reply gate or
+    /// persistent packet: receiving a reply closes the wait before network send, and already
+    /// admitted helper custody may legitimately outlive its requester's uncertain wait.
+    pub(crate) fn bind_request(
+        mut self,
+        original: Arc<dyn RequestAuthority>,
+    ) -> Result<Self, VoiceError> {
+        if self.original_request.is_some() || !original.authorized() {
+            return Err(VoiceError::Unauthorized);
+        }
+        self.original_request = Some(original);
+        Ok(self)
+    }
     pub(crate) fn actual_work(&self) -> catcoms_rt::SharedRequestKeepalive {
         self._credit.clone()
     }
@@ -947,7 +974,15 @@ impl IngressTicket {
         {
             return Err(VoiceError::Unauthorized);
         }
-        actor.current()
+        actor.current()?;
+        if self
+            .original_request
+            .as_ref()
+            .is_some_and(|original| !original.authorized())
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(())
     }
     /// Called under the final GroupState -> Policy locks, after all helper reservations. The
     /// earlier exact frame check cannot authorize a ticket that expired while those locks were
@@ -967,7 +1002,15 @@ impl IngressTicket {
         {
             return Err(VoiceError::Unauthorized);
         }
-        actor.current()
+        actor.current()?;
+        if self
+            .original_request
+            .as_ref()
+            .is_some_and(|original| !original.authorized())
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(())
     }
 }
 impl ActorOwner {
@@ -1062,6 +1105,8 @@ impl ActorOwner {
             hash: *blake3::hash(frame).as_bytes(),
             bytes: frame.len(),
             deadline: now.saturating_add(5_000),
+            clock: self.clock.clone(),
+            original_request: None,
             _credit: Arc::new(credit),
         })
     }
@@ -1078,6 +1123,54 @@ impl ActorOwner {
             Ok(())
         })
         .map(|(disposition, ())| disposition)
+    }
+}
+
+/// Immutable observing gates only. Driver checks never take Group/Policy/Root locks and cannot
+/// refresh membership or an expired request. Credit remains independently held after revocation.
+pub(crate) struct VerificationReplyAuthority {
+    actor: Arc<ActorGate>,
+    member: Arc<Member>,
+    policy: CallLease,
+    clock: Arc<EffectiveClock>,
+    deadline: u64,
+}
+impl VerificationReplyAuthority {
+    /// All reply currency checks share this original native sample. Sample callbacks must run
+    /// BEFORE observing any irreversible gate, including other members/room/recipient gates.
+    pub(crate) fn sample_time(&self) -> (u64, u64) {
+        (self.clock.now_ms(), self.clock.monotonic_ms())
+    }
+    pub(crate) fn authorized_at(&self, mono: u64) -> bool {
+        mono < self.deadline
+            && self.actor.authorized()
+            && self.member.live.is_live()
+            && self.policy.is_live()
+    }
+}
+redacted_debug!(VerificationReplyAuthority);
+#[async_trait::async_trait]
+impl RequestAuthority for VerificationReplyAuthority {
+    fn authorized(&self) -> bool {
+        let mono = self.clock.monotonic_ms();
+        self.authorized_at(mono)
+    }
+    async fn revoked(&self) {
+        if !self.authorized() {
+            return;
+        }
+        let waits = vec![
+            self.actor.live.wait_revoked().boxed(),
+            self.actor.session.live.wait_revoked().boxed(),
+            self.member.live.wait_revoked().boxed(),
+            self.policy.wait_revoked().boxed(),
+            self.clock
+                .sleep(std::time::Duration::from_millis(
+                    self.deadline.saturating_sub(self.clock.monotonic_ms()),
+                ))
+                .boxed(),
+        ];
+        futures::future::select_all(waits).await;
     }
 }
 impl EffectAuthority {

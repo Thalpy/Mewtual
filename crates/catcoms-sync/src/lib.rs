@@ -59,6 +59,7 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 mod blob_fetch;
+mod downloads;
 pub mod file_service;
 mod member_finalization;
 mod member_maintenance;

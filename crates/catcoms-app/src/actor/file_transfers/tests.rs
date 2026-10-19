@@ -899,7 +899,7 @@ async fn kept_queued_request_loses_authority_on_deadline_or_same_cid_replacement
         let queued = bounded(entered.recv()).await.unwrap();
         assert!(!queued.is_cancelled());
         let new_run = if replace {
-            requester.sync.pause_keep(old_run).unwrap();
+            old_run.pause(&mut requester).unwrap();
             let plan = requester.sync.kept_files().transfers[0].plan.clone();
             Some(requester.sync.begin_keep(plan).unwrap())
         } else {
@@ -2034,6 +2034,331 @@ async fn drive_keep<T: MeshTransport + 'static>(
     }
     panic!("bounded local Keep did not finish");
 }
+
+async fn drive_download<T: MeshTransport + 'static>(
+    server: &mut Server<T, ChaCha20Rng>,
+    transfers: &mut FileTransfers,
+    mut result: oneshot::Receiver<Result<DownloadReady, String>>,
+) -> Result<DownloadReady, String> {
+    for _ in 0..24 {
+        if let Ok(outcome) = result.try_recv() {
+            return outcome;
+        }
+        let step = bounded(transfers.next())
+            .await
+            .expect("private download continuation");
+        transfers.complete(server, step);
+    }
+    panic!("private download exceeded its bounded test steps");
+}
+
+#[tokio::test]
+async fn private_download_uses_real_acquisition_and_protected_store_without_publication() {
+    let Pair {
+        mut requester,
+        holder,
+        cid,
+        gate,
+        entered: _entered,
+        ..
+    } = pair().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _store = attach_protected_kept(&mut requester, dir.path());
+    let (source, _events, source_task) = spawn(holder);
+    gate.add_permits(8);
+    let mut transfers = isolated_transfers();
+    let (_cancel, watch) = watch::channel(false);
+    let (reply, result) = oneshot::channel();
+    transfers.download(
+        &mut requester,
+        cid.as_bytes().to_vec(),
+        None,
+        RequestCancellation::new(watch, None),
+        reply,
+    );
+    let ready = drive_download(&mut requester, &mut transfers, result)
+        .await
+        .unwrap();
+    assert!(ready.is_current());
+    assert_eq!(ready.cid(), cid);
+    assert!(requester.sync.kept_files().files.is_empty());
+    assert!(requester.sync.kept_files().transfers.is_empty());
+    assert!(requester.sync.automatic_keep_candidate(None).is_none());
+    for chunk in &ready.manifest.chunks {
+        assert!(!requester.sync.has_blob(&chunk.ciphertext_cid));
+        assert!(requester.sync.get_blob(&chunk.ciphertext_cid).is_none());
+        let bytes = requester
+            .sync
+            .read_download_export(
+                &ready.lease,
+                &chunk.ciphertext_cid,
+                kept_ciphertext_bound(chunk).unwrap(),
+            )
+            .unwrap();
+        requester.sync.open_file(&bytes, chunk).unwrap();
+    }
+    assert!(requester.sync.downloads().unwrap()[0].checked);
+    requester.sync.cancel_download(ready.id()).unwrap();
+    assert!(!ready.is_current());
+    source.shutdown().await;
+    bounded(source_task).await.unwrap();
+}
+
+#[tokio::test]
+async fn interrupted_private_download_preserves_original_plan_and_spend_on_explicit_resume() {
+    let Pair {
+        mut requester,
+        holder,
+        cid,
+        gate,
+        mut entered,
+        ..
+    } = pair().await;
+    let dir = tempfile::tempdir().unwrap();
+    attach_kept(&mut requester, dir.path());
+    let (source, _events, source_task) = spawn(holder);
+    let mut transfers = isolated_transfers();
+    let (cancel, watch) = watch::channel(false);
+    let (reply, result) = oneshot::channel();
+    transfers.download(
+        &mut requester,
+        cid.as_bytes().to_vec(),
+        None,
+        RequestCancellation::new(watch, None),
+        reply,
+    );
+    let step = bounded(transfers.next()).await.unwrap();
+    transfers.complete(&mut requester, step);
+    let lower = bounded(entered.recv()).await.unwrap();
+    let before = requester.sync.downloads().unwrap().remove(0);
+    cancel.send_replace(true);
+    let step = bounded(transfers.next()).await.unwrap();
+    transfers.complete(&mut requester, step);
+    assert!(bounded(result).await.unwrap().is_err() && lower.is_cancelled());
+    requester.set_blob_store(Box::new(catcoms_storage::MemoryBlobStore::new()));
+    attach_kept(&mut requester, dir.path());
+    let after = requester.sync.downloads().unwrap().remove(0);
+    assert_eq!(after.state.remaining, before.state.remaining);
+    assert_eq!(after.state.grant, before.state.grant);
+    assert!(!after.state.running && !after.checked);
+    assert!(requester.sync.automatic_keep_candidate(None).is_none());
+    gate.add_permits(8);
+    let (_cancel, watch) = watch::channel(false);
+    let (reply, result) = oneshot::channel();
+    transfers.download(
+        &mut requester,
+        cid.as_bytes().to_vec(),
+        Some(before.id),
+        RequestCancellation::new(watch, None),
+        reply,
+    );
+    let ready = drive_download(&mut requester, &mut transfers, result)
+        .await
+        .unwrap();
+    assert!(ready.is_current() && ready.id() == before.id);
+    assert_eq!(
+        requester.sync.downloads().unwrap()[0].state.grant,
+        before.state.grant
+    );
+    assert!(
+        requester.sync.downloads().unwrap()[0]
+            .state
+            .remaining
+            .requests
+            < before.state.remaining.requests
+    );
+    source.shutdown().await;
+    bounded(source_task).await.unwrap();
+}
+
+#[tokio::test]
+async fn private_export_cannot_survive_actual_actor_freeze_and_thaw() {
+    let Pair {
+        mut holder,
+        cid,
+        entered: _entered,
+        ..
+    } = pair().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = attach_protected_kept(&mut holder, dir.path());
+    let vault = Arc::new(tokio::sync::Mutex::new(Some(store)));
+    let (actor, mut events, task) = spawn(holder);
+    let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+    let (_cancel, watch) = watch::channel(false);
+    let origin = RequestCancellation::new(watch, None);
+    let ready = bounded(actor.acquire_download(cid.as_bytes().to_vec(), None, origin.clone()))
+        .await
+        .unwrap();
+    let slots = Arc::new(Semaphore::new(1));
+    let ready = ready.with_export_custody(Arc::new(slots.clone().try_acquire_owned().unwrap()));
+    assert!(ready.is_current());
+    let preparing = bounded(actor.prepare_shutdown()).await.unwrap();
+    let frozen = bounded(
+        preparing.save_and_freeze(crate::shutdown::ShutdownLease::new(
+            vault.lock_owned().await,
+            77,
+            (),
+        )),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !ready.is_current() && !ready.invocation_current(),
+        "old native publication/response observers retire before freeze acknowledgement"
+    );
+    drop(frozen);
+    assert!(
+        bounded(actor.read_download_chunk(ready.clone(), 0, origin.clone()))
+            .await
+            .is_err()
+    );
+    assert!(!ready.is_current(), "thaw cannot revive old export custody");
+    let fresh =
+        bounded(actor.acquire_download(cid.as_bytes().to_vec(), Some(ready.id()), origin.clone()))
+            .await
+            .unwrap()
+            .with_export_custody(Arc::new(()));
+    assert!(fresh.is_current());
+    assert!(bounded(actor.read_download_chunk(fresh, 0, origin))
+        .await
+        .is_ok());
+    actor.shutdown().await;
+    bounded(task).await.unwrap();
+    bounded(drain).await.unwrap();
+}
+
+#[tokio::test]
+async fn private_plaintext_reply_retains_export_slot_after_native_waiter_drops_its_ready() {
+    let Pair {
+        mut holder,
+        cid,
+        entered: _entered,
+        ..
+    } = pair().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _store = attach_protected_kept(&mut holder, dir.path());
+    let (actor, mut events, task) = spawn(holder);
+    let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+    let (_cancel, watch) = watch::channel(false);
+    let origin = RequestCancellation::new(watch, None);
+    let ready = bounded(actor.acquire_download(cid.as_bytes().to_vec(), None, origin.clone()))
+        .await
+        .unwrap();
+    let slots = Arc::new(Semaphore::new(1));
+    let ready = ready.with_export_custody(Arc::new(slots.clone().try_acquire_owned().unwrap()));
+    let (reply, plaintext) = oneshot::channel();
+    actor
+        .cmd_tx
+        .send(AppCommand::ReadDownloadChunk {
+            ready,
+            index: 0,
+            cancel: origin,
+            reply,
+        })
+        .await
+        .unwrap();
+    bounded(actor.downloads()).await.unwrap(); // FIFO proves the actor finished the read.
+    assert_eq!(
+        slots.available_permits(),
+        0,
+        "unconsumed plaintext owns the slot after queued Ready retires"
+    );
+    drop(plaintext);
+    assert_eq!(slots.available_permits(), 1);
+    actor.shutdown().await;
+    bounded(task).await.unwrap();
+    bounded(drain).await.unwrap();
+}
+
+#[tokio::test]
+async fn private_acquisition_publishes_current_intent_and_pause_before_the_save_reply() {
+    let Pair {
+        mut requester,
+        holder,
+        cid,
+        mut entered,
+        ..
+    } = pair().await;
+    let dir = tempfile::tempdir().unwrap();
+    attach_kept(&mut requester, dir.path());
+    let resolved = file_resolution::resolve(&requester.files(), &cid).unwrap();
+    let (plan, _) = kept_plan(resolved.variants[0].0.file_ref.clone(), cid).unwrap();
+    let keep = requester
+        .sync
+        .begin_keep_with_listing(plan, resolved.version)
+        .unwrap();
+    requester.sync.pause_keep(keep).unwrap();
+    let (source, _source_events, source_task) = spawn(holder);
+    let (actor, mut events, task) = spawn(requester);
+    let (_cancel, watch) = watch::channel(false);
+    let origin = RequestCancellation::new(watch, None);
+    let saving = tokio::spawn({
+        let actor = actor.clone();
+        let origin = origin.clone();
+        async move {
+            actor
+                .acquire_download(cid.as_bytes().to_vec(), None, origin)
+                .await
+        }
+    });
+    let lower = bounded(entered.recv()).await.unwrap();
+    bounded(async {
+        while !matches!(events.recv().await.unwrap().event, AppEvent::FilesUpdated) {}
+    })
+    .await;
+    let before = bounded(actor.downloads()).await.unwrap().remove(0);
+    assert!(before.state.running && !saving.is_finished());
+    assert!(
+        !actor.kept_files().await.transfers[0].running,
+        "same-CID Keep does not mask private acquisition progress"
+    );
+    while events.try_recv().is_ok() {}
+    actor
+        .set_download_paused(before.id, before.state.intent, true)
+        .await
+        .unwrap();
+    bounded(async {
+        while !matches!(events.recv().await.unwrap().event, AppEvent::FilesUpdated) {}
+    })
+    .await;
+    assert!(bounded(saving).await.unwrap().is_err() && lower.is_cancelled());
+    let paused = actor.downloads().await.unwrap().remove(0);
+    assert!(paused.state.user_paused && !paused.state.running);
+    assert_eq!(paused.state.intent, before.state.intent + 1);
+    assert_eq!(paused.state.remaining, before.state.remaining);
+    actor
+        .set_download_paused(paused.id, paused.state.intent, false)
+        .await
+        .unwrap();
+    while events.try_recv().is_ok() {}
+    let resuming = tokio::spawn({
+        let actor = actor.clone();
+        async move {
+            actor
+                .acquire_download(cid.as_bytes().to_vec(), Some(paused.id), origin)
+                .await
+        }
+    });
+    let lower = bounded(entered.recv()).await.unwrap();
+    bounded(async {
+        while !matches!(events.recv().await.unwrap().event, AppEvent::FilesUpdated) {}
+    })
+    .await;
+    let resumed = actor.downloads().await.unwrap().remove(0);
+    assert!(resumed.state.running && !resuming.is_finished());
+    assert_eq!(resumed.state.intent, paused.state.intent + 1);
+    assert_eq!(resumed.state.grant, before.state.grant);
+    actor
+        .set_download_paused(resumed.id, resumed.state.intent, true)
+        .await
+        .unwrap();
+    assert!(bounded(resuming).await.unwrap().is_err() && lower.is_cancelled());
+    actor.shutdown().await;
+    drop(events);
+    bounded(task).await.unwrap();
+    source.shutdown().await;
+    bounded(source_task).await.unwrap();
+}
 #[tokio::test]
 async fn protected_kept_native_factory_preserves_saved_plan_resume_and_check() {
     let Pair {
@@ -2380,8 +2705,8 @@ async fn queued_media_range_keeps_original_invocation_across_cancelled_freeze() 
 }
 
 #[tokio::test]
-async fn native_retirement_after_real_open_refuses_plaintext_and_storage_in_both_paths() {
-    for local in [false, true] {
+async fn native_retirement_after_real_aead_refuses_storage_and_bad_verdicts_in_both_paths() {
+    for (local, bad_key) in [(false, false), (true, false), (false, true), (true, true)] {
         let Pair {
             mut requester,
             holder,
@@ -2390,6 +2715,9 @@ async fn native_retirement_after_real_open_refuses_plaintext_and_storage_in_both
             entered: _entered,
             ..
         } = pair().await;
+        if bad_key {
+            add_bad_wrapped_variant(&mut requester, &cid).await;
+        }
         let directory = tempfile::tempdir().unwrap();
         attach_kept(&mut requester, directory.path());
         if local {
@@ -2415,16 +2743,20 @@ async fn native_retirement_after_real_open_refuses_plaintext_and_storage_in_both
             Some(RequestCancellation::new(receiver, None)),
             reply,
         );
+        let admitted = requester.sync.kept_files().transfers[0].clone();
         let error = bounded(async {
             loop { tokio::select! {
                 result = &mut result => break result.unwrap().unwrap_err(),
                 step = transfers.next(), if !transfers.is_empty() => transfers.complete(&mut requester, step.unwrap()),
             }}
         }).await;
-        assert!(error.contains("cancelled"), "path local={local}: {error}");
+        assert!(
+            error.contains("cancelled"),
+            "path local={local}, bad_key={bad_key}: {error}"
+        );
         assert!(
             transfers.before_storage_admission.is_none(),
-            "actual successful AEAD boundary was reached"
+            "actual AEAD completion boundary was reached"
         );
         assert_eq!(requester.sync.blob_cids(), before_cache);
         let inventory = requester.sync.kept_files();
@@ -2433,6 +2765,16 @@ async fn native_retirement_after_real_open_refuses_plaintext_and_storage_in_both
             .transfers
             .iter()
             .all(|entry| entry.verified_chunks == 0));
+        assert_eq!(
+            inventory.transfers[0].plan, admitted.plan,
+            "retired AEAD cannot select another candidate"
+        );
+        assert_eq!(inventory.transfers[0].intent, admitted.intent);
+        assert_eq!(inventory.transfers[0].grant, admitted.grant);
+        assert!(
+            !inventory.transfers[0].blocked,
+            "retired AEAD cannot block a candidate"
+        );
         assert_eq!(transfers.jobs.available_permits(), SERVER_ATTEMPTS);
         source.shutdown().await;
         bounded(source_task).await.unwrap();

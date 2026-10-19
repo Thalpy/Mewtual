@@ -54,6 +54,72 @@ const MAX_DISCOVERED_PER_TICK: usize = 16;
 /// error string). One chunk per command keeps the actor responsive during a large download.
 type ChunkResult = Result<(Vec<u8>, Option<String>), String>;
 
+/// Native-only export custody for a whole-file-verified private Download. This is deliberately
+/// not serializable: the renderer receives status, never saved manifests, keys or read leases.
+#[derive(Clone)]
+pub struct DownloadReady {
+    manifest: catcoms_storage::FileManifest,
+    lease: catcoms_storage::kept::DownloadExportLease,
+    root: Arc<dyn catcoms_rt::RequestAuthority>,
+    actor: tokio::sync::watch::Receiver<bool>,
+    export_custody: Option<catcoms_rt::SharedRequestKeepalive>,
+}
+/// One private plaintext reply retains the native whole-export slot even if its waiter was
+/// canceled while the actor was reading disk. The receiver must retain its DownloadReady owner
+/// while using `into_bytes`; the live native SaveSource does so through write/publication.
+pub struct DownloadChunk {
+    bytes: Vec<u8>,
+    _custody: catcoms_rt::SharedRequestKeepalive,
+}
+impl std::fmt::Debug for DownloadChunk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DownloadChunk { .. }")
+    }
+}
+impl DownloadChunk {
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+impl std::fmt::Debug for DownloadReady {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DownloadReady { .. }")
+    }
+}
+impl DownloadReady {
+    /// Attach native whole-export accounting before the first plaintext read. This is resource
+    /// custody only; it cannot change the original Root or storage permission.
+    pub fn with_export_custody(mut self, custody: catcoms_rt::SharedRequestKeepalive) -> Self {
+        self.export_custody = Some(custody);
+        self
+    }
+    pub fn id(&self) -> catcoms_storage::kept::DownloadId {
+        self.lease.id()
+    }
+    pub fn cid(&self) -> Cid {
+        self.manifest.plaintext_cid
+    }
+    pub fn total_size(&self) -> u64 {
+        self.manifest.total_size
+    }
+    pub fn chunks(&self) -> usize {
+        self.manifest.chunks.len()
+    }
+    pub fn mime(&self) -> &str {
+        &self.manifest.mime
+    }
+    /// Observe the ORIGINAL Root and mounted storage generations before plaintext effects.
+    /// Native invocation/session/entry and destination authorization remain caller obligations.
+    pub fn is_current(&self) -> bool {
+        self.invocation_current() && self.lease.is_current()
+    }
+    /// Original actor/Root observation without storage custody, used only to fence the final
+    /// native response after successful cleanup has intentionally retired the storage lease.
+    pub fn invocation_current(&self) -> bool {
+        *self.actor.borrow() && self.actor.has_changed().is_ok() && self.root.authorized()
+    }
+}
+
 /// Await one detached chunk request while retaining a native cancellation edge.
 ///
 /// Dropping only the bridge's reply receiver does not cancel an [`AppCommand`] already executing
@@ -707,6 +773,41 @@ pub enum AppCommand {
     KeepFile {
         cid: Vec<u8>,
         cancel: Option<RequestCancellation>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Explicit private acquisition. Resume selects only its original saved manifest set.
+    AcquireDownload {
+        cid: Vec<u8>,
+        resume: Option<catcoms_storage::kept::DownloadId>,
+        cancel: RequestCancellation,
+        reply: oneshot::Sender<Result<DownloadReady, String>>,
+    },
+    ReadDownloadChunk {
+        ready: DownloadReady,
+        index: usize,
+        cancel: RequestCancellation,
+        reply: oneshot::Sender<Result<DownloadChunk, String>>,
+    },
+    FinishDownloadExport {
+        ready: DownloadReady,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    Downloads {
+        reply: oneshot::Sender<Result<Vec<catcoms_storage::kept::DownloadStatus>, String>>,
+    },
+    SetDownloadPaused {
+        id: catcoms_storage::kept::DownloadId,
+        expected_intent: u64,
+        paused: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    RetryDownload {
+        id: catcoms_storage::kept::DownloadId,
+        request: catcoms_storage::kept::KeepRetry,
+        reply: oneshot::Sender<Result<catcoms_storage::kept::KeepRetryReceipt, String>>,
+    },
+    CancelDownload {
+        id: catcoms_storage::kept::DownloadId,
         reply: oneshot::Sender<Result<(), String>>,
     },
     RequestKeptFile {
@@ -2928,6 +3029,110 @@ impl ServerActor {
         receiver.await.unwrap_or_default()
     }
 
+    /// Acquire encrypted private progress before touching an external plaintext destination.
+    /// A saved ID selects its original plan; it never grants a new allowance or read authority.
+    pub async fn acquire_download(
+        &self,
+        cid: Vec<u8>,
+        resume: Option<catcoms_storage::kept::DownloadId>,
+        cancel: RequestCancellation,
+    ) -> Result<DownloadReady, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::AcquireDownload {
+                cid,
+                resume,
+                cancel: cancel.clone(),
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        fetch_chunk_or_cancel(Some(cancel), async {
+            receiver.await.map_err(|_| "server stopped".to_string())?
+        })
+        .await
+    }
+    /// Read only the original completed private copy; no network or new file-index resolution.
+    pub async fn read_download_chunk(
+        &self,
+        ready: DownloadReady,
+        index: usize,
+        cancel: RequestCancellation,
+    ) -> Result<DownloadChunk, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::ReadDownloadChunk {
+                ready,
+                index,
+                cancel: cancel.clone(),
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        fetch_chunk_or_cancel(Some(cancel), async {
+            receiver.await.map_err(|_| "server stopped".to_string())?
+        })
+        .await
+    }
+    /// Best-effort cleanup after publication, fenced to the exact completed export generation.
+    pub async fn finish_download_export(&self, ready: DownloadReady) -> Result<(), String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::FinishDownloadExport { ready, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
+    }
+    pub async fn downloads(&self) -> Result<Vec<catcoms_storage::kept::DownloadStatus>, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::Downloads { reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
+    }
+    pub async fn set_download_paused(
+        &self,
+        id: catcoms_storage::kept::DownloadId,
+        expected_intent: u64,
+        paused: bool,
+    ) -> Result<(), String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::SetDownloadPaused {
+                id,
+                expected_intent,
+                paused,
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
+    }
+    pub async fn retry_download(
+        &self,
+        id: catcoms_storage::kept::DownloadId,
+        request: catcoms_storage::kept::KeepRetry,
+    ) -> Result<catcoms_storage::kept::KeepRetryReceipt, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::RetryDownload { id, request, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
+    }
+    pub async fn cancel_download(
+        &self,
+        id: catcoms_storage::kept::DownloadId,
+    ) -> Result<(), String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::CancelDownload { id, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
+    }
+
     pub async fn forget_kept_file(&self, cid: Vec<u8>) -> Result<(), String> {
         let (reply, receiver) = oneshot::channel();
         self.cmd_tx
@@ -4959,6 +5164,29 @@ where
                     Some(AppCommand::KeepFile { cid, cancel, reply }) => {
                         file_transfers.keep(&mut server, cid, cancel, reply);
                     }
+                    Some(AppCommand::AcquireDownload { cid, resume, cancel, reply }) => {
+                        file_transfers.download(&mut server, cid, resume, cancel, reply);
+                        let _ = event_tx.send(AppEvent::FilesUpdated).await;
+                    }
+                    Some(AppCommand::ReadDownloadChunk { ready, index, cancel, reply }) => {
+                        let result = (|| {
+                            let valid = || ready.is_current() && !cancel.is_cancelled();
+                            if !valid() { return Err("The download is no longer active.".to_string()); }
+                            let custody = ready.export_custody.clone().ok_or("Download export has no resource owner.")?;
+                            let reference = ready.manifest.chunks.get(index).ok_or("Invalid download chunk.")?;
+                            let bound = file_transfers::kept_ciphertext_bound(reference)?;
+                            let bytes = server.sync.read_download_export(&ready.lease, &reference.ciphertext_cid, bound).map_err(|e| e.to_string())?;
+                            let plaintext = server.sync.open_file(&bytes, reference).map_err(|e| e.to_string())?;
+                            if !valid() { return Err("The download is no longer active.".to_string()); }
+                            Ok(DownloadChunk { bytes: plaintext, _custody: custody })
+                        })();
+                        let _ = reply.send(result);
+                    }
+                    Some(AppCommand::Downloads { reply }) => { let _ = reply.send(server.sync.downloads().map_err(|e| e.to_string())); }
+                    Some(AppCommand::FinishDownloadExport { ready, reply }) => { let _ = reply.send(server.sync.finish_download_export(&ready.lease).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
+                    Some(AppCommand::SetDownloadPaused { id, expected_intent, paused, reply }) => { let _ = reply.send(server.sync.set_download_paused(id, expected_intent, paused).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
+                    Some(AppCommand::RetryDownload { id, request, reply }) => { let _ = reply.send(server.sync.retry_download(id, request).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
+                    Some(AppCommand::CancelDownload { id, reply }) => { let _ = reply.send(server.sync.cancel_download(id).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
                     Some(AppCommand::RequestKeptFile { cid, reply }) => {
                         let session = keep_sessions.borrow().clone();
                         let result = file_transfers.request_keep(&mut server, cid, session);
@@ -5580,10 +5808,10 @@ where
                 fair::Turn::File(completed) => {
                     event_tx.idle();
                     if let Some(completed) = completed {
-                        let cid = completed.kept_cid();
-                        let before = cid.and_then(|cid| server.sync.keep_progress(&cid));
+                        let progress = completed.saved_progress();
+                        let before = progress.as_ref().and_then(|p| p.observe(&server));
                         file_transfers.complete(&mut server, completed);
-                        let after = cid.and_then(|cid| server.sync.keep_progress(&cid));
+                        let after = progress.as_ref().and_then(|p| p.observe(&server));
                         if before != after { let _ = event_tx.send(AppEvent::FilesUpdated).await; }
                     }
                 },

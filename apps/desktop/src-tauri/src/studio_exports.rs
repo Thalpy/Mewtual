@@ -179,10 +179,10 @@ fn encode_gif(bytes: &[u8], limit: usize, cancelled: impl Fn() -> bool) -> Resul
     Ok(output.bytes)
 }
 
-/// Stage, publish, then reveal. Only the rename makes plaintext visible under the final name, so
+/// Stage, publish, then reveal. Only publication makes plaintext visible under the final name, so
 /// only it runs under the UI-session guard and server-registry lock. Creating, writing and syncing
 /// the `.part` on a slow Downloads volume holds neither, and runs off the async workers. Every
-/// failure or cancellation before the rename removes the staging file and the reserved name.
+/// failure or cancellation before publication removes only the staging file.
 /// `before_chunk` and `before_commit` are test seams; production passes no-ops.
 #[allow(clippy::too_many_arguments)]
 async fn save_gif<W, F, R>(
@@ -227,8 +227,8 @@ where
     Ok(revealed(&staged.path, reveal))
 }
 
-/// Bytes written and synced to a `.part` beside a reserved final name, which stays empty until
-/// [`StagedGif::publish`]. Dropping it unpublished removes both.
+/// Bytes written and synced to a `.part` beside an absent final name. Publication atomically
+/// refuses a destination created by another local action. Dropping it removes only staging.
 struct StagedGif {
     staging: PathBuf,
     path: PathBuf,
@@ -237,7 +237,19 @@ struct StagedGif {
 
 impl StagedGif {
     fn publish(&mut self) -> Result<(), String> {
-        publish_staged_download(&self.staging, &self.path)?;
+        self.publish_with_cleanup(|path| std::fs::remove_file(path))
+    }
+
+    fn publish_with_cleanup(
+        &mut self,
+        cleanup: impl FnOnce(&Path) -> std::io::Result<()>,
+    ) -> Result<(), String> {
+        publish_staged_download_with(
+            &self.staging,
+            &self.path,
+            |from, to| std::fs::hard_link(from, to),
+            cleanup,
+        )?;
         self.published = true;
         Ok(())
     }
@@ -247,7 +259,6 @@ impl Drop for StagedGif {
     fn drop(&mut self) {
         if !self.published {
             let _ = std::fs::remove_file(&self.staging);
-            let _ = std::fs::remove_file(&self.path);
         }
     }
 }

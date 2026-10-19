@@ -23,7 +23,7 @@ const CONFIRM_BYTES: usize = 512;
 const RECORD_BYTES: usize = 1024;
 mod results;
 pub(crate) mod slots;
-pub use results::{CryptoOutcome, CryptoResultReceipt};
+pub use results::{CryptoOutcome, CryptoResultReceipt, CryptoResultStatus};
 pub(super) use results::{ResultBinding, TerminalResult};
 
 /// Closed operation identity; the native factory selects it from actual protocol state.
@@ -40,6 +40,24 @@ pub enum CryptoInput<'a> {
     Derive(&'a PairSetup),
     EncryptConfirmation(&'a CryptoFlight),
     DecryptConfirmation(&'a InboundPacket),
+}
+
+/// Owned capacity lease for borrowed native input. Compaction can remove the action's own
+/// reference, but a serializer/worker still holding this lease retains the original buffers
+/// and their credit. This grants no engine, signing, packet or RTC authority.
+pub struct CryptoInputLease(Arc<ActionPayload>);
+impl CryptoInputLease {
+    pub fn as_input(&self) -> CryptoInput<'_> {
+        match &self.0.input {
+            Input::Derive(input) => CryptoInput::Derive(input),
+            Input::Encrypt(input) => CryptoInput::EncryptConfirmation(input),
+            Input::Decrypt(input) => CryptoInput::DecryptConfirmation(input),
+        }
+    }
+}
+struct ActionPayload {
+    input: Input,
+    _credit: Credit,
 }
 
 enum Input {
@@ -60,6 +78,7 @@ struct Engine {
     settled: bool,
     permit: Option<Credit>,
     terminal: Option<results::RecordedResult>,
+    acknowledged: bool,
 }
 
 /// Opaque registered action. Clones preserve the exact engine fence and its actual charge.
@@ -70,7 +89,12 @@ pub struct CryptoAction {
     scope: Scope,
     call: CallLease,
     authority: CryptoAuthority,
-    input: Input,
+    // Lock order is Engine -> payload. An input lease clones its Arc under this mutex and
+    // releases the guard before any engine operation. Actual payload/credit drops occur after
+    // releasing BOTH locks, so downstream destructors cannot reenter an action fence.
+    input: Mutex<Option<Arc<ActionPayload>>>,
+    operation: CryptoOperation,
+    output_bytes: usize,
     resources: Arc<Resources>,
     budget: ByteBudget,
     engine_bytes: usize,
@@ -78,7 +102,12 @@ pub struct CryptoAction {
     _record: Credit,
     _slot: slots::Slot,
 }
-redacted_debug!(CryptoAction, CryptoInput<'_>, CryptoOperation);
+redacted_debug!(
+    CryptoAction,
+    CryptoInput<'_>,
+    CryptoInputLease,
+    CryptoOperation
+);
 
 impl CryptoAction {
     pub fn serial(&self) -> u64 {
@@ -91,18 +120,18 @@ impl CryptoAction {
         self.input_tag
     }
     pub fn operation(&self) -> CryptoOperation {
-        match self.input {
-            Input::Derive(_) => CryptoOperation::Derive,
-            Input::Encrypt(_) => CryptoOperation::EncryptConfirmation,
-            Input::Decrypt(_) => CryptoOperation::DecryptConfirmation,
-        }
+        self.operation
     }
-    pub fn input(&self) -> CryptoInput<'_> {
-        match &self.input {
-            Input::Derive(input) => CryptoInput::Derive(input),
-            Input::Encrypt(input) => CryptoInput::EncryptConfirmation(input),
-            Input::Decrypt(input) => CryptoInput::DecryptConfirmation(input),
-        }
+    /// Borrow through an actual owner, never an uncharged Vec extraction. An acknowledged and
+    /// settled action may have compacted its input; immutable terminal history remains usable.
+    pub fn input(&self) -> Result<CryptoInputLease, VoiceError> {
+        self.input
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .cloned()
+            .map(CryptoInputLease)
+            .ok_or(VoiceError::Unauthorized)
     }
     /// Exact same native call owner and authenticated scope, not merely equal JSON IDs.
     pub fn belongs_to(&self, scope: Scope, call: &CallLease) -> bool {
@@ -151,9 +180,23 @@ impl CryptoAction {
     /// a delayed admission cannot recreate its credit. No current-call check is required to
     /// settle old actual work while locked. The native registry rejects unknown action IDs.
     pub fn settle_engine(&self) {
-        let mut engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
-        engine.settled = true;
-        engine.permit = None;
+        let retired = {
+            let mut engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
+            engine.settled = true;
+            (
+                engine.permit.take(),
+                self.take_acknowledged_payload(&engine),
+            )
+        };
+        drop(retired);
+    }
+
+    fn take_acknowledged_payload(&self, engine: &Engine) -> Option<Arc<ActionPayload>> {
+        if engine.settled && engine.acknowledged && engine.terminal.is_some() {
+            self.input.lock().unwrap_or_else(|e| e.into_inner()).take()
+        } else {
+            None
+        }
     }
 
     /// Owner retirement may close an unstarted action without inventing actual settlement.
@@ -207,6 +250,7 @@ pub(super) struct PreparedAction {
     budget: ByteBudget,
     engine_bytes: usize,
     record: Credit,
+    payload: Credit,
     slot: slots::Slot,
 }
 
@@ -257,7 +301,8 @@ impl ActionQueue {
         let bytes = payload_bytes
             .checked_add(RECORD_BYTES + CONFIRM_BYTES)
             .ok_or(VoiceError::Bounds)?;
-        let record = budget.charge(&resources, scope.group, bytes, ResourceKind::Retained)?;
+        let mut record = budget.charge(&resources, scope.group, bytes, ResourceKind::Retained)?;
+        let payload = record.split_retained(payload_bytes)?;
         self.serial = serial; // Abandoned preparation burns identity, never permits resurrection.
         Ok(PreparedAction {
             key,
@@ -268,6 +313,7 @@ impl ActionQueue {
             budget,
             engine_bytes,
             record,
+            payload,
             slot,
         })
     }
@@ -279,13 +325,29 @@ impl ActionQueue {
         authority: CryptoAuthority,
     ) -> Arc<CryptoAction> {
         let input_tag = tag(&prepared, &input);
+        let (operation, output_bytes) = match &input {
+            Input::Derive(_) => (CryptoOperation::Derive, 0),
+            Input::Encrypt(flight) => (
+                CryptoOperation::EncryptConfirmation,
+                flight.plaintext.len() + 16,
+            ),
+            Input::Decrypt(packet) => (
+                CryptoOperation::DecryptConfirmation,
+                packet.ciphertext().len() - 16,
+            ),
+        };
         let action = Arc::new(CryptoAction {
             serial: prepared.serial,
             input_tag,
             scope: prepared.scope,
             call: prepared.call,
             authority,
-            input,
+            input: Mutex::new(Some(Arc::new(ActionPayload {
+                input,
+                _credit: prepared.payload,
+            }))),
+            operation,
+            output_bytes,
             resources: prepared.resources,
             budget: prepared.budget,
             engine_bytes: prepared.engine_bytes,
@@ -420,6 +482,74 @@ pub(super) fn is_confirmation(kind: EncryptedKind) -> bool {
 mod tests {
     use super::*;
     use catcoms_crypto::DeviceId;
+
+    #[test]
+    fn acknowledged_settled_input_compacts_without_refunding_held_leases_or_resetting_history() {
+        for ack_first in [false, true] {
+            let pool = Arc::new(Resources::default());
+            let call = CallLease::default();
+            let mut queue = ActionQueue::default();
+            let action = publish(&mut queue, &pool, &call, 1);
+            let input = action.input().unwrap();
+            let payload_bytes = allocation(&pool, &call).payload_bytes;
+            action.admit_engine(action.engine_bytes()).unwrap();
+            let tag = action.output_tag(&[]).unwrap();
+            let receipt = action
+                .with_result(&[], tag, || {
+                    Ok(TerminalResult {
+                        binding: ResultBinding {
+                            pair: CallLease::default(),
+                            attempt: None,
+                            deadline: 16_000,
+                            expires: 16_000,
+                        },
+                        outcome: CryptoOutcome::Derived,
+                    })
+                })
+                .unwrap();
+            let changed = CryptoResultReceipt {
+                output_tag: [9; 32],
+                ..receipt.clone()
+            };
+            assert_eq!(
+                action.acknowledge_result(&changed),
+                Err(VoiceError::RetryMismatch)
+            );
+            if ack_first {
+                action.acknowledge_result(&receipt).unwrap();
+                assert!(action.input().is_ok());
+                assert_eq!(pool.counts().1, 1);
+                action.settle_engine();
+            } else {
+                action.settle_engine();
+                assert!(
+                    action.input().is_ok(),
+                    "settlement cannot acknowledge a lost result reply"
+                );
+                action.acknowledge_result(&receipt).unwrap();
+            }
+            assert!(action.input().is_err());
+            assert!(matches!(input.as_input(), CryptoInput::Derive(_)));
+            let held = pool.counts().0;
+            drop(input);
+            assert_eq!(pool.counts().0, held - payload_bytes);
+            assert_eq!(
+                action.recover_result(&[], tag).unwrap(),
+                Some(receipt.clone())
+            );
+            assert!(queue.pull().is_empty());
+            assert!(action.admit_engine(action.engine_bytes()).is_err());
+            assert!(Arc::ptr_eq(
+                &queue.get(Key::Derive([1; 32])).unwrap(),
+                &action
+            ));
+            call.revoke();
+            action.acknowledge_result(&receipt).unwrap();
+            assert!(action.terminal_status().receipt.unwrap().retired);
+            drop((action, queue));
+            assert_eq!(pool.counts(), (0, 0));
+        }
+    }
     use catcoms_rt::ManualClock;
 
     // Deliberately tests queue/accounting in isolation. Real pair/proof factory coverage is in

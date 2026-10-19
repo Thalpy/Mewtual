@@ -89,6 +89,10 @@ pub(super) async fn register(
             persist: PersistCounters::default(),
         },
     );
+    // Match native installation: neither the actor handle nor a fixture call supplies unlock
+    // authority. Capture the mounted account and exact registry row through the production seam.
+    let generation = state.ui_session_generation.load(Ordering::Acquire);
+    actor.set_keep_session(keep_session::for_actor(&state, 1, &actor, generation).await);
     assert_eq!(
         persist_server_net(&state, 1, net).await,
         PersistOutcome::Durable

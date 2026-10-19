@@ -20,6 +20,16 @@ use crate::StorageError;
 /// and promotes the whole set once its manifest is published, so an upload that never finishes
 /// leaves nothing in the store to account for. See [`put_staged`](BlobStore::put_staged).
 pub trait BlobStore {
+    /// Optional private durable-download engine. Cache-only stores refuse this capability;
+    /// callers must not silently fall back to non-resumable shared-cache acquisition.
+    fn private_downloads(&self) -> Option<&dyn crate::kept::DownloadStore> {
+        None
+    }
+    /// Mutating half of the same mounted, quota-sharing engine. Its opaque Download runs are
+    /// intentionally distinct from Keep runs and from public content-addressed blob reads.
+    fn private_downloads_mut(&mut self) -> Option<&mut dyn crate::kept::DownloadStore> {
+        None
+    }
     /// Bind retention once to the actual MLS namespace/full native device before it can expose
     /// saved bytes or mutate V2 ownership. Unsupported cache-only stores have no retained effects.
     fn configure_keep_scope(&mut self, _scope: crate::kept::KeepScope) -> Result<(), StorageError> {

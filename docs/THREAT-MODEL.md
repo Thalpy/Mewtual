@@ -1,5 +1,45 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Voice terminal history checkpoint (19 October, Rust only)
+
+Past accepted and closed-rejected action results remain metadata after End and actual engine
+settlement. Exact output recovery rehashes bytes; a separate terminal-status snapshot permits
+receipt cleanup after those browser bytes have been destroyed. Status is not output validation
+or effect authority. The cfg(test) native registry preserves unacknowledged history across owner
+replacement with a combined32-row bound. ACK requires the immutable registered action/input/
+output/outcome tuple, ignores changing retirement, and cannot refund an unsettled engine.
+Production IPC must add independent account authorization and prepaid finite reply-copy custody;
+the Rust receipt allowance does not cover queued Tauri/WebView copies. Live V2 remains disabled.
+
+An exact receipt ACK and actual engine settlement are both required before dropping an action's
+input reference. Owned input leases preserve real buffers and their original charge across that
+compaction. The fixed history row, immutable output bound and permanent engine fence survive;
+no action slot, allocator or signing permission is recreated. The retained credit supports one
+fixed two-part partition only, conserving the original byte charge and shared phase custody.
+This is not a refund of serialized replies, browser plaintext or actual unsettled work.
+
+## Private download/export boundary (19 October, implementation in progress)
+
+Sealed Download ownership has its own domain and canonical random-ID directory, sharing the
+retained quota and exclusive mount with Keeps. Purpose and full MLS group/device scope are checked
+before pending-journal reconciliation. A CID match grants no cross-purpose cleanup or run access.
+Public blob reads/source preparation exclude all Downloads, including completed copies. Private
+export requires exact issuing mount AND transfer-generation identity, saved chunk bounds and
+whole-file verification. Original actor freeze/thaw, Root/epoch, account/entry, Pause/removal and
+remount revoke old effects; cleanup of a committed export cannot remove a later verification run.
+Four export owners survive queued plaintext replies independently of their canceled waiters.
+After the cleanup await, returning a saved path still requires original native/actor/Root scope.
+External file contents are flushed before no-clobber publication, but the destination directory
+entry is not durably flushed. Successful export/cleanup therefore does not establish final-name
+durability across host power loss; the native restart tests establish process-restart behavior.
+
+Restart retains only encrypted whole-chunk acquisition progress and conservative spend. External
+path/offset is never persisted and no startup flow may publish plaintext. Explicit resume resolves
+a fresh destination under fresh authority. No-replace hard-link publication protects collisions,
+not same-user tampering with the source staging path. A crash after publication but before cleanup
+can leave an external file plus private progress; the UI discloses possible duplicate re-export.
+This is not an exactly-once external receipt or a physical audio/network acceptance claim.
+
 ## Public MLS source-catalog boundary (19 October)
 
 Connected-peer snapshots and evictable descriptor tables are not complete MLS source rosters.
@@ -14,10 +54,23 @@ An inactive removed receiver may observe its current public tree; catalog validi
 be treated as local membership, native account/entry, file intent, helper route or work allowance.
 Same-epoch replacement groups reject old views, and normal self-removal advances the epoch and
 retires old views. Caller cancellation and local Busy cannot consume an unstarted proposed
-nonempty source batch; sparse empty pages must advance and yield. The app search remains test
-only. Live requester handoff, original Root/native ownership, persisted spend and end-to-end
-bridge acceptance must be enforced and tested before activation. Finite Keep allowance may expire
+nonempty source batch; sparse empty pages must advance and yield. The live native requester now
+captures original Root/native ownership. Signed helper and nested exact-source responses are
+authenticated before staged ciphertext; both AEAD success and rejection repeat original job,
+bridge-effect and KeepWork checks before storage or durable bad-candidate verdicts. Preparation
+reserves route custody before durable debit; subsequent commitment consumes source coverage.
+Local pacing and at most two later Unavailable sweeps preserve finite work without pretending
+that a negative batch proves global absence. Four focused TCP/native bridge scenarios pass;
+combined programme and physical network acceptance remain open.
+Finite Keep allowance may expire
 before a large catalog is exhausted; budget exhaustion must never be reported as global absence.
+
+Streamed external publication now creates an absent destination with a same-filesystem hard link,
+refusing collision without an overwriting fallback. Failure cleanup removes only staging, never
+a destination another local action may have created. Successful linking remains committed even
+if staging cleanup fails. This protects the destination-collision boundary, not against a same-user
+process with authority to modify the source `.part`. The separate private Download journal above
+implements encrypted acquisition resume, with a fresh external export rather than a saved path/offset.
 
 ## Connected file-source activation checkpoint (19 October)
 
@@ -182,7 +235,12 @@ all joins. No helper confidentiality/live-routing claim follows from this unused
 The inert V2 transport seam bounds framing before copying/verification, charges requester/process
 work before signatures, and checks the affine exact-frame admission again at final origin commit.
 A helper's valid signature cannot claim final endpoint admission: status and responder are bound
-to the original envelope's role/target. Driver-owned connection leases revoke before event queues
+to the original envelope's role/target. Typed prepared replies retain verification and exact first
+helper/public admission custody through byte clones and the driver's serialized lower copy.
+Original requester/actor/policy, route/epoch/descriptor/proof/connection and five-second admission
+deadline suppress delayed sends; reply-wait retirement is deliberately excluded. Cached helper
+bytes cannot adopt a replacement actor/room or extend their first permit to claim current custody.
+Room fan-out receipt validity does not require every original edge to remain live. Driver-owned connection leases revoke before event queues
 are drained, so same-peer disconnect/reconnect cannot revive queued helper or maintenance effects.
 Native Root descriptor/proof/policy/epoch gates remain additional checks. Source work shares that
 driver custody while retaining distinct attempt/ACK settlement, and encrypted source grants require
@@ -1822,7 +1880,7 @@ table with the commit that closed it.
   CID makes that CID and its dependent manifests unreadable without attempting unbounded repeated
   decryption. Native cache publication is additionally bound to the process-local server
   incarnation, while webview continuations require their exact still-unlocked view. A plaintext
-  export's verified staging rename and reveal hold the same exact unlock-generation commit guard,
+  export's verified no-replace publication and reveal hold the same exact unlock-generation commit guard,
   so an older export cannot become visible after lock or a later unlock. Before a
   server is founded/joined, the user chooses local on-demand, specific-member, or everyone trust;
   the bounded per-server policy is vault-sealed. On-demand is the default. It leaves passive shared

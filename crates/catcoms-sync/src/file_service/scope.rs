@@ -68,6 +68,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// changes still retire their captured work. New bridge service requires additional explicit
     /// authenticated P2P policy, current descriptors and captured Noise connection incarnations.
     pub(crate) fn reconcile_file_effects(&mut self) {
+        // This is ordinary native construction/committed-membership reconciliation. Cache one
+        // epoch observation here, before a later bounded requester page can use it. Page APIs
+        // never repair a missing/stale view by walking the roster themselves.
+        self.group.observe_member_catalog();
         self.file_effects.observe(View {
             epoch: self.group.epoch(),
             active_member: self.group.is_active()

@@ -6,7 +6,9 @@
 // The V2 action handoff has no production IPC consumer yet. Compile its registry only for
 // contract tests until endpoint result recovery and the browser adapter are integrated.
 #[cfg(test)]
-use catcoms_sync::voice_v2::crypto_actions::CryptoAction;
+use catcoms_sync::voice_v2::crypto_actions::{
+    CryptoAction, CryptoResultReceipt, CryptoResultStatus,
+};
 use catcoms_sync::voice_v2::resources::{Credit, ResourceKind, Resources};
 use catcoms_sync::voice_v2::runtime::Runtime;
 use catcoms_sync::voice_v2::{CallGrant, CallLease, Nonce, Scope};
@@ -16,7 +18,16 @@ use std::sync::Arc;
 const CANDIDATES: usize = 8;
 const CANDIDATE_TTL: u64 = 30_000;
 #[cfg(test)]
-const REGISTERED_ACTIONS: usize = 256;
+const REGISTERED_ACTIONS: usize = 32;
+
+/// Combined pending/terminal history across native owners. The original prepaid action owns
+/// its small Rust receipt; no serialized IPC/browser copy is covered by this row. Production
+/// exposure still needs independently prepaid, finite reply custody before removing cfg(test).
+#[cfg(test)]
+struct RegisteredAction {
+    action: Arc<CryptoAction>,
+    receipt_acknowledged: bool,
+}
 
 /// Parsed closed action identity. The bridge must decode canonical decimal u64 strings and a
 /// fixed hex fingerprint before constructing this; no JS payload can register a native action.
@@ -161,7 +172,7 @@ pub(crate) struct Coordinator {
     // survive End/lock/replacement while an engine is admitted but actual settlement is unknown.
     // Lock order is Coordinator -> action fence. Root never calls Coordinator under its fence.
     #[cfg(test)]
-    actions: HashMap<(String, u64), Arc<CryptoAction>>,
+    actions: HashMap<(String, u64), RegisteredAction>,
     resources: Arc<Resources>,
     runtime: Arc<Runtime>,
 }
@@ -307,9 +318,9 @@ impl Coordinator {
             owner.lease.revoke();
             #[cfg(test)]
             {
-                for ((id, _), action) in &self.actions {
+                for ((id, _), registered) in &self.actions {
                     if id == &owner.id {
-                        action.retire_if_unstarted();
+                        registered.action.retire_if_unstarted();
                     }
                 }
                 self.prune_actions();
@@ -319,8 +330,17 @@ impl Coordinator {
     #[cfg(test)]
     fn prune_actions(&mut self) {
         let current = self.owner.as_ref().map(|owner| owner.id.as_str());
-        self.actions
-            .retain(|(owner, _), action| current == Some(owner.as_str()) || !action.is_settled());
+        self.actions.retain(|(owner, _), registered| {
+            // End is not an acknowledgement of a result lost in transit. Read terminal state
+            // and settlement under one action fence: an admitted first effect cannot publish
+            // a result between two independent observations and then be silently collected.
+            let status = registered.action.terminal_status();
+            if status.receipt.is_some() {
+                !(registered.receipt_acknowledged && status.settled)
+            } else {
+                current == Some(owner.as_str()) || !status.settled
+            }
+        });
     }
 
     /// Trusted Root-to-native registration, not a command callable by the browser. The exact
@@ -346,7 +366,7 @@ impl Coordinator {
         };
         let key = (identity.owner.clone(), identity.action);
         if let Some(previous) = self.actions.get(&key) {
-            return if Arc::ptr_eq(previous, &action) {
+            return if Arc::ptr_eq(&previous.action, &action) {
                 Ok(identity)
             } else {
                 Err("voice action identity differs".into())
@@ -356,20 +376,68 @@ impl Coordinator {
         if self.actions.len() >= REGISTERED_ACTIONS || !action.is_pending() {
             return Err("voice action is unavailable".into());
         }
-        self.actions.insert(key, action);
+        self.actions.insert(
+            key,
+            RegisteredAction {
+                action,
+                receipt_acknowledged: false,
+            },
+        );
         Ok(identity)
     }
 
     #[cfg(test)]
     fn action(&self, identity: &ActionIdentity) -> Result<&Arc<CryptoAction>, String> {
-        let action = self
+        let registered = self
             .actions
             .get(&identity.key()?)
             .ok_or("voice action is unavailable")?;
+        let action = &registered.action;
         if identity.version != action.version() || identity.input_tag != action.input_tag() {
             return Err("voice action identity differs".into());
         }
         Ok(action)
+    }
+
+    /// History-only lookup does not require the original Root, LocalJoin or current call owner.
+    /// IPC must still authorize account access; no caller bytes are validated and no effect or
+    /// dispatch capability is returned. Clone before any future await outside Coordinator.
+    #[cfg(test)]
+    pub fn action_status(&self, identity: &ActionIdentity) -> Result<CryptoResultStatus, String> {
+        Ok(self.action(identity)?.terminal_status())
+    }
+
+    /// Exact immutable receipt ACK may precede engine settlement. Latch it in the existing row
+    /// and remove only after actual settlement. Unknown/duplicate ACK creates no tombstone, and
+    /// dynamic retirement is deliberately excluded from receipt identity. No RPC-copy custody
+    /// is implied: production collection must additionally await every prepaid reply owner.
+    #[cfg(test)]
+    pub fn acknowledge_action(
+        &mut self,
+        identity: &ActionIdentity,
+        receipt: &CryptoResultReceipt,
+    ) -> Result<bool, String> {
+        let key = identity.key()?;
+        if !self.actions.contains_key(&key) {
+            return Ok(false);
+        }
+        let status = self.action(identity)?.terminal_status();
+        if !status
+            .receipt
+            .as_ref()
+            .is_some_and(|past| past.same_transition(receipt))
+        {
+            return Err("voice receipt identity differs".into());
+        }
+        self.action(identity)?
+            .acknowledge_result(receipt)
+            .map_err(|error| error.to_string())?;
+        self.actions
+            .get_mut(&key)
+            .expect("checked registered action")
+            .receipt_acknowledged = true;
+        self.prune_actions();
+        Ok(true)
     }
 
     /// Idempotent exact-action engine admission. Capacity refusal is temporary: it neither

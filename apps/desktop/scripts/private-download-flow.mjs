@@ -1,0 +1,75 @@
+// Real rendered Transfers controls at the fixture IPC boundary. Native persistence/network
+// acceptance lives in six_client_recovery/files.rs; this scenario proves their UI wiring.
+export const privateDownloadFlowExpression = String.raw`(async () => {
+  const wait = async (predicate, label) => {
+    const until = performance.now() + 10000;
+    while (!predicate()) {
+      if (performance.now() >= until) throw new Error('download UI timed out: ' + label);
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  };
+  const base = window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
+  const first = { id: 'd'.repeat(64), cid: 'a'.repeat(64), intent: '3', grant: '1', status: 'incomplete', verifiedChunks: 1, totalChunks: 3 };
+  const exhausted = { ...first, id: 'e'.repeat(64), cid: 'b'.repeat(64), status: 'exhausted', grant: '9007199254740993' };
+  const ready = { ...first, id: 'f'.repeat(64), cid: 'c'.repeat(64), status: 'ready', verifiedChunks: 3 };
+  const names = new Map([[first.id,'Interrupted drawing.bin'],[exhausted.id,'Large download.bin'],[ready.id,'Ready example.bin']]);
+  let inventory = [first, exhausted, ready], saving = null;
+  const calls = [];
+  const notify = () => base('plugin:event|emit', { event: 'files-updated', payload: { server: 1 } });
+  window.__TAURI_INTERNALS__.invoke = async (command, args = {}) => {
+    if (command === 'get_private_downloads') return structuredClone(inventory);
+    if (command === 'get_files') {
+      const list = await base(command,args), template = list.files[0];
+      return { ...list, files: inventory.map(row => ({ ...template, cid: row.cid,
+        name: names.get(row.id), path: '', mime: 'application/octet-stream' })) };
+    }
+    if (command === 'retry_private_download') {
+      if (args.download !== exhausted.id || args.expectedGrant !== exhausted.grant || !/^[0-9a-f]{32}$/.test(args.request)) throw new Error('invalid exact retry');
+      calls.push([command,args]); exhausted.grant = String(BigInt(exhausted.grant) + 1n); exhausted.status = 'incomplete';
+      return exhausted.grant;
+    }
+    if (command === 'save_group_file') {
+      const record = inventory.find(row => row.id === args.resume && row.cid === args.cid);
+      if (!record || args.expectedIntent !== record.intent || args.server !== 1 || !args.operation?.startsWith('save-') || saving) throw new Error('duplicate/stale resume');
+      calls.push([command,args]); record.intent = String(BigInt(record.intent)+1n); record.status = 'receiving';
+      void notify();
+      return new Promise((resolve,reject) => { saving = { record, resolve, reject }; });
+    }
+    if (command === 'set_private_download_paused') {
+      const record = inventory.find(row => row.id === args.download);
+      if (!record || args.expectedIntent !== record.intent || args.paused !== true) throw new Error('stale pause');
+      calls.push([command,args]); record.intent = String(BigInt(record.intent)+1n); record.status = 'paused';
+      const old = saving; saving = null; old.reject(new Error('Download paused.')); void notify(); return;
+    }
+    if (command === 'cancel_private_download') throw new Error('flow must preserve saved progress');
+    return base(command,args);
+  };
+  const tab = [...document.querySelectorAll('.surface-bar button')].find(b => [...b.childNodes]
+    .some(node => node.nodeType === Node.TEXT_NODE && node.textContent.trim() === 'transfers'));
+  if (!tab) throw new Error('Transfers tab missing'); tab.scrollIntoView({ block: 'nearest', inline: 'nearest' }); tab.click();
+  const rows = () => [...document.querySelectorAll('.downloads-tab .dl-item')];
+  const row = name => rows().find(r => r.textContent.includes(name));
+  const action = (name,label) => [...(row(name)?.querySelectorAll('button') ?? [])].find(b => b.textContent.trim() === label);
+  const click = async (name,label) => { await wait(() => action(name,label) && !action(name,label).disabled,label); action(name,label).click(); };
+  await wait(() => row('Interrupted drawing.bin'),'saved progress after opening Transfers');
+  const out = { disclosure: document.querySelector('.downloads-tab').textContent.includes('check Downloads before saving again') };
+  await click('Interrupted drawing.bin','Resume download');
+  await wait(() => saving && first.status === 'receiving' && action('Interrupted drawing.bin','Pause'),'active metadata before save reply');
+  out.duplicateDisabled = action('Interrupted drawing.bin','Resume download').disabled;
+  out.pauseAvailable = !action('Interrupted drawing.bin','Pause').disabled;
+  await click('Interrupted drawing.bin','Pause');
+  await wait(() => !saving && row('Interrupted drawing.bin').textContent.includes('Paused'),'paused encrypted progress');
+  out.pausePreservesGrant = first.grant === '1' && first.verifiedChunks === 1;
+  await click('Interrupted drawing.bin','Resume download');
+  await wait(() => saving && first.status === 'receiving','new explicit resume');
+  const done = saving; saving = null; inventory = inventory.filter(row => row !== first);
+  done.resolve({ path: 'C:/Downloads/Interrupted drawing.bin', displayed: true }); await notify();
+  await wait(() => rows().some(row => row.textContent.includes('Saved')),'resumed row settles');
+  out.resumedSettles = rows().some(row => row.textContent.includes('Saved'));
+  await click('Large download.bin','Retry download');
+  await wait(() => saving?.record === exhausted,'exhausted explicit retry and resume');
+  out.retryExact = exhausted.grant === '9007199254740994' && calls.filter(([name]) => name === 'retry_private_download').length === 1;
+  // Leave the second acquisition pending so the screenshot includes usable Pause and an
+  // independent completed copy. These are fixture-only promises, never actual disk writes.
+  return out;
+})()`;

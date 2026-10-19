@@ -68,6 +68,7 @@ mod leaving;
 mod media_decode;
 mod media_worker;
 mod member_reconnect;
+mod private_downloads;
 mod studio_exports;
 mod voice_authority;
 // This broker model has no registered command consumers yet. Retain its contract tests without
@@ -13663,46 +13664,72 @@ fn write_download(downloads: &Path, requested_name: &str, bytes: &[u8]) -> Resul
     Ok(path)
 }
 
-/// Extension for a download still being written. A streamed save fills one of these and renames it
-/// onto the real name only once the whole file has been verified, so the peer-chosen name never
+/// Extension for a download still being written. A streamed save fills one of these and publishes
+/// the real name only once the whole file has been verified, so the peer-chosen name never
 /// exists holding bytes Mewtual has not authenticated. Crash, kill or power loss during a transfer
 /// therefore leaves a `.part`, not something that looks like the file.
 const DOWNLOAD_STAGING_SUFFIX: &str = "part";
 
-/// Reserve a staging file and the final name it will be renamed onto.
+/// Reserve a staging file corresponding to an unoccupied final name.
 ///
-/// Both are reserved up front with `create_new`, so a second save of the same file cannot pick the
-/// same final name while this one is still writing, and the rename at the end cannot collide.
+/// The `.part` is the cooperative reservation between Mewtual saves. Final-path existence is
+/// advisory here: another local action may occupy it while chunks are fetched, so publication
+/// must atomically refuse replacement. We never own a destination merely because we chose it.
 fn create_staged_download(
     downloads: &Path,
     requested_name: &str,
 ) -> Result<(std::fs::File, PathBuf, PathBuf), String> {
-    let (final_file, final_path) = create_download(downloads, requested_name)?;
-    // The reservation is a placeholder, not the download: hold the name, write elsewhere.
-    drop(final_file);
-    let staging_name = format!(
-        "{}.{DOWNLOAD_STAGING_SUFFIX}",
-        final_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("mewtual-download")
-    );
-    match create_download(downloads, &staging_name) {
-        Ok((file, staging_path)) => Ok((file, staging_path, final_path)),
-        Err(e) => {
-            let _ = std::fs::remove_file(&final_path);
-            Err(e)
+    std::fs::create_dir_all(downloads).map_err(|e| e.to_string())?;
+    let safe_name = safe_download_name(requested_name);
+    for number in 0..1_000 {
+        let name = numbered_download_name(&safe_name, number);
+        let final_path = downloads.join(&name);
+        match final_path.symlink_metadata() {
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        let staging_path = downloads.join(format!("{name}.{DOWNLOAD_STAGING_SUFFIX}"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging_path)
+        {
+            Ok(file) => return Ok((file, staging_path, final_path)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.to_string()),
         }
     }
+    Err("Too many downloads with this name already exist.".into())
 }
 
-/// Move a verified staging file onto its reserved final name.
+/// Atomically add the verified file at an absent destination, never replacing a local file.
 ///
-/// The reservation is an empty file this same call created, so replacing it is not clobbering
-/// anyone: `rename` over it is the atomic publish, and no window exists in which the final name
-/// holds a partial download.
+/// Both paths are on the same filesystem. Hard-link creation refuses an occupied destination;
+/// there is deliberately no overwriting-rename fallback on filesystems without hard links.
+/// Once the link succeeds publication is committed. Failed staging unlink leaves an orphan
+/// `.part`, not a failed/rolled-back download. This is not a sandbox against another process
+/// with authority to modify the source staging path itself.
 fn publish_staged_download(staging: &Path, final_path: &Path) -> Result<(), String> {
-    std::fs::rename(staging, final_path).map_err(|e| e.to_string())
+    publish_staged_download_with(
+        staging,
+        final_path,
+        |from, to| std::fs::hard_link(from, to),
+        |path| std::fs::remove_file(path),
+    )
+}
+
+// Private filesystem seams pin the commit boundary without relying on platform-specific
+// permissions or a race with antivirus. Production always uses the standard no-replace link.
+fn publish_staged_download_with(
+    staging: &Path,
+    final_path: &Path,
+    link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    cleanup: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    link(staging, final_path).map_err(|e| e.to_string())?;
+    let _ = cleanup(staging);
+    Ok(())
 }
 
 fn launch_path(path: &Path) -> Result<(), String> {
@@ -14428,10 +14455,9 @@ trait SaveSource {
 
 /// Stream a listed file into Downloads and return the path it was published at.
 ///
-/// Writes into a `.part` and renames onto the reserved name only once the whole file has been
-/// verified: reserving the final name up front stops a second save landing on it, and writing
-/// elsewhere until the end means neither an error here nor a crash can leave the peer's chosen
-/// filename holding bytes this device has not authenticated. Every failure path removes both.
+/// Writes into a `.part` and publishes at an unoccupied name only after whole-file verification.
+/// The final name stays absent until then. Failures remove only our staging path; a destination
+/// created by another local action during a fetch is never overwritten or deleted.
 async fn stream_download_to_disk(
     downloads: &Path,
     name: &str,
@@ -14445,7 +14471,6 @@ async fn stream_download_to_disk(
     let (mut file, staging, path) = create_staged_download(downloads, name)?;
     let failed = |error: String| -> String {
         let _ = std::fs::remove_file(&staging);
-        let _ = std::fs::remove_file(&path);
         error
     };
     source.progress(0, 0, 0, None);
@@ -14541,24 +14566,26 @@ struct ActorSaveSource<'a> {
     app: &'a AppHandle,
     server: u64,
     cid: String,
-    raw: Vec<u8>,
+    ready: catcoms_app::DownloadReady,
     total: usize,
     size: u64,
     generation: u64,
     origin: RequestCancellation,
+    operation: Option<String>,
 }
 
 impl SaveSource for ActorSaveSource<'_> {
     async fn chunk(&mut self, index: usize) -> Result<(Vec<u8>, Option<String>), String> {
         self.actor
-            .fetch_file_chunk_cancellable(self.raw.clone(), index, Some(self.origin.clone()))
+            .read_download_chunk(self.ready.clone(), index, self.origin.clone())
             .await
+            .map(|chunk| (chunk.into_bytes(), None))
     }
 
     async fn still_unlocked(&self) -> Result<(), String> {
         let generation_check = require_ui_session_generation(self.state, self.generation).await?;
         drop(generation_check);
-        if self.origin.is_cancelled() {
+        if self.origin.is_cancelled() || !self.ready.is_current() {
             return Err("The file read is no longer active.".into());
         }
         Ok(())
@@ -14566,7 +14593,7 @@ impl SaveSource for ActorSaveSource<'_> {
 
     async fn publish_verified(&self, staging: &Path, final_path: &Path) -> Result<(), String> {
         let _commit = require_ui_session_generation(self.state, self.generation).await?;
-        if self.origin.is_cancelled() {
+        if self.origin.is_cancelled() || !self.ready.is_current() {
             return Err("The file read is no longer active.".into());
         }
         publish_staged_download(staging, final_path)
@@ -14579,13 +14606,16 @@ impl SaveSource for ActorSaveSource<'_> {
         network_bytes_done: u64,
         provider: Option<String>,
     ) {
+        if !self.ready.is_current() {
+            return;
+        }
         keep_session::publish_progress(&self.origin, || {
             let _ = self.app.emit(
                 "download-progress",
                 DownloadProgressEvt {
                     server: self.server,
                     cid: self.cid.clone(),
-                    cancellation: None,
+                    cancellation: self.operation.clone(),
                     done,
                     total: self.total,
                     bytes_done,
@@ -14627,27 +14657,63 @@ async fn save_group_file(
     server: u64,
     cid: String,
     name: String,
+    resume: Option<String>,
+    expected_intent: Option<String>,
+    operation: Option<String>,
 ) -> Result<SavedFileResult, String> {
     let generation = keep_session::invocation_generation(&state).await?;
+    let export_slot = private_downloads::export_slot()?;
+    if operation.as_ref().is_some_and(|id| {
+        id.is_empty()
+            || id.len() > 128
+            || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    }) {
+        return Err("Invalid download progress ID.".into());
+    }
     let raw = hex::decode(cid.trim()).map_err(|e| format!("bad cid: {e}"))?;
     let target: [u8; 32] = raw
         .clone()
         .try_into()
         .map_err(|_| "bad cid length".to_string())?;
-    let actor = actor_of(&state, server).await?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
     let origin = keep_session::for_actor(&state, server, &actor, generation)
         .await
         .ok_or_else(|| "The file read is no longer active.".to_string())?;
-    let (total, size) = actor.file_download_plan(raw.clone()).await.ok_or_else(|| {
-        "this file can't be downloaded; it isn't listed, or its reference is invalid".to_string()
-    })?;
-    let declared_mime = actor
-        .file_head(raw.clone())
-        .await
-        .ok_or_else(|| {
-            "this file can't be inspected; it isn't listed, or its reference is invalid".to_string()
-        })?
-        .mime;
+    let resume = resume.as_deref().map(private_downloads::id).transpose()?;
+    if let Some(id) = resume {
+        // Explicit Resume changes intent by CAS; it neither supplies a new plan nor replenishes
+        // an exhausted allowance. A newer pause/replacement must defeat this delayed click.
+        let intent = private_downloads::intent(
+            expected_intent
+                .as_deref()
+                .ok_or("Download revision is required.")?,
+        )?;
+        commit_kept_command(
+            &state,
+            server,
+            instance,
+            generation,
+            actor.set_download_paused(id, intent, false),
+        )
+        .await?;
+    } else if expected_intent.is_some() {
+        return Err("Download ID is required.".into());
+    }
+    if origin.is_cancelled() {
+        return Err("The download is no longer active.".into());
+    }
+    // No external .part exists during acquisition. Only encrypted, owner-scoped chunks survive
+    // interruption/restart; resuming always captures this fresh invocation and destination.
+    let ready = actor
+        .acquire_download(raw, resume, origin.clone())
+        .await?
+        .with_export_custody(export_slot);
+    if origin.is_cancelled() || !ready.is_current() {
+        return Err("The download is no longer active.".into());
+    }
+    let total = ready.chunks();
+    let size = ready.total_size();
+    let declared_mime = ready.mime().to_owned();
     if size > MAX_FILE_BYTES as u64 {
         return Err(format!(
             "file is larger than the {MAX_FILE_BYTES}-byte limit"
@@ -14660,15 +14726,16 @@ async fn save_group_file(
         app: &app,
         server,
         cid,
-        raw,
+        ready,
         total,
         size,
         generation,
         origin,
+        operation,
     };
     let path =
         stream_download_to_disk(&downloads, &name, total, size, &target, &mut source).await?;
-    finish_saved_read(
+    let saved = finish_saved_read_if(
         &state,
         generation,
         &source.origin,
@@ -14676,13 +14743,52 @@ async fn save_group_file(
         &declared_mime,
         exported_media_validation,
         reveal_path,
+        || source.ready.is_current(),
+    )
+    .await?;
+    // Publication is already committed. Cleanup failure must never turn that success into a
+    // retryable save error or remove the external file; retained ciphertext remains charged.
+    finish_download_response(
+        &state,
+        generation,
+        &source.origin,
+        saved,
+        || source.ready.invocation_current(),
+        source.actor.finish_download_export(source.ready.clone()),
     )
     .await
+}
+
+/// Cleanup can wait behind actor work AFTER external publication. Its completion is not a new
+/// native response capability: the ORIGINAL invocation must still authorize returning a path.
+/// Self-cleanup deliberately retires storage custody, so only the original actor/Root observer
+/// participates in this final fence. A refusal never rolls back the committed external file.
+async fn finish_download_response<A, F>(
+    state: &AppState,
+    generation: u64,
+    origin: &RequestCancellation,
+    mut saved: SavedFileResult,
+    allowed: A,
+    cleanup: F,
+) -> Result<SavedFileResult, String>
+where
+    A: Fn() -> bool,
+    F: Future<Output = Result<(), String>>,
+{
+    if cleanup.await.is_err() {
+        saved.warning = Some("The file was saved. Its encrypted download copy could not be removed; remove it from Transfers.".into());
+    }
+    let _commit = keep_session::read_commit(state, generation, origin).await?;
+    if !allowed() {
+        return Err("The download is no longer active.".into());
+    }
+    Ok(saved)
 }
 
 /// Post-publication inspection/reveal is still part of the ORIGINAL native invocation. Lock
 /// can publish its atomic generation during CPU/OS work even while the commit mutex is held.
 /// Recheck at each synchronous boundary; a file already renamed stays in Downloads on refusal.
+#[cfg(test)]
 async fn finish_saved_read<I, R>(
     state: &AppState,
     generation: u64,
@@ -14696,15 +14802,46 @@ where
     I: FnOnce(&Path, &str) -> Option<String>,
     R: FnOnce(&Path) -> Result<(), String>,
 {
+    finish_saved_read_if(
+        state,
+        generation,
+        origin,
+        path,
+        declared_mime,
+        inspect,
+        reveal,
+        || true,
+    )
+    .await
+}
+
+async fn finish_saved_read_if<I, R, A>(
+    state: &AppState,
+    generation: u64,
+    origin: &RequestCancellation,
+    path: &Path,
+    declared_mime: &str,
+    inspect: I,
+    reveal: R,
+    allowed: A,
+) -> Result<SavedFileResult, String>
+where
+    I: FnOnce(&Path, &str) -> Option<String>,
+    R: FnOnce(&Path) -> Result<(), String>,
+    A: Fn() -> bool,
+{
     let _commit = keep_session::read_commit(state, generation, origin).await?;
+    if !allowed() {
+        return Err("The download is no longer active.".into());
+    }
     let content_validation = inspect(path, declared_mime);
-    if origin.is_cancelled() {
+    if origin.is_cancelled() || !allowed() {
         return Err("The file read is no longer active.".into());
     }
     let warning = reveal(path)
         .err()
         .map(|error| format!("The file was saved, but Downloads could not be opened: {error}"));
-    if origin.is_cancelled() {
+    if origin.is_cancelled() || !allowed() {
         return Err("The file read is no longer active.".into());
     }
     Ok(SavedFileResult {
@@ -17778,7 +17915,11 @@ pub fn run() {
             save_and_open_space_guide,
             save_space_layout,
             save_jam_sheet,
-            save_group_file
+            save_group_file,
+            private_downloads::get_private_downloads,
+            private_downloads::set_private_download_paused,
+            private_downloads::retry_private_download,
+            private_downloads::cancel_private_download
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Mewtual desktop app");
@@ -19254,6 +19395,7 @@ mod tests {
         /// Lock once this many chunks have actually been written. Reaches the phase after the
         /// loop, where there is no next iteration left to notice a lock.
         lock_after_writes: Option<usize>,
+        occupy_during_fetch: Option<PathBuf>,
         fetches: std::cell::Cell<usize>,
         locked: std::cell::Cell<bool>,
         /// `(chunks written, bytes written)` after each successful write. The observable record of
@@ -19268,6 +19410,7 @@ mod tests {
                 chunks,
                 lock_after_fetches: None,
                 lock_after_writes: None,
+                occupy_during_fetch: None,
                 fetches: std::cell::Cell::new(0),
                 locked: std::cell::Cell::new(false),
                 progress: std::cell::RefCell::new(Vec::new()),
@@ -19318,6 +19461,11 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| format!("no chunk {index}"))?;
             self.fetches.set(self.fetches.get() + 1);
+            if self.fetches.get() == 1 {
+                if let Some(path) = &self.occupy_during_fetch {
+                    std::fs::write(path, b"unrelated local file").unwrap();
+                }
+            }
             // The lock lands while this fetch is outstanding, which is the whole point: it becomes
             // true only after the await the caller was suspended in.
             if Some(self.fetches.get()) == self.lock_after_fetches {
@@ -19464,7 +19612,10 @@ mod tests {
                 .is_err()
         );
         assert!(staging.exists());
-        assert_eq!(std::fs::metadata(&final_path).unwrap().len(), 0);
+        assert!(
+            !final_path.exists(),
+            "a retired save cannot create its final destination"
+        );
 
         assert!(authenticate_mounted_store(&state, b"correct horse")
             .await
@@ -19687,10 +19838,9 @@ mod tests {
         assert_eq!(final_path.file_name().unwrap(), "notes.txt");
         assert_eq!(staging.file_name().unwrap(), "notes.txt.part");
         file.write_all(b"half a file").unwrap();
-        assert_eq!(
-            std::fs::metadata(&final_path).unwrap().len(),
-            0,
-            "the reserved name stays empty while bytes land in the staging file"
+        assert!(
+            !final_path.exists(),
+            "only staging exists before verified publication"
         );
 
         // A second save cannot take the reserved name, nor the staging file, while this one runs.
@@ -19706,19 +19856,80 @@ mod tests {
 
     #[test]
     fn an_abandoned_download_leaves_neither_a_partial_nor_a_reservation() {
-        // What the failure path has to undo: both the staging file and the name it was holding.
+        // Only staging belongs to this operation; the final name has not been created.
         let dir = tempfile::tempdir().unwrap();
         let (mut file, staging, final_path) =
             create_staged_download(dir.path(), "cat.png").unwrap();
         file.write_all(b"partial").unwrap();
         drop(file);
         let _ = std::fs::remove_file(&staging);
-        let _ = std::fs::remove_file(&final_path);
         assert!(!staging.exists());
         assert!(!final_path.exists());
         // And the name is free again for a later, honest save.
         let (_f, _s, again) = create_staged_download(dir.path(), "cat.png").unwrap();
         assert_eq!(again, final_path);
+    }
+
+    #[tokio::test]
+    async fn download_destination_created_during_fetch_is_never_replaced_or_deleted() {
+        for cancelled in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join("notes.txt");
+            let mut source = ScriptedSave::new(vec![b"verified download".to_vec()]);
+            source.occupy_during_fetch = Some(destination.clone());
+            if cancelled {
+                source.lock_after_fetches = Some(1);
+            }
+            let (total, size, target) = (source.total(), source.size(), source.address());
+            assert!(stream_download_to_disk(
+                dir.path(),
+                "notes.txt",
+                total,
+                size,
+                &target,
+                &mut source,
+            )
+            .await
+            .is_err());
+            assert_eq!(std::fs::read(destination).unwrap(), b"unrelated local file");
+            assert_eq!(
+                std::fs::read_dir(dir.path()).unwrap().count(),
+                1,
+                "only our staging file is cleaned on collision or cancellation"
+            );
+        }
+    }
+
+    #[test]
+    fn download_link_commit_survives_failed_staging_cleanup_and_unsupported_link_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut file, staging, destination) =
+            create_staged_download(dir.path(), "notes.txt").unwrap();
+        file.write_all(b"verified bytes").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let error = publish_staged_download_with(
+            &staging,
+            &destination,
+            |_, _| Err(std::io::ErrorKind::Unsupported.into()),
+            |_| panic!("a refused publication must never run committed cleanup"),
+        )
+        .unwrap_err();
+        assert!(!error.is_empty());
+        assert!(!destination.exists());
+        assert!(staging.exists());
+        publish_staged_download_with(
+            &staging,
+            &destination,
+            |from, to| std::fs::hard_link(from, to),
+            |_| Err(std::io::ErrorKind::PermissionDenied.into()),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(destination).unwrap(), b"verified bytes");
+        assert!(
+            staging.exists(),
+            "failed cleanup cannot undo committed output"
+        );
     }
 
     #[test]

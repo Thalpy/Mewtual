@@ -6,8 +6,8 @@
 
 use super::*;
 use crate::voice_v2::crypto_actions::{
-    self, Allocation, CryptoAction, CryptoInput, CryptoOutcome, CryptoResultReceipt, Key,
-    ResultBinding, TerminalResult,
+    self, Allocation, CryptoAction, CryptoInput, CryptoOperation, CryptoOutcome,
+    CryptoResultReceipt, Key, ResultBinding, TerminalResult,
 };
 use crate::voice_v2::packets::{
     InboundPacket, PairBinding, ReserveRequest, ReservedPacket, ValidatedInbound,
@@ -385,8 +385,11 @@ impl LocalJoin {
         if result.retired {
             return Err(VoiceError::Unauthorized);
         }
-        let CryptoInput::EncryptConfirmation(flight) = action.input() else {
-            unreachable!()
+        // Receipt ACK deliberately ends this compatibility sending seam after compaction.
+        // History still describes the past transition, but cannot reconstruct fresh send data.
+        let input = action.input()?;
+        let CryptoInput::EncryptConfirmation(flight) = input.as_input() else {
+            return Err(VoiceError::Unauthorized);
         };
         self.pair_current(flight.handshake, authority, clock)?;
         let CryptoOutcome::Sealed { message, hash } = result.outcome else {
@@ -413,10 +416,25 @@ impl LocalJoin {
         authority: &Authority<'_>,
         clock: &dyn Clock,
     ) -> Result<CryptoResultReceipt, VoiceError> {
-        if !action.belongs_to(self.scope, &self.lease) {
+        if !action.belongs_to(self.scope, &self.lease)
+            || action.operation() != CryptoOperation::EncryptConfirmation
+        {
             return Err(VoiceError::Unauthorized);
         }
-        let CryptoInput::EncryptConfirmation(flight) = action.input() else {
+        if let Some(receipt) = action.recover_result(ciphertext, claimed_tag)? {
+            return Ok(receipt);
+        }
+        let input = match action.input() {
+            Ok(input) => input,
+            // A concurrent terminal publication/ACK can compact after the history miss.
+            // Recheck exact history rather than reconstructing input or repeating effects.
+            Err(_) => {
+                return action
+                    .recover_result(ciphertext, claimed_tag)?
+                    .ok_or(VoiceError::Unauthorized)
+            }
+        };
+        let CryptoInput::EncryptConfirmation(flight) = input.as_input() else {
             return Err(VoiceError::Unauthorized);
         };
         action.with_result(ciphertext, claimed_tag, || {
@@ -480,10 +498,23 @@ impl LocalJoin {
         clock: &dyn Clock,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<CryptoResultReceipt, VoiceError> {
-        if !action.belongs_to(self.scope, &self.lease) {
+        if !action.belongs_to(self.scope, &self.lease)
+            || action.operation() != CryptoOperation::DecryptConfirmation
+        {
             return Err(VoiceError::Unauthorized);
         }
-        let CryptoInput::DecryptConfirmation(packet) = action.input() else {
+        if let Some(receipt) = action.recover_result(plaintext, claimed_tag)? {
+            return Ok(receipt);
+        }
+        let input = match action.input() {
+            Ok(input) => input,
+            Err(_) => {
+                return action
+                    .recover_result(plaintext, claimed_tag)?
+                    .ok_or(VoiceError::Unauthorized)
+            }
+        };
+        let CryptoInput::DecryptConfirmation(packet) = input.as_input() else {
             return Err(VoiceError::Unauthorized);
         };
         action.with_result(plaintext, claimed_tag, || {
@@ -522,10 +553,23 @@ impl LocalJoin {
         authority: &Authority<'_>,
         clock: &dyn Clock,
     ) -> Result<CryptoResultReceipt, VoiceError> {
-        if !action.belongs_to(self.scope, &self.lease) {
+        if !action.belongs_to(self.scope, &self.lease)
+            || action.operation() != CryptoOperation::Derive
+        {
             return Err(VoiceError::Unauthorized);
         }
-        let CryptoInput::Derive(setup) = action.input() else {
+        if let Some(receipt) = action.recover_result(&[], claimed_tag)? {
+            return Ok(receipt);
+        }
+        let input = match action.input() {
+            Ok(input) => input,
+            Err(_) => {
+                return action
+                    .recover_result(&[], claimed_tag)?
+                    .ok_or(VoiceError::Unauthorized)
+            }
+        };
+        let CryptoInput::Derive(setup) = input.as_input() else {
             return Err(VoiceError::Unauthorized);
         };
         action.with_result(&[], claimed_tag, || {

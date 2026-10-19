@@ -87,7 +87,7 @@ export const TAURI_COMMAND_GROUPS = {
       // Exact actor's authenticated mode; fenced against lock and replacement, no authority write.
       "group_communication_mode",
       "get_files", "get_storage_health", "get_online_members", "get_delivery", "dm_stats",
-      "get_dm_requests", "file_available", "get_kept_files", "get_file_usage", "get_wiki_pinned_cids", "get_statuses",
+      "get_dm_requests", "file_available", "get_kept_files", "get_private_downloads", "get_file_usage", "get_wiki_pinned_cids", "get_statuses",
       "get_events", "get_wiki_pages", "get_wiki_map", "get_wiki_page", "get_wiki_meta",
       "get_wiki_history", "get_wiki_pending", "get_wiki_review_days", "get_roles", "get_moderation",
       // The server's upload cap, off the file index document every member already reads. The
@@ -267,6 +267,8 @@ export const TAURI_COMMAND_GROUPS = {
       // Per-file local consent, reserved disk quota, full verification and native lock cancellation.
       // Forget only releases this device's separate copy; shared metadata grants no such authority.
       "keep_file", "request_kept_file", "set_kept_paused", "forget_kept_file", "retry_kept_file",
+      // Private encrypted progress, independent of Keep; exact revision/grant CAS, no paths/keys.
+      "set_private_download_paused", "retry_private_download", "cancel_private_download",
       "delete_file", "set_file_expiry", "delete_event", "set_wiki_format", "delete_wiki_page",
       "rename_wiki_page", "set_wiki_review_days", "approve_wiki_edit", "reject_wiki_edit",
       "restore_wiki_page", "warn_message", "create_kick_case", "cast_kick_vote",

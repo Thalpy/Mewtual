@@ -322,6 +322,13 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
           },
         ],
       });
+    case "get_private_downloads": return [];
+    case "get_storage_health":
+      return { listed_files: 2, unique_files: 2, referenced_chunks: 2, verified_chunks: 2,
+        missing_chunks: 0, unreadable_chunks: 0, invalid_manifests: 0, verified_bytes: 2048,
+        has_peers: true, checked_at_ms: VISUAL_FIXTURE_NOW, logical_bytes: 2048,
+        local_estimated_bytes: 2048, pinned_files: 0, pinned_logical_bytes: 0,
+        pinned_local_estimated_bytes: 0, categories: [], largest_files: [], local_files: [] };
     case "get_kept_files":
       return { supported: true, allocated_bytes: 0, limit_bytes: 1073741824, files: [], transfers: [], error: null };
     case "file_available":

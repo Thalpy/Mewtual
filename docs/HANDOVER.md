@@ -1,6 +1,64 @@
 # Mewtual; Handover
 
-## Work after pushed checkpoint b867c622 (2026-10-19)
+## V2 result/reply checkpoint (2026-10-19, disabled transport)
+
+Exact Rust terminal-result recovery and metadata-only post-End status are implemented. The
+cfg(test) native32-row retention/ACK model passes three new history cases. Typed transport ACKs
+now retain original verification and first helper/public packet custody through byte clones and
+actual driver serialization. Final send checks share one original time sample, then observe all
+original requester/route/epoch/packet gates without further callbacks. Original responder lifetime
+also fences new/cached admission; an old queued request cannot adopt a replacement connection.
+The follow-up separates fixed terminal history from variable input custody. Exact ACK plus
+actual engine settlement can compact input, while existing owned input leases retain their byte
+charge. Protective rows/fences remain and metadata recovery survives; compatibility send refuses
+instead of reconstructing a compacted payload. All 263 relevant voice tests, all 19 native authority
+tests and strict affected sync Clippy pass. Read-only re-review has no remaining findings.
+Native production registry/IPC/copy prepayment, atomic encrypted intake with protected native
+and browser continuations, live scheduling/dispatch/RTC, and media relay remain unfinished.
+Only one physical desktop is available; these tests establish no separate-network or audible
+device acceptance. The communication ledger records commands, red runs and exact limitations.
+
+The endpoint TURN-gateway candidate has a passing one-desktop feasibility experiment in Edge
+and the existing native WebView2 host: relay/relay selected, generated audio decoded, jam/drawing
+messages received, and an acknowledged TCP bridge cut/resume stops/restores delivery. The retained
+experiment has bounded setup/cleanup, socket/handshake limits and injected failure checks.
+`communication-recovery/MEDIA-RELAY-NEXT.md` identifies the frozen artifacts, corrected harness
+failures and production gates. This is not an implemented member relay or physical acceptance.
+
+## Native requester follow-up in progress (2026-10-19)
+
+The continuing source search is now in the sync owner and connected to native explicit chunk,
+range and Keep reads after direct-provider exhaustion. Root preparation reserves route custody
+before durable Keep spend; exact-choice commitment happens afterward. Helpers and exact variants
+retain independent coverage, including bounded later sweeps after signed Unavailable. Original
+native/Root/caller/connection/deadline authority survives actual transport custody and both AEAD
+result paths. The actual 512-offline-member prefix regression and both native TCP Keep scenarios
+pass, including interrupted/reopened C recovering through replacement D with A–C blocked.
+
+Review also found and corrected an existing external-publication collision: final files are now
+created without replacement, and cancellation/failure cannot delete a destination another local
+action created during the transfer. Downloads now acquire into a separate sealed private owner
+before resolving a fresh external destination. Download and Keep share the conservative 32-record/
+1 GiB quota and engine, while keeping immutable purpose, paths, runs and cleanup authority separate.
+Completed Downloads remain unavailable to public blob/source reads. Restart keeps encrypted whole
+chunks and spent allowance, requires explicit Resume and complete revalidation, and never resumes
+plaintext publication automatically. Transfers exposes saved progress, Pause, Resume, explicit
+Retry after exhaustion, and removal. No external path/offset is persisted. Four native export
+slots follow queued plaintext replies through actual retirement. Original account/entry/actor/
+Root/storage generations fence reads, writes, publication and the post-cleanup response.
+Focused evidence: 53 storage cases, 45 worker cases, 15 native download cases and 37 frontend
+cases pass. All four actual TCP file scenarios pass, including private/Keep B bridges, solo
+reopen/export and interrupted native C reopen with explicit private Resume through D. A subsequent
+fixture-only sealed-D-route readiness assertion also passes all four cases. Strict storage/sync/app Clippy
+and Svelte checks pass. Rendered Transfers Pause/Resume/Retry/completion passes at900×640; screenshot
+is `target/pr48-private-downloads.png`. The isolated Edge process needs sandbox elevation because
+its GPU subprocess is otherwise denied before app load. These remain focused software checks.
+This remains an uncommitted implementation checkpoint, not complete programme acceptance.
+Live V2, media relay, combined rollout and physical media acceptance remain open.
+Only one physical desktop is available. The complete-suite results below are historical for
+pushed ebdd8447 and do not establish acceptance of this uncommitted follow-up.
+
+## Historical checkpoint ebdd8447 (2026-10-19)
 
 Indirect probe starvation now has a scalar circular target cursor after the initial priority
 selection, with one target/pass and unchanged helper limits. It advances on each confirmed local

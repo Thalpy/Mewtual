@@ -1,10 +1,14 @@
 # Next file milestone: connected member page service
 
-Design and implementation checkpoint, 19 October 2026. **The complete connected bridge is not
-implemented or enabled.** Source30 and helper29 now dispatch only with the explicit current native
-attachment and strict authorization below; requester/Keep integration remains unfinished.
-Reviewed primitives and their evidence are recorded below. This is the next Package 4
-boundary after scoped durable Keep and whole-variant fallback. Existing kind5/kind27 reads keep
+Current implementation, 19 October 2026: the native requester now connects explicit chunk/range/
+Keep/private Download reads to source30 and helper29 after direct providers. The original native/Root/caller scope,
+strict bound helper, exact encrypted variant, route custody and finite work allowance remain
+mandatory. Actual C/B/A tests and four blocked-edge TCP/native file scenarios pass, covering Keep
+and private Download, solo revalidation/export, and interrupted C native restart with replacement D.
+An explicit observer-only sealed D→A/C route prerequisite passes under the same existing
+recovery deadlines. Complete programme, full-suite and physical-network acceptance remain open.
+The primitive-stage checkpoints below are historical.
+Existing kind5/kind27 reads keep
 their released authentication, peer binding, response grammars and compatibility behavior.
 
 ## Roles and route
@@ -162,7 +166,7 @@ now exist too; current Root authorization, revocation hooks, response custody, s
 and requester integration remain unimplemented.
 
 
-## Transport allocation and freshness checkpoints
+## Historical transport allocation and freshness checkpoints
 
 The released request/response codec accepts 16 MiB frames. A 72 KiB protocol response promise is
 insufficient to bound a malicious peer's raw response allocation, and four timed-out upper waits
@@ -187,7 +191,7 @@ Its explicit maximum four named sources, scoped service limits and original requ
 remain required; no such restart refills the durable origin Keep grant.
 
 
-## Closed frame implementation in progress
+## Historical closed frame implementation
 
 Pure signed frame parsing/issuance exists in `file_service::wire`; all eight focused checks pass
 and read-only review has no blocker/high/medium. Strict sync Clippy passes. These types do not authorize a current member, process an inbound request or start a
@@ -213,7 +217,7 @@ that helper's observation. The process-stable admission policy below adds replay
 effect custody and Root/actor dispatch remain unfinished; these frames are not a working bridge claim.
 
 
-## Process-stable admission policy
+## Historical process-stable admission policy checkpoint
 
 `file_service::admission` now supplies the inert policy stage. Its only production constructor
 shares one process ledger and sanctioned clock across Root/executor replacement. Native ingress
@@ -247,7 +251,7 @@ in this policy slice. Source two-second hop deadlines, current native authority 
 effects, actual capacity custody and ordinary Root dispatch remain activation requirements.
 
 
-## Activation review checkpoints
+## Historical activation review checkpoints
 
 The ordinary file worker now has independent actor and Root/member/policy observers. Native
 background Keep also captures exact entry/account ownership. These do not supply the stricter
@@ -287,7 +291,7 @@ must consume each attempt token once and pin the actual serialized allocation tr
 lower-only and response-only retirement cases prevent one owner from masking the other. These
 primitives alone provide no dispatcher or requester path.
 
-### Source30 activation checkpoint
+### Historical source30 activation checkpoint
 
 The current implementation now dispatches source30 through an explicit `NativeFileService`
 attachment. Its native account/exact entry and actor observers compose current Root membership/
@@ -299,7 +303,8 @@ panic or outer cancellation cannot refund another actual owner. Present retains 
 two-second read deadline through final driver admission, plus its current storage fence;
 reply-wait retirement is excluded. An eight-second parent permits a bounded timeout Unavailable
 observation. Actual dispatch and lifecycle/deadline regressions pass; the revision ledger records
-the positive evidence, deadline-only red control and review. Requester/Keep remains unfinished.
+the positive evidence, deadline-only red control and review. Requester/Keep was unfinished at this
+historical source-only checkpoint; see the current status above.
 
 Helper integration must prepay five bounded route records per admitted chain, rather than
 discovering a registry-capacity refusal after three attempts. The private builder consumes
@@ -308,7 +313,7 @@ A scope and exact two-second hop cutoff at final admission. Once queued, expiry 
 the lower driver cannot replace it with an Unavailable response. Root may choose Unavailable
 before transferring the responder. None of these limits renews the original eight-second scope.
 
-### Helper29 activation checkpoint
+### Historical helper29 activation checkpoint
 
 The helper is now dispatched with its original native/actor/Root/current C scope. It reserves
 all five route records before irreversible admission, then consumes each affine lower token
@@ -327,4 +332,6 @@ source bytes; it does not accumulate whole chunks or full historical source repl
 received Bytes and clones independently retain the same chain across final signing/admission
 refusal. Responder attaches service custody before its earliest refusal and retains a separate
 driver composite for actual serialization. Source/helper/metadata/cancellation tests pass;
-requester integration, blocked-topology TCP Keep and complete programme acceptance remain open.
+requester integration and blocked-topology TCP Keep were still open at that historical helper-only
+checkpoint. The current requester/Keep evidence above supersedes it; complete programme acceptance
+remains open.

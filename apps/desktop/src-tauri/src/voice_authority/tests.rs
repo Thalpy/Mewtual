@@ -108,6 +108,155 @@ fn proven_action(
     (join, action)
 }
 
+/// Commit the genuine native derivation action without a JSON result cache or a browser key.
+/// The returned metadata is used only to exercise native history ownership below.
+fn derivation_receipt(
+    coordinator: &Coordinator,
+    owner_id: &str,
+    join: &mut catcoms_sync::voice_v2::presence::LocalJoin,
+    action: &CryptoAction,
+) -> CryptoResultReceipt {
+    use catcoms_crypto::DeviceKeypair;
+    use catcoms_sync::voice_v2::packets::Authority;
+    use catcoms_sync::voice_v2::Context;
+    let owner = coordinator.owner(owner_id).unwrap();
+    let clock = coordinator.runtime.clock();
+    let context = Context {
+        scope: owner.binding.scope,
+        local: DeviceKeypair::from_seed(&[3; 32]).device_id(),
+        now: clock.now_ms(),
+        epoch: 1,
+        indirect: true,
+    };
+    let members = |_| true;
+    join.commit_derivation_result(
+        action,
+        action.output_tag(&[]).unwrap(),
+        &Authority {
+            context: &context,
+            lease: &owner.lease,
+            member: &members,
+        },
+        clock.as_ref(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn registered_terminal_history_survives_end_settlement_and_plaintext_loss_until_exact_ack() {
+    use catcoms_sync::voice_v2::crypto_actions::CryptoOutcome;
+    let mut c = action_coordinator();
+    let controller_id = controller(&mut c);
+    let owner = call(&mut c, &controller_id, 1, 1);
+    let (mut join, action) = proven_action(&c, &owner, c.resources.clone());
+    let identity = c.register_action(&owner, action.clone()).unwrap();
+    let pending = c.action_status(&identity).unwrap();
+    assert!(!pending.settled && pending.receipt.is_none());
+    c.admit_action(&identity, action.engine_bytes()).unwrap();
+    let receipt = derivation_receipt(&c, &owner, &mut join, &action);
+    assert_eq!(receipt.outcome, CryptoOutcome::Derived);
+    assert!(!receipt.retired);
+    drop(join);
+    c.end(&owner);
+    assert!(c.settle_action(&identity).unwrap());
+    let held = c.resources.counts();
+    assert_eq!(
+        c.actions.len(),
+        1,
+        "End and engine settlement cannot acknowledge a lost reply"
+    );
+    let status = c.action_status(&identity).unwrap();
+    assert!(status.settled);
+    assert!(status.receipt.as_ref().unwrap().retired);
+    assert!(receipt.same_transition(status.receipt.as_ref().unwrap()));
+    assert_eq!(
+        c.resources.counts(),
+        held,
+        "metadata status performs no new work"
+    );
+    assert!(c.admit_action(&identity, action.engine_bytes()).is_err());
+    assert!(c.acknowledge_action(&identity, &receipt).unwrap());
+    assert!(c.actions.is_empty());
+    assert!(
+        !c.acknowledge_action(&identity, &receipt).unwrap(),
+        "lost ACK reply is idempotent"
+    );
+    assert!(!c.settle_action(&identity).unwrap());
+}
+
+#[test]
+fn registered_terminal_ack_latches_before_settlement_and_never_recreates_root_action() {
+    use catcoms_sync::voice_v2::crypto_actions::CryptoOutcome;
+    let mut c = action_coordinator();
+    let controller_id = controller(&mut c);
+    let owner = call(&mut c, &controller_id, 1, 1);
+    let (mut join, action) = proven_action(&c, &owner, c.resources.clone());
+    let identity = c.register_action(&owner, action.clone()).unwrap();
+    c.admit_action(&identity, action.engine_bytes()).unwrap();
+    let receipt = derivation_receipt(&c, &owner, &mut join, &action);
+    for changed in [
+        CryptoResultReceipt {
+            output_tag: [9; 32],
+            ..receipt.clone()
+        },
+        CryptoResultReceipt {
+            outcome: CryptoOutcome::Opened,
+            ..receipt.clone()
+        },
+        CryptoResultReceipt {
+            input_tag: [9; 32],
+            ..receipt.clone()
+        },
+        CryptoResultReceipt {
+            action: receipt.action + 1,
+            ..receipt.clone()
+        },
+    ] {
+        assert!(c.acknowledge_action(&identity, &changed).is_err());
+    }
+    assert!(c.acknowledge_action(&identity, &receipt).unwrap());
+    assert!(c.acknowledge_action(&identity, &receipt).unwrap());
+    assert_eq!(c.actions.len(), 1);
+    assert_eq!(
+        c.resources.counts().1,
+        1,
+        "ACK is not actual engine settlement"
+    );
+    assert!(c.settle_action(&identity).unwrap());
+    assert!(c.actions.is_empty());
+    assert!(
+        c.register_action(&owner, action.clone()).is_err(),
+        "Root's retained terminal Arc cannot recreate an acknowledged row"
+    );
+    assert!(action.admit_engine(action.engine_bytes()).is_err());
+    assert!(!c.acknowledge_action(&identity, &receipt).unwrap());
+}
+
+#[test]
+fn registered_terminal_capacity_is_shared_across_replacement_owners_without_ttl_eviction() {
+    let mut c = action_coordinator();
+    let controller_id = controller(&mut c);
+    let mut retained = Vec::new();
+    for n in 1..=REGISTERED_ACTIONS {
+        let owner = call(&mut c, &controller_id, n as u8, n as u64);
+        let (mut join, action) = proven_action(&c, &owner, c.resources.clone());
+        let identity = c.register_action(&owner, action.clone()).unwrap();
+        c.admit_action(&identity, action.engine_bytes()).unwrap();
+        let receipt = derivation_receipt(&c, &owner, &mut join, &action);
+        c.settle_action(&identity).unwrap();
+        retained.push((identity, receipt));
+    }
+    assert_eq!(c.actions.len(), REGISTERED_ACTIONS);
+    let next = call(&mut c, &controller_id, 63, 63);
+    let (_join, action) = proven_action(&c, &next, c.resources.clone());
+    assert!(c.register_action(&next, action.clone()).is_err());
+    let (old, receipt) = &retained[0];
+    assert!(c.action_status(old).unwrap().receipt.is_some());
+    assert!(c.acknowledge_action(old, receipt).unwrap());
+    assert_eq!(c.actions.len(), REGISTERED_ACTIONS - 1);
+    assert!(c.register_action(&next, action).is_ok());
+}
+
 #[test]
 fn registered_action_lost_admission_reuses_permit_and_unknown_settlement_creates_no_fence() {
     let mut c = action_coordinator();

@@ -1,5 +1,40 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Voice action history checkpoint (19 October, Rust only)
+
+`CryptoAction::recover_result(bytes,tag)` rehashes the exact bounded engine output and returns
+only a previously recorded receipt. `terminal_status()` instead returns one action-fence snapshot
+of actual settlement and optional receipt, without requiring browser output that End may have
+destroyed. Neither operation can perform a first transition or grant signing/delivery/RTC access.
+Native callers must independently authorize the exact previously registered action. The native
+cfg(test) model retains at most32 combined pending/terminal rows across owner replacement; exact
+receipt ACK excludes dynamic retirement, latches before settlement and cannot recreate a removed
+terminal action. Production registration, IPC authorization and serialized reply-copy custody are
+still absent. See `communication-recovery/VOICE-NATIVE-RESULTS-NEXT.md` before exposing this seam.
+
+`CryptoAction::input()` returns an owned `CryptoInputLease`; borrowed inputs cannot outlive
+their paid buffers. Exact `acknowledge_result` plus actual engine settlement releases the
+action's input reference, in either order. Existing input leases retain the original bytes and
+credit until their last drop. Immutable operation/output bounds, serials, terminal history and
+engine fences remain in the original32-record table. Historical metadata recovery still works;
+the compatibility sending API refuses after compaction rather than reconstructing send bytes.
+This releases only input custody, not IPC copies, RTC strings or an unsettled engine permit.
+
+## Private download commands (19 October, implementation in progress)
+
+`save_group_file(server,cid,name,resume?,expectedIntent?,operation?)` first acquires encrypted
+private progress and verifies the whole file, then exports natively to a freshly resolved
+Downloads destination. Resume selects a saved Download ID and exact intent CAS; it accepts no
+manifest, key, plaintext offset, absolute path or caller allowance. `operation` is only an inert
+bounded progress-correlation string echoed in `download-progress.cancellation`, never authority.
+`get_private_downloads` returns at most32 closed metadata rows: ID/CID, decimal-string intent and
+grant, phase label and whole-chunk counts. `set_private_download_paused`, `retry_private_download`
+and `cancel_private_download` mutate only that saved local owner under the original native session/
+entry fence. Retry uses the existing exact latest-receipt CAS contract. Metadata updates are
+owner-specific and coalesced around actual actor progress, so a same-CID Keep cannot mask them.
+Completed ciphertext is private; only native `DownloadReady`/export leases can read it. Successful
+external publication remains committed if encrypted cleanup fails, with a visible warning.
+
 ## Native member catalog interface (19 October)
 
 `ServerGroup::observe_member_catalog` performs trusted native O(roster) observation once per
@@ -15,10 +50,16 @@ are typed errors. No wire or persistence format changes.
 
 Before `member_at` copies, the exact native observation must attest32-byte signature AND HPKE
 keys, and the borrowed credential must fit4KiB. The first native observation/load is not bounded
-by that page limit. These APIs grant no active-membership or file/route authority. Future Root
-preparation must additionally preserve the original native/read/epoch scope and finite budget.
-The app search is still behind `cfg(test)`; it retains one unstarted proposal, scoped to one
-search identity and ticket, and at most16 helper/variant positions. It cannot activate downloads.
+by that page limit. These APIs grant no active-membership or file/route authority. Root
+preparation additionally preserves the original native/read/epoch scope and finite budget.
+The sync requester retains one exact proposal, scoped to one search identity and ticket, and at
+most16 helper/variant positions. `begin_file_bridge_catalog` requires captured native read/Root
+authority; trusted Rust reads without that origin remain direct-only. `next_file_bridge_choice`
+yields bounded helper/source catalog turns. `prepare_file_bridge_page` reserves route custody
+before durable work debit; `commit_file_bridge_page` consumes coverage afterward. Opaque choices
+cannot cross reads, become current after moving on, or revive across a helper PeerId cycle.
+`refresh_file_bridge_choice` preserves the retried source batch while minting a new route ticket.
+Returned response authority remains mandatory after AEAD on both accepted and rejected outcomes.
 
 ## Connected file-source dispatch checkpoint (19 October)
 
@@ -153,8 +194,17 @@ duplicate descriptors do not increment it. The counter is ephemeral and adds no 
 
 ## Native ephemeral voice ownership foundation (2026-10-18)
 
-Trusted Rust transport seams remain inert: `receive_voice_transport` and
-`verify_voice_transport_response` enforce closed role-bound kind28 frames/ACKs. `prepare_voice_forwards`
+Trusted Rust transport seams remain inert: `handle_voice_transport_request` and
+`verify_voice_transport_response` enforce closed role-bound kind28 frames/ACKs. The former binds
+its typed prepared reply to the original responder; raw response extraction exists only in unit
+oracles. Custody-backed Bytes and the actual driver's serialized copy retain the same original
+verification credit and exact helper/public admission receipt through final retirement. An
+observing five-second request gate and original route/epoch/proof/descriptor/connection gate
+remain distinct from reply-wait cancellation. A cached HelperQueued observation must retain its
+FIRST actor, issuer/helper, targeted member when applicable, room and effective permit lifetime.
+Replacement authority or a longer retry permit cannot adopt those bytes. Previously the inert
+test model reported cached status after actor replacement; it now refuses that positive receipt
+while preserving packet identity and spent allowance. `prepare_voice_forwards`
 and `prepare_voice_sources` return at most four affine requests each, subject to the same four-group/
 eight-process actual lower-flight pool; `execute` takes a cancellation receiver and owns the
 exact lower flight. `complete_voice_forward` authenticates on the original Root with current
@@ -3647,7 +3697,7 @@ files, and `local_files`, the deduplicated files whose complete encrypted chunk 
 installation. The Storage pane can pass one of those rows through the existing authenticated
 `save_group_file` path. That explicit “Unlock copy” action verifies/decrypts the managed chunks and
 creates a separate, non-overwriting plaintext Downloads file; it does not alter or remove the
-vault-encrypted copy. Its final staging-file rename and reveal are authorized by the exact unlock
+vault-encrypted copy. Its final no-replace publication and reveal are authorized by the exact unlock
 generation that began the export; locking, then unlocking again, cannot revive the old operation.
 Chunk health is keyed by the exact encoded `FileRef`, and the inventory joins
 that verdict to the exact manifest in one actor snapshot; a reused ciphertext or plaintext CID

@@ -97,7 +97,7 @@ fn each_helper_and_exact_variant_covers_its_own_complete_native_catalog() {
                     .extend(ids(&choice));
                 assert!(search.admitted(&choice));
             }
-            Step::Yield => {}
+            Step::Yield | Step::Backoff => {}
             Step::Exhausted => break,
         }
     }
@@ -160,7 +160,7 @@ fn helper_replacement_and_temporarily_unavailable_proposal_do_not_reset_or_spend
                 assert_eq!(choice.helper, d);
                 assert!(search.admitted(&choice));
             }
-            Step::Yield => {}
+            Step::Yield | Step::Backoff => {}
             Step::Exhausted => return,
         }
     }
@@ -190,7 +190,7 @@ fn helper_and_variant_slots_remain_bounded_without_roster_or_source_count_cutoff
                 assert!(helpers[..4].contains(&choice.helper));
                 assert!(search.admitted(&choice));
             }
-            Step::Yield => {}
+            Step::Yield | Step::Backoff => {}
             Step::Exhausted => break,
         }
     }
@@ -287,4 +287,67 @@ fn helper_peer_cycle_cannot_make_an_old_unstarted_choice_current_again() {
         "unchanged local Busy keeps its exact proposal"
     );
     assert!(search.admitted(&returned));
+}
+
+#[test]
+fn admitted_retry_refresh_preserves_sources_without_resetting_coverage_and_fences_peer_aba() {
+    let (devices, group) = roster(8);
+    let b = helper(&devices[1], 1);
+    let changed = Helper {
+        peer: PeerId::from_u64(99),
+        ..b
+    };
+    let mut search = Search::new(
+        devices[0].device_id(),
+        group.current_member_catalog().unwrap(),
+    );
+    let original = ready(search.propose(&group, &[[1; 32]], &[b]).unwrap());
+    assert!(search.admitted(&original));
+    let rebound = search.refresh(&original, changed).unwrap();
+    let returned = search.refresh(&rebound, b).unwrap();
+    assert_eq!(ids(&original), ids(&returned));
+    assert!(!original.same_as(&returned));
+    assert!(!rebound.same_as(&returned));
+    assert!(search.refresh(&returned, b).unwrap().same_as(&returned));
+    let next = ready(search.propose(&group, &[[1; 32]], &[b]).unwrap());
+    assert!(ids(&next).iter().all(|id| !ids(&original).contains(id)));
+}
+
+#[test]
+fn unavailable_batches_cover_fresh_sources_before_a_bounded_retry_sweep() {
+    let (devices, group) = roster(10);
+    let b = helper(&devices[1], 1);
+    let mut search = Search::new(
+        devices[0].device_id(),
+        group.current_member_catalog().unwrap(),
+    );
+    let mut first_pass = BTreeSet::new();
+    let mut backoffs = 0;
+    let mut pages = 0;
+    loop {
+        match search.propose(&group, &[[1; 32]], &[b]).unwrap() {
+            Step::Ready(choice) => {
+                pages += 1;
+                if backoffs == 0 {
+                    for id in ids(&choice) {
+                        assert!(first_pass.insert(id));
+                    }
+                }
+                assert!(search.admitted(&choice));
+                search.retry_batch(&choice);
+            }
+            Step::Backoff => {
+                backoffs += 1;
+                assert_eq!(first_pass.len(), devices.len() - 2);
+            }
+            Step::Yield => {}
+            Step::Exhausted => break,
+        }
+        assert!(
+            pages < 20,
+            "Unavailable cannot create unlimited coverage passes"
+        );
+    }
+    assert_eq!(backoffs, 2);
+    assert_eq!(pages, 9);
 }

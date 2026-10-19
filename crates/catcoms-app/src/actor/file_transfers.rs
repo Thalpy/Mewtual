@@ -5,12 +5,18 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, OnceLock};
 
 use catcoms_rt::SharedRequestKeepalive;
+use catcoms_sync::file_service::{
+    bridge_reference_variant, BridgeCatalog, BridgeChoice, BridgeError, BridgeStep,
+    PreparedBridgePage,
+};
 use catcoms_sync::CompletedBlobFetch;
 use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
 use super::*;
 use crate::{file_resolution, CHUNK_BYTES};
+mod saved;
+use saved::SavedRun;
 
 /// Also bounds ready-but-unconsumed responses. These permits follow each transport attempt,
 /// including requests whose application deadline expired before the lower stream terminated.
@@ -36,7 +42,7 @@ const AUTOMATIC_KEEP_MS: u64 = 30_000;
 
 /// One source of truth for Keep's requested page length and durable debit. A lying plaintext
 /// size cannot make a larger request spend one byte after reaching its declared ciphertext end.
-fn kept_ciphertext_bound(reference: &FileRef) -> Result<usize, String> {
+pub(super) fn kept_ciphertext_bound(reference: &FileRef) -> Result<usize, String> {
     if reference.size > CHUNK_BYTES as u64 {
         return Err("chunk exceeds the file size limit".into());
     }
@@ -209,6 +215,7 @@ enum ReadReply {
     Chunk(oneshot::Sender<ChunkResult>),
     Range(oneshot::Sender<Result<FileRange, String>>),
     Keep(oneshot::Sender<Result<(), String>>),
+    Download(oneshot::Sender<Result<DownloadReady, String>>),
     AutomaticKeep,
 }
 
@@ -218,6 +225,7 @@ impl ReadReply {
             Self::Chunk(reply) => reply.is_closed(),
             Self::Range(reply) => reply.is_closed(),
             Self::Keep(reply) => reply.is_closed(),
+            Self::Download(reply) => reply.is_closed(),
             Self::AutomaticKeep => false,
         }
     }
@@ -227,6 +235,7 @@ impl ReadReply {
             Self::Chunk(reply) => reply.closed().await,
             Self::Range(reply) => reply.closed().await,
             Self::Keep(reply) => reply.closed().await,
+            Self::Download(reply) => reply.closed().await,
             Self::AutomaticKeep => std::future::pending().await,
         }
     }
@@ -240,6 +249,9 @@ impl ReadReply {
                 let _ = reply.send(Err(error));
             }
             Self::Keep(reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::Download(reply) => {
                 let _ = reply.send(Err(error));
             }
             Self::AutomaticKeep => {}
@@ -257,13 +269,58 @@ struct RangeState {
 }
 
 struct KeepState {
-    token: catcoms_storage::kept::KeepRun,
+    token: SavedRun,
     manifest: crate::FileManifest,
     hasher: catcoms_storage::CidHasher,
     plan_version: [u8; 32],
     /// A whole-candidate turn can visit each original plan at most once. Restart preserves the
     /// durable global allowance and bad-reference verdicts, not this ephemeral search cursor.
     tried: Vec<[u8; 32]>,
+}
+
+#[derive(Clone, Copy)]
+enum SavedRequest {
+    Keep {
+        resume_existing: bool,
+    },
+    Download {
+        resume: Option<catcoms_storage::kept::DownloadId>,
+    },
+}
+
+#[derive(Clone)]
+enum ReadCandidate {
+    Direct(FileRef, PeerId),
+    Bridge(FileRef, BridgeChoice),
+}
+impl ReadCandidate {
+    fn reference(&self) -> &FileRef {
+        match self {
+            Self::Direct(reference, _) | Self::Bridge(reference, _) => reference,
+        }
+    }
+    fn peer(&self) -> PeerId {
+        match self {
+            Self::Direct(_, peer) => *peer,
+            Self::Bridge(_, choice) => choice.helper_peer(),
+        }
+    }
+    fn into_parts(self) -> (FileRef, PeerId, Option<BridgeChoice>) {
+        match self {
+            Self::Direct(reference, peer) => (reference, peer, None),
+            Self::Bridge(reference, choice) => (reference, choice.helper_peer(), Some(choice)),
+        }
+    }
+    fn from_parts(reference: FileRef, peer: PeerId, choice: Option<BridgeChoice>) -> Self {
+        match choice {
+            Some(choice) => Self::Bridge(reference, choice),
+            None => Self::Direct(reference, peer),
+        }
+    }
+}
+enum PreparedRead<T: MeshTransport> {
+    Direct(catcoms_sync::PendingBlobFetch<T>),
+    Bridge(PreparedBridgePage),
 }
 
 pub(super) struct ReadJob {
@@ -280,7 +337,11 @@ pub(super) struct ReadJob {
     reply: ReadReply,
     range: Option<RangeState>,
     keep: Option<KeepState>,
-    candidates: Option<VecDeque<(FileRef, PeerId)>>,
+    candidates: Option<VecDeque<ReadCandidate>>,
+    /// Per-chunk helper/source coverage remains separate from direct-provider batches. It
+    /// captures this original native read, not whichever account happens to be current later.
+    bridge: Option<BridgeCatalog>,
+    bridge_retries: u8,
     /// Per-chunk/per-round search cursor. At most MAX_CONNECTED_PEER_SNAPSHOT distinct peers;
     /// busy entries stay in candidates, while completed batches make room for later holders.
     tried_providers: HashSet<PeerId>,
@@ -340,9 +401,7 @@ impl ReadJob {
                 .is_some_and(RequestCancellation::is_cancelled)
             && server.epoch() == self.epoch
             && if let Some(keep) = &self.keep {
-                server
-                    .sync
-                    .keep_run_current(keep.token, &self.cid, &keep.plan_version)
+                keep.token.current(server, &self.cid, &keep.plan_version)
             } else {
                 server
                     .file_head(&self.cid)
@@ -370,7 +429,7 @@ impl ReadJob {
             "file transfer failed"
         );
         if let Some(keep) = &self.keep {
-            let _ = server.sync.pause_keep(keep.token);
+            let _ = keep.token.pause(server);
         }
         self.reply.fail(error);
     }
@@ -387,6 +446,8 @@ impl ReadJob {
             if self.index + 1 < keep.manifest.chunks.len() {
                 self.index += 1;
                 self.candidates = None;
+                self.bridge = None;
+                self.bridge_retries = 0;
                 self.tried_providers.clear();
                 self.rejected_variants.clear();
                 // Rounds and staged bytes are a per-chunk allowance, like the deadline beside
@@ -405,22 +466,35 @@ impl ReadJob {
                 return Some(self);
             }
             if keep.hasher.cid() != self.cid {
-                let _ = server.sync.block_keep(keep.token);
+                let _ = keep.token.block(server);
                 self.fail(
                     server,
                     "kept file failed whole-file content verification".into(),
                 );
                 return None;
             }
-            let result = server
-                .sync
-                .finish_keep(keep.token)
-                .map_err(|e| e.to_string());
+            let result = keep.token.finish(server).map_err(|e| e.to_string());
             if result.is_err() {
-                let _ = server.sync.pause_keep(keep.token);
+                let _ = keep.token.pause(server);
             }
-            if let ReadReply::Keep(reply) = self.reply {
-                let _ = reply.send(result);
+            match self.reply {
+                ReadReply::Keep(reply) => {
+                    let _ = reply.send(result.map(|_| ()));
+                }
+                ReadReply::Download(reply) => {
+                    let _ = reply.send(result.and_then(|lease| {
+                        let lease =
+                            lease.ok_or_else(|| "Download ownership changed.".to_string())?;
+                        Ok(DownloadReady {
+                            lease,
+                            manifest: keep.manifest.clone(),
+                            root: self.root,
+                            actor: self.actor,
+                            export_custody: None,
+                        })
+                    }));
+                }
+                _ => {}
             }
         } else if let Some(range) = self.range.as_mut() {
             let base = self.index as u64 * CHUNK_BYTES as u64;
@@ -431,6 +505,8 @@ impl ReadJob {
             if base + (bytes.len() as u64) < range.end {
                 self.index += 1;
                 self.candidates = None;
+                self.bridge = None;
+                self.bridge_retries = 0;
                 self.tried_providers.clear();
                 self.rejected_variants.clear();
                 self.rounds = 0;
@@ -468,6 +544,9 @@ pub(super) struct FinishedAttempt {
     peer: PeerId,
     /// Whether this attempt asked for a page or for the whole blob.
     paged: bool,
+    /// Retained separately from the advancing catalog: lost replies retry this SAME source
+    /// batch with a fresh signed grant and another durable debit, never skip the first holder.
+    bridge_choice: Option<BridgeChoice>,
     result: Result<CompletedBlobFetch, String>,
     /// Original prepaid execution slice. A new actor turn cannot renew it to accept an old
     /// network result after pause, Retry, replacement or its original monotonic deadline.
@@ -522,12 +601,33 @@ impl catcoms_rt::RequestAuthority for ActorFileAuthority {
 }
 
 impl TransferStep {
-    pub(super) fn kept_cid(&self) -> Option<Cid> {
+    pub(super) fn saved_progress(&self) -> Option<SavedProgress> {
         let job = match self {
             Self::Local(job) => job.as_ref(),
             Self::Network(finished) => &finished.job,
         };
-        job.keep.as_ref().map(|_| job.cid)
+        job.keep.as_ref().map(|keep| SavedProgress {
+            run: keep.token,
+            cid: job.cid,
+        })
+    }
+}
+
+/// Owner-specific, cheap observations around one actor completion. A same-CID Keep cannot
+/// hide private Download progress or cause the UI to miss its terminal/paused transition.
+pub(super) struct SavedProgress {
+    run: SavedRun,
+    cid: Cid,
+}
+impl SavedProgress {
+    pub(super) fn observe<T: MeshTransport, R: CryptoRngCore>(
+        &self,
+        server: &Server<T, R>,
+    ) -> Option<catcoms_storage::kept::KeepProgress> {
+        match self.run {
+            SavedRun::Keep(_) => server.sync.keep_progress(&self.cid),
+            SavedRun::Download(run) => server.sync.download_progress(run.id()),
+        }
     }
 }
 
@@ -688,6 +788,40 @@ impl FileTransfers {
         reply: ReadReply,
         resume_existing: bool,
     ) -> Result<(), String> {
+        self.start_saved(
+            server,
+            raw,
+            cancel,
+            reply,
+            SavedRequest::Keep { resume_existing },
+        )
+    }
+
+    pub(super) fn download<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        raw: Vec<u8>,
+        resume: Option<catcoms_storage::kept::DownloadId>,
+        cancel: RequestCancellation,
+        reply: oneshot::Sender<Result<DownloadReady, String>>,
+    ) {
+        let _ = self.start_saved(
+            server,
+            raw,
+            Some(cancel),
+            ReadReply::Download(reply),
+            SavedRequest::Download { resume },
+        );
+    }
+
+    fn start_saved<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        raw: Vec<u8>,
+        cancel: Option<RequestCancellation>,
+        reply: ReadReply,
+        request: SavedRequest,
+    ) -> Result<(), String> {
         let root = match server.sync.file_effect_authority() {
             Ok(root) => root,
             Err(error) => {
@@ -726,17 +860,41 @@ impl FileTransfers {
                     .try_into()
                     .map_err(|_| "bad content address".to_string())?,
             );
+            let download = matches!(request, SavedRequest::Download { .. });
+            let saved_download = if let SavedRequest::Download { resume } = request {
+                let found = server
+                    .sync
+                    .downloads()
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .find(|d| resume.map_or(d.state.plan.cid == cid, |id| d.id == id));
+                if resume.is_some() && found.is_none() {
+                    return Err("Saved download changed.".into());
+                }
+                if found.as_ref().is_some_and(|d| d.state.plan.cid != cid) {
+                    return Err("Saved download changed.".into());
+                }
+                found
+            } else {
+                None
+            };
             let inventory = server.sync.kept_files();
-            let existing = inventory
-                .transfers
-                .into_iter()
-                .filter(|transfer| transfer.phase != catcoms_storage::kept::KeepPhase::Deleting)
-                .map(|transfer| (transfer.plan, transfer.listing))
-                .chain(inventory.files.into_iter().map(|file| {
-                    let listing = file.plan.version;
-                    (file.plan, listing)
-                }))
-                .find(|(plan, _)| plan.cid == cid);
+            let existing = if download {
+                saved_download
+                    .as_ref()
+                    .map(|d| (d.state.plan.clone(), d.state.listing))
+            } else {
+                inventory
+                    .transfers
+                    .into_iter()
+                    .filter(|transfer| transfer.phase != catcoms_storage::kept::KeepPhase::Deleting)
+                    .map(|transfer| (transfer.plan, transfer.listing))
+                    .chain(inventory.files.into_iter().map(|file| {
+                        let listing = file.plan.version;
+                        (file.plan, listing)
+                    }))
+                    .find(|(plan, _)| plan.cid == cid)
+            };
             // A user may explicitly check/repair their own saved manifest even after unlisting.
             // This local authority never enters files(), media heads, or replicated publication.
             let (plan, manifest, listing, candidates) = if let Some((plan, listing)) = existing {
@@ -744,10 +902,17 @@ impl FileTransfers {
                 if validated != plan {
                     return Err("kept manifest is inconsistent".into());
                 }
-                let saved = server
-                    .sync
-                    .kept_saved_plans(&cid)
-                    .ok_or("saved transfer changed")?;
+                let saved = if let Some(d) = &saved_download {
+                    server
+                        .sync
+                        .download_saved_plans(d.id)
+                        .map_err(|e| e.to_string())?
+                } else {
+                    server
+                        .sync
+                        .kept_saved_plans(&cid)
+                        .ok_or("saved transfer changed")?
+                };
                 if saved.is_empty() || saved.len() > file_resolution::MAX_MANIFEST_VARIANTS {
                     return Err("Saved file details could not be verified.".into());
                 }
@@ -772,7 +937,12 @@ impl FileTransfers {
                 }
                 (plan, manifest, listing, None)
             } else {
-                if resume_existing {
+                if matches!(
+                    request,
+                    SavedRequest::Keep {
+                        resume_existing: true
+                    }
+                ) {
                     return Err("saved transfer changed".into());
                 }
                 let resolved = file_resolution::resolve(&server.files(), &cid)
@@ -792,17 +962,42 @@ impl FileTransfers {
                     })
                     .unwrap_or(0);
                 let (plan, manifest) = plans[chosen].clone();
-                let candidates = (plans.len() > 1)
+                let candidates = (download || plans.len() > 1)
                     .then(|| (plans.into_iter().map(|(p, _)| p).collect(), chosen));
                 (plan, manifest, resolved.version, candidates)
             };
             let plan_version = plan.version;
-            let token = if let Some((plans, selected)) = candidates {
-                server.sync.begin_keep_variants(plans, selected, listing)
+            let token = if let Some(d) = saved_download {
+                SavedRun::Download(
+                    server
+                        .sync
+                        .resume_download(d.id)
+                        .map_err(|e| e.to_string())?,
+                )
+            } else if let Some((plans, selected)) = candidates {
+                if download {
+                    SavedRun::Download(
+                        server
+                            .sync
+                            .begin_download(plans, selected, listing)
+                            .map_err(|e| e.to_string())?,
+                    )
+                } else {
+                    SavedRun::Keep(
+                        server
+                            .sync
+                            .begin_keep_variants(plans, selected, listing)
+                            .map_err(|e| e.to_string())?,
+                    )
+                }
             } else {
-                server.sync.begin_keep_with_listing(plan, listing)
-            }
-            .map_err(|e| e.to_string())?;
+                SavedRun::Keep(
+                    server
+                        .sync
+                        .begin_keep_with_listing(plan, listing)
+                        .map_err(|e| e.to_string())?,
+                )
+            };
             Ok::<_, String>((cid, listing, token, manifest, plan_version))
         })();
         match result {
@@ -829,6 +1024,8 @@ impl FileTransfers {
                         tried: vec![plan_version],
                     }),
                     candidates: None,
+                    bridge: None,
+                    bridge_retries: 0,
                     tried_providers: HashSet::new(),
                     rejected_variants: HashSet::new(),
                     error: "no connected provider supplied the kept file's exact chunk".into(),
@@ -865,9 +1062,9 @@ impl FileTransfers {
             let Some(keep) = job.keep.as_mut() else {
                 return Ok(false);
             };
-            let Some((token, plan)) = server
-                .sync
-                .fallback_keep(keep.token, &keep.plan_version, &keep.tried, bad_current)
+            let Some((token, plan)) = keep
+                .token
+                .fallback(server, &keep.plan_version, &keep.tried, bad_current)
                 .map_err(|e| e.to_string())?
             else {
                 return Ok(false);
@@ -885,6 +1082,8 @@ impl FileTransfers {
             keep.hasher = catcoms_storage::CidHasher::new();
             job.index = 0;
             job.candidates = None;
+            job.bridge = None;
+            job.bridge_retries = 0;
             job.tried_providers.clear();
             job.rejected_variants.clear();
             job.staged = Vec::new();
@@ -905,7 +1104,7 @@ impl FileTransfers {
             Ok(false) => {
                 if bad_current {
                     if let Some(keep) = &job.keep {
-                        let _ = server.sync.block_keep(keep.token);
+                        let _ = keep.token.block(server);
                     }
                 }
                 job.fail(server, error);
@@ -1032,6 +1231,8 @@ impl FileTransfers {
             range,
             keep: None,
             candidates: None,
+            bridge: None,
+            bridge_retries: 0,
             tried_providers: HashSet::new(),
             rejected_variants: HashSet::new(),
             error: format!("file not available yet; no connected provider supplied chunk {index}"),
@@ -1066,7 +1267,7 @@ impl FileTransfers {
                 return;
             }
             let local_work = if let Some(keep) = &job.keep {
-                match server.sync.keep_work(keep.token, None) {
+                match keep.token.work(server, None) {
                     Ok(work) => Some(work),
                     Err(error) => {
                         job.fail(server, error.to_string());
@@ -1102,10 +1303,9 @@ impl FileTransfers {
                         continue;
                     }
                     let retained = job.keep.as_ref().and_then(|keep| {
-                        server
-                            .sync
-                            .get_keep(
-                                keep.token,
+                        keep.token
+                            .get(
+                                server,
                                 &reference.ciphertext_cid,
                                 catcoms_sync::MAX_BOUNDED_BLOB_BYTES,
                             )
@@ -1115,22 +1315,23 @@ impl FileTransfers {
                     if let Some(ciphertext) =
                         retained.or_else(|| server.sync.get_blob(&reference.ciphertext_cid))
                     {
-                        if let Ok(bytes) = server.sync.open_file(&ciphertext, reference) {
-                            self.before_storage_admission();
-                            // Opening can race lock/removal on another thread. Check the SAME
-                            // original invocation after CPU work, before plaintext or storage.
-                            if !job.current(server) {
-                                job.fail(server, "file download cancelled".into());
+                        let opened = server.sync.open_file(&ciphertext, reference);
+                        self.before_storage_admission();
+                        // Failed AEAD is also a durable effect when it rejects a Keep candidate.
+                        // Check the original invocation after CPU work on BOTH result paths.
+                        if !job.current(server) {
+                            job.fail(server, "file download cancelled".into());
+                            return;
+                        }
+                        if let Some(work) = &local_work {
+                            if let Err(error) = server.sync.validate_keep_work(work) {
+                                job.fail(server, error.to_string());
                                 return;
                             }
+                        }
+                        if let Ok(bytes) = opened {
                             if let Some(keep) = &job.keep {
-                                if let Some(work) = &local_work {
-                                    if let Err(error) = server.sync.validate_keep_work(work) {
-                                        job.fail(server, error.to_string());
-                                        return;
-                                    }
-                                }
-                                if let Err(error) = server.sync.put_keep(keep.token, &ciphertext) {
+                                if let Err(error) = keep.token.put(server, &ciphertext) {
                                     job.fail(server, error.to_string());
                                     return;
                                 }
@@ -1168,7 +1369,9 @@ impl FileTransfers {
                     missing
                         .into_iter()
                         .flat_map(|reference| {
-                            peers.iter().map(move |peer| (reference.clone(), *peer))
+                            peers
+                                .iter()
+                                .map(move |peer| ReadCandidate::Direct(reference.clone(), *peer))
                         })
                         .collect(),
                 );
@@ -1181,9 +1384,24 @@ impl FileTransfers {
             let mut deferred = false;
             if let Some(candidates) = job.candidates.as_mut() {
                 for _ in 0..candidates.len() {
-                    let Some((reference, peer)) = candidates.pop_front() else {
+                    let Some(candidate) = candidates.pop_front() else {
                         break;
                     };
+                    // Retry the same sources when the authenticated helper changes PeerId.
+                    // Refresh before checking old peer connectivity; old scopes never revive.
+                    let candidate = match candidate {
+                        ReadCandidate::Bridge(reference, choice) => {
+                            let Some(catalog) = job.bridge.as_mut() else {
+                                continue;
+                            };
+                            match server.sync.refresh_file_bridge_choice(catalog, &choice) {
+                                Ok(choice) => ReadCandidate::Bridge(reference, choice),
+                                Err(_) => continue,
+                            }
+                        }
+                        direct => direct,
+                    };
+                    let peer = candidate.peer();
                     // A proven or bootstrap candidate can disconnect during another attempt. Drop
                     // it without spending a permit or creating a request that could redial from
                     // remembered routes.
@@ -1191,15 +1409,16 @@ impl FileTransfers {
                         continue;
                     }
                     if self.inflight.contains(&peer) {
-                        candidates.push_back((reference, peer));
+                        candidates.push_back(candidate);
                         deferred = true;
                         continue;
                     }
-                    picked = Some((reference, peer));
+                    picked = Some(candidate);
                     break;
                 }
             }
-            let Some((reference, peer)) = picked else {
+            // Exhausted direct candidates do not establish that no indirect source exists.
+            if picked.is_none() {
                 let peers = server.sync.blob_fetch_peers_excluding(&job.tried_providers);
                 if !peers.is_empty() {
                     // A busy preferred provider must not hide later holders. Keep its queued
@@ -1227,11 +1446,73 @@ impl FileTransfers {
                         .expect("provider search initialized");
                     for reference in references {
                         if !job.rejected_variants.contains(&reference.encode()) {
-                            candidates.extend(peers.iter().map(|peer| (reference.clone(), *peer)));
+                            candidates.extend(
+                                peers
+                                    .iter()
+                                    .map(|peer| ReadCandidate::Direct(reference.clone(), *peer)),
+                            );
                         }
                     }
                     continue;
                 }
+                if !deferred && job.bridge.is_none() {
+                    if let Some(origin) = job.cancel.clone() {
+                        job.bridge = server
+                            .sync
+                            .begin_file_bridge_catalog(origin, job.root.clone())
+                            .ok();
+                    }
+                }
+                if let Some(catalog) = job.bridge.as_mut().filter(|_| !deferred) {
+                    let references: Vec<_> = if let Some(keep) = &job.keep {
+                        keep.manifest
+                            .chunks
+                            .get(job.index)
+                            .cloned()
+                            .into_iter()
+                            .collect()
+                    } else {
+                        file_resolution::resolve(&server.files(), &job.cid)
+                            .into_iter()
+                            .flat_map(|resolved| resolved.variants)
+                            .filter_map(|(_, manifest)| manifest.chunks.get(job.index).cloned())
+                            .collect()
+                    };
+                    let versions: Vec<_> = references
+                        .iter()
+                        .filter(|reference| !job.rejected_variants.contains(&reference.encode()))
+                        .filter_map(|reference| bridge_reference_variant(reference).ok())
+                        .collect();
+                    match server.sync.next_file_bridge_choice(catalog, &versions) {
+                        Ok(BridgeStep::Ready(choice)) => {
+                            if let Some(reference) = references.into_iter().find(|reference| {
+                                bridge_reference_variant(reference).ok() == Some(choice.variant())
+                            }) {
+                                let candidate = ReadCandidate::Bridge(reference, choice);
+                                job.bridge_retries = 0;
+                                if self.inflight.contains(&candidate.peer()) {
+                                    job.candidates.as_mut().unwrap().push_back(candidate);
+                                    deferred = true;
+                                } else {
+                                    picked = Some(candidate);
+                                }
+                            }
+                        }
+                        Ok(BridgeStep::Yield) => {
+                            // Bound local catalog work as well as network work. Large/sparse
+                            // rosters yield to commands without spinning while helpers recover.
+                            self.delay_local(server, job, 50);
+                            return;
+                        }
+                        Ok(BridgeStep::Backoff) => {
+                            self.delay_local(server, job, ROUND_BACKOFF_MS);
+                            return;
+                        }
+                        Ok(BridgeStep::Exhausted) | Err(_) => {}
+                    }
+                }
+            }
+            let Some(candidate) = picked else {
                 if deferred {
                     // Every surviving provider is busy. Waiting is the whole point of the
                     // per-peer bound; failing here would make serialization worse than the
@@ -1260,6 +1541,7 @@ impl FileTransfers {
                 self.fallback_or_fail(server, job, false, error);
                 return;
             };
+            let (reference, peer, bridge_choice) = candidate.into_parts();
             let permits = self
                 .slots
                 .clone()
@@ -1296,8 +1578,12 @@ impl FileTransfers {
             }
             // Paged by default; the whole-blob grammar is the fallback for a provider that
             // answered a page request with "I do not know this kind".
-            let paged = job.paging;
-            let desired = job.page_size.min(server.sync.blob_page_ceiling(peer));
+            let paged = bridge_choice.is_some() || job.paging;
+            let desired = if bridge_choice.is_some() {
+                catcoms_sync::MIN_BLOB_PAGE
+            } else {
+                job.page_size.min(server.sync.blob_page_ceiling(peer))
+            };
             let (request_limit, prepaid_bytes) = if job.keep.is_some() {
                 match kept_request_window(&reference, paged, desired, job.staged.len()) {
                     Ok(window) => window,
@@ -1316,7 +1602,33 @@ impl FileTransfers {
                     0,
                 )
             };
-            let prepared = if paged {
+            let prepared = if let Some(choice) = &bridge_choice {
+                let offset = match u32::try_from(job.staged.len()) {
+                    Ok(offset) => offset,
+                    Err(_) => {
+                        job.fail(server, "staged chunk exceeds its limit".into());
+                        return;
+                    }
+                };
+                match server.sync.prepare_file_bridge_page(
+                    job.bridge.as_ref().unwrap(),
+                    choice,
+                    &reference,
+                    offset,
+                    request_limit,
+                ) {
+                    Ok(prepared) => Ok(PreparedRead::Bridge(prepared)),
+                    Err(BridgeError::Busy) => {
+                        job.candidates
+                            .as_mut()
+                            .unwrap()
+                            .push_front(ReadCandidate::Bridge(reference, choice.clone()));
+                        self.delay_local(server, job, BUSY_PEER_BACKOFF_MS);
+                        return;
+                    }
+                    Err(error) => Err(error.to_string()),
+                }
+            } else if paged {
                 let offset = match u32::try_from(job.staged.len()) {
                     Ok(offset) => offset,
                     Err(_) => {
@@ -1327,15 +1639,19 @@ impl FileTransfers {
                 server
                     .sync
                     .prepare_blob_page(peer, reference.ciphertext_cid, offset, request_limit)
+                    .map(PreparedRead::Direct)
+                    .map_err(|error| error.to_string())
             } else {
                 server
                     .sync
                     .prepare_blob_fetch(peer, reference.ciphertext_cid, request_limit)
+                    .map(PreparedRead::Direct)
+                    .map_err(|error| error.to_string())
             };
             let request = match prepared {
                 Ok(request) => request,
                 Err(error) => {
-                    job.error = error.to_string();
+                    job.error = error;
                     continue;
                 }
             };
@@ -1343,8 +1659,8 @@ impl FileTransfers {
             // Capacity and authenticated preparation already succeeded. Debit persistent work
             // before the first actual dispatch, keeping a proven local refusal free of spend.
             let keep_work = if let Some(keep) = &job.keep {
-                match server.sync.keep_work(
-                    keep.token,
+                match keep.token.work(
+                    server,
                     Some(catcoms_storage::kept::KeepNetworkWork {
                         bytes: prepaid_bytes,
                         paged,
@@ -1359,10 +1675,25 @@ impl FileTransfers {
             } else {
                 None
             };
+            let request = match request {
+                PreparedRead::Direct(request) => request,
+                PreparedRead::Bridge(prepared) => match server
+                    .sync
+                    .commit_file_bridge_page(job.bridge.as_mut().unwrap(), prepared)
+                {
+                    Ok(request) => request,
+                    Err(error) => {
+                        job.error = error.to_string();
+                        continue;
+                    }
+                },
+            };
             let execution_deadline = keep_work
                 .as_ref()
                 .map_or(job.deadline, |work| work.deadline().min(job.deadline));
-            let deadline = execution_deadline.min(clock.monotonic_ms().saturating_add(ATTEMPT_MS));
+            let deadline = execution_deadline
+                .min(clock.monotonic_ms().saturating_add(ATTEMPT_MS))
+                .min(request.effect_deadline().unwrap_or(u64::MAX));
             let authority = Arc::new(FileRequestAuthority {
                 clock: clock.clone(),
                 deadline,
@@ -1407,6 +1738,7 @@ impl FileTransfers {
                     reference,
                     peer,
                     paged,
+                    bridge_choice,
                     result,
                     keep_work,
                     _accounting: accounting,
@@ -1434,6 +1766,7 @@ impl FileTransfers {
             reference,
             peer,
             paged,
+            bridge_choice,
             result,
             keep_work,
             _accounting,
@@ -1493,6 +1826,10 @@ impl FileTransfers {
         // the chunk sets `resume` instead: the read continues against the same provider, with
         // the bytes it has already earned retained.
         let mut resume = false;
+        let effect = result
+            .as_ref()
+            .ok()
+            .and_then(CompletedBlobFetch::effect_authority);
         let outcome = match result {
             Err(error) => {
                 job.retryable = attempt_expired;
@@ -1501,6 +1838,7 @@ impl FileTransfers {
             Ok(completed) if paged => {
                 match server.sync.authenticate_blob_page(completed) {
                     Ok(catcoms_sync::BlobPageOutcome::Page(page)) => {
+                        job.bridge_retries = 0;
                         if job.keep.is_some()
                             && kept_ciphertext_bound(&reference)
                                 .is_ok_and(|bound| page.total as usize > bound)
@@ -1554,15 +1892,33 @@ impl FileTransfers {
                         }
                     }
                     Ok(catcoms_sync::BlobPageOutcome::Absent) => Ok(None),
-                    Ok(catcoms_sync::BlobPageOutcome::Unsupported) => {
-                        // A build that predates paging. Restart this chunk on the whole-blob
-                        // grammar rather than reading its silence as absence.
-                        job.paging = false;
-                        job.staged = Vec::new();
-                        job.staged_cid = None;
-                        job.pages = 0;
-                        resume = true;
+                    Ok(catcoms_sync::BlobPageOutcome::Unavailable) => {
+                        if let (Some(catalog), Some(choice)) = (job.bridge.as_mut(), &bridge_choice)
+                        {
+                            server.sync.file_bridge_unavailable(catalog, choice);
+                        }
+                        // Cover fresh sources first. Sleeping on each offline batch can make
+                        // a late online holder unreachable within the original quiet deadline.
+                        job.error = "file helper is temporarily unavailable".into();
                         Ok(None)
+                    }
+                    Ok(catcoms_sync::BlobPageOutcome::Unsupported) => {
+                        if let Some(choice) = &bridge_choice {
+                            if let Some(catalog) = job.bridge.as_mut() {
+                                server.sync.file_bridge_unsupported(catalog, choice);
+                            }
+                            // An old helper never gains a legacy whole-file forwarding path.
+                            Ok(None)
+                        } else {
+                            // A build that predates paging. Restart this chunk on the whole-blob
+                            // grammar rather than reading its silence as absence.
+                            job.paging = false;
+                            job.staged = Vec::new();
+                            job.staged_cid = None;
+                            job.pages = 0;
+                            resume = true;
+                            Ok(None)
+                        }
                     }
                     Err(error) => {
                         job.retryable = matches!(error, catcoms_sync::SyncError::Transport(_));
@@ -1584,7 +1940,7 @@ impl FileTransfers {
             // preferring: another holder would serve the same bytes, but this one has a warm
             // path and the offset is only meaningful because the blob is immutable.
             if let Some(candidates) = job.candidates.as_mut() {
-                candidates.push_front((reference, peer));
+                candidates.push_front(ReadCandidate::from_parts(reference, peer, bridge_choice));
             }
             drop(_accounting);
             self.advance(server, job);
@@ -1592,23 +1948,25 @@ impl FileTransfers {
         }
         match outcome {
             Ok(Some((ciphertext, provider))) => {
-                match server.sync.open_file(&ciphertext, &reference) {
+                let opened = server.sync.open_file(&ciphertext, &reference);
+                self.before_storage_admission();
+                // Rejecting a wrapped key changes durable selection just as storing good
+                // ciphertext does. Neither outcome may escape the original effect scope.
+                if !job.current(server) || effect.as_ref().is_some_and(|guard| !guard.authorized())
+                {
+                    job.fail(server, "file download cancelled".into());
+                    return;
+                }
+                if let Some(work) = &keep_work {
+                    if let Err(error) = server.sync.validate_keep_work(work) {
+                        job.fail(server, error.to_string());
+                        return;
+                    }
+                }
+                match opened {
                     Ok(bytes) => {
-                        self.before_storage_admission();
-                        // CPU opening may outlive concurrent native lock/entry retirement.
-                        // This is storage admission; retirement AFTER it cannot recall I/O.
-                        if !job.current(server) {
-                            job.fail(server, "file download cancelled".into());
-                            return;
-                        }
-                        if let Some(work) = &keep_work {
-                            if let Err(error) = server.sync.validate_keep_work(work) {
-                                job.fail(server, error.to_string());
-                                return;
-                            }
-                        }
                         let stored = if let Some(keep) = &job.keep {
-                            server.sync.put_keep(keep.token, &ciphertext)
+                            keep.token.put(server, &ciphertext)
                         } else {
                             server.sync.put_blob(&ciphertext).map(|_| ())
                         };
@@ -1639,7 +1997,8 @@ impl FileTransfers {
                 // A second provider cannot repair the exact authenticated ciphertext/key pair.
                 job.rejected_variants.insert(reference.encode());
                 if let Some(candidates) = job.candidates.as_mut() {
-                    candidates.retain(|(r, _)| r.encode() != reference.encode());
+                    candidates
+                        .retain(|candidate| candidate.reference().encode() != reference.encode());
                 }
             }
             // An empty answer is an *answer*: this provider does not hold the blob, or refused
@@ -1650,6 +2009,24 @@ impl FileTransfers {
             // for. Everything else reaching here (a bad signature, a content-address mismatch, a
             // membership change) is a verdict on the bytes rather than on the wire.
             Err(error) => {
+                if let Some(choice) = bridge_choice {
+                    if job.retryable && job.bridge_retries < 3 {
+                        job.bridge_retries += 1;
+                        job.candidates
+                            .as_mut()
+                            .unwrap()
+                            .push_front(ReadCandidate::Bridge(reference, choice));
+                        job.error = error;
+                        drop(_accounting);
+                        self.delay_local(server, job, ROUND_BACKOFF_MS);
+                        return;
+                    }
+                    if job.retryable {
+                        if let Some(catalog) = job.bridge.as_mut() {
+                            server.sync.file_bridge_unavailable(catalog, &choice);
+                        }
+                    }
+                }
                 tracing::debug!(
                     cid = ?job.cid,
                     chunk = job.index,

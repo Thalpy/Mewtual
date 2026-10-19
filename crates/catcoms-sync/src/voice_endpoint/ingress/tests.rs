@@ -64,6 +64,34 @@ async fn locked_endpoint_housekeeping_releases_expired_public_cache_after_actual
         Some(clock.monotonic_ms() + 1000)
     );
 }
+
+#[tokio::test]
+async fn public_receipt_waits_for_all_original_watchers_without_spinning_on_the_first_retired_one()
+{
+    use futures::FutureExt;
+    let (sender, mut receiver, _runtime, _clock) = fixture().await;
+    let first_parent = CallLease::default();
+    let second_parent = CallLease::default();
+    let first = receiver.start_voice_watch(1, first_parent.clone()).unwrap();
+    let _second = receiver
+        .start_voice_watch(1, second_parent.clone())
+        .unwrap();
+    let receipt = admit(&mut receiver, announcement(&sender, first.scope()));
+    let mut waiting = Box::pin(receipt.revoked());
+    assert!(waiting.as_mut().now_or_never().is_none());
+    first_parent.revoke();
+    assert!(
+        receipt.authorized(),
+        "the second original watcher still admitted this packet"
+    );
+    assert!(waiting.as_mut().now_or_never().is_none());
+    // A second poll must stay Pending as well, rather than repeatedly selecting the same
+    // already-revoked watcher while another original target remains live.
+    assert!(waiting.as_mut().now_or_never().is_none());
+    second_parent.revoke();
+    assert!(waiting.as_mut().now_or_never().is_some());
+    assert!(!receipt.authorized());
+}
 fn announcement(sender: &Node, scope: Scope) -> Envelope {
     let key = JoinKey::new([9; 32], hex::decode("046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5").unwrap().try_into().unwrap()).unwrap();
     Envelope::Direct(

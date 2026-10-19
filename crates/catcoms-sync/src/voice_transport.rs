@@ -5,11 +5,13 @@ use super::*;
 use voice_v2::helper::BoundRoute;
 use voice_v2::{Disposition, Envelope, VoiceError, MAX_ENVELOPE};
 mod forwarding;
+mod reply;
 pub(super) use forwarding::RouteOwners;
 pub use forwarding::{
     CompletedVoiceForward, CompletedVoiceSource, PendingVoiceForward, PendingVoiceSource,
     VoiceCompletionFailure,
 };
+use reply::{Receipt, VoiceTransportReply};
 
 const KIND: u8 = KIND_VOICE_TRANSPORT;
 const OUTER_OVERHEAD: usize = 145;
@@ -314,9 +316,45 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// wire handler. Unknown/unbound Noise endpoints refuse before verification. Endpoint ingress
     /// remains Refused until an exact native Watcher/LocalJoin queue is installed; helper retention
     /// is typed admission only and never establishes endpoint delivery, liveness or media.
-    pub fn receive_voice_transport(&mut self, from: PeerId, frame: &[u8]) -> Option<Vec<u8>> {
+    #[cfg(test)]
+    pub(crate) fn receive_voice_transport(
+        &mut self,
+        from: PeerId,
+        frame: &[u8],
+    ) -> Option<VoiceTransportReply> {
+        self.prepare_voice_transport_reply(from, frame, None)
+    }
+
+    /// Trusted dispatch seam. Normal kind28 dispatch remains disabled. Bind the prepared ACK
+    /// to this exact request's responder; no caller can detach response bytes or substitute a
+    /// later responder. Driver ingress and original application/packet gates remain distinct.
+    pub fn handle_voice_transport_request(
+        &mut self,
+        from: PeerId,
+        frame: &[u8],
+        responder: catcoms_rt::Responder,
+    ) {
+        let original = responder.cancellation_authority();
+        if let Some(reply) = self.prepare_voice_transport_reply(from, frame, Some(original)) {
+            let _ = reply.respond(responder);
+        }
+    }
+
+    fn prepare_voice_transport_reply(
+        &mut self,
+        from: PeerId,
+        frame: &[u8],
+        original_request: Option<Arc<dyn catcoms_rt::RequestAuthority>>,
+    ) -> Option<VoiceTransportReply> {
+        if original_request
+            .as_ref()
+            .is_some_and(|original| !original.authorized())
+        {
+            return None;
+        }
         let outer = Outer::parse(frame).ok()?;
-        let requester = self.voice_bound_route(from)?.device;
+        let route = self.voice_bound_route(from)?;
+        let requester = route.device;
         self.reconcile_voice_actor();
         if DeviceId::from_public_key_bytes(outer.key) != requester
             || self.group.member_signature_key(&requester).as_deref() != Some(outer.key.as_slice())
@@ -332,9 +370,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .ok()?
             .admit_transport_verification(requester, outer.inner)
             .ok()?;
+        let ticket = match original_request {
+            Some(original) => ticket.bind_request(original).ok()?,
+            None => ticket, // Unit intake oracle, never the production request handler.
+        };
         // Helper admission consumes the affine credential; this independent actual-work owner
         // retains its one credit through the response signature without cloning admission.
-        let _verification_work = ticket.actual_work();
+        let verification_work = ticket.actual_work();
+        let verification_authority = ticket.reply_authority();
+        // Capacity and exact route ownership precede persistent packet/origin admission.
+        // The route observes normal epoch changes too, which EffectAuthority alone does not.
+        let reply_route = self
+            .capture_voice_reply_route(route, verification_work.clone())
+            .ok()?;
         let transcript = catchup_auth_transcript(
             &self.group.group_id(),
             KIND,
@@ -354,7 +402,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         ticket
             .check(self.voice_transport_actor().ok()?, outer.inner)
             .ok()?;
-        let mut endpoint = None;
+        let mut receipt = None;
         let (status, object_hash) = match Envelope::decode(outer.inner) {
             Err(_) => (Status::Refused, [0; 32]),
             Ok(envelope) => {
@@ -369,18 +417,22 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     match disposition {
                         Disposition::Forward(_) => {
                             let actor = self.voice_transport_actor()?;
-                            actor.helper()?.admit_verified(
+                            let admitted = actor.helper()?.admit_verified(
                                 actor, ticket, envelope, &context, &room, &routes,
                             )?;
+                            if !admitted.authorized() {
+                                return Err(VoiceError::Unauthorized);
+                            }
+                            receipt = Some(Receipt::Helper(admitted));
                             Ok(Status::HelperQueued)
                         }
                         Disposition::Deliver => {
-                            let receipt =
+                            let admitted =
                                 self.admit_voice_endpoint_public(ticket, envelope, &context, room)?;
-                            if receipt.object_hash() != hash || !receipt.authorized() {
+                            if admitted.object_hash() != hash || !admitted.authorized() {
                                 return Err(VoiceError::Unauthorized);
                             }
-                            endpoint = Some(receipt);
+                            receipt = Some(Receipt::Endpoint(admitted));
                             Ok(Status::EndpointAdmitted)
                         }
                     }
@@ -392,12 +444,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // A retained helper admission is not a final-recipient receipt. Even an authenticated
         // HelperQueued response leaves the source's final edge pending for alternate routes.
         self.voice_transport_actor().ok()?.helper().ok()?;
-        if endpoint
-            .as_ref()
-            .is_some_and(|receipt| !receipt.authorized())
-        {
-            return None;
-        }
         let body = answer_body(status, object_hash, outer.inner);
         let transcript = response_transcript(
             &self.group.group_id(),
@@ -409,17 +455,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         );
         let signature = self.device.sign(&transcript).ok()?;
         self.voice_transport_actor().ok()?.helper().ok()?;
-        if endpoint
-            .as_ref()
-            .is_some_and(|receipt| !receipt.authorized())
-        {
-            return None;
-        }
-        Some(encode_signed_commit_resp(
-            &self.device.public_key_bytes(),
-            &signature,
-            &body,
-        ))
+        VoiceTransportReply::new(
+            encode_signed_commit_resp(&self.device.public_key_bytes(), &signature, &body),
+            verification_authority,
+            reply_route,
+            receipt,
+            verification_work,
+        )
     }
 }
 

@@ -1,6 +1,30 @@
 # Mewtual; Architecture
 
-## Native MLS source catalog (19 October, requester not connected)
+## V2 action input retirement (19 October, transport disabled)
+
+Typed crypto actions split fixed history capacity from owned variable input capacity without
+changing the total pool charge. Native input readers hold an opaque Arc-backed lease. Under the
+original engine fence, exact receipt acknowledgement and actual settlement can remove the
+action's input reference; actual readers retain their buffers and credit through last drop.
+Engine-to-input is the sole nested lock order, and buffer/credit destruction runs outside both
+locks. The fixed action/history row remains through the join; this does not free protective IDs,
+complete the engine-to-RTC phase transfer or account for Tauri/browser serialization.
+
+## Private durable Download ownership (19 October, implementation in progress)
+
+`BlobStore` optionally exposes the native `DownloadStore` interface. `ProtectedBlobs` forwards
+that capability to the same encrypted retained engine; cache-only stores refuse it. Immutable
+Keep(CID) and Download(random saved ID) owners share reservations and persistence machinery,
+but have distinct paths, run tokens, public-serving eligibility and cleanup. The actor's
+`SavedRun` dispatch preserves purpose through each local/network/fallback/terminal effect.
+Native Save acquires/reverifies the whole encrypted copy before plaintext export. `DownloadReady`
+observes the ORIGINAL actor generation, Root and mounted storage generations. Native account/
+registry-row custody stays separate. Four whole-export slots follow queued plaintext replies and
+remain distinct from eight process-wide acquisition jobs/attempts. Renderer metadata exposes no
+saved manifests, keys, external destination authority or resource grants. Resume is explicit;
+there is no startup plaintext publication or persisted external path. See design-file-reliability.
+
+## Native MLS source catalog and explicit requester (19 October)
 
 `ServerGroup::member_count` now retains a fixed native observation of its committed epoch:
 member count, last occupied leaf and whether both copied OpenMLS key vectors have the supported
@@ -16,12 +40,22 @@ then checks the borrowed credential against4KiB. Empty incomplete pages mean yie
 Catalogs expose public tree metadata on inactive groups too; they grant no active membership,
 Root, native session, file intent, connection or execution authority.
 
-The app's still-test-only `file_bridge_search` now uses these continuing pages, with independent
+The sync owner's native requester search uses these continuing pages, with independent
 positions for at most four helpers by four exact encrypted variants. A nonempty proposed page
 stays unconsumed across local pre-admission refusal. Helper replacement cannot reset its cursor;
 empty pages advance one bounded local turn. There is no permanent320/512-member source cutoff.
-Actual requester/Keep dispatch and its original durable work allowance remain unimplemented;
-these primitives alone do not establish an indirect download or exhaustive search before expiry.
+The app's explicit native chunk/range and Keep reads now fall back to this search after direct
+providers. The captured native invocation and Root file authority remain mandatory. Root prepares
+an exact signed kind29 grant and reserves route custody before the actor's durable Keep debit;
+only subsequent commitment consumes that proposal. A helper forwards kind30 to at most four
+named sources, without gaining file keys or retaining their ciphertext. Each bridge page stays
+at64KiB and has its original12-second Root deadline, independently of B/A's service clocks.
+Signed Unavailable observations schedule at most two later helper/variant sweeps after fresh
+coverage. Ambiguous transport failures retry the same batch with fresh nonces and paid work.
+Stable-helper local pacing is a scheduling hint, not a guarantee about remote arrival rates.
+Finite read and Keep allowance can expire before complete coverage; this never proves absence.
+Four focused TCP/native end-to-end file scenarios pass; full programme and physical network
+acceptance remain separate.
 
 ## Connected file source checkpoint (19 October)
 
@@ -32,8 +66,8 @@ checks and signing stay on Root; only an affine bounded storage plan enters the 
 executor. The source credit follows worker, pending metadata and actual response independently.
 File completions rotate as a fourth input in the existing owner selector. Final Present effects
 recheck captured scope, storage generation and the original two-second read deadline, excluding
-the reply wait that retires before a driver send. This source slice is separate from unfinished
-requester integration and complete indirect Keep acceptance. Helper29 now uses the same retained
+the reply wait that retires before a driver send. Source tests alone do not establish complete
+indirect Keep acceptance. Helper29 uses the same retained
 queue for one-hop source requests: its affine chain prepays all four lower attempts and five
 route records before admission. Original lower bytes, output bytes and actual driver sends own
 the same charge independently, including final-refusal paths. The selected A scope survives
@@ -120,7 +154,10 @@ keepalive ownership still survives waiter cancellation. V2 time advances with lo
 elapsed time as well as forward wall observations, so rollback cannot outlive pruned protection.
 Helper flights share four group/eight process slots and the same declared-byte pool.
 An inert kind28 admission seam now enforces bound Noise identity, pre-signature work/byte budgets,
-exact frame tickets and role-bound typed ACKs. Detached source/helper requests capture actual driver
+exact frame tickets and role-bound typed ACKs. Prepared replies now retain original verification,
+first packet-admission and route custody through the driver's actual serialization/send. A cached
+helper packet cannot adopt replacement actor/room authority or a later longer permit to issue a
+positive ACK; protective identity and spend remain retained. Detached source/helper requests capture actual driver
 connection generations plus Root descriptor/proof/epoch owners, and retain lower flight custody.
 Source attempts preserve exact native cached packets/pairs/actions and share the helper flight
 pool, with separate typed settlement. Normal request dispatch, production source retry scheduling

@@ -8,6 +8,7 @@ use voice_v2::{CallGrant, CallLease, JoinKey, Scope, VoiceError, WatchLease};
 
 const WATCHES: usize = 8;
 mod ingress;
+pub(crate) use ingress::PublicReceipt;
 
 /// Affine native reply custody for one observer. The Root holds no strong reference to this
 /// grant: losing its reply/last native owner closes observation even if the stop command is lost.

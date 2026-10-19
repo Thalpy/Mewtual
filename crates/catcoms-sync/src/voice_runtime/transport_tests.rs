@@ -57,7 +57,7 @@ async fn voice_transport_root_requires_bound_noise_identity_and_keeps_helper_ack
     assert_eq!(source.verify_voice_transport_response(helper.local_peer(), &frame, object.hash(), &false_endpoint), Err(VoiceError::Unauthorized), "B's valid signature cannot claim C's admission");
     let helper_ledger = helper.voice_transport_actor().unwrap().helper().unwrap();
     assert_eq!(helper_ledger.counts(), (1, 1, 0), "target edge is retained without a route or a dial");
-    let mut corrupted = answer.clone(); let last = corrupted.len() - 1; corrupted[last] ^= 1;
+    let mut corrupted = answer.to_vec(); let last = corrupted.len() - 1; corrupted[last] ^= 1;
     assert!(source.verify_voice_transport_response(helper.local_peer(), &frame, object.hash(), &corrupted).is_err());
     let changed_request = voice_frame(&mut source, &envelope);
     assert_eq!(source.verify_voice_transport_response(helper.local_peer(), &changed_request, object.hash(), &answer), Err(VoiceError::Signature), "ACK is bound to the exact request nonce");
@@ -112,7 +112,197 @@ struct VoiceForwardFixture {
     recipient: VoiceTestNode,
     helper_runtime: Arc<Runtime>,
     clock: Arc<ManualClock>,
+    reply_clock: Arc<ReplySampleClock>,
     _endpoints: Vec<Arc<Runtime>>,
+}
+/// One-shot synchronous retirement at a native Clock seam. No wall time or sleeping is used
+/// to place these driver-currency races; the callback owns only observing/test-native handles.
+type ClockRetirement = (usize, Box<dyn FnOnce() + Send>);
+struct ReplySampleClock {
+    inner: Arc<ManualClock>,
+    on_mono: std::sync::Mutex<Option<ClockRetirement>>,
+}
+impl std::fmt::Debug for ReplySampleClock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("ReplySampleClock { .. }") }
+}
+impl catcoms_rt::Clock for ReplySampleClock {
+    fn now_ms(&self) -> u64 { self.inner.now_ms() }
+    fn monotonic_ms(&self) -> u64 {
+        let callback = {
+            let mut armed = self.on_mono.lock().unwrap();
+            match armed.as_mut() {
+                Some((skip, _)) if *skip > 0 => { *skip -= 1; None },
+                Some(_) => armed.take().map(|(_, action)| action),
+                None => None,
+            }
+        };
+        if let Some(callback) = callback { callback(); }
+        self.inner.monotonic_ms()
+    }
+    fn sleep(&self, duration: std::time::Duration) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        self.inner.sleep(duration)
+    }
+}
+fn incoming_helper_frame(f: &mut VoiceForwardFixture, message: u8) -> Vec<u8> {
+    let object = voice_v2::SignedObject::issue(f._source.voice_v2_context(1).unwrap().scope,
+        &f._source.device, [message; 32], 1000, 16_000,
+        voice_v2::Body::WatchChallenge { watcher: [1; 32], target: f.recipient.device_id(),
+            join: [2; 32], key_ref: [3; 32], challenge: [4; 32] }).unwrap();
+    let permit = voice_v2::RoutePermit::issue(&f._source.device, &object, f.helper.device_id(), 1000, 16_000).unwrap();
+    voice_frame(&mut f._source, &voice_v2::Envelope::ToHelper { object, permit })
+}
+
+#[tokio::test]
+async fn voice_transport_prepared_ack_keeps_verification_through_driver_and_last_byte_owner() {
+    let mut f = VoiceForwardFixture::empty().await;
+    let frame = incoming_helper_frame(&mut f, 150);
+    let pool = f.helper_runtime.resources();
+    let before = pool.counts().1;
+    let reply = f.helper.receive_voice_transport(f._source.local_peer(), &frame).unwrap();
+    assert_eq!(pool.counts().1, before + 1);
+    let (responder, receiver) = catcoms_rt::Responder::channel();
+    reply.respond(responder).unwrap();
+    let response = receiver.recv_owned().await.unwrap();
+    assert!(response.is_current());
+    let bytes = response.data().clone();
+    // Model the actual driver's separate serialized-buffer custody. Byte and lower-send
+    // holders are independent; dropping either one cannot refund the other.
+    let lower = response.keepalive().unwrap();
+    drop(response);
+    f.clock.advance_ms(60_001);
+    f.helper_runtime.collect_expired();
+    assert_eq!(pool.counts().1, before + 1, "expiry suppresses effects without refunding live bytes");
+    drop(lower);
+    assert_eq!(pool.counts().1, before + 1, "the byte clone still owns verification custody");
+    drop(bytes);
+    assert_eq!(pool.counts().1, before);
+}
+
+#[tokio::test]
+async fn voice_transport_driver_time_sample_precedes_all_negative_and_positive_reply_owner_checks() {
+    for positive in [false, true] {
+        let mut f = VoiceForwardFixture::empty().await;
+        let frame = if positive {
+            incoming_helper_frame(&mut f, 156)
+        } else {
+            let object = voice_v2::SignedObject::issue(f._source.voice_v2_context(1).unwrap().scope,
+                &f._source.device, [157; 32], 1000, 16_000,
+                voice_v2::Body::WatchChallenge { watcher: [1; 32], target: f.helper.device_id(),
+                    join: [2; 32], key_ref: [3; 32], challenge: [4; 32] }).unwrap();
+            voice_frame(&mut f._source, &voice_v2::Envelope::Direct(object))
+        };
+        let reply = f.helper.receive_voice_transport(f._source.local_peer(), &frame).unwrap();
+        let (responder, receiver) = catcoms_rt::Responder::channel();
+        reply.respond(responder).unwrap();
+        let response = receiver.recv_owned().await.unwrap();
+        assert!(response.is_current());
+        let before = f.helper_runtime.resources().counts();
+        if positive {
+            let hub = f._hub.clone();
+            let peer = f._source.local_peer();
+            // Old composition checked the route, then sampled another Clock for its packet
+            // receipt. Retiring that route on the second sample escaped those earlier checks.
+            *f.reply_clock.on_mono.lock().unwrap() = Some((1, Box::new(move || { drop(hub.join(peer)); })));
+        } else {
+            let runtime = Arc::downgrade(&f.helper_runtime);
+            // A Refused reply has no positive receipt to incidentally recheck the session.
+            *f.reply_clock.on_mono.lock().unwrap() = Some((0, Box::new(move || { runtime.upgrade().unwrap().revoke_session(); })));
+        }
+        assert!(!response.is_current(), "positive={positive}");
+        assert_eq!(f.helper_runtime.resources().counts(), before, "retirement does not refund held response bytes");
+        drop(response);
+        assert_eq!(f.helper_runtime.resources().counts().1, 0);
+    }
+}
+
+#[tokio::test]
+async fn voice_transport_reply_route_capacity_refuses_before_original_packet_admission() {
+    let mut f = VoiceForwardFixture::empty().await;
+    let frame = incoming_helper_frame(&mut f, 155);
+    let route = f.helper.voice_bound_routes().into_iter().find(|route| route.device == f._source.device_id()).unwrap();
+    // Fill only the small route-registry boundary. These trusted unit-fixture owners do not
+    // claim to model64 simultaneous real Crypto operations or bypass their separate limits.
+    let held: Vec<_> = (0..64).map(|_| f.helper.capture_voice_reply_route(route, Arc::new(())).unwrap()).collect();
+    assert!(f.helper.receive_voice_transport(f._source.local_peer(), &frame).is_none());
+    assert_eq!(f.helper.voice_transport_actor().unwrap().helper().unwrap().counts(), (0,0,0));
+    assert_eq!(f.helper_runtime.resources().counts().1, 0);
+    drop(held);
+    let reply = f.helper.receive_voice_transport(f._source.local_peer(), &frame).unwrap();
+    assert_eq!(f.helper.voice_transport_actor().unwrap().helper().unwrap().counts(), (1,1,0));
+    drop(reply);
+    assert_eq!(f.helper_runtime.resources().counts().1, 0);
+}
+
+#[tokio::test]
+async fn voice_transport_old_held_ingress_cannot_capture_new_connection_and_admit_helper_work() {
+    use futures::FutureExt;
+    let mut f = VoiceForwardFixture::empty().await;
+    let (_watcher, _object, _activity) = queued_source_watch(&mut f, voice_v2::CallLease::default());
+    let pending = f._source.prepare_voice_sources().unwrap().pop().unwrap();
+    let (_publisher, signal) = tokio::sync::watch::channel(false);
+    let mut flight = Box::pin(pending.execute(signal));
+    assert!(flight.as_mut().now_or_never().is_none());
+    let (from, data, responder) = loop {
+        if let Some(TransportEvent::Request { from, data, responder, .. }) = f.helper.transport.next_event().await {
+            break (from, data, responder);
+        }
+    };
+    assert!(responder.is_current());
+    let replacement = f._hub.join(f._source.local_peer());
+    // Mem's canceled request drops its original response receiver on this poll. Production
+    // ingress additionally observes the actual driver connection directly, before event drain.
+    drop(flight.as_mut().now_or_never().expect("original driver connection retired"));
+    assert!(!responder.is_current());
+    f.helper.handle_voice_transport_request(from, &data, responder);
+    assert_eq!(f.helper.voice_transport_actor().unwrap().helper().unwrap().counts(), (0,0,0));
+    assert_eq!(f.helper_runtime.resources().counts().1, 0);
+    let fresh = incoming_helper_frame(&mut f, 158);
+    assert!(f.helper.receive_voice_transport(from, &fresh).is_some(), "fresh ingress on the replacement connection remains eligible");
+    drop(replacement);
+}
+
+#[tokio::test]
+async fn voice_transport_prepared_ack_refuses_original_route_and_request_deadline_replacement() {
+    for scenario in 0..5 {
+        let mut f = VoiceForwardFixture::empty().await;
+        let frame = incoming_helper_frame(&mut f, 151);
+        let reply = f.helper.receive_voice_transport(f._source.local_peer(), &frame).unwrap();
+        let mut replacement = None;
+        match scenario {
+            0 => { replacement = Some(f._hub.join(f._source.local_peer())); } // Driver closes before Root sees events.
+            1 => { f._source.publish_self_record(Vec::new(), 131_073).unwrap(); f.helper.ingest_peer_record(f._source.self_record().unwrap().clone()); }
+            2 => { f.helper.demote_member_peer(f._source.local_peer()); f.helper.promote_member_peer_bound(f._source.local_peer(), f._source.device_id(), true); }
+            3 => { f.clock.advance_ms(5_000); }
+            _ => { f.helper_runtime.revoke_session(); }
+        }
+        let (responder, receiver) = catcoms_rt::Responder::channel();
+        assert!(matches!(reply.respond(responder), Err(catcoms_rt::TransportError::Cancelled)), "scenario {scenario}");
+        assert!(receiver.recv_owned().await.is_none());
+        assert_eq!(f.helper_runtime.resources().counts().1, 0);
+        drop(replacement);
+    }
+}
+
+#[tokio::test]
+async fn voice_transport_queued_ack_epoch_change_retires_even_when_all_existing_members_survive() {
+    let mut f = VoiceForwardFixture::empty().await;
+    let frame = incoming_helper_frame(&mut f, 152);
+    let reply = f.helper.receive_voice_transport(f._source.local_peer(), &frame).unwrap();
+    let (responder, receiver) = catcoms_rt::Responder::channel();
+    reply.respond(responder).unwrap();
+    let response = receiver.recv_owned().await.unwrap();
+    assert!(response.is_current());
+    let original_epoch = f.helper.group.epoch();
+    let joiner = MlsDevice::generate().unwrap();
+    let key_package = joiner.key_package().unwrap();
+    f.helper.with_observed_mls_transition(|node| node.group.add_member(&node.device, key_package)).unwrap();
+    assert!(f.helper.group.epoch() > original_epoch);
+    assert!(f.helper.group.contains_device(&f._source.device_id()));
+    assert!(f.helper.group.contains_device(&f.recipient.device_id()));
+    assert!(!response.is_current(), "the driver must reject an old-epoch ACK before the next actor await");
+    assert_eq!(f.helper_runtime.resources().counts().1, 1, "retired response still owns its credit");
+    drop(response);
+    assert_eq!(f.helper_runtime.resources().counts().1, 0);
 }
 impl VoiceForwardFixture {
     async fn new() -> Self {
@@ -131,7 +321,8 @@ impl VoiceForwardFixture {
         let mut nodes = nodes.into_iter();
         let mut source = nodes.next().unwrap(); let mut helper = nodes.next().unwrap(); let mut recipient = nodes.next().unwrap();
         let clock = Arc::new(ManualClock::new(1000));
-        let helper_runtime = Runtime::new(clock.clone());
+        let reply_clock = Arc::new(ReplySampleClock { inner: clock.clone(), on_mono: std::sync::Mutex::new(None) });
+        let helper_runtime = Runtime::new(reply_clock.clone());
         let endpoints = vec![Runtime::new(clock.clone()), Runtime::new(clock.clone())];
         attach(&mut source, &endpoints[0]); attach(&mut helper, &helper_runtime); attach(&mut recipient, &endpoints[1]);
         let (ok, served) = tokio::join!(source.finalize_member_connection(helper.local_peer()), helper.run_once()); assert!(ok.unwrap() && served.unwrap());
@@ -143,7 +334,7 @@ impl VoiceForwardFixture {
         let frame = voice_frame(&mut source, &voice_v2::Envelope::ToHelper { object, permit });
         assert!(helper.receive_voice_transport(source.local_peer(), &frame).is_some());
         }
-        Self { _hub: hub, _source: source, helper, recipient, helper_runtime, clock, _endpoints: endpoints }
+        Self { _hub: hub, _source: source, helper, recipient, helper_runtime, clock, reply_clock, _endpoints: endpoints }
     }
     async fn reply(&mut self, status: u8) -> crate::CompletedVoiceForward {
         let pending = self.helper.prepare_voice_forwards().unwrap().pop().unwrap();
@@ -374,9 +565,12 @@ async fn voice_transport_source_helper_ack_and_direct_upgrade_preserve_original_
                     let envelope = voice_v2::Envelope::decode(&inner).unwrap();
                     assert!(matches!(envelope, voice_v2::Envelope::ToHelper { .. }));
                     assert_eq!(envelope.object(), &original, "the sole native source keeps original signed bytes");
-                    let answer = if status == 2 { f.helper.receive_voice_transport(from, &data).unwrap() }
-                        else { voice_answer(&f.helper, from, &data, original.hash(), status) };
-                    responder.respond(Bytes::from(answer)); break;
+                    if status == 2 {
+                        f.helper.handle_voice_transport_request(from, &data, responder);
+                    } else {
+                        responder.respond(Bytes::from(voice_answer(&f.helper, from, &data, original.hash(), status)));
+                    }
+                    break;
                 }
             }
         });
@@ -457,7 +651,7 @@ async fn root_prepares_and_submits_prepaid_sdp_with_the_ordinary_pool_full() {
                 let (inner, ..) = decode_authed_request(&data[1..]).unwrap();
                 let envelope = voice_v2::Envelope::decode(&inner).unwrap();
                 assert_eq!(envelope.object(), &object);
-                responder.respond(Bytes::from(f.helper.receive_voice_transport(from, &data).unwrap()));
+                f.helper.handle_voice_transport_request(from, &data, responder);
                 break;
             }
         }
@@ -576,7 +770,7 @@ async fn serve_public_voice(node: &mut VoiceTestNode) {
     loop {
         if let Some(TransportEvent::Request { from, data, responder, .. }) = node.transport.next_event().await {
             assert_eq!(data[0], KIND_VOICE_TRANSPORT);
-            responder.respond(Bytes::from(node.receive_voice_transport(from, &data).unwrap()));
+            node.handle_voice_transport_request(from, &data, responder);
             return;
         }
     }

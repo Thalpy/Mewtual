@@ -25,11 +25,26 @@ pub(crate) struct Choice {
     ticket: u64,
     owner: Arc<()>,
 }
+impl Choice {
+    /// A cloned observation may propose the same batch, but cannot become a later generation.
+    pub(super) fn same_as(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.owner, &other.owner)
+            && self.ticket == other.ticket
+            && self.variant == other.variant
+            && self.helper == other.helper
+            && self.sources.len() == other.sources.len()
+            && self.sources.iter().zip(&other.sources).all(|(a, b)| {
+                a.device_id() == b.device_id() && a.signature_key() == b.signature_key()
+            })
+    }
+}
 struct Progress {
     variant: [u8; 32],
     helper: DeviceId,
     cursor: MemberCatalogCursor,
     complete: bool,
+    retry: bool,
+    passes: u8,
 }
 struct Proposal {
     choice: Choice,
@@ -45,6 +60,7 @@ struct Proposal {
 pub(crate) enum Step {
     Ready(Choice),
     Yield,
+    Backoff,
     Exhausted,
 }
 pub(crate) struct Search {
@@ -161,6 +177,8 @@ impl Search {
                     helper: device,
                     cursor: self.view.start(),
                     complete: false,
+                    retry: false,
+                    passes: 0,
                 });
                 self.progress.len() - 1
             };
@@ -195,7 +213,30 @@ impl Search {
             });
             return Ok(Step::Ready(choice));
         }
-        Ok(Step::Exhausted)
+        // A signed Unavailable can mean temporary pressure rather than missing data. Revisit
+        // affected helper/variant pairs only AFTER fresh coverage, never once per offline batch.
+        // Sixteen flags and two additional passes are bounded by the same read/Keep allowance.
+        let mut retry = false;
+        for progress in &mut self.progress {
+            if progress.complete
+                && progress.retry
+                && progress.passes < 2
+                && variants.contains(&progress.variant)
+                && !self.unsupported.contains(&progress.helper)
+                && helpers.iter().any(|h| h.device == progress.helper)
+            {
+                progress.cursor = self.view.start();
+                progress.complete = false;
+                progress.retry = false;
+                progress.passes += 1;
+                retry = true;
+            }
+        }
+        Ok(if retry {
+            Step::Backoff
+        } else {
+            Step::Exhausted
+        })
     }
 
     /// Commit only the exact admitted proposal. The caller must retain any known-unstarted lower
@@ -219,6 +260,62 @@ impl Search {
         progress.cursor = proposal.next;
         progress.complete = proposal.complete;
         true
+    }
+
+    /// Root has checked its exact currently selected choice, including admitted retries. Mint
+    /// a new generation only when the helper route changes, preserving sources and progress.
+    pub(super) fn refresh(
+        &mut self,
+        choice: &Choice,
+        helper: Helper,
+    ) -> Result<Choice, MemberCatalogError> {
+        if !Arc::ptr_eq(&self.owner, &choice.owner)
+            || choice.helper.device != helper.device
+            || self.unsupported.contains(&helper.device)
+            || self
+                .pending
+                .as_ref()
+                .is_some_and(|p| !p.choice.same_as(choice))
+        {
+            return Err(MemberCatalogError::Inconsistent);
+        }
+        let mut refreshed = choice.clone();
+        if choice.helper != helper {
+            self.ticket = self
+                .ticket
+                .checked_add(1)
+                .ok_or(MemberCatalogError::Inconsistent)?;
+            refreshed.ticket = self.ticket;
+            refreshed.helper = helper;
+            if let Some(pending) = self.pending.as_mut() {
+                pending.choice = refreshed.clone();
+            }
+        }
+        Ok(refreshed)
+    }
+
+    pub(super) fn retry_batch(&mut self, choice: &Choice) {
+        if Arc::ptr_eq(&self.owner, &choice.owner) {
+            if let Some(progress) = self
+                .progress
+                .iter_mut()
+                .find(|p| p.variant == choice.variant && p.helper == choice.helper.device)
+            {
+                progress.retry = true;
+            }
+        }
+    }
+
+    /// Relinquish an unstarted selection without advancing its source cursor. Reintroducing
+    /// that variant must mint a fresh ticket, even if bootstrap yields before the next search.
+    pub(super) fn retire_pending(&mut self, choice: &Choice) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.choice.same_as(choice))
+        {
+            self.pending = None;
+        }
     }
 
     /// An old peer's empty new-kind response disables this helper for this read. It never enables

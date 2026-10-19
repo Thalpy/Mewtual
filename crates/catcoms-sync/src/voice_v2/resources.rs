@@ -72,6 +72,10 @@ pub struct Credit {
     lane: Option<LaneBorrow>,
     // Optional native phase/count owner. Its guard retires only with the actual byte credit.
     custody: Option<catcoms_rt::SharedRequestKeepalive>,
+    // A native preparation may partition one retained input from its fixed metadata exactly
+    // once. This is not a general allocator: tiny repeated partitions could multiply otherwise
+    // uncharged owner/control-block metadata even while their byte sum remained bounded.
+    partitioned: bool,
 }
 
 /// One prepaid exclusive Crypto/Forward slot for a bounded progress workflow. This is capacity only,
@@ -283,6 +287,7 @@ impl Resources {
             reservation: None,
             lane: None,
             custody: None,
+            partitioned: false,
         })
     }
 
@@ -418,11 +423,42 @@ impl Reservation {
             reservation: Some(self.clone()),
             lane: None,
             custody: None,
+            partitioned: false,
         })
     }
 }
 
 impl Credit {
+    /// Partition one retained action's already prepaid input bytes from its fixed metadata.
+    /// No new charge, refund, authority or slot is created. Both partitions retain any original
+    /// phase/count custody until its actual last owner drops; reserved portions return under
+    /// the same reserve→pool close protocol. Errors leave the original credit intact.
+    ///
+    /// Only one partition is allowed, on BOTH resulting owners. Crypto/Forward credits and
+    /// prepaid work-lane loans must never be split or refunded through this capacity seam.
+    pub(super) fn split_retained(&mut self, bytes: usize) -> Result<Credit, VoiceError> {
+        if self.kind != ResourceKind::Retained
+            || self.lane.is_some()
+            || self.partitioned
+            || bytes == 0
+            || bytes >= self.bytes
+        {
+            return Err(VoiceError::Bounds);
+        }
+        self.bytes -= bytes;
+        self.partitioned = true;
+        Ok(Credit {
+            pool: self.pool.clone(),
+            group: self.group,
+            bytes,
+            kind: ResourceKind::Retained,
+            reservation: self.reservation.clone(),
+            lane: None,
+            custody: self.custody.clone(),
+            partitioned: true,
+        })
+    }
+
     pub(crate) fn with_custody(mut self, custody: catcoms_rt::SharedRequestKeepalive) -> Self {
         assert!(self.custody.is_none(), "one native phase owner per credit");
         self.custody = Some(custody);
@@ -490,6 +526,106 @@ impl Drop for Credit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fixed_retained_partition_conserves_ordinary_charge_and_refuses_recursive_splitting() {
+        let pool = Arc::new(Resources::default());
+        for payload_first in [false, true] {
+            let mut metadata = pool.charge([1; 32], 4096, ResourceKind::Retained).unwrap();
+            for invalid in [0, 4096, usize::MAX] {
+                assert!(metadata.split_retained(invalid).is_err());
+                assert_eq!(pool.counts(), (4096, 0));
+            }
+            let mut payload = metadata.split_retained(2560).unwrap();
+            assert_eq!(pool.counts(), (4096, 0));
+            assert!(metadata.split_retained(1).is_err());
+            assert!(payload.split_retained(1).is_err());
+            if payload_first {
+                drop(payload);
+                assert_eq!(pool.counts(), (1536, 0));
+                drop(metadata);
+            } else {
+                drop(metadata);
+                assert_eq!(pool.counts(), (2560, 0));
+                drop(payload);
+            }
+            assert_eq!(pool.counts(), (0, 0));
+        }
+    }
+
+    #[test]
+    fn fixed_reserved_partition_returns_each_actual_part_across_concurrent_close() {
+        let pool = Arc::new(Resources::default());
+        let reserve = pool.reserve([2; 32], 8192).unwrap();
+        let mut metadata = reserve
+            .charge([2; 32], 4096, ResourceKind::Retained)
+            .unwrap();
+        let payload = metadata.split_retained(2560).unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                barrier.wait();
+                reserve.close();
+            });
+            barrier.wait();
+            drop(metadata);
+        });
+        assert_eq!(pool.counts(), (2560, 0));
+        drop(reserve);
+        assert_eq!(
+            pool.counts(),
+            (2560, 0),
+            "actual last partition owns the retired reserve"
+        );
+        drop(payload);
+        assert_eq!(pool.counts(), (0, 0));
+    }
+
+    #[test]
+    fn fixed_partition_retains_shared_phase_until_last_part_and_refuses_actual_work_slots() {
+        #[derive(Debug)]
+        struct Phase(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Phase {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let pool = Arc::new(Resources::default());
+        let retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut metadata = pool
+            .charge([3; 32], 4096, ResourceKind::Retained)
+            .unwrap()
+            .with_custody(Arc::new(Phase(retired.clone())));
+        let payload = metadata.split_retained(2560).unwrap();
+        drop(metadata);
+        assert!(!retired.load(std::sync::atomic::Ordering::Acquire));
+        drop(payload);
+        assert!(retired.load(std::sync::atomic::Ordering::Acquire));
+        for kind in [ResourceKind::Crypto, ResourceKind::Forward] {
+            let mut credit = pool.charge([3; 32], 4096, kind).unwrap();
+            let before = pool.counts();
+            assert!(credit.split_retained(2560).is_err());
+            assert_eq!(pool.counts(), before);
+        }
+        let reserve = pool.reserve([3; 32], 8192).unwrap();
+        let lane = pool.reserve_crypto_lane([3; 32]).unwrap();
+        let budget = ByteBudget::ReservedLane {
+            reservation: reserve.clone(),
+            lane: lane.clone(),
+        };
+        let mut actual = budget
+            .charge(&pool, [3; 32], 4096, ResourceKind::Crypto)
+            .unwrap();
+        let before = pool.counts();
+        assert!(
+            actual.split_retained(2560).is_err(),
+            "work-lane loan has Retained kind internally but still owns a real slot"
+        );
+        assert_eq!(pool.counts(), before);
+        reserve.close();
+        lane.close();
+        drop((actual, budget, reserve, lane));
+        assert_eq!(pool.counts(), (0, 0));
+    }
     #[test]
     fn prepaid_lane_serializes_actual_work_and_survives_retirement_without_double_slots() {
         let pool = Arc::new(Resources::default());

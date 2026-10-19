@@ -44,10 +44,10 @@ impl Variants {
             e.put_u8(u8::from(candidate.bad));
         }
     }
-    pub(super) fn decode(d: &mut Decoder<'_>) -> Result<Self, StorageError> {
+    pub(super) fn decode(d: &mut Decoder<'_>, minimum: usize) -> Result<Self, StorageError> {
         let malformed = |_| StorageError::Malformed;
         let count = d.get_u8().map_err(malformed)? as usize;
-        if !(2..=MAX_VARIANTS).contains(&count) {
+        if !(minimum..=MAX_VARIANTS).contains(&count) {
             return Err(StorageError::Malformed);
         }
         let selected = d.get_u8().map_err(malformed)? as usize;
@@ -89,11 +89,44 @@ impl Record {
         listing: [u8; 32],
         rng: &mut dyn CryptoRngCore,
     ) -> Result<Self, StorageError> {
-        if !(2..=MAX_VARIANTS).contains(&plans.len()) || selected >= plans.len() {
+        Self::initial_variant_body(scope, plans, selected, listing, rng, RecordEncoding::V4)
+    }
+
+    pub(in crate::kept) fn initial_download(
+        scope: KeepScope,
+        plans: Vec<KeepPlan>,
+        selected: usize,
+        listing: [u8; 32],
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<Self, StorageError> {
+        Self::initial_variant_body(
+            scope,
+            plans,
+            selected,
+            listing,
+            rng,
+            RecordEncoding::DownloadV1,
+        )
+    }
+
+    fn initial_variant_body(
+        scope: KeepScope,
+        plans: Vec<KeepPlan>,
+        selected: usize,
+        listing: [u8; 32],
+        rng: &mut dyn CryptoRngCore,
+        encoding: RecordEncoding,
+    ) -> Result<Self, StorageError> {
+        let minimum = if encoding == RecordEncoding::DownloadV1 {
+            1
+        } else {
+            2
+        };
+        if !(minimum..=MAX_VARIANTS).contains(&plans.len()) || selected >= plans.len() {
             return Err(StorageError::Malformed);
         }
         let mut record = Self::initial(scope, plans[selected].clone(), listing, rng)?;
-        record.encoding = RecordEncoding::V4;
+        record.encoding = encoding;
         record.variants = Some(Variants {
             candidates: plans
                 .into_iter()
@@ -111,7 +144,7 @@ impl Record {
         Ok(record)
     }
     pub(in crate::kept) fn slot_limit(&self) -> usize {
-        if self.encoding == RecordEncoding::V4 {
+        if self.encoding.has_variants() {
             VARIANT_RECORD_LIMIT
         } else {
             RECORD_LIMIT
@@ -166,14 +199,19 @@ impl Record {
     }
     pub(in crate::kept) fn validate_variants(&self) -> Result<(), StorageError> {
         let Some(v) = &self.variants else {
-            return if self.encoding == RecordEncoding::V4 {
+            return if self.encoding.has_variants() {
                 Err(StorageError::Malformed)
             } else {
                 Ok(())
             };
         };
-        if self.encoding != RecordEncoding::V4
-            || !(2..=MAX_VARIANTS).contains(&v.candidates.len())
+        let minimum = if self.encoding == RecordEncoding::DownloadV1 {
+            1
+        } else {
+            2
+        };
+        if !self.encoding.has_variants()
+            || !(minimum..=MAX_VARIANTS).contains(&v.candidates.len())
             || v.selected >= v.candidates.len()
             || v.committed.is_some_and(|i| i >= v.candidates.len())
         {

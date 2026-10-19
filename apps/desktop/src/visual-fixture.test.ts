@@ -85,6 +85,10 @@ test("visual fixture fails loudly for an unsupported native dependency", () => {
 });
 
 test("file fixture separates cached bytes from explicitly kept copies", () => {
+  assert.deepEqual(visualFixtureResponse("get_private_downloads"), []);
+  const health = visualFixtureResponse("get_storage_health") as { referenced_chunks: number; verified_chunks: number; categories: unknown[] };
+  assert.equal(health.verified_chunks, health.referenced_chunks);
+  assert.deepEqual(health.categories, []);
   assert.equal(visualFixtureResponse("file_available"), true);
   assert.deepEqual(visualFixtureResponse("get_kept_files"), {
     supported: true, allocated_bytes: 0, limit_bytes: 1073741824, files: [], transfers: [], error: null,

@@ -58,7 +58,7 @@ fn has_saved_bridge_endpoints(net: &ServerNet, expected: &[(PeerId, String); 2])
 /// Original admission already requests both allowed outgoing directions. Wait for the ordinary
 /// native worker to authenticate and seal them before destroying this bridge. Merely queueing
 /// those dials (or retaining only its founder route) cannot establish this restart precondition.
-async fn wait_for_saved_bridge_endpoints(scenario: &Scenario) -> [(PeerId, String); 2] {
+pub(super) async fn wait_for_saved_bridge_endpoints(scenario: &Scenario) -> [(PeerId, String); 2] {
     let expected = [1, 2].map(|target| {
         (
             scenario.rules.peers[target],
@@ -78,7 +78,7 @@ async fn wait_for_saved_bridge_endpoints(scenario: &Scenario) -> [(PeerId, Strin
         // Same bound as original native route capture; the reopened recovery bound stays intact.
         _ = SystemClock.sleep(Duration::from_secs(90)) => {
             let actual = bridge_diagnostic(scenario, 3).await;
-            panic!("replacement voice bridge lacks sealed original endpoint routes: {actual:?}");
+            panic!("replacement bridge lacks sealed original endpoint routes: {actual:?}");
         }
     }
     expected

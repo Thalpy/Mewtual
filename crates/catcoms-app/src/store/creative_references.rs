@@ -316,6 +316,12 @@ pub(super) struct ProtectedBlobs {
     pub(super) protection: SharedProtection,
 }
 impl BlobStore for ProtectedBlobs {
+    fn private_downloads(&self) -> Option<&dyn catcoms_storage::kept::DownloadStore> {
+        self.inner.private_downloads()
+    }
+    fn private_downloads_mut(&mut self) -> Option<&mut dyn catcoms_storage::kept::DownloadStore> {
+        self.inner.private_downloads_mut()
+    }
     fn configure_keep_scope(
         &mut self,
         scope: catcoms_storage::kept::KeepScope,

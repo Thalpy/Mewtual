@@ -10,6 +10,9 @@ use futures::FutureExt;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+mod receipt;
+use receipt::AdmissionAuthority;
+pub(crate) use receipt::HelperReceipt;
 
 const FANOUT: usize = 4;
 const ATTEMPTS: u8 = 3;
@@ -68,6 +71,7 @@ struct Packet {
     expires: u64,
     deadline: u64,
     edges: BTreeMap<DeviceId, Arc<Edge>>,
+    admission: Arc<AdmissionAuthority>,
     _credit: Credit,
 }
 struct Cursor {
@@ -159,6 +163,7 @@ impl HelperLedger {
             room,
             routes,
         )
+        .map(|receipt| receipt.info())
     }
     /// The transport path has already debited this exact immediate requester before crypto.
     /// Keep its affine frame admission through the whole helper transaction and never spend
@@ -171,7 +176,7 @@ impl HelperLedger {
         context: &Context,
         room: &RoomAuthority,
         routes: &[BoundRoute],
-    ) -> Result<Admission, VoiceError> {
+    ) -> Result<HelperReceipt, VoiceError> {
         self.admit_inner(
             actor,
             RequestWork::Admitted(ticket),
@@ -189,7 +194,7 @@ impl HelperLedger {
         context: &Context,
         room: &RoomAuthority,
         routes: &[BoundRoute],
-    ) -> Result<Admission, VoiceError> {
+    ) -> Result<HelperReceipt, VoiceError> {
         self.current(actor)?;
         if room.scope != context.scope || !room.lease.is_live() {
             return Err(VoiceError::Unauthorized);
@@ -223,10 +228,18 @@ impl HelperLedger {
             if packet.hash != hash {
                 return Err(VoiceError::RetryMismatch);
             }
-            return Ok(Admission {
-                cached: true,
-                edges: packet.edges.len(),
-            });
+            // A duplicate cannot adopt a new actor, recreated room or longer permit as the
+            // owner of old custody. In particular a zero-edge room packet needs this original
+            // admission gate even though it has no edge authority to inspect.
+            if !packet.admission.authorized() {
+                return Err(VoiceError::Unauthorized);
+            }
+            if let RequestWork::Admitted(ticket) = &work {
+                // Cached classification can wait behind this ledger lock too. Repeat the
+                // original request/deadline check after its last Clock-bearing owner check.
+                ticket.check(actor, &envelope.encode())?;
+            }
+            return Ok(HelperReceipt::new(packet.clone(), true));
         }
         let routes = checked_routes(routes)?;
         let mut targets = routes
@@ -248,6 +261,15 @@ impl HelperLedger {
         }
         let expires = object.expires();
         let delivery_expires = expires.min(permit.expires);
+        let admission = Arc::new(AdmissionAuthority {
+            helper: actor.effect(object.issuer(), context.local, delivery_expires)?,
+            target: object
+                .body()
+                .target()
+                .map(|target| actor.effect(object.issuer(), target, delivery_expires))
+                .transpose()?,
+            room: room.clone(),
+        });
         let remaining = expires
             .saturating_add(CLOCK_SKEW_MS)
             .saturating_sub(self.clock.now_ms());
@@ -340,23 +362,18 @@ impl HelperLedger {
                 }
             }
         }
-        let edges_len = edges.len();
-        state.packets.insert(
-            key,
-            Arc::new(Packet {
-                hash,
-                envelope: Arc::new(outgoing),
-                bytes,
-                expires,
-                deadline,
-                edges,
-                _credit: credit,
-            }),
-        );
-        Ok(Admission {
-            cached: false,
-            edges: edges_len,
-        })
+        let packet = Arc::new(Packet {
+            hash,
+            envelope: Arc::new(outgoing),
+            bytes,
+            expires,
+            deadline,
+            edges,
+            admission,
+            _credit: credit,
+        });
+        state.packets.insert(key, packet.clone());
+        Ok(HelperReceipt::new(packet, false))
     }
 
     /// Return finite detached work without awaiting the network on the actor. Re-resolve routes

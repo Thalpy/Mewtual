@@ -9,7 +9,11 @@ use catcoms_rt::SharedRequestKeepalive;
 /// the released explicit-read bootstrap may try known live candidates, but never causes fresh dials.
 pub const MAX_BLOB_FETCH_PEERS: usize = 4;
 
-struct FetchContext {
+enum FetchContext {
+    Direct(DirectFetchContext),
+    Bridge(Box<crate::file_service::requester::BridgeContext>),
+}
+struct DirectFetchContext {
     instance: Arc<()>,
     cid: Cid,
     group: Vec<u8>,
@@ -50,6 +54,9 @@ pub enum BlobPageOutcome {
     /// The provider answered empty. On this kind that means it predates paging (or refused the
     /// page under its byte budget), and the caller should fall back to the whole-blob grammar.
     Unsupported,
+    /// An authenticated helper could not complete this source batch. This is retryable
+    /// availability evidence, never signed global absence or permission for legacy forwarding.
+    Unavailable,
 }
 
 #[cfg(test)]
@@ -83,10 +90,81 @@ impl fmt::Debug for CompletedBlobFetch {
     }
 }
 
+impl CompletedBlobFetch {
+    /// Retain this exact response's observing gate through CPU verification and final effects.
+    /// Earlier pages may expire after staging; the original whole-job native/Root owner remains
+    /// mandatory independently and cannot be refreshed by switching helpers.
+    pub fn effect_authority(&self) -> Option<Arc<dyn catcoms_rt::RequestAuthority>> {
+        match &self.context {
+            FetchContext::Direct(_) => None,
+            FetchContext::Bridge(context) => Some(context.scope.clone()),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct BridgeAttemptAuthority {
+    original: RequestCancellation,
+    route: Arc<dyn catcoms_rt::RequestAuthority>,
+}
+#[async_trait::async_trait]
+impl catcoms_rt::RequestAuthority for BridgeAttemptAuthority {
+    fn authorized(&self) -> bool {
+        !self.original.is_cancelled() && self.route.authorized()
+    }
+    async fn revoked(&self) {
+        let mut original = self.original.clone();
+        if self.authorized() {
+            tokio::select! {
+                _ = original.cancelled() => {},
+                _ = self.route.revoked() => {},
+            }
+        }
+    }
+}
+
 impl<T: MeshTransport> PendingBlobFetch<T> {
+    pub(crate) fn bridge(
+        transport: Arc<T>,
+        prepared: crate::file_service::PreparedBridgePage,
+    ) -> Self {
+        Self {
+            transport,
+            peer: prepared.peer,
+            request: prepared.frame,
+            context: FetchContext::Bridge(Box::new(prepared.context)),
+        }
+    }
+
+    /// Original C deadline, fixed before durable debit. All times here use the owning Root's
+    /// clock, which the actor also uses; external runtime authorities compose independently.
+    pub fn effect_deadline(&self) -> Option<u64> {
+        match &self.context {
+            FetchContext::Direct(_) => None,
+            FetchContext::Bridge(context) => Some(context.scope.deadline()),
+        }
+    }
+
     /// Perform only network I/O. The caller owns deadline/cancellation signalling and must retain
     /// its own independent capacity for EACH attempt until the transport's actual terminal event.
     pub async fn fetch(self, cancellation: RequestCancellation) -> CompletedBlobFetch {
+        // with_authority replaces, rather than composes, the supplied authority. Preserve the
+        // original Keep/run/deadline/caller explicitly and let actual lower custody retain BOTH
+        // its old accounting and this same route reservation after an outer future is dropped.
+        let mut publisher = None;
+        let cancellation = if let FetchContext::Bridge(context) = &self.context {
+            let custody: SharedRequestKeepalive =
+                Arc::new((cancellation.keepalive(), context.scope.clone()));
+            let authority = Arc::new(BridgeAttemptAuthority {
+                original: cancellation,
+                route: context.scope.clone(),
+            });
+            let (live, signal) = tokio::sync::watch::channel(false);
+            publisher = Some(live);
+            RequestCancellation::new(signal, Some(custody)).with_authority(authority)
+        } else {
+            cancellation
+        };
         let keepalive = cancellation.keepalive();
         let response = self
             .transport
@@ -97,6 +175,7 @@ impl<T: MeshTransport> PendingBlobFetch<T> {
                 cancellation,
             )
             .await;
+        drop(publisher);
         CompletedBlobFetch {
             context: self.context,
             response,
@@ -132,10 +211,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .collect();
         let mut peers = Vec::new();
         for proof in self.member_peers.iter().rev() {
-            if live.contains(&proof.peer)
-                && self.group.contains_device(&proof.device)
-                && !tried.contains(&proof.peer)
+            if !tried.contains(&proof.peer)
+                && live.contains(&proof.peer)
                 && !peers.contains(&proof.peer)
+                && self.group.contains_device(&proof.device)
             {
                 peers.push(proof.peer);
                 if peers.len() == remaining {
@@ -234,7 +313,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             transport: self.transport.clone(),
             peer,
             request,
-            context: FetchContext {
+            context: FetchContext::Direct(DirectFetchContext {
                 instance: self.blob_fetch_instance.clone(),
                 cid,
                 group: self.group.group_id(),
@@ -243,7 +322,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 auth,
                 max_bytes,
                 window: None,
-            },
+            }),
         })
     }
 
@@ -287,7 +366,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             transport: self.transport.clone(),
             peer,
             request,
-            context: FetchContext {
+            context: FetchContext::Direct(DirectFetchContext {
                 instance: self.blob_fetch_instance.clone(),
                 cid,
                 group: self.group.group_id(),
@@ -296,7 +375,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 auth,
                 max_bytes,
                 window: Some(offset),
-            },
+            }),
         })
     }
 
@@ -310,7 +389,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         &self,
         completed: CompletedBlobFetch,
     ) -> Result<BlobPageOutcome, SyncError> {
-        let context = &completed.context;
+        let CompletedBlobFetch {
+            context,
+            response,
+            _keepalive,
+        } = completed;
+        let context = match context {
+            FetchContext::Bridge(context) => {
+                return self.authenticate_bridge_page(*context, response)
+            }
+            FetchContext::Direct(context) => context,
+        };
         let Some(asked_offset) = context.window else {
             return Err(SyncError::Malformed);
         };
@@ -326,7 +415,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return Err(SyncError::Unauthorized);
         }
-        let response = completed.response?;
+        let response = response?;
         if response.is_empty() {
             return Ok(BlobPageOutcome::Unsupported);
         }
@@ -414,7 +503,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         &self,
         completed: CompletedBlobFetch,
     ) -> Result<Option<(Vec<u8>, String)>, SyncError> {
-        let context = &completed.context;
+        let CompletedBlobFetch {
+            context,
+            response,
+            _keepalive,
+        } = completed;
+        let FetchContext::Direct(context) = context else {
+            return Err(SyncError::Malformed);
+        };
         if !Arc::ptr_eq(&self.blob_fetch_instance, &context.instance)
             || self.group.group_id() != context.group
             || self.group.epoch() != context.auth.epoch
@@ -427,7 +523,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return Err(SyncError::Unauthorized);
         }
-        let response = completed.response?;
+        let response = response?;
         if response.is_empty() {
             return Ok(None);
         }

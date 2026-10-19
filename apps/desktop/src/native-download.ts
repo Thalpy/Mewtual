@@ -49,8 +49,22 @@ export async function saveGroupFile(
   server: number,
   cid: string,
   name: string,
+  options?: { resume?: string; expectedIntent?: string; operation?: string },
 ): Promise<SavedFileResult> {
-  return checkedResult(await invoke<unknown>("save_group_file", { server, cid, name }));
+  return checkedResult(await invoke<unknown>("save_group_file", {
+    server, cid, name,
+    ...(options?.resume ? { resume: options.resume, expectedIntent: options.expectedIntent } : {}),
+    ...(options?.operation ? { operation: options.operation } : {}),
+  }));
+}
+
+/** Explicit resume selects saved encrypted work by ID/revision; native captures a fresh
+ * session and destination. A browser path, plaintext offset or new allowance is never sent. */
+export async function resumeGroupFile(
+  invoke: NativeInvoker, server: number, cid: string, name: string,
+  resume: string, expectedIntent: string, operation?: string,
+): Promise<SavedFileResult> {
+  return saveGroupFile(invoke, server, cid, name, { resume, expectedIntent, operation });
 }
 
 export async function saveSpaceGuide(
@@ -77,21 +91,23 @@ export function completedDownload(
 }
 
 export function downloadSavedNotice(name: string, saved: SavedFileResult) {
+  const warning = saved.warning ? ` ${saved.warning}` : "";
   if (saved.contentValidation === "mismatch") {
     return {
-      text: `Saved ${name}, but its bytes do not match the declared media type. Treat the unlocked copy as untrusted.`,
+      text: `Saved ${name}, but its bytes do not match the declared media type. Treat the unlocked copy as untrusted.${warning}`,
       kind: "warn" as const,
       ms: 10_000,
     };
   }
   if (saved.contentValidation === "unrecognized") {
     return {
-      text: `Saved ${name}, but Mewtual could not recognize its declared media format. Treat the unlocked copy as untrusted.`,
+      text: `Saved ${name}, but Mewtual could not recognize its declared media format. Treat the unlocked copy as untrusted.${warning}`,
       kind: "warn" as const,
       ms: 10_000,
     };
   }
-  return saved.displayed
+  return saved.warning && saved.displayed ? { text: `Saved ${name} to Downloads. ${saved.warning}`, kind: "info" as const, ms: 8_000 }
+    : saved.displayed
     ? { text: `Saved ${name} to Downloads`, kind: "ok" as const, ms: 4_000 }
     : {
         text: `Saved to ${saved.path}. ${saved.warning ?? "Open Downloads to view it."}`,

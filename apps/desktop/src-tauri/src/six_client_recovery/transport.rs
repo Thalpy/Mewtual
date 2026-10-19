@@ -35,7 +35,15 @@ pub(super) struct NetworkRules {
     /// connected-only automatic-recovery adapter always reach the real product transport.
     pub drop_next_call_signal: AtomicBool,
     pub delay_replies: AtomicBool,
+    /// One actual first kind29 response can wait for an explicit test-controlled release.
+    /// The surrounding cancellable request retains the original owner while this latch waits.
+    pub file_reply: StdMutex<Option<HeldFileReply>>,
     pub trace: StdMutex<Trace>,
+}
+
+pub(super) struct HeldFileReply {
+    pub entered: tokio::sync::oneshot::Sender<()>,
+    pub release: tokio::sync::oneshot::Receiver<()>,
 }
 
 pub(super) fn forbidden(left: usize, right: usize) -> bool {
@@ -234,8 +242,19 @@ impl MeshTransport for Transport {
                 Err(error) => format!("{error:?}"),
             };
         }
+        let held = if self.index == 2 && kind == 29 && answer.is_ok() {
+            self.rules.file_reply.lock().unwrap().take()
+        } else {
+            None
+        };
         tokio::select! {
-            answer = self.completed(peer, answer) => answer,
+            answer = async {
+                if let Some(held) = held {
+                    let _ = held.entered.send(());
+                    let _ = held.release.await;
+                }
+                self.completed(peer, answer).await
+            } => answer,
             _ = cancellation.cancelled() => Err(TransportError::Cancelled),
         }
     }

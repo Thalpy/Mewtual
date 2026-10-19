@@ -27,6 +27,17 @@ impl Targets {
             Self::Join(_, lease) => lease.is_live(),
         }
     }
+    async fn revoked(&self) {
+        match self {
+            // Admission originally selected ANY live observer. Wait for ALL original targets;
+            // a retired observer must neither cancel another observer nor create a ready loop.
+            Self::Watch(targets) => {
+                futures::future::join_all(targets.iter().map(|(_, lease)| lease.wait_revoked()))
+                    .await;
+            }
+            Self::Join(_, lease) => lease.wait_revoked().await,
+        }
+    }
 }
 struct Packet {
     object: SignedObject,
@@ -54,6 +65,23 @@ impl PublicReceipt {
     }
     pub(crate) fn object_hash(&self) -> [u8; 32] {
         self.0.hash
+    }
+    pub(crate) fn authorized_at(&self, wall: u64, mono: u64) -> bool {
+        self.0.effect.authorized_at(wall, mono)
+            && self.0.room.lease.is_live()
+            && self.0.targets.live()
+    }
+    pub(crate) async fn revoked(&self) {
+        use futures::FutureExt;
+        if !self.authorized() {
+            return;
+        }
+        let waits = vec![
+            self.0.effect.revoked().boxed(),
+            self.0.room.lease.wait_revoked().boxed(),
+            self.0.targets.revoked().boxed(),
+        ];
+        futures::future::select_all(waits).await;
     }
 }
 struct Work {
@@ -114,6 +142,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             if !work.packet.admitted() {
                 return Err(VoiceError::Unauthorized);
             }
+            ticket.check(actor, &envelope.encode())?;
             return Ok(PublicReceipt(work.packet.clone()));
         }
         if voice.endpoints.public.packets.len() >= PACKETS {

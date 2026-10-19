@@ -41,19 +41,45 @@ plaintext or revive an obsolete result.
 
 ## Copy ownership is a separate enablement gate
 
-The 19 October activation review also identifies a missing history-only native entry point:
-the retained `CryptoAction` must recover its exact terminal receipt after End has pruned its
-`LocalJoin`, including after Root replacement. Looking up an already registered action must
-precede any requirement for a current participant. This lookup may report past accepted or
-closed-rejected results; it must neither execute an effect nor grant dispatch authority. Test
-both lost-result cases after settlement, End and pruning, plus changed bytes with the original
-claimed digest. General action IPC and production registry registration are still unfinished.
+The 19 October follow-up adds Rust `CryptoAction::recover_result(bytes,tag)` for exact bounded
+output retries and a separately named `terminal_status()` snapshot for a browser that has already
+destroyed its plaintext at End. Both recover past metadata after LocalJoin loss without executing
+a first effect or granting dispatch authority. The snapshot observes actual engine settlement
+and optional terminal receipt under the same action fence. Exact acknowledgement compares action,
+input/output tags and closed outcome; dynamic present-time retirement is excluded.
+
+The native **cfg(test)** registry model now shares32 rows across pending and terminal actions and
+replacement owners. End/settlement preserves unacknowledged terminal history. An exact early ACK
+latches until actual settlement; unknown duplicate ACKs create no rows. Acknowledged terminal
+Arcs still held by Root cannot register again. This is a Rust lifecycle model, not production
+registration or serialized reply custody. Looking up a previously registered action must precede
+requiring a current participant; independently authorized production IPC remains unfinished.
+
+The next Rust slice separates each action's variable input from its fixed history record, using
+one conserved two-part retained-credit partition. `input()` lends an owned lease rather than a
+detached buffer. Exact result ACK and actual settlement remove only the action's input reference,
+in either order; held leases keep the original buffers and charge. Fixed rows, serials, immutable
+operation/output bounds, history and admission fences remain. All four current LocalJoin callers
+classify terminal history before requesting input and repeat history lookup if compaction races
+the first lookup. Compatibility send refuses after compaction. This is not the phase-transfer or
+serialized-copy solution below, and it does not reserve the complete confirmation chain.
+
+Before exposure, prepay a finite number of metadata replies, including request-output copies,
+JSON framing, browser UTF-16/decoded metadata and acknowledgement state. Retain that capacity
+through explicit post-invoke retirement, independently of the serialized DTO: Tauri can move its
+serialized String into HTTP/Channel ownership after serialization returns. End, timeout, a lost
+callback and serialization are not retirement. Overlapping recovery attempts need separate paid
+lanes; an uncertain reply cannot make its lane reusable. History collection additionally waits
+for all actual reply owners, and retired browser cleanup needs status→exact ACK without plaintext.
 
 Encrypted endpoint intake currently refuses encrypted bodies, and action factories cover only
 derivation and confirmation, not SDP. Activation needs prepaid inbox/token/action publication,
 native-selected offer/answer and current OfferId/ICE ownership, plus fair retained completion
-and deadline scheduling. Reply admission must carry original authority and byte custody through
-the actual transport driver; a prepared byte vector alone is insufficient. A first two-party
+and deadline scheduling. The follow-up replaces prepared unowned transport reply vectors with
+typed custody-backed replies bound to their original responder, request/route gates and exact
+first helper/public admission. Verification and original packet custody follow byte clones and
+the actual driver's serialized lower copy. Cached helper receipts refuse replacement actor/room
+authority and first-permit extension. Normal kind28 dispatch remains disabled. A first two-party
 exchange must not silently imply support for the existing UI's later track changes, glare,
 additional peers or ICE restarts.
 
@@ -84,6 +110,44 @@ limits and terminal identities initially, with explicit refusal. Do not delete p
 to reconstruct allocators or let repeated fresh Hello packets steal continuation slots.
 
 ## Candidate sequence and required proof
+
+The next intake boundary must prepay a complete supported confirmation chain, rather than
+publishing an inbound token and then calling `confirmation_decryption_action`. One endpoint
+needs derivation plus three confirmation operations for a first attempt. Three full attempts
+with one shared derivation use ten native records; adding one SDP seal and one SDP open gives
+twelve. The browser currently has only the confirmation-open broker, so reserving its current
+one-record low-side / two-record high-side subset is not whole-chain readiness.
+
+Protect role-specific lanes: derive once; at most three Hello, Proof and Finish operations;
+then the two SDP records. A malformed fresh Hello must spend its bounded candidate lane even
+when no nonce is accepted and `pair.starts` stays unchanged. It cannot consume the reserved
+Proof/Finish/SDP lanes. Exact retries reuse original identities and receipts. Capacity and
+proven unstarted refusal happen before replay/origin/candidate debit; ambiguous handoff never
+gets a general attempt refund. Engine failure or abandoned reservations need an explicit finite
+replacement policy within those lanes, not automatic allocation until the32-row table fills.
+
+Native and surviving browser reservations must both exist before readiness. Keep a single
+group progress owner through actual retired engine/IPC/input loans, across End and replacement
+calls. Fixed acknowledged history may remain charged without keeping an already drained
+progress lane busy forever. Do not put a strong workflow reference in permanent history or its
+immutable budget accidentally; likewise, dropping LocalJoin must not release a still-owned loan.
+The new input lease/compaction seam helps this composition but does not itself implement it.
+
+Prepare one affine encrypted-intake value containing the ledger replay proposal, exact current
+Hello floor or attempt binding, inactive/unpublished decrypt action, endpoint receipt/inbox
+credit and protected continuation. Check an exact issuer/MessageId/hash retry before token or
+replay admission. After one final native Group -> Policy transaction repeats original packet,
+request, room, membership, call, pair, candidate and deadline owners, publish replay/token,
+binding, action and receipt synchronously without a fallible tail; issue the metadata wake last.
+No action or engine grant may escape preparation. With no actually proven FreshPeer/pair, refuse
+without admission; if reordering needs a ciphertext candidate inbox, bound it separately and
+release the verification slot before waiting for proof. A raw header cannot create a pair.
+
+Measure the complete peak before choosing reservation bytes. Adding a separate confirmation
+reserve alongside the existing224KiB SDP reserve can exceed the256KiB group bound. Return only
+unused capacity during an explicit phase transition; retain protective history, actual lower
+copies and unsettled engine/IPC owners. Full native/browser/UTF-16 copy handoff still needs its
+own measured phases. These are design requirements, not implemented readiness guarantees.
 
 Registration stays internal: Root creates and registers opaque typed actions before a rotating,
 non-dequeueing pull exposes them. Exact admission reuses one engine permit. Exact commit either

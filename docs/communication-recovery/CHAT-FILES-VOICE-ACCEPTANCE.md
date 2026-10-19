@@ -1,5 +1,105 @@
 # Chat, files and voice implementation evidence
 
+## Endpoint media gateway feasibility (19 October, experiment only)
+
+The retained loopback experiment passes in headless Edge and the existing Mewtual WebView2 host.
+Both endpoints select relay candidates; generated audio decodes and jam/drawing fixture messages
+arrive. A runner-acknowledged TCP bridge cut stops accepted bridge writes and new endpoint audio/
+message delivery; restoring it resumes messages and audio packet progress. The native checkpoint
+records 134 accepted writes / 15,165 bytes in 6.23s, with separate frozen native/Edge log and JSON
+artifacts identified in [the architecture candidate](MEDIA-RELAY-NEXT.md).
+
+Review found and resolved incomplete setup cleanup, uncapped silent sockets, an inactivity timer
+where an absolute role deadline was required, attempted-versus-accepted counter drift, and
+ambiguous overwritten run artifacts. Four injected failure/cleanup cases plus high-water refusal
+and silent/partial-frame dribble checks pass. Early native runs also exposed an initial-document
+navigation race and relative HTTP control reaching the app dev server. The retained probe waits
+for the actual mounted app document, keeps its CSP, and uses closed acknowledged runner controls.
+Read-only final re-review has no remaining finding for the experiment.
+
+The Node TURN/role handshake is fixture-only. This is no production membership, consent, V2
+signalling, mesh-driver, media-key isolation, helper-failover, load or rebuilt-host acceptance.
+Only one physical desktop is available, so independent-network and audible-device acceptance
+remain open. A full member relay is still unimplemented.
+
+## V2 input custody follow-up (19 October, not live enablement)
+
+Each action now retains fixed terminal history separately from variable input bytes, with one
+fixed two-part credit partition that neither debits nor refunds the pool. Exact receipt ACK plus
+actual engine settlement removes the action's input reference. Actual readers use an owned input
+lease, keeping buffers and credit through last drop. The32 protective rows, serials, immutable
+operation/output bounds and engine fences remain. Exact history recovery works after compaction;
+the compatibility sending seam refuses without reconstructing bytes or signing again. This does
+not implement IPC-copy accounting, full confirmation-chain prepayment or Crypto-to-RTC handoff.
+
+Focused results:263 voice tests pass in9.72s (`target/communication-voice-payload-focused-4.log`),
+including actual accepted/rejected open, derive and seal history after compaction; all19 native
+authority tests pass in0.92s (`target/communication-voice-native-compaction.log`); strict affected
+Clippy passes in15.36s (`target/communication-voice-payload-clippy.log`). The first broader run had
+two stale assertions that expected input bytes to remain charged after the intentional last
+lease drop. Assertions now distinguish held readers from compacted history and retain the
+mismatched-result protection checks. Read-only implementation review has no B/H/M/L finding.
+Full checkpoint validation is in progress; historical full-suite results below are not evidence
+for this uncommitted revision. Live V2, media relay and physical acceptance remain open.
+
+## V2 result and reply ownership follow-up (19 October, not live enablement)
+
+Rust history now has exact-output `recover_result` and a separately named metadata-only
+`terminal_status` for End after browser-buffer destruction. Both accepted and closed-rejected
+outcomes remain recoverable after settlement and LocalJoin loss. The cfg(test) native registry
+retains32 combined pending/terminal rows across replacement owners; immutable receipt ACK can
+precede settlement, while an acknowledged terminal Arc cannot register again. Three native
+history regressions pass (`target/communication-voice-native-history.log`). Production native
+registration, independently authorized action IPC and finite serialized reply-copy custody remain
+unfinished; no current-call or RTC authority follows from history.
+
+The disabled transport seam now constructs custody-backed typed ACKs and consumes them only
+through the original responder. Original verification and exact first helper/public packet
+ownership follow byte clones and the driver's separate serialized copy. Original requester,
+actor/session/policy, route/proof/descriptor/epoch/connection and absolute request deadline gate
+the final send. One native wall/monotonic sample precedes all observing gates, avoiding retirement
+inside a later Clock callback. Original responder authority also gates new/cached intake and the
+final origin transaction, but is excluded from persistent packets and final sends because receiving
+the reply itself closes that wait. Cached helper receipt validity retains its first actor/room/
+permit, including zero-edge room fan-out. Another departed room target does not cancel all edges.
+
+All259 relevant voice tests pass (`target/communication-voice-reply-all-focused-3.log`,9.70s),
+including actual held Mem request/reconnect, an unrelated-member MLS epoch advance with old
+members surviving, negative/positive driver time-sample races, original-request retirement while
+waiting for the helper lock, route-capacity refusal, two original watchers, and actual-last-owner
+credit retirement. Strict affected Clippy passes (`target/communication-voice-reply-clippy-2.log`).
+The initial broad focused run exposed an intentionally changed old expectation: actor replacement
+previously returned cached positive status; it now refuses that receipt while preserving identity
+and spent allowance. The test retains those protection checks. Read-only re-review reports no
+remaining blocker/high/medium/low finding for these changes. These are software boundary checks;
+normal kind28 dispatch, encrypted intake, full browser/RTC integration and media relay remain open.
+
+Final aggregate read-only review of the file/resume diff against `ebdd8447` reports no confirmed
+B/H/M/L finding. Residual limits include absent physical-device/WebView acceptance and no
+power-loss durability claim for the external final directory entry: file data is flushed before
+publication, but its parent directory is not. Original encrypted progress is removed only after
+successful publication under the current owner; the tests cover process restart and collisions.
+
+Current uncommitted follow-up (19 October): the native requester is connected to explicit
+chunk/range/Keep reads after direct-provider exhaustion. Actual C/B/A handler tests cover signed
+page receipt, effective-wall rollback and temporary source pressure. The actual large offline-prefix
+case and TCP/native sealed-Keep checks pass, including C reopening and replacement helper D.
+This supersedes historical statements below that the requester search was test-only, but is not
+complete package4 acceptance. Full-suite evidence below applies to earlier pushed checkpoints.
+External publication now refuses final-destination collisions and never deletes another local
+file on cancellation. Private durable Download ownership/resume is connected through the actual
+native storage adapter and actor; completed copies are excluded from shared serving. Restart
+retains encrypted whole chunks, original manifests and spent allowance, requires explicit Resume,
+and never automatically writes plaintext. Private acquisition through B with A–C blocked, solo
+native reopen/revalidation, and streamed export pass over actual TCP; these are same-host tests.
+Focused current evidence: 53 storage, 45 workers, 15 native download and 37 frontend cases pass.
+Four actual TCP native file scenarios pass, including interrupted private and Keep recovery through
+D after C reopens. The four scenarios also pass with an observer-only check of the sealed D→A/C
+routes before restarting C; this check adds no dial or hint and keeps the existing setup bound.
+Strict affected Clippy, Svelte and rendered900×640 Transfers Pause/Resume/Retry/completion checks pass. No current
+full-suite, abrupt-crash external publication receipt or physical-network claim is made. Live V2,
+member media relay, combined rollout and physical audio/network acceptance remain open.
+
 Started 18 October 2026 on `chat-update-implementation`, from verified and pushed Gate7 commit
 `4d321fef17514c5080f96d98f01be3e86c375333`. Scope and ordering follow
 [CHAT-FILES-VOICE-PLAN](CHAT-FILES-VOICE-PLAN.md). This ledger is separate from Gate7 acceptance.
@@ -53,7 +153,7 @@ acceptance is claimed for this WIP.
 | 1: connections and scheduling | Detached connected maintenance and automatic repair; bounded driver delivery; native router/call lifecycle corrections | Broader permitted alternate paths, integrated multi-group congestion latency and full acceptance |
 | 2: room/signalling | Reviewed v2 design; focused crypto, signed codec and native ownership implementation; no live V2 or forwarding enabled | Fresh endpoint sessions, confidentiality/forwarding enforcement, legacy isolation, topology and native evidence |
 | 3: chat recovery | Existing mechanisms remain; new work not accepted | Exact-union recovery and demonstrated gaps under the plan's topology/restart matrix |
-| 4: file recovery | Provider rotation, scoped resumable journal, saved whole-part progress, persistent allowance, automatic partial resume, user Pause/Resume and explicit Retry; integration checks in progress | Indirect service, external destination resume and complete native crash/cancellation/compatibility matrix |
+| 4: file recovery | Provider rotation, scoped Keep/private Download journals, persistent progress/allowance, distinct Pause/Resume/Retry, actual indirect service and explicit private re-export; focused native and rendered evidence | Complete abrupt-crash/cancellation/compatibility/load matrix and final complete suites |
 | 5A: existing TURN feasibility | No new native/audio observation | Forced relay candidate, audible/native reconnect and unavailable-path evidence |
 | 5B: media bridging | No relay implementation or new dependency selected | Architecture/key/authority review, physical-network/audio evidence and resource bounds |
 | 6: combined rollout | Not accepted | Combined named scenarios, versioned compatibility, no forbidden edges or downgrade |

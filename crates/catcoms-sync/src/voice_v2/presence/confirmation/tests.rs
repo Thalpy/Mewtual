@@ -518,6 +518,14 @@ fn lost_open_reply(malformed: bool) {
             ByteBudget::Ordinary,
         )
         .unwrap();
+    let tag = action.output_tag(&plaintext).unwrap();
+    let before = f.pool.counts();
+    assert_eq!(action.recover_result(&plaintext, tag).unwrap(), None);
+    assert_eq!(
+        f.pool.counts(),
+        before,
+        "a history miss neither executes nor admits an engine"
+    );
     action.admit_engine(action.engine_bytes()).unwrap();
     let expected = f.high.join.commit_confirmation_action(
         &action,
@@ -532,7 +540,6 @@ fn lost_open_reply(malformed: bool) {
         1,
         "terminal result does not settle the actual engine"
     );
-    let tag = action.output_tag(&plaintext).unwrap();
     let receipt = f
         .high
         .join
@@ -623,6 +630,48 @@ fn lost_open_reply(malformed: bool) {
         ),
         Err(VoiceError::Unauthorized)
     );
+    drop(f.high.join);
+    // The registered native Arc can survive actual LocalJoin/Root pruning. Its historical
+    // success OR closed rejection remains exact metadata and cannot recreate first authority.
+    let held = f.pool.counts();
+    let recovered = action.recover_result(&plaintext, tag).unwrap().unwrap();
+    assert!(recovered.retired);
+    assert_eq!(recovered.outcome, receipt.outcome);
+    // The browser may already have cleared its quarantined output at End. Status recovery
+    // needs neither that output nor a surviving participant, and cannot validate a commit retry.
+    let status = action.terminal_status();
+    assert!(status.settled);
+    assert_eq!(status.receipt.as_ref(), Some(&recovered));
+    assert!(receipt.same_transition(status.receipt.as_ref().unwrap()));
+    assert_ne!(receipt.retired, recovered.retired);
+    assert_eq!(
+        f.pool.counts(),
+        held,
+        "history/status lookup allocates no new record"
+    );
+    let input = action.input().unwrap();
+    action.acknowledge_result(&recovered).unwrap();
+    assert!(action.input().is_err());
+    assert_eq!(
+        f.pool.counts(),
+        held,
+        "borrowed input still owns all original ciphertext and action payload custody"
+    );
+    assert_eq!(
+        action.recover_result(&plaintext, tag).unwrap(),
+        Some(recovered.clone())
+    );
+    drop(input);
+    assert!(f.pool.counts().0 < held.0);
+    let compacted = f.pool.counts();
+    for claimed in [tag, action.output_tag(&changed).unwrap()] {
+        assert_eq!(
+            action.recover_result(&changed, claimed),
+            Err(VoiceError::RetryMismatch)
+        );
+    }
+    assert_eq!(f.pool.counts(), compacted);
+    assert!(action.admit_engine(action.engine_bytes()).is_err());
 }
 
 #[test]
@@ -685,6 +734,35 @@ fn native_action_lost_seal_reply_recovers_after_construction_deadline_without_re
         Ok(accepted),
         "historical success does not require the consumed five-second encryption grant"
     );
+    let tag = action.output_tag(&ciphertext).unwrap();
+    let receipt = action.recover_result(&ciphertext, tag).unwrap().unwrap();
+    action.acknowledge_result(&receipt).unwrap();
+    assert!(action.input().is_err());
+    assert_eq!(
+        f.low
+            .join
+            .submit_confirmation_result(
+                &action,
+                &ciphertext,
+                tag,
+                &signer,
+                &ca(&f.low.context, &f.low.lease),
+                &f.clock,
+            )
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(
+        f.low.join.submit_confirmation_action(
+            &action,
+            &ciphertext,
+            &signer,
+            &ca(&f.low.context, &f.low.lease),
+            &f.clock,
+        ),
+        Err(VoiceError::Unauthorized),
+        "acknowledged history cannot reconstruct fresh send data"
+    );
     assert_eq!(signer.calls.get(), 1, "exact lookup does not sign again");
 }
 
@@ -711,6 +789,8 @@ fn native_derivation_history_uses_original_clock_and_ignores_nonce_attempt_repla
     assert_eq!(ready.outcome, CryptoOutcome::Derived);
     assert!(!ready.retired);
     action.settle_engine();
+    action.acknowledge_result(&ready).unwrap();
+    assert!(action.input().is_err());
     f.low.start(f.id, &f.clock, &mut f.rng).unwrap();
     f.low.start(f.id, &f.clock, &mut f.rng).unwrap();
     assert_eq!(
