@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { StudioSession } from "./studio-session.ts";
+import { StudioSession, affectedObject } from "./studio-session.ts";
 import { decodeStudioDraft, encodeStudioDraft, validateDraftOperation } from "./studio-draft.ts";
 import { decodePixa } from "./pixa.ts";
 import { sanitizeUiContinuity, planLegacyReadMarkMigration } from "./ui-continuity.ts";
@@ -261,17 +261,203 @@ test("navigation saves only the document it leaves; another document's held work
   h.session.reset();
 });
 
-test("a departure Save leaves the shared deadline running for the Index edit made with a title", async () => {
-  const h = await harness(), other = id32(9);
-  const listed = () => ({ ...ordinaryView(indexContent({ objects: { [object]: indexEntry({ title: "initial" }) } })), group });
+test("a departure Save leaves the shared deadline running for an Index edit about another document", async () => {
+  const h = await harness(), other = id32(9), third = id32(10);
+  const listed = () => ({ ...ordinaryView(indexContent({ objects: { [object]: indexEntry({ title: "initial" }), [third]: indexEntry({ title: "third" }) } })), group });
   h.ipc.on("studio_list", listed); h.ipc.on("studio_apply_index", listed);
   await h.session.refreshIndex(); await settle(8);
-  h.session.setTitle(object, "renamed");
-  assert.deepEqual(h.session.saves.map(s => s.kind).sort(), ["apply", "applyIndex"]);
+  h.session.setTitle(object, "renamed"); h.session.setEntryExpiry(third, { kind: "never" });
+  assert.deepEqual(h.session.saves.map(s => s.kind).sort(), ["apply", "applyIndex", "applyIndex"]);
   await h.session.navigate(() => h.session.open(other)); await settle(8);
-  assert.deepEqual(h.session.saves.map(s => s.kind), ["applyIndex"], "the document's own edit saved on departure");
+  assert.deepEqual(h.session.saves.map(s => s.object), [third], "both halves of the rename went with the departure");
   await h.tick(5000);
-  assert.equal(h.session.saves.length, 0, "the Index rename still saved at its deadline");
+  assert.equal(h.session.saves.length, 0, "the other document's Index edit still saved at its deadline");
+  h.session.reset();
+});
+
+// Adversarial review of 22e4ed77's fixes, M3: leaving a restored document sent only its document
+// half; its Index half (in the shared Index lane) stayed held.
+test("leaving a restored, renamed document sends both halves on the ordinary, Closing and Unconfirmed routes", async () => {
+  for (const route of ["ordinary", "closing", "unconfirmed"] as const) {
+    const h = await harness(), other = id32(9);
+    const listed = indexContent({ objects: { [object]: indexEntry({ title: "initial" }), [other]: indexEntry({ title: "other" }) } });
+    const view = (content: unknown) => route === "unconfirmed" ? { ...previewView(content), group } : { ...ordinaryView(content, { phase: route === "closing" ? "closing" : "open" }), group };
+    const doc = () => view(flipnoteContent({ frames: [] }));
+    h.ipc.on("studio_list", () => view(listed)); h.ipc.on("studio_read", doc); h.ipc.on("studio_apply", doc); h.ipc.on("studio_apply_index", () => view(listed));
+    for (const kind of ["unconfirmed", "closing"] as const) {
+      h.ipc.on(`studio_${kind}_overlay_save_begin`, a => ({ v: 1, kind: `${kind}OverlaySaveTicket`, channel: a.channel, object: a.object ?? null, basis: id64(1), branch: id64(2), provenance: kind }));
+      h.ipc.on(`studio_${kind}_overlay_save`, a => ({ v: 1, kind: `${kind}OverlaySave`, channel: a.channel, object: a.object ?? null, state: "saved", basis: id64(1), accepted: 1, localOnly: true, provisional: true, provenance: kind }));
+    }
+    await h.session.refreshIndex(); await h.session.refreshDoc(object); await settle(8);
+    h.session.setTitle(object, "renamed");
+    const draft = decodeStudioDraft(h.session.draftSnapshot()!);
+    h.session.reset(); h.session.restoreDraft(draft); h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); await settle(8);
+    h.session.open(object); await settle(8);
+    await h.session.navigate(() => h.session.open(other)); await settle(8);
+    const bodyOf = (args: Record<string, unknown>) => String(args.body ?? (args.save as { body?: unknown } | undefined)?.body ?? "");
+    assert.equal(h.ipc.calls.filter(c => /"title"/.test(bodyOf(c.args)) && /renamed/.test(bodyOf(c.args))).length, 2, `${route}: both halves sent`);
+    assert.equal(h.session.saves.length, 0, `${route}: nothing held behind`);
+    h.session.reset();
+  }
+});
+
+// Review of 5bc43d2c: departure released the Index half before the document's own Save, and the one
+// save worker then waited on the Index receipt, so a slow Index response held the navigation.
+test("with the worker free, leaving a document saves it, navigates, and only then sends its Index half", async () => {
+  const h = await harness(), other = id32(9), third = id32(10), indexAck = deferred<unknown>();
+  const listed = () => ({ ...ordinaryView(indexContent({ objects: { [object]: indexEntry({ title: "initial" }), [other]: indexEntry({ title: "other" }), [third]: indexEntry({ title: "third" }) } })), group });
+  h.ipc.on("studio_list", listed);
+  h.ipc.on("studio_apply_index", () => indexAck.promise); // the slow Index receipt
+  await h.session.refreshIndex(); await settle(8);
+  h.session.setTitle(object, "renamed");
+  h.session.open(third); await settle(8); h.session.setFps(third, 5); // another document's restored work
+  const draft = decodeStudioDraft(h.session.draftSnapshot()!);
+  const indexHalf = draft.records.find(r => r.kind === "applyIndex")!;
+  h.session.reset(); h.session.restoreDraft(draft); h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); await settle(8);
+  h.session.open(object); await settle(8);
+  // No clock tick: navigation must not depend on this Index receipt, nor wait for the 10 s timer.
+  const outcome = await Promise.race([h.session.navigate(() => h.session.open(other)).then(() => "navigated", e => String(e)), settle(10).then(() => "still leaving")]);
+  assert.equal(outcome, "navigated"); assert.equal(h.session.doc?.object, other);
+  const writes = h.ipc.calls.filter(c => c.cmd === "studio_apply" || c.cmd === "studio_apply_index").map(c => c.cmd);
+  assert.deepEqual(writes, ["studio_apply", "studio_apply_index"], "the document's Save went first and landed");
+  const pending = h.session.saves.find(s => s.kind === "applyIndex")!;
+  assert.equal(pending.status, "inflight", "the Index half was sent, and is retained until its receipt");
+  assert.deepEqual(pending.kind === "applyIndex" && pending.request, indexHalf.kind === "applyIndex" && indexHalf.request, "with its original request identity");
+  const sent = h.ipc.calls.find(c => c.cmd === "studio_apply_index")!.args;
+  assert.equal(indexHalf.kind === "applyIndex" && sent.nonce, indexHalf.kind === "applyIndex" && indexHalf.request.nonce);
+  const held = h.session.saves.find(s => s.object === third)!;
+  assert.equal(h.session.awaitsExplicitSave(held.id), true, "the other document's restored work stays held");
+  indexAck.resolve(listed()); await settle(8);
+  assert.deepEqual(h.session.saves.map(s => s.object), [third]);
+  h.session.reset();
+});
+
+// Several save workers, one per lane at a time: an Index delivery in flight (from the deadline, an
+// earlier departure, or a sidebar retry) no longer holds a document's departure behind it. This
+// was the pinned single-worker limit, and the timing variant of the review of 64fed24b.
+test("a departure never waits on an Index delivery already in flight", async () => {
+  for (const edit of ["before leaving", "while leaving"] as const) {
+    const h = await harness(), other = id32(9), titleAck = deferred<unknown>(), indexAck = deferred<unknown>();
+    const listed = () => ({ ...ordinaryView(indexContent({ objects: { [object]: indexEntry({ title: "initial" }) } })), group });
+    h.ipc.on("studio_list", listed); h.ipc.on("studio_apply_index", () => indexAck.promise);
+    let applies = 0; h.ipc.on("studio_apply", () => ++applies === 1 ? titleAck.promise : h.view());
+    await h.session.refreshIndex(); await settle(8);
+    h.session.setTitle(object, "renamed"); await h.tick(5000); // the deadline releases both halves
+    assert.equal(h.session.saves.find(s => s.kind === "applyIndex")?.status, "inflight", `${edit}: the Index half runs on its own worker`);
+    if (edit === "before leaving") h.session.setFps(object, 7);
+    const leaving = h.session.navigate(() => h.session.open(other)).then(() => "navigated", e => String(e));
+    // Review of 64fed24b: an edit made while the departure waits on the title receipt joins the
+    // next round of the drain, and must not wait on the Index receipt either.
+    if (edit === "while leaving") { await settle(3); h.session.setFps(object, 7); }
+    titleAck.resolve(h.view());
+    const outcome = await Promise.race([leaving, settle(12).then(() => "still leaving")]);
+    assert.equal(outcome, "navigated", `${edit}: B opens while the Index receipt is still pending`);
+    assert.equal(h.session.doc?.object, other);
+    assert.equal(applies, 2, `${edit}: the title and the fps Save both landed`);
+    assert.deepEqual(h.session.saves.map(s => [s.kind, s.status]), [["applyIndex", "inflight"]], `${edit}: only the Index half is still out`);
+    indexAck.resolve(listed()); await settle(8); assert.equal(h.session.saves.length, 0);
+    h.session.reset();
+  }
+});
+
+// Lane order holds with several workers: a lane never has two saves in flight, and its records
+// run in queue order, so a document's later edits wait for its earlier ones.
+test("several workers never run two saves of one lane at once", async () => {
+  const h = await harness(), acks: ReturnType<typeof deferred<unknown>>[] = [];
+  h.ipc.on("studio_apply", () => { const ack = deferred<unknown>(); acks.push(ack); return ack.promise; });
+  h.session.setTitle(object, "one"); h.session.setFps(object, 7); h.session.setTitle(object, "two");
+  void h.session.save().catch(() => {}); await settle(8);
+  assert.equal(acks.length, 1, "one document lane, one save in flight");
+  acks[0].resolve(h.view()); await settle(8);
+  assert.equal(acks.length, 2, "the next record of the lane went only after the first answered");
+  const bodies = h.ipc.calls.filter(c => c.cmd === "studio_apply").map(c => JSON.parse(String(c.args.body)).field);
+  assert.deepEqual(bodies, ["title", "fps"]);
+  for (const ack of acks.slice(1)) ack.resolve(h.view());
+  await settle(8); acks.at(-1)?.resolve(h.view()); await settle(8);
+  h.session.reset();
+});
+
+// Review of the 5bc43d2c fix, L1 and L2: a refused departure sends nothing of the Index half, which
+// stays recoverable; a superseded one that did drain still sends it, so a drained departure does
+// not split the rename.
+test("a refused departure holds the restored Index half; a superseded one that drained sends it", async () => {
+  for (const ending of ["refused", "superseded"] as const) {
+    const h = await harness(), other = id32(9), docAck = deferred<unknown>();
+    const listed = () => ({ ...ordinaryView(indexContent({ objects: { [object]: indexEntry({ title: "initial" }) } })), group });
+    h.ipc.on("studio_list", listed); h.ipc.on("studio_apply_index", listed);
+    await h.session.refreshIndex(); await settle(8);
+    h.session.setTitle(object, "renamed");
+    const draft = decodeStudioDraft(h.session.draftSnapshot()!);
+    h.session.reset(); h.session.restoreDraft(draft); h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); await settle(8);
+    h.session.open(object); await settle(8);
+    if (ending === "refused") h.ipc.on("studio_apply", () => { throw new Error("receipt lost"); });
+    else h.ipc.on("studio_apply", () => docAck.promise);
+    const leaving = h.session.navigate(() => h.session.open(other)).then(() => "navigated", e => String(e));
+    const indexWrites = () => h.ipc.calls.filter(c => c.cmd === "studio_apply_index").length;
+    if (ending === "refused") {
+      assert.match(await leaving, /Could not confirm the save/);
+      const half = h.session.saves.find(s => s.kind === "applyIndex")!;
+      assert.equal(indexWrites(), 0); assert.equal(h.session.awaitsExplicitSave(half.id), true, "held, not sent");
+      assert.equal(h.session.pendingFor(object).length, 2, "both halves still show in the open document");
+      h.ipc.on("studio_apply", () => h.view()); h.session.retry(h.session.saves[0].id); await settle(8);
+      await h.session.saveDocument(object); await settle(8);
+      assert.equal(indexWrites(), 1); assert.equal(h.session.saves.length, 0);
+    } else {
+      await settle(3); h.session.claimNavigation(); // a newer action that does not leave this document
+      docAck.resolve(h.view()); await leaving; await settle(8);
+      assert.equal(h.session.doc?.object, object, "the superseded navigation did not happen");
+      assert.equal(indexWrites(), 1, "the drained document's Index half was still sent");
+    }
+    h.session.reset();
+  }
+});
+
+// Re-review: overlapping Saves that finish out of order must not leave a stale preference behind.
+test("overlapping Saves finishing out of order leave no stale preference", async () => {
+  const h = await harness(), other = id32(9), ack = deferred<unknown>();
+  h.ipc.on("studio_apply", () => ack.promise);
+  h.session.setFps(object, 7);
+  const leaving = h.session.navigate(() => h.session.open(other)).catch(() => {});
+  const saving = h.session.saveDocument(object).catch(() => {});
+  await settle(3); ack.resolve(h.view()); await Promise.all([leaving, saving]); await settle(8);
+  assert.deepEqual((h.session as unknown as { preferring: unknown[] }).preferring, [], "every finished Save removed its own preference");
+  h.session.reset();
+});
+
+test("affectedObject names the document a record changes, whatever its native target", () => {
+  const base = { id: 1, status: "queued", attempts: 0, error: "", epochChanged: false, mayHaveCommitted: false, label: "x" };
+  const record = (r: object) => ({ ...base, ...r }) as unknown as SaveRecord;
+  assert.equal(affectedObject(record({ kind: "apply", object })), object, "a document record");
+  assert.equal(affectedObject(record({ kind: "applyIndex", object, op: { op: "set_title", object, title: "t" } })), object, "an ordinary Index record");
+  for (const op of [{ op: "set_title", object, title: "t" }, { op: "tombstone_object", object }, { op: "set_expiry", object, expiry: 0 }]) {
+    assert.equal(affectedObject(record({ kind: "overlayApply", object: null, op })), object, `a local-draft Index ${op.op}`);
+  }
+  assert.equal(affectedObject(record({ kind: "overlayApply", object: null, op: {} })), null, "an Index record about no one entry");
+  for (const kind of ["object", "objectTitle", "objectExpiry", "objectDeletion"]) {
+    assert.equal(affectedObject(record({ kind: "recoveryApply", object: null, edit: { choice: { kind, id: object, value: "00" } } })), object, `an Index recovery of one entry (${kind})`);
+  }
+  assert.equal(affectedObject(record({ kind: "recoveryApply", object: null, edit: { choice: { kind: "title", value: "00" } } })), null, "an Index recovery naming no entry");
+});
+
+// Adversarial review of 22e4ed77's fixes, M1: B's Save waited ten seconds and then said "try
+// again" when B's Index half sat in the shared Index lane behind A's restored, held Index record.
+test("a document's Save behind another document's held Index edit refuses at once and names it", async () => {
+  const h = await harness(), other = id32(9);
+  const listed = () => ({ ...ordinaryView(indexContent({ objects: { [object]: indexEntry({ title: "first" }), [other]: indexEntry({ title: "second" }) } })), group });
+  h.ipc.on("studio_list", listed); h.ipc.on("studio_apply_index", listed);
+  await h.session.refreshIndex(); await settle(8);
+  h.session.setTitle(object, "first renamed");
+  h.session.open(other); await settle(8); h.session.setTitle(other, "second renamed");
+  const draft = decodeStudioDraft(h.session.draftSnapshot()!);
+  h.session.reset(); h.session.restoreDraft(draft); h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); await settle(8);
+  h.session.open(other); await settle(8);
+  // No clock tick: the refusal must not wait for the ten-second timer.
+  const outcome = await Promise.race([h.session.saveDocument(other).then(() => "saved", e => String(e)), settle(10).then(() => "still waiting")]);
+  assert.match(outcome, /waits behind an unsaved edit \(index title of "first"\)/);
+  await settle(8);
+  const left = h.session.saves.map(s => [s.object, s.kind, h.session.awaitsExplicitSave(s.id)]);
+  assert.deepEqual(left, [[object, "apply", true], [object, "applyIndex", true], [other, "applyIndex", false]],
+    "B's document half landed; its Index half waits, released, behind A's two held records");
   h.session.reset();
 });
 
@@ -337,6 +523,42 @@ test("before the Index is read, a restored edit is refused as unread without cou
   assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_apply").length, 0, "the retry compared the binding and refused");
   assert.match(h.session.saves[0].error, /Shared history changed/);
   h.session.reset();
+});
+
+// Re-review of 22e4ed77, finding 2: a document's Save covered `object === id`, which a Closing or
+// Unconfirmed Index record (native target null, entry in its op) never matches. A restored rename
+// then saved only its document half, and the held Index half vanished from the editor.
+test("a document's Save sends both halves of a rename on the ordinary, Closing and Unconfirmed routes", async () => {
+  for (const route of ["ordinary", "closing", "unconfirmed"] as const) {
+    const h = await harness(), other = id32(9);
+    const listed = indexContent({ objects: { [object]: indexEntry({ title: "initial" }), [other]: indexEntry({ title: "other" }) } });
+    const view = (content: unknown) => route === "unconfirmed" ? { ...previewView(content), group } : { ...ordinaryView(content, { phase: route === "closing" ? "closing" : "open" }), group };
+    const doc = () => view(flipnoteContent({ frames: [] }));
+    h.ipc.on("studio_list", () => view(listed)); h.ipc.on("studio_read", doc);
+    h.ipc.on("studio_apply", doc); h.ipc.on("studio_apply_index", () => view(listed));
+    for (const kind of ["unconfirmed", "closing"] as const) {
+      h.ipc.on(`studio_${kind}_overlay_save_begin`, a => ({ v: 1, kind: `${kind}OverlaySaveTicket`, channel: a.channel, object: a.object ?? null, basis: id64(1), branch: id64(2), provenance: kind }));
+      h.ipc.on(`studio_${kind}_overlay_save`, a => ({ v: 1, kind: `${kind}OverlaySave`, channel: a.channel, object: a.object ?? null, state: "saved", basis: id64(1), accepted: 1, localOnly: true, provisional: true, provenance: kind }));
+    }
+    await h.session.refreshIndex(); await h.session.refreshDoc(object); await settle(8);
+    h.session.setTitle(object, "renamed");
+    h.session.open(other); await settle(8); h.session.setFps(other, 5);
+    const draft = decodeStudioDraft(h.session.draftSnapshot()!);
+    h.session.reset(); h.session.restoreDraft(draft); h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); await settle(8);
+    h.session.open(object); await settle(8);
+    const mine = h.session.pendingFor(object);
+    assert.equal(mine.length, 2, `${route}: the editor counts both halves of the rename`);
+    if (route !== "ordinary") assert.ok(mine.some(s => s.kind === "overlayApply" && s.object === null), `${route}: the Index half keeps the Index as its native target`);
+    await h.session.saveDocument(object); await settle(8);
+    // Ordinary Apply carries `body`; a local-draft Save nests its request under `save`.
+    const bodyOf = (args: Record<string, unknown>) => String(args.body ?? (args.save as { body?: unknown } | undefined)?.body ?? "");
+    const titles = h.ipc.calls.filter(c => /"title"/.test(bodyOf(c.args)) && /renamed/.test(bodyOf(c.args)));
+    assert.equal(titles.length, 2, `${route}: the document title and the Index title were both sent (${titles.map(c => c.cmd).join(", ")})`);
+    if (route !== "ordinary") assert.ok(titles.some(c => c.args.object === undefined || c.args.object === null), `${route}: the Index half still went to the Index`);
+    assert.deepEqual(h.session.pendingFor(object), [], `${route}: nothing of this document is left behind`);
+    assert.equal(h.session.saves.length, 1); assert.equal(h.session.awaitsExplicitSave(h.session.saves[0].id), true, `${route}: the other document stays held`);
+    h.session.reset();
+  }
 });
 
 test("an admission read overtaken by a newer read of the document says it was still reading", async () => {

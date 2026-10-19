@@ -56,6 +56,43 @@ test("a stroke drawn while Save awaited its receipt is saved too before leaving"
   assert.equal(saves, 2); assert.equal(went, true);
 });
 
+// The route an action carries across its awaits (re-review of 13e338eb, finding 1).
+test("a route never renews its claim: once a newer action begins, it resolves false and saves nothing", async () => {
+  const h = fakeHost({ pending: 1, saves: [async () => true] });
+  const older = h.gate.begin();
+  h.gate.begin(); // the member went back to the Studio
+  assert.equal(older.current(), false);
+  assert.equal(await older.leave(), false); assert.equal(await older.scope(), false);
+  assert.equal(h.log.saves, 0, "a retired action asks nothing of the newer one's Studio");
+  assert.equal(older.current(), false, "asking does not revive it");
+});
+
+test("leave saves only a Studio on screen; scope saves retained work wherever it is", async () => {
+  const off = fakeHost({ onStudio: false, pending: 1 });
+  const route = off.gate.begin();
+  assert.equal(await route.leave(), true); assert.equal(off.log.saves, 0, "leaving another surface leaves the queue alone");
+  off.setPending(1); // scope: the session's channel is about to change under the queue
+  const scoped = off.gate.begin(), saving = scoped.scope();
+  off.setPending(0); assert.equal(await saving, true); assert.equal(off.log.saves, 1);
+});
+
+test("one route asked twice at once saves once per round and both answers agree", async () => {
+  const ack = deferred<boolean>(); let pending = 1, saves = 0;
+  const gate = createStudioExit({ onStudio: () => true, closing: () => false, hasWork: () => pending > 0,
+    claim: () => () => true, save: () => { saves++; return ack.promise.then(ok => { pending = 0; return ok; }); } });
+  const route = gate.begin(), first = route.leave(), second = route.leave();
+  ack.resolve(true);
+  assert.deepEqual(await Promise.all([first, second]), [true, true]);
+  assert.ok(saves <= 2, `${saves} saves`);
+});
+
+test("endless new work during Saves ends in a refusal, never a departure or an unbounded loop", async () => {
+  let saves = 0, told = 0;
+  const gate = createStudioExit({ onStudio: () => true, closing: () => false, hasWork: () => true, claim: () => () => true,
+    save: async () => { saves++; return true; }, exhausted: () => { told++; } });
+  assert.equal(await gate.release(), false); assert.equal(saves, 16); assert.equal(told, 1, "the member is told why nothing happened");
+});
+
 test("a route never races the window-close sequence's own Save", async () => {
   const h = fakeHost({ pending: 1, closing: true });
   assert.equal(await h.gate.release(), false); assert.equal(h.log.saves, 0);

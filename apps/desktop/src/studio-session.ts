@@ -24,7 +24,7 @@
 //   reference whenever something changed.
 
 import { PixError, decodePix } from "./pix.ts";
-import { busyRetrying, isPreExecutionRefusal } from "./studio-busy.ts";
+import { busyRetrying } from "./studio-busy.ts";
 import { workingFlipnote, workingScore, workingIndex, workingSlot } from "./studio-working.ts";
 import { encodeStudioDraft, validateDraftOperation, type StudioDraft } from "./studio-draft.ts";
 import { validateJamPatch } from "./jam-patch.ts";
@@ -250,6 +250,26 @@ const BLOB_CACHE_BYTES = 8 * 1024 * 1024;
 const BLOB_CACHE_ENTRIES = 512;
 const RECENT_VIEWS = 8;
 const RETAINED_OVERLAY_COPIES = 8;
+/// Saves in flight at once across lanes (still one per lane). Two is the least that lets a document
+/// lane and the shared Index lane both be in flight, so a departure's document Save does not wait
+/// on its own Index half's receipt. Workers are not reserved per lane: two other lanes (a Create
+/// and another document's Save, say) can still hold both, and the next Save then waits for one of
+/// them. More buys nothing natively: the server actor runs Studio operations one at a time, and
+/// every Studio IPC call (reads, blob fetches and the native receiver's passes too) holds one of
+/// the bridge's four shared inline slots for its whole round trip.
+const SAVE_WORKERS = 2;
+/// Backoff before each automatic resend of a request the bridge refused before dispatch
+/// (nativeNoWrite): the same request, no attempt counted unless an earlier attempt was already
+/// uncertain (resendLater). The backoffs total 1.75 s, but the
+/// refusal itself is not always instant: "Studio actor busy" arrives only after its 5 s rendezvous,
+/// so four such sends take about 22 s and outlast a departure's 10 s timeout, which then reports
+/// the Save as still running.
+/// This is the second of two layers. Every call through `this.ipc` first repeats a storage-busy
+/// refusal itself (busyRetrying in studio-busy.ts: five quick repeats, 1.24 s of pauses), so only a
+/// storage-busy that outlasts those reaches this layer. A Save refused that way throughout makes
+/// 4 × 6 identical calls over about 6.7 s before it settles, still inside the departure timeout.
+/// The other two no-write texts are not repeated by that wrapper and arrive here at once.
+const BUSY_BACKOFF_MS = [250, 500, 1000];
 
 type BlobJob = {
   key: string;
@@ -297,7 +317,20 @@ export class StudioSession {
     if (this.closeHeld) throw new StudioNativeError("The window is closing. Wait for saving to finish.");
     const current = this.claimNavigation();
     const leaving = this.doc?.object ?? null;
-    if (leaving !== null) await this.saveUntilClear(s => laneOf(s) === leaving);
+    if (leaving !== null) {
+      const generation = this.generation;
+      await this.saveUntilClear(s => laneOf(s) === leaving);
+      // The document's records in the shared Index lane (the Index half of a rename, an expiry)
+      // are its work too: send them, but never wait on them. That lane can sit behind another
+      // document's held work, and waiting there would bring back the deadlock this scoping removes.
+      // Released only AFTER the document's own lane drained: the save workers are few (and the
+      // actor serves one Studio operation at a time), so Index work released first would compete
+      // with the document's own Save for them, the lane the departure must not wait on. Released even if a newer
+      // action superseded this navigation: the document half has been sent, and holding the Index
+      // half back would split the rename. Not across a reset, though (a lock and restore landing in
+      // the resume gap would otherwise release freshly restored work nobody chose to send).
+      if (generation === this.generation) this.releaseQueued(true, s => laneOf(s) !== leaving && affectedObject(s) === leaving);
+    }
     if (!current()) return;
     action();
   }
@@ -353,9 +386,17 @@ export class StudioSession {
   /// Immutable snapshots of the queue, rebuilt on every change: what the surfaces read.
   saves: SaveRecord[] = [];
   private saveSeq = 0;
-  /// The token of the worker that owns the save lane right now (0 = none). Only that worker
-  /// may release it; a worker from a cleared scope finds a different token and stands down.
-  private saving = 0;
+  /// Tokens of the save workers running now (at most SAVE_WORKERS). Only a worker whose token is
+  /// still here may re-pump when it ends; a worker from a cleared scope finds its token gone and
+  /// stands down.
+  private readonly workers = new Set<number>();
+  /// Records a worker has taken, by id. A record stays `queued` through its admission read, so
+  /// this, not its status, is what keeps a second worker off it and its lane.
+  private readonly running = new Set<number>();
+  /// Records waiting out a backoff after a pre-dispatch refusal; each blocks its lane until resent.
+  private readonly cooling = new Set<number>();
+  /// Automatic resends used per record (see BUSY_BACKOFF_MS).
+  private readonly busyResends = new Map<number, number>();
   private workerSeq = 0;
   private readonly autosaveMs: number;
   get buffering(): boolean { return this.autosaveMs > 0; }
@@ -522,6 +563,7 @@ export class StudioSession {
 
   private clearScoped(): void {
     this.closeHeld = false;
+    this.preferring.length = 0; // every awaited Save of the old scope rejects on the generation change
     this.cancelAutosave?.(); this.cancelAutosave = null; this.eligible.clear();
     this.restoredHeld.clear(); this.editorSnapshot = null;
     this.draftGroup = null;
@@ -539,7 +581,8 @@ export class StudioSession {
     this.overlayCopies.clear();
     for (const s of this.records) s.settle?.("discarded");
     this.records.length = 0;
-    this.saving = 0;
+    this.workers.clear(); this.running.clear(); // old workers find their tokens gone and stand down
+    this.cooling.clear(); this.busyResends.clear();
     this.receivePaused = false;
     this.receivePauseDetail = ""; this.syncObservation = null;
     // Queued jobs are dropped; started ones keep their slot until they actually finish.
@@ -693,7 +736,7 @@ export class StudioSession {
     this.indexLoading = true;
     this.notify();
     try {
-      const view = await studioList(this.ipc, target);
+      const view = await this.unlessBusy(() => studioList(this.ipc, target), () => this.current(gen) && req === this.indexReq);
       if (!this.current(gen) || req !== this.indexReq) return;
       this.index = view;
       this.indexModel = indexModel(view.content);
@@ -795,7 +838,8 @@ export class StudioSession {
     this.patchDoc(object, { loading: true });
     try {
       const objectKind = this.objectKind(object);
-      const view = objectKind === "score" ? await studioRead(this.ipc, target, object, "score") : await studioRead(this.ipc, target, object);
+      const view = await this.unlessBusy<StudioObjectView | null>(() => objectKind === "score" ? studioRead(this.ipc, target, object, "score") : studioRead(this.ipc, target, object),
+        () => this.current(gen) && req === this.docReq.get(object));
       if (!this.current(gen) || req !== this.docReq.get(object)) return;
       const model = view?.content.kind === "flipnote" ? flipnoteModel(view.content) : null;
       const score = view?.content.kind === "score" ? scoreModel(view.content) : null;
@@ -815,6 +859,20 @@ export class StudioSession {
     // suppresses the other merely because the renderer raced them.
     if (this.current(gen) && req === this.docReq.get(object) && this.doc?.object === object) {
       await this.refreshOverlay(object);
+    }
+  }
+
+  /// A read the bridge refused before dispatch (nativeNoWrite: slots full, actor busy, storage busy)
+  /// was never served, so it is asked again after the same short backoffs a Save uses, while the
+  /// caller's read is still the current one. Any other failure, or a superseded read, ends it.
+  private async unlessBusy<T>(call: () => Promise<T>, live: () => boolean): Promise<T> {
+    for (let round = 0; ; round++) {
+      try { return await call(); }
+      catch (e) {
+        if (!nativeNoWrite(e) || round >= BUSY_BACKOFF_MS.length || !live()) throw e;
+        await new Promise<void>((resolve) => { this.schedule(resolve, BUSY_BACKOFF_MS[round]); });
+        if (!live()) throw e;
+      }
     }
   }
 
@@ -1314,10 +1372,17 @@ export class StudioSession {
     this.applyOp(object, { op: "set_header", field: "score", value: score }, "linked Score");
   }
 
+  /** Whether the document's own content has unsaved edits: exactly what its working model applies
+   * (see notify). Index records about it (its listing title, its expiry) change no media, so they
+   * never put playback or export on the draft path; their failures still refuse via pendingFor. */
+  private hasDocumentDraft(object: Hex32): boolean {
+    return this.records.some(s => s.kind !== "applyIndex" && s.object === object);
+  }
+
   /** Capture the displayed projection, not a silently substituted ordinary base beneath a draft. */
   private mediaSource(object: Hex32, kind: StudioObjectKind): { view: StudioObjectView; server: number; assertCurrent: () => void } {
     const doc = this.doc, scope = this.target(), gen = this.generation, epoch = this.mediaEpoch, editor = this.editorEpoch;
-    const draft = this.pendingFor(object).length > 0;
+    const draft = this.hasDocumentDraft(object);
     if (draft && !this.autosaveMs) throw new StudioNativeError("finish or reconcile this document's pending saves before playback/export");
     if (!doc || doc.object !== object || doc.objectKind !== kind || !doc.view || doc.loading || this.overlay?.loading) throw new StudioNativeError("wait for this document to finish loading");
     if (this.pendingFor(object).some(s => s.status === "blocked" || s.status === "uncertain" || s.mayHaveCommitted)) throw new StudioNativeError("resolve this document's failed save before playback/export");
@@ -1384,7 +1449,7 @@ export class StudioSession {
   prepareScorePlayback(object: Hex32): Promise<ScorePlayback> {
     return this.oneMedia(async () => {
       const source = this.mediaSource(object, "score");
-      const playback = this.pendingFor(object).length && this.workingScore
+      const playback = this.hasDocumentDraft(object) && this.workingScore
         ? await exportScorePlayback(this.scoreInput(object, this.workingScore), this.mediaContext(source.view))
         : await scorePlaybackFromNative(object, source.view as ScoreView, this.me);
       source.assertCurrent();
@@ -1394,7 +1459,7 @@ export class StudioSession {
 
   private async preparePixa(object: Hex32): Promise<{ bytes: Uint8Array; server: number; assertCurrent: () => void }> {
     const source = this.mediaSource(object, "flipnote"), view = source.view as FlipnoteView;
-    const draft = this.pendingFor(object).length > 0;
+    const draft = this.hasDocumentDraft(object);
     const model = draft ? this.workingModel! : flipnoteModel(view.content);
     if (!draft || view.content.timeline.length) preflightFlipnoteMedia(view);
     else if (Object.keys(view.content.frames).length) throw new StudioNativeError("The animation timeline is incomplete.");
@@ -1402,7 +1467,7 @@ export class StudioSession {
         model.frames.some(f => f.conflicts.length || f.insertions > 1)) throw new StudioNativeError("Resolve animation conflicts before playing or exporting.");
     let linked: { object: string; view: ScoreView } | undefined;
     if (model.sound.score) {
-      if (this.pendingFor(model.sound.score).length) throw new StudioNativeError("Save your music changes before playing this flipnote.");
+      if (this.hasDocumentDraft(model.sound.score)) throw new StudioNativeError("Save your music changes before playing this flipnote.");
       const score = await studioRead(this.ipc, this.target(), model.sound.score, "score");
       source.assertCurrent();
       if (!score) throw new StudioNativeError("the linked Score is not held locally; no shorter silent export was made");
@@ -1628,11 +1693,32 @@ export class StudioSession {
     // No timer, eligible identity or worker is installed: only Save/retry can submit restored work.
   }
 
+  /** Restored work that only an explicit Save, retry or discard (or leaving its document) will
+   * move: the deadline never releases it. Surfaces offer that Save and discard next to it. */
+  awaitsExplicitSave(id: number): boolean {
+    return this.restoredHeld.has(id) && this.records.some(s => s.id === id && s.status === "queued");
+  }
+
   /** Save a fixed revision and await definite receipts. Failure/timeout keeps the editor intact. */
   async save(): Promise<void> { await this.saveCovered(() => true); }
 
+  /** `save()` for one document's records (including its Index records): what a Save button inside
+   * that document's editor means. Other documents' restored work stays held for its own explicit
+   * action, and another lane's failure cannot refuse this document's Save. */
+  async saveDocument(object: Hex32): Promise<void> { await this.saveCovered(s => affectedObject(s) === object); }
+
+  /** The records each awaited Save is draining, most recent last; pump prefers the most recent
+   * one's (see pump). A list, not one slot: overlapping Saves can finish in any order. */
+  private readonly preferring: ((s: SaveRecord) => boolean)[] = [];
+
   /** `save()` restricted to the records `covers` selects; the rest keep their queue state. */
   private async saveCovered(covers: (s: SaveRecord) => boolean): Promise<void> {
+    this.preferring.push(covers);
+    try { await this.saveCoveredNow(covers); }
+    finally { const at = this.preferring.lastIndexOf(covers); if (at >= 0) this.preferring.splice(at, 1); }
+  }
+
+  private async saveCoveredNow(covers: (s: SaveRecord) => boolean): Promise<void> {
     this.stageDrawing();
     const generation = this.generation, ids = new Set(this.records.filter(covers).map(s => s.id));
     // The shared deadline is cancelled only when every record is being released now. A partial
@@ -1641,15 +1727,28 @@ export class StudioSession {
     if (ids.size === this.records.length) { this.cancelAutosave?.(); this.cancelAutosave = null; }
     this.releaseQueued(true, covers);
     if (!ids.size) return;
+    // A covered record can sit in a lane behind an uncovered one this Save will never move (the
+    // Index lane is shared by every document). Waiting would only time out with "try again", which
+    // never helps; say at once what it waits for. What could run has been released and still runs.
+    const stuck = (blocker: SaveEntry) => {
+      const entry = affectedObject(blocker), listed = [...(this.indexModel?.entries ?? []), ...(this.indexModel?.overflow ?? [])].find(e => e.id === entry);
+      const choice = blocker.status === "queued" ? "Save or discard" : "Retry or discard";
+      return new StudioNativeError(`Part of this Save waits behind an unsaved edit (${blocker.label}${listed?.title ? ` of "${listed.title}"` : ""}). ${choice} that edit first; this document's edits are kept.`);
+    };
+    const blocker = this.stuckBehind(ids);
+    if (blocker) throw stuck(blocker);
     await new Promise<void>((resolve, reject) => {
       let detach = () => {}, cancel = () => {};
       const check = () => {
         const remaining = this.records.filter(s => ids.has(s.id));
         const failure = remaining.find(s => s.status === "blocked" || s.status === "uncertain");
-        if (generation !== this.generation || failure || !remaining.length) {
+        // Asked again on every change: a record ahead that was in flight can fail meanwhile.
+        const behind = failure ? null : this.stuckBehind(ids);
+        if (generation !== this.generation || failure || behind || !remaining.length) {
           detach(); cancel();
           if (generation !== this.generation) reject(new StudioNativeError("Studio changed before saving finished"));
           else if (failure) reject(new StudioNativeError("Could not confirm the save. Your edits are still here; retry before leaving."));
+          else if (behind) reject(stuck(behind));
           else resolve();
         }
       };
@@ -1657,6 +1756,22 @@ export class StudioSession {
       cancel = this.schedule(() => { detach(); reject(new StudioNativeError("Studio is still saving. Your edits are still here; wait and try again.")); }, 10_000);
       check();
     });
+  }
+
+  /** The first uncovered record that keeps a covered, queued one of `ids` from ever running: it is
+   * ahead of it in its lane and only the member can move it (failed, uncertain, or restored and
+   * held). A record waiting for its deadline or already in flight will move on its own. */
+  private stuckBehind(ids: Set<number>): SaveEntry | null {
+    for (const s of this.records) {
+      if (!ids.has(s.id) || s.status !== "queued") continue;
+      const lane = laneOf(s);
+      for (const r of this.records) {
+        if (r === s) break;
+        if (ids.has(r.id) || laneOf(r) !== lane) continue;
+        if (r.status === "blocked" || r.status === "uncertain" || (r.status === "queued" && this.restoredHeld.has(r.id))) return r;
+      }
+    }
+    return null;
   }
 
   /** Leaving the Studio, a channel or the window: every retained edit must reach a definite receipt. */
@@ -1772,7 +1887,7 @@ export class StudioSession {
     const at = this.records.findIndex((r) => r.id === id && r.status !== "inflight");
     if (at < 0) return;
     const [s] = this.records.splice(at, 1);
-    this.eligible.delete(s.id); this.restoredHeld.delete(s.id);
+    this.eligible.delete(s.id); this.restoredHeld.delete(s.id); this.cooling.delete(s.id); this.busyResends.delete(s.id);
     this.settleRecord(s, "discarded");
     this.notify();
     this.pump();
@@ -1794,8 +1909,10 @@ export class StudioSession {
     return this.closeHeld || this.restoredDraft ? 0 : Math.max(0, DRAFT_QUEUE_MAX - this.records.length);
   }
 
+  /// `null` is the channel Index's own lane (every Index record, of any route); a document is every
+  /// record that changes it, including its Index records (see `affectedObject`).
   pendingFor(object: Hex32 | null): SaveRecord[] {
-    return this.saves.filter((s) => (s.kind === "applyIndex" ? object === null || s.object === object : s.object === object));
+    return this.saves.filter((s) => object === null ? s.kind === "applyIndex" || s.object === null : affectedObject(s) === object);
   }
 
   /// Queued saves that cannot run until this uncertain or known-not-written save is handled.
@@ -1806,26 +1923,34 @@ export class StudioSession {
     return this.records.filter((r) => r.id !== id && r.status === "queued" && laneOf(r) === lane).length;
   }
 
-  /// One save at a time, in queue order within each lane (a document, or the Index). An
-  /// uncertain, known-not-written or in-flight save blocks later saves of its lane; other lanes proceed.
+  /// Up to SAVE_WORKERS saves at a time, at most one per lane (a document, or the Index), in queue
+  /// order within each lane. An uncertain, known-not-written or in-flight save blocks later saves of
+  /// its lane; other lanes proceed on the other workers, so one slow receipt (an Index Save, say)
+  /// no longer holds every document's next Save behind it. Across lanes the next save is the
+  /// earliest runnable lane head, except that the most recently started Save still being awaited
+  /// (`preferring`) goes first, so a departure draining its document gets a worker ahead of other
+  /// work. Native Studio operations for one server still run one at a time in its actor; workers
+  /// change only what the renderer has sent, never native ordering within a lane.
   private pump(): void {
-    if (this.saving) return;
-    const blocked = new Set<string>();
-    let next: SaveEntry | undefined;
-    for (const s of this.records) {
-      const lane = laneOf(s);
-      if (blocked.has(lane)) continue;
-      if (s.status === "queued" && (!this.autosaveMs || this.eligible.has(s.id))) { next = s; break; }
-      blocked.add(lane); // blocked/uncertain (or, defensively, inflight): nothing later runs
+    while (this.workers.size < SAVE_WORKERS) {
+      const seen = new Set<string>(), heads: SaveEntry[] = [];
+      for (const s of this.records) {
+        const lane = laneOf(s);
+        if (seen.has(lane)) continue;
+        seen.add(lane); // a lane's first record decides it: runnable now, or nothing later runs
+        if (!this.running.has(s.id) && !this.cooling.has(s.id) && s.status === "queued" && (!this.autosaveMs || this.eligible.has(s.id))) heads.push(s);
+      }
+      const preferred = this.preferring.at(-1);
+      const next = (preferred && heads.find(preferred)) || heads[0];
+      if (!next) return;
+      const token = ++this.workerSeq;
+      this.workers.add(token); this.running.add(next.id);
+      void this.run(next).finally(() => {
+        if (!this.workers.delete(token)) return; // a cleared scope owns different workers now
+        this.running.delete(next.id);
+        this.pump();
+      });
     }
-    if (!next) return;
-    const token = ++this.workerSeq;
-    this.saving = token;
-    void this.run(next).finally(() => {
-      if (this.saving !== token) return; // a cleared scope owns a different lane now
-      this.saving = 0;
-      this.pump();
-    });
   }
 
   private async run(s: SaveEntry): Promise<void> {
@@ -1928,10 +2053,21 @@ export class StudioSession {
             await this.landed(s.object, view, docRead);
             for (const r of batch) this.finish(r);
           } catch (e) {
-            // One native outcome for the whole batch: every member settles the same way `s`
-            // does below (known not written for a pre-execution refusal, otherwise uncertain,
-            // since native may have written the items before the one it names).
             if (!this.current(gen)) return;
+            // A pre-dispatch refusal (nativeNoWrite) wrote no item. While `s` has resends left, its
+            // members go back to queued behind it, uncounted exactly as resendLater leaves `s`, and
+            // travel again with its resend. Settling them here instead would strand them as "not
+            // written" cards behind a head that is quietly resent, and the lane would then wait on
+            // the member's explicit retry. Otherwise there is one native outcome for the whole
+            // batch: every member settles the same way `s` does below (known not written once the
+            // resends are used up, otherwise uncertain, since native may have written the items
+            // before the one it names). resendLater changes nothing when it returns false, so the
+            // outer catch asking it again settles `s` alike.
+            if (nativeNoWrite(e) && this.resendLater(s)) {
+              for (const r of batch) { r.status = "queued"; if (!r.mayHaveCommitted) r.attempts = Math.max(0, r.attempts - 1); }
+              this.notify();
+              return;
+            }
             for (const r of batch) this.settleFailure(r, e);
             throw e;
           }
@@ -1963,6 +2099,7 @@ export class StudioSession {
       this.finish(s);
     } catch (e) {
       if (!this.current(gen)) return;
+      if (nativeNoWrite(e) && this.resendLater(s)) return;
       this.settleFailure(s, e);
     }
   }
@@ -1997,13 +2134,41 @@ export class StudioSession {
     return out;
   }
 
+  /// A request the bridge refused before the execution lease was transferred (slots full, actor
+  /// busy, storage busy) never ran, so resending the SAME request is safe: back it off and requeue
+  /// it, a bounded number of times. Its lane waits (FIFO holds); other lanes carry on. False when
+  /// the resends are used up, and settleFailure then decides the outcome.
+  /// The visit is not counted, and the record settles as not written, only while no earlier
+  /// attempt was uncertain. After one that may have committed, attempts are left as they are
+  /// (never lowered, so a restored draft keeps attempts >= 1) and the record settles uncertain
+  /// again: a later refusal cannot show what that earlier attempt did.
+  private resendLater(s: SaveEntry): boolean {
+    const used = this.busyResends.get(s.id) ?? 0;
+    if (used >= BUSY_BACKOFF_MS.length) return false;
+    this.busyResends.set(s.id, used + 1);
+    if (!s.mayHaveCommitted) s.attempts = Math.max(0, s.attempts - 1);
+    s.status = "queued";
+    this.cooling.add(s.id);
+    const generation = this.generation;
+    this.schedule(() => {
+      if (generation !== this.generation) return;
+      this.cooling.delete(s.id);
+      this.pump();
+    }, BUSY_BACKOFF_MS[used]);
+    this.notify();
+    return true;
+  }
+
   private settleFailure(s: SaveEntry, e: unknown): void {
+    this.busyResends.delete(s.id);
     // Typed Flow-S refusals and pre-Apply epoch refusals prove this attempt did not write, and so
-    // do native's two pre-execution refusals (storage busy, actor busy: raised before the request
-    // reached the vault). Other native errors remain uncertain because they may have crossed a
-    // final delivery fence after commit.
-    const noWrite = e instanceof OverlayNoWrite || isPreExecutionRefusal(e);
+    // do the native refusals raised before the execution lease is transferred (nativeNoWrite). Other
+    // native errors remain uncertain because they may have crossed a final delivery fence after commit.
+    const noWrite = e instanceof OverlayNoWrite || nativeNoWrite(e);
     const earlierAttemptWasUncertain = s.mayHaveCommitted;
+    // A pre-dispatch refusal is not a delivery: it does not use up the first-attempt admission
+    // check, so the member's retry reads and compares the document again before sending.
+    if (nativeNoWrite(e) && !earlierAttemptWasUncertain) s.attempts = Math.max(0, s.attempts - 1);
     if (!noWrite) s.mayHaveCommitted = true;
     s.status = s.mayHaveCommitted ? "uncertain" : "blocked";
     s.error = (noWrite && earlierAttemptWasUncertain
@@ -2138,7 +2303,7 @@ export class StudioSession {
     while (this.views.size > RECENT_VIEWS) this.views.delete(this.views.keys().next().value as Hex32);
   }
   private finish(s: SaveEntry): void {
-    this.eligible.delete(s.id); this.restoredHeld.delete(s.id);
+    this.eligible.delete(s.id); this.restoredHeld.delete(s.id); this.busyResends.delete(s.id);
     const at = this.records.indexOf(s);
     if (at >= 0) this.records.splice(at, 1);
     this.settleRecord(s, "landed");
@@ -2479,11 +2644,14 @@ export class StudioSession {
         const outcome = await new Promise<SaveOutcome>((resolve) => { record.settle = resolve; });
         if (!live()) return;
         if (outcome !== "landed") {
-          // The complete payload is on the save record; only its exact retry may finish it.
-          item.state = "uncertain";
-          item.error = outcome === "uncertain" ? "apply uncertain; retry the same request from the save card, then run again" : "discarded";
+          // The complete payload is on the save record; only its exact retry may finish it. Each
+          // outcome says what is true of that record: an uncertain apply may have landed, one that
+          // was not written is still queued (blocked) for retry or discard, a discard is gone.
+          item.state = outcome === "uncertain" ? "uncertain" : "error";
+          item.error = outcome === "uncertain" ? "apply uncertain; retry the same request from the save card, then run again"
+            : outcome === "notWritten" ? "apply not written; retry or discard it from the save card, then run again" : "discarded";
           run.status = "stopped";
-          run.error = "stopped at an uncertain apply";
+          run.error = outcome === "uncertain" ? "stopped at an uncertain apply" : outcome === "notWritten" ? "stopped at an apply that was not written" : "stopped at a discarded apply";
           publish();
           return;
         }
@@ -2593,6 +2761,25 @@ function utf8Length(text: string): number {
   return new TextEncoder().encode(text).length;
 }
 
+/** The document a record changes, for "this document's work" (its Save, its pending indicators, the
+ * sidebar's held rows), never for routing. A document record names it as `object`, and so does an
+ * ordinary Index record. A Closing or Unconfirmed Index record keeps the channel Index as its
+ * native target (`object: null`, which must not change: the local-draft branch is the Index's),
+ * and names the entry it edits only inside its operation. A title edit therefore spans both kinds,
+ * and a document's Save must cover both. Null: an Index record about no one entry. */
+export function affectedObject(s: SaveRecord): Hex32 | null {
+  if (s.object !== null) return s.object;
+  if (s.kind === "recoveryApply") {
+    // An Index recovery (copying one entry's listing, title, expiry or deletion back from history)
+    // names that entry in its choice; a whole-Index recovery names none.
+    const choice = s.edit.choice;
+    return choice.kind === "object" || choice.kind === "objectTitle" || choice.kind === "objectExpiry" || choice.kind === "objectDeletion" ? choice.id : null;
+  }
+  if (s.kind !== "overlayApply") return null;
+  const entry = (s.op as { object?: unknown }).object;
+  return typeof entry === "string" ? entry : null;
+}
+
 const jobKey = (generation: number, cid: Hex64, bytes: number) => `${generation}:${cid}:${bytes}`;
 const contentKey = (cid: Hex64, bytes: number) => `${cid}:${bytes}`;
 
@@ -2612,6 +2799,21 @@ function historicalBlob(v: RecoveryVersionRead, frame: Hex32, opId: Hex64): { ci
   for (const x of [e.pixels.selected, ...e.pixels.conflicts]) if (x.source.opId === opId) return x.value;
   for (const x of e.insertions) if (x.source.opId === opId) return x.value.blob;
   return null;
+}
+
+/// Native refusals raised before the execution lease is transferred to the server actor, so the
+/// operation never ran and nothing of it was written.
+/// Exact bridge messages (apps/desktop/src-tauri; studio-native-no-write.test.ts pins them against
+/// that source): the actor's five-second rendezvous was lost, after which the actor never receives
+/// the request's lease and drops it; the bridge's shared inline slots were all taken, which is
+/// refused before the actor is contacted; and the vault-lease locks were busy, which `authorize`
+/// reports before the lease is sent (the actor then drops the request). Matching is exact on
+/// purpose: other texts, such as "superseded", are raised both before and after a write and must
+/// stay uncertain.
+export const NATIVE_NO_WRITE = ["Studio actor busy; retry", "too many inline downloads are already active", "Studio storage busy; retry the same request"] as const;
+export function nativeNoWrite(e: unknown): boolean {
+  const text = reason(e);
+  return NATIVE_NO_WRITE.some((message) => text === message);
 }
 
 export function reason(e: unknown): string {

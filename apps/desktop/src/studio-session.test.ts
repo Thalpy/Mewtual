@@ -1003,13 +1003,14 @@ test("a frame save publishes then applies with the view's epoch, and an uncertai
   const pix = pixBytes(3);
   h.ipc.on("publish_pix", (a) => ({ cid: id64(0xc3), bytes: base64ToBytes(String(a.bytesB64)).length }));
   let applies = 0;
-  // A withheld result after the request crossed native's final fence: genuinely uncertain.
-  h.ipc.on("studio_apply", () => { applies++; throw new Error("outcome=uncertain; the Save may have completed, but its result could not be delivered; refresh the Studio document, or retry exactly"); });
+  // A failure after dispatch: uncertain. (The bridge's pre-dispatch "busy" refusals are definite
+  // no-writes since nativeNoWrite, and are resent automatically.)
+  h.ipc.on("studio_apply", () => { applies++; throw new Error("Studio transaction expired, cancelled or server stopped"); });
   h.session.saveFrame(OBJ, F1, pix);
   await h.sync();
   const rec = h.session.saves[0];
   assert.equal(rec.status, "uncertain");
-  assert.match(rec.error, /uncertain/);
+  assert.match(rec.error, /expired/);
   assert.ok(rec.kind === "frame");
   assert.deepEqual(rec.pix, pix, "the unsaved pixels stay on the record");
   assert.deepEqual(h.session.unsavedPix(OBJ, F1), pix);
@@ -1055,12 +1056,15 @@ test("a storage-busy refusal that outlasts every pause is known not written, not
   let applies = 0;
   h.ipc.on("studio_apply", () => { applies++; throw new Error("Studio storage busy; retry the same request"); });
   h.session.setTitle(OBJ, "still busy");
-  await h.sync(); await h.sync();
+  // Each pass fires one pause of the chain: the wrapper's five per send, the session's three resends.
+  for (let pass = 0; pass < 12; pass++) await h.sync();
   const rec = h.session.saves[0];
   assert.equal(rec.status, "blocked", "native refuses before executing, so nothing was written");
   assert.equal(rec.mayHaveCommitted, false);
   assert.match(rec.error, /busy/);
-  assert.equal(applies, 6, "one attempt plus the five bounded repeats");
+  // Two bounded layers (see BUSY_BACKOFF_MS): the session sends four times (one plus three
+  // resends), and the wrapper repeats each send five times before the session sees the refusal.
+  assert.equal(applies, 4 * 6, "four session sends, each one attempt plus the five bounded repeats");
   assert.equal(h.session.canReauthor(rec.id), true, "a known-no-write save may be re-authored or discarded");
   // The same holds for the overlay status reads: the banner's error is the refusal itself, and
   // only after the same bounded repeats (the read is left running while the pauses are fired).
@@ -1109,7 +1113,7 @@ test("create freezes object, nonce, title and timestamp; a retry after failure r
   h.ipc.on("studio_list", () => ordinaryView(indexContent()));
   h.session.setScope({ server: SERVER, channel: CHANNEL });
   await h.sync();
-  h.ipc.on("studio_create", () => { throw new Error("Studio actor busy; retry"); });
+  h.ipc.on("studio_create", () => { throw new Error("Studio transaction expired, cancelled or server stopped"); });
   const object = h.session.createFlipnote("moon cat");
   await h.sync();
   h.tick(5_000);

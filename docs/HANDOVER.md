@@ -1,5 +1,38 @@
 # Mewtual; Handover
 
+## Merge of Gate7 `d2548a37` into `score-composer-2` (2026-10-19)
+
+Both lines had fixed native "busy" refusals independently, so the merge composes them rather
+than picking one. Decisions a reader of either branch alone would not expect:
+
+- **Two retry layers, one classifier.** The branch's `busyRetrying` (`studio-busy.ts`) still wraps
+  every native call of the Studio session and repeats a storage-busy refusal five times over
+  1.24 s. Gate7's session-level resend (`resendLater`, `unlessBusy`: the Save worker and the
+  document/Index reads, three resends over 1.75 s) sits on top and covers all three no-write texts.
+  `nativeNoWrite` is the only "nothing was written" classifier. The branch's `isPreExecutionRefusal`
+  is removed: it knew two of the three texts and missed the full inline-slot refusal. A Save that
+  stays storage-busy therefore makes 4 × 6 identical calls over about 6.7 s before it settles not
+  written. The overlay, recovery, fault and blob reads get the wrapper's repeats but no session
+  resend.
+- **Batched Score saves ride the resend.** Before this, a batch refused before dispatch settled
+  every member as not written while Gate7's outer catch quietly resent only the head, which
+  stranded the members as failed cards behind it. While the head has resends left, the members
+  now go back to queued behind it, uncounted, and travel with its resend. Once the resends are used
+  up, every member settles not written, as before.
+- **`switchTo` answers with its route.** The branch's `return studioRequest === studioNavigation`
+  referenced a variable Gate7 had removed. Git merged it without a conflict, which would have broken
+  the build. It is now `return route.current()`, the same comparison in Gate7's route API.
+  `saveStudioForNavigation` is gone (Gate7 removed its callers). `noteStudioNavigation` stays: both
+  Studio surfaces still announce document navigations through `onnavigate`.
+- **Score surface.** Gate7's `heldQueuedCard` renders beside `pendingSaves`. The tabs, loop and
+  download controls Gate7 still showed there live in `ScoreEditor.svelte` on this branch.
+
+Test contracts changed by the composition: in `studio-native-no-write.test.ts`, the storage-busy
+cases of the two exhaustion tests now expect the wrapper's repeats inside every send.
+`studio-session.test.ts`'s "outlasts every pause" test now expects 24 calls. `studio-score-batch.test.ts`
+now checks that members ride the resend. `studio-busy.test.ts` checks that the wrapper's texts are on
+`NATIVE_NO_WRITE`, and `studio-navigation-token.test.ts` pins `return route.current();`.
+
 ## Score composer: phrases, preview lengths, zoom (2026-10-19, branch `score-composer-2`)
 
 The three items the previous entry deferred from the owner's UX assessment. Frontend only.
@@ -410,6 +443,228 @@ change: svelte-check, the focused `score-editor` and `studio-surface` files, the
 unit suite, the root and native Cargo suites, the production frontend build, and fixture
 screenshots at 1280×800 and 900×640; the startup and flow gates were not run because the change
 touches neither `setup`, process spawning nor the chat/friend-request flows.
+
+## PR #46 fifth review: two save workers; follow-ups closed (2026-10-19)
+
+The review of `64fed24b` reproduced one P2, a timing variant of the departure-ordering finding.
+An edit made while a departure waited on an earlier receipt became eligible only in the drain's
+next round, so the one worker went to the queued Index half first and the departure timed out.
+The owner asked for "a handful" of save workers.
+
+The Studio now runs two (`SAVE_WORKERS`), one per lane at a time and in queue order within each
+lane. A document lane and the shared Index lane can therefore both be in flight, which removes
+that P2 and the single-worker limit the previous entry pinned. Three were built first, but
+an adversarial review showed they oversubscribe the bridge's four shared inline slots: saves, blob
+fetches, reads and the native receiver all hold one. That produced "too many inline downloads"
+refusals in ordinary use, and more would make it worse.
+
+- **Renderer scheduling only.** The server actor runs Studio operations one at a time, so an
+  operation slow inside the actor still delays the next one there. The native "latest request"
+  fence is per server and target, and one save per lane means one per target, so concurrent saves
+  never supersede each other.
+- **Pre-execution refusals are not writes.** The bridge's actor-busy, slot-pool-full and
+  storage-busy (`authorize`) refusals are raised before the execution lease is transferred, so
+  the operation never runs. The actor may already have signalled Ready (always so with
+  storage-busy), but it gets no lease. `nativeNoWrite` classifies exactly these as not written.
+  Queued Saves and the plain document and Index reads refused this way are resent automatically:
+  the same request, at 250/500/1000 ms. A visit is uncounted, and exhausted resends settle a Save
+  as not written so a retry is admitted afresh, only when no earlier attempt was uncertain. After
+  an uncertain post-dispatch failure and an exact retry, each visit counts and the record stays
+  uncertain, with its original request and no reauthor. All three texts are pinned to their
+  single sites in the Rust sources.
+- **One worker per record.** A record a worker has taken is marked synchronously (it stays
+  `queued` through its admission read), so no second worker takes it. Removing that guard fails
+  two existing tests.
+- **Recovery rail.** It now labels a not-written recovery apply as not written, not as uncertain
+  and "discarded".
+- **Restored Creates.** A restored, held Create reads "create not saved yet · open to save" in the
+  sidebar.
+
+Follow-ups closed:
+
+- An Index recovery record of one entry now counts for that entry's document (held row, Save,
+  indicators).
+- Restoring a wiki revision names the page it restored and closes only that pane's history.
+
+Regressions:
+
+- Edits made before and while leaving, with the Index receipt pending. Fails with one worker and
+  at `64fed24b`.
+- Lane exclusivity. It passes at `64fed24b` too, where one worker made it trivially true, and it
+  does not reach the `running` guard (that needs an admission read). It fails when the lane-head
+  rule is removed, which is what it pins.
+- The no-write classification and its source pins. They fail with the resends, the read retry or
+  the attempt revert removed.
+- Recovery-record affinity and the restore toast. Both fail at `64fed24b`.
+- Added after the review of `28b6ba28`, which cleared the P2 and raised only a documentation P3:
+  an uncertain post-dispatch failure, an exact retry, then each busy text exhausting its
+  resends. The record stays uncertain, keeps its request and cannot be reauthored. The test fails
+  if a pre-execution refusal clears the earlier uncertainty.
+
+Residuals (LOW, from the re-review; not fixed):
+
+- The overlay, recovery, fault and blob reads are not resent after a pre-dispatch refusal. A
+  refused overlay read shows its ordinary error, and a document with a local draft shows the plain
+  projection, until the next refresh.
+- "Studio actor busy" takes its 5 s rendezvous to arrive, so four refused sends outlast a
+  departure's 10 s timeout, which then reports the Save as still running.
+- Workers are not reserved per lane. Two other lanes (a Create and another document's Save) can
+  hold both, so an Index half, or a third document's Save, waits for one of them.
+- Rarer pre-lease refusals (server changed before commit, request cancelled, lease-send expiry)
+  are still classified uncertain. That is safe but pessimistic.
+- A retried read may run natively after a Save that started later, yet still count as the older
+  read. That Save's acknowledgement can briefly replace a slightly newer view; the next refresh
+  corrects it.
+
+Checks:
+
+- `npm --prefix apps/desktop test`: 1759/1759.
+- `npm run check`: 0 errors, 0 warnings.
+- `npm run build`: passed.
+- `npm run test:flows`: 9/9.
+- `scripts/check-no-ambient.sh`: passed.
+- `cargo test --all --all-features`: 2463 passed, 0 failed (Rust unchanged).
+- `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`: 363 passed, 0 failed.
+
+Adversarial review: HIGH-1 (three workers oversubscribed the slots) and HIGH-2 (storage-busy
+missed) are fixed, as are three MEDIUMs. The re-review found no BLOCKER, HIGH or MEDIUM issues.
+
+Tests changed because their contract changed:
+
+- `SAVE-001`, the frame test in `studio-session.test.ts`, the Create-retry test there, and the
+  pending-thumbnail `UI-003` used "busy" texts as examples of uncertain failures. Those texts are
+  now definite no-writes that are resent, so each uses a post-dispatch error to keep its own claim.
+- `SAVE-002` asserted a second lane stays queued "behind the one worker". It now fills both
+  workers and asserts that the cleared scope's worker cannot start the waiting third lane, while a
+  new-scope worker can. It pins that behaviour, not the token mechanism.
+- `UI-003` checks both outcomes. While doing so it exposed that a not-written Create showed
+  "creating…" in the sidebar; that now reads "create not written · retry in the editor".
+- The two departure tests from the previous round that pinned single-worker order and the
+  single-worker limit are replaced by the multi-worker contract above.
+
+## PR #46 fourth review: departure ordering (2026-10-18)
+
+The review of `5bc43d2c` confirmed the rename-context and Index-half fixes, plus 14 extended wiki
+cases and the media separation. It reproduced one new P2: leaving a document released its
+Index-lane records before draining its own lane. The single save worker then took the Index record
+first, so a slow Index receipt held the document's Save and the navigation until the 10 s refusal.
+The departure now drains the document's lane, then releases its Index records without awaiting
+them. The regression keeps the Index receipt pending: navigation completes, the document's Save
+lands first, the Index record stays in flight with its original request, and another document's
+restored work stays held. It fails at `5bc43d2c`.
+
+An adversarial review of the fix found no blocker/high; its medium is that the fix holds only
+while the worker is free. Two changes and a pinned limit follow from it:
+
+- A Save being awaited now goes ahead of other lanes' runnable heads, so an Index record an
+  earlier deadline released can no longer overtake a departure's own record (pinned; it fails
+  without the preference).
+- The post-drain release is skipped across a reset and still happens after a superseded but
+  drained departure, so a drained departure does not split the rename. A refused departure holds
+  its restored Index half for Save/retry (pinned). Overlapping Saves keep a list of active
+  preferences, so one finishing early cannot leave a stale one behind.
+- **Follow-up (pre-existing, pinned as a known limit):** one worker serves every lane, so an Index
+  delivery already running still delays a departure or a Create until it answers or the 10 s
+  refusal. It can come from a deadline, an earlier departure or a sidebar retry. A separate
+  Index-lane worker would remove this; it needs a concurrency design review.
+
+The two disclosed lows (Index recovery record without a held row, the restore toast's page name)
+remain follow-ups.
+
+Checks: frontend 1751/1751, `npm run check` 0 errors, build, 9/9 Edge flows (one earlier run
+failed the debug-console flow on load and passed on rerun), ambient gate, root Rust 2463 passed
+(24 ignored), native 363 passed (both in isolated target directories).
+
+## PR #46 third review: rename context and Index-half Save (2026-10-18)
+
+The review of `22e4ed77` confirmed the previous three fixes and reproduced two new P2s, both fixed:
+
+- **A wiki rename never retargets another server's page.** `commitWikiRename` captures the server
+  and view generation before its awaits. It reloads the page list, reopens and falls back by name
+  only while the pane still shows that server's wiki. A rename on A that lands after a switch to B
+  no longer renames B's open "Shared" pane to "Renamed", so B's Save keeps its target.
+- **A document's Save covers both halves of a rename.** `affectedObject(s)` names the document a
+  record changes, including a Closing/Unconfirmed Index record. That record keeps the Index as its
+  native target and names the entry in its op. Save, the editor's pending indicators and the
+  sidebar's held rows all use it.
+
+Both regressions fail at `22e4ed77`, as does the new sidebar assertion for an Index-only held edit.
+
+An adversarial review of these fixes found no blocker/high and four medium findings, all fixed:
+
+- A Save whose Index half sits behind another document's held, failed or uncertain Index record
+  now refuses at once and names it, instead of timing out after 10 s with "try again".
+- The rename fallback also requires that no page has been opened into the pane since the rename
+  began. A pane serial, `wikiPane()`, captures server, generation, serial and page. A newer open of
+  the old name (which reads the post-rename, empty page) keeps its identity.
+- Leaving a restored document sends both halves of its rename: its Index-lane records are
+  released, not awaited.
+- The older wiki actions use the pane they began on. `saveWikiPage` (which marks clean only the
+  text actually sent), `deleteWikiPage`, `setWikiPageFormat` and `openWikiHistory` now use the
+  captured server and page, and touch the pane only while it is still that pane (history also
+  never behind a lock).
+
+Its lows are fixed too:
+
+- Playback and export decide "draft" from content records only.
+- Held rows take a deleted entry's title from the saved Index, and the sidebar comment is updated.
+- Reauthor of an Index record is gated on the Index's refusal.
+
+One low remains: a restored Index recovery record about one entry still has no held row. `affectedObject` has a direct unit test.
+
+A short re-review found no blocker/high and one new medium, introduced by the save fix: a stash
+restored into the pane survived a Save and could later revert the page. That is fixed (saving the
+pane retires its stash) and pinned. Of its lows, these are also fixed:
+
+- The stuck-behind check reruns on every queue change.
+- The refusal says "Retry or discard" for a failed blocker.
+- Delete clears only the pane it began on.
+
+`restoreWikiRev`'s toast still names the page then on screen (cosmetic).
+
+Checks: frontend 1746/1746, `npm run check` 0 errors, build, 9/9 Edge flows, ambient gate,
+root Rust 2463 passed (24 ignored; isolated target), native 363 passed (isolated target: the
+running desktop app held `src-tauri/target/debug/mewtual-desktop.exe`).
+
+## PR #46 re-review fixes: route ownership, read-error recovery, settings requests (2026-10-18)
+
+The re-review of `13e338eb` confirmed the five original fixes and reproduced three remaining P2s:
+
+- **Stale responses no longer take over the screen.** A navigation action now owns a
+  `StudioRoute` from first step to last (`studioExit.begin()`). It carries the route across
+  every await and asks `route.leave()` again right before changing the view, never with a fresh
+  claim. A wiki response that arrives after the member returned to the Studio is discarded. Work
+  drawn in a Studio that stayed on screen during the read is saved first, or keeps the Studio on
+  refusal. History Back/Forward, ticker, inbox, news, mention, topic/search, call-diagnostics,
+  wiki rename/create and add-channel flows hand one route to `switchServer`/`switchTo`/
+  `switchView`/`openWikiPage`. From the Studio they change the surface before the channel, because
+  a channel moved under a mounted Studio ends every route. The route audit rejects a guard separated from its
+  screen change by an await. It also rejects a route-less navigation call after an await, except
+  four stated forced or background cases and one branch that begins its own action.
+- **Wiki menus act on the page they opened.** `openWikiPage` reports whether it opened a page, so a
+  retired request can no longer arm Delete or Rename on the page still shown.
+- **Read errors no longer hide recovery.** With no model on screen, the editor shows the read
+  error beside the retained requests' exact retry, armed discard and waiting count. Restored
+  queued work has a Save and discard in every editor state, without a refused departure first.
+  Save inside an editor now saves only that document (`saveDocument`), so other documents'
+  restored work stays held. A discard confirmation lapses when its record's state changes.
+- **Settings requests own navigation.** A request for the server already on screen retires an
+  older one still waiting on a Studio Save to switch, so that switch never commits, closes the
+  newer dialog or seeds over its draft.
+
+Each regression fails with its fix removed (wiki second check, current-server claim, surface-first
+order, document-scoped Save, state-keyed arming, route threading) or against `13e338eb`
+(read-error controls). An adversarial review of this round found no blocker/high finding; its three
+medium findings (Back to another channel, wiki menu arming, Save scope) and its low findings are
+fixed. Opening settings for the current server deliberately retires other in-flight navigation
+(newest action wins). A short re-review of those fixes found no blocker/high/medium; its low
+findings are fixed, except that the discard key can match again after an uncertain → retry →
+uncertain cycle (accepted: the same risk as when it was armed).
+
+Checks: frontend 1740/1740, `npm run check` 0 errors, build, 9/9 Edge flows, root Rust 2463
+passed (24 ignored), native 363 passed, ambient gate. Root Rust note: a run in the shared `target/`
+reused a `catcoms-rt` artifact from the `chat-update-implementation` worktree and failed to compile.
+The isolated-target run is the one reported.
 
 ## PR #46 review fixes: restored drafts, Studio exits, settings, playback (2026-10-18)
 

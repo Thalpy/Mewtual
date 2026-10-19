@@ -7,7 +7,7 @@
   import { PixRaster } from "./pix-canvas.ts";
   import { DEFAULT_PALETTE } from "./studio-store.ts";
   import { FLIPNOTE_H, FLIPNOTE_W } from "./studio-contract.ts";
-  import { reason, type KnownView, type SaveRecord } from "./studio-session.ts";
+  import { affectedObject, reason, type KnownView, type SaveRecord } from "./studio-session.ts";
   import { base64ToBytes, type NativeExpiry } from "./studio-native.ts";
 
   let { me, server, channel, onopen, onnavigate, onnotice } = $props<{
@@ -42,12 +42,15 @@
     void studio.rev;
     return session.pendingFor(null).filter((s) => s.status === "blocked" || s.status === "uncertain");
   });
-  // Unsaved edits held for a document other than the one in the editor. Switching documents never
-  // leaves any (a document is saved as it is left); a lock/unlock restore does, and so, until its
-  // deadline, does deleting a document whose edits are still queued. Their Save, Retry and discard
-  // controls live in that document's own editor. Each row opens it, so those
+  // Unsaved edits held for a document other than the one in the editor. Switching documents saves
+  // the document left, and sends (without awaiting) its Index records, which can show here until
+  // they land. A lock/unlock restore leaves work here, and so, until its deadline, does deleting a
+  // document whose edits are still queued. Their Save, Retry and discard controls live in that
+  // document's own editor. Each row opens it, so those
   // controls stay one click away even for a document this list does not show (deleted from the
-  // Index, or past an unread listing). A pending Create already has its own row below.
+  // Index, or past an unread listing). Records are grouped by the document they change, so an
+  // Index edit about one entry (an expiry, the Index half of a rename, on any route) counts for
+  // that document. A pending Create already has its own row below.
   // Held documents are shown eight at a time, paged rather than counted: every one of them needs
   // its own open button, because reaching its recovery controls is the only way to resolve it.
   const HELD_PAGE = 8;
@@ -58,11 +61,14 @@
     const creating = new Set(session.saves.filter((s) => s.kind === "create").map((s) => s.object));
     const byObject = new Map<string, SaveRecord[]>();
     for (const s of session.saves) {
-      if (s.kind === "applyIndex" || s.object === null || s.object === open || creating.has(s.object)) continue;
-      const list = byObject.get(s.object);
-      if (list) list.push(s); else byObject.set(s.object, [s]);
+      const object = affectedObject(s);
+      if (object === null || object === open || creating.has(object)) continue;
+      const list = byObject.get(object);
+      if (list) list.push(s); else byObject.set(object, [s]);
     }
-    const listed = [...(model?.entries ?? []), ...(model?.overflow ?? [])];
+    // The working Index first; the saved one names an entry whose pending delete hid it there.
+    const saved = session.indexModel;
+    const listed = [...(model?.entries ?? []), ...(model?.overflow ?? []), ...(saved?.entries ?? []), ...(saved?.overflow ?? [])];
     return [...byObject].map(([object, saves]) => ({
       object,
       title: listed.find((e) => e.id === object)?.title || `untitled ${session.objectKind(object)}`,
@@ -385,7 +391,7 @@
     <li>
       <button type="button" class="studio-obj pending" class:active={studio.selected === s.object} onclick={() => open(s.object)}>
         <span class="studio-obj-name"><span class="nm">{s.kind === "create" ? s.request.title : ""}</span></span>
-        <span class="studio-obj-meta"><span class="micro">{s.status === "uncertain" ? "create uncertain · retry in the editor" : "creating…"}</span></span>
+        <span class="studio-obj-meta"><span class="micro">{s.status === "uncertain" ? "create uncertain · retry in the editor" : s.status === "blocked" ? "create not written · retry in the editor" : session.awaitsExplicitSave(s.id) ? "create not saved yet · open to save" : "creating…"}</span></span>
       </button>
     </li>
   {/each}

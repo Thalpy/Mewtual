@@ -75,7 +75,9 @@ test("SAVE-001: discarding the uncertain save releases its lane; an uncertain cr
   h.ipc.on("studio_list", () => ordinaryView(indexContent()));
   h.ipc.on("studio_read", () => docView());
   h.ipc.on("publish_pix", () => ({ cid: id64(0xb1), bytes: pixBytes(1).length }));
-  h.ipc.on("studio_apply", () => { throw new Error("Studio storage busy; retry the same request"); });
+  // A failure after dispatch (the bridge's pre-dispatch "busy" refusals are definite no-writes and
+  // are resent automatically, see nativeNoWrite).
+  h.ipc.on("studio_apply", () => { throw new Error("Studio transaction expired, cancelled or server stopped"); });
   h.session.setScope({ server: SERVER, channel: CHANNEL });
   h.session.open(OBJ);
   await h.sync();
@@ -89,8 +91,9 @@ test("SAVE-001: discarding the uncertain save releases its lane; an uncertain cr
   await h.sync();
   assert.equal(h.calls("studio_apply").length, 2, "the fps edit runs once the lane is released");
   assert.equal(JSON.parse(String(h.calls("studio_apply")[1].args.body)).field, "fps");
-  // Create then its first frame: the frame cannot run while the create is uncertain.
-  h.ipc.on("studio_create", () => { throw new Error("Studio actor busy; retry"); });
+  // Create then its first frame: the frame cannot run while the create is uncertain. (A failure
+  // after dispatch; the bridge's actor-busy refusal is a definite no-write since nativeNoWrite.)
+  h.ipc.on("studio_create", () => { throw new Error("Studio transaction expired, cancelled or server stopped"); });
   const created = h.session.createFlipnote("new one");
   h.session.open(created, { read: false });
   h.session.insertFrame(created, null, pixBytes(2));
@@ -101,35 +104,42 @@ test("SAVE-001: discarding the uncertain save releases its lane; an uncertain cr
 });
 
 test("SAVE-002: a save from a cleared scope cannot release the new scope's lane", async () => {
+  // With several save workers the claim is about capacity: the new scope fills every worker and
+  // has one more lane waiting. The old scope's worker finishing must not start that lane; only a
+  // new-scope worker freeing up may.
   const h = await harness();
-  const OBJ2 = id32(0x0d);
-  const oldPublish = deferred<unknown>();
-  const newPublish = deferred<unknown>();
-  let publishes = 0;
+  const OBJ2 = id32(0x0d), OBJ3 = id32(0x0e);
+  const publishes: ReturnType<typeof deferred<unknown>>[] = [];
+  const indexAck = deferred<unknown>();
   h.ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ2]: indexEntry({ title: "two" }) } })));
   h.ipc.on("studio_read", () => docView());
-  h.ipc.on("publish_pix", () => (++publishes === 1 ? oldPublish.promise : newPublish.promise));
+  h.ipc.on("publish_pix", () => { const next = deferred<unknown>(); publishes.push(next); return next.promise; });
   h.ipc.on("studio_apply", () => docView());
-  h.ipc.on("studio_apply_index", () => ordinaryView(indexContent({ objects: { [OBJ2]: indexEntry({ title: "two", expiry: { kind: "never" } }) } })));
+  h.ipc.on("studio_apply_index", () => indexAck.promise);
   h.session.setScope({ server: SERVER, channel: CHANNEL });
   h.session.open(OBJ);
   await h.sync();
   h.session.saveFrame(OBJ, F1, pixBytes(1)); // old scope, waits on native
   await h.sync();
+  assert.equal(publishes.length, 1);
   h.session.setScope({ server: SERVER, channel: "9" });
-  h.session.open(OBJ2);
+  for (const id of [OBJ3, OBJ2]) { h.session.open(id); await h.sync(); }
+  h.session.saveFrame(OBJ2, F2, pixBytes(2)); // lane OBJ2
+  h.session.setEntryExpiry(OBJ2, { kind: "never" }); // the Index lane: the second worker
+  h.session.saveFrame(OBJ3, F2, pixBytes(3)); // lane OBJ3: waits, every worker is busy
   await h.sync();
-  h.session.saveFrame(OBJ2, F2, pixBytes(2)); // B1, waits on native
-  h.session.setEntryExpiry(OBJ2, { kind: "never" }); // B2, another lane, queued behind the one worker
+  assert.equal(h.session.saves.map((s) => s.status).join(","), "inflight,inflight,queued");
+  assert.equal(publishes.length, 2, "the old frame and the new scope's first frame");
+  publishes[0].resolve({ cid: id64(1), bytes: pixBytes(1).length }); // the OLD scope's worker ends
   await h.sync();
-  assert.equal(h.session.saves.map((s) => s.status).join(","), "inflight,queued");
-  oldPublish.resolve({ cid: id64(1), bytes: pixBytes(1).length });
+  assert.equal(publishes.length, 2, "the old worker's completion did not start the waiting lane");
+  assert.equal(h.session.saves.map((s) => s.status).join(","), "inflight,inflight,queued");
+  publishes[1].resolve({ cid: id64(2), bytes: pixBytes(2).length }); // a new-scope worker frees up
   await h.sync();
-  assert.equal(h.calls("studio_apply_index").length, 0, "the old worker's completion did not start B2");
-  assert.equal(h.session.saves.map((s) => s.status).join(","), "inflight,queued");
-  newPublish.resolve({ cid: id64(2), bytes: pixBytes(2).length });
+  assert.equal(publishes.length, 3, "the waiting lane runs under the freed new-scope worker");
+  publishes[2].resolve({ cid: id64(3), bytes: pixBytes(3).length });
+  indexAck.resolve(ordinaryView(indexContent({ objects: { [OBJ2]: indexEntry({ title: "two", expiry: { kind: "never" } }) } })));
   await h.sync();
-  assert.equal(h.calls("studio_apply_index").length, 1, "B2 runs after B1, under the new worker");
   assert.equal(h.session.saves.length, 0);
 });
 

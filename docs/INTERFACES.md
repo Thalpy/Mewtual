@@ -17,7 +17,52 @@ Roles on non-owner devices still have the existing published-roster freshness li
 in that document's lane must reach a definite receipt or the open is vetoed. With no document open
 nothing is left, so nothing is saved first. Records held for any other document keep their state,
 so opening a restored document never requires its own held work to save. Restored work is sent
-only by explicit Save or retry, or by leaving its own document (that document's departure Save).
+only by explicit Save or retry, or by leaving its own document. That document's departure Save
+awaits its own lane first. Only then does it release, without awaiting, its records in the shared
+Index lane.
+
+Two save workers run at once (`SAVE_WORKERS`), at most one per lane, with each lane's records
+still in queue order. A document lane and the shared Index lane can therefore both be in flight,
+so a departure's document Save (including an edit made while leaving) does not wait on its own
+Index half's receipt. Workers are not reserved per lane: two other lanes, such as a Create and
+another document's Save, can hold both, and the next Save then waits for one of them to answer.
+The most recently started Save still awaited has its records go ahead of other lanes' runnable
+heads, but it does not preempt a save already in flight. A record taken by a worker is marked
+synchronously, because it stays `queued` through its admission read, so no second worker takes it.
+
+This is renderer scheduling only. The server's actor runs Studio operations one at a time, so an
+Index operation that is slow inside the actor still delays the document's Save there. More
+workers would buy nothing natively and would compete for the bridge's four shared inline slots.
+Every Studio IPC call holds one of those slots for its round trip, as do blob fetches, chat inline
+downloads and the native receiver's passes.
+
+Three native refusals are raised before execution, that is before the execution lease is
+transferred to the actor, so the operation never runs and nothing of it can have been written. (The
+actor may already have signalled Ready, as it always has in the storage-busy case, but it receives
+no lease and so does not execute.)
+
+- "Studio actor busy; retry": the 5 s rendezvous was lost.
+- "too many inline downloads are already active": the slot pool was full.
+- "Studio storage busy; retry the same request": `authorize`'s locks were busy before the lease
+  was sent.
+
+`nativeNoWrite` classifies exactly these. A queued Save, or the plain document or Index read
+(`refreshDoc`, `refreshIndex`), refused this way is resent automatically, the same request after
+250, 500 and 1000 ms, without counting the visit unless an earlier attempt was already uncertain
+(see below). The overlay, recovery, fault and blob reads are
+not resent; a refusal there shows as their ordinary read error until the next refresh. The
+backoffs total 1.75 s, but "Studio actor busy" itself arrives only after its 5 s rendezvous, so a
+Save refused that way four times takes about 22 s and a departure's 10 s timeout reports it as
+still saving. Only when the resends are used up does the Save settle. It settles as not written
+only when no earlier attempt of it was uncertain. It then stays uncounted, so the member's retry is
+admitted afresh against the current history, and reauthor is available subject to the record
+kind's usual restrictions. A record whose earlier attempt was uncertain (it failed after dispatch,
+and the member retried its exact request) stays uncertain, keeps its original request and cannot
+be reauthored. Later refusals cannot show what that first attempt did. Every other native error
+stays uncertain, including the few rarer refusals that also precede the lease (a server change
+before commit, a cancelled request, a lease-send expiry); that errs toward "may have committed".
+`studio-native-no-write.test.ts` pins all three texts to their single pre-execution sites in the
+Rust sources.
 A partial departure Save leaves the shared five-second deadline running for uncovered records.
 `saveBeforeLeaving()` (leaving the Studio, a channel, a server or the window) still covers every
 record. Before a first delivery, admission reads a record's document when no view of it is held
@@ -28,15 +73,53 @@ reading"), an unread channel Index and a changed server group are all refused as
 without counting an attempt, so a retry is admitted afresh.
 
 `studio-exit.ts` `createStudioExit(host)` is the gate for App routes that change the main pane
-directly (`view`, the inbox, DM home): `release()` resolves whether leaving is allowed now and
-`leaveThen(go)` runs `go` synchronously when nothing needs saving, else only after Save succeeds
-and the route is still the newest claim. The add-server and vault-change screens, which replace
-the whole layout, are entered through it too. In App, `switchServer(id, committed?)` and
-`switchTo(id)` resolve `Promise<boolean>`: false when the switch never happened (window closing,
-Studio Save refused or superseded). `switchServer` resolves after the new server's batch read;
-its optional `committed` callback runs in the turn the switch commits. Composite routes use
-`arriveAtServer(id)`; `openServerSettings` opens in that committed turn for the requested server
-and never on the server being left. No IPC, wire or persistence format changes.
+directly (`view`, the inbox, DM home, the add-server and vault-change screens). `begin()` claims
+navigation for one user action and returns a `StudioRoute`: `current()` (no newer action, lock,
+reload or Studio channel/server change since: the claim includes the Studio session's lease),
+`leave()` (may this action change the main pane now, saving first when the Studio is on screen
+with work) and `scope()` (the same for a channel/server change, counting any retained edit). None
+of the three renews the claim, and a departure runs at most 16 Saves before refusing. An action
+that awaits anything carries its route across the await and asks `leave()` again right before
+the screen changes, so a response that outlived a newer action is discarded and work drawn
+meanwhile is saved first. Because moving the channel under a mounted Studio ends the lease, a
+composite action changes the surface before the channel. `release()` is `begin().leave()` and
+`leaveThen(go)` runs `go(route)` synchronously when nothing needs saving. A navigation call made
+without a route after an await is a new action of its own; `studio-exit-routes.test.ts` lists the
+few such calls (a completed join, leaving a server, channel reconciliation, a lost moderation
+permission) with their reasons, and every other one carries its function's route.
+
+In App, `switchView(v, route?)`, `switchServer(id, committed?, route?)`, `switchTo(id, keepSearch?,
+route?)`, `openWikiPage(name, opts?, route?)` and `openStatusRef(id, route?)` take the action's
+route (a standalone call begins its own). `switchServer`/`switchTo` resolve `Promise<boolean>`
+(false when the switch never happened) and stay synchronous up to their first await when the route
+is current and the Studio holds nothing. `switchServer` resolves after the new server's batch
+read; `committed` runs in the turn it commits. Composite routes use `arriveAtServer(id, route)`.
+Every `openServerSettings` request begins a route, including one for the server already on
+screen, so a newer request retires an older one still waiting to switch; the dialog opens in
+the committed turn for the requested, still-current request only. Like any newer action it also
+retires other in-flight navigation (a pending sidebar open, a deferred tab change). `openWikiPage`
+resolves `true` only when it opened a page; Rename, Delete and new-page edit mode act only on the
+page their own request opened. No IPC, wire or persistence format changes.
+
+Studio's editor renders a document's retained requests whatever its read state: with no model
+(read error, absent, still reading), attention records keep their exact retry and armed discard
+beside the read error. Restored queued records awaiting an explicit Save
+(`StudioSession.awaitsExplicitSave(id)`) show a Save and armed discard in every editor state. A
+Save inside a document's editor is `StudioSession.saveDocument(id)`: it releases and awaits only
+that document's records, so other documents' restored work stays held and another document's
+failure cannot refuse it. "That document's records" is `affectedObject(s) === id`, which also
+drives `pendingFor(id)` and the sidebar's held rows. An ordinary Index record names the entry as
+`object`. A Closing or Unconfirmed Index record keeps the channel Index as its native target
+(`object: null`, unchanged) and names the entry in `op.object`; an Index recovery record of one
+entry names it in `edit.choice.id`. Both halves of a rename are therefore one document's work on
+every route. The Index lane is shared, so one of these Index
+records can sit behind another document's failed, uncertain or restored-held Index record. The
+Save then refuses at once and names that record ("waits behind an unsaved edit (…)"); what could
+run was released and still runs. Leaving a document also releases, without awaiting, its records
+in the Index lane, so the departure never waits on that shared lane. Playback and export treat a
+document as a draft only for its own content records; Index records about it never put media on
+the draft path, though their failures still refuse it. A discard confirmation is armed for one
+record in one state and lapses when that record's status changes.
 
 ## Studio local working state and Save boundaries (2026-10-18)
 
