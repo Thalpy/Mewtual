@@ -15,17 +15,29 @@ async function listen(server) {
 const close = server => new Promise(resolve => server.close(resolve));
 
 test("occupied Vite port refuses without reading or stopping the existing app", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "catcoms-vite-port-test-"));
   let requests = 0;
   const stranger = createServer((_req, res) => { requests++; res.end("another checkout"); });
-  const port = await listen(stranger);
-  const child = spawn(process.execPath, [fileURLToPath(new URL("../node_modules/vite/bin/vite.js", import.meta.url)), "--host", "127.0.0.1", "--port", String(port), "--strictPort"], {
-    cwd: new URL("..", import.meta.url), stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
-  });
+  let child;
   try {
-    await assert.rejects(waitForOwnedVite(child, port), /Vite exited/);
+    const port = await listen(stranger);
+    // This checks Vite's actual strict-port refusal and our owned-output observer, not app
+    // dependency compilation. A cold full app prebundle can otherwise consume this deadline
+    // before Vite attempts to listen. Real application compilation/readiness is test:flows.
+    const config = join(fixture, "vite.config.mjs");
+    await writeFile(config, "export default { optimizeDeps: { noDiscovery: true, include: [] }, server: { preTransformRequests: false } };\n");
+    child = spawn(process.execPath, [fileURLToPath(new URL("../node_modules/vite/bin/vite.js", import.meta.url)), fixture, "--config", config, "--configLoader", "native", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], {
+      cwd: fixture, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+    });
+    await assert.rejects(waitForOwnedVite(child, port), error => error instanceof Error &&
+      /Vite exited/.test(error.message) && error.message.includes(`Port ${port} is already in use`));
     assert.equal(requests, 0, "no request may select the stranger as the tested app");
     assert.equal(await (await fetch(`http://127.0.0.1:${port}`)).text(), "another checkout");
-  } finally { child.kill(); await close(stranger); }
+  } finally {
+    child?.kill();
+    if (stranger.listening) await close(stranger);
+    await rm(fixture, { recursive: true, force: true });
+  }
 });
 
 test("only the private profile's exact debugger identity can select an endpoint", async () => {

@@ -39,6 +39,26 @@ measured SDP phase transfer, live V2 dispatch/RTC, media relay or physical accep
 media candidate section also records the mux pre-allocation/retained-copy boundary that must be
 resolved before enabling a production relay; no replacement mux profile is selected.
 
+Continuation validation update: all20 native authority cases pass0.98s after rebuilding the
+actual isolated worktree (`target/communication-v2-chain-native-authority.log`). The complete
+native command passes427 library and5 ACL cases in645.42s, with main/doc targets also passing
+(`target/communication-v2-continuation-native-full.log`). The complete frontend command passes
+1860 cases in67.55s (`target/communication-v2-continuation-frontend-full-3.log`); Svelte reports
+zero errors/warnings, the production build passes56.92s and all ten rendered flows pass. Their
+logs are `target/communication-v2-continuation-{svelte-check,frontend-build,rendered-flows}.log`.
+Formatting, the ambient-dependency gate and `cargo deny check` pass; existing duplication warnings
+remain. Complete root validation and the current native check/rebuild/startup have not yet exited.
+
+The first frontend command had1859 passes and one occupied-port harness failure: app dependency
+prebundling used the original20s deadline before Vite tried its strict-port listen. That test now
+uses a fresh minimal root/config and native config loading while retaining the installed Vite
+CLI, original deadline, strict-port refusal, zero requests to the stranger and stranger-usability
+assertions. Re-review also tightened the oracle to require the exact occupied-port diagnostic;
+this exposed and corrected a sandbox config-bundling error previously accepted by the broad exit
+check. The final five focused harness cases pass1.74s; the final1860-case command above includes
+that stronger oracle. Real application compilation/readiness still runs through `test:flows`.
+Earlier permissive-oracle results are not used as proof of the final occupied-port path.
+
 ## Prepared confirmation binding (19 October, disabled continuation)
 
 Candidate/attempt binding and the original pair deadline are now installed in `PreparedInbound`
