@@ -189,6 +189,12 @@ export function scoreOverlappingNotes(model: Pick<ScoreModel, "cells">, key: str
 export const SCORE_SNAPS: readonly number[] = [1, 2, 4];
 /** A placed note starts as an eighth: long enough to hear, short enough to phrase. */
 export const SCORE_DEFAULT_HOLD = 2;
+/** Intervals a phrase (or one note) transposes by in one step, in semitones. */
+export const SCORE_INTERVALS: readonly { semitones: number; label: string }[] = [
+  { semitones: 1, label: "semitone" }, { semitones: 2, label: "tone" }, { semitones: 3, label: "minor 3rd" }, { semitones: 4, label: "major 3rd" },
+  { semitones: 5, label: "4th" }, { semitones: 7, label: "5th" }, { semitones: 12, label: "octave" },
+];
+export const SCORE_DEFAULT_INTERVAL = 12;
 /** The step a click at `step` places on under `snap`: never past the authored length. */
 export function scoreSnapStart(step: number, snap: number, steps: number): number {
   const unit = SCORE_SNAPS.includes(snap) ? snap : 1;

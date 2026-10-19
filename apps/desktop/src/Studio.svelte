@@ -51,6 +51,7 @@
   import { ensureStudio, setStudioScope, studio } from "./studio-state.svelte.ts";
   import { frameClaimState, type ClaimView, type StudioClaimActions, type StudioClaimSnapshot } from "./draw-claims.ts";
   import ScoreEditor from "./ScoreEditor.svelte";
+  import { scoreSelectionMemory } from "./score-selection.ts";
   import StudioSound from "./StudioSound.svelte";
   import StudioMusic, { type MusicTrack } from "./StudioMusic.svelte";
   import StudioSoundfont from "./StudioSoundfont.svelte";
@@ -135,14 +136,21 @@
   const score = $derived.by(() => { void studio.rev; return session.doc?.object === objectId ? session.buffering ? session.workingScore : session.doc.score : null; });
   const sourceGeneration = $derived.by(() => { void studio.rev; return session.editorMediaGeneration; });
   // Which object and source generation the current audio was started against. Playback is
-  // stopped when the source it was prepared from is no longer the one on screen (a remote edit,
-  // a navigation, a lock) and never because of the generation its own gesture produced: placing a
-  // note bumps the generation and then auditions that note, and the audition must survive it.
+  // stopped when the source it was prepared from is no longer the one on screen (a navigation, a
+  // lock, a flipnote's or an audition's document edited meanwhile) and never because of the
+  // generation its own gesture produced: placing a note bumps the generation and then auditions
+  // that note, and the audition must survive it. A Score document playing is the exception: its
+  // edits, local or remote, do not stop it; a loop takes them into its next pass (the audio
+  // session's `refresh`) and a one-shot play finishes the pass it began.
   let audioOwner = { object: "", generation: -1 };
   function claimAudio() { audioOwner = { object: objectId, generation: untrack(() => session.editorMediaGeneration) }; }
   $effect(() => {
     const object = objectId, generation = sourceGeneration;
-    untrack(() => { if (audioOwner.object !== object || audioOwner.generation !== generation) audioActions?.stop(); });
+    untrack(() => {
+      if (audioOwner.object === object && audioOwner.generation === generation) return;
+      if (audioOwner.object === object && isScore && playing) audioActions?.refresh?.();
+      else audioActions?.stop();
+    });
   });
   $effect(() => { void objectId; untrack(() => { mediaReceipt = ""; savedPreview = null; }); });
   const readOnlyWhy = $derived.by(() => { void studio.rev; return objectId ? session.editRefusal(objectId) : ""; });
@@ -1357,9 +1365,10 @@
       {@render pendingSaves()}
       {#if mediaReceipt}<div class="st-banner info wrap">{mediaReceipt}</div>{/if}
       {#key objectId}
-        <ScoreEditor model={score} readonlyReason={playing ? "Stop playback before editing" : readOnlyWhy} loading={doc?.loading ?? false} error={doc?.error ?? ""} {patchLibrary} library={patchShelves} {who} {tint}
+        <ScoreEditor model={score} readonlyReason={readOnlyWhy} loading={doc?.loading ?? false} error={doc?.error ?? ""} {patchLibrary} library={patchShelves} {who} {tint}
           onop={(op) => guard(() => session.applyScoreOp(objectId, op))} onroom={() => session.draftRoom()} onaddpatch={addStudioPatch}
-          onplay={audioActions ? toggleStudioPlay : undefined} onstop={() => audioActions?.stop()} {playing} positionMs={playing ? audioState.elapsedMs : null}
+          selection={scoreSelectionMemory.recall(objectId)} onselection={(selection) => scoreSelectionMemory.remember(objectId, selection)}
+          onplay={audioActions ? toggleStudioPlay : undefined} onstop={() => audioActions?.stop()} {playing} nextPass={playing && !!audioState.nextPass} positionMs={playing ? audioState.elapsedMs : null}
           {loop} onloop={(next) => { loop = next; }} onaudition={audioActions ? auditionSound : undefined} onauditionpad={audioActions ? auditionPad : undefined} onnew={openSoundfont}
           onexport={() => downloadMedia()} onshare={onshareScore ? () => downloadMedia("share") : undefined} onpost={onpostScore ? () => downloadMedia("post") : undefined} {mediaBusy}
           history={scoreHistory} onnotice={(text, kind) => onnotice(text, kind === "error" ? "error" : "info")} />

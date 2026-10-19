@@ -13368,6 +13368,7 @@
   const studioAudioActions: StudioAudioActions = {
     start: (kind, prepare, loop, offset) => startStudioAudio(kind, prepare, loop, offset),
     stop: stopStudioAudio,
+    refresh: () => { studioAudio?.refresh(); if (studioAudio) studioAudioState = studioAudio.state; },
   };
   async function shareStudioScore(take: JamTake, server: number): Promise<void> {
     if (locked || activeServerId !== server || view !== "studio") throw new Error("the Score share target changed");

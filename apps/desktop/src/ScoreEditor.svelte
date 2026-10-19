@@ -24,13 +24,23 @@
   // composer keeps the inverse operations of the gestures it sent, for this document, while it is
   // mounted; they replay the previous values as ordinary edits, so a concurrent change by someone
   // else since the gesture is overwritten by the undo exactly as it would be by a hand edit.
+  //
+  // The selection (one cell, or a phrase) is the one piece of view state the host may keep for
+  // the document: it arrives through `selection` and every change leaves through `onselection`,
+  // so a document switched away from and back to opens on the same note.
+  //
+  // Playback does not lock the grid. The host plays a loop from the document as it was when the
+  // pass began and takes the edits made meanwhile into the next pass; `nextPass` says edits are
+  // waiting for it. While the document plays, a placed or moved note is not auditioned on its
+  // own (the loop will play it), only an explicit listen is.
   import { onDestroy, tick, untrack, type Snippet } from "svelte";
   import { JAM_MET_BPM_MIN, JAM_MET_BPM_MAX, JAM_MET_BPB_MIN, JAM_MET_BPB_MAX, type JamPatch } from "./jam-contract.ts";
   import { SCORE_MAX_CELLS, SCORE_MAX_STEPS, SCORE_MAX_PATCHES, SCORE_ROWS, SCORE_VOLUME_MAX, SCORE_VOLUME_MIN, canonicalJson, type ScoreCell, type ScoreOp } from "./studio-contract.ts";
   import type { ScoreModel } from "./studio-native.ts";
   import { groupShelves, instrumentName, libraryKey, rackLabel, samePatch, waveGlyph, type LibraryItem } from "./studio-sound-ui.ts";
+  import { validScoreKey, type ScoreSelection } from "./score-selection.ts";
   import {
-    PAD_CODES, PAD_NAMES, SCORE_ALTERNATIVE_PAGE, SCORE_DEFAULT_HOLD, SCORE_DIAGNOSTIC_PAGE, SCORE_ISSUE_LABELS, SCORE_PAGE_STEPS,
+    PAD_CODES, PAD_NAMES, SCORE_ALTERNATIVE_PAGE, SCORE_DEFAULT_HOLD, SCORE_DEFAULT_INTERVAL, SCORE_DIAGNOSTIC_PAGE, SCORE_INTERVALS, SCORE_ISSUE_LABELS, SCORE_PAGE_STEPS,
     SCORE_ROOTS, SCORE_ROW_BASE_NOTE, SCORE_SCALE_KINDS, SCORE_SNAPS, SCORE_STEPS_PER_BEAT, SCORE_WIDE_CARD_PX, SCORE_WIDE_PAGE_STEPS,
     scoreApplyLocal, scoreAttention, scoreBarBeat, scoreCellOperation, scoreClearSelection, scoreDiagnosticOperation, scoreDuplicateSelection, scoreDurationMs,
     scoreHeaderOperation, scoreHolds, scoreInverse, scoreLastSoundingStep, scoreMoveOperations, scoreMoveSelection, scoreNotesAt, scoreOccupiedSteps, scoreOnsetAt,
@@ -58,12 +68,18 @@
     /** How many operations the host can still queue; a gesture longer than that is refused whole
      *  before anything is sent. Absent means unbounded. */
     onroom?: () => number;
+    /** The selection to open on, as a previous mount of this document left it. */
+    selection?: ScoreSelection | null;
+    /** Every change of the selection, for the host to keep across document switches. */
+    onselection?: (selection: ScoreSelection) => void;
     /** Adds a recipe to the document; resolves its id once queued. */
     onaddpatch: (patch: JamPatch) => Promise<string>;
     /** Starts document playback, optionally from a millisecond offset into the score. */
     onplay?: (offsetMs?: number) => void;
     onstop?: () => void;
     playing?: boolean;
+    /** Edits made during this loop pass are waiting for the next one. */
+    nextPass?: boolean;
     /** Milliseconds into document playback, or null when nothing is playing. */
     positionMs?: number | null;
     loop?: boolean;
@@ -86,7 +102,7 @@
   };
   let {
     model, readonlyReason, loading, error, patchLibrary, library = [], who = (id: string) => id.slice(0, 8), tint = () => "var(--muted)",
-    onop, onroom, onaddpatch, onplay, onstop, playing = false, positionMs = null, loop = false, onloop, onaudition, onauditionpad, onnew, onexport, onshare, onpost,
+    onop, onroom, selection = null, onselection, onaddpatch, onplay, onstop, playing = false, nextPass = false, positionMs = null, loop = false, onloop, onaudition, onauditionpad, onnew, onexport, onshare, onpost,
     mediaBusy = false, history, onnotice,
   }: Props = $props();
 
@@ -114,10 +130,19 @@
   let scaleKind = $state<ScoreScaleKind>("chromatic");
   let scaleLast = $state<ScoreScaleKind>("major"); // the kind the toggle returns to
   let scaleRoot = $state(0);
-  let selected = $state<string | null>(null); // a "step:row" key, live cell or not
+  // The selection opens as the host remembered it for this document (keys it cannot have written
+  // are dropped, not trusted); from then on every change is reported back. Read once, on purpose:
+  // the memory is where this mount starts, not a value to follow.
+  const remembered = untrack(() => selection);
+  const opening = remembered && remembered.selected !== null && validScoreKey(remembered.selected) ? remembered.selected : null;
+  let selected = $state<string | null>(opening); // a "step:row" key, live cell or not
   // A phrase: several onsets handled as one (moved, nudged, duplicated, cleared together). Built
   // by Shift+click, a Shift+drag marquee or Ctrl+A; a plain click or Escape returns to one note.
-  let picked = $state<Set<string>>(new Set());
+  let picked = $state<Set<string>>(new Set((remembered?.picked ?? []).filter(validScoreKey)));
+  $effect(() => { const snapshot: ScoreSelection = { selected, picked: [...picked] }; untrack(() => onselection?.(snapshot)); });
+  if (opening) start = Math.floor(Number(opening.split(":")[0]) / SCORE_PAGE_STEPS) * SCORE_PAGE_STEPS;
+  // The interval a transposition moves by (the phrase panel's chooser, Alt+PageUp/PageDown).
+  let interval = $state(SCORE_DEFAULT_INTERVAL);
   // Horizontal zoom: steps per page. Null follows the card's width (16, or 32 when it is wide).
   const ZOOM_LEVELS: readonly number[] = [8, 16, 32, 64];
   let zoom = $state<number | null>(null);
@@ -481,7 +506,9 @@
     const entry = mode === "drum" ? { mode: "drum" as const, pad: scorePadForRow(row) ?? pad } : { mode: "note" as const, patch: recipe, len, volume };
     if (!send(() => scoreCellOperation(model!, step, row, entry), entry.mode === "drum" ? "place a hit" : "place a note")) return;
     selected = `${step}:${row}`;
-    if (entry.mode === "note") { if (remember) hold = len; audition(entry.patch, row, len, entry.volume); }
+    if (entry.mode === "note" && remember) hold = len;
+    if (playing) return; // the loop's next pass plays it
+    if (entry.mode === "note") audition(entry.patch, row, len, entry.volume);
     else onauditionpad?.(entry.pad);
   }
   /** Carry the onset at `from` to `to` as one undoable gesture (a clear and a set, batched by the host). */
@@ -495,9 +522,19 @@
     record(gesture);
     selected = `${to.step}:${to.row}`;
     goTo(to.step);
-    auditionCell(cell, to.row);
+    if (!playing) auditionCell(cell, to.row);
     void focusSelected();
     return true;
+  }
+  /** Shift the phrase, or the selected note, by an interval as one gesture (the panel's chooser,
+   *  Alt+PageUp/PageDown). A note that would leave the grid refuses; nothing is clamped. */
+  function transpose(semitones: number) {
+    if (!model || !semitones) return;
+    if (phrase) { moveGroup(0, semitones); return; }
+    if (!selected || !model.cells[selected]) return;
+    const [s, r] = selected.split(":").map(Number), row = r + semitones;
+    if (row < 0 || row >= SCORE_ROWS) { onnotice("that would push the note off the grid", "info"); return; }
+    moveOnset(selected, { step: s, row });
   }
   /** Alt+arrows: nudge the selected onset, or the whole phrase, one step or one pitch. */
   function nudgeSelected(dStep: number, dRow: number) {
@@ -827,7 +864,7 @@
   function reassignSelected(recipe: string) {
     if (!model || !selected || selectedCell?.k !== "n" || !recipe || recipe === selectedCell.p) return;
     const [step, row] = selected.split(":").map(Number), cell = selectedCell;
-    if (send(() => scoreCellOperation(model!, step, row, { mode: "note", patch: recipe, len: cell.len ?? 1, volume: cell.vol ?? SCORE_VOLUME_MAX }), "change a note's sound")) audition(recipe, row, cell.len ?? 1, cell.vol ?? SCORE_VOLUME_MAX);
+    if (send(() => scoreCellOperation(model!, step, row, { mode: "note", patch: recipe, len: cell.len ?? 1, volume: cell.vol ?? SCORE_VOLUME_MAX }), "change a note's sound") && !playing) audition(recipe, row, cell.len ?? 1, cell.vol ?? SCORE_VOLUME_MAX);
   }
   function setVolume(next: number) {
     volume = Math.max(SCORE_VOLUME_MIN, Math.min(SCORE_VOLUME_MAX, Math.round(next) || SCORE_VOLUME_MAX));
@@ -838,7 +875,7 @@
     const [step, row] = selected.split(":").map(Number), cell = selectedCell;
     const level = Math.max(SCORE_VOLUME_MIN, Math.min(SCORE_VOLUME_MAX, Math.round(next) || SCORE_VOLUME_MAX));
     if (level === (cell.vol ?? SCORE_VOLUME_MAX)) return;
-    if (send(() => scoreCellOperation(model!, step, row, { mode: "note", patch: cell.p, len: cell.len ?? 1, volume: level }), "change a note's volume")) { volume = level; audition(cell.p, row, cell.len ?? 1, level); }
+    if (send(() => scoreCellOperation(model!, step, row, { mode: "note", patch: cell.p, len: cell.len ?? 1, volume: level }), "change a note's volume")) { volume = level; if (!playing) audition(cell.p, row, cell.len ?? 1, level); }
   }
   function useAlternative(item: ScoreDiagnostic, index: number) {
     send(() => scoreDiagnosticOperation(model!, item, index), "choose a retained value");
@@ -887,10 +924,10 @@
   function onNudgeKey(event: KeyboardEvent) {
     if (!event.altKey || event.ctrlKey || event.metaKey || !cardEl?.contains(document.activeElement)) return;
     const nudge: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
-    const delta = nudge[event.key];
-    if (!delta) return;
+    const delta = nudge[event.key], jump = event.key === "PageUp" ? interval : event.key === "PageDown" ? -interval : 0;
+    if (!delta && !jump) return;
     event.preventDefault(); event.stopPropagation();
-    nudgeSelected(delta[0], delta[1]);
+    if (delta) nudgeSelected(delta[0], delta[1]); else transpose(jump);
   }
   function moveSelection(dStep: number, dRow: number) {
     const [s, r] = (selected ?? `${columns[0] ?? 0}:12`).split(":").map(Number);
@@ -951,6 +988,14 @@
       <span class="grow"></span>
       <button type="button" class="st-btn ghost" data-score-duplicate title="copy the phrase to start where it ends [ctrl d]" disabled={blocked} onclick={duplicateSelection}>duplicate</button>
       <button type="button" class="st-tile" aria-label="Clear the phrase" title="clear [delete]" disabled={blocked} onclick={clearSelection}>×</button>
+    </div>
+    <div class="st-opt" data-score-transpose>
+      <span class="lb">transpose</span>
+      <select class="st-input" aria-label="Interval" title="the interval to transpose by" value={String(interval)} disabled={blocked} onchange={(e) => { interval = Number(e.currentTarget.value); }}>
+        {#each SCORE_INTERVALS as item (item.semitones)}<option value={String(item.semitones)}>{item.label}</option>{/each}
+      </select>
+      <button type="button" class="st-tile" aria-label="Transpose the phrase up" title="up by the interval [alt page up]" disabled={blocked} onclick={() => transpose(interval)}>↑</button>
+      <button type="button" class="st-tile" aria-label="Transpose the phrase down" title="down by the interval [alt page down]" disabled={blocked} onclick={() => transpose(-interval)}>↓</button>
     </div>
   {:else if model && selected}
     {@const [sStep, sRow] = selected.split(":").map(Number)}
@@ -1378,7 +1423,8 @@
       {/if}
       <button type="button" class="sc-tool sm" aria-label="Next page" disabled={currentPage + 1 >= pages} onclick={() => show(currentPage + 1)}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M3.5 3 10 8l-6.5 5zM11.5 3H13v10h-1.5z"></path></svg></button>
       <button type="button" class="sc-tool sm" aria-label="Last page" disabled={currentPage + 1 >= pages} onclick={() => show(pages - 1)}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M2 3l6 5-6 5zM8 3l6 5-6 5z"></path></svg></button>
-      <button type="button" class="sc-tool sm" class:on={loop} aria-pressed={loop} aria-label="Loop playback" title={loop ? "looping the whole score" : "play once"} disabled={playing || !onloop} onclick={() => onloop?.(!loop)}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8a5 5 0 015-5h4M13 8a5 5 0 01-5 5H4"></path><path d="M10.5 1.5 12 3l-1.5 1.5M5.5 11.5 4 13l1.5 1.5"></path></svg></button>
+      <button type="button" class="sc-tool sm" class:on={loop} class:next={nextPass} aria-pressed={loop} aria-label="Loop playback" title={loop ? nextPass ? "looping · your changes play on the next pass" : "looping the whole score" : "play once"} disabled={playing || !onloop} onclick={() => onloop?.(!loop)}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8a5 5 0 015-5h4M13 8a5 5 0 01-5 5H4"></path><path d="M10.5 1.5 12 3l-1.5 1.5M5.5 11.5 4 13l1.5 1.5"></path></svg></button>
+      {#if nextPass}<span class="chip ok" data-score-next-pass title="changes made during this pass play on the next one"><i></i><span class="micro">next pass</span></span>{/if}
       <span class="mono strong">{cursor + 1} <span class="dim">/ {model.steps}</span></span>
       <span class="micro">{scoreTimeLabel(cursorMs)} <span class="dim">of {scoreTimeLabel(totalMs)}</span> · bar {scoreBarBeat(cursor, model.bpb).bar} · beat {scoreBarBeat(cursor, model.bpb).beat}</span>
       <span class="grow"></span>
@@ -1465,6 +1511,7 @@
   .sc-tool .k { position: absolute; right: 2px; bottom: 0; font-family: var(--mono); font-size: 0.5rem; color: var(--faint); }
   .sc-tool.on .k { color: var(--accent-hi); }
   .sc-tool.sm { width: 26px; height: 26px; } .sc-tool.sm svg { width: 11px; height: 11px; }
+  .sc-tool.next::after { content: ""; position: absolute; top: 2px; right: 2px; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
   .sc-tool.play { width: 34px; height: 30px; border-radius: 999px; background: var(--accent); border-color: var(--accent); color: var(--on-accent); margin: 0 4px; }
   .sc-tool.play svg { width: 14px; height: 14px; }
   .sc-tool.play.on { background: var(--accent-dim); color: var(--accent-hi); }

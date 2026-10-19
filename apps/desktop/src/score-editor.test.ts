@@ -3,6 +3,7 @@ import test from "node:test";
 import type { JamPatch } from "./jam-contract.ts";
 import type { ScoreModel, ScoreSlot, Valued, IndexSource } from "./studio-native.ts";
 import type { ScoreCell } from "./studio-contract.ts";
+import type { ScoreSelection } from "./score-selection.ts";
 import {
   PAD_CODES, PAD_NAMES, SCORE_DEFAULT_HOLD, SCORE_PAGE_STEPS, SCORE_WIDE_PAGE_STEPS, scoreApplyLocal, scoreAttention, scoreBarBeat, scoreCellOperation, scoreContinuations,
   scoreDiagnosticOperation, scoreDiagnostics, scoreDurationMs, scoreExtent, scoreHeaderOperation, scoreHolds, scoreLastSoundingStep,
@@ -166,15 +167,15 @@ type Surface = ReturnType<typeof surface>;
 // is folded into the model object in place, so a later gesture (an undo) sees what was written.
 // The DOM is not re-rendered for it (the prop identity is unchanged), which is enough for tests
 // that assert the operations sent.
-function surface(m: ScoreModel, options: { readonlyReason?: string; loading?: boolean; onaddpatch?: () => Promise<string>; onaudition?: (patch: JamPatch, note: number, durationMs: number, level?: number) => void; onauditionpad?: (pad: number) => void; playing?: boolean; positionMs?: number | null; loop?: boolean; onpost?: () => void; refuse?: (op: ScoreOp) => boolean; apply?: boolean; onroom?: () => number } = {}) {
+function surface(m: ScoreModel, options: { readonlyReason?: string; loading?: boolean; onaddpatch?: () => Promise<string>; onaudition?: (patch: JamPatch, note: number, durationMs: number, level?: number) => void; onauditionpad?: (pad: number) => void; playing?: boolean; nextPass?: boolean; positionMs?: number | null; loop?: boolean; onpost?: () => void; refuse?: (op: ScoreOp) => boolean; apply?: boolean; onroom?: () => number; selection?: ScoreSelection | null; onselection?: (selection: ScoreSelection) => void } = {}) {
   const target = document.createElement("div"); document.body.appendChild(target);
   const ops: unknown[] = [], notices: string[] = [], loops: boolean[] = [];
   const instance = mount(ScoreEditor, { target, props: {
     model: m, readonlyReason: options.readonlyReason ?? "", loading: options.loading ?? false, error: "", patchLibrary: [{ name: "SYNTH", patch: PATCH }],
     library: [{ name: "SYNTH", patch: PATCH, shelf: "preset" }, { name: "OTHER", patch: { ...PATCH, o: [{ w: 1, t: 0, c: 0, l: 80 }] }, shelf: "mine" }],
     onop: (op: ScoreOp) => { if (options.refuse?.(op)) return false; ops.push(op); if (options.apply) Object.assign(m, scoreApplyLocal(m, op)); }, onnotice: (text: string) => { notices.push(text); }, onaddpatch: options.onaddpatch ?? (async () => PATCH_ID),
-    onaudition: options.onaudition, playing: options.playing ?? false, positionMs: options.positionMs ?? null, loop: options.loop ?? false, onloop: (v: boolean) => { loops.push(v); },
-    onpost: options.onpost, onauditionpad: options.onauditionpad, onroom: options.onroom,
+    onaudition: options.onaudition, playing: options.playing ?? false, nextPass: options.nextPass ?? false, positionMs: options.positionMs ?? null, loop: options.loop ?? false, onloop: (v: boolean) => { loops.push(v); },
+    onpost: options.onpost, onauditionpad: options.onauditionpad, onroom: options.onroom, selection: options.selection ?? null, onselection: options.onselection,
   } }); flushSync();
   return { target, ops, notices, loops,
     click(selector: string) { const button = target.querySelector<HTMLButtonElement>(selector); assert.ok(button, selector); button.click(); flushSync(); },
@@ -1236,5 +1237,81 @@ test("tabbing into the grid never replaces a selection made elsewhere", async ()
     ui.click('[data-score-cell="3:2"]');
     ui.cell("5:10").focus(); flushSync();
     assert.ok(ui.target.querySelector('[data-score-selected] [aria-label="Sound of this note"]'), "the note stays selected when another cell merely receives focus");
+  } finally { await ui.done(); }
+});
+
+test("the phrase panel transposes the phrase by the chosen interval as one gesture; a member that would leave the grid refuses the whole move", async () => {
+  const m = model(); m.steps = 16; m.cells["2:5"] = { k: "n", p: PATCH_ID, len: 2 }; m.cells["4:7"] = { k: "n", p: PATCH_ID, len: 2 };
+  const ui = surface(m, { apply: true });
+  const pointer = (type: string, target: EventTarget, init: PointerEventInit = {}) => { target.dispatchEvent(new w.PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, button: 0, ...init })); flushSync(); };
+  const shiftClick = (key: string) => { pointer("pointerdown", ui.cell(key), { shiftKey: true }); pointer("pointerup", window, { shiftKey: true }); ui.cell(key).dispatchEvent(new w.MouseEvent("click", { bubbles: true, shiftKey: true })); flushSync(); };
+  try {
+    ui.click('[data-score-cell="2:5"]');
+    assert.equal(ui.target.querySelector("[data-score-transpose]"), null, "one note has the move buttons, not the interval chooser");
+    shiftClick("4:7");
+    assert.ok(ui.target.querySelector("[data-score-transpose]"), "a phrase offers an interval");
+    ui.click('[aria-label="Transpose the phrase up"]');
+    assert.deepEqual(ui.ops, [{ op: "clear_cell", step: 2, row: 5 }, { op: "clear_cell", step: 4, row: 7 },
+      { op: "set_cell", step: 2, row: 17, value: { k: "n", p: PATCH_ID, len: 2 } }, { op: "set_cell", step: 4, row: 19, value: { k: "n", p: PATCH_ID, len: 2 } }], "an octave by default");
+    ui.ops.length = 0;
+    ui.click('[aria-label="Transpose the phrase up"]');
+    assert.deepEqual(ui.ops, [], "another octave would leave the grid: nothing moves, nothing is clamped");
+    assert.match(ui.notices.at(-1) ?? "", /off the grid/);
+    ui.change('[aria-label="Interval"]', "7");
+    ui.click('[aria-label="Transpose the phrase down"]');
+    assert.deepEqual(ui.ops, [{ op: "clear_cell", step: 2, row: 17 }, { op: "clear_cell", step: 4, row: 19 },
+      { op: "set_cell", step: 2, row: 10, value: { k: "n", p: PATCH_ID, len: 2 } }, { op: "set_cell", step: 4, row: 12, value: { k: "n", p: PATCH_ID, len: 2 } }], "a fifth down, the phrase still picked at its new place");
+    assert.match(ui.target.querySelector("[data-score-phrase]")?.parentElement?.textContent ?? "", /2 notes/);
+  } finally { await ui.done(); }
+});
+
+test("alt+page up/down transposes the selected note by the interval; a note that would leave the grid is refused, not clamped", async () => {
+  const m = model(); m.steps = 16; m.cells["4:4"] = { k: "n", p: PATCH_ID, len: 2 }; m.cells["8:20"] = { k: "n", p: PATCH_ID, len: 1 };
+  const ui = surface(m, { apply: true });
+  const key = (cell: string, name: string) => { ui.cell(cell).focus(); ui.cell(cell).dispatchEvent(new w.KeyboardEvent("keydown", { key: name, altKey: true, bubbles: true, cancelable: true })); flushSync(); };
+  try {
+    ui.click('[data-score-cell="4:4"]'); key("4:4", "PageUp");
+    assert.deepEqual(ui.ops, [{ op: "clear_cell", step: 4, row: 4 }, { op: "set_cell", step: 4, row: 16, value: { k: "n", p: PATCH_ID, len: 2 } }]);
+    ui.ops.length = 0;
+    ui.click('[data-score-cell="8:20"]'); key("8:20", "PageUp");
+    assert.deepEqual(ui.ops, []); assert.match(ui.notices.at(-1) ?? "", /off the grid/);
+    key("8:20", "PageDown");
+    assert.deepEqual(ui.ops, [{ op: "clear_cell", step: 8, row: 20 }, { op: "set_cell", step: 8, row: 8, value: { k: "n", p: PATCH_ID, len: 1 } }]);
+  } finally { await ui.done(); }
+});
+
+test("a remembered selection opens the composer on it, and every change is reported for the next mount", async () => {
+  const m = model(); m.steps = 48; m.cells["20:5"] = { k: "n", p: PATCH_ID, len: 2 }; m.cells["22:7"] = { k: "n", p: PATCH_ID, len: 2 };
+  const reported: ScoreSelection[] = [];
+  const ui = surface(m, { selection: { selected: "20:5", picked: ["20:5", "22:7", "bad", "9:99"] }, onselection: (s) => reported.push(s) });
+  try {
+    assert.match(ui.target.querySelector("[data-score-phrase]")?.parentElement?.textContent ?? "", /2 notes/, "the phrase is back, without keys the composer could never have written");
+    assert.ok(ui.cell("20:5"), "the page holding the selection is the one shown");
+    assert.deepEqual(reported.at(-1), { selected: "20:5", picked: ["20:5", "22:7"] });
+    ui.cell("20:5").focus(); ui.cell("20:5").dispatchEvent(new w.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); flushSync();
+    assert.deepEqual(reported.at(-1), { selected: "20:5", picked: [] }, "escape ends the phrase and the host hears of it");
+    ui.click('[data-score-cell="22:7"]');
+    assert.deepEqual(reported.at(-1), { selected: "22:7", picked: [] });
+  } finally { await ui.done(); }
+  const empty = surface(model(), { selection: { selected: "3:3", picked: [] } });
+  try { assert.match(empty.target.querySelector("[data-score-selected]")?.textContent ?? "", /selected cell/, "an empty cell can be the remembered selection"); }
+  finally { await empty.done(); }
+});
+
+test("the grid stays editable while the score plays: a placed note is written but not auditioned on its own, and the loop shows edits waiting for the next pass", async () => {
+  const m = model(); m.steps = 16;
+  const heard: number[] = [];
+  const ui = surface(m, { apply: true, playing: true, positionMs: 0, loop: true, nextPass: true, onaudition: (_p, note) => heard.push(note) });
+  try {
+    assert.ok(ui.target.querySelector("[data-score-next-pass]"), "edits wait for the next pass");
+    assert.equal(ui.target.querySelector(".st-banner.warn"), null, "playback is not a read-only reason");
+    ui.click('[data-score-cell="3:2"]');
+    assert.deepEqual(ui.ops, [{ op: "set_cell", step: 2, row: 2, value: { k: "n", p: PATCH_ID, len: 2 } }]);
+    assert.deepEqual(heard, [], "the loop's next pass plays it; no audition cuts the loop");
+    ui.click('[aria-label="Move this note up"]');
+    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 2, row: 3, value: { k: "n", p: PATCH_ID, len: 2 } });
+    assert.deepEqual(heard, [], "nor does a move");
+    ui.click('[aria-label="Listen to this note"]');
+    assert.deepEqual(heard, [63], "an explicit listen still sounds");
   } finally { await ui.done(); }
 });
