@@ -1,5 +1,24 @@
 # Mewtual; Handover
 
+## Current file/resume checkpoint80927a85 (2026-10-19)
+
+The native full suite passes427 library and5 ACL tests, including all four TCP file scenarios
+and onward channel-directory discovery. All1860 frontend cases, Svelte/static/build, ten rendered
+flows, separate native check/rebuild/startup, strict root Clippy, formatting, ambient-dependency
+and dependency audit checks pass. The complete root rerun passes2,993 cases across56 targets,
+with zero failures and24 existing ignored cases. The first attempt's registry-seed stack overflow
+was corrected by boxing its unchanged
+shared async fixture; four exact seed and all16 registry-ingress cases pass with default stacks.
+See the communication acceptance ledger and checkpoint logs for commands and honest boundaries.
+
+The isolated media feasibility probe also passes in that rebuilt host, with relay/relay,
+decoded generated audio and jam/drawing stop/resume. It exercises no production V2 signalling,
+membership/media consent or member relay, and does not establish physical audibility/network acceptance.
+
+Further V2 implementation is isolated in `target/communication-live-v2-worktree` so it cannot
+change the sources covered by that full run. Its targeted evidence is separate. Live V2, production
+member media relay, combined rollout and physical audio/network acceptance remain unfinished.
+
 ## V2 result/reply checkpoint (2026-10-19, disabled transport)
 
 Exact Rust terminal-result recovery and metadata-only post-End status are implemented. The
@@ -53,10 +72,10 @@ fixture-only sealed-D-route readiness assertion also passes all four cases. Stri
 and Svelte checks pass. Rendered Transfers Pause/Resume/Retry/completion passes at900×640; screenshot
 is `target/pr48-private-downloads.png`. The isolated Edge process needs sandbox elevation because
 its GPU subprocess is otherwise denied before app load. These remain focused software checks.
-This remains an uncommitted implementation checkpoint, not complete programme acceptance.
+This implementation is committed in80927a85; it is not complete programme acceptance.
 Live V2, media relay, combined rollout and physical media acceptance remain open.
 Only one physical desktop is available. The complete-suite results below are historical for
-pushed ebdd8447 and do not establish acceptance of this uncommitted follow-up.
+pushed ebdd8447; the current checkpoint validation is recorded at the top of this document.
 
 ## Historical checkpoint ebdd8447 (2026-10-19)
 

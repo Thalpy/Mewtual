@@ -1,6 +1,46 @@
 # Chat, files and voice implementation evidence
 
+## Checkpoint80927a85 validation (19 October)
+
+This committed runtime checkpoint implements the native file requester/private durable Download
+follow-up and the disabled V2 result/input/reply custody described below. Its full root suite
+passes against fixed files; the separate live-V2 continuation worktree is not covered by these
+results. No live V2, production member relay or physical media acceptance is claimed.
+
+| Check | Current checkpoint result |
+|---|---|
+| Complete native suite |427 library and5 ACL cases pass; main/doc targets pass |
+| Complete frontend suite |1860 pass |
+| Svelte checks and production frontend build |Pass;0 errors/warnings from Svelte |
+| Rendered browser flows |All10 pass |
+| Separate native workspace `cargo check` |Pass |
+| Native debug rebuild and `test:startup` |Pass; actual application setup completes |
+| Strict root all-target/all-feature Clippy |Pass |
+| Root/native formatting, ambient-dependency check and `cargo deny check` |Pass; existing dependency-duplication warnings only |
+| Complete root suite |2,993 pass;0 fail;24 existing ignored;56 target summaries; command exits0 |
+
+Logs are `target/communication-checkpoint-{native-full,frontend-full,svelte-check,frontend-build,
+rendered-flows,native-check,native-build,startup,root-clippy,cargo-deny,root-full-2}.log`.
+The first root attempt aborted on the registry seed test's nested async fixture stack. The
+unchanged shared fixture body is now boxed, preserving all operations/assertions and default
+test stack settings. The exact four seed cases and all16 registry-ingress cases pass; read-only
+review found no remaining issue. The successful full rerun includes that regression.
+
+The complete-suite commands were `cargo test --all --all-features -j2 -- --test-threads=4`,
+`cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml -j2 -- --test-threads=4` and
+`npm --prefix apps/desktop test`. Build concurrency and test-thread limits avoid competing heavy
+storage workloads; no test filters, enlarged stacks or extended acceptance deadlines were used.
+The successful root command includes the large offline-prefix and10,000-message catch-up cases.
+
 ## Endpoint media gateway feasibility (19 October, experiment only)
+
+The repeated probe also passes in the freshly rebuilt80927a85 native host: relay/relay,
+generated-audio peak0.10104 and28 packets before the cut; jam/drawing delivery;129 accepted
+bridge writes /14,618 bytes in5.83s; stop/resume assertions and cleanup pass. Frozen evidence is
+`target/member-media-probe-native-rebuilt-19oct-3.log` and
+`target/member-media-probe-native-rebuilt-19oct.json`. Two earlier repeats did not mount the
+document and sent no TURN packets. The first lacked its dev server; the second was not diagnosed.
+Failure diagnostics now report mount state without page content; assertions/deadlines are unchanged.
 
 The retained loopback experiment passes in headless Edge and the existing Mewtual WebView2 host.
 Both endpoints select relay candidates; generated audio decodes and jam/drawing fixture messages
@@ -18,7 +58,7 @@ for the actual mounted app document, keeps its CSP, and uses closed acknowledged
 Read-only final re-review has no remaining finding for the experiment.
 
 The Node TURN/role handshake is fixture-only. This is no production membership, consent, V2
-signalling, mesh-driver, media-key isolation, helper-failover, load or rebuilt-host acceptance.
+signalling, mesh-driver, media-key isolation, helper-failover or load acceptance.
 Only one physical desktop is available, so independent-network and audible-device acceptance
 remain open. A full member relay is still unimplemented.
 
@@ -39,8 +79,9 @@ Clippy passes in15.36s (`target/communication-voice-payload-clippy.log`). The fi
 two stale assertions that expected input bytes to remain charged after the intentional last
 lease drop. Assertions now distinguish held readers from compacted history and retain the
 mismatched-result protection checks. Read-only implementation review has no B/H/M/L finding.
-Full checkpoint validation is in progress; historical full-suite results below are not evidence
-for this uncommitted revision. Live V2, media relay and physical acceptance remain open.
+The complete checkpoint validation above includes this revision. Historical full-suite results
+below remain evidence only for their named revisions. Live V2, media relay and physical acceptance
+remain open.
 
 ## V2 result and reply ownership follow-up (19 October, not live enablement)
 
@@ -80,12 +121,13 @@ power-loss durability claim for the external final directory entry: file data is
 publication, but its parent directory is not. Original encrypted progress is removed only after
 successful publication under the current owner; the tests cover process restart and collisions.
 
-Current uncommitted follow-up (19 October): the native requester is connected to explicit
+Checkpoint80927a85 follow-up (19 October): the native requester is connected to explicit
 chunk/range/Keep reads after direct-provider exhaustion. Actual C/B/A handler tests cover signed
 page receipt, effective-wall rollback and temporary source pressure. The actual large offline-prefix
 case and TCP/native sealed-Keep checks pass, including C reopening and replacement helper D.
 This supersedes historical statements below that the requester search was test-only, but is not
-complete package4 acceptance. Full-suite evidence below applies to earlier pushed checkpoints.
+complete package4 acceptance. Full-suite evidence at the top covers80927a85; later historical
+entries apply to their named checkpoints.
 External publication now refuses final-destination collisions and never deletes another local
 file on cancellation. Private durable Download ownership/resume is connected through the actual
 native storage adapter and actor; completed copies are excluded from shared serving. Restart

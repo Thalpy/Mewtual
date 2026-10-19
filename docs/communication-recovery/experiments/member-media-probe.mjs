@@ -275,7 +275,13 @@ await bounded(new Promise((resolve,reject)=>{web.once('error',reject);web.listen
       try { const state=await send('Runtime.evaluate',{expression:"location.origin==='http://localhost:1420' && document.readyState==='complete' && !!document.getElementById('app')?.firstElementChild",returnByValue:true});ready=state.result?.value===true; }catch{}
       if(!ready)await bounded(sleep(200),'native document retry');
     }
-    if(!ready)throw new Error('Native application document did not mount');
+    if(!ready) {
+      // Keep the readiness assertion strict, but distinguish a missing dev server/navigation
+      // from a mounted origin whose app failed to initialize. Do not print user/page content.
+      const state=await send('Runtime.evaluate',{expression:"JSON.stringify({href:location.href,ready:document.readyState,appChildren:document.getElementById('app')?.childElementCount??0,viteError:!!document.querySelector('vite-error-overlay')})",returnByValue:true});
+      console.log('native mount diagnostic '+state.result?.value);
+      throw new Error('Native application document did not mount');
+    }
   }
   const origin = await send('Runtime.evaluate',{expression:'JSON.stringify({href:location.href,title:document.title})',returnByValue:true});
   console.log('probe page '+origin.result?.value);

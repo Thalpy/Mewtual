@@ -25,10 +25,19 @@ The retained Edge run passes the same assertions in 6.21 seconds (134 writes / 1
 `target/member-media-probe-edge-19oct-checkpoint.{log,json}`. Enqueue counters are local evidence;
 selected candidates, decoded audio and channel receive/echo checks establish endpoint receipt.
 
+A repeat against the freshly rebuilt80927a85 native host also passes: relay/relay, decoded
+generated-audio peak0.10104,28 received audio packets,129 accepted bridge writes /14,618 bytes
+in5.83 seconds, with jam/drawing delivery and the same cut/resume assertions. Its frozen log and
+JSON are `target/member-media-probe-native-rebuilt-19oct-3.log` and
+`target/member-media-probe-native-rebuilt-19oct.json`. Two preceding attempts failed before any
+TURN packet because the native document did not mount. The first had no frontend dev server;
+the second's exact document state was not captured. The runner now records only URL/readiness/
+app-child-count/Vite-overlay diagnostics on that failure. Readiness and deadlines were unchanged.
+
 This is a feasibility result for synthetic tuples in this WebView2 implementation. It uses a
 small loopback-only Node TURN fixture, fixture credentials, two peer connections in one window,
 and an ordinary local TCP bridge. It does not exercise Mewtual membership, V2 signalling, its
-mesh driver, consent enforcement, helper replacement, a rebuilt current native executable,
+mesh driver, consent enforcement, helper replacement,
 microphone/speaker audibility, independent hosts or NAT/firewall diversity. The fixture parser
 and its fixed credentials/role handshake must never become the application server or authority.
 

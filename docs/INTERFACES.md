@@ -86,7 +86,9 @@ checks. Final Found retains both parent C and selected A's two-second scope. Ski
 invalid or temporary failures produce Unavailable unless a later source succeeds; only all
 actually checked signed Absent replies produce the helper's Absent observation. Original source
 Bytes clones and outgoing response inputs retain custody even when final admission refuses.
-Requester/Keep integration remains unfinished.
+The native requester now uses this bridge after direct-provider exhaustion for explicit reads,
+Keep and private Download acquisition. Four actual TCP/native scenarios cover those paths and
+interrupted helper replacement; the communication ledger records their exact restart boundary.
 
 ## Congested transport delivery and automatic repair submissions (PR 48 revision)
 
