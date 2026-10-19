@@ -4,35 +4,98 @@ use super::*;
 
 impl Scenario {
     async fn discover_channel(&self, indices: &[usize], channel: u128) {
-        bounded("automatic channel directory discovery", async {
+        let mut catalogs = BTreeMap::new();
+        let complete = tokio::select! {
+            _ = async {
             loop {
                 let mut complete = true;
                 for index in indices {
-                    complete &= self
-                        .online(*index)
-                        .actor
-                        .channels()
-                        .await
-                        .iter()
-                        .any(|candidate| candidate.id == channel);
+                    let catalog = self.online(*index).actor.channels().await;
+                    complete &= catalog.iter().any(|candidate| candidate.id == channel);
+                    catalogs.insert(*index, catalog.iter().map(|row| row.id).collect::<Vec<_>>());
                 }
                 if complete {
                     break;
                 }
                 SystemClock.sleep(Duration::from_millis(50)).await;
             }
-        })
-        .await;
+            } => true,
+            _ = SystemClock.sleep(Duration::from_millis(PERIODIC_RECOVERY_MS)) => false,
+        };
+        if !complete {
+            // Diagnostic reads have their own small bound so a busy/stopped actor cannot hide
+            // which recipient failed. They do not drive discovery, extend acceptance time or
+            // inject a source. Driver observations remain available even if queries stall.
+            for index in indices {
+                let running = self.online(*index);
+                let observed = async {
+                    let routes = running
+                        .actor
+                        .member_routes()
+                        .await
+                        .into_iter()
+                        .map(|route| {
+                            let peer = route.peer_id.map(PeerId::new);
+                            (
+                                peer.and_then(|peer| {
+                                    self.rules.peers.iter().position(|row| *row == peer)
+                                }),
+                                route.connected,
+                                route.binding,
+                                route.health,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let recovery = running
+                        .actor
+                        .recovery_progress(
+                            catcoms_wire::DocType::ChannelIndex,
+                            0, // released shared directory ID
+                        )
+                        .await;
+                    let finalized = running.actor.finalized_member_peers().await;
+                    (routes, recovery, finalized)
+                };
+                let query = tokio::select! {
+                    result = observed => Some(result),
+                    _ = SystemClock.sleep(Duration::from_millis(500)) => None,
+                };
+                let driver = self.clients[*index].driver.as_ref().unwrap().borrow();
+                let observers: Vec<_> = driver
+                    .observations
+                    .iter()
+                    .map(|row| {
+                        self.rules
+                            .libp2p_peers
+                            .iter()
+                            .position(|peer| *peer == row.observer)
+                    })
+                    .collect();
+                eprintln!("directory timeout: client={index} target={channel:032x} wall={} mono={} passes={} catalog={:?} identify_observers={observers:?} actor_routes_recovery_finalized={query:?}",
+                    self.clock.now_ms(), self.clock.monotonic_ms(), running.passes.load(Ordering::Acquire), catalogs.get(index));
+            }
+            let trace = self.rules.trace.lock().unwrap();
+            eprintln!(
+                "directory timeout transport: received={:?} completed={:?} recovery={:?}",
+                trace.received_requests, trace.completed_requests, trace.received_recovery
+            );
+            panic!(
+                "six-client operation exceeded its bound: automatic channel directory discovery"
+            );
+        }
     }
 
     /// Compare full device identities, including absence, rather than equating roster counts or
     /// four-byte display fingerprints. An epoch transition must not leave a removed peer present.
     async fn converge_members(&self, indices: &[usize], member_indices: &[usize]) {
+        eprintln!("membership phase: observers={indices:?} expected={member_indices:?}");
         let expected: BTreeSet<_> = member_indices
             .iter()
             .map(|index| hex::encode(self.clients[*index].identity.as_ref().unwrap().1.as_bytes()))
             .collect();
-        bounded("exact authenticated membership recovery", async {
+        let mut rosters = BTreeMap::new();
+        let complete = tokio::select! {
+            _ = async {
             loop {
                 let mut complete = true;
                 for index in indices {
@@ -45,14 +108,31 @@ impl Scenario {
                         .map(|member| member.identity)
                         .collect();
                     complete &= actual == expected;
+                    rosters.insert(*index, actual);
                 }
                 if complete {
                     break;
                 }
                 SystemClock.sleep(Duration::from_millis(50)).await;
             }
-        })
-        .await;
+            } => true,
+            _ = SystemClock.sleep(Duration::from_millis(PERIODIC_RECOVERY_MS)) => false,
+        };
+        if !complete {
+            eprintln!("membership timeout: expected={member_indices:?} actual={rosters:?}");
+            for index in indices {
+                let actor = &self.online(*index).actor;
+                let query = tokio::select! {
+                    result = async { (actor.recovery_progress(catcoms_wire::DocType::ChannelIndex, 0).await, actor.member_routes().await) } => Some(result),
+                    _ = SystemClock.sleep(Duration::from_millis(500)) => None,
+                };
+                eprintln!(
+                    "membership timeout: client={index} passes={} recovery_routes={query:?}",
+                    self.online(*index).passes.load(Ordering::Acquire)
+                );
+            }
+            panic!("exact authenticated membership recovery exceeded {PERIODIC_RECOVERY_MS} ms");
+        }
         self.rules.assert_graph();
     }
 }

@@ -7,7 +7,7 @@
 //! phase quotas count retained terminal records and actual lower/engine/result owners too.
 
 use super::resources::{ByteBudget, Credit, Reservation, ResourceKind, Resources, WorkLane};
-use super::{CallLease, EncryptedKind, Scope, VoiceError, MAX_SDP_PLAINTEXT};
+use super::{CallLease, EncryptedKind, Scope, VoiceError, MAX_SDP_PLAINTEXT, ROUTE_METADATA_BYTES};
 use catcoms_crypto::DeviceId;
 use std::sync::{Arc, Mutex};
 
@@ -20,7 +20,7 @@ const CIPHERTEXT: usize = MAX_SDP_PLAINTEXT + 16;
 pub const MAX_AAD: usize = 542;
 const PACKET_BYTES: usize = 2 * CIPHERTEXT + 1340;
 const SOURCE_BYTES: usize = CIPHERTEXT + 2154;
-const LOWER_BYTES: usize = 4 * CIPHERTEXT + 8616;
+const LOWER_BYTES: usize = 4 * CIPHERTEXT + 8616 + ROUTE_METADATA_BYTES;
 const ACTION_BYTES: usize = CIPHERTEXT + MAX_AAD + 1536;
 const ENGINE_BYTES: usize = 4 * (CIPHERTEXT + MAX_AAD) + 3 * MAX_SDP_PLAINTEXT + 2048;
 const RESULT_BYTES: usize = MAX_SDP_PLAINTEXT + 1040;

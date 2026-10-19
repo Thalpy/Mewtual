@@ -412,6 +412,105 @@ async fn voice_transport_source_helper_ack_and_direct_upgrade_preserve_original_
     assert_eq!(f._source.voice_transport_actor().unwrap().source().unwrap().counts(), (1, 3, 0));
 }
 
+fn queued_source_offer(f: &mut VoiceForwardFixture) -> (voice_v2::presence::LocalJoin, voice_v2::SignedObject) {
+    use voice_v2::packets::{Authority, PairBinding, ReserveRequest};
+    use voice_v2::presence::LocalJoin;
+    use voice_v2::{EncryptedKind, JoinKey, MAX_SDP_PLAINTEXT};
+    let context = f._source.voice_v2_context(1).unwrap();
+    let lease = f._source.voice_call_lease(1).unwrap();
+    let public = hex::decode("046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5").unwrap().try_into().unwrap();
+    let key = JoinKey::new([121; 32], public).unwrap();
+    let mut join = LocalJoin::new(&context, key, lease.clone(), f._endpoints[0].resources()).unwrap();
+    let authority = Authority { context: &context, lease: &lease, member: &|_| true };
+    // This test begins at the native established-pair seam; it claims actual Root framing,
+    // transport submission and ACK verification, not browser AEAD or live RTC acceptance.
+    let ledger = join.packet_ledger_for_test();
+    let handshake = [122; 32];
+    f._source.voice_transport_actor().unwrap().with_limits(|limits| {
+        ledger.established_sdp_pair_for_test(PairBinding { peer: f.recipient.device.device_id(), join: [123; 32], key_ref: [124; 32], handshake }, &authority, limits, &[f.helper.device.device_id()], f.clock.as_ref())
+    }).unwrap();
+    let reservation = ledger.reserve(f._source.device.public_key_bytes().try_into().unwrap(), ReserveRequest {
+        handshake, kind: EncryptedKind::Offer, offer: None, ciphertext_bytes: MAX_SDP_PLAINTEXT + 16,
+    }, &authority, f.clock.as_ref(), &mut f._source.rng).unwrap();
+    let object = ledger.submit(reservation.id, &vec![5; MAX_SDP_PLAINTEXT + 16], &f._source.device, &authority, f.clock.as_ref()).unwrap();
+    let activity = join.source_packet_activity(&object, &authority, f._endpoints[0].clock()).unwrap();
+    f._source.queue_voice_source(object.clone(), activity).unwrap();
+    (join, object)
+}
+
+#[tokio::test]
+async fn root_prepares_and_submits_prepaid_sdp_with_the_ordinary_pool_full() {
+    use voice_v2::resources::ResourceKind;
+    let mut f = VoiceForwardFixture::empty().await;
+    let (_join, object) = queued_source_offer(&mut f);
+    let context = f._source.voice_v2_context(1).unwrap();
+    let resources = f._endpoints[0].resources();
+    let ordinary = resources.charge(context.scope.group, 256 * 1024 - resources.counts().0, ResourceKind::Retained).unwrap();
+    let mut pending = f._source.prepare_voice_sources().unwrap();
+    assert_eq!(pending.len(), 1, "prepaid lower work includes Root route metadata before spending an attempt");
+    assert_eq!(resources.counts().0, 256 * 1024);
+    assert!(resources.charge(context.scope.group, 1, ResourceKind::Retained).is_err());
+    let (_publisher, signal) = tokio::sync::watch::channel(false);
+    let (completed, ()) = tokio::join!(pending.pop().unwrap().execute(signal), async {
+        loop {
+            if let Some(TransportEvent::Request { from, data, responder, .. }) = f.helper.transport.next_event().await {
+                let (inner, ..) = decode_authed_request(&data[1..]).unwrap();
+                let envelope = voice_v2::Envelope::decode(&inner).unwrap();
+                assert_eq!(envelope.object(), &object);
+                responder.respond(Bytes::from(f.helper.receive_voice_transport(from, &data).unwrap()));
+                break;
+            }
+        }
+    });
+    assert_eq!(f._source.complete_voice_source(completed).unwrap(), (crate::VoiceTransportStatus::HelperQueued, voice_v2::source::SourceOutcome::Pending));
+    assert_eq!(f._source.voice_transport_actor().unwrap().source().unwrap().counts(), (1, 1, 0));
+    drop(ordinary);
+}
+
+#[tokio::test]
+async fn root_prepaid_sdp_routes_keep_two_actual_lowers_charged_after_cancellation() {
+    use voice_v2::resources::ResourceKind;
+    let mut f = VoiceForwardFixture::empty().await;
+    let (_join, object) = queued_source_offer(&mut f);
+    let resources = f._endpoints[0].resources();
+    let group = object.scope().group;
+    let ordinary = resources.charge(group, 256 * 1024 - resources.counts().0, ResourceKind::Retained).unwrap();
+    let first = f._source.prepare_voice_sources().unwrap().pop().unwrap();
+    f.clock.advance_ms(500);
+    let second = f._source.prepare_voice_sources().unwrap().pop().unwrap();
+    let source = f._source.voice_transport_actor().unwrap().source().unwrap();
+    assert_eq!(source.counts(), (1, 2, 2));
+    f.clock.advance_ms(500);
+    assert!(f._source.prepare_voice_sources().unwrap().is_empty());
+    assert_eq!(source.counts(), (1, 2, 2), "two retained lower loans leave no third phase or attempt");
+    let (cancel_first, signal_first) = tokio::sync::watch::channel(false);
+    let (cancel_second, signal_second) = tokio::sync::watch::channel(false);
+    let (first, second, responders) = tokio::join!(first.execute(signal_first), second.execute(signal_second), async {
+        let mut responders = Vec::new();
+        while responders.len() < 2 {
+            if let Some(TransportEvent::Request { from, data, responder, .. }) = f.helper.transport.next_event().await {
+                let (inner, ..) = decode_authed_request(&data[1..]).unwrap();
+                assert_eq!(voice_v2::Envelope::decode(&inner).unwrap().object(), &object);
+                assert!(f.helper.receive_voice_transport(from, &data).is_some());
+                responders.push(responder);
+            }
+        }
+        cancel_first.send_replace(true);
+        cancel_second.send_replace(true);
+        responders
+    });
+    assert!(f._source.complete_voice_source(first).is_err());
+    assert!(f._source.complete_voice_source(second).is_err());
+    assert_eq!(source.counts(), (1, 2, 2), "upper cancellation and completions cannot refund actual lower custody");
+    drop(ordinary);
+    f._endpoints[0].revoke_session();
+    drop(_join); // closes unused exchange headroom; actual lower phase loans remain owned
+    let retained = resources.counts().0;
+    drop(responders);
+    assert_eq!(source.counts(), (1, 2, 0));
+    assert!(resources.counts().0 < retained, "route metadata and both lower phase/lane charges retire with the real responders");
+}
+
 #[tokio::test]
 async fn voice_transport_source_end_and_driver_replacement_reject_queued_or_completed_work() {
     for scenario in 0..4 {

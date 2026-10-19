@@ -21,6 +21,7 @@ async-trait.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 blake3 = "1"
+sha2 = "0.10"
 hex = "0.4"
 automerge = "0.10"
 zeroize = "1"

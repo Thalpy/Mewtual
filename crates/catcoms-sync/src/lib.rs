@@ -312,7 +312,9 @@ const SIGNED_ANSWER_OVERHEAD: usize = 256;
 /// The largest operation bundle a paged answer may carry, once its envelope is accounted for.
 const MAX_SIGNED_CATCHUP_BUNDLE: usize = MAX_CONTROL_RESPONSE - SIGNED_ANSWER_OVERHEAD;
 
-const CATCHUP_PEER_COOLDOWN_MS: u64 = 30_000;
+/// Quiet document/source retry interval, also used to pace periodic reconciliation. This is
+/// scheduling policy, separate from any individual request or authority deadline.
+pub const CATCHUP_PEER_COOLDOWN_MS: u64 = 30_000;
 
 /// How long a peer's claim that a document has more to come is honoured, on the injected elapsed
 /// clock. Long enough that an ordinary reconnection resumes from the source that made it; bounded
@@ -1084,6 +1086,24 @@ pub struct SyncStats {
     /// Gauge: **proven member** catch-up sources currently known (promoted via a
     /// verified signed catch-up; the trusted pool).
     pub member_peers: usize,
+}
+
+/// Read-only recovery gauges for one document. These are local scheduling observations,
+/// never proof of remote custody or freshness. No content, keys or dial addresses are included.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryProgress {
+    pub epoch: u64,
+    pub connected_bound_sources: usize,
+    pub queued_documents: usize,
+    pub queued_membership: usize,
+    pub pending_document: Option<(DocType, u128)>,
+    pub pending_peer: Option<PeerId>,
+    pub waiting_response: bool,
+    pub restore_sweep_owed: bool,
+    pub document_version: u64,
+    pub document_queued: bool,
+    pub document_checked_sources: usize,
+    pub document_cooling_sources: usize,
 }
 
 /// Deferred recovery work, performed on the next async drain in [`ChannelSync::run_once`]
@@ -5380,6 +5400,56 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         s
     }
 
+    /// Sample bounded queues without driving them. In particular, a diagnostic read must not
+    /// manufacture the wake or connection whose absence it is trying to explain.
+    pub fn recovery_progress(&self, doc_type: DocType, doc_id: u128) -> RecoveryProgress {
+        let version = self.doc_version(doc_type, doc_id);
+        let task = CatchupTask::Doc { doc_type, doc_id };
+        RecoveryProgress {
+            epoch: self.group.epoch(),
+            connected_bound_sources: self
+                .member_peers
+                .iter()
+                .filter(|proof| {
+                    proof.bound
+                        && self.connected_peers.contains(&proof.peer)
+                        && self.group.contains_device(&proof.device)
+                })
+                .count(),
+            queued_documents: self
+                .catchup_queue
+                .iter()
+                .filter(|task| matches!(task, CatchupTask::Doc { .. }))
+                .count(),
+            queued_membership: self
+                .catchup_queue
+                .iter()
+                .filter(|task| matches!(task, CatchupTask::Commits { .. }))
+                .count(),
+            pending_document: self.catchup_inflight.and_then(|(task, _)| match task {
+                CatchupTask::Doc { doc_type, doc_id } => Some((doc_type, doc_id)),
+                CatchupTask::Commits { .. } => None,
+            }),
+            pending_peer: self.catchup_inflight.and_then(|(_, peer)| peer),
+            waiting_response: self.pending_catchup.is_some(),
+            restore_sweep_owed: self.first_proof_sweep_owed,
+            document_version: version,
+            document_queued: self.catchup_queue.contains(&task),
+            document_checked_sources: self
+                .catchup_sources_checked
+                .get(&(doc_type, doc_id))
+                .filter(|(checked_version, _)| *checked_version == version)
+                .map_or(0, |(_, peers)| peers.len()),
+            document_cooling_sources: self
+                .catchup_cooldowns
+                .iter()
+                .filter(|((kind, id, _), until)| {
+                    *kind == doc_type && *id == doc_id && **until > self.clock.monotonic_ms()
+                })
+                .count(),
+        }
+    }
+
     /// The inbound join attempts this node has served this session, **newest first** (the order
     /// an operator reads them in: the attempt they are debugging is the one that just happened).
     pub fn join_attempts(&self) -> Vec<JoinAttempt> {
@@ -6793,7 +6863,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             self.member_peers.pop_front();
         }
         self.reconcile_voice_routes();
-        if newly_proven && bound && self.first_proof_sweep_owed {
+        if bound && self.first_proof_sweep_owed {
             // The restore's outstanding sweep, discharged now that a source exists for it.
             //
             // A restored node reaches its first connection with an empty proof pool, so
@@ -6802,6 +6872,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // sweep that connection could not run is the sweep that has to happen, or history
             // written while this node was away stays missing until something unrelated notices.
             // Restoring, opening one channel and finding the rest still short is the shape of it.
+            // PEX/commit discovery may already have proved this SAME peer without endpoint
+            // binding. Its later bound upgrade must discharge the latch too; newly_proven is
+            // false in that ordinary sequence. The latch itself ensures this happens once.
             //
             // **Only a bound proof.** That is exactly a peer that has served *this node* a
             // document catch-up, which means its membership check ran and passed. The unbound
@@ -18258,6 +18331,63 @@ mod tests {
         assert!(
             queued_docs(&alice).is_empty(),
             "the restore's sweep is discharged, not repeated for every new source"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_peer_unbound_to_bound_upgrade_discharge_restored_directory_sweep() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        let alice = &mut members[0];
+        alice.open_channel(DocType::ChannelIndex, 55).await.unwrap();
+        alice.open_channel(DocType::Channel, 56).await.unwrap();
+        let saved = alice.snapshot().unwrap();
+        let network = Hub::new();
+        let mut restored = Member::restore(
+            &saved,
+            network.join(PeerId::from_u64(99)),
+            ChaCha20Rng::seed_from_u64(7),
+            Box::new(ManualClock::new(1_000)),
+        )
+        .unwrap();
+        restored.catchup_queue.clear();
+        let peer = PeerId::from_u64(9_998);
+        restored.note_peer_connected(peer);
+        // Ordinary PEX/commit discovery proves the member before finalization binds its
+        // endpoint. Both proofs name the SAME peer; no later connection edge is guaranteed.
+        restored.promote_member_peer(peer, ids[1]);
+        assert!(restored.first_proof_sweep_owed);
+        let before = restored.recovery_progress(DocType::ChannelIndex, 55);
+        assert!(before.restore_sweep_owed);
+        assert!(!before.document_queued);
+        assert_eq!(before.connected_bound_sources, 0);
+        assert!(restored
+            .catchup_queue
+            .iter()
+            .all(|task| !matches!(task, CatchupTask::Doc { .. })));
+        restored.promote_member_peer_bound(peer, ids[1], true);
+        assert!(
+            restored.catchup_queue.contains(&CatchupTask::Doc {
+                doc_type: DocType::ChannelIndex,
+                doc_id: 55
+            }),
+            "the bound upgrade must wake directory recovery immediately"
+        );
+        assert!(restored.catchup_queue.contains(&CatchupTask::Doc {
+            doc_type: DocType::Channel,
+            doc_id: 56
+        }));
+        assert!(!restored.first_proof_sweep_owed);
+        let after = restored.recovery_progress(DocType::ChannelIndex, 55);
+        assert!(!after.restore_sweep_owed);
+        assert!(after.document_queued);
+        assert_eq!(after.connected_bound_sources, 1);
+        assert!(!after.waiting_response);
+        assert!(after.pending_document.is_none());
+        restored.catchup_queue.clear();
+        restored.promote_member_peer_bound(peer, ids[1], true);
+        assert!(
+            restored.catchup_queue.is_empty(),
+            "the owed latch discharges exactly once"
         );
     }
 

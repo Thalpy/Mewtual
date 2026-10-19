@@ -5,7 +5,6 @@ use catcoms_rt::{RequestAuthority, SharedRequestKeepalive};
 use futures::FutureExt;
 use std::sync::Weak;
 use voice_v2::helper::{ForwardJob, HelperLedger};
-use voice_v2::resources::{Credit, ResourceKind};
 use voice_v2::source::{SourceActivity, SourceHop, SourceJob, SourceLedger, SourceOutcome};
 use voice_v2::CallLease;
 
@@ -45,7 +44,10 @@ struct RouteGate {
     policy: Option<[u8; 32]>,
     live: CallLease,
     connection: catcoms_rt::ConnectionLease,
-    _credit: Credit,
+    // The source/helper reserves these metadata bytes before spending its attempt. Retaining
+    // the SAME flight also retains its phase/lane through any driver authority or completion;
+    // cancellation alone cannot refund custody. Flight has no back-edge to this RouteGate.
+    _custody: SharedRequestKeepalive,
 }
 struct FlightAuthority {
     route: Arc<RouteGate>,
@@ -446,9 +448,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             policy: context.scope.policy,
             live: CallLease::default(),
             connection,
-            _credit: voice
-                .resources
-                .charge(context.scope.group, 512, ResourceKind::Retained)?,
+            _custody: job.keepalive(),
         });
         voice.routes.active.push(Arc::downgrade(&gate));
         let authority = Arc::new(FlightAuthority {

@@ -565,7 +565,9 @@ impl SourceLedger {
                 continue;
             };
             let effect = actor.effect(key.0, hop.device(), packet.object.expires())?;
-            let bytes = 4 * packet.bytes + 4096;
+            // Root framing and route authority share this same affine lower credit. Reserving
+            // route metadata here avoids a fallible ordinary allocation after attempt debit.
+            let bytes = 4 * packet.bytes + 4096 + ROUTE_METADATA_BYTES;
             let budget = if let Some(exchange) = packet.activity.exchange() {
                 exchange.charge(super::negotiation::Stage::Lower, bytes)
             } else {

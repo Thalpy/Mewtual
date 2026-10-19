@@ -589,6 +589,12 @@ pub enum AppCommand {
     MemberRoutes {
         reply: oneshot::Sender<Vec<catcoms_sync::MemberRoute>>,
     },
+    /// Local scheduling observations only; this query never starts recovery work.
+    RecoveryProgress {
+        doc_type: crate::DocType,
+        doc_id: u128,
+        reply: oneshot::Sender<catcoms_sync::RecoveryProgress>,
+    },
     FinalizedMemberPeers {
         reply: oneshot::Sender<Vec<PeerId>>,
     },
@@ -2545,6 +2551,25 @@ impl ServerActor {
             .await
             .map_err(|_| "server stopped".to_string())?;
         rx.await.map_err(|_| "server stopped".to_string())
+    }
+
+    /// Inspect recovery without changing its scheduling or substituting a successful empty
+    /// result when the actor stopped. There is no renderer/native command for this Rust seam.
+    pub async fn recovery_progress(
+        &self,
+        doc_type: crate::DocType,
+        doc_id: u128,
+    ) -> Result<catcoms_sync::RecoveryProgress, String> {
+        let (reply, result) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::RecoveryProgress {
+                doc_type,
+                doc_id,
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        result.await.map_err(|_| "server stopped".to_string())
     }
 
     /// Request one explicit safety-bounded fallback redial pass.
@@ -4697,6 +4722,9 @@ where
                     }
                     Some(AppCommand::MemberRoutes { reply }) => {
                         let _ = reply.send(server.member_routes());
+                    }
+                    Some(AppCommand::RecoveryProgress { doc_type, doc_id, reply }) => {
+                        let _ = reply.send(server.sync().recovery_progress(doc_type, doc_id));
                     }
                     Some(AppCommand::FinalizedMemberPeers { reply }) => {
                         let _ = reply.send(server.finalized_member_peers());

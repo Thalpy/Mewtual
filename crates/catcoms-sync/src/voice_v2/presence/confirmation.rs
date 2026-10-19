@@ -5,9 +5,12 @@
 //! independent of the pair pin; a failed newer join must not evict a working confirmed peer.
 
 use super::*;
-use crate::voice_v2::crypto_actions::{self, Allocation, CryptoAction, CryptoInput, Key};
+use crate::voice_v2::crypto_actions::{
+    self, Allocation, CryptoAction, CryptoInput, CryptoOutcome, CryptoResultReceipt, Key,
+    ResultBinding, TerminalResult,
+};
 use crate::voice_v2::packets::{
-    CommittedPacket, InboundPacket, PairBinding, ReserveRequest, ReservedPacket,
+    InboundPacket, PairBinding, ReserveRequest, ReservedPacket, ValidatedInbound,
 };
 use crate::voice_v2::resources::ByteBudget;
 
@@ -182,6 +185,55 @@ fn decode(
     d.finish()?;
     Ok((low, high))
 }
+/// All fallible counter/ownership checks precede retirement of the previous packet. The caller
+/// installs this value synchronously, after its final pair/token checks, without an await.
+struct PreparedActionChange {
+    action: Action,
+    retire: Option<MessageId>,
+}
+fn prepare_action(
+    pair: &Pair,
+    kind: EncryptedKind,
+    low: Nonce,
+    high: Option<Nonce>,
+    ledger: &PacketLedger,
+    authority: &Authority<'_>,
+) -> Result<PreparedActionChange, VoiceError> {
+    let serial = pair
+        .action_serial
+        .checked_add(1)
+        .ok_or(VoiceError::Capacity)?;
+    // Retire the previous packet's independently captured source owner before publishing a
+    // replacement nonce/action. The pair and join can remain live across these transitions.
+    let retire = pair.action.as_ref().and_then(|action| {
+        action
+            .draft
+            .as_ref()
+            .map(|draft| draft.id)
+            .or_else(|| action.signed.as_ref().map(SignedObject::id))
+    });
+    // This checks the ledger's current owner without retiring anything. There is no fallible
+    // step after the caller consumes its incoming token and installs this prepared action.
+    if retire.is_some() {
+        ledger.validate_establish(&pair.binding.handshake, authority)?;
+    }
+    Ok(PreparedActionChange { action: Action {
+        serial,
+        kind,
+        plaintext: plaintext(kind, pair.binding.handshake, low, high),
+        draft: None,
+        signed: None,
+        created: 0,
+        live: RevocationOwner::default(),
+    }, retire })
+}
+fn apply_action(pair: &mut Pair, prepared: PreparedActionChange, ledger: &PacketLedger) {
+    if let Some(id) = prepared.retire {
+        ledger.retire_outgoing_validated(id);
+    }
+    pair.action_serial = prepared.action.serial;
+    pair.action = Some(prepared.action);
+}
 fn set_action(
     pair: &mut Pair,
     kind: EncryptedKind,
@@ -190,32 +242,8 @@ fn set_action(
     ledger: &PacketLedger,
     authority: &Authority<'_>,
 ) -> Result<(), VoiceError> {
-    let serial = pair
-        .action_serial
-        .checked_add(1)
-        .ok_or(VoiceError::Capacity)?;
-    // Retire the previous packet's independently captured source owner before publishing a
-    // replacement nonce/action. The pair and join can remain live across these transitions.
-    if let Some(action) = &pair.action {
-        if let Some(id) = action
-            .draft
-            .as_ref()
-            .map(|draft| draft.id)
-            .or_else(|| action.signed.as_ref().map(SignedObject::id))
-        {
-            ledger.retire_outgoing(id, authority)?;
-        }
-    }
-    pair.action = Some(Action {
-        serial,
-        kind,
-        plaintext: plaintext(kind, pair.binding.handshake, low, high),
-        draft: None,
-        signed: None,
-        created: 0,
-        live: RevocationOwner::default(),
-    });
-    pair.action_serial = serial;
+    let prepared = prepare_action(pair, kind, low, high, ledger, authority)?;
+    apply_action(pair, prepared, ledger);
     Ok(())
 }
 
@@ -332,9 +360,9 @@ impl LocalJoin {
         Ok(self.actions.pull())
     }
 
-    /// First ciphertext submission uses the same fence as native admission/settlement. An
-    /// endpoint result owner still needs to cache its exact committed reply before returning it;
-    /// this wrapper deliberately provides no lost-reply recovery or public IPC by itself.
+    /// Recover an exact accepted seal without signing again. Historical receipts are separate
+    /// from permission to send: this compatibility API exposes bytes only while their original
+    /// pair/attempt, signed packet and current native authority remain valid.
     pub fn submit_confirmation_action(
         &mut self,
         action: &CryptoAction,
@@ -343,14 +371,44 @@ impl LocalJoin {
         authority: &Authority<'_>,
         clock: &dyn Clock,
     ) -> Result<SignedObject, VoiceError> {
+        let result = self.submit_confirmation_result(
+            action, ciphertext, action.output_tag(ciphertext)?, signer, authority, clock,
+        )?;
+        if result.retired {
+            return Err(VoiceError::Unauthorized);
+        }
+        let CryptoInput::EncryptConfirmation(flight) = action.input() else { unreachable!() };
+        self.pair_current(flight.handshake, authority, clock)?;
+        let CryptoOutcome::Sealed { message, hash } = result.outcome else {
+            return Err(VoiceError::Unauthorized);
+        };
+        let signed = self.confirmations.pairs[&flight.handshake].action.as_ref()
+            .and_then(|pending| pending.signed.as_ref())
+            .filter(|signed| signed.id() == message && signed.hash() == hash)
+            .ok_or(VoiceError::Reservation)?;
+        signed.check_freshness(clock.now_ms())?;
+        Ok(signed.clone())
+    }
+
+    /// Metadata-only exact result recovery. The native adapter must authorize the registered
+    /// action owner before calling; the receipt itself never authorizes transport or RTC work.
+    pub fn submit_confirmation_result(
+        &mut self,
+        action: &CryptoAction,
+        ciphertext: &[u8],
+        claimed_tag: [u8; 32],
+        signer: &dyn VoiceSigner,
+        authority: &Authority<'_>,
+        clock: &dyn Clock,
+    ) -> Result<CryptoResultReceipt, VoiceError> {
         if !action.belongs_to(self.scope, &self.lease) {
             return Err(VoiceError::Unauthorized);
         }
         let CryptoInput::EncryptConfirmation(flight) = action.input() else {
             return Err(VoiceError::Unauthorized);
         };
-        action.with_pending(|| {
-            self.submit_confirmation(
+        action.with_result(ciphertext, claimed_tag, clock, || {
+            let signed = self.submit_confirmation(
                 FlightSubmission {
                     handshake: flight.handshake,
                     action: flight.action,
@@ -360,7 +418,11 @@ impl LocalJoin {
                 signer,
                 authority,
                 clock,
-            )
+            )?;
+            Ok(TerminalResult {
+                binding: self.result_binding(flight.handshake, u64::MAX, signed.expires()),
+                outcome: CryptoOutcome::Sealed { message: signed.id(), hash: signed.hash() },
+            })
         })
     }
 
@@ -374,14 +436,35 @@ impl LocalJoin {
         clock: &dyn Clock,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<(), VoiceError> {
+        let result = self.commit_confirmation_result(
+            action, plaintext, action.output_tag(plaintext)?, authority, clock, rng,
+        )?;
+        match result.outcome {
+            CryptoOutcome::Opened => Ok(()),
+            CryptoOutcome::Rejected(error) => Err(error),
+            _ => Err(VoiceError::Unauthorized),
+        }
+    }
+
+    /// Record both accepted and closed-rejected plaintext results under the same action fence.
+    /// A lookup after settlement/token consumption returns history without repeating effects.
+    pub fn commit_confirmation_result(
+        &mut self,
+        action: &CryptoAction,
+        plaintext: &[u8],
+        claimed_tag: [u8; 32],
+        authority: &Authority<'_>,
+        clock: &dyn Clock,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<CryptoResultReceipt, VoiceError> {
         if !action.belongs_to(self.scope, &self.lease) {
             return Err(VoiceError::Unauthorized);
         }
         let CryptoInput::DecryptConfirmation(packet) = action.input() else {
             return Err(VoiceError::Unauthorized);
         };
-        action.with_pending(|| {
-            self.commit_confirmation(
+        action.with_result(plaintext, claimed_tag, clock, || {
+            self.commit_confirmation_terminal(
                 OpenedFlight {
                     token: packet.token,
                     aad: packet.aad(),
@@ -394,6 +477,16 @@ impl LocalJoin {
                 rng,
             )
         })
+    }
+
+    fn result_binding(&self, handshake: Nonce, deadline: u64, expires: u64) -> ResultBinding {
+        let pair = &self.confirmations.pairs[&handshake];
+        ResultBinding {
+            pair: pair.pin.clone(),
+            attempt: pair.attempt.0.clone(),
+            deadline: pair.deadline.min(deadline),
+            expires: expires.saturating_add(CLOCK_SKEW_MS),
+        }
     }
 
     /// Derivation belongs to the unchanged native pair, independently of confirmation nonce

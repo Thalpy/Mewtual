@@ -309,13 +309,16 @@ members; direct-only scopes cannot prepare helpers. Actual lower custody can blo
 hedge but cannot consume protected reply capacity. Readiness expires after 30 seconds; the first
 SDP begins an immutable 20-second work window. Exact retries cannot extend either deadline.
 
-At the 8 KiB plaintext ceiling, the declared simultaneous peak is 224,294 bytes: local packet,
-Source and two lower holders (111,014), remote packet, decrypt record and serialized engine/
+At the 8 KiB plaintext ceiling, the declared simultaneous peak is 225,318 bytes: local packet,
+Source and two lower holders (112,038), remote packet, decrypt record and serialized engine/
 verification scratch (89,666), retained encrypt record (10,286), native result (9,232), and
 workflow metadata (4,096). These fit the 229,376-byte reserve without refunding actual work.
 All phase quotas count retained terminal records. Closing releases unused headroom only;
 actual bytes, engine/forward lanes and continuation slots remain charged until custody ends.
 Maximum native packet/Source/reply and pressured composition regressions pin this arithmetic.
+Each lower holder includes 512 bytes for Root's route/authority metadata, reserved before an
+attempt is spent. The route retains that same actual flight credit through cancellation and
+completion; Root requires no additional ordinary-pool allocation to submit prepaid SDP work.
 
 This is enforced native capacity infrastructure, not completed SDP crypto-action factories,
 browser-copy custody or RTC result delivery. Those integrations, exact historical receipts and

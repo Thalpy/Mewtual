@@ -37,6 +37,9 @@ pub const MAX_ENVELOPE: usize = 48 * 1024;
 /// Native SDP packet factories additionally require the bounded prepaid exchange owner.
 /// Encrypted endpoint/action/browser integration remains disabled until all consumers use it.
 pub const MAX_SDP_PLAINTEXT: usize = 8 * 1024;
+/// Root's route/authority record belongs to each actual lower flight. Reserve it before the
+/// source/helper spends an attempt; ordinary-pool pressure must not strand prepaid SDP work.
+pub(crate) const ROUTE_METADATA_BYTES: usize = 512;
 pub const MAX_PACKET_LIFETIME_MS: u64 = 15_000;
 pub const MAX_DELEGATION_LIFETIME_MS: u64 = 30_000;
 pub const CLOCK_SKEW_MS: u64 = 5_000;
@@ -245,7 +248,7 @@ const VERSION: u8 = 2;
 const SUITE: u8 = 1; // P-256 ECDH / HKDF-SHA256 / AES-256-GCM, 96-bit IV, 128-bit tag.
 
 /// No payload/address/key material is interpolated into diagnostics by these errors.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum VoiceError {
     #[error("malformed voice-v2 object")]
     Malformed,

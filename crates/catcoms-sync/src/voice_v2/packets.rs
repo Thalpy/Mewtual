@@ -225,6 +225,18 @@ pub struct CommittedPacket {
     _credit: Arc<Credit>,
 }
 
+/// Private synchronous transaction plan. It must not cross an await: its sole ledger owner
+/// prepares closed-result work, repeats final checks, then consumes it without a fallible tail.
+pub(super) struct ValidatedInbound {
+    token: u64,
+    pub header: EncryptedHeader,
+    pub hash: [u8; 32],
+    pub expires: u64,
+    pub retire: u64,
+    pair: CallLease,
+    token_owner: CallLease,
+}
+
 /// Packet-specific source authority, created only for the ledger's exact cached signed bytes.
 /// Pair retirement/promotion closes queued sends independently of the still-live local join.
 #[derive(Clone)]
@@ -355,6 +367,24 @@ impl PacketLedger {
             action_slots: Arc::new(super::crypto_actions::slots::Slots::default()),
         })
     }
+    /// Root transport regressions begin at an established native pair without claiming an
+    /// actual browser handshake. Keep this fixture capability unavailable in production/IPC.
+    #[cfg(test)]
+    pub(crate) fn established_sdp_pair_for_test(
+        &mut self,
+        binding: PairBinding,
+        authority: &Authority<'_>,
+        limits: &mut super::limits::OriginLimits,
+        helpers: &[DeviceId],
+        clock: &dyn Clock,
+    ) -> Result<(), VoiceError> {
+        let handshake = binding.handshake;
+        self.register_pair(binding, authority)?;
+        self.establish(&handshake, authority)?;
+        self.prepare_sdp_exchange(handshake, authority, limits, helpers, clock)?;
+        Ok(())
+    }
+
     /// Native readiness must prepay this before either SDP direction is positively admitted.
     /// It is deliberately separate from confirmation's irreversible transition: a local
     /// capacity refusal cannot strand an already consumed confirmation token.
@@ -608,8 +638,22 @@ impl PacketLedger {
         authority: &Authority<'_>,
     ) -> Result<(), VoiceError> {
         self.pair(handshake, authority)?;
-        self.pairs.get_mut(handshake).expect("checked pair").status = Status::Established;
+        self.establish_validated(handshake);
         Ok(())
+    }
+    pub(super) fn validate_establish(
+        &self,
+        handshake: &[u8; 32],
+        authority: &Authority<'_>,
+    ) -> Result<(), VoiceError> {
+        self.pair(handshake, authority).map(|_| ())
+    }
+    /// Apply only inside the synchronous confirmation transaction after final owner validation.
+    pub(super) fn establish_validated(&mut self, handshake: &[u8; 32]) {
+        self.pairs
+            .get_mut(handshake)
+            .expect("validated pair")
+            .status = Status::Established;
     }
     pub fn retire_member(&mut self, peer: DeviceId) {
         for pair in self
@@ -989,6 +1033,12 @@ impl PacketLedger {
         authority: &Authority<'_>,
     ) -> Result<(), VoiceError> {
         self.current(authority)?;
+        self.retire_outgoing_validated(id);
+        Ok(())
+    }
+    /// This is the infallible half of a prepared confirmation transition. No new authority is
+    /// minted: a stale revocation remains safe, and every later send repeats its current gate.
+    pub(super) fn retire_outgoing_validated(&self, id: MessageId) {
         // Expiry may already have pruned an unsigned draft. Idempotent retirement must not
         // prevent its owner's next action; it never recreates a missing reservation.
         if let Some(outgoing) = self.outgoing.get(&id) {
@@ -998,7 +1048,6 @@ impl PacketLedger {
                 exchange.close();
             }
         }
-        Ok(())
     }
     /// Original signature/route verification precedes this call. Replay is charged at admission,
     /// before UI decrypt; helper replacement and alternate connections cannot reset the window.
@@ -1174,6 +1223,20 @@ impl PacketLedger {
         authority: &Authority<'_>,
         clock: &dyn Clock,
     ) -> Result<CommittedPacket, VoiceError> {
+        let prepared =
+            self.validate_inbound_commit(token, aad, sequence, ciphertext, authority, clock)?;
+        self.validate_inbound_owner(&prepared, authority, clock)?;
+        Ok(self.consume_validated_inbound(prepared))
+    }
+    pub(super) fn validate_inbound_commit(
+        &mut self,
+        token: u64,
+        aad: &[u8],
+        sequence: u64,
+        ciphertext: &[u8],
+        authority: &Authority<'_>,
+        clock: &dyn Clock,
+    ) -> Result<ValidatedInbound, VoiceError> {
         self.prune(clock);
         self.current(authority)?;
         let incoming = self.incoming.get(&token).ok_or(VoiceError::Reservation)?;
@@ -1207,18 +1270,64 @@ impl PacketLedger {
         {
             return Err(VoiceError::Unauthorized);
         }
-        let pair_lease = self.pair(&header.handshake, authority)?.live.clone();
+        let pair = self.pair(&header.handshake, authority)?.live.clone();
+        Ok(ValidatedInbound {
+            token,
+            header: header.clone(),
+            hash: incoming.object.hash(),
+            expires: incoming.object.expires(),
+            retire: incoming.retire,
+            pair,
+            token_owner: incoming.token.0.clone(),
+        })
+    }
+    /// Recheck immediately before consumption, after all closed-result validation, RNG draws
+    /// and checked counters. No await/ledger mutation may intervene between this and consume.
+    pub(super) fn validate_inbound_owner(
+        &self,
+        prepared: &ValidatedInbound,
+        authority: &Authority<'_>,
+        clock: &dyn Clock,
+    ) -> Result<(), VoiceError> {
+        let pair = self.pair(&prepared.header.handshake, authority)?;
         let incoming = self
             .incoming
-            .remove(&token)
-            .expect("checked incoming packet");
-        Ok(CommittedPacket {
+            .get(&prepared.token)
+            .ok_or(VoiceError::Reservation)?;
+        incoming.object.check_freshness(clock.now_ms())?;
+        if !prepared.pair.is_same(&pair.live)
+            || !prepared.pair.is_live()
+            || !prepared.token_owner.is_same(&incoming.token.0)
+            || !prepared.token_owner.is_live()
+            || clock.monotonic_ms() >= prepared.retire
+            || incoming
+                .confirmation
+                .as_ref()
+                .is_some_and(|pending| !pending.authorized())
+            || incoming
+                .exchange
+                .as_ref()
+                .is_some_and(|exchange| !exchange.is_live())
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(())
+    }
+    pub(super) fn consume_validated_inbound(
+        &mut self,
+        prepared: ValidatedInbound,
+    ) -> CommittedPacket {
+        let incoming = self
+            .incoming
+            .remove(&prepared.token)
+            .expect("validated synchronous incoming transaction");
+        CommittedPacket {
             object: incoming.object,
             local_lease: self.lease.clone(),
-            pair_lease,
+            pair_lease: prepared.pair,
             retire: incoming.retire,
             _credit: incoming._credit,
-        })
+        }
     }
 }
 

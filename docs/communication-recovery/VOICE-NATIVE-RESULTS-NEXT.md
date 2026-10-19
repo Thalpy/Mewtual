@@ -33,7 +33,8 @@ plaintext or revive an obsolete result.
 
 The current 9,232-byte SdpResult phase owns one native Vec. It does not account for native IPC
 serialization, browser quarantine or RTC UTF-16 strings. The narrow simultaneous native peak
-leaves only 5,082 spare bytes in its 229,376-byte reserve, so adding those copies alongside an
+leaves only 4,058 spare bytes in its 229,376-byte reserve, including the later route-metadata
+correction, so adding those copies alongside an
 unchanged engine loan is not justified.
 
 Prefer receipt-only commit replies. The browser already has its computed plaintext; retain it

@@ -16,7 +16,7 @@ signed request. The actor rechecks cancellation and the complete current manifes
 before accepting it. Restoring/replacing an owner, unlisting, changing the manifest set or changing
 membership invalidates old work before storage.
 
-There are four attempts per server and eight per process. Each independent attempt holds its own
+There are four concurrent attempts per server and eight per process. Each independent attempt holds its own
 permits through the actual transport completion and through ready-but-unconsumed responses.
 Application cancellation/deadline does not refund a still-live lower stream. Drop explicitly signals
 cancellation, including abort of an unpolled worker; the driver rejects a cancelled/closed queued
@@ -24,10 +24,15 @@ request before admission. Requests prefer existing live, authenticated member so
 the same total cap to preserve restart bootstrap. A candidate is never trusted as a member: its
 actual response signer must be in the current roster and authenticate the exact request. This
 explicit-read fallback can reveal a requested ciphertext CID to an unproven connected candidate,
-as the released fetch path already could; it never promotes endpoint trust and cannot redial. At most four distinct providers per encrypted variant are
-considered, with a twelve-second attempt deadline (transport timeout plus two seconds) and a
-sixty-second quiet read/chunk deadline. Accepted page progress refreshes the quiet deadline;
-separate page/round bounds limit repeated partial work. This is not a persistent execution budget
+as the released fetch path already could; it never promotes endpoint trust and cannot redial.
+Search admits connected providers in batches of four, continuing beyond absent or busy preferred
+providers. One bounded tried set admits at most 320 distinct candidates per chunk/round; each
+candidate can be tried against the admitted exact encrypted variants (at most four). A busy
+candidate stays queued while later batches are searched. These are search bounds, separate from
+the concurrent-attempt permits above. Each attempt has a twelve-second deadline (transport timeout
+plus two seconds), beside a sixty-second quiet read/chunk deadline. Accepted page progress refreshes
+the quiet deadline. At most 1,024 accepted pages per chunk and six retry rounds after the initial
+search bound repeated partial work; retry rounds preserve rejected exact variants. These are not persistent execution budgets
 across restart; durable resume is tracked in the communication plan. Admission
 fails with a busy error instead of waiting on actor-owned capacity. Media ranges are at most one
 `CHUNK_BYTES` window (8 MiB), including windows crossing two chunks.

@@ -12,6 +12,9 @@ pub(super) struct Trace {
     pub connections: BTreeSet<(usize, usize)>,
     pub received_requests: BTreeSet<(usize, usize)>,
     pub completed_requests: BTreeSet<(usize, usize)>,
+    /// Actual recovery notifications observed at the receiver's transport. Endpoint admission
+    /// is checked separately through authenticated indirect-route evidence, never this counter.
+    pub received_recovery: BTreeSet<(usize, usize, u8)>,
     pub dropped_gossip: usize,
     pub delayed_replies: usize,
 }
@@ -226,6 +229,19 @@ impl MeshTransport for Transport {
     ) -> Result<(), TransportError> {
         self.inner.notify_connected(peer, proto, data).await
     }
+    async fn notify_connected_cancellable(
+        &self,
+        peer: PeerId,
+        proto: ProtocolId,
+        data: Bytes,
+        cancellation: RequestCancellation,
+    ) -> Result<(), TransportError> {
+        // Preserve the exact authority and lower keepalive. The fail-closed trait default
+        // intentionally refuses unsupported adapters; it must not silently replace real TCP.
+        self.inner
+            .notify_connected_cancellable(peer, proto, data, cancellation)
+            .await
+    }
     async fn dial_addr(&self, address: &str) -> Result<(), TransportError> {
         self.inner.dial_addr(address).await
     }
@@ -279,17 +295,61 @@ impl MeshTransport for Transport {
                         .connections
                         .insert((self.index, self.rules.index(*peer)));
                 }
-                TransportEvent::Request { from, .. } => {
-                    self.rules
-                        .trace
-                        .lock()
-                        .unwrap()
-                        .received_requests
-                        .insert((self.index, self.rules.index(*from)));
+                TransportEvent::Request { from, data, .. } => {
+                    let mut trace = self.rules.trace.lock().unwrap();
+                    let source = self.rules.index(*from);
+                    trace.received_requests.insert((self.index, source));
+                    if let Some(kind @ (14..=17)) = data.first() {
+                        trace.received_recovery.insert((self.index, source, *kind));
+                    }
                 }
                 _ => {}
             }
             return Some(event);
         }
     }
+}
+
+/// A successful local submission cannot satisfy this test: the returned witness exists only
+/// after the helper authenticates the probe and the requester authenticates its exact result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn automatic_recovery_notifications_reach_authenticated_tcp_endpoints() {
+    let mut scenario = Scenario::new(false);
+    scenario.admit().await;
+    scenario.close(&[3, 4, 5]).await;
+    let target = *scenario.rules.peers[2].as_bytes();
+    periodic_bounded("automatic authenticated indirect probe result", async {
+        loop {
+            if scenario
+                .online(1)
+                .actor
+                .member_routes()
+                .await
+                .iter()
+                .any(|route| {
+                    route.peer_id == Some(target)
+                        && route.indirect_health
+                            == catcoms_sync::IndirectRouteHealth::ReachableViaMember
+                        && route.indirect_witnesses > 0
+                })
+            {
+                break;
+            }
+            SystemClock.sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    {
+        let trace = scenario.rules.trace.lock().unwrap();
+        assert!(
+            trace.received_recovery.contains(&(0, 1, 16)),
+            "probe must reach the permitted helper"
+        );
+        assert!(
+            trace.received_recovery.contains(&(1, 0, 17)),
+            "authenticated result must reach its requester"
+        );
+    }
+    scenario.rules.assert_graph();
+    scenario.close(&[0, 1, 2]).await;
 }

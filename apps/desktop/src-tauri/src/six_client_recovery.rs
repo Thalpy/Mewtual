@@ -4,7 +4,6 @@
 //! The adapter runs the shared production cadence and native worker/send/close/restore seams;
 //! platform interface sampling and the Tauri window/frontend are deliberately outside this test.
 use super::*;
-use catcoms_rt::ManualClock;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::collections::{BTreeMap, BTreeSet};
@@ -53,6 +52,24 @@ async fn bounded<F: Future>(label: &str, future: F) -> F::Output {
     }
 }
 
+// Automatic recovery can start just after an empty exchange and just after a cadence tick.
+// Account for the released source cooldown, worst-case discovery interval/start spread and
+// four bounded transport stages. Command responsiveness keeps its independent 30-second bound.
+// Real TCP uses production time: accelerating a shared clock also expires prepared jobs and
+// retained completions, even if no network future is currently waiting.
+const PERIODIC_RECOVERY_MS: u64 = catcoms_sync::CATCHUP_PEER_COOLDOWN_MS
+    + DISCOVERY_INTERVAL_SECS * 1_000
+    + DISCOVERY_JITTER_MS
+    + DISCOVERY_START_SPREAD_MS
+    + 4 * catcoms_rt::REQUEST_TIMEOUT_MS;
+
+async fn periodic_bounded<F: Future>(label: &str, future: F) -> F::Output {
+    tokio::select! {
+        result = future => result,
+        _ = SystemClock.sleep(Duration::from_millis(PERIODIC_RECOVERY_MS)) => panic!("six-client periodic recovery exceeded {PERIODIC_RECOVERY_MS} ms: {label}"),
+    }
+}
+
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
@@ -72,9 +89,7 @@ struct Client {
 struct Scenario {
     clients: Vec<Client>,
     rules: Arc<NetworkRules>,
-    clock: ManualClock,
-    clock_step_ms: Arc<AtomicU64>,
-    _ticker: Option<AbortOnDrop>,
+    clock: SystemClock,
     reverse: bool,
     token: u128,
 }
@@ -113,22 +128,11 @@ impl Scenario {
             delay_replies: AtomicBool::new(false),
             trace: StdMutex::new(Trace::default()),
         });
-        let clock = ManualClock::new(SystemClock.now_ms());
-        let clock_step_ms = Arc::new(AtomicU64::new(100));
-        let timer_clock = clock.clone();
-        let timer_step = clock_step_ms.clone();
-        let ticker = AbortOnDrop(tokio::spawn(async move {
-            loop {
-                SystemClock.sleep(Duration::from_millis(100)).await;
-                timer_clock.advance_ms(timer_step.load(Ordering::Acquire));
-            }
-        }));
+        let clock = SystemClock;
         Self {
             clients,
             rules,
             clock,
-            clock_step_ms,
-            _ticker: Some(ticker),
             reverse,
             token: 0,
         }
@@ -159,7 +163,7 @@ impl Scenario {
                     transport,
                     MlsDevice::generate().unwrap(),
                     ChaCha20Rng::seed_from_u64(90),
-                    Box::new(self.clock.clone()),
+                    Box::new(self.clock),
                     "client 1",
                 )
                 .unwrap()
@@ -189,7 +193,7 @@ impl Scenario {
                         transport,
                         MlsDevice::generate().unwrap(),
                         ChaCha20Rng::seed_from_u64(90 + index as u64),
-                        Box::new(self.clock.clone()),
+                        Box::new(self.clock),
                         format!("client {}", index + 1),
                         self.rules.peers[0],
                         &invite,
@@ -269,7 +273,6 @@ impl Scenario {
                 }
             }
         }
-        self.clock_step_ms.store(500, Ordering::Release);
         self.wait_for_routes().await;
         for index in ALL {
             assert_eq!(
@@ -355,7 +358,7 @@ impl Scenario {
                     ChaCha20Rng::seed_from_u64(
                         300 + index as u64 + self.clients[index].generation * 6,
                     ),
-                    Box::new(self.clock.clone()),
+                    Box::new(self.clock),
                     &[],
                     net.record_seq,
                     net.reconnect_policy,
@@ -578,7 +581,7 @@ async fn six_client_scenario(hostile: bool) {
         scenario.online(5).passes.load(Ordering::Acquire),
     ];
     // Observe a full periodic pass, not only the startup wake, while the forbidden pair is alone.
-    bounded("isolated discovery passes", async {
+    periodic_bounded("isolated discovery passes", async {
         while (4..6).any(|index| {
             scenario.online(index).passes.load(Ordering::Acquire)
                 < (starting_passes[index - 4] + 1).max(2)

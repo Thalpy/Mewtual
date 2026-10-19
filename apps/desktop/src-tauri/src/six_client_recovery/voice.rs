@@ -4,7 +4,7 @@ use super::*;
 
 async fn wait_for_bridge(scenario: &Scenario, bridge: usize) {
     let bridge_label = fingerprint(&scenario.clients[bridge].identity.as_ref().unwrap().1);
-    bounded("only the permitted voice bridge is online", async {
+    periodic_bounded("only the permitted voice bridge is online", async {
         loop {
             let left = scenario.online(1).actor.online_members().await;
             let right = scenario.online(2).actor.online_members().await;

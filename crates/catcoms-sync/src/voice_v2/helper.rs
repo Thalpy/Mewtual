@@ -412,7 +412,7 @@ impl HelperLedger {
             // transcript is dropped before framing. Missing capacity spends no attempt.
             let credit = match self.resources.charge(
                 self.group,
-                3 * packet.bytes + 4096,
+                3 * packet.bytes + 4096 + ROUTE_METADATA_BYTES,
                 ResourceKind::Forward,
             ) {
                 Ok(credit) => credit,

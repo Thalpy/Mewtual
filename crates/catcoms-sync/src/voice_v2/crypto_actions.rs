@@ -3,9 +3,9 @@
 //! The action is registered before a pull can expose it. A lost admit reply must reuse the same
 //! actual permit, and settlement before a delayed admission permanently refuses new work.
 //!
-//! This is not the endpoint result/OfferId queue or an IPC adapter. A future endpoint must prepay
-//! its closed result/continuation records before token consumption and store exact historical
-//! receipts independently of these pending authorities. Normal kind28 dispatch remains disabled.
+//! Exact terminal receipts share the action's prepaid record and fence, independently of pending
+//! token authority. Continuation prepayment, SDP/RTC dispatch and IPC remain separate boundaries;
+//! this action/result owner alone never enables normal kind28 dispatch.
 
 use super::crypto_authority::CryptoAuthority;
 use super::packets::InboundPacket;
@@ -21,7 +21,10 @@ const ACTIONS: usize = 32;
 const CONTEXT_BYTES: usize = 4096;
 const CONFIRM_BYTES: usize = 512;
 const RECORD_BYTES: usize = 1024;
+mod results;
 pub(crate) mod slots;
+pub use results::{CryptoOutcome, CryptoResultReceipt};
+pub(super) use results::{ResultBinding, TerminalResult};
 
 /// Closed operation identity; the native factory selects it from actual protocol state.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -56,6 +59,7 @@ pub(super) enum Key {
 struct Engine {
     settled: bool,
     permit: Option<Credit>,
+    terminal: Option<results::RecordedResult>,
 }
 
 /// Opaque registered action. Clones preserve the exact engine fence and its actual charge.
@@ -118,7 +122,7 @@ impl CryptoAction {
     }
     pub fn is_pending(&self) -> bool {
         let engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
-        !engine.settled && self.authority.authorized()
+        !engine.settled && engine.terminal.is_none() && self.authority.authorized()
     }
 
     /// The trusted native adapter calls this only for an already registered exact action.
@@ -129,7 +133,7 @@ impl CryptoAction {
         if bytes != self.engine_bytes {
             return Err(VoiceError::RetryMismatch);
         }
-        if engine.settled || !self.authority.authorized() {
+        if engine.settled || engine.terminal.is_some() || !self.authority.authorized() {
             return Err(VoiceError::Unauthorized);
         }
         if engine.permit.is_none() {
@@ -171,7 +175,11 @@ impl CryptoAction {
         commit: impl FnOnce() -> Result<T, VoiceError>,
     ) -> Result<T, VoiceError> {
         let engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
-        if engine.settled || engine.permit.is_none() || !self.authority.authorized() {
+        if engine.settled
+            || engine.terminal.is_some()
+            || engine.permit.is_none()
+            || !self.authority.authorized()
+        {
             return Err(VoiceError::Unauthorized);
         }
         let result = commit();

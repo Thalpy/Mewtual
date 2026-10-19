@@ -57,7 +57,7 @@ pub(super) async fn register(
     mesh: MeshHandle,
     net: &ServerNet,
     instance: u64,
-    clock: &ManualClock,
+    clock: &SystemClock,
     index: usize,
 ) -> Running {
     let RestoredActor {
@@ -160,7 +160,7 @@ pub(super) async fn register(
     let seen_passes = passes.clone();
     let cadence_state = state.clone();
     let cadence_actor = actor.clone();
-    let cadence_clock = clock.clone();
+    let cadence_clock = *clock;
     let changes = state.network_changes.subscribe();
     let cadence = tokio::spawn(async move {
         discovery_timer::run(

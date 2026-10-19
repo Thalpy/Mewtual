@@ -491,6 +491,119 @@ fn native_action_capacity_refusal_does_not_consume_identity_or_engine_eligibilit
 }
 
 #[test]
+fn native_action_lost_accepted_and_rejected_open_replies_recover_after_settlement() {
+    for malformed in [false, true] {
+        let mut f = fixture();
+        let (flight, signed) = hello(&mut f);
+        let mut plaintext = flight.plaintext;
+        if malformed {
+            plaintext[0] ^= 1;
+        }
+        let ReceiveProgress::Decrypt(event) = f.high.receive(signed, &f.clock).unwrap() else {
+            panic!("decrypt");
+        };
+        let action = f
+            .high
+            .join
+            .confirmation_decryption_action(
+                *event,
+                &ca(&f.high.context, &f.high.lease),
+                Arc::new(f.clock.clone()),
+                ByteBudget::Ordinary,
+            )
+            .unwrap();
+        action.admit_engine(action.engine_bytes()).unwrap();
+        let expected = f.high.join.commit_confirmation_action(
+            &action,
+            &plaintext,
+            &ca(&f.high.context, &f.high.lease),
+            &f.clock,
+            &mut f.rng,
+        );
+        assert_eq!(expected.is_err(), malformed);
+        let pair = &f.high.join.confirmations.pairs[&f.id];
+        let unchanged = (
+            pair.starts,
+            pair.action_serial,
+            pair.low_nonce,
+            pair.high_nonce,
+        );
+        action.settle_engine();
+        let held = f.pool.counts();
+        let recovered = f.high.join.commit_confirmation_action(
+            &action,
+            &plaintext,
+            &ca(&f.high.context, &f.high.lease),
+            &f.clock,
+            &mut f.rng,
+        );
+        assert_eq!(recovered, expected, "exact native outcome must survive consumed token and lost result reply; malformed={malformed}");
+        let pair = &f.high.join.confirmations.pairs[&f.id];
+        assert_eq!(
+            (
+                pair.starts,
+                pair.action_serial,
+                pair.low_nonce,
+                pair.high_nonce
+            ),
+            unchanged
+        );
+        assert_eq!(
+            f.pool.counts(),
+            held,
+            "historical lookup neither runs another engine nor allocates a second result record"
+        );
+        assert!(!action.is_pending());
+        assert!(action.admit_engine(action.engine_bytes()).is_err());
+    }
+}
+
+#[test]
+fn native_action_lost_seal_reply_recovers_after_construction_deadline_without_resigning() {
+    let mut f = fixture();
+    f.low.start(f.id, &f.clock, &mut f.rng).unwrap();
+    let flight = f.low.flight(f.id, &f.clock, &mut f.rng);
+    let ciphertext = vec![22; flight.plaintext.len() + 16];
+    let action = f
+        .low
+        .join
+        .confirmation_encryption_action(
+            flight,
+            &ca(&f.low.context, &f.low.lease),
+            Arc::new(f.clock.clone()),
+            ByteBudget::Ordinary,
+        )
+        .unwrap();
+    action.admit_engine(action.engine_bytes()).unwrap();
+    f.clock.advance_ms(4_900);
+    let accepted = f
+        .low
+        .join
+        .submit_confirmation_action(
+            &action,
+            &ciphertext,
+            &f.low.signer,
+            &ca(&f.low.context, &f.low.lease),
+            &f.clock,
+        )
+        .unwrap();
+    action.settle_engine();
+    f.clock.advance_ms(200);
+    let recovered = f.low.join.submit_confirmation_action(
+        &action,
+        &ciphertext,
+        &f.low.signer,
+        &ca(&f.low.context, &f.low.lease),
+        &f.clock,
+    );
+    assert_eq!(
+        recovered,
+        Ok(accepted),
+        "historical success does not require the consumed five-second encryption grant"
+    );
+}
+
+#[test]
 fn native_action_expiry_end_and_root_drop_keep_admitted_engine_custody() {
     for transition in 0..3 {
         let mut f = fixture();

@@ -109,11 +109,11 @@ escape from a blocked event send is insufficient because it still freezes swarm 
 ## Reviewed voice resource correction contracts
 
 For ciphertext size C and policy/OfferId-bound targeted helper envelopes, current charges are:
-outgoing `2C+1340`, source cache `C+2154`, Source lower `4C+8616`, helper retention `C+3068`,
-helper lower `3C+7156`, verification `5C+9196`, and incoming packet/event `2C+1340`.
+outgoing `2C+1340`, source cache `C+2154`, Source lower `4C+9128`, helper retention `C+3068`,
+helper lower `3C+7668`, verification `5C+9196`, and incoming packet/event `2C+1340`.
 At 8 KiB plaintext, outgoing + source + verification needs 78,354 bytes. But two retained outgoing
 and source packets, four held Source lower flights, one verification and incoming packet need
-290,020 bytes before engine/result/setup. Reducing the unreleased ceiling alone cannot establish
+292,068 bytes before engine/result/setup. Reducing the unreleased ceiling alone cannot establish
 unrestricted negotiation concurrency.
 
 A native Runtime group progress owner must reserve measured phase capacity and continuation/
@@ -128,7 +128,8 @@ two actual lower holders, with one fixed OfferId/initiator-or-responder role. Cr
 refuse before positive admission; this does not promise glare recovery. One exclusive Crypto
 lane and two exclusive Forward lanes are prepaid from the existing shared slot caps. Packet,
 Source, both retained action records, engine, result and 4,096 bytes of workflow metadata have
-a declared simultaneous peak of 224,294 bytes within the 229,376-byte reserve. Every phase
+a declared simultaneous peak of 225,318 bytes within the 229,376-byte reserve, including
+512 bytes of route metadata per lower holder. Every phase
 credit retains its actual count/lane until last custody drops. Native result capacity and
 readiness prerequisites are implemented and tested; general SDP action factories, historical
 receipts, browser-copy ownership and RTC delivery remain separate enablement gates.
