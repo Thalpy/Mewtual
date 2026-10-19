@@ -1,6 +1,6 @@
 // The renderer treats exactly three native error texts as "nothing was written" (nativeNoWrite in
 // studio-session.ts), resends such a request automatically, and never counts it as a delivery.
-// That is only true while each text is raised before a request reaches the server actor. This pins
+// That is only true while each text is raised before the execution lease is transferred. This pins
 // all three against the Rust sources, so moving or reusing one fails here instead of silently
 // turning a possibly committed Save into a reauthorable "not written" one.
 import assert from "node:assert/strict";
@@ -125,6 +125,29 @@ test("a retry after an exhausted pre-dispatch refusal is admitted afresh against
   assert.equal(h.ipc.calls.filter(c => c.cmd === "studio_apply").length, sends, "nothing was sent into the changed history");
   assert.match(h.session.saves[0].error, /Shared history changed/);
   h.session.reset();
+});
+
+// Review of 28b6ba28 (P3): later pre-execution refusals cannot show what an earlier, uncertain
+// attempt did, so exhausting them after an exact retry leaves the record uncertain, not written-off.
+test("exhausted pre-execution refusals after an uncertain attempt leave the exact request uncertain", async () => {
+  for (const busy of NATIVE_NO_WRITE) {
+    const h = harness(); let applies = 0;
+    h.ipc.on("studio_apply", () => { throw ++applies === 1 ? "Studio transaction expired, cancelled or server stopped" : busy; });
+    h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); h.session.open(h.object); await settle(8);
+    h.session.setFps(h.object, 7); await settle(8);
+    const [first] = h.session.saves; // surfaces get copies, so read the record afresh after the retry
+    assert.equal(first.status, "uncertain", `${busy}: the post-dispatch failure may have committed`);
+    h.session.retry(first.id); await settle(8); await h.runTimers();
+    assert.equal(applies, 5, `${busy}: the exact retry and its three resends were all refused`);
+    const [record] = h.session.saves;
+    assert.deepEqual([record.id, record.status, record.mayHaveCommitted], [first.id, "uncertain", true], busy);
+    assert.ok(record.attempts >= 1, `${busy}: an uncertain record keeps a counted attempt, as the draft decoder requires`);
+    assert.match(record.error, /earlier attempt may already have committed/, busy);
+    assert.equal(h.session.canReauthor(record.id), false, `${busy}: reauthor would double-apply a committed first attempt`);
+    const sent = h.ipc.calls.filter(c => c.cmd === "studio_apply").map(c => c.args);
+    for (const args of sent) assert.deepEqual(args, sent[0], `${busy}: the original request every time`);
+    h.session.reset();
+  }
 });
 
 test("a read refused before dispatch is asked again rather than shown as a read error", async () => {

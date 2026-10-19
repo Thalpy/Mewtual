@@ -253,7 +253,8 @@ const RETAINED_OVERLAY_COPIES = 8;
 /// the bridge's four shared inline slots for its whole round trip.
 const SAVE_WORKERS = 2;
 /// Backoff before each automatic resend of a request the bridge refused before dispatch
-/// (nativeNoWrite): the same request, no attempt counted. The backoffs total 1.75 s, but the
+/// (nativeNoWrite): the same request, no attempt counted unless an earlier attempt was already
+/// uncertain (resendLater). The backoffs total 1.75 s, but the
 /// refusal itself is not always instant: "Studio actor busy" arrives only after its 5 s rendezvous,
 /// so four such sends take about 22 s and outlast a departure's 10 s timeout, which then reports
 /// the Save as still running.
@@ -2048,10 +2049,14 @@ export class StudioSession {
     }
   }
 
-  /// A request the bridge refused before dispatch (slots full, actor busy, storage busy) never ran,
-  /// so resending the SAME request is safe: back it off and requeue it, a bounded number of times,
-  /// without counting the visit. Its lane waits (FIFO holds); other lanes carry on. False when the
-  /// resends are used up, and the refusal then settles as not written.
+  /// A request the bridge refused before the execution lease was transferred (slots full, actor
+  /// busy, storage busy) never ran, so resending the SAME request is safe: back it off and requeue
+  /// it, a bounded number of times. Its lane waits (FIFO holds); other lanes carry on. False when
+  /// the resends are used up, and settleFailure then decides the outcome.
+  /// The visit is not counted, and the record settles as not written, only while no earlier
+  /// attempt was uncertain. After one that may have committed, attempts are left as they are
+  /// (never lowered, so a restored draft keeps attempts >= 1) and the record settles uncertain
+  /// again: a later refusal cannot show what that earlier attempt did.
   private resendLater(s: SaveEntry): boolean {
     const used = this.busyResends.get(s.id) ?? 0;
     if (used >= BUSY_BACKOFF_MS.length) return false;
@@ -2072,7 +2077,7 @@ export class StudioSession {
   private settleFailure(s: SaveEntry, e: unknown): void {
     this.busyResends.delete(s.id);
     // Typed Flow-S refusals and pre-Apply epoch refusals prove this attempt did not write, and so
-    // do the native refusals raised before a request reaches the actor (nativeNoWrite). Other
+    // do the native refusals raised before the execution lease is transferred (nativeNoWrite). Other
     // native errors remain uncertain because they may have crossed a final delivery fence after commit.
     const noWrite = e instanceof OverlayNoWrite || nativeNoWrite(e);
     const earlierAttemptWasUncertain = s.mayHaveCommitted;
@@ -2701,7 +2706,8 @@ function historicalBlob(v: RecoveryVersionRead, frame: Hex32, opId: Hex64): { ci
   return null;
 }
 
-/// Native refusals raised before a request reaches the server actor, so nothing of it was written.
+/// Native refusals raised before the execution lease is transferred to the server actor, so the
+/// operation never ran and nothing of it was written.
 /// Exact bridge messages (apps/desktop/src-tauri; studio-native-no-write.test.ts pins them against
 /// that source): the actor's five-second rendezvous was lost, after which the actor never receives
 /// the request's lease and drops it; the bridge's shared inline slots were all taken, which is

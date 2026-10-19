@@ -18,12 +18,16 @@ refusals in ordinary use, and more would make it worse.
   operation slow inside the actor still delays the next one there. The native "latest request"
   fence is per server and target, and one save per lane means one per target, so concurrent saves
   never supersede each other.
-- **Pre-dispatch refusals are not writes.** The bridge's actor-busy, slot-pool-full and
-  storage-busy (`authorize`) refusals are raised before dispatch. `nativeNoWrite` classifies
-  exactly these as not written. Queued Saves and the plain document and Index reads refused this
-  way are resent automatically: the same request, at 250/500/1000 ms, with no attempt counted.
-  Only exhausted resends settle a Save as not written, still uncounted, so a retry is admitted
-  afresh. All three texts are pinned to their single sites in the Rust sources.
+- **Pre-execution refusals are not writes.** The bridge's actor-busy, slot-pool-full and
+  storage-busy (`authorize`) refusals are raised before the execution lease is transferred, so
+  the operation never runs. The actor may already have signalled Ready (always so with
+  storage-busy), but it gets no lease. `nativeNoWrite` classifies exactly these as not written.
+  Queued Saves and the plain document and Index reads refused this way are resent automatically:
+  the same request, at 250/500/1000 ms. A visit is uncounted, and exhausted resends settle a Save
+  as not written so a retry is admitted afresh, only when no earlier attempt was uncertain. After
+  an uncertain post-dispatch failure and an exact retry, each visit counts and the record stays
+  uncertain, with its original request and no reauthor. All three texts are pinned to their
+  single sites in the Rust sources.
 - **One worker per record.** A record a worker has taken is marked synchronously (it stays
   `queued` through its admission read), so no second worker takes it. Removing that guard fails
   two existing tests.
@@ -48,6 +52,10 @@ Regressions:
 - The no-write classification and its source pins. They fail with the resends, the read retry or
   the attempt revert removed.
 - Recovery-record affinity and the restore toast. Both fail at `64fed24b`.
+- Added after the review of `28b6ba28`, which cleared the P2 and raised only a documentation P3:
+  an uncertain post-dispatch failure, an exact retry, then each busy text exhausting its
+  resends. The record stays uncertain, keeps its request and cannot be reauthored. The test fails
+  if a pre-execution refusal clears the earlier uncertainty.
 
 Residuals (LOW, from the re-review; not fixed):
 

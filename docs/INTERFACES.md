@@ -36,8 +36,10 @@ workers would buy nothing natively and would compete for the bridge's four share
 Every Studio IPC call holds one of those slots for its round trip, as do blob fetches, chat inline
 downloads and the native receiver's passes.
 
-Three native refusals are raised before a request reaches the actor, so nothing of it can have
-been written:
+Three native refusals are raised before execution, that is before the execution lease is
+transferred to the actor, so the operation never runs and nothing of it can have been written. (The
+actor may already have signalled Ready, as it always has in the storage-busy case, but it receives
+no lease and so does not execute.)
 
 - "Studio actor busy; retry": the 5 s rendezvous was lost.
 - "too many inline downloads are already active": the slot pool was full.
@@ -46,16 +48,21 @@ been written:
 
 `nativeNoWrite` classifies exactly these. A queued Save, or the plain document or Index read
 (`refreshDoc`, `refreshIndex`), refused this way is resent automatically, the same request after
-250, 500 and 1000 ms, without counting the visit. The overlay, recovery, fault and blob reads are
+250, 500 and 1000 ms, without counting the visit unless an earlier attempt was already uncertain
+(see below). The overlay, recovery, fault and blob reads are
 not resent; a refusal there shows as their ordinary read error until the next refresh. The
 backoffs total 1.75 s, but "Studio actor busy" itself arrives only after its 5 s rendezvous, so a
 Save refused that way four times takes about 22 s and a departure's 10 s timeout reports it as
-still saving. Only when the resends are used up does a Save settle as not written, still
-uncounted, so the member's retry is admitted afresh against the current history; reauthor stays
-available. Every other native error stays uncertain, including the few rarer refusals that also
-precede the lease (a server change before commit, a cancelled request, a lease-send expiry); that
-errs toward "may have committed". `studio-native-no-write.test.ts` pins all three texts to their
-single pre-dispatch sites in the Rust sources.
+still saving. Only when the resends are used up does the Save settle. It settles as not written
+only when no earlier attempt of it was uncertain. It then stays uncounted, so the member's retry is
+admitted afresh against the current history, and reauthor is available subject to the record
+kind's usual restrictions. A record whose earlier attempt was uncertain (it failed after dispatch,
+and the member retried its exact request) stays uncertain, keeps its original request and cannot
+be reauthored. Later refusals cannot show what that first attempt did. Every other native error
+stays uncertain, including the few rarer refusals that also precede the lease (a server change
+before commit, a cancelled request, a lease-send expiry); that errs toward "may have committed".
+`studio-native-no-write.test.ts` pins all three texts to their single pre-execution sites in the
+Rust sources.
 A partial departure Save leaves the shared five-second deadline running for uncovered records.
 `saveBeforeLeaving()` (leaving the Studio, a channel, a server or the window) still covers every
 record. Before a first delivery, admission reads a record's document when no view of it is held
