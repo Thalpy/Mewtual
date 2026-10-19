@@ -1,5 +1,24 @@
 # Mewtual; Architecture
 
+## Protected browser derivation (19 October, inactive)
+
+The surviving browser broker v5 shares one closed derive/confirmation action driver. Protected
+derivation uses an opaque broker-generated join key, its exact accepted native join projection,
+and a frozen native pair setup. Its inactive plan protects twelve shared row claims (24 KiB),
+96 KiB variable custody, 8 KiB control metadata and one actual execution position before publication.
+Only derivation row0 has a consumer. Existing published records plus unused claims remain capped
+at32; ordinary queued work cannot occupy the protected position. These are conservative bounded
+payload/layout allowances, not a measurement or bound on WebCrypto/JavaScript implementation heap.
+
+Lost admission/commit replies reuse the original action and computation. Exact native terminal
+history without matching locally retained keys returns a historical receipt with no usable pair.
+The empty Derived marker never causes ECDH/HKDF reconstruction. Protected keys cannot enter the
+ordinary encrypt/open/confirmation APIs; their protected consumers are still unimplemented.
+Close clears key references and unused capacity, while real action and RPC promises retain their
+position and variable custody until drainage. Fixed history and closed pair stamps remain separate.
+The original browser-request deadline closes an idle plan; native monotonic timestamps are not
+compared with browser time. Production native registration/IPC and live V2 remain disabled.
+
 ## Prepared confirmation token binding (19 October, transport disabled)
 
 LocalJoin binds an incoming confirmation's actual Hello floor or attempt and original pair

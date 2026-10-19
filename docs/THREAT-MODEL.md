@@ -1,5 +1,20 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Inactive browser derivation boundary (19 October)
+
+The browser v5 plan binds the exact owner, broker-generated private-key handle, accepted local
+join/key/public point, native chain projection, both device/join/key identities, epoch, handshake,
+generation, role, original deadlines and frozen pair setup. Coercible objects are refused for
+closed string fields before publication. A serialized ID is not a native capability: eventual
+IPC must resolve the original native action and repeat authority checks independently.
+
+Protected derive-only keys refuse every ordinary encrypt/decrypt/confirmation fallback. Lost
+native replies cannot rerun ECDH/HKDF; terminal native Derived history cannot reconstruct missing
+keys. End/expiry closes pending eligibility but does not settle an actual promise. Ordinary pair
+wrappers also repeat their pair fence at the final broker-to-caller handoff and clear withheld
+plaintext if it closed in that microtask gap. These browser tests use real WebCrypto and mocked
+native replies, with no claim of live native/WebView integration or complete IPC/COM-copy custody.
+
 ## Voice terminal history checkpoint (19 October, Rust only)
 
 The inactive confirmation plan is capacity only. Its twelve fixed local rows/slots and 96 KiB

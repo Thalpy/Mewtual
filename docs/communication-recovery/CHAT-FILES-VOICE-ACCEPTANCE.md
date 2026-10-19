@@ -1,5 +1,59 @@
 # Chat, files and voice implementation evidence
 
+The communication programme remains **open**. File bridging and explicit private Download resume
+are implemented and exercised; live V2, production member media relay, combined rollout and
+independent physical audio/network acceptance are not complete. The dated sections distinguish
+current runtime paths from inactive prerequisites and experiments.
+
+## Inactive protected browser derivation (19 October, isolated continuation)
+
+Broker v5 shares one closed action driver across derivation and confirmation. Its opaque key
+handle, accepted native local join/key/public point, complete frozen native pair setup and exact
+chain/epoch/device/join/key/handshake/generation/role/deadline binding precede protected row0
+publication. The plan protects twelve combined row claims (24 KiB fixed history),96 KiB variable
+custody,8 KiB metadata and a real execution position; only derive consumes a claim in this slice.
+Other published records plus unused claims stay at32. The ordinary queue can be full without
+occupying the protected position. Native engine bytes are checked independently against the
+actual `3 * transcript.length + 4096 + 256` formula.
+
+Lost admission/accepted/rejected replies retry the exact native request without repeating the
+ECDH/HKDF pipeline. Historical native acceptance without matching local keys cannot reconstruct
+them. End/expiry clears pending keys/capacity but keeps actual engine/RPC promises charged until
+drainage. Fixed history and finite closed pair stamps remain separate. The derive-only keys
+refuse ordinary encrypt/open/confirmation fallback until protected typed consumers are implemented.
+
+The first30 focused new cases passed; review then found a final microtask handoff gap and an
+ordinary-confirmation fallback into protected keys. The corrected contract refuses all those
+protected fallbacks, and ordinary wrappers repeat their final pair fence (clearing late plaintext).
+New actual-AES regressions pin the final handoff gap. Review also caught coercible closed string
+fields, now refused before charge/publication. A real maximum-input test exposed Node/OpenSSL's
+1024-byte HKDF info limit;987 transcript bytes plus the direction prefix pass, the next byte
+refuses before admission. The current native canonical transcript fits; no wire format changed.
+
+These checks use real WebCrypto and simulated native action faults. Native registration/IPC,
+complete protected confirmation/SDP rows, atomic encrypted intake, agreed helpers, live dispatch/
+RTC and production member media relay remain open. Windows source inspection identified missing
+framework/COM reply-owner hooks; app serialization completion cannot close that accounting gate.
+See VOICE-NATIVE-RESULTS-NEXT. No physical-network/audible acceptance is claimed on this desktop.
+
+Final browser validation: all1903 frontend cases pass64.17s
+(`target/communication-protected-browser-frontend-full-2.log`), Svelte reports zero errors/warnings
+(`target/communication-protected-browser-check-final.log`) and the production build passes49.05s
+with the existing large-chunk warning (`target/communication-protected-browser-build.log`). This
+includes43 new derivation cases and the existing48 crypto/confirmation cases. A prior1903-case
+run passed before the last history-only settlement correction; the final run includes it.
+Read-only re-review has no remaining blocker/high/medium/low finding. The first static run caught
+two union-narrowing errors, corrected before the final check. The initial synthetic4096-byte
+transcript failed at real HKDF; it is retained as investigation evidence, not a passing boundary.
+Actual native startup also passes with the same20-second marker deadline
+(`target/communication-protected-browser-startup.log`); this exercises setup, not live V2.
+All ten actual rendered Edge flows pass (`target/communication-protected-browser-rendered-flows.log`).
+All91 focused crypto/confirmation/derive cases pass1.35s
+(`target/communication-protected-browser-focused-final.log`). The same Rust/native source was
+already checked by the427+5 complete native run below; the complete root run remains on its
+frozen native continuation source while this browser slice is validated separately. No test
+sources were changed in that running Rust worktree.
+
 ## Inactive native confirmation capacity (19 October, isolated continuation)
 
 `prepare_crypto_chain` protects twelve local fixed history rows/slots, a provisional96 KiB
@@ -47,7 +101,12 @@ native command passes427 library and5 ACL cases in645.42s, with main/doc targets
 zero errors/warnings, the production build passes56.92s and all ten rendered flows pass. Their
 logs are `target/communication-v2-continuation-{svelte-check,frontend-build,rendered-flows}.log`.
 Formatting, the ambient-dependency gate and `cargo deny check` pass; existing duplication warnings
-remain. Complete root validation and the current native check/rebuild/startup have not yet exited.
+remain. Native `cargo check` passes51.40s and the debug build with `--no-default-features` passes
+3m08s (`target/communication-v2-continuation-{native-check,native-build}.log` in the native
+continuation worktree). The first sandboxed startup attempt timed out at its unchanged20-second
+bound with no marker; an unchanged normal-desktop-access rerun passes2.34s
+(`target/communication-v2-continuation-startup{-2,}.log`). Both results are retained. Complete
+root validation is still in progress; no root completion is inferred from the other gates.
 
 The first frontend command had1859 passes and one occupied-port harness failure: app dependency
 prebundling used the original20s deadline before Vite tried its strict-port listen. That test now
@@ -300,9 +359,9 @@ acceptance is claimed for this WIP.
 | 0: reproduction and baseline | In progress: source trace and read-only design review completed; deterministic regressions being added | Constrained live topology, replacement races, measured recovery/control baseline and redacted native evidence |
 | 1: connections and scheduling | Detached connected maintenance and automatic repair; bounded driver delivery; native router/call lifecycle corrections | Broader permitted alternate paths, integrated multi-group congestion latency and full acceptance |
 | 2: room/signalling | Reviewed v2 design; focused crypto, signed codec and native ownership implementation; no live V2 or forwarding enabled | Fresh endpoint sessions, confidentiality/forwarding enforcement, legacy isolation, topology and native evidence |
-| 3: chat recovery | Existing mechanisms remain; new work not accepted | Exact-union recovery and demonstrated gaps under the plan's topology/restart matrix |
-| 4: file recovery | Provider rotation, scoped Keep/private Download journals, persistent progress/allowance, distinct Pause/Resume/Retry, actual indirect service and explicit private re-export; focused native and rendered evidence | Complete abrupt-crash/cancellation/compatibility/load matrix and final complete suites |
-| 5A: existing TURN feasibility | No new native/audio observation | Forced relay candidate, audible/native reconnect and unavailable-path evidence |
+| 3: chat recovery | Exact signed-operation union, automatic new-channel/membership onward recovery and sealed-close restart scenarios pass the six-client TCP fixture | Broader topology/restart matrix and abrupt-crash custody beyond the graceful freeze/save barrier |
+| 4: file recovery | Provider rotation, scoped Keep/private Download journals, persistent progress/allowance, distinct Pause/Resume/Retry, actual indirect service and explicit private re-export; checkpoint complete suites and native/rendered evidence | Complete abrupt-crash/cancellation/compatibility/load matrix and combined acceptance |
+| 5A: existing TURN feasibility | Native WebView2 loopback experiment observes relay/relay selection and generated audio; production TURN unaccepted | Production forced-relay, physical audibility/network reconnect and unavailable-path evidence |
 | 5B: media bridging | No relay implementation or new dependency selected | Architecture/key/authority review, physical-network/audio evidence and resource bounds |
 | 6: combined rollout | Not accepted | Combined named scenarios, versioned compatibility, no forbidden edges or downgrade |
 

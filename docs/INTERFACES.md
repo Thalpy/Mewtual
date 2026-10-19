@@ -1,5 +1,26 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Browser protected derivation contract (19 October, inactive)
+
+`VoiceCryptoBroker.createJoinKeyHandle` creates an opaque, non-extractable-key handle on that
+exact surviving broker. `bindJoinKey` captures the accepted native local join/key/public point
+once; browser bookkeeping itself grants no native authority. `prepareChain` freezes the complete
+native binding and derivation setup, original browser deadline and combined row/byte/execution
+reservation. Exact live repulls return the same plan; closed pair stamps cannot reprepare.
+`registerProtectedDerivation` consumes only row0 and returns one continuing handle. Native engine
+admission receives exactly `3 * transcript.length + 4096 + 256`, independently of browser pricing.
+
+An accepted receipt exposes locally computed keys only while that exact plan/owner remains live.
+Historical native acceptance without those keys remains history-only. Ordinary crypto/confirmation
+entry points refuse protected pairs until their typed consumers exist. The browser transcript
+bound is987 bytes: both HKDF direction labels plus the transcript must fit the1024-byte info limit
+of the tested Node/OpenSSL WebCrypto implementation. The current native canonical pair transcript
+fits; this changes no signed wire format. Larger projections refuse before engine admission.
+
+Broker v5 refuses older HMR pools rather than creating overlapping engine budgets. The native
+adapter is still a contract exercised by simulated fault responses, not implemented action IPC.
+Any future serialized chain ID must resolve to the original native registered object/lease.
+
 ## Voice action history checkpoint (19 October, Rust only)
 
 `LocalJoin::prepare_crypto_chain` returns an opaque inactive native plan for one proven pair.

@@ -1,5 +1,56 @@
 # Next voice milestone: native result recovery
 
+## Browser derivation prerequisite (19 October, inactive)
+
+The surviving broker v5 now has a shared closed derive/confirmation driver. Its opaque key
+handles cannot adopt a caller-supplied private key. An accepted native local point/join/key and
+the complete original pair setup are frozen before a derive-only plan protects twelve combined
+row claims,24 KiB fixed history,96 KiB variable capacity,8 KiB control metadata and one actual
+execution position. Native admission uses its own exact engine byte formula. Only row0 has a
+consumer; unused confirmation/SDP claims do not imply whole-chain readiness.
+
+The derivation pipeline runs once. Lost admission and accepted/rejected terminal replies retry
+only their original native RPCs. A native historical Derived marker without locally retained
+keys yields a historical receipt and no pair. Protected pairs refuse the ordinary encrypt/open
+and confirmation APIs until typed protected consumers exist. Owner/plan close clears key
+references but retains actual action/IPC custody through drainage. This is not production IPC.
+Historical-only replies also issue no settlement report: the new browser cannot attest that an
+earlier browser's engine retired. The production adapter must independently bind settlement to
+the original admitted controller/permit, beyond the historical action identity.
+
+## Pinned Windows IPC ownership investigation (19 October)
+
+Source inspection used Tauri2.11.3 and Wry0.55.1 from the resolved Cargo cache. Moving the whole
+`InvokeMessage` into a `Bytes::from_owner` backing object could preserve its owned Raw Vec through
+Root command slices without cloning it. `InvokeMessage::clone` instead clones that body and must
+not be used for such a lane. The command ACL is checked before the custom invoke handler, but
+does not substitute for original actor/call/action authorization. This proposed handler is not
+implemented by the current browser prerequisite.
+
+That app-owned input custody is not an IPC-wide allocation firewall. Wry's Windows request
+handler reads COM IStream bytes into a growing Vec before Tauri parses the command or checks
+ACL. Stock Tauri JavaScript can retry a failed custom-protocol invocation through postMessage,
+where binary input becomes a numeric JSON array. A closed Raw handler would have to reject that
+fallback and require a separately paid lane for every physical retry, not one per JS Promise.
+
+Responses have a separate unresolved owner: Tauri's public reply body is only Json(String) or
+Raw(Vec). The async task finishes before calling the framework responder. Wry can queue that
+response onto the main thread, then copies its content into a COM memory stream and hands the
+stream to WebView2. There is no public last-owner callback carrying an application credit through
+those copies. Future completion, resolver return, browser ACK, timeout and serialization are
+therefore not evidence of final transport retirement. Receipt-only replies reduce payload size
+but do not prove this lifetime. Resolve a reviewed platform/framework ownership hook or a fully
+accounted alternative before claiming complete reply custody; do not refund an uncertain copy.
+
+Relevant pinned symbols: Tauri `ipc/mod.rs` (`InvokeMessage`, `InvokeResponseBody`,
+`respond_async_serialized_inner`), `ipc/protocol.rs` (`parse_invoke_request`),
+`webview/mod.rs` (`on_message`), Wry `webview2/mod.rs` (`prepare_request` and the custom protocol
+response callback). Tauri's optional tracing path also records IPC bodies before a custom handler;
+plaintext exposure requires that path disabled or redacted, including transitive feature changes.
+These are source-verified enablement constraints, not a claim that the future Raw handler exists.
+The current resolved default native feature graph has no `tauri/tracing` feature
+(`target/communication-v2-tauri-features.log`); that observation does not cover future feature changes.
+
 Design-review checkpoint, 18 October 2026; first slice implemented in the 19 October worktree,
 with focused verification and adversarial review in progress. **The milestone remains open.** Live V2,
 normal kind28 dispatch and general SDP action IPC remain disabled. This is the next small slice

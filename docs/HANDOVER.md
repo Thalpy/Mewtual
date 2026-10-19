@@ -1,5 +1,25 @@
 # Mewtual; Handover
 
+## Inactive protected browser derivation (2026-10-19)
+
+Broker v5 now gives derivation the same continuing native-action/result lifecycle as confirmation.
+An opaque broker-generated join key and complete frozen native setup bind a twelve-row inactive
+plan; only row0 is consumed. It protects a real execution position from ordinary queue pressure,
+uses the existing combined32-row inventory, and separates24 KiB history,96 KiB variable custody
+and8 KiB metadata. Historical native acceptance without locally retained keys stays history-only.
+Protected keys refuse ordinary crypto/confirmation fallback; original deadlines and closed stamps
+cannot rearm the pair. All91 focused crypto/confirmation/derive cases and the complete1903-case
+frontend suite pass; Svelte, production build, ten rendered flows and real native startup pass.
+Read-only re-review has no remaining findings. The complete root run for the unchanged Rust
+continuation is still in progress; the complete native427+5 run passed. The communication ledger
+records the exact scope and logs, including the earlier corrected failures.
+
+Production native action registration/IPC, protected confirmation/SDP consumers, atomic encrypted
+intake, agreed helpers, live dispatch/RTC and member media relay remain open. Pinned Tauri/Wry
+inspection also shows that app-level response serialization cannot prove final WebView/COM-copy
+retirement; see VOICE-NATIVE-RESULTS-NEXT before attempting native exposure. One desktop remains
+insufficient for independent physical-network/audible acceptance.
+
 ## Inactive V2 confirmation capacity (2026-10-19, isolated continuation)
 
 LocalJoin now prepays twelve fixed local rows/slots plus a confirmation-only96 KiB Workflow;
