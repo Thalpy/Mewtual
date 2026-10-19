@@ -20,6 +20,14 @@ engine fences remain in the original32-record table. Historical metadata recover
 the compatibility sending API refuses after compaction rather than reconstructing send bytes.
 This releases only input custody, not IPC copies, RTC strings or an unsettled engine permit.
 
+The pending engine lender is permanently removed by settlement. Proven unstarted retirement
+also removes unused input; an admitted uncertain engine cannot use that path. Settled work with
+no terminal result may compact its input because first-result publication is permanently fenced.
+Accepted/rejected terminal input still requires ACK. Exchange actions prepare fixed history
+without live phase custody and consume one affine per-direction issue permit at publication;
+only unpublished abandonment returns it. These are disabled Rust ownership boundaries, not
+whole-chain/native IPC/browser readiness.
+
 ## Private download commands (19 October, implementation in progress)
 
 `save_group_file(server,cid,name,resume?,expectedIntent?,operation?)` first acquires encrypted

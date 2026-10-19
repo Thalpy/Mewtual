@@ -743,7 +743,6 @@ async fn closing_sdp_exchange_wakes_actual_source_cancellation_without_refunding
 
 #[test]
 fn maximum_sdp_reply_and_declared_engine_result_fit_with_two_lowers_under_unrelated_pressure() {
-    use super::super::resources::ByteBudget;
     let f = Fixture::new(true);
     // Readiness must prepay the actual local/peer/two-helper member rows itself. Unrelated
     // pressure applied afterward must not strand a later requester/original transaction.
@@ -817,17 +816,24 @@ fn maximum_sdp_reply_and_declared_engine_result_fit_with_two_lowers_under_unrela
     struct RetainedActionInput {
         _input: Vec<u8>,
         _record: super::super::resources::Credit,
+        _payload: super::super::resources::Credit,
         _slot: super::super::crypto_actions::slots::Slot,
     }
-    let retain = |budget: ByteBudget| RetainedActionInput {
-        _input: vec![7; MAX_SDP_PLAINTEXT],
-        _record: budget
-            .charge(&resources, group, 10_286, ResourceKind::Retained)
-            .unwrap(),
-        _slot: owner.action_slot(&action_pool).unwrap(),
+    let retain = |stage| {
+        let (record, payload, issue) = owner
+            .prepare_action_credits(stage, 1536, 10_286 - 1536)
+            .unwrap();
+        let slot = owner.action_slot(&action_pool).unwrap();
+        issue.publish();
+        RetainedActionInput {
+            _input: vec![7; MAX_SDP_PLAINTEXT],
+            _record: record,
+            _payload: payload,
+            _slot: slot,
+        }
     };
-    let encrypt = retain(owner.encryption_budget());
-    let decrypt = retain(owner.decryption_budget());
+    let encrypt = retain(super::super::negotiation::Stage::EncryptAction);
+    let decrypt = retain(super::super::negotiation::Stage::DecryptAction);
     let engine = owner
         .decryption_budget()
         .charge(&resources, group, 61_624, ResourceKind::Crypto)

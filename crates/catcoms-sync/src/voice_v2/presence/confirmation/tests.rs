@@ -296,9 +296,19 @@ fn native_action_repeated_registration_and_pull_share_one_engine_fence() {
     let permit = action.admit_engine(action.engine_bytes()).unwrap();
     assert_eq!(action.admit_engine(action.engine_bytes()).unwrap(), permit);
     assert_eq!(f.pool.counts(), (before.0 + action.engine_bytes(), 1));
+    let reader = action.input().unwrap();
+    let CryptoInput::Derive(setup) = reader.as_input() else {
+        panic!("derive input")
+    };
+    let payload_bytes = crypto_actions::derive_bytes(setup.transcript.len())
+        .unwrap()
+        .0;
     action.settle_engine();
     action.settle_engine();
     assert_eq!(f.pool.counts(), before);
+    assert!(action.input().is_err());
+    drop(reader);
+    assert_eq!(f.pool.counts(), (before.0 - payload_bytes, 0));
     assert!(action.admit_engine(action.engine_bytes()).is_err());
     assert!(!action.is_pending());
     assert!(f
@@ -329,6 +339,11 @@ fn native_action_settle_before_admit_refuses_delayed_admission_and_first_sign() 
         action.operation(),
         crypto_actions::CryptoOperation::EncryptConfirmation
     );
+    let reader = action.input().unwrap();
+    let CryptoInput::EncryptConfirmation(flight) = reader.as_input() else {
+        panic!("seal input")
+    };
+    let payload_bytes = flight.reservation.aad.len() + flight.plaintext.len() + 16;
     let before = f.pool.counts();
     action.settle_engine();
     assert!(action.admit_engine(action.engine_bytes()).is_err());
@@ -344,6 +359,9 @@ fn native_action_settle_before_admit_refuses_delayed_admission_and_first_sign() 
         )
         .is_err());
     assert_eq!(f.pool.counts(), before);
+    assert!(action.input().is_err());
+    drop(reader);
+    assert_eq!(f.pool.counts(), (before.0 - payload_bytes, 0));
     assert!(matches!(
         f.low.prepare(f.id, &f.clock, &mut f.rng).unwrap(),
         Some(ConfirmationOutput::Encrypt(_))
@@ -933,8 +951,21 @@ fn native_action_reserved_bytes_continue_under_ordinary_pressure_and_close_keeps
     let held = f.pool.counts();
     assert!(held.0 < 256 * 1024 && held.1 == 1);
     assert!(action.is_pending());
+    let reader = action.input().unwrap();
+    let CryptoInput::Derive(setup) = reader.as_input() else {
+        panic!("derive input")
+    };
+    let payload_bytes = crypto_actions::derive_bytes(setup.transcript.len())
+        .unwrap()
+        .0;
     action.settle_engine();
     assert_eq!(f.pool.counts(), (held.0 - action.engine_bytes(), 0));
+    assert!(action.input().is_err());
+    drop(reader);
+    assert_eq!(
+        f.pool.counts(),
+        (held.0 - action.engine_bytes() - payload_bytes, 0)
+    );
     drop((action, f.low.join, pressure, reserve));
     // This test starts after actual public proof. It is not full-chain starvation acceptance.
 }

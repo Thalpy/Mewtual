@@ -11,12 +11,20 @@ output/outcome tuple, ignores changing retirement, and cannot refund an unsettle
 Production IPC must add independent account authorization and prepaid finite reply-copy custody;
 the Rust receipt allowance does not cover queued Tauri/WebView copies. Live V2 remains disabled.
 
-An exact receipt ACK and actual engine settlement are both required before dropping an action's
-input reference. Owned input leases preserve real buffers and their original charge across that
+For an installed terminal result, exact receipt ACK and actual engine settlement are both
+required before dropping the action's input reference. Owned input leases preserve real buffers and their original charge across that
 compaction. The fixed history row, immutable output bound and permanent engine fence survive;
-no action slot, allocator or signing permission is recreated. The retained credit supports one
-fixed two-part partition only, conserving the original byte charge and shared phase custody.
+no action slot, allocator or signing permission is recreated. Ordinary non-Exchange retained
+credits support one fixed two-part partition only, conserving the original byte charge.
 This is not a refund of serialized replies, browser plaintext or actual unsettled work.
+
+Exchange action history is separately prepaid without live phase custody. Variable input and
+actual engine loans retain that custody; a pending engine lender is removed permanently at
+settlement. Publication consumes a separate directional identity that compaction cannot return.
+Unpublished abandonment may return its unused direction. Unstarted retirement requires both
+no actual permit and no terminal result; a settled accepted/rejected action with a lost ACK is
+not unstarted. Actual final settlement without a terminal result permanently excludes later
+first effects and can release input. No held reader or uncertain engine is refunded by End.
 
 ## Private download/export boundary (19 October, implementation in progress)
 

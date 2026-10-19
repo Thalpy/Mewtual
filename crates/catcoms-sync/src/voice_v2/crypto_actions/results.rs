@@ -101,7 +101,7 @@ impl CryptoAction {
                 return Err(VoiceError::RetryMismatch);
             }
             engine.acknowledged = true;
-            self.take_acknowledged_payload(&engine)
+            self.take_settled_payload(&engine)
         };
         // Do not run buffer/phase/credit destructors while an action or payload lock is held.
         drop(compacted);

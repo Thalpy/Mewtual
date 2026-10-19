@@ -2,6 +2,14 @@
 
 ## V2 action input retirement (19 October, transport disabled)
 
+Exchange-backed actions prepare fixed history bytes independently from variable input. Only
+input and an actual engine loan retain the exchange's phase owner; the pending engine lender
+is cleared permanently under the engine fence on settlement. A direction permit returns only
+after unpublished abandonment and is consumed at publication, so compaction never permits a
+second seal/open identity. Unstarted retirement also drops unused input; settlement without a
+terminal result drops input because the same fence permanently excludes a later first result.
+Installed terminal results still require their exact ACK. Borrowed readers retain actual bytes.
+
 Typed crypto actions split fixed history capacity from owned variable input capacity without
 changing the total pool charge. Native input readers hold an opaque Arc-backed lease. Under the
 original engine fence, exact receipt acknowledgement and actual settlement can remove the

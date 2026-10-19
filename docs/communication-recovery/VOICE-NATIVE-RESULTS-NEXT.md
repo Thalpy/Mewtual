@@ -64,6 +64,15 @@ classify terminal history before requesting input and repeat history lookup if c
 the first lookup. Compatibility send refuses after compaction. This is not the phase-transfer or
 serialized-copy solution below, and it does not reserve the complete confirmation chain.
 
+The subsequent prerequisite removes a settled engine lender from permanent action history.
+Exchange-backed factories prepare history separately from input, retaining phase custody only
+on input and actual engine loans. An affine seal/open direction permit is reversible only while
+unpublished; history/input compaction never re-arms it. Proven unstarted retirement drops unused
+input and the lender. Actual final settlement without any terminal result also drops input,
+since no first result can pass that permanent fence; installed terminal results still require
+their exact ACK. Existing input readers preserve their original buffers and credit. This does
+not implement the Workflow, protected confirmation rows or browser readiness described below.
+
 Before exposure, prepay a finite number of metadata replies, including request-output copies,
 JSON framing, browser UTF-16/decoded metadata and acknowledgement state. Retain that capacity
 through explicit post-invoke retirement, independently of the serialized DTO: Tauri can move its

@@ -297,6 +297,13 @@ fn registered_action_lost_admission_reuses_permit_and_unknown_settlement_creates
     assert!(c.register_action(&owner, action.clone()).unwrap() == identity);
     let before = c.resources.counts();
     let permit = c.admit_action(&identity, action.engine_bytes()).unwrap();
+    let reader = action.input().unwrap();
+    let catcoms_sync::voice_v2::crypto_actions::CryptoInput::Derive(setup) = reader.as_input()
+    else {
+        panic!("derive input")
+    };
+    // The native action contract includes256 bytes of fixed derive-input metadata.
+    let payload_bytes = setup.transcript.len() + 256;
     assert_eq!(
         c.admit_action(&identity, action.engine_bytes()).unwrap(),
         permit
@@ -325,6 +332,9 @@ fn registered_action_lost_admission_reuses_permit_and_unknown_settlement_creates
     assert!(c.settle_action(&identity).unwrap());
     assert!(c.settle_action(&identity).unwrap());
     assert_eq!(c.resources.counts(), before);
+    assert!(action.input().is_err());
+    drop(reader);
+    assert_eq!(c.resources.counts(), (before.0 - payload_bytes, 0));
     assert!(c.admit_action(&identity, action.engine_bytes()).is_err());
 }
 
@@ -336,11 +346,20 @@ fn registered_action_settlement_before_admission_is_permanent_for_delayed_reques
     let (_join, action) = proven_action(&c, &owner, c.resources.clone());
     let identity = c.register_action(&owner, action.clone()).unwrap();
     let before = c.resources.counts();
+    let reader = action.input().unwrap();
+    let catcoms_sync::voice_v2::crypto_actions::CryptoInput::Derive(setup) = reader.as_input()
+    else {
+        panic!("derive input")
+    };
+    let payload_bytes = setup.transcript.len() + 256;
     assert!(c.settle_action(&identity).unwrap());
     assert!(c.admit_action(&identity, action.engine_bytes()).is_err());
     assert!(c.register_action(&owner, action.clone()).unwrap() == identity);
     assert!(c.admit_action(&identity, action.engine_bytes()).is_err());
     assert_eq!(c.resources.counts(), before);
+    assert!(action.input().is_err());
+    drop(reader);
+    assert_eq!(c.resources.counts(), (before.0 - payload_bytes, 0));
 }
 
 #[test]

@@ -1,5 +1,16 @@
 # Mewtual; Handover
 
+## V2 exchange/history separation (2026-10-19, disabled continuation)
+
+The isolated continuation separates fixed Exchange history from variable phase custody and
+removes settled engine lenders permanently. Published seal/open direction identities cannot
+re-arm after input compaction. Terminal lost-ACK input is preserved; proven unstarted and
+no-terminal settled work compact while held readers retain actual bytes.269 voice,19 native
+authority and11 final action cases pass; strict affected Clippy passes. Read-only re-review is
+clear. Complete checkpoint80927a85 suites run independently against fixed sources and are not
+full-suite evidence for this later continuation. Live V2/native IPC/browser readiness, member
+media relay and physical audio/network acceptance remain open.
+
 ## Current file/resume checkpoint80927a85 (2026-10-19)
 
 The native full suite passes427 library and5 ACL tests, including all four TCP file scenarios

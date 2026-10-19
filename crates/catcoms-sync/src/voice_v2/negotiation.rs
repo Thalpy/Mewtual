@@ -58,6 +58,10 @@ impl Stage {
 struct State {
     closed: bool,
     used: [usize; STAGES],
+    // Issuance is irreversible at publication. Actual input occupancy can drain without
+    // permitting a second seal/open identity to steal the opposite direction's reserved row.
+    action_preparing: [bool; 2],
+    action_issued: [bool; 2],
 }
 pub(super) struct Binding {
     pub scope: Scope,
@@ -84,6 +88,44 @@ pub struct Exchange {
 struct PhaseLoan {
     exchange: Arc<Exchange>,
     index: usize,
+}
+/// Affine direction reservation. Only unpublished abandonment returns this identity; neither
+/// input compaction nor actual engine settlement makes a published action eligible again.
+pub(super) struct ActionIssue {
+    exchange: Arc<Exchange>,
+    direction: usize,
+    unpublished: bool,
+}
+impl ActionIssue {
+    pub(super) fn publish(mut self) {
+        let mut state = self
+            .exchange
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert!(
+            state.action_preparing[self.direction],
+            "prepared action direction"
+        );
+        assert!(
+            !state.action_issued[self.direction],
+            "one issued action per direction"
+        );
+        state.action_preparing[self.direction] = false;
+        state.action_issued[self.direction] = true;
+        self.unpublished = false;
+    }
+}
+impl Drop for ActionIssue {
+    fn drop(&mut self) {
+        if self.unpublished {
+            self.exchange
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .action_preparing[self.direction] = false;
+        }
+    }
 }
 redacted_debug!(Exchange, Stage, PhaseLoan, SdpResult);
 impl Drop for PhaseLoan {
@@ -144,8 +186,19 @@ impl Exchange {
     /// Refusal therefore precedes the first outgoing SDP nonce or incoming positive admission.
     #[cfg(test)]
     fn new(resources: Arc<Resources>, group: [u8; 32]) -> Result<Arc<Self>, VoiceError> {
-        let slots = Arc::new(super::crypto_actions::slots::Slots::default()).reserve(2)?;
-        Self::new_inner(resources, group, None, slots)
+        Self::new_for_test(
+            resources,
+            group,
+            Arc::new(super::crypto_actions::slots::Slots::default()),
+        )
+    }
+    #[cfg(test)]
+    pub(super) fn new_for_test(
+        resources: Arc<Resources>,
+        group: [u8; 32],
+        slots: Arc<super::crypto_actions::slots::Slots>,
+    ) -> Result<Arc<Self>, VoiceError> {
+        Self::new_inner(resources, group, None, slots.reserve(2)?)
     }
     fn new_inner(
         resources: Arc<Resources>,
@@ -174,6 +227,8 @@ impl Exchange {
             state: Mutex::new(State {
                 closed: false,
                 used: [0; STAGES],
+                action_preparing: [false; 2],
+                action_issued: [false; 2],
             }),
             binding,
             live: CallLease::default(),
@@ -241,6 +296,11 @@ impl Exchange {
         stage: Stage,
         bytes: usize,
     ) -> Result<Credit, VoiceError> {
+        // Registered actions require the affine publication permit below. A generic phase
+        // loan would re-arm after input retirement and bypass the one-action direction limit.
+        if matches!(stage, Stage::EncryptAction | Stage::DecryptAction) {
+            return Err(VoiceError::Scope);
+        }
         let (index, maximum_count, maximum_bytes, kind) = stage.contract();
         if bytes == 0 || bytes > maximum_bytes {
             return Err(VoiceError::Bounds);
@@ -279,6 +339,67 @@ impl Exchange {
             exchange: self.clone(),
             index,
         })))
+    }
+    /// Prepare a fixed history row and variable input under one bounded action identity.
+    /// History retains only its exact reservation bytes; input alone owns live phase custody.
+    /// Every fallible charge precedes attaching that custody, so refusal cannot run its
+    /// destructor while holding the exchange accounting fence.
+    pub(super) fn prepare_action_credits(
+        self: &Arc<Self>,
+        stage: Stage,
+        history_bytes: usize,
+        input_bytes: usize,
+    ) -> Result<(Credit, Credit, ActionIssue), VoiceError> {
+        let direction = match stage {
+            Stage::EncryptAction => 0,
+            Stage::DecryptAction => 1,
+            _ => return Err(VoiceError::Scope),
+        };
+        let total = history_bytes
+            .checked_add(input_bytes)
+            .ok_or(VoiceError::Bounds)?;
+        let (index, _, maximum_bytes, _) = stage.contract();
+        if history_bytes == 0 || input_bytes == 0 || total > maximum_bytes {
+            return Err(VoiceError::Bounds);
+        }
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.closed
+            || !self.is_live()
+            || state.action_preparing[direction]
+            || state.action_issued[direction]
+            || state.used[index] != 0
+        {
+            return Err(VoiceError::Capacity);
+        }
+        let budget = ByteBudget::Reserved(self.reserve.clone());
+        let history = budget.charge(
+            &self.resources,
+            self.group,
+            history_bytes,
+            ResourceKind::Retained,
+        )?;
+        let input = budget.charge(
+            &self.resources,
+            self.group,
+            input_bytes,
+            ResourceKind::Retained,
+        )?;
+        state.action_preparing[direction] = true;
+        state.used[index] = 1;
+        drop(state);
+        let input = input.with_custody(Arc::new(PhaseLoan {
+            exchange: self.clone(),
+            index,
+        }));
+        Ok((
+            history,
+            input,
+            ActionIssue {
+                exchange: self.clone(),
+                direction,
+                unpublished: true,
+            },
+        ))
     }
     /// Retire effects separately through their actual protocol leases. This releases unused
     /// capacity only. Actual stage credits keep both this owner and their retired lane alive.
@@ -337,7 +458,10 @@ mod tests {
             .charge([1; 32], 32 * 1024, ResourceKind::Retained)
             .unwrap();
         let outgoing = exchange.charge(Stage::LocalPacket, PACKET_BYTES).unwrap();
-        let encrypt_record = exchange.charge(Stage::EncryptAction, ACTION_BYTES).unwrap();
+        let (encrypt_history, encrypt_input, encrypt_issue) = exchange
+            .prepare_action_credits(Stage::EncryptAction, 1536, ACTION_BYTES - 1536)
+            .unwrap();
+        encrypt_issue.publish();
         let engine = exchange.charge(Stage::Crypto, ENGINE_BYTES).unwrap();
         assert!(exchange.charge(Stage::Crypto, 1).is_err());
         drop(engine);
@@ -354,7 +478,10 @@ mod tests {
             .unwrap();
         let incoming = exchange.charge(Stage::RemotePacket, PACKET_BYTES).unwrap();
         drop(verification);
-        let decrypt_record = exchange.charge(Stage::DecryptAction, ACTION_BYTES).unwrap();
+        let (decrypt_history, decrypt_input, decrypt_issue) = exchange
+            .prepare_action_credits(Stage::DecryptAction, 1536, ACTION_BYTES - 1536)
+            .unwrap();
+        decrypt_issue.publish();
         let engine = Arc::new(exchange.charge(Stage::Crypto, ENGINE_BYTES).unwrap());
         let result = SdpResult::new(&exchange, &vec![b'a'; MAX_SDP_PLAINTEXT]).unwrap();
         assert_eq!(result.bytes().len(), MAX_SDP_PLAINTEXT);
@@ -375,8 +502,10 @@ mod tests {
             outgoing,
             source,
             incoming,
-            encrypt_record,
-            decrypt_record,
+            encrypt_history,
+            encrypt_input,
+            decrypt_history,
+            decrypt_input,
             result,
         ));
         let bytes = resources.counts().0;

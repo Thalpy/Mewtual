@@ -1,5 +1,33 @@
 # Chat, files and voice implementation evidence
 
+## V2 exchange/history separation (19 October, isolated continuation)
+
+Fixed Exchange-backed action history no longer retains live phase custody. History and input
+are independently prepaid; only variable input and actual engine loans retain the exchange.
+Settlement permanently removes the pending lender. Installed terminal outcomes require exact
+ACK before input compaction; no-terminal actual settlement and proven unstarted retirement can
+drop input because first effects are permanently fenced. Held input readers retain real bytes.
+An affine per-direction issue permit is returned only on unpublished abandonment and consumed
+at publication. Input compaction cannot issue a second seal or steal the receive row.
+
+All269 focused voice cases pass16.36s (`target/communication-v2-action-ownership-2.log`), all19
+native authority cases pass0.98s (`target/communication-v2-action-native-authority-2.log`), and
+the final11 action cases, including exact result recovery after Exchange drain, pass0.92s
+(`target/communication-v2-action-last-owner.log`). Strict affected all-target/all-feature Clippy
+passes18.12s (`target/communication-v2-action-ownership-clippy-2.log`). Read-only review and short
+re-review have no remaining finding. Root/native formatting checks pass.
+
+The first focused run caught three old expectations that no-terminal input stayed retained and
+one pressure fixture using generic action-stage charging. Existing assertions remain; those
+fixtures now hold actual input readers, then verify exact last-reader byte release, and use
+typed directional preparation. The first native run caught the same old assumption in two
+registry cases; both now preserve all old custody/rejection checks with real held readers.
+No tests were skipped. The first strict lint rerun found one obsolete test import, now removed.
+
+This continuation is separate from checkpoint80927a85's complete suites. It does not establish
+whole-chain row/browser/IPC readiness, activate V2, implement member media relay, or provide
+physical media/network acceptance. Those programme gates remain open.
+
 ## Checkpoint80927a85 validation (19 October)
 
 This committed runtime checkpoint implements the native file requester/private durable Download

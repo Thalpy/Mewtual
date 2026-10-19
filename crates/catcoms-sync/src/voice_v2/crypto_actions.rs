@@ -76,6 +76,9 @@ pub(super) enum Key {
 #[derive(Default)]
 struct Engine {
     settled: bool,
+    // Lending authority is pending state, not permanent history. Taking it under this same
+    // fence prevents a delayed admission from rebuilding capacity after actual settlement.
+    lender: Option<ByteBudget>,
     permit: Option<Credit>,
     terminal: Option<results::RecordedResult>,
     acknowledged: bool,
@@ -96,7 +99,6 @@ pub struct CryptoAction {
     operation: CryptoOperation,
     output_bytes: usize,
     resources: Arc<Resources>,
-    budget: ByteBudget,
     engine_bytes: usize,
     engine: Mutex<Engine>,
     _record: Credit,
@@ -124,6 +126,7 @@ impl CryptoAction {
     }
     /// Borrow through an actual owner, never an uncharged Vec extraction. An acknowledged and
     /// settled action may have compacted its input; immutable terminal history remains usable.
+    /// Proven unstarted retirement and actual settlement without a terminal result compact too.
     pub fn input(&self) -> Result<CryptoInputLease, VoiceError> {
         self.input
             .lock()
@@ -166,33 +169,44 @@ impl CryptoAction {
             return Err(VoiceError::Unauthorized);
         }
         if engine.permit.is_none() {
-            engine.permit = Some(self.budget.charge(
-                &self.resources,
-                self.scope.group,
-                bytes,
-                ResourceKind::Crypto,
-            )?);
+            engine.permit = Some(
+                engine
+                    .lender
+                    .as_ref()
+                    .ok_or(VoiceError::Unauthorized)?
+                    .charge(
+                        &self.resources,
+                        self.scope.group,
+                        bytes,
+                        ResourceKind::Crypto,
+                    )?,
+            );
         }
         Ok(self.serial)
     }
 
     /// Actual engine and last result-RPC settlement only. An unstarted action can be closed too;
     /// a delayed admission cannot recreate its credit. No current-call check is required to
-    /// settle old actual work while locked. The native registry rejects unknown action IDs.
+    /// settle old actual work while locked. No-terminal input can retire because this same fence
+    /// permanently rejects a later first result. The native registry rejects unknown action IDs.
     pub fn settle_engine(&self) {
         let retired = {
             let mut engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
             engine.settled = true;
             (
                 engine.permit.take(),
-                self.take_acknowledged_payload(&engine),
+                engine.lender.take(),
+                self.take_settled_payload(&engine),
             )
         };
         drop(retired);
     }
 
-    fn take_acknowledged_payload(&self, engine: &Engine) -> Option<Arc<ActionPayload>> {
-        if engine.settled && engine.acknowledged && engine.terminal.is_some() {
+    fn take_settled_payload(&self, engine: &Engine) -> Option<Arc<ActionPayload>> {
+        // No terminal result after actual last-RPC settlement can ever become a first result:
+        // the permanent engine fence already refuses it. Such failed/unstarted work has no
+        // receipt to ACK. Installed terminal results still require their exact ACK.
+        if engine.settled && (engine.terminal.is_none() || engine.acknowledged) {
             self.input.lock().unwrap_or_else(|e| e.into_inner()).take()
         } else {
             None
@@ -202,10 +216,21 @@ impl CryptoAction {
     /// Owner retirement may close an unstarted action without inventing actual settlement.
     /// An admitted operation remains charged and is closed only by its real settlement report.
     pub fn retire_if_unstarted(&self) {
-        let mut engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
-        if engine.permit.is_none() {
-            engine.settled = true;
-        }
+        let retired = {
+            let mut engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
+            // A settled terminal action can also have no permit. Lost ACKs must not be
+            // mistaken for proof of unstarted work or discard their still-unacknowledged input.
+            if engine.permit.is_none() && engine.terminal.is_none() {
+                engine.settled = true;
+                (
+                    engine.lender.take(),
+                    self.input.lock().unwrap_or_else(|e| e.into_inner()).take(),
+                )
+            } else {
+                (None, None)
+            }
+        };
+        drop(retired);
     }
 
     /// First protocol effects serialize against the same fence used by admit/settle. The sole
@@ -252,6 +277,7 @@ pub(super) struct PreparedAction {
     record: Credit,
     payload: Credit,
     slot: slots::Slot,
+    issue: Option<super::negotiation::ActionIssue>,
 }
 
 pub(super) struct Allocation {
@@ -298,11 +324,32 @@ impl ActionQueue {
             ByteBudget::Exchange { exchange, .. } => exchange.action_slot(&self.slots)?,
             _ => self.slots.charge(1)?,
         };
-        let bytes = payload_bytes
-            .checked_add(RECORD_BYTES + CONFIRM_BYTES)
-            .ok_or(VoiceError::Bounds)?;
-        let mut record = budget.charge(&resources, scope.group, bytes, ResourceKind::Retained)?;
-        let payload = record.split_retained(payload_bytes)?;
+        let (record, payload, issue) = match &budget {
+            ByteBudget::Exchange { exchange, stage } => {
+                if !exchange.uses_resources(&resources, scope.group) {
+                    return Err(VoiceError::Scope);
+                }
+                let (record, payload, issue) = exchange.prepare_action_credits(
+                    *stage,
+                    RECORD_BYTES + CONFIRM_BYTES,
+                    payload_bytes,
+                )?;
+                (record, payload, Some(issue))
+            }
+            ByteBudget::Ordinary | ByteBudget::Reserved(_) | ByteBudget::ReservedLane { .. } => {
+                // These closed variants have no phase/workflow custody on retained charges.
+                // Their existing conserved partition is safe; Exchange is deliberately handled
+                // above before any phase owner can be attached. A future Workflow variant must
+                // supply independently prepared history rather than enter this branch.
+                let bytes = payload_bytes
+                    .checked_add(RECORD_BYTES + CONFIRM_BYTES)
+                    .ok_or(VoiceError::Bounds)?;
+                let mut record =
+                    budget.charge(&resources, scope.group, bytes, ResourceKind::Retained)?;
+                let payload = record.split_retained(payload_bytes)?;
+                (record, payload, None)
+            }
+        };
         self.serial = serial; // Abandoned preparation burns identity, never permits resurrection.
         Ok(PreparedAction {
             key,
@@ -315,6 +362,7 @@ impl ActionQueue {
             record,
             payload,
             slot,
+            issue,
         })
     }
 
@@ -349,12 +397,17 @@ impl ActionQueue {
             operation,
             output_bytes,
             resources: prepared.resources,
-            budget: prepared.budget,
             engine_bytes: prepared.engine_bytes,
-            engine: Mutex::new(Engine::default()),
+            engine: Mutex::new(Engine {
+                lender: Some(prepared.budget),
+                ..Engine::default()
+            }),
             _record: prepared.record,
             _slot: prepared.slot,
         });
+        if let Some(issue) = prepared.issue {
+            issue.publish();
+        }
         assert!(
             self.actions.insert(prepared.key, action.clone()).is_none(),
             "native action uniqueness"
@@ -579,9 +632,18 @@ mod tests {
         call: &CallLease,
         seed: u8,
     ) -> Arc<CryptoAction> {
-        let prepared = queue
-            .prepare(Key::Derive([seed; 32]), allocation(pool, call))
-            .unwrap();
+        publish_budget(queue, pool, call, seed, ByteBudget::Ordinary)
+    }
+    fn publish_budget(
+        queue: &mut ActionQueue,
+        pool: &Arc<Resources>,
+        call: &CallLease,
+        seed: u8,
+        budget: ByteBudget,
+    ) -> Arc<CryptoAction> {
+        let mut allocation = allocation(pool, call);
+        allocation.budget = budget;
+        let prepared = queue.prepare(Key::Derive([seed; 32]), allocation).unwrap();
         let authority = CryptoAuthority::new(
             call.clone(),
             CallLease::default(),
@@ -591,6 +653,211 @@ mod tests {
         )
         .unwrap();
         queue.publish_derive(prepared, setup(seed), authority)
+    }
+
+    fn finish(action: &CryptoAction, outcome: CryptoOutcome) -> CryptoResultReceipt {
+        let tag = action.output_tag(&[]).unwrap();
+        action
+            .with_result(&[], tag, || {
+                Ok(TerminalResult {
+                    binding: ResultBinding {
+                        pair: CallLease::default(),
+                        attempt: None,
+                        deadline: 16_000,
+                        expires: 16_000,
+                    },
+                    outcome,
+                })
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn settled_history_does_not_pin_exchange_but_a_real_input_reader_does() {
+        for hold_input in [false, true] {
+            let pool = Arc::new(Resources::default());
+            let call = CallLease::default();
+            let mut queue = ActionQueue::default();
+            let exchange = super::super::negotiation::Exchange::new_for_test(
+                pool.clone(),
+                allocation(&pool, &call).scope.group,
+                queue.slots.clone(),
+            )
+            .unwrap();
+            let weak = Arc::downgrade(&exchange);
+            let action = publish_budget(&mut queue, &pool, &call, 1, exchange.encryption_budget());
+            let input = hold_input.then(|| action.input().unwrap());
+            action.admit_engine(action.engine_bytes()).unwrap();
+            let receipt = finish(&action, CryptoOutcome::Derived);
+            action.acknowledge_result(&receipt).unwrap();
+            action.settle_engine();
+            exchange.close();
+            drop(exchange);
+            assert_eq!(weak.upgrade().is_some(), hold_input);
+            drop(input);
+            assert!(
+                weak.upgrade().is_none(),
+                "fixed history cannot hold a live exchange"
+            );
+            assert_eq!(pool.counts(), (RECORD_BYTES + CONFIRM_BYTES, 0));
+            assert_eq!(action.terminal_status().receipt, Some(receipt.clone()));
+            assert_eq!(
+                action.recover_result(&[], receipt.output_tag).unwrap(),
+                Some(receipt)
+            );
+            assert!(action.admit_engine(action.engine_bytes()).is_err());
+            drop((action, queue));
+            assert_eq!(pool.counts(), (0, 0));
+        }
+    }
+
+    #[test]
+    fn unstarted_retirement_drops_lender_and_input_without_restoring_delayed_admission() {
+        for settle_first in [false, true] {
+            let pool = Arc::new(Resources::default());
+            let call = CallLease::default();
+            let mut queue = ActionQueue::default();
+            let action = publish(&mut queue, &pool, &call, 1);
+            let input = action.input().unwrap();
+            if settle_first {
+                action.settle_engine();
+            }
+            action.retire_if_unstarted();
+            action.retire_if_unstarted();
+            assert!(action.input().is_err());
+            assert!(action.admit_engine(action.engine_bytes()).is_err());
+            assert!(action.terminal_status().receipt.is_none());
+            assert!(queue.pull().is_empty());
+            drop(input);
+            assert_eq!(pool.counts(), (RECORD_BYTES + CONFIRM_BYTES, 0));
+        }
+    }
+
+    #[test]
+    fn unstarted_exchange_retirement_keeps_only_actual_input_reader_and_fixed_history() {
+        let pool = Arc::new(Resources::default());
+        let call = CallLease::default();
+        let mut queue = ActionQueue::default();
+        let exchange = super::super::negotiation::Exchange::new_for_test(
+            pool.clone(),
+            allocation(&pool, &call).scope.group,
+            queue.slots.clone(),
+        )
+        .unwrap();
+        let weak = Arc::downgrade(&exchange);
+        let action = publish_budget(&mut queue, &pool, &call, 1, exchange.encryption_budget());
+        let reader = action.input().unwrap();
+        action.retire_if_unstarted();
+        assert!(action.input().is_err());
+        assert!(action.admit_engine(action.engine_bytes()).is_err());
+        exchange.close();
+        drop(exchange);
+        assert!(
+            weak.upgrade().is_some(),
+            "actual reader still owns the input phase"
+        );
+        assert!(matches!(reader.as_input(), CryptoInput::Derive(_)));
+        drop(reader);
+        assert!(
+            weak.upgrade().is_none(),
+            "retired lender and history cannot pin the phase"
+        );
+        assert_eq!(pool.counts(), (RECORD_BYTES + CONFIRM_BYTES, 0));
+        assert!(action.is_settled());
+        assert!(action.terminal_status().receipt.is_none());
+        drop((action, queue));
+        assert_eq!(pool.counts(), (0, 0));
+    }
+
+    #[test]
+    fn retirement_preserves_uncertain_engine_and_lost_ack_input_for_both_outcomes() {
+        for outcome in [
+            CryptoOutcome::Derived,
+            CryptoOutcome::Rejected(VoiceError::Unauthorized),
+        ] {
+            let pool = Arc::new(Resources::default());
+            let call = CallLease::default();
+            let mut queue = ActionQueue::default();
+            let action = publish(&mut queue, &pool, &call, 1);
+            action.admit_engine(action.engine_bytes()).unwrap();
+            let before = pool.counts();
+            action.retire_if_unstarted();
+            assert_eq!(pool.counts(), before);
+            assert!(!action.is_settled());
+            let receipt = finish(&action, outcome);
+            action.settle_engine();
+            let before = pool.counts();
+            action.retire_if_unstarted();
+            assert_eq!(pool.counts(), before);
+            assert!(action.input().is_ok(), "lost ACK is not unstarted work");
+            assert_eq!(action.terminal_status().receipt, Some(receipt.clone()));
+            action.acknowledge_result(&receipt).unwrap();
+            assert!(action.input().is_err());
+        }
+    }
+
+    #[test]
+    fn published_direction_never_rearms_and_unpublished_abandonment_returns_its_slot() {
+        let pool = Arc::new(Resources::default());
+        let call = CallLease::default();
+        let mut queue = ActionQueue::default();
+        let exchange = super::super::negotiation::Exchange::new_for_test(
+            pool.clone(),
+            allocation(&pool, &call).scope.group,
+            queue.slots.clone(),
+        )
+        .unwrap();
+        let mut first = allocation(&pool, &call);
+        first.budget = exchange.encryption_budget();
+        drop(queue.prepare(Key::Derive([1; 32]), first).unwrap());
+        let action = publish_budget(&mut queue, &pool, &call, 2, exchange.encryption_budget());
+        action.admit_engine(action.engine_bytes()).unwrap();
+        let receipt = finish(&action, CryptoOutcome::Derived);
+        action.acknowledge_result(&receipt).unwrap();
+        action.settle_engine();
+        let mut duplicate_direction = allocation(&pool, &call);
+        duplicate_direction.budget = exchange.encryption_budget();
+        let before = pool.counts();
+        assert!(queue
+            .prepare(Key::Derive([3; 32]), duplicate_direction)
+            .is_err());
+        assert_eq!(pool.counts(), before);
+        // A different direction still has its actual protected slot. The derive input here
+        // tests capacity in isolation; it does not claim SDP or endpoint authority.
+        let open = publish_budget(&mut queue, &pool, &call, 4, exchange.decryption_budget());
+        open.retire_if_unstarted();
+        exchange.close();
+        drop((action, open, queue, exchange));
+        assert_eq!(pool.counts(), (0, 0));
+    }
+
+    #[test]
+    fn racing_unstarted_retirement_and_admission_cannot_reopen_a_settled_lender() {
+        for _ in 0..16 {
+            let pool = Arc::new(Resources::default());
+            let call = CallLease::default();
+            let mut queue = ActionQueue::default();
+            let action = publish(&mut queue, &pool, &call, 1);
+            let barrier = std::sync::Barrier::new(2);
+            std::thread::scope(|scope| {
+                let admission = scope.spawn(|| {
+                    barrier.wait();
+                    action.admit_engine(action.engine_bytes())
+                });
+                barrier.wait();
+                action.retire_if_unstarted();
+                let admitted = admission.join().unwrap().is_ok();
+                assert_eq!(pool.counts().1, usize::from(admitted));
+                assert_eq!(action.is_settled(), !admitted);
+            });
+            // This is the actual final settlement, including when admission won the race.
+            // There is no result receipt in this failed/unstarted path and none can be added.
+            action.settle_engine();
+            action.retire_if_unstarted();
+            assert!(action.input().is_err());
+            assert!(action.admit_engine(action.engine_bytes()).is_err());
+            assert_eq!(pool.counts(), (RECORD_BYTES + CONFIRM_BYTES, 0));
+        }
     }
 
     #[test]
