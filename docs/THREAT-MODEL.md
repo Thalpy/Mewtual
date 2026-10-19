@@ -1,5 +1,49 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Pre-upload video editing boundary (2026-10-19)
+
+A video added to the chat or status composer opens `VideoEditor.svelte` before upload. This is a
+sender-side product feature with no protocol, wire or native change: the result is an ordinary
+`File` that goes through the existing `begin_file_upload` path, limits and magic-byte check.
+
+What the honest sender's client guarantees:
+
+- **Removed time is absent from the uploaded bytes.** An edited video is decoded and re-encoded
+  from the kept frames only (`copy: false`); no packet is ever copied. A packet copy would have to
+  start on a key frame and so could carry seconds of cut footage into the file, hidden from a
+  player but present for anyone holding the bytes. A frame is encoded only for the part of its
+  display time inside a kept range: a frame wholly inside removed time is never encoded, and the
+  frame already on screen at a cut point (it began up to one frame earlier) opens the next range,
+  which is also what the preview shows there. Mediabunny's encoder-support probe encodes one frame
+  into a discarded null target that never reaches the output. Verified against real codecs in
+  headless Edge (MP4, MOV, WebM), not only in unit tests.
+- **Descriptive metadata is not carried into edited uploads.** The output container is written
+  fresh with an empty tag set (`tags: {}`), so the source's title, comment and the location or
+  device tags phone footage often carries are not copied. Checked end to end for title and
+  comment; other tag kinds rely on the muxer writing only what it is given.
+- **Output is bounded** by the server's upload limit (or the 1 GiB protocol ceiling while that is
+  unread): `CappedBytes` refuses to grow past it and the export stops. Assembling the final Blob
+  briefly holds about twice the output.
+- **Parsing surface.** Decoding uses the WebView's own decoders, as previewing does. Mediabunny's
+  JavaScript demuxer is new parsing surface on top of that; its worst case is a hung or crashed
+  page, not code execution outside the WebView. The editor opens the sender's own pick, but that
+  can be a video previously downloaded from a peer, so peer-authored bytes can reach it. Inbound
+  inline media and the native-decode rule for images are not changed by this path.
+- **Video with transparency is refused** before editing: Mediabunny would need blob-URL workers
+  for it, which the CSP blocks. The test is whether the first packet carries alpha data, not the
+  container's alpha flag (Chrome's recorder sets that on opaque canvas captures too). A file whose
+  alpha only starts later fails at export, closed, with the generic message.
+
+What it does not claim:
+
+- An **unedited** upload (the person pressed Upload without trimming or removing anything, or the
+  editor was unavailable and they chose "upload unedited") sends the original bytes, metadata
+  included, exactly as before this feature existed.
+- Nothing here is enforced against a modified client or verifiable by recipients: they receive a
+  normal video and cannot tell whether, or how, it was edited. The original stays on the sender's
+  disk; the editor never touches it.
+- Re-encoding is lossy and may change codec (QuickTime becomes MP4/H.264; WebM becomes VP9/Opus).
+
 ## Volatile Studio edits and orderly lock recovery (2026-10-18)
 
 Working editor projections are unconfirmed local intentions. They never replace authenticated

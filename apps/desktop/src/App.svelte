@@ -253,6 +253,9 @@
   import { JamTakeSuppression } from "./jam-take-suppression.ts";
   import PixaCanvas from "./PixaCanvas.svelte";
   import PixaViewer from "./PixaViewer.svelte";
+  import VideoEditor from "./VideoEditor.svelte";
+  import { editableContainer, editedFileName, webCodecsAvailable, type VideoEditorResult } from "./video-export.ts";
+  import { VideoReviewQueue, type OpenReview, type ReviewPosition } from "./video-review.ts";
   import { draftAttachments, removeDraftAttachment } from "./draft-attachments.ts";
   import ServerStudioSettings from "./ServerStudioSettings.svelte";
   import { PixaPreviewManager, type PixaPreviewScope } from "./pixa-preview.ts";
@@ -6477,7 +6480,6 @@
     stopStudioAudio();
     studioReset?.(); // and the studio's views, held pixels and unsaved strokes
     restoredStudioDraft = null;
-    if (studioCaptureError) error = studioCaptureError;
     servers = [];
     beginViewSwitch(); // a read still in flight must not land behind the lock
     // studio-exit: forced edge. Lock does not ask the Studio to save: studioSnapshot() above
@@ -6514,7 +6516,9 @@
     clearTimeout(uiStateSaveTimer);
     passphrase = "";
     revealPassphrase = false; // never leave a lock screen showing the next thing typed into it
-    error = "";
+    // The one message the lock screen keeps: the latest Studio edits could not be captured. Assigned
+    // here, after the reset, because assigning it earlier was cleared by this line (review of d2548a37).
+    error = studioCaptureError;
     syncIntent = false;
     locked = true; // studio-exit: forced edge (lock, as above)
   }
@@ -7193,31 +7197,96 @@
     }
   }
 
+  /// Servers whose native leave is in flight, each with whether its `server-closed` has arrived. The
+  /// stopping actor emits that event before leave_server returns, and only leave_server's outcome
+  /// says whether this was a leave, so the event waits for it (serverClosed).
+  const leavingServers = new Map<number, boolean>();
+
+  /// The server a draft restored at unlock belongs to, read from App's copy without loading the
+  /// Studio chunk (studio-draft.ts's `scope.server`). Null when unreadable: such a draft fails to
+  /// restore at all, so it can never install, or block, anywhere.
+  function restoredDraftServer(): number | null {
+    try { const server = JSON.parse(restoredStudioDraft ?? "null")?.scope?.server; return typeof server === "number" ? server : null; }
+    catch { return null; }
+  }
+
   async function leaveServer(id: number) {
+    if (windowCloseInFlight || locked) return;
+    // The Studio's unsaved work for this server is settled while its actor can still take it.
+    // After leave_server nothing can, and serverGone drops whatever is left (review of d2548a37).
+    // A restored draft for it installs only when its channel opens, so that is where the member
+    // saves or discards it first. Before the Studio has loaded, App holds that draft itself.
+    const work = restoredStudioDraft ? (restoredDraftServer() === id ? { server: id, restored: true } : null) : studioWork?.() ?? null;
+    if (work?.server === id) {
+      if (work.restored) {
+        toast("Your restored Studio edits for this server are not saved yet. Open their channel in the Studio to save or discard them, then leave.", "warn", 8000);
+        return;
+      }
+      const route = studioExit.begin();
+      if (!(await route.scope())) {
+        // A refused Save has said why. A newer action (a click, a lock) retiring this one has not.
+        if (!locked && !windowCloseInFlight && !route.current()) toast("Leaving the server was cancelled by a newer action. Leave again if you still want to.", "info", 5000);
+        return; // nothing has left
+      }
+    }
     // Leaving a server is also a privacy boundary. End its independent WebRTC session before the
     // native request can hang or fail so a forgotten server can never retain a hot mic, display or
     // separately granted application-audio source.
     if (inCall && callServer === id) leaveVoice();
+    leavingServers.set(id, false);
     try {
       await invoke("leave_server", { server: id });
     } catch (e) {
-      error = String(e);
+      const closed = leavingServers.get(id) ?? false;
+      leavingServers.delete(id);
+      if (!locked) error = String(e); // never over the lock screen's own message
+      // The leave failed after the actor had stopped: still a member, but the server is gone from
+      // this session, so it is handled as a closure and its Studio edits are kept.
+      if (closed) serverGone(id, false);
       return;
     }
+    leavingServers.delete(id);
     const { [id]: _removedTrust, ...remainingTrust } = fileTrustPolicies;
     fileTrustPolicies = remainingTrust;
+    serverGone(id, true); // first, so the continuity saved next no longer carries its Studio work
     void saveUiStateImmediately();
+  }
+
+  /// `server-closed`: the server's actor stopped. During this server's own leave the leave decides
+  /// (it calls serverGone once it knows how leave_server ended); otherwise this is a closure.
+  function serverClosed(id: number) {
+    if (leavingServers.has(id)) { leavingServers.set(id, true); return; }
+    serverGone(id, false);
+  }
+
+  /// A server's native session ended: the member left it (`left`), or it closed under this session.
+  /// Its actor accepts nothing now, so moving off it is a forced edge that never waits on a Studio
+  /// Save to it. Before d2548a37's review this went through switchServer's Save gate, which refused
+  /// against the stopped actor and left the app selected on a server that no longer existed, with
+  /// the Studio still scoped to it. The Studio scope is retired first. A closed server's unsaved
+  /// edits are kept as a restored draft: a lock does not restart its actor, so they come back when
+  /// its channel opens after Mewtual restarts, and the Studio sidebar can discard them meanwhile. A
+  /// left server's are dropped, since leaveServer saved what it could beforehand. A later event for
+  /// a server already gone finds nothing to do.
+  function serverGone(id: number, left: boolean) {
+    const name = servers.find((s) => s.id === id)?.name || "A server";
     servers = servers.filter((s) => s.id !== id);
-    if (activeServerId === id) {
-      if (servers.length) switchServer(servers[0].id);
-      else {
-        beginViewSwitch();
-        // studio-exit: forced edge. Membership already ended above, so this is not a navigation
-        // the member can be held back from to finish a Studio Save.
-        activeServerId = null;
-        clearServerView(); // studio-exit: forced edge. Leaving the last one must not leave its messages on screen
-      }
-    }
+    // Lock already cleared all of this. A window close may be under way: the Studio keeps its
+    // input hold, and a snapshot the close takes later carries a kept draft. If the close is then
+    // abandoned the app is on no server, not on this one (switchServer refuses during a close).
+    if (locked) return;
+    const retired = retireStudioServer?.(id, !left) ?? "none";
+    if (retired === "kept" || retired === "partial") {
+      toast(`${name} stopped. Its unsaved Studio edits are kept and come back when you open their channel after Mewtual restarts; the Studio sidebar can discard them.${retired === "partial" ? " A stroke still being drawn could not be kept." : ""}`, "warn", 10000);
+    } else if (retired === "dropped") toast(left ? `You left ${name}, so Studio edits for it that were not saved were discarded.` : `${name} stopped, and its unsaved Studio edits could not be kept.`, "warn", 8000);
+    if (activeServerId !== id) return;
+    beginViewSwitch();
+    // studio-exit: forced edge. The server's native session ended, so nothing could accept a Studio Save, and its Studio scope was retired above.
+    activeServerId = null;
+    clearServerView(); // studio-exit: forced edge (server gone, as above). Its messages must not stay on screen
+    // A new action. With the scope retired there is nothing of this server to save; if the Studio
+    // still refuses for other work, the app stays coherently on no server rather than a dead one.
+    if (servers.length) void switchServer(servers[0].id);
   }
 
   async function addChannel() {
@@ -8462,6 +8531,8 @@
   let studioRestore: ((json: string | null) => void) | null = null;
   let studioSave: (() => Promise<void>) | null = null;
   let studioHasWork: (() => boolean) | null = null;
+  let studioWork: (() => { server: number; restored: boolean } | null) | null = null;
+  let retireStudioServer: ((server: number, keep: boolean) => "none" | "kept" | "partial" | "dropped") | null = null;
   let studioClaimNavigation: (() => () => boolean) | null = null;
   let studioBeginClose: (() => void) | null = null;
   let studioEndClose: (() => void) | null = null;
@@ -8502,6 +8573,7 @@
       studioReset = st.resetStudio;
       studioSnapshot = st.studioDraftSnapshot; studioRestore = st.restoreStudioDraft;
       studioSave = st.saveStudio; studioHasWork = st.studioHasPending;
+      studioWork = st.studioWork; retireStudioServer = st.retireStudioServer;
       studioClaimNavigation = st.claimStudioNavigation;
       studioBeginClose = st.beginStudioClose; studioEndClose = st.endStudioClose;
       if (restoredStudioDraft) { studioRestore(restoredStudioDraft); restoredStudioDraft = null; }
@@ -10767,28 +10839,114 @@
 
   // Embed media that already knows what it wants to be called. A picked or dropped file brings its
   // own name; a pasted screenshot has no name of its own and is given one (see clipboard-media.ts).
+  //
+  // A video the editor can open goes through it first (see `reviewVideo`): the person may trim it,
+  // cut pieces out, send it untouched, or not send it at all. Only what they confirm is uploaded.
+  //
+  // Every item is bound to where the batch started (`videoEditorScope`: lock state, server and
+  // channel). Reviews and uploads take time, and the person can move in the meantime. Once they
+  // have, nothing more is reviewed or uploaded, and nothing lands in the draft now on screen,
+  // which belongs to somewhere else. `addSharedFile` reads the active server when it is called,
+  // so the check must come right before that call, with no await in between.
   async function embedMedia(target: "chat" | "status", items: { file: File; name: string }[]) {
     if (items.length === 0 || activeServerId === null) return;
+    // Videos are reviewed one at a time, in the order they were picked; "2 of 3" counts only them.
+    const editing = webCodecsAvailable();
+    const videoCount = editing ? items.filter(({ file }) => editableContainer(file.type) !== null).length : 0;
+    let videoIndex = 0;
+    const scope = videoEditorScope;
+    // The epoch catches a round trip (channel A, B, then A again, or a lock and unlock) that the
+    // key alone would miss: the batch was still interrupted, and its context may have changed.
+    const epoch = videoScopeEpoch;
+    const here = () => videoEditorScope === scope && videoScopeEpoch === epoch;
+    let abandoned = 0;
     uploading = true;
     try {
-      for (const { file, name } of items) {
-        const tid = toast(`Uploading ${name}…`, "info", 0);
+      for (let i = 0; i < items.length; i++) {
+        if (!here()) { abandoned = items.length - i; break; }
+        const { file, name } = items[i];
+        let upload = file;
+        let uploadName = name;
+        const container = editing ? editableContainer(file.type) : null;
+        if (container) {
+          const result = await reviewVideo(file, { index: ++videoIndex, count: videoCount }, scope);
+          // A lock or a server or channel switch while the editor was open (or while this review
+          // waited its turn) settled it as a skip. That file is counted in the rescope effect's
+          // message; count only the ones after it.
+          if (!here()) { abandoned = items.length - i - 1; break; }
+          if (result.kind === "skip") continue;
+          if (result.kind === "edited") {
+            upload = result.file;
+            uploadName = editedFileName(name, container);
+          }
+        }
+        const tid = toast(`Uploading ${uploadName}…`, "info", 0);
         try {
-          const cid = await addSharedFile(file, myEmbedFolder, name);
+          const cid = await addSharedFile(upload, myEmbedFolder, uploadName);
+          if (!here()) {
+            // Shared where the batch started, but the composer on screen now belongs elsewhere.
+            updateToast(tid, `Shared ${uploadName}, not attached: you moved to another channel`, "info", 7000);
+            continue;
+          }
           // Brackets in the alt would break the `![alt](cid:…)` marker parse: strip them.
-          const alt = name.replace(/[[\]]/g, " ");
+          const alt = uploadName.replace(/[[\]]/g, " ");
           const marker = `![${alt}](cid:${cid})`;
           if (target === "chat") { draft = draft ? `${draft} ${marker}` : marker; saveDraftFor(chanKey()); }
           else statusDraft = statusDraft ? `${statusDraft} ${marker}` : marker;
-          updateToast(tid, `Attached ${name}`, "ok");
+          updateToast(tid, `Attached ${uploadName}`, "ok");
         } catch (e) {
-          updateToast(tid, `Upload of ${name} failed: ${e}`, "err", 9000);
+          updateToast(tid, `Upload of ${uploadName} failed: ${e}`, "err", 9000);
         }
+      }
+      if (abandoned > 0 && !locked) {
+        toast(`${abandoned} file${abandoned === 1 ? " was" : "s were"} not attached: you moved to another channel`, "info", 7000);
       }
       await refreshFiles();
     } finally {
       uploading = false;
     }
+  }
+
+  // The pre-upload video editor (VideoEditor.svelte). `VideoReviewQueue` holds the rules: one
+  // editor at a time with later requests waiting their turn, answers accepted only from the editor
+  // they were asked of, and every request settled (as `skip` once its scope is gone).
+  let videoEditor = $state.raw<OpenReview | null>(null);
+  const videoReviews = new VideoReviewQueue((open) => { videoEditor = open; });
+  // Everything a review is bound to, as one primitive so the effect below only reruns when it
+  // actually changes. Reading `cur?.active` straight from an effect would rerun it whenever the
+  // server list is replaced, and that would close an editor mid-edit for nothing.
+  const videoEditorScope = $derived(`${locked ? "locked" : "open"}|${activeServerId ?? ""}|${chanKey() ?? ""}`);
+  // The protocol ceiling on a single file (catcoms-app MAX_FILE_BYTES); the cap the editor uses
+  // while this server's own limit has not been read. The native side enforces the real one.
+  const VIDEO_EDITOR_FALLBACK_CAP = 1024 * 1024 * 1024;
+  // Bumped by the effect below every time `videoEditorScope` changes; see `embedMedia`.
+  let videoScopeEpoch = 0;
+  function reviewVideo(file: File, position: ReviewPosition, scope: string): Promise<VideoEditorResult> {
+    return videoReviews.request(file, position, scope);
+  }
+  $effect(() => {
+    const scope = videoEditorScope;
+    untrack(() => {
+      videoScopeEpoch++;
+      const { closedOpen, dropped } = videoReviews.rescope(scope);
+      const lost = (closedOpen ? 1 : 0) + dropped;
+      // Not on lock: the lock screen is its own explanation, and a toast would sit behind it.
+      if (lost === 0 || scope.startsWith("locked")) return;
+      toast(closedOpen && dropped === 0
+        ? "The video you were editing was not attached: you moved to another channel"
+        : `${lost} videos were not attached: you moved to another channel`, "info", 7000);
+    });
+  });
+  // Keys the editor lets through to the app although it is modal: Lock, which must work from
+  // anywhere, and push-to-talk, so someone in a call can still speak while trimming a clip.
+  // Push-to-talk only matches its code, so a combination that merely contains that key (Ctrl+Z
+  // with push-to-talk on Z, Alt+Left with it on an arrow) stays with the editor: passed on, it
+  // would both skip the editor's own command and fire an app shortcut behind the dialog.
+  function videoEditorPassKey(e: KeyboardEvent): boolean {
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "l") return true;
+    const modifierKey = /^(Control|Alt|Meta|Shift|OS)/.test(e.code);
+    if ((e.ctrlKey || e.metaKey || e.altKey) && !modifierKey) return false;
+    return pushToTalkEvent(pushToTalk, { code: e.code, typing: false, inCall });
   }
 
   function onComposerDrop(target: "chat" | "status", e: DragEvent) {
@@ -21066,18 +21224,7 @@
       listen<{ server: number; caution: boolean }>("eclipse-changed", (e) => {
         if (e.payload.server === activeServerId) eclipseCaution = e.payload.caution;
       }),
-      listen<{ server: number }>("server-closed", (e) => {
-        servers = servers.filter((s) => s.id !== e.payload.server);
-        if (activeServerId === e.payload.server) {
-          if (servers.length) void switchServer(servers[0].id);
-          else {
-            beginViewSwitch();
-            // studio-exit: forced edge. The native server is gone; nothing could accept a Save.
-            activeServerId = null;
-            clearServerView(); // studio-exit: forced edge (server closed, as above)
-          }
-        }
-      }),
+      listen<{ server: number }>("server-closed", (e) => serverClosed(e.payload.server)),
     ];
     // Global keyboard shortcuts: Escape closes the top-most overlay/menu; Ctrl/Cmd+1–5 switch
     // tabs; Ctrl/Cmd+K opens the quick switcher.
@@ -21327,6 +21474,9 @@
     const onMouseNav = (e: MouseEvent) => {
       if (e.button !== 3 && e.button !== 4) return;
       e.preventDefault();
+      // The pre-upload video editor is modal: a thumb button must not navigate out from under it
+      // (which would close it and discard the edit).
+      if (videoEditor) return;
       if (e.button === 3) navBack();
       else navForward();
     };
@@ -30582,6 +30732,15 @@
         </div>
       </div>
     {/if}
+
+    <!-- Keyed by review id: the editor reads its file once at mount, so every review gets a fresh
+         instance, and `open` stays that review's own object for as long as its instance lives. Its
+         answer is therefore always filed under its own id; a late answer from an instance being
+         torn down cannot be taken as the next review's (the queue ignores a stale id). -->
+    {#each videoEditor ? [videoEditor] : [] as open (open.id)}
+      <VideoEditor file={open.file} capBytes={fileSizeLimit?.limit ?? VIDEO_EDITOR_FALLBACK_CAP} position={open.position}
+        passKey={videoEditorPassKey} onfinish={(result) => videoReviews.finish(open.id, result)} />
+    {/each}
 
     {#if pixaViewer}
       <PixaViewer name={pixaViewer.file.name} pixa={pixaViewer.pixa} error={pixaViewer.error} bytes={pixaViewer.file.size}

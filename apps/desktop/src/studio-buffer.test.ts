@@ -163,6 +163,26 @@ test("a media preparation cannot cross a failed autosave while its frame fetch i
   await preparing; h.session.reset();
 });
 
+// Review of d2548a37, P2 2: preparation captured the working model, then looked each frame's unsaved
+// pixels up in the live queue across its awaits. An autosave receipt for a later frame, landing
+// while an earlier frame's read was pending, removed that record, so the captured `draft:`
+// placeholder was fetched as a CID and Play, download, Post and GIF export failed.
+test("an autosave landing while a frame read is pending keeps the captured draft frame's pixels", async () => {
+  const h = await harness(), read = deferred<unknown>();
+  h.ipc.on("request_blob_bounded", () => read.promise);
+  const added = h.session.insertFrame(object, frame, pixBytes(5));
+  const preparing = h.session.prepareFlipnotePixa(object); await settle(3);
+  await h.tick(5000); // the deadline saves the new frame while the first frame's read is pending
+  assert.equal(h.session.saves.length, 0, "the autosave landed");
+  assert.equal(h.session.unsavedPix(object, added), null, "and its record left the queue");
+  read.resolve({ bytes: pixBytes().length, bytes_b64: b64(pixBytes()) });
+  const animation = decodePixa(await preparing);
+  assert.equal(animation.frames.length, 2);
+  assert.deepEqual([...animation.frames[1]], [...pixBytes(5)], "the new frame's own pixels");
+  assert.ok(!h.ipc.calls.some(c => JSON.stringify(c.args).includes("draft:")), "no placeholder reached a native lookup");
+  h.session.reset();
+});
+
 test("failed Create preserves a long exact title, and Score pads8/9 round-trip without writing", async () => {
   const h = await harness();
   h.ipc.on("studio_create", () => { throw new Error("delivery lost"); });

@@ -83,6 +83,13 @@
     const scope = session.scope;
     return scope && archive ? `${scope.server}:${scope.channel}:index:${archive}` : "";
   });
+  // A restored draft still waiting for its channel refuses every new edit. Its channel may never
+  // open again (a server that stopped takes nothing until Mewtual restarts; a channel can be
+  // deleted), so the member can discard it here. Armed per draft, so a different one never
+  // inherits a confirmation.
+  const waitingDraft = $derived.by(() => { void studio.rev; return session.waitingDraft; });
+  const waitingDraftKey = $derived(waitingDraft ? `${waitingDraft.server}:${waitingDraft.channel}:${waitingDraft.first}:${waitingDraft.edits}` : "");
+  let waitingDraftDiscardArmed = $state("");
   let indexDiscardArmed = $state("");
   let indexReleaseArmed = $state("");
   let indexSaveDiscardArmed = $state("");
@@ -229,6 +236,20 @@
 {/if}
 {#if indexError}
   <p class="studio-note danger">{indexError}</p>
+{/if}
+{#if waitingDraft}
+  <div class="studio-index-draft warn" data-waiting-draft>
+    <span><b>restored edits waiting</b> · {waitingDraft.edits} {waitingDraft.edits === 1 ? "edit" : "edits"} for another channel</span>
+    <span class="micro wrap">open that channel in the Studio to save them; until then new Studio edits are refused here{#if waitingDraft.uncertain} · {waitingDraft.uncertain} of them may already have been saved before they were interrupted, so discarding keeps whatever landed{/if}</span>
+    <span class="index-draft-actions">
+      {#if waitingDraftDiscardArmed === waitingDraftKey}
+        <button type="button" class="ghost small ctx-action danger" onclick={() => { if (waitingDraftDiscardArmed === waitingDraftKey) { session.discardWaitingDraft(); waitingDraftDiscardArmed = ""; } }}>discard restored edits for real</button>
+        <button type="button" class="ghost small ctx-action" onclick={() => (waitingDraftDiscardArmed = "")}>cancel</button>
+      {:else}
+        <button type="button" class="ghost small ctx-action" onclick={() => (waitingDraftDiscardArmed = waitingDraftKey)}>discard restored edits…</button>
+      {/if}
+    </span>
+  </div>
 {/if}
 {#if indexAttention.length}
   {@const save = indexAttention[0]}

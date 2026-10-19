@@ -81,6 +81,26 @@ export function studioHasPending(): boolean {
   try { session?.stageDrawing(); return !!session?.saves.length; }
   catch { return true; } // the awaited Save path reports the refusal without starting navigation
 }
+/// The server the Studio holds unsaved work for, and whether that work is a restored draft still
+/// waiting for its channel (see StudioSession.workServer). Stages the drawing first, like
+/// studioHasPending; a stroke that could not be staged counts as the scope's work.
+export function studioWork(): { server: number; restored: boolean } | null {
+  if (!session) return restoredDraft ? { server: restoredDraft.scope.server, restored: true } : null;
+  let unstaged = false;
+  try { session.stageDrawing(); } catch { unstaged = true; }
+  return session.workServer(unstaged);
+}
+/// A server's native session ended; see StudioSession.retireServer. Also covers a restored draft
+/// still waiting here for the session to be created.
+export function retireStudioServer(server: number, keep: boolean): "none" | "kept" | "partial" | "dropped" {
+  let outcome: "none" | "kept" | "partial" | "dropped" = "none";
+  if (!keep && restoredDraft?.scope.server === server) { restoredDraft = null; outcome = "dropped"; }
+  if (!session) return outcome;
+  const scoped = session.scope?.server === server;
+  const retired = session.retireServer(server, keep);
+  if (scoped) { studio.selected = ""; studio.rev++; } // the retired scope's document is gone from the surface
+  return retired === "none" ? outcome : retired;
+}
 export function studioDraftSnapshot(): string | null {
   session?.stageDrawing();
   return session?.draftSnapshot() ?? (restoredDraft ? encodeStudioDraft(restoredDraft) : null);

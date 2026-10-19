@@ -25,7 +25,7 @@
 
 import { PixError, decodePix } from "./pix.ts";
 import { workingFlipnote, workingScore, workingIndex, workingSlot } from "./studio-working.ts";
-import { encodeStudioDraft, validateDraftOperation, type StudioDraft } from "./studio-draft.ts";
+import { decodeStudioDraft, encodeStudioDraft, validateDraftOperation, type StudioDraft } from "./studio-draft.ts";
 import { validateJamPatch } from "./jam-patch.ts";
 import type { JamPatch, JamTake } from "./jam-contract.ts";
 import { flipnotePixaFromNative, preflightFlipnoteMedia, scorePlaybackFromNative } from "./studio-resolved-export.ts";
@@ -533,6 +533,77 @@ export class StudioSession {
     this.installRestoredDraft();
     this.notify();
     if (scope) this.invalidate({ index: true });
+  }
+
+  /// The server this session holds unsaved work for: the scope's, when it has retained records (or
+  /// `unstaged` says a stroke could not be staged into them), or else a restored draft's, which
+  /// waits until its channel is the scope again. Null when there is none.
+  workServer(unstaged = false): { server: number; restored: boolean } | null {
+    if (this.scope && (this.records.length || unstaged)) return { server: this.scope.server, restored: false };
+    if (this.restoredDraft) return { server: this.restoredDraft.scope.server, restored: true };
+    return null;
+  }
+
+  /// The native server behind `server` is gone: the member left it, or it closed under this session
+  /// (its actor stopped). Nothing can accept a Save to it now, so leaving it must never wait on one
+  /// (review of d2548a37: the switch off a removed server ran the Save gate against the stopped
+  /// actor, refused, and left the app on a server that no longer existed). This retires that scope
+  /// without saving; scope changes are otherwise vetoed while records remain (setScope).
+  ///
+  /// `keep` turns the retained records into a restored draft, exactly as lock's snapshot does: it
+  /// waits until that channel is open again, and an interrupted delivery comes back uncertain. A
+  /// server whose actor closed is not restarted by a lock and unlock (the node stays online and
+  /// lists it again, still stopped), so in practice that is after Mewtual restarts; the draft is in
+  /// the continuity snapshot until then. Like any waiting draft it refuses new Studio edits
+  /// meanwhile, and `discardWaitingDraft` is the member's way out. Without `keep` the records are
+  /// dropped, and so is a waiting restored draft for that server, which a server the member left
+  /// could never install. "partial" means kept, except a stroke the full queue refused to stage.
+  /// Lock resets the session itself, so callers skip this while locked. Window close may be under
+  /// way: its hold on new input is kept, and a snapshot it takes later includes the kept draft.
+  retireServer(server: number, keep: boolean): "none" | "kept" | "partial" | "dropped" {
+    let outcome: "none" | "kept" | "partial" | "dropped" = "none";
+    if (this.scope?.server === server) {
+      let lostStroke = false;
+      try { this.stageDrawing(); } catch { lostStroke = true; } // a stroke the full queue refused goes with the scope
+      let draft: StudioDraft | null = null;
+      if (keep && this.records.length) {
+        // The same encoding lock uses, so what is kept is exactly what a lock would have kept.
+        try { const json = this.draftSnapshot(); draft = json ? decodeStudioDraft(json) : null; } catch { draft = null; }
+      }
+      if (draft) outcome = lostStroke ? "partial" : "kept";
+      else if (this.records.length || lostStroke) outcome = "dropped";
+      const closing = this.closeHeld;
+      this.clearScoped(); // settles awaited Saves as discarded and retires the old workers
+      this.closeHeld = closing; // clearScoped releases a window close's input hold; this is not that close ending
+      this.scope = null;
+      this.generation++; // ends every navigation lease and in-flight read of the old scope
+      // Records and a waiting draft never coexist (restoreDraft and enqueue refuse it), so this
+      // cannot replace another server's draft.
+      if (draft) this.restoredDraft = draft;
+    }
+    if (!keep && this.restoredDraft?.scope.server === server) { this.restoredDraft = null; outcome = "dropped"; }
+    this.syncByServer.delete(server);
+    this.notify();
+    return outcome;
+  }
+
+  /// A restored draft still waiting for its channel (null when there is none or it has installed):
+  /// where it belongs, its first record's id (an identity for confirmations), how many edits it
+  /// holds and how many of those were interrupted deliveries that may already have landed. While
+  /// one waits, new edits are refused.
+  get waitingDraft(): { server: number; channel: string; first: number; edits: number; uncertain: number } | null {
+    const draft = this.restoredDraft;
+    return draft ? { server: draft.scope.server, channel: draft.scope.channel, first: draft.records[0]?.id ?? 0, edits: draft.records.length,
+      uncertain: draft.records.filter(r => r.status === "inflight" || r.mayHaveCommitted).length } : null;
+  }
+
+  /// The member's explicit discard of a waiting restored draft: its channel may never open again
+  /// (a stopped server lists again after unlock but takes nothing until Mewtual restarts; a deleted
+  /// channel never does), and while it waits every new Studio edit is refused. Nothing was sent.
+  discardWaitingDraft(): void {
+    if (!this.restoredDraft) return;
+    this.restoredDraft = null;
+    this.notify();
   }
 
   /// Lock or session change: forget everything, including cached pixels and unsaved work.
@@ -1451,6 +1522,11 @@ export class StudioSession {
     else if (Object.keys(view.content.frames).length) throw new StudioNativeError("The animation timeline is incomplete.");
     if (!model || model.overCapCount || model.titleConflicts.length || model.fpsConflicts.length || !model.sound.ready ||
         model.frames.some(f => f.conflicts.length || f.insertions > 1)) throw new StudioNativeError("Resolve animation conflicts before playing or exporting.");
+    // The unsaved pixels the captured model names, taken in this same turn, before the first await.
+    // A draft frame's cid is a `draft:` placeholder that only the live queue can resolve, and an
+    // autosave receipt landing during an await below removes that record; looking it up then fell
+    // through to fetching the placeholder as a CID (review of d2548a37). The bytes are immutable.
+    const unsaved = new Map(model.frames.map(f => [f.id, this.unsavedPix(object, f.id)] as const));
     let linked: { object: string; view: ScoreView } | undefined;
     if (model.sound.score) {
       if (this.hasDocumentDraft(model.sound.score)) throw new StudioNativeError("Save your music changes before playing this flipnote.");
@@ -1464,7 +1540,7 @@ export class StudioSession {
     for (const frame of model.frames) {
       const key = contentKey(frame.cid, frame.bytes);
       if (held.has(key)) continue;
-      const bytes = this.unsavedPix(object, frame.id) ?? await this.fetchNow(frame.cid, frame.bytes);
+      const bytes = unsaved.get(frame.id) ?? await this.fetchNow(frame.cid, frame.bytes);
       source.assertCurrent();
       if (!bytes) throw new StudioNativeError("an animation frame is unavailable; no partial export was made");
       held.set(key, bytes);
@@ -1594,7 +1670,7 @@ export class StudioSession {
 
   private enqueue(rec: NewSave): SaveEntry {
     if (this.closeHeld) throw new StudioNativeError("The window is closing. Wait for saving to finish.");
-    if (this.restoredDraft) throw new StudioNativeError("Open the channel with your restored Studio edits before making more changes.");
+    if (this.restoredDraft) throw new StudioNativeError("Open the channel with your restored Studio edits, or discard them in the Studio sidebar, before making more changes.");
     this.mediaEpoch++;
     const record = { ...rec, label: rec.label.slice(0, 256), id: ++this.saveSeq, status: "queued", attempts: 0, error: "", epochChanged: false, mayHaveCommitted: false } as SaveEntry;
     if (record.kind === "apply" || record.kind === "applyIndex" || record.kind === "overlayApply") {
