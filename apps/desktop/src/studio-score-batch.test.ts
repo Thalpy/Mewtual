@@ -46,6 +46,28 @@ test("edits queued behind an in-flight save travel as one batch, in order, each 
   assert.equal(h.session.doc?.score?.cells["0:0"]?.k, "d", "the returned view replaces the projection");
 });
 
+test("a move's clear and set travel in one batch in order, and a clear between two sets of one cell is never collapsed", async () => {
+  const h = await harness();
+  const first = deferred<unknown>();
+  h.ipc.on("studio_apply", () => first.promise);
+  h.session.setScoreCell(object, 9, 9, { k: "d", pad: 1 }); await settle(3);
+  // The composer's move: clear the source, set the destination; then a set, a clear and a set of
+  // one cell, which the tail-collapse rule must leave as three records because the clear is not a
+  // collapsible slot.
+  h.session.clearScoreCell(object, 2, 5);
+  h.session.setScoreCell(object, 6, 8, { k: "n", p: "a".repeat(64), len: 3 });
+  h.session.setScoreCell(object, 0, 0, { k: "d", pad: 1 });
+  h.session.clearScoreCell(object, 0, 0);
+  h.session.setScoreCell(object, 0, 0, { k: "d", pad: 2 });
+  assert.equal(h.session.saves.filter((s) => s.status === "queued").length, 5);
+  h.ipc.on("studio_apply_batch", () => ordinaryView(scoreContent()));
+  first.resolve(ordinaryView(scoreContent())); await h.sync();
+  const sent = (h.calls("studio_apply_batch")[0].args as { operations: { body: string }[] }).operations.map((o) => JSON.parse(o.body));
+  assert.deepEqual(sent.map((op) => [op.op, op.step, op.row]), [["clear_cell", 2, 5], ["set_cell", 6, 8], ["set_cell", 0, 0], ["clear_cell", 0, 0], ["set_cell", 0, 0]]);
+  assert.equal(sent[4].value.pad, 2);
+  assert.equal(h.session.saves.length, 0);
+});
+
 test("a refused batch settles every member the same way and an exact retry resends the same items", async () => {
   const h = await harness();
   const first = deferred<unknown>();

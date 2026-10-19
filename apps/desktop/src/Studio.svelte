@@ -54,7 +54,8 @@
   import StudioSound from "./StudioSound.svelte";
   import StudioMusic, { type MusicTrack } from "./StudioMusic.svelte";
   import StudioSoundfont from "./StudioSoundfont.svelte";
-  import { auditionPlayback } from "./studio-audition.ts";
+  import { auditionPadPlayback, auditionPlayback } from "./studio-audition.ts";
+  import type { ScorePlayback } from "./studio-export.ts";
   import { instrumentName, noteName } from "./studio-sound-ui.ts";
   import { JAM_SAVED_PATCHES_MAX, type JamPatch, type JamTake } from "./jam-contract.ts";
   import { jamPatchId, validateJamPatch } from "./jam-patch.ts";
@@ -771,11 +772,18 @@
   /// Play one note of a recipe through the Studio's own audio session. No second synth path: the
   /// note is a one-event take, so it inherits the session's gesture, scope and Deafen gates.
   function auditionSound(patch: JamPatch, note: number, durationMs: number, volume: number | undefined = undefined) {
+    playAudition((group) => auditionPlayback({ group, exporter: me }, patch, note, durationMs, volume));
+  }
+  /// One pad hit through the same path, so a placed or chosen drum is heard like a placed note.
+  function auditionPad(pad: number) {
+    playAudition((group) => auditionPadPlayback({ group, exporter: me }, pad));
+  }
+  function playAudition(build: (group: string) => ScorePlayback) {
     if (!audioActions) { onnotice("audio playback is unavailable on this surface", "warn"); return; }
     const group = view?.group;
-    if (!group) { onnotice("reopen this flipnote before auditioning: its group is not known yet", "warn"); return; }
+    if (!group) { onnotice("reopen this document before listening: its group is not known yet", "warn"); return; }
     let playback;
-    try { playback = auditionPlayback({ group, exporter: me }, patch, note, durationMs, volume); } catch (e) { onnotice(reason(e), "warn"); return; }
+    try { playback = build(group); } catch (e) { onnotice(reason(e), "warn"); return; }
     // Raised before start: the session reports "preparing"/"playing" for this note and the
     // editor must already know it is not document playback when that lands.
     auditioning = true;
@@ -1350,9 +1358,9 @@
       {#if mediaReceipt}<div class="st-banner info wrap">{mediaReceipt}</div>{/if}
       {#key objectId}
         <ScoreEditor model={score} readonlyReason={playing ? "Stop playback before editing" : readOnlyWhy} loading={doc?.loading ?? false} error={doc?.error ?? ""} {patchLibrary} library={patchShelves} {who} {tint}
-          onop={(op) => guard(() => session.applyScoreOp(objectId, op))} onaddpatch={addStudioPatch}
+          onop={(op) => guard(() => session.applyScoreOp(objectId, op))} onroom={() => session.draftRoom()} onaddpatch={addStudioPatch}
           onplay={audioActions ? toggleStudioPlay : undefined} onstop={() => audioActions?.stop()} {playing} positionMs={playing ? audioState.elapsedMs : null}
-          {loop} onloop={(next) => { loop = next; }} onaudition={audioActions ? auditionSound : undefined} onnew={openSoundfont}
+          {loop} onloop={(next) => { loop = next; }} onaudition={audioActions ? auditionSound : undefined} onauditionpad={audioActions ? auditionPad : undefined} onnew={openSoundfont}
           onexport={() => downloadMedia()} onshare={onshareScore ? () => downloadMedia("share") : undefined} onpost={onpostScore ? () => downloadMedia("post") : undefined} {mediaBusy}
           history={scoreHistory} onnotice={(text, kind) => onnotice(text, kind === "error" ? "error" : "info")} />
       {/key}
@@ -1765,7 +1773,7 @@
   {#if soundfont}
     <StudioSoundfont name={soundfont.name} initial={soundfont.initial} startFrom={patchLibrary} {libraryCount} libraryMax={JAM_SAVED_PATCHES_MAX}
       targetName={model?.title || "this flipnote"} recipeCount={model?.sound.patchSlots.filter((s) => !s.removed).length ?? 0} recipeMax={FLIPNOTE_MAX_PATCHES} shareName={onsharePatch ? serverName : ""}
-      onaudition={(patch, note) => auditionSound(patch, note, 400)} onuse={useSoundfont} onsave={onsavePatch ?? refusePatch} onshare={shareSoundfont} {onnotice} onclose={() => (soundfont = null)} />
+      bpm={score?.bpm ?? 120} onaudition={(patch, note, ms) => auditionSound(patch, note, ms)} onuse={useSoundfont} onsave={onsavePatch ?? refusePatch} onshare={shareSoundfont} {onnotice} onclose={() => (soundfont = null)} />
   {/if}
 </div>
 

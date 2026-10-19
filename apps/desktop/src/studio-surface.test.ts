@@ -976,7 +976,7 @@ test("G6-UI-001: native Score composer routes real drum edits and retains exact 
     assert.match(m.text(), /not an atomic restore/);
     assert.doesNotMatch(m.text(), /copy replaces the current title and fps/);
     assert.equal(ipc.calls.find(c => c.cmd === "studio_read")?.args.objectKind, "score");
-    m.click("button.st-itab", "patches");
+    m.click("button.st-itab", "sounds");
     m.target.querySelector<HTMLButtonElement>('[data-score-mode="drum"]')!.click(); flushSync();
     m.target.querySelector<HTMLButtonElement>('[data-score-cell="0:0"]')!.click(); flushSync(); await settled(300);
     const first = ipc.calls.find(c => c.cmd === "studio_apply")!.args;

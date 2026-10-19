@@ -244,6 +244,8 @@ export type SessionOptions = {
 };
 
 const REFRESH_COALESCE_MS = 120;
+/** Records the draft queue holds before an edit is refused; a lock snapshot must fit them all. */
+const DRAFT_QUEUE_MAX = 512;
 const BLOB_CACHE_BYTES = 8 * 1024 * 1024;
 const BLOB_CACHE_ENTRIES = 512;
 const RECENT_VIEWS = 8;
@@ -1673,7 +1675,7 @@ export class StudioSession {
 
   private checkDraftBudget(next: SaveRecord, replacing?: SaveRecord): void {
     const entries = [...this.records.filter(s => s !== replacing), next];
-    if (entries.length > 512) throw new StudioNativeError("Too many unsaved edits. Save before continuing.");
+    if (entries.length > DRAFT_QUEUE_MAX) throw new StudioNativeError("Too many unsaved edits. Save before continuing.");
     if (next.kind === "frame") decodePix(next.pix);
     let pixels = 0, encoded = 2048; // version/scope/group, separators and JSON wrapper
     for (const s of entries) {
@@ -1784,6 +1786,12 @@ export class StudioSession {
       if (s.kind === "frame" && s.object === object && s.frame === frame) return s.pix;
     }
     return null;
+  }
+
+  /** How many more edits the draft queue takes before `enqueue` refuses: a multi-step gesture
+   *  asks before it starts, so it is never left half queued. */
+  draftRoom(): number {
+    return this.closeHeld || this.restoredDraft ? 0 : Math.max(0, DRAFT_QUEUE_MAX - this.records.length);
   }
 
   pendingFor(object: Hex32 | null): SaveRecord[] {

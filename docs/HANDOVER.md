@@ -1,5 +1,157 @@
 # Mewtual; Handover
 
+## Score composer: phrases, preview lengths, zoom (2026-10-19, branch `score-composer-2`)
+
+The three items the previous entry deferred from the owner's UX assessment. Frontend only.
+
+**Phrases.** Several onsets can be handled as one: Shift+click adds a note to the phrase or takes
+it out (the first pick joins the selected note), a Shift+drag marquee picks every onset inside its
+rectangle, Ctrl+A picks every note, a plain click or Escape returns to one note. A phrase moves
+as one gesture: drag any of its notes (the whole phrase previews at its destination, red if any
+member is blocked), Alt+arrows or the pinned panel's move buttons nudge it, Ctrl+D or the panel's
+"duplicate" copies it to start where it ends (the score grows first if it must, taken cells are
+skipped and counted), Delete or the panel clears it. The helpers in `score-editor.ts`
+(`scoreOnsetsIn`, `scoreMoveSelection`, `scoreDuplicateSelection`, `scoreClearSelection`) build
+the operations: a move is every source cleared then every note set, validated with the phrase
+lifted out (it may slide over its own cells) and against the other members; one blocked member
+refuses the whole move, nothing partial. A single selected note also duplicates (right after
+itself). The phrase is composer view state: it is dropped with the component, and it dissolves
+when its notes are no longer in the document.
+
+**Preview lengths in the sound designer.** The audition keyboard held every key for 400 ms, and
+the envelope graph drew an illustrative shelf, so a slow attack was released before it had
+developed while the picture suggested the full curve. `StudioSoundfont.svelte` now has four
+preview lengths beside the register stepper (short 0.4 s, one beat, one bar of four beats, long
+2 s; beat and bar follow the open score's tempo through a new `bpm` prop, 120 otherwise) and
+passes the chosen hold to `onaudition` as a third argument, which the Studio hands to the same
+audition path. The envelope scope is now drawn on the preview's real time axis: attack, decay,
+the shelf until the key-up (a dashed rule at the chosen length), then the release; a key let go
+during the attack or decay releases from the level it had reached, which is what the engine does.
+The other scopes stay proportional, as before.
+
+**Zoom.** The grid's steps per page can be chosen: 8, 16, 32 or 64, from the footer's zoom
+buttons or the `-` / `=` keys, keeping the first visible step in view; with no choice the page
+follows the card's width as before. The row-height toggle stays.
+
+**Tests.** `score-gestures.test.ts` (marquee, phrase move and its refusals, duplicate with
+growth and skips, clear); `score-editor.test.ts` (Shift+click and marquee, phrase nudge, carried
+drag with a blocked member, Delete, Ctrl+A, Ctrl+D for a phrase and a single note, Escape, zoom
+from the footer and keys); `studio-soundfont.test.ts` (preview lengths, tempo-following beat and
+bar, the key-up marker moving with the hold).
+
+**Review.** This round's read-only adversarial review found no blocker. Its high finding is
+fixed: a phrase gesture longer than the session's draft queue (Ctrl+A on a large score, then a
+nudge) could half-apply and flood notices; the session now exposes `draftRoom()` and the composer
+(`onroom`) refuses a gesture it cannot queue whole before sending anything. Its mediums are fixed:
+the drag preview now asks the same helper the release will, so a phrase that overlaps itself or
+lost a sound shows red instead of being refused on release; taking a note out of a two-note phrase
+leaves one ordinary selection rather than an invisible pick; a press outside the phrase ends it
+like a click does; and clearing a phrase whose notes could not be re-authored as they were (an
+overlap, a note past the end, a sound that is gone) says so at once instead of at the undo. Lows:
+a duplicate that places nothing says so and sends nothing; stale picks no longer ring empty cells;
+a phrase that shrank under a drag moves what is left; the marquee works in every tool; the
+designer's chips are labelled "length"; a non-finite tempo falls back to 120.
+
+**Verification.** svelte-check, the production build and the focused frontend files
+(`score-gestures`, `score-editor`, `studio-soundfont`, `studio-surface`); the complete suites,
+`test:startup` and `test:flows` were not run (user instruction); no Rust changed.
+
+**Still open from the assessment.** The listen-adjust loop (editing during playback, a steady loop
+period, changes on the next pass) is the engine stream. Transposing a phrase by an interval other
+than one pitch at a time, and a selection that survives switching documents, are not built.
+
+## Score composer: moves, undo, pinned selection, listening feedback (2026-10-19, branch `score-composer-2`)
+
+The owner's UX assessment of `eb411f1` ranked the composer's gaps for a "short pieces, good
+manipulation" toy: moving a note meant recreating it, nothing could be undone, the selected note's
+controls scrolled away under the sound library, sounds and drums gave no feedback when chosen, and
+the screen was small and faint. This round takes the immediate stream of that assessment; it is
+frontend only (no native or wire change).
+
+**Moves.** `ScoreEditor.svelte` gained a third drag kind: pressing a note's body (any cell of it
+but the handle at its end) or a drum hit and carrying it previews the landing on any step or
+pitch, red where another note is in the way, and writes on release. Alt+arrows and the selected
+panel's move buttons nudge the selected onset one step or one pitch. A move is
+`scoreMoveOperations` in `score-editor.ts`: a clear of the source and a set of the same cell
+(sound, length, level) at the destination, validated against the projection without the source,
+sent as two ordinary operations that the session batches into one native transaction once the
+autosave releases them. It is not an atomic wire operation. Native admission refuses a Score
+`set_cell` only at the 4096-cell cap, so the real way the pair can split is the session's own
+limits: a full draft queue (512 records) refusing the set, or the pair straddling a 64-item batch
+boundary with a lock or refusal between the halves. The composer answers the first by rolling the
+accepted clear back (`sendAll` sends the inverses of what was accepted, newest first, and says
+"nothing was changed"; if even that is refused it records what remains so it can be undone); the
+second leaves the cleared value reachable from the attention list's "use this". The atomic
+`move_cell` the earlier entry promised
+was examined and deferred: a score change folds one record under one `c/<step>:<row>` key and the
+change validator requires exactly one entry key per change (`change.rs`, `change.len() > 7`), so
+a two-cell record needs the fold, the validator, the primitive bound and the snapshot's per-slot
+reconstruction changed together; that is a replication-crate design round of its own.
+
+**Undo and redo.** Every gesture the composer sends (placing, erasing, resizing, moving, a sound
+or volume change, a header change, a retained-value choice, a repeated bar; not adding a sound
+from the library, which is the host's own asynchronous save) is recorded with its inverse
+(`scoreInverse`, computed against a rolling local projection, `scoreApplyLocal`, because the model
+prop only updates on the host's next flush), 64 deep per mounted document; Ctrl+Z / Ctrl+Shift+Z
+(or Ctrl+Y) and two tool-rail buttons replay them. A replay passes the same guards a hand edit
+gets (`scoreReplay`: inside the length, with its sound, no overlap), checked against the document
+as it is now, so an undo after a collaborator's edit is refused with a notice rather than writing
+an overlap; a replay that passes overwrites that collaborator's value exactly as a hand edit would.
+What was actually sent, with inverses computed at that moment, is what the opposite stack receives,
+so a value someone wrote between an undo and its redo is restored by the next undo rather than
+cleared. The stack is dropped when the document is left (the component is keyed by object).
+Alt+arrows are taken on the window's capture phase and stopped there, because the app binds
+Alt+Left/Right to its history; while a grid cell is focused those keys nudge, elsewhere they
+navigate as before. A moved drum keeps its pad whatever row it lands on; the drum lane rows are a
+placement aid, not a constraint on moves.
+
+**Selection first.** The selected note's controls (sound, length, move, volume, clear, listen,
+overlapping notes, author, retained values) are a snippet pinned above the inspector's tabs, so
+selecting anything answers at once whatever tab is open; the sounds tab's own block is labelled
+"new notes" so the two are never confused.
+
+**Listening.** Sounds in the score and library tiles have a listen button (one beat at C5, no
+document change); choosing a drum and placing a hit play it through a new `auditionPadPlayback`
+(one-hit take, the kit's own tail as its end) over the same audition path; the listen tool hears
+drums too.
+
+**Wording and legibility.** patches → sounds, hold → note length, audition → listen, keys/pads →
+notes/drums, "+ new…" → "sound designer…", "no recipe" → "no sound". Rows are 22 px (a compact
+toggle keeps 16), labels people read use `--muted` (about 5:1 on the panel) instead of `--faint`,
+the row and ruler labels are larger, the resize handle is drawn on the selected or hovered note's
+last cell (the right part of that cell resizes; the rest of a note moves), and the grid keeps one
+tabbable cell (the selection, else the page's first) so Tab enters it once and arrows move inside.
+"repeat bar" on the score tab copies the current bar one bar later, growing the score first and
+skipping taken cells.
+
+**Tests.** `score-gestures.test.ts` (local projection, inverses, moves, repeats, replay guards);
+`score-editor.test.ts` (body drag with preview and refusal, the handle/body split with a measured
+cell, Alt+arrow and panel nudges, the capture-phase stop against an app-level Alt+arrow listener,
+undo/redo through keys and buttons, a refused undo, fresh inverses across a redo, a midway refusal
+rolled back, listen buttons, drum audition, pinned panel across tabs, roving tab stop that never
+replaces a selection, repeat bar and its undo); `studio-score-batch.test.ts` (a clear and a set in
+one batch, a clear never collapsed); `studio-audition.test.ts` (pad take). Renamed labels updated
+in the existing tests.
+
+**Review.** This round's read-only adversarial review found no blocker. Its high finding (the
+Alt+arrow collision with the app's history keys) and its mediums (replays bypassing the hand-edit
+guards; a move's clear left behind at the queue limit) are fixed above; its lows are fixed where
+they were defects (redo kept a stale inverse, a half-undo was lost, focus replaced the selection,
+a continuation cell read as empty, a nudge onto a folded row failed silently, a bar with a
+sound-less note could not be repeated, the past-the-end refusal was misworded, leftover "recipe"
+wording, instructional copy in the panel) and noted as design questions otherwise (a moved drum
+keeps its pad).
+
+**Verification.** svelte-check, the production build and the focused frontend files
+(`score-gestures`, `score-editor`, `studio-surface`, `studio-audition`); the complete suites,
+`test:startup` and `test:flows` were not run (user instruction); no Rust changed.
+
+**Deferred, in the assessment's order.** The listen-adjust loop (editing during playback and a
+steady loop period with changes applied on the next pass) is the engine stream and still needs the
+cyclic playback owner; playback still locks editing. Phrase selection (select several notes,
+transpose, duplicate a selection) and the sound designer's preview-length choices with a release
+marker on the envelope graph are next. Zoom is only the density toggle.
+
 ## Score composer: busy spam, batched saves, note volume, post to chat (2026-10-19, branch `score-composer-2`)
 
 **Storage-busy spam.** With one person editing, the composer kept raising "Studio storage busy;

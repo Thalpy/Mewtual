@@ -57,7 +57,7 @@ export const PAD_NAMES: readonly string[] = JAM_KIT.map((pad) => pad.name);
 
 /** Issue flags as short labels, in the order the backend reports them. */
 export const SCORE_ISSUE_LABELS: Readonly<Record<keyof ScoreCellIssues, string>> = {
-  count: "over cap", extent: "past the end", recipe: "no recipe", overlap: "overlaps", conflict: "conflict",
+  count: "over cap", extent: "past the end", recipe: "no sound", overlap: "overlaps", conflict: "conflict",
 };
 
 /** A note entry's `volume` is 1..100; omitted or 100 writes no `vol`, the format's full level. */
@@ -73,7 +73,7 @@ export function scoreCellOperation(model: ScoreModel, step: number, row: number,
     if (!integer(entry.pad, 0, 9)) throw new Error("Drum pad must be 0–9.");
     return { op: "set_cell", step, row, value: { k: "d", pad: entry.pad } };
   }
-  if (!/^[0-9a-f]{64}$/.test(entry.patch) || !Object.hasOwn(model.patches, entry.patch)) throw new Error("Choose an active score recipe. A queued recipe is not available until its save is read back.");
+  if (!/^[0-9a-f]{64}$/.test(entry.patch) || !Object.hasOwn(model.patches, entry.patch)) throw new Error("Choose a sound this score holds. A sound still being saved is not available until it is read back.");
   if (!integer(entry.len, 1, model.steps - step)) throw new Error("The authored hold must fit the remaining sixteenth steps. No note is shortened automatically.");
   if (entry.volume !== undefined && !integer(entry.volume, SCORE_VOLUME_MIN, SCORE_VOLUME_MAX)) throw new Error(`Volume is ${SCORE_VOLUME_MIN} to ${SCORE_VOLUME_MAX}.`);
   for (const [key, cell] of Object.entries(model.cells)) {
@@ -102,7 +102,7 @@ export function scoreHeaderOperation(field: "title" | "bpm" | "bpb" | "steps", i
 }
 
 export function scoreCellLabel(value: ScoreCell | null): string {
-  return value === null ? "cleared" : value.k === "d" ? `drum ${value.pad}` : `note · ${value.len ?? 1} sixteenth step${(value.len ?? 1) === 1 ? "" : "s"} · recipe ${value.p}`;
+  return value === null ? "cleared" : value.k === "d" ? `drum ${value.pad}` : `note · ${value.len ?? 1} sixteenth step${(value.len ?? 1) === 1 ? "" : "s"} · sound ${value.p}`;
 }
 
 /** Continuations are display-only; they never create another onset or replace an authored hold. */
@@ -348,6 +348,208 @@ export function scoreAttention(model: ScoreModel): ScoreDiagnostic[] {
 /** One slot's diagnostic, for the inspector's selected-cell panel; null when nothing is retained there. */
 export function scoreSlotDiagnostic(model: ScoreModel, kind: ScoreDiagnostic["kind"], key: string): ScoreDiagnostic | null {
   return scoreDiagnostics(model).find((item) => item.kind === kind && item.key === key) ?? null;
+}
+
+// --- gestures: local projection, inverses, moves, repeats ------------------------------------------
+// The composer's multi-step gestures (a move, a repeated bar) and its undo stack are built from
+// the same single-cell operations the document already accepts, so nothing here needs a new wire
+// grammar. A gesture is a list of operations; its inverse is computed against the projection as
+// it was before each operation, so undoing a gesture replays the previous values in reverse. The
+// native side applies a gesture's operations as one batch (one transaction) once the autosave
+// releases them, so the intermediate state is never shown; the batch is not atomic, and a refused
+// item leaves the earlier ones saved with the retained values reachable from the attention list.
+
+/** `model` with `op` applied the way the session's working projection applies it (cells/patches copied). */
+export function scoreApplyLocal(model: ScoreModel, op: ScoreOp): ScoreModel {
+  const next = { ...model, cells: { ...model.cells }, patches: { ...model.patches } };
+  switch (op.op) {
+    case "set_cell": next.cells[`${op.step}:${op.row}`] = op.value; break;
+    case "clear_cell": delete next.cells[`${op.step}:${op.row}`]; break;
+    case "set_patch": next.patches[op.patch] = op.descriptor as ScoreModel["patches"][string]; break;
+    case "remove_patch": delete next.patches[op.patch]; break;
+    case "set_header":
+      if (op.field === "title") next.title = String(op.value);
+      else next[op.field] = Number(op.value);
+      break;
+  }
+  return next;
+}
+
+/**
+ * The operation that puts back what `op` replaces in `model`, or null when `op` changes nothing
+ * recoverable (clearing an empty cell, removing an absent recipe). A previous value is restored
+ * as it was, level and hold included; a cell that was empty is cleared again.
+ */
+export function scoreInverse(model: ScoreModel, op: ScoreOp): ScoreOp | null {
+  switch (op.op) {
+    case "set_cell": case "clear_cell": {
+      const prev = model.cells[`${op.step}:${op.row}`];
+      if (prev) return { op: "set_cell", step: op.step, row: op.row, value: { ...prev } };
+      return op.op === "set_cell" ? { op: "clear_cell", step: op.step, row: op.row } : null;
+    }
+    case "set_patch": {
+      const prev = model.patches[op.patch];
+      return prev ? { op: "set_patch", patch: op.patch, descriptor: prev } : { op: "remove_patch", patch: op.patch };
+    }
+    case "remove_patch": {
+      const prev = model.patches[op.patch];
+      return prev ? { op: "set_patch", patch: op.patch, descriptor: prev } : null;
+    }
+    case "set_header":
+      return op.field === "title" ? { op: "set_header", field: "title", value: model.title } : { op: "set_header", field: op.field, value: model[op.field] };
+  }
+}
+
+/**
+ * Move the onset at `from` so it starts at `to`: a clear of the source and a set of the same cell
+ * at the destination, in that order. The destination must lie inside the authored length and be
+ * free of every other note along the moved note's hold (the note's own cells do not count), on a
+ * row that is not folded away. An unchanged position is no gesture (empty list).
+ */
+export function scoreMoveOperations(model: ScoreModel, from: string, to: { step: number; row: number }): ScoreOp[] {
+  const cell = model.cells[from];
+  if (!cell) throw new Error("There is no note to move at that cell.");
+  const [fromStep, fromRow] = from.split(":").map(Number);
+  if (to.step === fromStep && to.row === fromRow) return [];
+  if (!integer(to.step, 0, SCORE_MAX_STEPS - 1) || !integer(to.row, 0, SCORE_ROWS - 1)) throw new Error("That destination is outside the grid.");
+  const without = scoreApplyLocal(model, { op: "clear_cell", step: fromStep, row: fromRow });
+  const len = cell.k === "n" ? (cell.len ?? 1) : 1;
+  if (to.step + len > model.steps) throw new Error("It would run past the end of the score.");
+  if (scoreFreeRun(without, to.step, to.row, len) !== len) throw new Error("Another note is in the way there.");
+  const entry: ScoreEntry = cell.k === "d" ? { mode: "drum", pad: cell.pad } : { mode: "note", patch: cell.p, len, ...(cell.vol === undefined ? {} : { volume: cell.vol }) };
+  return [{ op: "clear_cell", step: fromStep, row: fromRow }, scoreCellOperation(without, to.step, to.row, entry)];
+}
+
+/**
+ * Copy every onset of bar `bar` (zero-based, `stepsPerBar` steps wide) one bar later: the length
+ * grows first if the next bar lies past it, then each cell is set where its destination is free
+ * along its whole hold. Occupied destinations are skipped and counted, never overwritten; the
+ * caller says how many were. Nothing is written past the format's 256 steps.
+ */
+export function scoreRepeatBar(model: ScoreModel, bar: number, stepsPerBar: number): { ops: ScoreOp[]; copied: number; skipped: number } {
+  if (!integer(bar, 0, SCORE_MAX_STEPS) || !integer(stepsPerBar, 1, SCORE_MAX_STEPS)) throw new Error("That bar is outside the grid.");
+  const start = bar * stepsPerBar, next = start + stepsPerBar;
+  if (next + stepsPerBar > SCORE_MAX_STEPS) throw new Error("The score cannot grow past 256 steps.");
+  const ops: ScoreOp[] = [];
+  let working = model;
+  if (working.steps < next + stepsPerBar) {
+    const grow: ScoreOp = { op: "set_header", field: "steps", value: next + stepsPerBar };
+    ops.push(grow); working = scoreApplyLocal(working, grow);
+  }
+  let copied = 0, skipped = 0;
+  const sources = Object.entries(model.cells).map(([key, cell]) => ({ key, cell, step: Number(key.split(":")[0]), row: Number(key.split(":")[1]) }))
+    .filter(({ step }) => step >= start && step < next).sort((a, b) => a.step - b.step || a.row - b.row);
+  for (const { cell, step, row } of sources) {
+    const len = cell.k === "n" ? (cell.len ?? 1) : 1, dest = step + stepsPerBar;
+    if (scoreFreeRun(working, dest, row, len) !== len) { skipped++; continue; }
+    const entry: ScoreEntry = cell.k === "d" ? { mode: "drum", pad: cell.pad } : { mode: "note", patch: cell.p, len, ...(cell.vol === undefined ? {} : { volume: cell.vol }) };
+    // A note whose sound the score no longer holds cannot be placed again; it is skipped like a
+    // taken cell rather than aborting the whole bar.
+    let op: ScoreOp;
+    try { op = scoreCellOperation(working, dest, row, entry); } catch { skipped++; continue; }
+    ops.push(op); working = scoreApplyLocal(working, op); copied++;
+  }
+  return { ops, copied, skipped };
+}
+
+// --- phrase selection: several onsets handled as one gesture -------------------------------------
+
+/** Onset keys inside the rectangle spanned by two corners (either order, inclusive), by step then row. */
+export function scoreOnsetsIn(model: Pick<ScoreModel, "cells">, a: { step: number; row: number }, b: { step: number; row: number }): string[] {
+  const [s0, s1] = [Math.min(a.step, b.step), Math.max(a.step, b.step)], [r0, r1] = [Math.min(a.row, b.row), Math.max(a.row, b.row)];
+  return Object.keys(model.cells).map((key) => ({ key, step: Number(key.split(":")[0]), row: Number(key.split(":")[1]) }))
+    .filter(({ step, row }) => step >= s0 && step <= s1 && row >= r0 && row <= r1)
+    .sort((x, y) => x.step - y.step || x.row - y.row).map(({ key }) => key);
+}
+
+function selectionSources(model: ScoreModel, keys: readonly string[]) {
+  const sources = [...new Set(keys)].filter((key) => model.cells[key]).map((key) => {
+    const cell = model.cells[key], [step, row] = key.split(":").map(Number);
+    return { key, cell, step, row, len: cell.k === "n" ? (cell.len ?? 1) : 1 };
+  }).sort((x, y) => x.step - y.step || x.row - y.row);
+  if (!sources.length) throw new Error("Nothing is selected.");
+  return sources;
+}
+function entryOf(cell: ScoreCell): ScoreEntry {
+  return cell.k === "d" ? { mode: "drum", pad: cell.pad } : { mode: "note", patch: cell.p, len: cell.len ?? 1, ...(cell.vol === undefined ? {} : { volume: cell.vol }) };
+}
+
+/**
+ * Move every selected onset by the same offset as one gesture: every source is cleared, then
+ * every note is set at its destination, so the phrase keeps its shape. Destinations are checked
+ * against the projection with the whole selection lifted out (the phrase may slide over its own
+ * old cells) and against each other; one blocked note refuses the whole move, nothing partial.
+ */
+export function scoreMoveSelection(model: ScoreModel, keys: readonly string[], dStep: number, dRow: number): ScoreOp[] {
+  if (dStep === 0 && dRow === 0) return [];
+  const sources = selectionSources(model, keys);
+  let working = sources.reduce((m, { step, row }) => scoreApplyLocal(m, { op: "clear_cell", step, row }), model);
+  const clears: ScoreOp[] = sources.map(({ step, row }) => ({ op: "clear_cell", step, row }));
+  const sets: ScoreOp[] = [];
+  for (const { cell, step, row, len } of sources) {
+    const to = { step: step + dStep, row: row + dRow };
+    if (!integer(to.step, 0, SCORE_MAX_STEPS - 1) || !integer(to.row, 0, SCORE_ROWS - 1)) throw new Error("That would push a note off the grid.");
+    if (to.step + len > model.steps) throw new Error("That would push a note past the end of the score.");
+    if (scoreFreeRun(working, to.step, to.row, len) !== len) throw new Error("Another note is in the way there.");
+    const op = scoreCellOperation(working, to.step, to.row, entryOf(cell));
+    sets.push(op); working = scoreApplyLocal(working, op);
+  }
+  return [...clears, ...sets];
+}
+
+/**
+ * Copy the selection so the copy starts where the phrase ends: every onset is shifted by the
+ * phrase's own extent (first onset to the end of its last note). The score grows first if the
+ * copy would run past its length; taken destinations are skipped and counted, never overwritten.
+ */
+export function scoreDuplicateSelection(model: ScoreModel, keys: readonly string[]): { ops: ScoreOp[]; copied: number; skipped: number; shift: number; keys: string[] } {
+  const sources = selectionSources(model, keys);
+  const first = sources[0].step, end = Math.max(...sources.map(({ step, len }) => step + len)), shift = end - first;
+  if (end + shift > SCORE_MAX_STEPS) throw new Error("The copy would run past 256 steps.");
+  const ops: ScoreOp[] = [];
+  let working = model;
+  if (working.steps < end + shift) {
+    const grow: ScoreOp = { op: "set_header", field: "steps", value: end + shift };
+    ops.push(grow); working = scoreApplyLocal(working, grow);
+  }
+  let copied = 0, skipped = 0;
+  const placed: string[] = [];
+  for (const { cell, step, row, len } of sources) {
+    const dest = step + shift;
+    if (scoreFreeRun(working, dest, row, len) !== len) { skipped++; continue; }
+    let op: ScoreOp;
+    try { op = scoreCellOperation(working, dest, row, entryOf(cell)); } catch { skipped++; continue; }
+    ops.push(op); working = scoreApplyLocal(working, op); copied++; placed.push(`${dest}:${row}`);
+  }
+  return { ops, copied, skipped, shift, keys: placed };
+}
+
+/** Clear every selected onset as one gesture. */
+export function scoreClearSelection(model: ScoreModel, keys: readonly string[]): ScoreOp[] {
+  return selectionSources(model, keys).map(({ step, row }) => ({ op: "clear_cell", step, row }));
+}
+
+/**
+ * The operations of a recorded gesture, checked against the projection as it is NOW (rolling
+ * through the list) with the same guards a hand edit gets, so an undo or redo can never write
+ * an overlap, a note past the end or a note without its sound after a collaborator moved
+ * things. Throws on the first operation that can no longer be replayed; nothing is sent then.
+ */
+export function scoreReplay(model: ScoreModel, ops: readonly ScoreOp[]): ScoreOp[] {
+  let working = model;
+  const checked: ScoreOp[] = [];
+  for (const op of ops) {
+    let next: ScoreOp = op;
+    if (op.op === "set_cell") {
+      const value = op.value;
+      next = scoreCellOperation(working, op.step, op.row, value.k === "d" ? { mode: "drum", pad: value.pad }
+        : { mode: "note", patch: value.p, len: value.len ?? 1, ...(value.vol === undefined ? {} : { volume: value.vol }) });
+    } else if (op.op === "set_header") {
+      next = scoreHeaderOperation(op.field, String(op.value));
+    }
+    checked.push(next); working = scoreApplyLocal(working, next);
+  }
+  return checked;
 }
 
 /** An intentional choice reauthors an ordinary operation; old source ids never become authority. */
