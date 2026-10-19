@@ -9,20 +9,25 @@ outside this programme's changes.
 The [PR48 revision ledger](PR48-REVIEW-REVISION.md) records the subsequent transport congestion,
 detached automatic submissions, pending mapping, provider rotation, announcement clock, native
 build and narrow SDP resource corrections. Those fixes have focused evidence and clear read-only
-reviews. The revision ledger records final suite results, including the failed full root sweep
-and complete affected-target reruns after its two test corrections. Earlier pending/running notes
+reviews. The revision ledger records suite results, including the earlier failed full root sweep,
+its affected-target reruns and the subsequent fresh successful full root command. Earlier pending/running notes
 below are chronological checkpoints. Live V2 remains disabled. The 19 October durable Keep work
 below adds scoped resumable storage, paced automatic partial resume, persistent Pause/Resume and
 explicit Retry, but does not close file recovery.
 
-The latest19October checkpoint passes419 native tests and1849 frontend tests, static/build,
-browser-flow, native-startup and strict checks. Its root unfiltered command finishes all other
+The previously pushed 19 October checkpoint b867c622 passes419 native tests and1849 frontend tests,
+static/build, browser-flow, native-startup and strict checks. Its root unfiltered command finishes all other
 targets with2906 passes and24 existing ignored cases, but exits101 after the single failing
 integration executable stalls in a one-turn serving fixture. A bounded reproduction confirms that
 fixture defect; the corrected complete target passes all30 cases on the original workspace
 feature graph. See the revision ledger's final verification table for exact commands and limits.
-There is no fresh successful unfiltered root run or new hosted-Linux result claimed. The additional
-production probe-target-starvation MEDIUM remains open alongside the programme gaps below.
+Those are historical checkpoint results. The subsequent probe-target rotation closes the narrow
+starvation finding, including cancellation after the first admitted helper. The native MLS catalog
+and still-test-only file search remove the permanent source-roster cutoff; requester dispatch
+remains unfinished. The fresh full root command passes2949 cases with24 existing ignored cases,
+the final frontend suite passes1851, and all ten browser flows pass. Strict root Clippy, formatting,
+ambient-dependency and dependency-audit checks pass. Final native verification is recorded in the
+revision ledger; no new hosted-Linux, live V2 or physical media acceptance is claimed.
 
 Current follow-up: hosted Linux acceptance remains unverified. The latest eight-case Windows
 recovery run passes all eight scenarios (277.63 s), including onward channel-directory discovery

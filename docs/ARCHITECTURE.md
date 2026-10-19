@@ -1,5 +1,28 @@
 # Mewtual; Architecture
 
+## Native MLS source catalog (19 October, requester not connected)
+
+`ServerGroup::member_count` now retains a fixed native observation of its committed epoch:
+member count, last occupied leaf and whether both copied OpenMLS key vectors have the supported
+32-byte shapes. Create, join and restore each have a fresh opaque instance identity. The cache is
+not serialized; a committed epoch change makes it unavailable until ordinary native observation.
+Staging/aborting a commit does not change the committed roster. Native loading and the first
+O(roster) observation remain outside the bounded request-page claim.
+
+An already observed catalog proposes at most four sorted distinct public signing keys while
+examining at most64 raw leaf positions, including holes and requester/helper exclusions. Before
+OpenMLS's indexed copying accessor, it checks the exact instance/epoch and attested key lengths,
+then checks the borrowed credential against4KiB. Empty incomplete pages mean yield, never absence.
+Catalogs expose public tree metadata on inactive groups too; they grant no active membership,
+Root, native session, file intent, connection or execution authority.
+
+The app's still-test-only `file_bridge_search` now uses these continuing pages, with independent
+positions for at most four helpers by four exact encrypted variants. A nonempty proposed page
+stays unconsumed across local pre-admission refusal. Helper replacement cannot reset its cursor;
+empty pages advance one bounded local turn. There is no permanent320/512-member source cutoff.
+Actual requester/Keep dispatch and its original durable work allowance remain unimplemented;
+these primitives alone do not establish an indirect download or exhaustive search before expiry.
+
 ## Connected file source checkpoint (19 October)
 
 The native server actor installs an observing file-service attachment from its exact account/
@@ -942,6 +965,12 @@ is broken. The load-bearing fixes:
   traffic; switchboards remain opt-in admission-only, while general circuit relay hosting remains
   a separate opt-in role. HyParView/CYCLON-like active/passive selection and local age/source
   metadata improve which peers are tried but cannot repair a partition with no surviving edge.
+  Indirect probing keeps one target per pass. Initial selection honors topology priority; later
+  passes traverse eligible full device IDs circularly across the complete bounded peer-record
+  set. A scalar session cursor advances immediately after each confirmed local admission, before
+  another helper can suspend. Local refusal, negative replies, descriptor refresh and disappearance
+  of the cursor's record do not rewind traversal. This is ordering only; every existing live
+  membership, descriptor, path, expiry and rate check still applies.
 - Pairwise route evidence is a bounded, session-only refinement of aggregate transport liveness.
   Libp2p reports a sorted/deduplicated IPv4/IPv6/DNS/memory + TCP/QUIC/WebSocket/circuit snapshot
   after connection edges, including relay-to-direct DCUtR upgrades and partial closes. The sync

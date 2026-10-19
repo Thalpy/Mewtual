@@ -1,5 +1,25 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native member catalog interface (19 October)
+
+`ServerGroup::observe_member_catalog` performs trusted native O(roster) observation once per
+committed epoch; existing `member_count` reuses it. It must not be called to repair a missing view
+on an untrusted page/request path. `current_member_catalog` returns only an already current view,
+without scanning. `MemberCatalogView::validate` checks exact group-object identity and epoch;
+`start` creates an opaque cursor. `page` proposes a new cursor plus at most four sorted distinct
+`MemberCatalogEntry` values after at most64 raw leaf positions. Its fixed exclusions are actual
+requester C and helper B. Count occupied leaves before exclusions, and treat empty/`!complete`
+as Yield. `MemberCatalogEntry::validate` rechecks its original leaf/key with the same bounded
+indexed accessor. Stale instance/epoch, unsupported copied shapes and inconsistent observations
+are typed errors. No wire or persistence format changes.
+
+Before `member_at` copies, the exact native observation must attest32-byte signature AND HPKE
+keys, and the borrowed credential must fit4KiB. The first native observation/load is not bounded
+by that page limit. These APIs grant no active-membership or file/route authority. Future Root
+preparation must additionally preserve the original native/read/epoch scope and finite budget.
+The app search is still behind `cfg(test)`; it retains one unstarted proposal, scoped to one
+search identity and ticket, and at most16 helper/variant positions. It cannot activate downloads.
+
 ## Connected file-source dispatch checkpoint (19 October)
 
 Kind30 now dispatches a bounded source read with `NativeFileService`: the native host supplies
@@ -2359,6 +2379,11 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
   - `17` KIND_INDIRECT_RESULT; separately authed exact target hash + echoed attempt + boolean. It
     is accepted only from the pending proven helper while the target descriptor remains current.
     Two distinct negatives are suspicion only; one positive may queue kind 14 through that helper.
+    Target scheduling remains one descriptor per pass with at most two helpers. After the initial
+    priority choice, a session-local full-device-ID cursor rotates through all eligible retained
+    records; only a confirmed local probe admission advances it, immediately before any later
+    helper await. No negative result or descriptor refresh resets it. Frame grammars, helper rate
+    allowances and the independent reciprocal-submission return count are unchanged.
   - `18` KIND_DELIVERY_RECEIPT; connected-only authed document type, document id, and 32-byte
     change hash. A receiver queues it only when that exact signed op is newly applied, and the
     sender accepts it only for one of its bounded recent targets. Duplicates are inert; unknown

@@ -41,6 +41,28 @@ plaintext or revive an obsolete result.
 
 ## Copy ownership is a separate enablement gate
 
+The 19 October activation review also identifies a missing history-only native entry point:
+the retained `CryptoAction` must recover its exact terminal receipt after End has pruned its
+`LocalJoin`, including after Root replacement. Looking up an already registered action must
+precede any requirement for a current participant. This lookup may report past accepted or
+closed-rejected results; it must neither execute an effect nor grant dispatch authority. Test
+both lost-result cases after settlement, End and pruning, plus changed bytes with the original
+claimed digest. General action IPC and production registry registration are still unfinished.
+
+Encrypted endpoint intake currently refuses encrypted bodies, and action factories cover only
+derivation and confirmation, not SDP. Activation needs prepaid inbox/token/action publication,
+native-selected offer/answer and current OfferId/ICE ownership, plus fair retained completion
+and deadline scheduling. Reply admission must carry original authority and byte custody through
+the actual transport driver; a prepared byte vector alone is insufficient. A first two-party
+exchange must not silently imply support for the existing UI's later track changes, glare,
+additional peers or ICE restarts.
+
+The live legacy handler still changes presence and removes peers using room/device identity.
+Before activation, an immutable V2 call mode must exclude every legacy kind from those effects.
+V2 RTC continuations need the exact native call, remote join/key, pair generation, OfferId and
+dispatch generation before and after each await. These are software enablement requirements,
+independent of the separate physical audio/network acceptance that one desktop cannot provide.
+
 The current 9,232-byte SdpResult phase owns one native Vec. It does not account for native IPC
 serialization, browser quarantine or RTC UTF-16 strings. The narrow simultaneous native peak
 leaves only 4,058 spare bytes in its 229,376-byte reserve, including the later route-metadata

@@ -1,5 +1,7 @@
 use super::*;
-use crate::tests::{build_members, converge_and_publish_test_routes};
+use crate::tests::{
+    build_members, converge_and_publish_test_routes, prove_live_member, serve_one_test_request,
+};
 use catcoms_rt::{ManualClock, SharedRequestKeepalive};
 use futures::{Future, FutureExt, StreamExt};
 use rand_chacha::ChaCha20Rng;
@@ -252,6 +254,9 @@ struct HeldReceiptAck {
     inner: catcoms_rt::MemNetwork,
     release: watch::Receiver<bool>,
     calls: Arc<std::sync::atomic::AtomicUsize>,
+    /// Let one real local admission complete, then hold later acknowledgements. False preserves
+    /// the original receipt fixture's identical held behavior at both notification seams.
+    pass_first: bool,
 }
 #[async_trait::async_trait]
 impl MeshTransport for HeldReceiptAck {
@@ -304,9 +309,9 @@ impl MeshTransport for HeldReceiptAck {
         protocol: ProtocolId,
         bytes: Bytes,
     ) -> Result<(), TransportError> {
-        self.calls.fetch_add(1, Ordering::AcqRel);
+        let first = self.calls.fetch_add(1, Ordering::AcqRel) == 0;
         let mut release = self.release.clone();
-        while !*release.borrow() {
+        while !(*release.borrow() || self.pass_first && first) {
             release
                 .changed()
                 .await
@@ -321,9 +326,9 @@ impl MeshTransport for HeldReceiptAck {
         bytes: Bytes,
         mut cancellation: RequestCancellation,
     ) -> Result<(), TransportError> {
-        self.calls.fetch_add(1, Ordering::AcqRel);
+        let first = self.calls.fetch_add(1, Ordering::AcqRel) == 0;
         let mut release = self.release.clone();
-        while !*release.borrow() {
+        while !(*release.borrow() || self.pass_first && first) {
             tokio::select! {
                 value = release.changed() => value.map_err(|_| TransportError::Closed)?,
                 _ = cancellation.cancelled() => return Err(TransportError::Closed),
@@ -356,6 +361,7 @@ async fn held_delivery_receipt_ack_cannot_starve_inbound_catchup_across_cancelle
             inner: hub.join(peer),
             release: receiver,
             calls: calls.clone(),
+            pass_first: false,
         },
         ChaCha20Rng::seed_from_u64(170),
         Box::new(ManualClock::new(1_000)),
@@ -407,6 +413,63 @@ async fn held_delivery_receipt_ack_cannot_starve_inbound_catchup_across_cancelle
         1,
         "one retained submission, not re-created on every owner poll"
     );
+}
+
+#[tokio::test]
+async fn mesh_repair_target_first_admission_survives_a_cancelled_second_helper_ack() {
+    let (hub, mut members, ids) = build_members(5).await;
+    converge_and_publish_test_routes(&mut members);
+    let mut original = members.remove(0);
+    let snapshot = original.snapshot().unwrap();
+    let peer = original.local_peer();
+    drop(original);
+    let clock = ManualClock::new(1_000);
+    for member in &mut members {
+        member.clock = Arc::new(clock.clone());
+    }
+    let (_release, release) = watch::channel(false);
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut alice = ChannelSync::restore(
+        &snapshot,
+        HeldReceiptAck {
+            inner: hub.join(peer),
+            release,
+            calls: calls.clone(),
+            pass_first: true,
+        },
+        ChaCha20Rng::seed_from_u64(171),
+        Box::new(clock.clone()),
+    )
+    .unwrap();
+    for (helper, device) in members.iter_mut().take(2).zip(&ids[1..3]) {
+        prove_live_member(&mut alice, helper.local_peer(), *device);
+        prove_live_member(helper, peer, ids[0]);
+    }
+    alice.topology_promotions.push_front(ids[3]);
+    // The first notify really enters MemNetwork; the second suspends at its local ACK before
+    // handoff. Dropping this one poll models an unrelated actor command cancelling the await.
+    assert!(alice.drive_mesh_repair().now_or_never().is_none());
+    assert_eq!(calls.load(Ordering::Acquire), 2);
+    assert_eq!(alice.repair_target_after, Some(ids[3]));
+    let first = alice.pending_indirect_probes[0].1.helper.device;
+    let helper = &mut members[ids[1..3].iter().position(|id| *id == first).unwrap()];
+    serve_one_test_request(helper).await;
+    assert_eq!(helper.repair_outbox.len(), 1);
+    helper.drain_repair_outbox().await;
+    serve_one_test_request(&mut alice).await;
+    assert!(alice.indirect_reachability[&ids[3]]
+        .negative_responses
+        .contains(&first));
+    // The second, never-completed pending probe keeps its original finite expiry. Once it
+    // expires, its cancellation must not restore the first target's old priority monopoly.
+    clock.advance_ms(REPAIR_INTENT_LIFETIME_MS + 1);
+    alice.queue_mesh_repair().await;
+    assert_eq!(alice.repair_target_after, Some(ids[4]));
+    assert_eq!(alice.pending_indirect_probes.len(), 2);
+    assert!(alice
+        .pending_indirect_probes
+        .iter()
+        .all(|(_, pending)| pending.target.device == ids[4]));
 }
 
 #[tokio::test]

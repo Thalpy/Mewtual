@@ -1184,3 +1184,246 @@ establish physical audio, separate-network behaviour or crash custody before a c
 This checkpoint is ready to push, not programme completion. Requester/Keep bridge integration,
 external destination resume, live V2/legacy isolation, TURN/native media acceptance, member media
 bridging, probe-target fairness and combined compatibility/load/rollout evidence remain open.
+
+## After pushed checkpoint b867c622: probe target rotation
+
+Checkpoint b867c622 is committed and the exact SHA is verified at the remote
+`chat-update-implementation` branch. Work below follows that push; the complete verification table
+above is evidence for that checkpoint, not a full-suite result for subsequent runtime changes.
+
+The starvation regression reproduces the old selection in0.50s: after the helper's authenticated
+negative, the same promoted offline target is selected again instead of the later reachable
+member (`pr48-probe-rotation-control-red.log`). A fixed optional DeviceId cursor now retains the
+last confirmed local target admission. Initial selection honors the old priority; subsequent
+passes sort the complete bounded descriptor set in circular full-ID order. No connected-snapshot
+truncation, additional fan-out or extra helper allowance is introduced. Local refusal, negative
+replies, descriptor refresh and disappearance of the cursor's descriptor do not reset traversal.
+
+Initial review identifies a MEDIUM in the public awaited path: committing the cursor after the
+whole helper loop loses an already admitted first turn when a second helper's ACK suspends and
+the caller cancels. The actual first-admission/held-second regression reproduces this in0.74s
+(`pr48-probe-rotation-cancel-control-red.log`). Cursor commitment now follows EACH successful
+helper return immediately, before the next await. The regression authenticates the first helper's
+negative, expires the second pending probe under the original injected clock and verifies that
+the next admitted work addresses the other target. It does not refund or erase a lower request.
+
+All three focused rotation regressions pass in0.81s (`pr48-probe-rotation-cancel-fixed.log`). They
+also cover two negative/positive cycles and the actual reciprocal delivery under unchanged
+four-request/device/minute protection, refreshed descriptors, local full-outbox refusal and a
+missing cursor record. The first new cycle fixture initially failed to give the helper the
+refreshed signed target record, so its correct current-descriptor refusal stalled the next
+receive; both endpoints now ingest that same signed record and the fixture asserts the exact
+reply queue before proceeding. A fixed ten-second sanctioned SystemClock watchdog bounds failure
+without advancing protocol time. A Duration qualification compile error is corrected before
+the successful run.
+
+Final neighbours pass nine recovery-submission cases in0.78s, the existing signed-negative case
+in0.55s and two reciprocal cases in0.35s; earlier repair/indirect selections also pass. Strict sync
+all-target/all-feature Clippy passes in15.56s after simplifying two test-fixture boolean expressions
+reported by its first run. The retained receipt fixture uses `pass_first: false`, preserving its
+original behavior. Read-only actual-diff re-review has no blocker/high/medium. A greater-than320
+selector-only regression remains optional coverage; static inspection confirms the complete
+at-most512 descriptor collection is scanned. Current authentication, expiry, replay, membership,
+path and rate enforcement remains unchanged. This closes the narrow identified starvation defect,
+not the broader multi-group/load acceptance or a wall-time guarantee under continuous churn.
+
+Requester design review separately confirms that320 connected snapshots and512 cached descriptors
+are both wrong permanent cutoffs for a full MLS source catalog. MLS membership has no product512
+cap. The test-only Search also needs explicit local-requester exclusion before advancing a batch:
+a grant containing C is invalid and cannot silently consume other legitimate sources alongside C.
+The production requester remains inactive while bounded continuing epoch-scoped catalog pages,
+independent helper/variant cursors and original durable execution allowance are integrated.
+
+### Native catalog and unstarted source proposals
+
+The new MLS catalog removes the proposed permanent320/512 source cutoff. Its immutable native
+observation retains only count, highest occupied leaf and both32-byte key-shape attestations,
+scoped to an opaque group-instance identity and committed epoch. Existing `member_count` performs
+and reuses the observation. The cache is not serialized, and missing/stale request views never
+rescan. Native load/first observation still traverse/copy the roster and are outside the page
+claim. One page examines at most64 raw positions, including holes/exclusions, and returns at most
+four sorted distinct public signing keys. Borrowed credentials are checked against4KiB BEFORE
+OpenMLS copies the member; both key lengths were attested before that copy too.
+
+The full affected MLS crate passes37 cases (`pr48-member-catalog-crate.log`):15 unit,10 group,
+3 policy and9 invite. Catalog regressions include a real514-member MLS roster, sparse removed
+leaves, exact same-epoch restore/new epoch rejection, count-cache staging/abort versus commit,
+actual restored oversized HPKE/signature keys and exact4096/4097-byte credential boundaries.
+Strict MLS all-target/all-feature Clippy passes before the final small public validate wrapper
+and removed-receiver test (`pr48-member-catalog-clippy.log`). The added actual removed-receiver
+case passes in0.06s (`pr48-member-catalog-removal.log`): old views retire on self-removal; a new
+inactive public-tree catalog grants no active-membership authority. Read-only actual-diff review
+has no blocker/high/medium; that optional coverage finding is now addressed.
+
+The app's still-test-only Search is changed to use continuing native pages and actual local-C
+exclusion. It keeps at most16 helper/variant positions and one proposed nonempty page, committing
+only an exact same-search ticket after local admission. Busy does not consume source coverage;
+helper replacement/unavailability does not reset it. Empty pages commit one local bounded turn
+and Yield, so holes cannot cause a hidden full-roster scan. Unsupported helpers never trigger
+legacy kind5/27 forwarding. Initial five-case focus passes in0.11s after the default app graph
+rebuild (`pr48-native-catalog-search.log`). Additional same-search identity/field checks and the
+replacement-cycle regression follow that build; final execution is pending.
+
+Read-only review finds a MEDIUM proposal-generation defect: changing B's PeerId away and back
+could revive the first cloned ticket. The exact peer1/peer2/peer1 regression fails in0.05s with
+only that correction removed (`pr48-native-catalog-search-cycle-control-red.log`); a finally
+guard restores the corrected source before the command exits. Every observed PeerId change now
+mints a checked fresh ticket while preserving the unconsumed source cursor. Unchanged local Busy
+retains its current ticket. Same-PeerId connection-incarnation checks remain the Root's separate
+mandatory authority. Actual-diff short re-review has no remaining blocker/high/medium. Original
+search identity and exact-field comparisons also prevent another job or mutated proposal from
+committing its cursor. The complete frontend rerun passes all1849 cases in93.09s, with no skipped
+or cancelled cases (`pr48-postpush-frontend-full.log`). Backend full verification is in progress;
+the earlier b867c622 table is not evidence for these subsequent runtime changes.
+
+Requester design review has no blocker in this approach, with mandatory integration constraints:
+bind helper-key attestations to the original MLS view; do not reintroduce hidden full-roster
+scans through descriptor/member helpers; retain the original Root/native/read and durable work
+scope; freeze C's twelve-second deadline before handoff; preserve spent allowance across timeout,
+cancellation and restart. A finite Keep grant may expire before the complete catalog is searched.
+Local preparation refusal, ambiguous handoff, signed negative and global absence are different
+outcomes. Actual requester/Keep dispatch, bounded execution work and indirect acceptance remain
+unfinished. These tests do not establish any live file bridge, V2 call or native media result.
+
+### Post-push verification in progress
+
+The final seven-case app search focus passes in0.10s after45.61s rebuild
+(`pr48-native-catalog-search-final.log`). Root and native formatting and diff whitespace checks
+pass. The ambient-dependency gate passes through Git Bash
+(`pr48-postpush-no-ambient-gitbash.log`); the default Windows `bash` selected inaccessible WSL
+and did not execute the script. Dependency audit passes advisories/bans/licences/sources after
+normal advisory-cache-lock access (`pr48-postpush-deny-approved.log`). The first restricted
+attempt cannot acquire that outside-workspace lock. No automatic approval review rejects a step.
+
+PR48 is still open and references exact pushed b867c622. At11:22 UTC GitHub reports an empty
+status-check rollup for that head; earlier failed workflow runs reference a41933f3. These local
+results must not be described as hosted/Linux validation of the pushed checkpoint.
+
+The browser gate first fails before any scenario because restricted Edge GPU subprocesses exit
+with access denied (`pr48-postpush-flows-trace.log`). Running normally reveals a genuine transient
+`EBUSY` while Edge publishes its private `DevToolsActivePort` file
+(`pr48-postpush-flows-approved.log`). The helper now retries only that sharing error and existing
+ENOENT under its unchanged absolute15-second startup deadline, on the same fresh owned path.
+The strict localhost port/path parser, exact debugger WebSocket identity and EACCES refusal stay
+intact. Two new focused regressions execute RED against the old catch (three passes/two failures,
+`pr48-flow-profile-lock-control-red.log`); all five pass after correction in2.79s
+(`pr48-flow-profile-lock-fixed.log`). Actual-diff read-only review has no blocker/high/medium or
+actionable low finding. This changes a test helper, not browser security flags or product UI.
+
+The next normal browser attempt gets through debugger startup but fails its original90-second
+fixture readiness bound (`pr48-postpush-flows-fixed-approved.log`), before any scenario assertion.
+It observes a complete document with an empty app element while the full root suite is doing
+heavy persistence tests. Resource contention is a hypothesis, not an established cause; no
+timeout has been increased and this is not a passing browser result. Final full frontend,
+backend and browser results remain pending here.
+
+The subsequent normal-permission browser run passes all ten original scenarios after the
+frontend unit/static/build work finishes (`pr48-postpush-flows-final-approved.log`). It keeps the
+same startup/readiness bounds and private debugger identity checks, then cleans up its own child
+processes. This passing rerun does not establish the earlier readiness failure's cause.
+The final full frontend suite passes1851 cases in82.34s, including the two new sharing-lock tests;
+none are skipped/cancelled (`pr48-postpush-frontend-full-final.log`). Svelte check reports zero
+errors/warnings and production build passes in47.40s with the existing bundle-size warning
+(`pr48-postpush-frontend-check.log`, `pr48-postpush-frontend-build.log`). Root/native backend
+completion and final strict Rust lint remain pending.
+
+The fresh unfiltered root command now exits0: `cargo test --all --all-features --no-fail-fast -j2`
+passes2949 cases with24 existing ignored cases across56 targets, including documentation targets
+(`pr48-postpush-root-full.log`). No test is removed, newly ignored or loosened to obtain this run;
+the24 ignored cases are unchanged. The main app target passes1182 with22 existing ignored in
+1095.47s, replication passes403 in148.01s, and the expensive ten-thousand-operation catch-up
+regression also completes successfully. The new seven MLS catalog tests, seven app search tests,
+target rotation/held-ACK cases and all30 sync integration cases pass on the full workspace graph.
+This supersedes the previous checkpoint's exit101 as current root verification; it does not
+rewrite that historical failed command. Strict all-target/all-feature lint and native full
+verification are running sequentially after this completed command.
+
+Strict all-target/all-feature root Clippy passes in1m12s
+(`pr48-postpush-root-clippy.log`). Native full verification is rebuilding next under the same
+two-compiler limit; no other Rust suite/build is run concurrently.
+
+The native command finishes with 413 passes and one failure in the legacy voice baseline
+(`pr48-postpush-native-full.log`, 483.66s). Source 1 reports local submission, but bridge 0
+observes no kind8 request or authenticated call event during the receipt window. The nearby
+EOF has no retained notification kind, so it cannot establish that particular packet's failure
+cause. An unchanged focused rerun passes both bridge phases in 7.86s
+(`pr48-legacy-voice-focus.log`). A separate concurrent six-client diagnostic also passes the
+voice and onward-directory tests; that diagnostic is deliberately stopped after the relevant
+observations to release its executable for the fault-injection regression. It is not a passing
+full or six-client-suite result (`pr48-six-client-debug.log`).
+
+Read-only review identifies a test-contract mismatch: `send_call_signal` promises local queueing,
+while the baseline requires delivery of one best-effort notification. The actual App repeats this
+heartbeat every five seconds. The regression now deliberately loses exactly the first client-1
+legacy heartbeat on each permitted helper edge, then must observe the real authenticated event
+after a fresh native send. Its fixed thirty-second total receipt deadline, blocked endpoint's
+zero receipts and physical graph assertions remain acceptance requirements. This correction
+does not establish reliable legacy offer/ICE delivery or explain the original packet loss.
+
+The original one-shot behavior executes RED under the injected loss in34.91s
+(`pr48-legacy-heartbeat-loss-control-red.log`). The retry version passes in17.95s; review's LOW
+finding replaces wall-clock cadence and elapsed measurements with `Clock::monotonic_ms`.
+The final focused test passes in18.44s after29.61s rebuild
+(`pr48-legacy-heartbeat-loss-final.log`): each helper receives the second heartbeat after about
+five seconds, with exactly one injected loss per helper and zero blocked-endpoint receipts.
+Short actual-diff re-review reports no remaining blocker/high/medium or actionable low.
+Root and native formatting, whitespace and the ambient-dependency gate pass again after this
+test-only correction. The final full native command runs against that exact monotonic version.
+
+That command finishes with 413 passes and one failure in479.02s
+(`pr48-postpush-native-full-final.log`). The first helper's injected-loss phase passes with two
+submissions and a5039ms receipt. After closing the founder and reopening helper3, the existing
+150-second connectivity prerequisite fails before any replacement-helper voice send. This is a
+different failure from one-shot packet delivery. The failed run lacks sealed-route observations;
+its specific missing routes therefore remain an inference, not an established log observation.
+
+Static inspection confirms a missing preparation barrier: original admission requests3-to-1/2
+connections but waits only for3-to-founder route custody. The voice scenario closes the founder
+and needs both other directions. A queued dial is not authenticated, persisted route evidence.
+The voice-only preparation now polls the actual sealed native record for `MemberMesh` and both
+exact endpoint peer/listener pairs, using the existing90-second capture bound. It neither dials,
+calls capture/finalization nor supplies route records. After the actual native close/reopen it
+rechecks those same original routes. Unit boundaries reject either missing route, a wrong
+listener, duplicate peers and singleton consent. Recovery keeps its original150-second bound
+and receipt its original30-second bound. Failure diagnostics independently probe sealed target
+indices/current-listener equality, online sets and cadence counts under500ms bounds, without
+printing seeds or raw addresses. Actual-diff review finds no blocker/high/medium or actionable
+code low; its stale-verification-note low is corrected here.
+
+The initial prepared-route scenario passes in18.26s
+(`pr48-legacy-voice-sealed-routes.log`). The final predicate unit and real sealed-close/reopen
+scenario both pass in18.67s (`pr48-legacy-voice-sealed-routes-final.log`). Read-only re-review
+clears the implemented boundary; the final full native command is running against this version.
+The prior failed commands remain above. Formatting and the ambient-dependency gate pass again.
+
+### Final verification of the post-b867c622 checkpoint
+
+The final unfiltered native command exits0: all415 unit cases and all five command-ACL cases
+pass, with no ignored or filtered cases (`pr48-postpush-native-full-sealed-routes.log`, 491.23s
+for the unit executable). Every six-client scenario passes, including actual notification
+receipt, onward directory discovery, membership recovery, both native restart orders and the
+lost-heartbeat/replacement-helper baseline. This supersedes the two earlier native failures as
+current verification; it does not erase them or establish physical media acceptance.
+
+| Command | Final result |
+| --- | --- |
+| `cargo test --all --all-features --no-fail-fast -j2` | PASS:2949 cases,24 unchanged existing ignored, across56 targets. |
+| `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml -j2` | PASS:415 unit +5 command ACL, no ignored/filtered cases. |
+| `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml -j2` | PASS:50.10s (`pr48-postpush-native-check.log`). |
+| `npm --prefix apps/desktop test` | PASS:1851 cases, no skipped/cancelled cases. |
+| `npm --prefix apps/desktop run check` | PASS:zero errors/warnings. |
+| `npm --prefix apps/desktop run build` | PASS:existing bundle-size warning. |
+| `npm --prefix apps/desktop run test:flows` | PASS:all ten real-browser scenarios. |
+| `cargo fmt --all -- --check` and native-workspace formatting | PASS. |
+| `cargo clippy --all-targets --all-features -j2 -- -D warnings` | PASS. |
+| Git Bash `scripts/check-no-ambient.sh` | PASS, including the final test-only corrections. |
+| `cargo deny check` | PASS:advisories/bans/licences/sources. |
+
+The fresh root command includes every production change in this checkpoint. The subsequent
+corrections affect only native test preparation/observation and documentation; their final full
+native command is recorded above. No concurrent Rust suite/build or F-drive target is used.
+The native startup gate is not repeated: this follow-up changes no production Tauri setup,
+thread/runtime placement or process spawning. The previous b867c622 build/startup evidence is
+historical and is not presented as a fresh application launch. Hosted Linux checks remain
+unverified; live V2, C-side file requester/Keep bridging, external destination resume, media
+relay and combined rollout/physical audio acceptance remain open.

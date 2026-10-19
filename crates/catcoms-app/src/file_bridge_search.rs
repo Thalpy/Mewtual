@@ -1,62 +1,129 @@
-//! Finite source coverage per helper and exact encrypted variant. Search progress is separate
-//! from transport retries: four signed misses must not hide a fifth possible source, and a
-//! helper/proof reorder must not repeatedly assign each source to the wrong reachable helper.
+//! Continuing source coverage per helper and exact encrypted variant. This native search uses
+//! the MLS leaf catalog, never a truncated connected-peer or evictable descriptor snapshot.
+//! Transport preparation owns admission: merely proposing a batch does not consume coverage.
 use catcoms_crypto::DeviceId;
+use catcoms_mls::group::{
+    MemberCatalogCursor, MemberCatalogEntry, MemberCatalogError, MemberCatalogView,
+};
+use catcoms_mls::ServerGroup;
 use catcoms_rt::PeerId;
+use std::sync::Arc;
 
 const HELPERS: usize = 4;
 const VARIANTS: usize = 4;
-const SOURCES: usize = catcoms_rt::MAX_CONNECTED_PEER_SNAPSHOT;
-const BATCH: usize = catcoms_sync::file_service::wire::MAX_SOURCES;
-const SEARCH_BATCHES: usize = HELPERS * VARIANTS * SOURCES.div_ceil(BATCH);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Helper {
     pub device: DeviceId,
     pub peer: PeerId,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) struct Choice {
     pub variant: [u8; 32],
     pub helper: Helper,
-    pub sources: Vec<DeviceId>,
+    pub sources: Vec<MemberCatalogEntry>,
+    ticket: u64,
+    owner: Arc<()>,
 }
 struct Progress {
     variant: [u8; 32],
     helper: DeviceId,
-    next: usize,
+    cursor: MemberCatalogCursor,
+    complete: bool,
 }
-#[derive(Default)]
+struct Proposal {
+    choice: Choice,
+    position: usize,
+    next: MemberCatalogCursor,
+    complete: bool,
+}
+
+/// These observations describe only this read's admitted helper/variant combinations. Exhausted
+/// is not a signed statement of global absence. Yield advances at most one 64-position local
+/// catalog turn; the owning job's original deadline and durable allowance still bound execution.
+#[derive(Debug)]
+pub(crate) enum Step {
+    Ready(Choice),
+    Yield,
+    Exhausted,
+}
 pub(crate) struct Search {
-    sources: Option<Vec<DeviceId>>,
+    owner: Arc<()>,
+    requester: DeviceId,
+    view: MemberCatalogView,
     helpers: Vec<DeviceId>,
     variants: Vec<[u8; 32]>,
     progress: Vec<Progress>,
     unsupported: Vec<DeviceId>,
+    pending: Option<Proposal>,
     turn: usize,
-    batches: usize,
+    ticket: u64,
 }
 impl Search {
-    /// Inputs are trusted native observations, not remote lists. Root must independently check
-    /// every selected member/key/descriptor at request preparation and completion. Only the
-    /// FIRST bounded source snapshot is retained; local source connectivity is never required.
-    pub(crate) fn next(
+    /// Only the native owner supplies the actual local C and immutable current MLS observation.
+    /// Root must additionally bind this state to its original native/read/epoch lifetime; a public
+    /// roster view itself grants no local membership, file or route authority.
+    pub(crate) fn new(requester: DeviceId, view: MemberCatalogView) -> Self {
+        Self {
+            owner: Arc::new(()),
+            requester,
+            view,
+            helpers: Vec::new(),
+            variants: Vec::new(),
+            progress: Vec::new(),
+            unsupported: Vec::new(),
+            pending: None,
+            turn: 0,
+            ticket: 0,
+        }
+    }
+
+    /// Propose one page without committing its source cursor. Repeating after a proven LOCAL
+    /// pre-handoff Busy returns the same sources and ticket. If that helper/variant is currently
+    /// unavailable, drop only the unstarted proposal and allow another pair to progress; its
+    /// original cursor remains intact. No attempt is refunded after an ambiguous handoff.
+    pub(crate) fn propose(
         &mut self,
+        group: &ServerGroup,
         variants: &[[u8; 32]],
         helpers: &[Helper],
-        sources: &[DeviceId],
-    ) -> Option<Choice> {
-        if self.batches >= SEARCH_BATCHES {
-            return None;
+    ) -> Result<Step, MemberCatalogError> {
+        self.view.validate(group)?;
+        if let Some(proposal) = &self.pending {
+            for entry in &proposal.choice.sources {
+                entry.validate(group)?;
+            }
+            if variants.contains(&proposal.choice.variant)
+                && !self.unsupported.contains(&proposal.choice.helper.device)
+            {
+                if let Some(helper) = helpers
+                    .iter()
+                    .find(|h| h.device == proposal.choice.helper.device)
+                {
+                    let mut choice = proposal.choice.clone();
+                    if choice.helper != *helper {
+                        // PeerId can change away and back. A distinct preparation generation
+                        // prevents an old clone becoming current again, without spending the
+                        // proposed source cursor. Same-PeerId connection incarnations still
+                        // require the original Root/transport lease at actual admission.
+                        self.ticket = self
+                            .ticket
+                            .checked_add(1)
+                            .ok_or(MemberCatalogError::Inconsistent)?;
+                        choice.ticket = self.ticket;
+                    }
+                    choice.helper = *helper;
+                    self.pending.as_mut().unwrap().choice = choice.clone();
+                    return Ok(Step::Ready(choice));
+                }
+            }
+            self.pending = None;
         }
-        let snapshot = self.sources.get_or_insert_with(|| {
-            let mut ids: Vec<_> = sources.iter().take(SOURCES).copied().collect();
-            ids.sort_unstable();
-            ids.dedup();
-            ids
-        });
         for helper in helpers {
-            if self.helpers.len() < HELPERS && !self.helpers.contains(&helper.device) {
+            if helper.device != self.requester
+                && self.helpers.len() < HELPERS
+                && !self.helpers.contains(&helper.device)
+            {
                 self.helpers.push(helper.device);
             }
         }
@@ -67,8 +134,10 @@ impl Search {
         }
         let combinations = self.helpers.len() * self.variants.len();
         if combinations == 0 {
-            return None;
+            return Ok(Step::Exhausted);
         }
+        // At most16 fixed metadata rows, even under route churn. Only ONE actual catalog page
+        // is read per call, so a run of holes cannot turn an actor turn into a roster scan.
         for _ in 0..combinations {
             let index = self.turn % combinations;
             self.turn = (index + 1) % combinations;
@@ -77,11 +146,7 @@ impl Search {
             if !variants.contains(&variant) || self.unsupported.contains(&device) {
                 continue;
             }
-            let Some(helper) = helpers
-                .iter()
-                .find(|helper| helper.device == device)
-                .copied()
-            else {
+            let Some(helper) = helpers.iter().find(|h| h.device == device).copied() else {
                 continue;
             };
             let position = if let Some(position) = self
@@ -91,38 +156,73 @@ impl Search {
             {
                 position
             } else {
-                // At most four helpers x four variants. No entry is evicted/reset when
-                // a route disconnects, changes PeerId or returns an unsupported response.
                 self.progress.push(Progress {
                     variant,
                     helper: device,
-                    next: 0,
+                    cursor: self.view.start(),
+                    complete: false,
                 });
                 self.progress.len() - 1
             };
             let progress = &mut self.progress[position];
-            let mut batch = Vec::with_capacity(BATCH);
-            while progress.next < snapshot.len() && batch.len() < BATCH {
-                let source = snapshot[progress.next];
-                progress.next += 1;
-                if source != device {
-                    batch.push(source);
-                }
-            }
-            if batch.is_empty() {
+            if progress.complete {
                 continue;
             }
-            self.batches += 1;
-            return Some(Choice {
+            let page = self
+                .view
+                .page(group, &progress.cursor, self.requester, device)?;
+            if page.entries.is_empty() {
+                progress.cursor = page.next;
+                progress.complete = page.complete;
+                return Ok(Step::Yield);
+            }
+            self.ticket = self
+                .ticket
+                .checked_add(1)
+                .ok_or(MemberCatalogError::Inconsistent)?;
+            let choice = Choice {
                 variant,
                 helper,
-                sources: batch,
+                sources: page.entries,
+                ticket: self.ticket,
+                owner: self.owner.clone(),
+            };
+            self.pending = Some(Proposal {
+                choice: choice.clone(),
+                position,
+                next: page.next,
+                complete: page.complete,
             });
+            return Ok(Step::Ready(choice));
         }
-        None
+        Ok(Step::Exhausted)
     }
-    /// Empty old-peer bridge responses disable that helper for this read, without creating
-    /// legacy kind5/27 forwarding or refilling its source cursor after a reconnect/upgrade.
+
+    /// Commit only the exact admitted proposal. The caller must retain any known-unstarted lower
+    /// preparation under its ORIGINAL authority/deadline, rather than refunding a submitted batch.
+    /// A stale cloned Choice cannot accidentally commit a later pending page.
+    pub(crate) fn admitted(&mut self, choice: &Choice) -> bool {
+        if !self.pending.as_ref().is_some_and(|p| {
+            Arc::ptr_eq(&p.choice.owner, &choice.owner)
+                && p.choice.ticket == choice.ticket
+                && p.choice.helper == choice.helper
+                && p.choice.variant == choice.variant
+                && p.choice.sources.len() == choice.sources.len()
+                && p.choice.sources.iter().zip(&choice.sources).all(|(a, b)| {
+                    a.device_id() == b.device_id() && a.signature_key() == b.signature_key()
+                })
+        }) {
+            return false;
+        }
+        let proposal = self.pending.take().unwrap();
+        let progress = &mut self.progress[proposal.position];
+        progress.cursor = proposal.next;
+        progress.complete = proposal.complete;
+        true
+    }
+
+    /// An old peer's empty new-kind response disables this helper for this read. It never enables
+    /// legacy whole-file forwarding, evicts a row or resets completed coverage after reconnect.
     pub(crate) fn unsupported(&mut self, device: DeviceId) {
         if self.helpers.contains(&device) && !self.unsupported.contains(&device) {
             self.unsupported.push(device);
@@ -131,97 +231,4 @@ impl Search {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    fn device(id: u16) -> DeviceId {
-        let mut bytes = [0; 32];
-        bytes[..2].copy_from_slice(&id.to_be_bytes());
-        DeviceId::from_bytes(bytes)
-    }
-    fn helper(id: u16) -> Helper {
-        Helper {
-            device: device(id),
-            peer: PeerId::from_u64(id as u64),
-        }
-    }
-    fn sources(count: u16) -> Vec<DeviceId> {
-        (1..=count).map(device).collect()
-    }
-
-    #[test]
-    fn signed_misses_advance_to_fifth_holder_without_a_transport_retry_round() {
-        let mut search = Search::default();
-        let first = search
-            .next(&[[1; 32]], &[helper(900)], &sources(5))
-            .unwrap();
-        assert_eq!(first.sources, sources(4));
-        let fifth = search
-            .next(&[[1; 32]], &[helper(900)], &sources(5))
-            .unwrap();
-        assert_eq!(fifth.sources, vec![device(5)]);
-        assert!(search
-            .next(&[[1; 32]], &[helper(900)], &sources(5))
-            .is_none());
-    }
-
-    #[test]
-    fn crossed_helper_adjacency_searches_each_source_batch_on_each_helper() {
-        let mut search = Search::default();
-        let helpers = [helper(900), helper(901)];
-        let mut b_found = false;
-        let mut d_found = false;
-        let mut attempts = 0;
-        while let Some(choice) = search.next(&[[1; 32]], &helpers, &sources(8)) {
-            // B can reach only source5; D only source1. A global cursor would give B1..4
-            // and D5..8, missing BOTH. Each immutable helper/variant has its own coverage.
-            if choice.helper == helpers[0] {
-                b_found |= choice.sources.contains(&device(5));
-            } else {
-                d_found |= choice.sources.contains(&device(1));
-            }
-            attempts += 1;
-        }
-        assert!(b_found && d_found);
-        assert_eq!(attempts, 4);
-    }
-
-    #[test]
-    fn same_helper_replacement_and_source_reordering_never_restart_snapshot_or_coverage() {
-        let mut search = Search::default();
-        let helper = helper(900);
-        search.next(&[[1; 32]], &[helper], &sources(8)).unwrap();
-        let replacement = Helper {
-            peer: PeerId::from_u64(999),
-            ..helper
-        };
-        let mut changed = sources(12);
-        changed.reverse();
-        let next = search.next(&[[1; 32]], &[replacement], &changed).unwrap();
-        assert_eq!(next.sources, (5..=8).map(device).collect::<Vec<_>>());
-        assert_eq!(next.helper.peer, replacement.peer);
-        search.unsupported(helper.device);
-        assert!(search.next(&[[1; 32]], &[replacement], &changed).is_none());
-    }
-
-    #[test]
-    fn exact_variant_and_helper_limits_bound_complete_search_without_eviction() {
-        let mut search = Search::default();
-        let helpers: Vec<_> = (900..910).map(helper).collect();
-        let variants = [[1; 32], [2; 32], [3; 32], [4; 32], [5; 32]];
-        let mut count = 0;
-        while let Some(choice) = search.next(&variants, &helpers, &sources(SOURCES as u16)) {
-            assert!(
-                choice.sources.len() <= BATCH && choice.sources.windows(2).all(|p| p[0] < p[1])
-            );
-            assert!(choice.helper.device <= device(903));
-            assert_ne!(choice.variant, [5; 32]);
-            count += 1;
-        }
-        assert_eq!(count, SEARCH_BATCHES);
-        assert_eq!(search.progress.len(), HELPERS * VARIANTS);
-        assert_eq!(search.sources.as_ref().unwrap().len(), SOURCES);
-        assert!(search
-            .next(&[[9; 32]], &[helper(999)], &sources(1))
-            .is_none());
-    }
-}
+mod tests;

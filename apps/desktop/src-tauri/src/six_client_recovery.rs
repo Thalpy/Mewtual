@@ -130,6 +130,7 @@ impl Scenario {
             peers,
             libp2p_peers,
             drop_gossip: AtomicBool::new(false),
+            drop_next_call_signal: AtomicBool::new(false),
             delay_replies: AtomicBool::new(false),
             trace: StdMutex::new(Trace::default()),
         });

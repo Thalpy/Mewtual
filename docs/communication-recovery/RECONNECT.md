@@ -219,3 +219,18 @@ establish the six-client TCP acceptance result or cross-group progress under loa
 ```text
 cargo test -p catcoms-sync --lib mesh_reconnect_ -j2
 ```
+
+## Indirect probe target rotation after checkpoint b867c622
+
+The first indirect target still uses topology priority and local age. Subsequent passes start
+strictly after the last admitted full DeviceId in circular ID order, scanning the complete
+retained descriptor set (at most512), rather than stopping at the connected-snapshot limit320.
+This retains one target and at most two helpers per pass. The fixed cursor is session-only;
+negative replies, descriptor refresh, removal of its record and local capacity refusal do not
+reset it. A successful helper admission commits the cursor immediately before any next helper
+await; cancelling that later wait cannot erase the completed turn.
+
+The helper still shares four requests/device/minute between probes and reciprocal forwards.
+Rotation adds no burst or rate allowance. Fair selection is conditional on a stable eligible set
+and admission opportunities, not a wall-time guarantee under continuous churn or denied capacity.
+Every current-member/descriptor/path and original request-lifetime check remains independent.

@@ -1,5 +1,32 @@
 # Mewtual; Handover
 
+## Work after pushed checkpoint b867c622 (2026-10-19)
+
+Indirect probe starvation now has a scalar circular target cursor after the initial priority
+selection, with one target/pass and unchanged helper limits. It advances on each confirmed local
+admission before another helper await. Three focused regressions pass, including authenticated
+negative/positive cycles, descriptor refresh, full outbox, missing cursor record and cancellation
+after the first real admission. Re-review has no blocker/high/medium; nine recovery-owner cases,
+the signed-negative and reciprocal neighbours, and strict sync Clippy pass. The full-suite/
+checkpoint results below apply to pushed b867c622, before this change.
+Requester integration remains unfinished. Its source search must use a bounded continuing current
+MLS catalog, not permanently truncate to320 connected-snapshot identities or512 cached descriptors.
+The catalog primitive and still-test-only Search now cover that correction and explicit local-C
+exclusion. Catalogs bind an opaque exact group instance/epoch and propose at most four keys after
+64 raw leaf positions, using a pre-copy bound on both keys and borrowed credentials. Native
+observation remains O(roster); no request path may silently invoke it. Source/helper/variant
+cursors and unstarted proposals remain separate from actual transport admission and durable
+spend. The requester is not connected to downloads yet. MLS catalog review has no blocker/high/
+medium; the revision ledger records focused evidence and remaining requester design constraints.
+
+Final local follow-up verification: the fresh root suite passes2949 cases with24 unchanged
+existing ignored cases; the complete native suite passes420 and frontend suite1851. All ten
+browser flows, static/frontend build, strict root Clippy, formatting, ambient-dependency and
+dependency-audit gates pass. Native voice acceptance now injects one lost heartbeat per helper
+and requires original sealed endpoint routes before closing its replacement helper; both exact
+routes must survive the actual native close/reopen. Recovery and receipt deadlines are unchanged.
+See the revision ledger for commands, executed red controls, failed historical runs and limits.
+
 ## Communication follow-up in progress (2026-10-19)
 
 Native requested reads now retain their original account/exact registry-row scope through queued
@@ -13,12 +40,12 @@ This checkpoint does not complete C-side
 bridge/Keep, external destination resume, live V2, media relay or combined acceptance. Physical
 separate-network/audible checks remain open with only one available desktop.
 
-Checkpoint acceptance found an additional open recovery fairness issue: a stable first-ranked
+The b867c622 checkpoint exposed an additional recovery fairness issue: a stable first-ranked
 offline target can monopolize automatic indirect probes after negative replies. The adapter's
 receipt test now uses three actually admitted members so its sole helper and blocked target are
-unambiguous; this does not fix production target rotation. Keep the one-target/pass traffic
-contract when adding a retained bounded cursor and cover every eligible retained record. The
-revision ledger records the failed full native run and the required regression/follow-up.
+unambiguous. The subsequent production rotation described above fixes that narrow starvation
+defect while preserving one target per pass. The revision ledger retains the failed native run,
+executed red controls, cancellation regression and subsequent verification.
 
 Latest file checkpoint: source30 and helper29 now dispatch behind native account/exact-entry,
 actor, Root/member/policy and strict bound-connection scope. This supersedes the earlier inert

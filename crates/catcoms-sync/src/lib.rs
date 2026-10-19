@@ -4343,6 +4343,11 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// Asynchronous probes awaiting a separately authenticated result push. Bounded, transient,
     /// exact-descriptor-bound, and wall-expired without holding the server actor on remote I/O.
     pending_indirect_probes: VecDeque<([u8; 16], PendingIndirectProbe)>,
+    /// Last target with at least one confirmed local probe admission. After the initial priority
+    /// choice, traverse current eligible full device IDs circularly so negative replies or
+    /// descriptor refresh cannot keep one offline target first forever. Session-only ordering,
+    /// never membership/route authority; a missing cursor device does not reset the traversal.
+    repair_target_after: Option<DeviceId>,
     /// Reciprocal intents accepted by this target and awaiting a later bounded dial pass.
     reciprocal_intents: VecDeque<ReciprocalIntent>,
     /// Connected-only helper deliveries. Inbound handlers append here and return immediately; a
@@ -4772,6 +4777,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             pairwise_reachability: HashMap::new(),
             indirect_reachability: HashMap::new(),
             pending_indirect_probes: VecDeque::new(),
+            repair_target_after: None,
             reciprocal_intents: VecDeque::new(),
             repair_outbox: VecDeque::new(),
             repair_replay: VecDeque::new(),
@@ -10627,22 +10633,29 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .filter_map(|device| self.descriptor_ref(*device))
             .filter(|reference| !self.connected_peers.contains(&reference.peer))
             .collect();
-        targets.sort_by_key(|reference| {
-            (
-                !self.topology_promotions.contains(&reference.device),
-                self.topology_promotions
-                    .iter()
-                    .position(|device| *device == reference.device)
-                    .unwrap_or(usize::MAX),
-                std::cmp::Reverse(
-                    self.peer_record_age
-                        .get(&reference.device)
-                        .copied()
-                        .unwrap_or(0),
-                ),
-                reference.device,
-            )
-        });
+        if let Some(after) = self.repair_target_after {
+            // Cover the complete bounded peer-record set, including records beyond a transport
+            // connection snapshot's limit. Keep one target per pass: probing a burst of targets
+            // could consume the helper's shared allowance before the reciprocal forward.
+            targets.sort_by_key(|reference| (reference.device <= after, reference.device));
+        } else {
+            targets.sort_by_key(|reference| {
+                (
+                    !self.topology_promotions.contains(&reference.device),
+                    self.topology_promotions
+                        .iter()
+                        .position(|device| *device == reference.device)
+                        .unwrap_or(usize::MAX),
+                    std::cmp::Reverse(
+                        self.peer_record_age
+                            .get(&reference.device)
+                            .copied()
+                            .unwrap_or(0),
+                    ),
+                    reference.device,
+                )
+            });
+        }
         let Some(target) = targets.into_iter().find(|reference| {
             let no_reciprocal = self
                 .outbound_reciprocal
@@ -10667,9 +10680,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return submitted;
         }
         for helper in helpers {
-            let _ = self
+            if self
                 .queue_indirect_probe_to(helper, target.clone(), detached)
-                .await;
+                .await
+            {
+                // Commit BEFORE another helper's local ACK can suspend this owner poll. Even
+                // cancellation must preserve the turn already admitted through the first helper.
+                // Busy/refusal consumes no turn; this refunds no request, remote rate or lower
+                // owner and only orders the next ordinary discovery pass.
+                self.repair_target_after = Some(target.device);
+            }
         }
         submitted
     }
@@ -21656,7 +21676,9 @@ mod tests {
     /// keeps multi-actor repair tests deterministic and makes the property under test explicit:
     /// the synchronous handler must authenticate, enqueue/answer, and return without awaiting a
     /// second peer.
-    async fn serve_one_test_request(member: &mut Member) {
+    pub(super) async fn serve_one_test_request<T: MeshTransport + 'static, R: CryptoRngCore>(
+        member: &mut ChannelSync<T, R>,
+    ) {
         let Some(TransportEvent::Request {
             from,
             data,
@@ -21815,6 +21837,135 @@ mod tests {
         let expired = route();
         assert_eq!(expired.indirect_health, IndirectRouteHealth::Unknown);
         assert_eq!(expired.indirect_age_ms, None);
+    }
+
+    #[tokio::test]
+    async fn mesh_repair_target_rotation_survives_signed_negatives_and_leaves_forward_capacity() {
+        let scenario = async {
+            let (_hub, mut members, ids) = build_members(4).await;
+            converge_and_publish_test_routes(&mut members);
+            let clock = ManualClock::new(1_000);
+            for member in &mut members {
+                member.clock = Arc::new(clock.clone());
+            }
+            let (alice, rest) = members.split_first_mut().unwrap();
+            let (helper, rest) = rest.split_first_mut().unwrap();
+            let (offline, rest) = rest.split_first_mut().unwrap();
+            let target = &mut rest[0];
+            prove_live_member(alice, helper.local_peer(), ids[1]);
+            prove_live_member(helper, alice.local_peer(), ids[0]);
+            prove_live_member(helper, target.local_peer(), ids[3]);
+            prove_live_member(target, helper.local_peer(), ids[1]);
+            // This offline member always wins the old priority ranking. Its signed negative result
+            // must not make it immediately win another turn while the reachable member goes unheard.
+            alice.topology_promotions.push_front(ids[2]);
+
+            for cycle in 0..2 {
+                for (device, reachable) in [(ids[2], false), (ids[3], true)] {
+                    alice.drive_mesh_repair().await;
+                    assert_eq!(alice.pending_indirect_probes.len(), 1);
+                    assert_eq!(
+                        alice
+                            .pending_indirect_probes
+                            .front()
+                            .unwrap()
+                            .1
+                            .target
+                            .device,
+                        device,
+                        "an authenticated negative must not monopolize the next target"
+                    );
+                    serve_one_test_request(helper).await;
+                    assert_eq!(
+                        helper.repair_outbox.len(),
+                        1,
+                        "the helper must authenticate and answer this exact probe"
+                    );
+                    helper.drain_repair_outbox().await;
+                    serve_one_test_request(alice).await;
+                    assert!(alice.pending_indirect_probes.is_empty());
+                    if !reachable {
+                        assert!(alice.repair_outbox.is_empty());
+                        assert!(alice.indirect_reachability[&device]
+                            .negative_responses
+                            .contains(&ids[1]));
+                        continue;
+                    }
+                    assert!(alice.indirect_reachability[&device]
+                        .witnesses
+                        .contains(&ids[1]));
+                    alice.drain_repair_outbox().await;
+                    serve_one_test_request(helper).await;
+                    assert_eq!(
+                        helper.repair_outbox.len(),
+                        1,
+                        "the positive probe must leave capacity for reciprocal forwarding"
+                    );
+                    helper.drain_repair_outbox().await;
+                    serve_one_test_request(target).await;
+                    assert!(target.has_pending_reciprocal());
+                    assert_eq!(target.drive_pending_reciprocal().await, 1);
+                }
+                if cycle == 0 {
+                    // A refreshed high-priority descriptor cannot rewind traversal to the old
+                    // ranking. Expire the previous reciprocal intent and enter the next rate window
+                    // using the same injected clock at every authenticated endpoint.
+                    offline
+                        .publish_self_record(
+                            vec![member_route(offline, "/ip6/2001:db8::99/tcp/22487")],
+                            2,
+                        )
+                        .unwrap();
+                    assert!(!alice.ingest_peer_record(offline.self_record().unwrap().clone()));
+                    assert!(!helper.ingest_peer_record(offline.self_record().unwrap().clone()));
+                    clock.advance_ms(60_001);
+                }
+            }
+        };
+        tokio::select! {
+            _ = scenario => {},
+            _ = catcoms_rt::SystemClock.sleep(std::time::Duration::from_secs(10)) => panic!("bounded target-rotation fixture stalled"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mesh_repair_target_busy_keeps_turn_and_missing_cursor_record_does_not_reset_it() {
+        let (_hub, mut members, ids) = build_members(4).await;
+        converge_and_publish_test_routes(&mut members);
+        let (alice, rest) = members.split_first_mut().unwrap();
+        let helper = &mut rest[0];
+        prove_live_member(alice, helper.local_peer(), ids[1]);
+        prove_live_member(helper, alice.local_peer(), ids[0]);
+        alice.topology_promotions.push_front(ids[2]);
+
+        alice.queue_mesh_repair().await;
+        assert_eq!(alice.repair_target_after, Some(ids[2]));
+        let pressure = alice.repair_outbox.front().unwrap().clone();
+        alice.drain_repair_outbox().await;
+        serve_one_test_request(helper).await;
+        helper.drain_repair_outbox().await;
+        serve_one_test_request(alice).await;
+        assert!(alice.pending_indirect_probes.is_empty());
+
+        // Hold the actual fixed outbox full while the next target is otherwise eligible. These
+        // local pressure items are never sent; losing a local admission must not skip its turn.
+        alice.repair_outbox = std::iter::repeat_n(pressure, MAX_REPAIR_OUTBOX).collect();
+        alice.queue_mesh_repair().await;
+        assert_eq!(alice.repair_target_after, Some(ids[2]));
+        assert!(alice.pending_indirect_probes.is_empty());
+        alice.repair_outbox.clear();
+        alice.queue_mesh_repair().await;
+        assert_eq!(alice.repair_target_after, Some(ids[3]));
+        assert_eq!(alice.pending_indirect_probes.len(), 1);
+        assert_eq!(alice.pending_indirect_probes[0].1.target.device, ids[3]);
+
+        // Retire that descriptor before its locally queued packet is sent. Its advisory cursor
+        // remains, and the remaining authenticated descriptor still receives the wrapped turn.
+        alice.peer_records.remove(&ids[3]);
+        alice.queue_mesh_repair().await;
+        assert_eq!(alice.repair_target_after, Some(ids[2]));
+        assert_eq!(alice.pending_indirect_probes.len(), 1);
+        assert_eq!(alice.pending_indirect_probes[0].1.target.device, ids[2]);
     }
 
     #[tokio::test]

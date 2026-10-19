@@ -34,14 +34,22 @@ export function parseDebuggerPort(text) {
   return { base: `http://127.0.0.1:${lines[0]}`, path: lines[1] };
 }
 
-/** Only the fresh private profile may select the debugger. An old FLOW_CDP_PORT is ignored. */
-export async function ownedDebuggerEndpoint(profileDir, browserFailure = () => null, timeoutMs = 15_000) {
+/** Only the fresh private profile may select the debugger. An old FLOW_CDP_PORT is ignored.
+ * readProfile injects the publication sharing refusal in focused tests; production always reads
+ * the fixed filename within its own fresh profile and verifies the exact debugger identity.
+ */
+export async function ownedDebuggerEndpoint(profileDir, browserFailure = () => null, timeoutMs = 15_000, readProfile = readFile) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (browserFailure()) throw browserFailure();
     let endpoint = null;
-    try { endpoint = parseDebuggerPort(await readFile(join(profileDir, "DevToolsActivePort"), "utf8")); }
-    catch (error) { if (error.code !== "ENOENT") throw error; }
+    try { endpoint = parseDebuggerPort(await readProfile(join(profileDir, "DevToolsActivePort"), "utf8")); }
+    catch (error) {
+      // Edge may briefly hold this file without read sharing while publishing its endpoint on
+      // Windows. Keep the SAME startup deadline, then retry this exact owned path. Permission
+      // and other I/O failures still surface; no familiar-port or alternate-profile fallback.
+      if (error.code !== "ENOENT" && error.code !== "EBUSY") throw error;
+    }
     if (endpoint) {
       try {
         const version = await (await fetch(`${endpoint.base}/json/version`, { signal: AbortSignal.timeout(2_000) })).json();

@@ -15,6 +15,12 @@ use crate::device::MlsDevice;
 use crate::invite::{membership_from_key_package, InviteError, InviteLedger, InviteToken};
 use crate::{proto, MlsError};
 
+mod catalog;
+pub use catalog::{
+    MemberCatalogCursor, MemberCatalogEntry, MemberCatalogError, MemberCatalogPage,
+    MemberCatalogView, MAX_MEMBER_CATALOG_CREDENTIAL_BYTES, MAX_MEMBER_CATALOG_PROBES,
+};
+
 /// The result of adding a member: the joiner's Welcome, the Commit to fan out to
 /// existing members, and the epoch the commit was built at.
 #[derive(Debug, Clone)]
@@ -63,6 +69,9 @@ pub enum Incoming {
 /// One server/connection: a wrapper over an MLS group.
 pub struct ServerGroup {
     group: MlsGroup,
+    // Native observation only: fresh for every create/join/load, never serialized. Catalog
+    // pages cannot accidentally reuse a summary from a same-epoch replacement group instance.
+    catalog: catalog::CatalogCache,
 }
 
 impl ServerGroup {
@@ -75,7 +84,10 @@ impl ServerGroup {
             device.credential(),
         )
         .map_err(proto)?;
-        Ok(Self { group })
+        Ok(Self {
+            group,
+            catalog: Default::default(),
+        })
     }
 
     /// Join an existing group from a serialized Welcome (as produced by
@@ -91,7 +103,10 @@ impl ServerGroup {
                 .map_err(proto)?
                 .into_group(device.provider())
                 .map_err(proto)?;
-        Ok(Self { group })
+        Ok(Self {
+            group,
+            catalog: Default::default(),
+        })
     }
 
     /// Reconstruct a group from a `device` whose provider storage was **restored** from a
@@ -102,7 +117,10 @@ impl ServerGroup {
         let group = MlsGroup::load(device.provider().storage(), &gid)
             .map_err(|e| MlsError::Protocol(format!("{e:?}")))?
             .ok_or(MlsError::Internal("group missing from restored storage"))?;
-        Ok(Self { group })
+        Ok(Self {
+            group,
+            catalog: Default::default(),
+        })
     }
 
     /// Add `key_package`'s device and merge the commit. Returns the [`AddOutcome`]:
@@ -617,7 +635,9 @@ impl ServerGroup {
 
     /// The number of current members.
     pub fn member_count(&self) -> usize {
-        self.group.members().count()
+        // This observation already traversed the whole native roster. Retain its small summary
+        // once per actual epoch, rather than making bounded catalog pages repeat that traversal.
+        self.observe_member_catalog().member_count()
     }
 
     /// The device ids of all current members.

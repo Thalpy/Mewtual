@@ -1,4 +1,4 @@
-//! Real product TCP transport; the fixture can only discard gossip and delay completed replies.
+//! Real product TCP transport with explicit gossip/heartbeat loss and completed-reply delay.
 use super::*;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -21,12 +21,19 @@ pub(super) struct Trace {
     pub received_recovery: BTreeSet<(usize, usize, u8)>,
     pub dropped_gossip: usize,
     pub delayed_replies: usize,
+    /// One deliberately lost legacy heartbeat per voice-baseline phase, never an endpoint receipt.
+    pub dropped_call_signals: BTreeMap<(usize, usize), usize>,
+    /// Local queue admissions only; these counters cannot establish authenticated delivery.
+    pub submitted_call_signals: BTreeMap<(usize, usize), usize>,
 }
 
 pub(super) struct NetworkRules {
     pub peers: Vec<PeerId>,
     pub libp2p_peers: Vec<libp2p::PeerId>,
     pub drop_gossip: AtomicBool,
+    /// Test-only one-shot loss on client 1's next legacy notification. Other kinds and the
+    /// connected-only automatic-recovery adapter always reach the real product transport.
+    pub drop_next_call_signal: AtomicBool,
     pub delay_replies: AtomicBool,
     pub trace: StdMutex<Trace>,
 }
@@ -238,7 +245,39 @@ impl MeshTransport for Transport {
         proto: ProtocolId,
         data: Bytes,
     ) -> Result<(), TransportError> {
-        self.inner.notify(peer, proto, data).await
+        let call_target = (self.index == 1 && data.first() == Some(&8))
+            .then(|| (self.index, self.rules.index(peer)));
+        if let Some(target) = call_target {
+            if self
+                .rules
+                .drop_next_call_signal
+                .swap(false, Ordering::AcqRel)
+            {
+                *self
+                    .rules
+                    .trace
+                    .lock()
+                    .unwrap()
+                    .dropped_call_signals
+                    .entry(target)
+                    .or_default() += 1;
+                // `notify` acknowledges local queueing, not endpoint receipt. Deliberately
+                // model one lost heartbeat without inventing an authenticated receive event.
+                return Ok(());
+            }
+        }
+        self.inner.notify(peer, proto, data).await?;
+        if let Some(target) = call_target {
+            *self
+                .rules
+                .trace
+                .lock()
+                .unwrap()
+                .submitted_call_signals
+                .entry(target)
+                .or_default() += 1;
+        }
+        Ok(())
     }
     async fn notify_connected(
         &self,

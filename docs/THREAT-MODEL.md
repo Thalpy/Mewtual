@@ -1,5 +1,24 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Public MLS source-catalog boundary (19 October)
+
+Connected-peer snapshots and evictable descriptor tables are not complete MLS source rosters.
+The new catalog has no permanent320/512-member cutoff. Each page examines at most64 raw leaf
+positions and retains at most four distinct public signing keys, with no full-roster clone/sort.
+An opaque native summary attests BOTH copied key lengths for one exact group instance/epoch;
+a borrowed credential-length check precedes the indexed OpenMLS copy. Actual restored oversized
+signature/HPKE and credential fixtures pin this ordering. MLS loading and initial native roster
+observation can still copy/traverse the complete roster and are not covered by the page bound.
+
+An inactive removed receiver may observe its current public tree; catalog validity must never
+be treated as local membership, native account/entry, file intent, helper route or work allowance.
+Same-epoch replacement groups reject old views, and normal self-removal advances the epoch and
+retires old views. Caller cancellation and local Busy cannot consume an unstarted proposed
+nonempty source batch; sparse empty pages must advance and yield. The app search remains test
+only. Live requester handoff, original Root/native ownership, persisted spend and end-to-end
+bridge acceptance must be enforced and tested before activation. Finite Keep allowance may expire
+before a large catalog is exhausted; budget exhaustion must never be reported as global absence.
+
 ## Connected file-source activation checkpoint (19 October)
 
 Source kind30 requires current native account/exact entry, actor generation, Root membership/
@@ -773,6 +792,14 @@ table with the commit that closed it.
   suspicion and never change presence or MLS membership. The control plane reveals attempted peer
   pairs/timing to the selected helper, but no plaintext; ordinary participation does not make that
   helper a public listener or general relay.
+  A stable highest-priority offline target must not monopolize probe selection after every
+  authenticated negative. After initial priority, target order rotates over the full bounded
+  descriptor set, retaining its cursor through refresh and local Busy. Each confirmed admission
+  commits that cursor before another helper await can be cancelled. The cursor grants no
+  membership/path authority, does not refund ambiguous handoffs and does not increase per-pass
+  fan-out or shared helper budgets. Fair selection assumes a stable eligible set and local
+  admission opportunities; continuous membership/route churn or capacity denial has no fixed
+  recovery-time guarantee.
 - **The desktop webview is trusted only while the UI session is unlocked.** An explicit lock keeps
   native actors online for background sync but closes all non-bootstrap Tauri commands. CSP and
   the main-window capability reduce injection reach; the native command gate is the enforcement

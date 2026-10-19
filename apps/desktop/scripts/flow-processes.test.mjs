@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -52,4 +52,38 @@ test("debugger profile parsing rejects nonlocal paths and malformed port claims"
   for (const text of ["0\n/devtools/browser/x", "65536\n/devtools/browser/x", "1234\nhttps://other", "1234\n/devtools/browser/x\nextra"]) {
     assert.equal(parseDebuggerPort(text), null);
   }
+});
+
+test("private debugger discovery survives a transient publication sharing lock", async () => {
+  const profile = await mkdtemp(join(tmpdir(), "catcoms-flow-test-"));
+  const path = "/devtools/browser/our-new-browser";
+  let port, requests = 0, reads = 0;
+  const browser = createServer((req, res) => {
+    assert.equal(req.url, "/json/version"); requests++;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ webSocketDebuggerUrl: `ws://127.0.0.1:${port}${path}` }));
+  });
+  port = await listen(browser);
+  try {
+    const file = join(profile, "DevToolsActivePort");
+    await writeFile(file, `${port}\n${path}\n`);
+    const endpoint = await ownedDebuggerEndpoint(profile, () => null, 2_000, async (name, encoding) => {
+      assert.equal(name, file); assert.equal(encoding, "utf8");
+      if (++reads === 1) throw Object.assign(new Error("owned file is still being published"), { code: "EBUSY" });
+      return readFile(name, encoding);
+    });
+    assert.equal(endpoint, `http://127.0.0.1:${port}`);
+    assert.equal(reads, 2);
+    assert.equal(requests, 1, "sharing refusal cannot select or probe another debugger");
+  } finally { await close(browser); await rm(profile, { recursive: true, force: true }); }
+});
+
+test("debugger sharing retries keep the original deadline and do not mask permission failures", async () => {
+  let reads = 0;
+  await assert.rejects(ownedDebuggerEndpoint("private-profile", () => null, 60, async () => {
+    reads++; throw Object.assign(new Error("busy"), { code: "EBUSY" });
+  }), /private Edge profile/);
+  assert.ok(reads > 0 && reads <= 4, "retrying never renews the original bounded wait");
+  const denied = Object.assign(new Error("not permitted"), { code: "EACCES" });
+  await assert.rejects(ownedDebuggerEndpoint("private-profile", () => null, 60, async () => { throw denied; }), error => error === denied);
 });
