@@ -23,10 +23,14 @@ cleanup precedes evidence. The final cleanup-fault run refuses publication and p
 previous record. Logs: `communication-loopback-framing-takeover-native.log` and
 `communication-loopback-framing-cleanup-fault-final.log` in the probe checkout's `target/`.
 
-Nine Rust and16 Node tests pass, plus strict fixture Clippy/formatting and the packaged build.
+Nine Rust and17 Node tests pass, plus strict fixture Clippy/formatting and the packaged build.
 Review corrected input mutation across HMAC, stalled-read cancellation, dribble-renewable socket
 timeouts and a stale-reply false-positive oracle; regressions pin each. Final read-only re-review
-has no remaining code finding. The additional standalone deny audit **fails** on existing pinned
+has no remaining code finding. A later final-handoff review removes redundant asynchronous body
+cancellation after the last plaintext check. The new regression fails with the isolated prior
+condition and passes with the guard; the rebuilt packaged run passes again. Logs:
+`communication-loopback-handoff-before.log`, `communication-loopback-framing-node-handoff-final.log`
+and `communication-loopback-framing-native-handoff-final.log`. The additional standalone deny audit **fails** on existing pinned
 Tauri maintenance and quick-xml/plist advisories, including with the Windows filter. No exemptions
 or package-version changes were added; the README records the source reachability observation.
 This audit follow-up, production action authority and full copy/phase custody remain open. These

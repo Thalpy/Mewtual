@@ -138,3 +138,13 @@ test("a fresh forged u64-max reply reaches HMAC refusal and cannot poison the re
   assert.equal(codec.snapshot().headerRefusals, before + 1, "refusal must occur at authentication, after fresh-sequence validation");
   assert.deepEqual(await codec.open(await response(request, { sequence: 3n }), request), new Uint8Array([3]));
 });
+test("completed reader cleanup cannot add an asynchronous retirement gap after the final plaintext check", async () => {
+  const codec = await createCodec(seed(), 1), request = await codec.request(new Uint8Array([3]), id);
+  const reply = await response(request), originalCancel = reply.body.cancel.bind(reply.body);
+  let retiredDuringExtraCleanup = false;
+  reply.body.cancel = async () => { retiredDuringExtraCleanup = true; await codec.close(); return originalCancel(); };
+  const result = await codec.open(reply, request).then(plain => ({ plain }), () => ({ refused: true }));
+  assert.ok(!retiredDuringExtraCleanup || result.refused, "a close after final checks cannot still deliver plaintext");
+  assert.equal(retiredDuringExtraCleanup, false, "the actual reader already completed cancellation before the final check");
+  assert.deepEqual(result.plain, new Uint8Array([3]));
+});

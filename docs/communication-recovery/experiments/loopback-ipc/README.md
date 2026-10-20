@@ -70,11 +70,14 @@ The forged reply's freshu64-maximum sequence reaches and fails HMAC verification
 keyless listener cleanup, output EOF and profile cleanup precede success publication. The final
 cleanup-fault run again refuses success without replacing the previous result.
 
-Nine Rust unit tests and16 Node tests pass. They cover maximum real crypto, cross-grant/direction
+Nine Rust unit tests and17 Node tests pass. They cover maximum real crypto, cross-grant/direction
 and request binding, finite replay allowance/reordering, coalesced HTTP/body boundaries, completed
 worker permits, partial-body deadline/shutdown, stalled reader cancellation/custody, deferred-input
 mutation, dribbling header/body deadlines, occupied/pending bind cleanup and child output EOF.
-Strict fixture Clippy and formatting pass. Read-only re-review has no remaining code finding.
+Successful reader cancellation has no second asynchronous cleanup after the final plaintext
+check. Its new regression fails with the isolated prior condition and passes with the guard;
+the final rebuilt packaged run also passes. Strict fixture Clippy and formatting pass.
+Read-only re-review has no remaining code finding.
 Logs live in the isolated probe checkout's ignored `target/communication-loopback-*` files;
 `result.json` is intentionally not committed.
 

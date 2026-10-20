@@ -113,7 +113,7 @@ export async function createCodec(seed, grant) {
         // Header/HMAC refusal also cancels the actual response stream. Cancellation completion
         // still does not establish last-owner retirement of browser/network internal copies.
         if (reader) { try { await closeReader(); } catch { /* refuse or preserve original failure */ } }
-        else if (!response.body?.locked) { try { await response.body?.cancel(); } catch { /* already closed */ } }
+        else if (!closing && !response.body?.locked) { try { await response.body?.cancel(); } catch { /* already closed */ } }
         activeReaders.delete(cancel); signal?.removeEventListener("abort", cancel);
       }
     },

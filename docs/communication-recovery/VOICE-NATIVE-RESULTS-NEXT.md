@@ -16,7 +16,7 @@ irreversible physical counters and one64-admission process allowance prevent cou
 Response HMAC/AEAD includes the exact original request header. Four header and two body positions
 persist through actual task collection; browser cancellation keeps its reader position until
 settlement. An independent keyless responder really replaces the closed native port and its
-fresh forged reply reaches/fails HMAC verification. Nine Rust and16 Node tests, strict fixture
+fresh forged reply reaches/fails HMAC verification. Nine Rust and17 Node tests, strict fixture
 Clippy, actual packaged framing/takeover and terminal cleanup-fault checks pass, with no remaining
 read-only code-review finding.
 
