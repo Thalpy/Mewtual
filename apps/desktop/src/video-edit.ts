@@ -229,15 +229,35 @@ export function sourceToOutput(edit: VideoEdit, t: number): number {
   return out;
 }
 
+/**
+ * The source time shown at output time `o`: the inverse of `sourceToOutput` over kept time. Null
+ * when `o` is outside the upload (negative, or past its end). The end of a range belongs to the
+ * next range's start, so a join never maps into the removed time between them.
+ */
+export function outputToSource(edit: VideoEdit, o: number): number | null {
+  if (!Number.isFinite(o) || o < 0) return null;
+  let at = 0;
+  for (const range of keptRanges(edit)) {
+    const length = range.end - range.start;
+    if (o < at + length) return range.start + (o - at);
+    at += length;
+  }
+  return null;
+}
+
 // --- Undo/redo ----------------------------------------------------------------------------------
 
-export type EditHistory = {
-  readonly past: readonly VideoEdit[];
-  readonly present: VideoEdit;
-  readonly future: readonly VideoEdit[];
+/**
+ * Undo/redo over any immutable value: the cut list here, the whole clip document in
+ * `clip-doc.ts`. Every rule below works on identity alone, so it holds for both.
+ */
+export type EditHistory<T = VideoEdit> = {
+  readonly past: readonly T[];
+  readonly present: T;
+  readonly future: readonly T[];
 };
 
-export function startHistory(edit: VideoEdit): EditHistory {
+export function startHistory<T = VideoEdit>(edit: T): EditHistory<T> {
   return { past: [], present: edit, future: [] };
 }
 
@@ -245,7 +265,7 @@ export function startHistory(edit: VideoEdit): EditHistory {
  * Record `next` as a new undo step. A refused operation hands back the present edit itself, and
  * that is not a step: pushing it would make Undo appear to do nothing.
  */
-export function pushEdit(history: EditHistory, next: VideoEdit): EditHistory {
+export function pushEdit<T>(history: EditHistory<T>, next: T): EditHistory<T> {
   if (next === history.present) return history;
   const past = [...history.past, history.present];
   if (past.length > HISTORY_LIMIT) past.splice(0, past.length - HISTORY_LIMIT);
@@ -256,18 +276,18 @@ export function pushEdit(history: EditHistory, next: VideoEdit): EditHistory {
  * Replace the present edit without making an undo step. A drag calls this for every pointer move
  * after the first, so one drag is one undo step however many moves it took.
  */
-export function replaceEdit(history: EditHistory, next: VideoEdit): EditHistory {
+export function replaceEdit<T>(history: EditHistory<T>, next: T): EditHistory<T> {
   return next === history.present ? history : { ...history, present: next };
 }
 
-export function undo(history: EditHistory): EditHistory {
+export function undo<T>(history: EditHistory<T>): EditHistory<T> {
   if (history.past.length === 0) return history;
   const past = [...history.past];
-  const present = past.pop() as VideoEdit;
+  const present = past.pop() as T;
   return { past, present, future: [history.present, ...history.future] };
 }
 
-export function redo(history: EditHistory): EditHistory {
+export function redo<T>(history: EditHistory<T>): EditHistory<T> {
   if (history.future.length === 0) return history;
   const [present, ...future] = history.future;
   return { past: [...history.past, history.present], present, future };

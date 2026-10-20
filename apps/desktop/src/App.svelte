@@ -255,6 +255,7 @@
   import PixaCanvas from "./PixaCanvas.svelte";
   import PixaViewer from "./PixaViewer.svelte";
   import VideoEditor from "./VideoEditor.svelte";
+  import { studioMusic } from "./clip-music.ts";
   import {
     editableContainer, editedFileName, webCodecsAvailable, type VideoEditorContext, type VideoEditorResult,
   } from "./video-export.ts";
@@ -11010,6 +11011,13 @@
   // The protocol ceiling on a single file (catcoms-app MAX_FILE_BYTES); the cap the editor uses
   // while this server's own limit has not been read. The native side enforces the real one.
   const VIDEO_EDITOR_FALLBACK_CAP = 1024 * 1024 * 1024;
+  // The clip maker's Music tab: this channel's Studio songs, read and resolved exactly as the
+  // Studio does (clip-music.ts). Only where there is a channel, and an identity to render takes as;
+  // elsewhere the tab offers music files from disk alone. The editor closes on any change of
+  // server or channel (`videoEditorScope`), so a review never reads another channel's songs.
+  const videoEditorMusic = $derived(activeServerId !== null && cur?.active && /^[0-9a-f]{64}$/.test(myIdentity)
+    ? studioMusic({ invoke, listen: (name, handler) => tauriListen(name, handler) }, { server: activeServerId, channel: cur.active }, myIdentity)
+    : null);
   // Bumped by the effect below every time `videoEditorScope` changes; see `embedMedia`.
   let videoScopeEpoch = 0;
   function reviewVideo(file: File, position: ReviewPosition, scope: string, context: VideoEditorContext): Promise<VideoEditorResult> {
@@ -30908,7 +30916,7 @@
          torn down cannot be taken as the next review's (the queue ignores a stale id). -->
     {#each videoEditor ? [videoEditor] : [] as open (open.id)}
       <VideoEditor file={open.file} capBytes={fileSizeLimit?.limit ?? VIDEO_EDITOR_FALLBACK_CAP} position={open.position} context={open.context}
-        passKey={videoEditorPassKey} onfinish={(result) => videoReviews.finish(open.id, result)} />
+        passKey={videoEditorPassKey} music={videoEditorMusic} onfinish={(result) => videoReviews.finish(open.id, result)} />
     {/each}
 
     {#if pixaViewer}

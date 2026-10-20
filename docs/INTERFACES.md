@@ -4181,6 +4181,30 @@ and every drop handler returns early on a drop that carries no files.
 - Mediabunny (MPL-2.0, pinned 1.61.3) is imported dynamically, so it is a separate chunk loaded
   only when an editor opens. See the threat model's pre-upload video editing boundary.
 
+**Clip maker (2026-10-20).** The editor edits a `ClipDoc` (`clip-doc.ts`): `layers[0]` is the
+picked video with its cut list and defines the output timeline; `layers[1..2]` are added videos,
+picture in picture; `overlays` (text in a chat text effect, or a picture) carry keyframes; `audio`
+items are music or sound effects. All times except layer 0's own are OUTPUT time. Media is
+referenced by `source` id into the session's `MediaBin` (`clip-media.ts`; `"base"` is the picked
+file). The host contract is unchanged except for one optional prop and one test seam:
+
+- `music?: ClipMusicSource | null` (`clip-music.ts`): `list()` gives the channel's visible Studio
+  songs `{id, title}`; `load(id)` gives `{take, gridMs}` from `scorePlaybackFromNative`, or rejects
+  with the Studio's own sentence (unresolved conflicts, missing recipe). App builds it with
+  `studioMusic(ipc, {server, channel}, myIdentity)` for the active channel when there is one and an
+  identity; the editor is closed by `videoEditorScope` on any channel change, so a review never
+  reads another channel. Read only when the Music tab opens.
+- `composer?` defaults to `exportClip(doc, media, {capBytes, signal, onProgress, container, name})`
+  (`clip-export.ts`), with the same rejections as `exportEditedVideo`.
+- Outcome rule: `isUntouched(doc)` gives `original`; `!needsCompositor(doc)` (only layer 0's cuts
+  changed) gives `edited` from `exportEditedVideo(file, layers[0].edit)`; anything else gives
+  `edited` from `composer`. `VideoEditorResult` is unchanged.
+- Keys added: R (record motion for the selected overlay), L (library), and Delete removes the
+  selected overlay, sound or layer before it falls back to the piece. Keys typed into the
+  inspector's fields, sliders or the effect list are theirs: no editor shortcut fires.
+- Files dropped on the editor go onto the clip (by type; refused types and over-size files get a
+  footer notice) and never reach the page behind it.
+
 ## 13. Call identity and Flipnote frame claims  *(Gate 5; desktop WebRTC; docs/GATE5-DESIGN.md)*
 
 **Call signal identity (C0d).** `KIND_CALL_SIGNAL`'s wire is unchanged: the sender's Ed25519 key is

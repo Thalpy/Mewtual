@@ -1,5 +1,70 @@
 # Mewtual; Handover
 
+## Clip maker: text, stickers, music, sounds, three videos, recorded motion (2026-10-20)
+
+The pre-upload video editor grew into a small "cartoon maker" (the user's brief: "think Spider-Man
+cartoon maker"), from a mockup the user approved (canvas `JFAFBfH968afztVV6Uu2YV`). Everything in
+the cut-only editor still works the same way; on top of it:
+
+- **Text** in any of the 47 chat text effects (or plain, in six colours), **stickers** (pictures
+  from disk, emoji), up to **three videos** (the clip plus two picture-in-picture clips, each
+  movable, resizable, mutable, with its own volume and order), **music** (this channel's Studio
+  songs, or sound and `.jamtake` files from disk), **sound effects** (12 built-in cartoon sounds, or
+  files). Each sits on a timeline lane (V1 to V3, T, A) and can be moved or trimmed there.
+- **Recorded motion**: R (or the record tool) plays the clip, and dragging the selected text or
+  sticker records its path; dragging it while paused just moves it at that moment. Paths are
+  simplified (`simplifyPath`, 0.4% of the frame) and capped at 900 keys.
+- **One action, no needless re-render**: untouched posts the original bytes; only cut uses the old
+  cut-only exporter; anything added or any sound changed goes through the new compositor.
+- **Discard** asks first whenever anything was cut, added or changed.
+
+Files (all `apps/desktop/src`): the document `clip-doc.ts`; drawing `clip-render.ts` (the stage
+and the export share `drawClipFrame`, so the stage shows the posted clip); the compositor
+`clip-export.ts`; sound `clip-audio.ts` (mix in 20 s segments, stateless soft clip);
+`jam-offline.ts` (Studio takes rendered by the real `JamEngine` through `OfflineAudioContext`
+suspend/resume); `clip-sfx.ts`; `text-fx-raster.ts` (text effects frozen at time t as SVG
+foreignObject data URLs); `clip-media.ts` (the session's media bin and file limits);
+`clip-timeline.ts`, `clip-stage.ts`, `clip-preview.ts` (pure geometry and preview decisions);
+`clip-music.ts` (the Studio song source App passes in as `music`); UI in `VideoEditor.svelte`,
+`ClipLibrary.svelte`, `ClipInspector.svelte`. Small exports were added to `video-export.ts` and
+`studio-playback.ts`, and `video-edit.ts`'s history became generic.
+
+Verification: unit tests for every module above and the editor (jsdom), including the
+compositor's wiring over a fake media library (what it decodes and draws per frame); headless Edge
+runs of all 47 effects (rendered, animated, never tainting the canvas), the offline music render,
+the sound effects' levels, a composed export checked frame by frame and by frequency (MP4 and
+WebM, cancel, cap), the text snapshot under the shipped CSP with Tauri's nonce, and the full UI
+flow through real mouse input (text, emoji, picture, sound, second video, music file, a paused
+drag, a recorded drag, post).
+
+Adversarial review (no blocker), all fixed with regression tests, each confirmed to fail when
+its fix is removed:
+- **High**: a Studio listing that failed (likely in any channel without a Studio index) asked
+  again forever. It is now asked once and offers "try again", and no index means no songs.
+- **Medium**: volume or mute changes cut a sound to a shorter clip for good, and could leave a
+  negative length. Push-to-talk keys could not be typed into the text field during a call. An
+  undo or edit during a recording left a stale overlay position and trail on the stage (undo is
+  now refused while recording). Decoded sizes were unbounded: pictures are now sized from their
+  header first, sounds decoded only as far as the clip needs, and the bin has a 1 GiB budget. The
+  compositor's wiring had no checked-in test.
+- **Low**: song renders stop when the editor answers; a full bin no longer leaves a song stuck;
+  a release anywhere ends a stage drag; items past the clip's end and muted sounds no longer force
+  a re-render, and muting a soundless clip is off; raw parser text no longer reaches the person;
+  reset keeps ids unique; the text picture cache is pruned; the drawn trail is capped.
+- Design notes left as they are: Files, wiki and announcements list the current chat channel's
+  songs; the preview plays through Deafen like the plain video preview always has; adding
+  anything soft-clips the clip's own peaks above about -2 dBFS. Expired songs are no longer
+  offered.
+
+Not explained: in headless Edge, Chromium dropped pointer capture mid-drag on the stage (a bare
+test element keeps it). The stage now ignores a lost capture while the button is down and ends
+on any release, so it does not matter there; it has not been seen with a real mouse.
+
+Known limits: fonts are the sender's own (recipients get pixels). Offline music is the same
+music on every render but not bit-identical (about -140 dB). Composed clips are capped at 10
+minutes and 1920 px. Server stickers and shared Files media are not offered yet: they are other
+people's bytes and need the native CORS change plus their own review first.
+
 ## Readable text on dark accents and member colours (2026-10-19)
 
 User report: a dark custom accent left near-black text on accent buttons (a dark red "EXPORT .WAV").

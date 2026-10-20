@@ -11,6 +11,9 @@ import { readFileSync } from "node:fs";
 import { deferred } from "./studio-testkit.ts";
 import { OutputTooLargeError, ExportCanceledError, type VideoEditorResult, type VideoProbe } from "./video-export.ts";
 import type { VideoEdit } from "./video-edit.ts";
+import type { ClipDoc } from "./clip-doc.ts";
+import type { ClipMedia } from "./clip-export.ts";
+import type { ClipMusicSource } from "./clip-music.ts";
 
 const w = (globalThis as unknown as { window: Window & typeof globalThis }).window;
 Object.assign(globalThis, {
@@ -45,6 +48,8 @@ type Options = {
   passKey?: (e: KeyboardEvent) => boolean;
   probe?: (file: Blob) => Promise<VideoProbe>;
   exporter?: (file: File, edit: VideoEdit, options: { capBytes: number; signal?: AbortSignal; onProgress?: (f: number) => void }) => Promise<File>;
+  composer?: (doc: ClipDoc, media: ClipMedia, options: { capBytes: number; signal?: AbortSignal; container: string; name: string }) => Promise<File>;
+  music?: ClipMusicSource;
   capBytes?: number;
   size?: number;
 };
@@ -54,6 +59,7 @@ async function harness(options: Options = {}) {
   document.body.append(target);
   const results: VideoEditorResult[] = [];
   const exports: Array<{ edit: VideoEdit; capBytes: number; signal?: AbortSignal }> = [];
+  const compositions: Array<{ doc: ClipDoc; media: ClipMedia; container: string; name: string }> = [];
   const stripCalls: number[][] = [];
   const file = new File([new Uint8Array(options.size ?? 2048)], "holiday.mov", { type: "video/quicktime" });
   const app = mount(VideoEditor, {
@@ -74,6 +80,12 @@ async function harness(options: Options = {}) {
         return new File([new Uint8Array(8)], "holiday.mp4", { type: "video/mp4" });
       },
       thumbnails: async (_file: Blob, at: readonly number[]) => { stripCalls.push([...at]); },
+      composer: async (doc: ClipDoc, media: ClipMedia, o: { capBytes: number; signal?: AbortSignal; container: string; name: string }) => {
+        compositions.push({ doc, media, container: o.container, name: o.name });
+        if (options.composer) return options.composer(doc, media, o);
+        return new File([new Uint8Array(8)], "holiday.mp4", { type: "video/mp4" });
+      },
+      ...(options.music ? { music: options.music } : {}),
     },
   });
   await settle();
@@ -87,8 +99,22 @@ async function harness(options: Options = {}) {
   layout();
   const action = (name: string) => target.querySelector<HTMLButtonElement>(`[data-action="${name}"]`);
   return {
-    target, results, exports, stripCalls, file,
+    target, results, exports, compositions, stripCalls, file,
     state: () => card().dataset.state,
+    /** Every bar on the timeline: "overlay:o2", "audio:a3"... */
+    bars: () => [...target.querySelectorAll<HTMLElement>("[data-bar]")].map((b) => b.dataset.bar!),
+    bar: (id: string) => target.querySelector<HTMLElement>(`[data-bar="${id}"]`),
+    inspector: () => target.querySelector<HTMLElement>("[data-inspector]")?.dataset.inspector ?? "",
+    field: <T extends HTMLElement = HTMLInputElement>(name: string) => target.querySelector<T>(`[data-field="${name}"]`),
+    /** Type into a field the way a person does: value, then an input event. Keys go through the editor. */
+    type: (el: HTMLInputElement, text: string) => {
+      for (const ch of text) {
+        el.dispatchEvent(new w.KeyboardEvent("keydown", { key: ch, bubbles: true, cancelable: true }));
+        el.value += ch;
+        el.dispatchEvent(new w.Event("input", { bubbles: true }));
+      }
+      flushSync();
+    },
     action,
     click: (name: string) => { const b = action(name); assert.ok(b, `no ${name} button`); b.click(); flushSync(); },
     key: (key: string, init: KeyboardEventInit = {}) => {
@@ -168,7 +194,9 @@ test("split at the playhead, remove the piece under it, and export only the kept
     assert.deepEqual(h.pieces(), [false, false]);
     h.key("Delete");
     assert.deepEqual(h.pieces(), [false, true], "the piece under the playhead was removed");
-    assert.match(h.chip(), /keeps 0:03\.0 of 0:10\.0 · 1 removed/);
+    // No "·"-chained fragments in the chip: how many pieces are out is its tooltip.
+    assert.equal(h.chip(), "keeps 0:03.0 of 0:10.0");
+    assert.equal(h.target.querySelector<HTMLElement>(".foot .ve-chip")!.title, "1 piece removed");
     h.click("upload");
     await settle();
     assert.equal(h.exports.length, 1);
@@ -576,7 +604,7 @@ test("the Keybinds page lists every key the editor handles", async () => {
   // second Delete) are deliberately not listed.
   const shown: Record<string, string> = {
     " ": "Space", Escape: "Esc", ArrowLeft: "←", ArrowRight: "→", Home: "Home", End: "End", Delete: "Delete",
-    Enter: "Ctrl+Enter", b: "B", s: "S", i: "I", o: "O", m: "M", z: "Ctrl+Z", y: "Ctrl+Y",
+    Enter: "Ctrl+Enter", b: "B", s: "S", i: "I", o: "O", m: "M", z: "Ctrl+Z", y: "Ctrl+Y", r: "R", l: "L",
   };
   const unlisted = new Set(["Tab", "Backspace"]);
   for (const key of handled) {
@@ -640,4 +668,267 @@ test("the modal keeps its keys from the app's window-level shortcuts behind it",
     w.removeEventListener("keydown", listener);
     await h.destroy();
   }
+});
+
+// --- The clip maker ----------------------------------------------------------------------------------
+
+test("text added from the library is selected, ready to type over, and makes the clip a composition", async () => {
+  const h = await harness({ context: "chat" });
+  try {
+    h.target.querySelector<HTMLButtonElement>('[data-add-text="wave"]')!.click();
+    await settle();
+    assert.deepEqual(h.bars(), ["overlay:o2"]);
+    assert.equal(h.inspector(), "overlay");
+    assert.equal(document.activeElement, h.field("text"), "the new words have focus");
+    h.click("upload");
+    await settle();
+    assert.equal(h.exports.length, 0, "not the cut-only exporter: every frame needs drawing");
+    assert.equal(h.compositions.length, 1);
+    const [c] = h.compositions;
+    assert.deepEqual(c.doc.overlays.map((o) => o.content.kind === "text" && o.content.effect), ["wave"]);
+    assert.equal(c.container, "mp4", "a .mov is written as MP4");
+    assert.equal(c.name, "holiday.mov");
+    assert.ok(c.media.video("base"), "the compositor can read the clip itself");
+    assert.equal(h.results.length, 1);
+    assert.equal(h.results[0].kind === "edited" && h.results[0].post, true);
+  } finally { await h.destroy(); }
+});
+
+test("keys typed into the text field are words, not shortcuts, and one typed word is one undo step", async () => {
+  const h = await harness();
+  try {
+    h.target.querySelector<HTMLButtonElement>('[data-add-text="plain"]')!.click();
+    await settle();
+    const field = h.field("text")!;
+    field.value = "";
+    h.type(field, "sob!");
+    field.dispatchEvent(new w.Event("change", { bubbles: true }));
+    flushSync();
+    assert.equal(h.cuts(), 0, "typing an s did not split the clip");
+    assert.deepEqual(h.pieces(), [false], "nor did anything else typed change the cut");
+    assert.equal(h.bar("overlay:o2")!.title, "sob!");
+    h.key("z", { ctrlKey: true });
+    assert.equal(h.bar("overlay:o2")!.title, "Hello!", "the whole word undoes at once");
+    h.key("z", { ctrlKey: true });
+    assert.deepEqual(h.bars(), [], "and then the text itself");
+  } finally { await h.destroy(); }
+});
+
+test("Escape in the text field hands keys back to the editor; Escape again deselects before it would close", async () => {
+  const h = await harness();
+  try {
+    h.target.querySelector<HTMLButtonElement>('[data-add-text="plain"]')!.click();
+    await settle();
+    h.field("text")!.dispatchEvent(new w.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    flushSync();
+    assert.equal(document.activeElement, h.target.querySelector('[role="dialog"]'));
+    assert.equal(h.inspector(), "overlay", "still selected");
+    h.key("Escape");
+    assert.equal(h.inspector(), "base", "deselected");
+    assert.equal(h.results.length, 0, "nothing closed");
+    h.key("Escape");
+    assert.ok(h.action("discard"), "only now does leaving ask about the work");
+  } finally { await h.destroy(); }
+});
+
+test("Delete removes the selected text, not the piece under the playhead", async () => {
+  const h = await harness();
+  try {
+    h.target.querySelector<HTMLButtonElement>('[data-add-text="plain"]')!.click();
+    await settle();
+    h.key("Escape"); // leave the text field; the text stays selected
+    h.pointer("pointerdown", 10, h.bar("overlay:o2"));
+    h.pointer("pointerup", 10, h.bar("overlay:o2"));
+    assert.equal(h.inspector(), "overlay");
+    h.key("Delete");
+    assert.deepEqual(h.bars(), []);
+    assert.deepEqual(h.pieces(), [false], "the clip itself was not touched");
+    h.key("Delete");
+    assert.deepEqual(h.pieces(), [true], "with nothing selected, Delete is the piece again");
+  } finally { await h.destroy(); }
+});
+
+test("dragging a bar moves its text in one undo step, and dragging an end trims it", async () => {
+  const h = await harness();
+  try {
+    h.target.querySelector<HTMLButtonElement>('[data-add-text="plain"]')!.click();
+    await settle();
+    h.key("Escape");
+    const bar = () => h.bar("overlay:o2")!;
+    assert.equal(bar().style.left, "0%");
+    h.pointer("pointerdown", 50, bar());
+    for (const x of [100, 150, 250]) h.pointer("pointermove", x);
+    h.pointer("pointerup", 250);
+    assert.equal(bar().style.left, "20%", "moved by 2 s");
+    assert.equal(bar().style.width, "30%", "and still 3 s long");
+    h.key("z", { ctrlKey: true });
+    assert.equal(bar().style.left, "0%", "the whole drag undid at once");
+    h.pointer("pointerdown", 300, bar().querySelector('[data-edge="end"]'));
+    h.pointer("pointermove", 100);
+    h.pointer("pointerup", 100);
+    assert.equal(bar().style.width, "10%", "the end came in to 1 s");
+  } finally { await h.destroy(); }
+});
+
+test("record mode needs something selected, and locks cutting and posting until it stops", async () => {
+  const h = await harness();
+  try {
+    assert.equal(h.action("record")!.disabled, true, "nothing to animate yet");
+    h.key("r");
+    assert.equal(h.target.querySelector(".rec-chip"), null);
+    h.target.querySelector<HTMLButtonElement>('[data-add-text="plain"]')!.click();
+    await settle();
+    // Escape in the text field, as a person would: keys come back to the editor, the text stays selected.
+    h.field("text")!.dispatchEvent(new w.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    flushSync();
+    h.key("r");
+    assert.ok(h.target.querySelector(".rec-chip"), "recording");
+    assert.equal(h.action("split")!.disabled, true);
+    assert.equal(h.action("upload")!.disabled, true);
+    assert.equal(h.action("upload")!.title, "Stop recording first");
+    h.key("Escape");
+    assert.equal(h.target.querySelector(".rec-chip"), null, "Escape stops recording first");
+    assert.equal(h.action("upload")!.disabled, false);
+    assert.equal(h.results.length, 0);
+  } finally { await h.destroy(); }
+});
+
+test("muting the clip's own sound re-renders it; muting and unmuting again posts the original", async () => {
+  const muted = await harness();
+  try {
+    muted.click("mute-v1");
+    muted.click("upload");
+    await settle();
+    assert.equal(muted.compositions.length, 1);
+    assert.equal(muted.compositions[0].doc.layers[0].muted, true);
+  } finally { await muted.destroy(); }
+
+  const back = await harness();
+  try {
+    back.click("mute-v1");
+    back.click("mute-v1");
+    back.click("upload");
+    assert.deepEqual(back.results, [{ kind: "original" }], "nothing changed after all: no re-render");
+    assert.equal(back.compositions.length + back.exports.length, 0);
+  } finally { await back.destroy(); }
+});
+
+test("the Music tab lists the channel's Studio songs and shows a song's refusal in its own words", async () => {
+  let listed = 0;
+  const music: ClipMusicSource = {
+    list: async () => { listed++; return [{ id: "s1", title: "Night Drive" }]; },
+    load: async () => { throw new Error("resolve score conflicts before playback/export"); },
+  };
+  const h = await harness({ music });
+  try {
+    assert.equal(listed, 0, "nothing is read until the tab is opened");
+    h.target.querySelector<HTMLButtonElement>('[data-tab="music"]')!.click();
+    await settle();
+    assert.equal(listed, 1);
+    const lib = () => h.target.querySelector(".lib")!.textContent ?? "";
+    assert.match(lib(), /Night Drive/);
+    h.target.querySelector<HTMLButtonElement>('[data-add-song="s1"]')!.click();
+    await settle();
+    assert.match(lib(), /Resolve score conflicts before playback\/export/);
+    assert.deepEqual(h.bars(), [], "a song that cannot play as written is not added as something else");
+  } finally { await h.destroy(); }
+});
+
+test("undo is refused while recording, and an edit mid-recording drops the live drag and its trail", async () => {
+  // Found in review: Ctrl+Z (or Delete) during a recording drag left the overlay drawn where the
+  // pointer had been, at every time, and the red trail on screen.
+  const h = await harness();
+  try {
+    h.target.querySelector<HTMLButtonElement>('[data-add-text="plain"]')!.click();
+    await settle();
+    h.field("text")!.dispatchEvent(new w.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    flushSync();
+    h.key("r");
+    const stage = h.target.querySelector<HTMLElement>(".ve-stage")!;
+    stage.dispatchEvent(new w.MouseEvent("pointerdown", { button: 0, buttons: 1, bubbles: true, cancelable: true }));
+    flushSync();
+    assert.ok(h.target.querySelector(".trail"), "recording: the trail shows");
+    h.key("z", { ctrlKey: true });
+    assert.deepEqual(h.bars(), ["overlay:o2"], "Ctrl+Z did nothing while recording");
+    assert.ok(h.target.querySelector(".trail"), "and the recording carries on");
+    h.key("Delete");
+    assert.deepEqual(h.bars(), []);
+    assert.equal(h.target.querySelector(".trail"), null, "the drag and its trail went with the edit");
+    w.dispatchEvent(new w.MouseEvent("pointerup", { bubbles: true }));
+    flushSync();
+    assert.equal(h.results.length, 0);
+  } finally { await h.destroy(); }
+});
+
+test("a release anywhere ends a stage drag, even one the stage never hears", async () => {
+  const h = await harness();
+  try {
+    h.target.querySelector<HTMLButtonElement>('[data-add-text="plain"]')!.click();
+    await settle();
+    h.field("text")!.dispatchEvent(new w.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    flushSync();
+    h.key("r");
+    h.target.querySelector(".ve-stage")!.dispatchEvent(new w.MouseEvent("pointerdown", { button: 0, buttons: 1, bubbles: true, cancelable: true }));
+    flushSync();
+    assert.ok(h.target.querySelector(".trail"));
+    // Capture was lost (Chromium does this on its own sometimes), so the release lands elsewhere.
+    document.body.dispatchEvent(new w.MouseEvent("pointerup", { bubbles: true }));
+    flushSync();
+    assert.equal(h.target.querySelector(".trail"), null, "the drag ended");
+  } finally { await h.destroy(); }
+});
+
+test("a passed push-to-talk key still types into the text field", async () => {
+  // Found in review: with push-to-talk on Space (or V), the editor prevented the key everywhere,
+  // so a text overlay could not hold a space (or a v) during a call.
+  const h = await harness({ passKey: (e) => e.code === "Space" || e.code === "KeyV" });
+  try {
+    h.target.querySelector<HTMLButtonElement>('[data-add-text="plain"]')!.click();
+    await settle();
+    for (const [key, code] of [[" ", "Space"], ["v", "KeyV"]]) {
+      const typed = new w.KeyboardEvent("keydown", { key, code, bubbles: true, cancelable: true });
+      h.field("text")!.dispatchEvent(typed);
+      assert.equal(typed.defaultPrevented, false, `${code} types in the field`);
+    }
+    const onButton = new w.KeyboardEvent("keydown", { key: " ", code: "Space", bubbles: true, cancelable: true });
+    h.action("remove")!.dispatchEvent(onButton);
+    assert.equal(onButton.defaultPrevented, true, "but still cannot press a focused button");
+  } finally { await h.destroy(); }
+});
+
+test("a song list that cannot be read is asked once, then waits for the person to try again", async () => {
+  // Found in review: a failing list reset the tab to "not asked", and the tab asked again at once,
+  // forever (29 calls in 300 ms against a fast failure).
+  let calls = 0;
+  const music: ClipMusicSource = { list: async () => { calls++; throw new Error("studio is not ready"); }, load: async () => ({ take: null, gridMs: 0 }) };
+  const h = await harness({ music });
+  try {
+    h.target.querySelector<HTMLButtonElement>('[data-tab="music"]')!.click();
+    for (let i = 0; i < 5; i++) await settle();
+    assert.equal(calls, 1, "asked exactly once");
+    assert.match(h.target.querySelector(".lib")!.textContent ?? "", /Studio is not ready/);
+    h.click("retry-songs");
+    for (let i = 0; i < 3; i++) await settle();
+    assert.equal(calls, 2, "and again only when asked");
+  } finally { await h.destroy(); }
+
+  const empty = await harness({ music: { list: async () => [], load: async () => ({ take: null, gridMs: 0 }) } });
+  try {
+    empty.target.querySelector<HTMLButtonElement>('[data-tab="music"]')!.click();
+    await settle();
+    assert.match(empty.target.querySelector(".lib")!.textContent ?? "", /none yet/, "an empty Studio says so, it is not loading forever");
+  } finally { await empty.destroy(); }
+});
+
+test("a dropped file that cannot go on a clip is refused in the footer, and the drop stays in the editor", async () => {
+  const h = await harness();
+  try {
+    const drop = new w.Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", { value: { types: ["Files"], files: [new File(["x"], "notes.txt", { type: "text/plain" })] } });
+    h.target.querySelector('[role="dialog"]')!.dispatchEvent(drop);
+    await settle();
+    assert.equal(drop.defaultPrevented, true, "the page behind never sees it as a navigation or an attachment");
+    assert.match(h.target.querySelector(".foot .notice")?.textContent ?? "", /can't go on a clip/);
+    assert.deepEqual(h.bars(), []);
+  } finally { await h.destroy(); }
 });
