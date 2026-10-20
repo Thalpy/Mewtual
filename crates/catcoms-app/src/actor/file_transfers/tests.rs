@@ -10,6 +10,8 @@ use catcoms_rt::{
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+mod bridge;
+
 /// These manually driven unit owners share production limits within each test, not with
 /// unrelated parallel tests in this executable. Actual actor/transport integration retains the
 /// process-global pool; capacity/retirement regressions below also choose explicit private pools.
@@ -212,6 +214,38 @@ struct Pair {
     gate: Arc<Semaphore>,
     entered: mpsc::UnboundedReceiver<RequestCancellation>,
     clock: ManualClock,
+    clock_hook: ClockHook,
+}
+
+type ClockHook = Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>;
+/// One-shot native retirement on a real validation time sample, after CPU work has completed.
+/// This tests ordering at the Clock seam without wall time, sleeping or a second executor.
+struct ValidationClock {
+    inner: ManualClock,
+    hook: ClockHook,
+}
+impl std::fmt::Debug for ValidationClock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ValidationClock { .. }")
+    }
+}
+impl catcoms_rt::Clock for ValidationClock {
+    fn now_ms(&self) -> u64 {
+        self.inner.now_ms()
+    }
+    fn monotonic_ms(&self) -> u64 {
+        let hook = self.hook.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        self.inner.monotonic_ms()
+    }
+    fn sleep(
+        &self,
+        duration: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        self.inner.sleep(duration)
+    }
 }
 
 async fn pair() -> Pair {
@@ -219,8 +253,13 @@ async fn pair() -> Pair {
 }
 
 async fn pair_inner() -> Pair {
+    pair_with_data(b"a file that must not pin the actor".to_vec()).await
+}
+
+async fn pair_with_data(data: Vec<u8>) -> Pair {
     let hub = Hub::new();
     let clock = ManualClock::new(1_000);
+    let clock_hook: ClockHook = Arc::new(std::sync::Mutex::new(None));
     let gate = Arc::new(Semaphore::new(0));
     let (entered, received) = mpsc::unbounded_channel();
     let holder_peer = PeerId::from_u64(1);
@@ -234,7 +273,6 @@ async fn pair_inner() -> Pair {
     .unwrap();
     holder.subscribe_control().await.unwrap();
     holder.open_files().await.unwrap();
-    let data = b"a file that must not pin the actor".to_vec();
     let cid = holder
         .add_file("test.bin", "application/octet-stream", "", &data)
         .await
@@ -253,7 +291,10 @@ async fn pair_inner() -> Pair {
             },
             MlsDevice::generate().unwrap(),
             ChaCha20Rng::seed_from_u64(2),
-            Box::new(clock.clone()),
+            Box::new(ValidationClock {
+                inner: clock.clone(),
+                hook: clock_hook.clone(),
+            }),
             "bob",
             holder_peer,
             &invite,
@@ -282,6 +323,7 @@ async fn pair_inner() -> Pair {
         gate,
         entered: received,
         clock,
+        clock_hook,
     }
 }
 
@@ -776,6 +818,58 @@ async fn range_limit_is_checked_before_any_network_request() {
 }
 
 #[tokio::test]
+async fn accepted_crossing_range_chunk_renews_quiet_deadline_before_fetching_the_next_chunk() {
+    let data: Vec<_> = (0..CHUNK_BYTES + 64).map(|i| (i % 223) as u8).collect();
+    let Pair {
+        mut requester,
+        holder,
+        cid,
+        mut entered,
+        gate,
+        clock,
+        ..
+    } = bounded(pair_with_data(data.clone())).await;
+    let manifest = FileManifest::decode_or_legacy(&requester.files()[0].file_ref).unwrap();
+    assert_eq!(manifest.chunks.len(), 2);
+    let first = manifest.chunks[0].ciphertext_cid;
+    requester
+        .sync
+        .put_blob(&holder.sync.get_blob(&first).unwrap())
+        .unwrap();
+    let version = requester.file_head(&cid).unwrap().manifest_version;
+    let (source, _events, source_task) = spawn(holder);
+    let mut transfers = isolated_transfers();
+    let old_deadline = clock.monotonic_ms() + READ_MS;
+    let at_accept = clock.clone();
+    transfers.before_storage_admission = Some(Box::new(move || {
+        at_accept.set_ms(old_deadline - 1);
+    }));
+    let start = CHUNK_BYTES - 16;
+    let (reply, result) = oneshot::channel();
+    transfers.range_cancellable(
+        &mut requester,
+        cid.as_bytes().to_vec(),
+        version,
+        start as u64,
+        32,
+        None,
+        reply,
+    );
+    let attempt = bounded(entered.recv()).await.unwrap();
+    clock.set_ms(old_deadline + 1);
+    gate.add_permits(1);
+    let completed = bounded(transfers.next()).await.unwrap();
+    transfers.complete(&mut requester, completed);
+    assert_eq!(
+        bounded(result).await.unwrap().unwrap().bytes,
+        data[start..start + 32]
+    );
+    drop(attempt);
+    source.shutdown().await;
+    bounded(source_task).await.unwrap();
+}
+
+#[tokio::test]
 async fn kept_request_windows_charge_the_actual_tail_and_legacy_frame() {
     let Pair { requester, cid, .. } = pair().await;
     let manifest = FileManifest::decode_or_legacy(&requester.files()[0].file_ref).unwrap();
@@ -1024,12 +1118,15 @@ async fn kept_signed_oversized_chunk_is_rejected_before_staging_or_progress() {
 async fn cancelled_or_timed_out_requests_hold_capacity_until_transport_retirement() {
     let Pair {
         mut requester,
-        holder: _holder,
+        holder,
         cid,
+        data,
+        gate,
         mut entered,
         clock,
         ..
     } = pair().await;
+    let (source, _events, source_task) = spawn(holder);
     // A per-test process pool avoids cross-test timing changing this capacity assertion.
     let mut transfers = FileTransfers {
         lifetime: watch::channel(true).0,
@@ -1043,7 +1140,7 @@ async fn cancelled_or_timed_out_requests_hold_capacity_until_transport_retiremen
         automatic_after: None,
         before_storage_admission: None,
     };
-    let (reply, result) = oneshot::channel();
+    let (reply, mut result) = oneshot::channel();
     transfers.chunk(&mut requester, cid.as_bytes().to_vec(), 0, None, reply);
     let attempt = bounded(entered.recv()).await.unwrap();
     clock.advance_ms(ATTEMPT_MS);
@@ -1058,21 +1155,36 @@ async fn cancelled_or_timed_out_requests_hold_capacity_until_transport_retiremen
         0,
         "lower ownership has not retired"
     );
-    // Drive the paused round. The permit is still held by the unretired request, so the retry
-    // is refused for capacity, which is what finally fails the read.
+    // Transient local pressure must keep the admitted read alive. It cannot borrow/refund the
+    // old request's permit, spend another provider attempt, or replace the selected candidate.
     let resumed = resume_paused(&mut transfers, &clock, ROUND_BACKOFF_MS).await;
     transfers.complete(&mut requester, resumed);
-    assert!(bounded(result).await.unwrap().is_err());
+    assert!(matches!(
+        result.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert_eq!(
+        transfers.running.len(),
+        1,
+        "one bounded parked job, no busy loop"
+    );
     assert_eq!(
         transfers.slots.available_permits(),
         0,
         "a refused retry must not refund the live request's permit"
     );
-    let (reply, result) = oneshot::channel();
-    transfers.chunk(&mut requester, cid.as_bytes().to_vec(), 0, None, reply);
-    assert!(bounded(result).await.unwrap().unwrap_err().contains("busy"));
     drop(attempt);
     assert_eq!(transfers.slots.available_permits(), 1);
+    gate.add_permits(1);
+    let resumed = resume_paused(&mut transfers, &clock, BUSY_PEER_BACKOFF_MS).await;
+    transfers.complete(&mut requester, resumed);
+    drop(bounded(entered.recv()).await.unwrap());
+    let completed = bounded(transfers.next()).await.unwrap();
+    transfers.complete(&mut requester, completed);
+    assert_eq!(bounded(result).await.unwrap().unwrap().0, data);
+    assert_eq!(transfers.slots.available_permits(), 1);
+    source.shutdown().await;
+    bounded(source_task).await.unwrap();
 }
 
 fn attach_kept<T: MeshTransport>(server: &mut Server<T, ChaCha20Rng>, root: &std::path::Path) {
@@ -2706,13 +2818,23 @@ async fn queued_media_range_keeps_original_invocation_across_cancelled_freeze() 
 
 #[tokio::test]
 async fn native_retirement_after_real_aead_refuses_storage_and_bad_verdicts_in_both_paths() {
-    for (local, bad_key) in [(false, false), (true, false), (false, true), (true, true)] {
+    for (local, bad_key, at_clock) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (true, true, false),
+        (false, false, true),
+        (true, false, true),
+        (false, true, true),
+        (true, true, true),
+    ] {
         let Pair {
             mut requester,
             holder,
             cid,
             gate,
             entered: _entered,
+            clock_hook,
             ..
         } = pair().await;
         if bad_key {
@@ -2734,7 +2856,15 @@ async fn native_retirement_after_real_aead_refuses_storage_and_bad_verdicts_in_b
         let (original, receiver) = watch::channel(false);
         let mut transfers = isolated_transfers();
         transfers.before_storage_admission = Some(Box::new(move || {
-            original.send_replace(true);
+            if at_clock {
+                // Arm after actual AEAD; validate_keep_work's NEXT sample retires the caller.
+                // Checking only before that validation used to admit storage/bad-key effects.
+                *clock_hook.lock().unwrap() = Some(Box::new(move || {
+                    original.send_replace(true);
+                }));
+            } else {
+                original.send_replace(true);
+            }
         }));
         let (reply, mut result) = oneshot::channel();
         transfers.keep(
@@ -2752,7 +2882,7 @@ async fn native_retirement_after_real_aead_refuses_storage_and_bad_verdicts_in_b
         }).await;
         assert!(
             error.contains("cancelled"),
-            "path local={local}, bad_key={bad_key}: {error}"
+            "path local={local}, bad_key={bad_key}, at_clock={at_clock}: {error}"
         );
         assert!(
             transfers.before_storage_admission.is_none(),

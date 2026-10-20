@@ -290,9 +290,9 @@ fn source_three_total_submissions_mix_direct_and_two_helpers_without_refill() {
     assert_eq!(
         f.source
             .complete(direct.finish(Some(crate::VoiceTransportStatus::EndpointAdmitted)))
-            .err(),
-        Some(VoiceError::Reservation),
-        "late old direct ACK cannot replace selected helper flight"
+            .unwrap(),
+        SourceOutcome::EndpointAdmitted,
+        "a valid delayed target ACK still confirms the original immutable packet"
     );
     assert_eq!(
         f.source
@@ -304,7 +304,7 @@ fn source_three_total_submissions_mix_direct_and_two_helpers_without_refill() {
         f.source
             .complete(second.finish(Some(crate::VoiceTransportStatus::HelperQueued)))
             .unwrap(),
-        SourceOutcome::Unconfirmed
+        SourceOutcome::EndpointAdmitted
     );
     assert_eq!(f.source.counts(), (1, 3, 0));
 }

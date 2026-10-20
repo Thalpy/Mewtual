@@ -128,9 +128,10 @@ async fn persist_with_proofs(
         .filter(|entry| entry.instance == instance)
         .and_then(|entry| entry.mesh.as_ref().map(MeshHandle::local_peer))
         .ok_or_else(|| "group changed during reconnect finalization".to_string())?;
-    // A close can race the post-admission worker before either side pulled a descriptor. Give
-    // this already-proven outbound direction two bounded connected-only opportunities. This
-    // also lets an actor leave an earlier reciprocal catch-up wait before the second request.
+    // A restored remote has forgotten our bilateral proof even if we retained its historical
+    // identity binding. Core work selection also includes known INBOUND-only connections; only
+    // listener-hint persistence below requires actual successful outbound Noise dial evidence.
+    // Repair uses the existing bounded connected-only scheduler, independently of PEX backoff.
     let targets = finalization_targets(&evidence, &candidates);
     let work = if acquire_proofs {
         actor
@@ -144,16 +145,32 @@ async fn persist_with_proofs(
         // outside the actor on one deterministic side, where it can serve the other's request.
         if local > peer {
             SystemClock.sleep(Duration::from_millis(250)).await;
-            if actor.finalized_member_peers().await?.contains(&peer) {
+            if actor
+                .member_finalization_ready_peers()
+                .await?
+                .contains(&peer)
+            {
                 continue;
             }
         }
         for attempt in 0..2 {
-            if attempt == 1 && local > peer {
-                // A slow network can exceed the initial stagger. Leave this actor available
-                // for the opposite request's entire two-second deadline before retrying.
-                SystemClock.sleep(Duration::from_millis(2_250)).await;
-                if actor.finalized_member_peers().await?.contains(&peer) {
+            if attempt == 1 {
+                // The server spaces kind26 replies by one second per member. Even a fast
+                // empty reply must not burn both tries inside that same interval. The larger
+                // deterministic-side stagger also leaves the opposite request's two-second
+                // deadline available; waiting stays outside the sole actor loop.
+                SystemClock
+                    .sleep(Duration::from_millis(if local > peer {
+                        2_250
+                    } else {
+                        1_000
+                    }))
+                    .await;
+                if actor
+                    .member_finalization_ready_peers()
+                    .await?
+                    .contains(&peer)
+                {
                     break;
                 }
             }

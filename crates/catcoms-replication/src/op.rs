@@ -119,6 +119,10 @@ mod domain_framing_tests {
 }
 
 /// A CRDT delta authored and inner-signed by one device.
+///
+/// A legacy v1 signature binds type/id/key/change bytes, not the originating MLS group or
+/// authored epoch. Re-encryption by a current member does not prove historical group tenure;
+/// callers must not present this envelope alone as a group-scoped moderation audit proof.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SignedOp {
     /// Which kind of document this op belongs to.

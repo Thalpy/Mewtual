@@ -15,6 +15,9 @@ pub(super) struct Trace {
     pub connected_submissions: BTreeMap<(usize, usize, u8), (usize, bool, String)>,
     /// Bounded by the six fixture identities; contains no routes, identity seeds or payloads.
     pub peer_dials: BTreeMap<(usize, usize), (usize, String)>,
+    /// Driver-confirmed local dial attempts, excluding suppressed batches/errors. This is
+    /// neither a connection nor a remote delivery receipt. At most six fixture identities.
+    pub submitted_peer_dials: BTreeMap<(usize, usize), usize>,
     pub completed_requests: BTreeSet<(usize, usize)>,
     /// Actual recovery notifications observed at the receiver's transport. Endpoint admission
     /// is checked separately through authenticated indirect-route evidence, never this counter.
@@ -342,6 +345,15 @@ impl MeshTransport for Transport {
     ) -> Result<Vec<DialSubmission>, TransportError> {
         let outcome = MeshTransport::dial_peer_permits(&self.inner, peer, permits).await;
         let mut trace = self.rules.trace.lock().unwrap();
+        if outcome
+            .as_ref()
+            .is_ok_and(|outcomes| outcomes.contains(&DialSubmission::Submitted))
+        {
+            *trace
+                .submitted_peer_dials
+                .entry((self.index, self.rules.index(peer)))
+                .or_default() += 1;
+        }
         let entry = trace
             .peer_dials
             .entry((self.index, self.rules.index(peer)))

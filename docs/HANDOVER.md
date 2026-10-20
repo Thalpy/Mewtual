@@ -1,6 +1,193 @@
 # Mewtual; Handover
 
-## Combined validated checkpoint and recovery priority (2026-10-20)
+## Where to resume (2026-10-20)
+
+**The communication programme is not finished.** This validated continuation belongs to
+`chat-update-implementation` (PR48 targets `Gate7`), following checkpoint `202c17f1`.
+It was developed in `M:\Git (local)\CatComs\target\communication-atomic-intake-worktree`;
+the branch checkout is `M:\Git (local)\CatComs\target\communication-review-worktree`.
+Complete application validation now passes: root 3,073, native 430+5 and frontend 2,067,
+with the remaining protocol and physical acceptance limits below kept explicit.
+
+The main checkout, `M:\Git (local)\CatComs`, remains on `Gate7` and contains
+separate UI/clip-editor work. Preserve that work and continue the communication fixes here.
+These are real Git worktrees inside `target/`: do not delete or clean that directory to reclaim
+build space. Logs below are local ignored files under this checkout's `target/`, unless a
+different checkout is named. Do not run duplicate full Cargo suites against a shared target.
+
+The user prioritizes useful recovery through delayed, duplicated/reordered messages and changing
+bridges. Recover quietly where possible, preserving original membership, authorization, deadlines
+and spent work. Prefer automatic recovery over unnecessary error prompts for valid network churn.
+
+Next steps, in order:
+
+1. Continue the user's chat-history investigation with automatic multi-bubble recovery acceptance,
+   comparing original signed-operation unions as well as rendered rows. Before claiming hostile-
+   member or moderator-audit correctness, design/review a versioned typed-message contract with
+   group/historical authorization and a writer-incarnation/equivocation rule. The documented
+   legacy limitations cannot safely be fixed by timestamp ordering or current-roster filtering.
+2. Continue live V2 implementation using
+   [VOICE-NATIVE-RESULTS-NEXT](communication-recovery/VOICE-NATIVE-RESULTS-NEXT.md).
+   The next scoped consumer is protected high-side `ConfirmHello`; token/origin transactions and
+   browser derivation are prerequisites already built, not a working call path. Complete the
+   protected confirmation/SDP consumers, production native/browser IPC and RTC dispatch, compatible
+   helper selection and legacy/V2 session isolation before enabling V2. Keep unsupported roles
+   refused until their actual consumers exist.
+3. Implement and validate the member media relay and combined recovery/rollout scenarios in
+   [CHAT-FILES-VOICE-PLAN](communication-recovery/CHAT-FILES-VOICE-PLAN.md).
+   Only one physical desktop is available; independent native audio and separate-network
+   acceptance remain open, rather than being inferred from loopback or mocked RTC tests.
+
+File bridging and saved private Download resume are implemented. Resume retains verified encrypted
+acquisition progress and its execution allowance; external export chooses a fresh destination.
+Appending to an existing partly written external plaintext file is not implemented. Do not equate
+these two behaviors when describing completion.
+
+The standalone IPC feasibility probe passes its recorded functional checks, but its separate
+dependency audit still fails on the pinned Tauri maintenance/quick-xml/plist advisories. Passing
+root `cargo deny` does not clear that separate failure. No dependency exemption was added.
+The [acceptance ledger](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md) records the evidence.
+
+## Chat history adversarial checkpoint (2026-10-20)
+
+The latest user request is to explain/test additive chat history across MLS epochs, disconnected
+20–50-member activity bubbles, edits and deletions, and possible moderator audit. See
+[CHAT-HISTORY-CONVERGENCE](communication-recovery/CHAT-HISTORY-CONVERGENCE.md) for the trace,
+fixes, audit design constraints and explicit remaining security limits. The implementation and
+tests in this checkpoint are validated; broader chat acceptance, live V2 and media relay remain open.
+
+The first application run found six failures out of seven tests. The lookup correction then
+passed all 12 expanded cases in 4.63s (`chat-history-adversarial-after-1.log`), including actual
+Server edit/delete/op counts, 20/50 first writers, reordered duplicates, causal edit/delete
+conflicts and ten MLS epoch advances followed by author removal and orphan-save/reopen.
+The final focused application rerun passes all 15 cases in 3.54s
+(`chat-history-adversarial-after-2.log`), including malformed-root/ID cases, actual reaction/pin
+assertions and independent deletions with an unrelated addition. The writer-boundary suite passes
+four cases in 0.17s (`chat-history-writer-boundaries-after-1.log`); two explicitly demonstrate
+remaining legacy limitations. All 14 replication document cases pass in 61.35s
+(`chat-history-replication-doc-after-2.log`), and all four paging cases pass in 143.46s
+(`chat-history-pages-after-1.log`). These are semantic/crypto tests, not 50 physical peers or
+automatic ten-epoch network acceptance.
+
+A separate real-signed writer probe failed as expected before the fix: forged modern actor-first
+was accepted (`chat-history-writer-boundaries-before-2.log`, 3 pass/1 fail). A signed-page probe
+also failed before the fix because cursor 7 advanced to 10 despite an unprocessed tail
+(`chat-history-rejected-page-before-2.log`, 0 pass/1 fail). The fixes bind modern 32-byte actors to
+verified signers, preserve old actor-length compatibility, defer cursor/completion publication
+until import success, and retain verified-prefix recovery before propagating a later error.
+The broader replication run exposed old synthetic-actor fixtures incompatible with the new
+admission rule; their sibling graphs now use real independent signers with unchanged assertions.
+That already-failed broad run was stopped during unrelated Studio checks; it is not counted as
+a complete result. The subsequent document-only run initially passed 12/14; the two remaining
+provider fixtures were corrected to sign with their actual writer identities, then all 14 pass.
+
+First frontend run: 2,067 pass in 77.36s (`chat-history-frontend-full.log`). Root formatting, ambient
+gate, whitespace and root deny pass. The first root Clippy attempt selected stale shared metadata
+and could not see the new ActorMismatch variant. First-party fingerprint directories only were
+preserved under `target/chat-history-old-root-fingerprints` and invalidated to rebuild the exact
+current workspace; no target tree, app data or third-party cache was deleted. Its strict Clippy
+rerun passes in 2m51s (`chat-history-root-clippy-2.log`). The equivalent native first-party
+fingerprints are preserved in `target/chat-history-old-native-fingerprints`; native check passes
+in 1m28s and the debug build in 4m33s (`chat-history-native-check.log`,
+`chat-history-native-build.log`). Actual startup passes with its original 20-second deadline
+(`chat-history-native-startup.log`), and all ten rendered browser flows pass
+(`chat-history-frontend-flows.log`). Local ignored dependency/target junctions point this worktree
+at the existing frontend dependencies and native build output; startup tested that rebuilt binary.
+The first complete-root command stopped after the application binary: 1,199 passed, one failed,
+22 ignored, 4,432.38s (`chat-history-root-full.log`). The unchanged Studio archive-budget test
+`release_leaves_the_intent_budget_it_was_given_unusable` failed in setup at
+`store/epoch_studio/tests/rotation/overlay.rs:166`: `save_studio_closing_overlay` returned
+`Io("out of memory")`, before preservation, release or the budget assertions. The exact originating
+I/O call and resource cause are unknown; concurrent workloads are plausible contributors, not a
+proven cause. Read-only review finds no demonstrated code/security defect from this result.
+The same executable passes four exact standalone runs (26.34s, 47.55s, 82.20s, 109.16s;
+`chat-history-studio-budget-reproduction.log` and suffixes `-1` through `-3`). These do not make
+the failed full attempt green. No production limit or test assertion was changed.
+
+The second full attempt passed that archive case, but failed the new file-bridge test at its
+terminal drain (`chat-history-root-full-2.log`). An exact standalone run reproduced it in 10.35s
+(`chat-history-file-bridge-reproduction.log`): successful completion readied the reply and emptied
+the task queue, and an unbiased select could poll the empty queue first and unwrap `None`.
+Read-only review confirmed the fixture race. That already-failed run was stopped, not counted as
+complete. The final test drain now polls the terminal reply first; every prefix, deadline, budget,
+error and completed-byte assertion remains unchanged. No production behavior or limit changed.
+The corrected focused regression passes in 8.80s (`chat-history-file-bridge-after.log`), and its
+short re-review has no findings. Strict root Clippy passes again in 31.41s
+(`chat-history-root-clippy-3.log`); formatting, ambient and root deny pass. The first deny retry
+could not lock the advisory cache in the sandbox; its authorized rerun passes without an exemption
+(`chat-history-root-deny-2.log`).
+
+Root attempt three completed: 3,069 passed, four failed, 24 ignored across 57 result summaries
+(`chat-history-root-full-3.log`, two build jobs/eight test threads). All 1,200 application cases
+passed, including the previously failed archive-budget and file-bridge cases. The four failures
+are sync disconnect fixtures that delivered a loss event while retaining the actual remote
+transport. The production guard correctly ignores such stale events. These fixtures now drop
+the endpoint, assert its absence and revoked lease, then deliver the loss; reconnect cases hold
+a new registration and assert a distinct live lease. All original assertions are retained.
+All six focused fixture/stale-edge cases pass (`chat-history-disconnect-fixtures.log`), and
+strict whole-root Clippy passes again in 27.31s (`chat-history-root-clippy-4.log`). Static
+re-review has no findings. Separate existing regressions retain a live replacement while
+delivering old disconnect edges and check readiness and absence of artificial recovery work.
+
+Complete native testing passes 430 library cases in 569.80s plus five ACL cases
+(`chat-history-native-full.log`, two build jobs/four test threads). This includes all active-read
+bridge restart, automatic notification receipt and onward-directory scenarios. The final frontend
+repeat passes all 2,067 cases in 68.63s (`chat-history-frontend-full-final.log`).
+The corrected complete-root run passes 3,073 cases, zero failures and 24 existing ignored across
+57 target summaries (`chat-history-root-full-4.log`, two build jobs/eight test threads). Its
+application binary passes 1,200 in 1,775.19s; replication passes 403 in 269.38s and sync passes
+752 in 121.99s. The 10,000-operation cold-provider regression transfers one operation in one page,
+590 payload bytes. Both previously failed application cases and all four disconnect fixtures
+pass inside this complete run. Runtime source stayed unchanged across the full attempts; only
+the reviewed test fixtures changed. Tracked diff and all four new source fingerprints match the
+frozen full-run inputs. The latest four fixtures are absent from native dependency builds.
+Read-only review and re-reviews have no unresolved blocker/high findings in these changes;
+three stale documentation status lines were corrected. The low-priority wire-offset follow-up
+is recorded below. These are local results, separate from hosted CI.
+
+Do not claim full hostile-peer or moderator-audit convergence. Same-device equivocation, legacy
+actor collisions, raw channel semantic authorization (R6), original-group signature binding and
+repair of already poisoned snapshots remain open. The named `legacy_boundary_*` tests are
+characterizations of those remaining limitations, not successful security acceptance. Deleted
+content retained by all members is not moderator-only just because ordinary UI hides it.
+
+## Recovery robustness checkpoint (2026-10-20)
+
+The isolated continuation keeps admitted file reads pending under actual lower-capacity pressure,
+distinguishes helper-route churn from original invocation retirement, retains accepted encrypted
+prefixes at final AEAD and preserves original deadline/debit accounting. Disabled V2 work now
+parks before exhausting route-registry capacity and accepts an exact valid delayed endpoint ACK
+after selecting a helper hedge. Live V2 and member media relay are still unfinished.
+
+The first complete native run passed 426/429 library cases. Two new active-download restart cases
+exposed a real missing reconnect wake after the startup discovery tick; the third failure was an
+obsolete reconnect fixture that closed its purported connected endpoints. The fixture now retains
+connected unresponsive registrations and checks this owner's outbound readiness. A deterministic
+startup-tick-consumed reproduction fails 0/2 before the finite actor retry fix, with valid saved B
+routes but no new connection. With the finite retry fix, all three active-read restart cases pass
+(`communication-chaos-native-active-focused-7.log`, 14.53s). Both corrected reconnect-selection
+cases pass (`communication-chaos-native-capture-focused-2.log`, 5.92s). The final complete root,
+native and frontend suites now pass as recorded above.
+
+So far 27 focused finalization/loss regressions, three retry scheduling/deadline cases and two
+actual dial-command custody cases pass. The separate earlier 292 voice, 14 requester
+and actor file-transfer checks passed their recorded source increments. Current frontend: 2,067;
+Svelte: 0/0. Production build, ten rendered flows, root ambient/deny and prior strict Clippy pass;
+the latest actor retry additions are included in the final complete root/native passes. Current strict
+root Clippy, native check/build/startup and rendered flows now pass as recorded above. Root and
+native formatting, the diff whitespace check and the Git Bash ambient-dependency gate pass. The
+first frontend run lacked this worktree's dependency link; the configured rerun passed. The first
+flow browser could not retain its debugger connection in the sandbox; the authorized rerun passed.
+No physical two-device, external plaintext-offset resume, live V2 or media-relay completion follows.
+The remaining low-priority coverage follow-up is to record the next signed retry's wire offset
+in the actor bridge test. That test already checks retained prefix bytes, unchanged accounting
+and the exact completed file; requester tests separately check signed request/response windows.
+The late-return TCP case observes a real first local dial admission while B is absent. That
+does not prove terminal socket failure: an already admitted attempt may succeed after B returns.
+The second scheduled opportunity is checked separately with the injected clock. An actual first
+terminal dial failure followed by a second actual successful dial remains unverified by this case.
+
+## Previous combined checkpoint and recovery priority — `202c17f1` (2026-10-20)
 
 Complete root testing passes 3,035 cases, zero failures, 24 existing ignored; strict whole-root
 Clippy, formatting, ambient and root deny checks pass. Combined native 427+5 and frontend 2,067

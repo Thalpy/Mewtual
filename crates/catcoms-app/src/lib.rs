@@ -654,7 +654,17 @@ pub fn append_message(
 ) -> Result<(), AutomergeError> {
     let list = match doc.get(ROOT, MESSAGES)? {
         Some((Value::Object(ObjType::List), id)) => id,
-        _ => doc.put_object(ROOT, MESSAGES, ObjType::List)?,
+        _ => match doc
+            .get_all(ROOT, MESSAGES)?
+            .into_iter()
+            .find_map(|(value, list)| matches!(value, Value::Object(ObjType::List)).then_some(list))
+        {
+            // A concurrent malformed scalar may win the root property while valid lists remain
+            // visible. Replacing that property would causally hide every observed list and make
+            // an ordinary new message erase the visible conversation. Reuse a live list instead.
+            Some(list) => list,
+            None => doc.put_object(ROOT, MESSAGES, ObjType::List)?,
+        },
     };
     let index = doc.length(&list);
     let msg = doc.insert_object(&list, index, ObjType::Map)?;
@@ -852,6 +862,45 @@ fn read_message(doc: &AutoCommit, msg: &ObjId) -> ChatMessage {
 /// Separator (0x1F); a control char that appears in neither emoji nor hex fingerprints.
 const REACTION_SEP: char = '\u{1f}';
 
+/// An exact visible message object and its list element. Concurrent first writers may create
+/// several live `messages` lists, all of which the reader displays. Addressing only the winning
+/// root property would acknowledge edits/deletes without changing the message the user sees.
+struct MessageLocation {
+    list: ObjId,
+    index: usize,
+    object: ObjId,
+}
+
+/// Resolve the same objects that `read_messages` renders, before any mutation. A repeated id is
+/// ambiguous even within one list: never authorize one author's row and change another one's.
+/// Legacy id-less rows remain readable but cannot be addressed. No history is rewritten or pruned.
+fn resolve_message(doc: &AutoCommit, id: &str) -> Result<Option<MessageLocation>, AutomergeError> {
+    if id.is_empty() {
+        return Ok(None);
+    }
+    let mut found = None;
+    for (value, list) in doc.get_all(ROOT, MESSAGES)? {
+        if !matches!(value, Value::Object(ObjType::List)) {
+            continue;
+        }
+        for item in doc.list_range(&list, ..) {
+            if matches!(item.value, automerge::ValueRef::Object(ObjType::Map))
+                && str_field(doc, &item.id(), MSG_ID) == id
+            {
+                if found.is_some() {
+                    return Ok(None);
+                }
+                found = Some(MessageLocation {
+                    list: list.clone(),
+                    index: item.index,
+                    object: item.id(),
+                });
+            }
+        }
+    }
+    Ok(found)
+}
+
 /// Whether `emoji` is one this server will store as a reaction key. An emoji carrying the key
 /// separator would forge a second field on the message map, so the flat-key layout only holds if
 /// every document that uses it applies the same rule; hence one predicate rather than a copy per
@@ -872,49 +921,31 @@ fn toggle_reaction_in_doc(
     emoji: &str,
     fp: &str,
 ) -> Result<bool, AutomergeError> {
-    let Some((Value::Object(ObjType::List), list)) = doc.get(ROOT, MESSAGES)? else {
+    let Some(location) = resolve_message(doc, id)? else {
         return Ok(false);
     };
-    for i in 0..doc.length(&list) {
-        let Some((Value::Object(ObjType::Map), msg)) = doc.get(&list, i)? else {
-            continue;
-        };
-        if str_field(doc, &msg, MSG_ID) != id {
-            continue;
-        }
-        let key = format!("{emoji}{REACTION_SEP}{fp}");
-        if doc.get(&msg, &key)?.is_some() {
-            doc.delete(&msg, &key)?;
-        } else {
-            doc.put(&msg, &key, true)?;
-        }
-        return Ok(true);
+    let key = format!("{emoji}{REACTION_SEP}{fp}");
+    if doc.get(&location.object, &key)?.is_some() {
+        doc.delete(&location.object, &key)?;
+    } else {
+        doc.put(&location.object, &key, true)?;
     }
-    Ok(false)
+    Ok(true)
 }
 
 /// Pin or unpin the message with `id` by setting/removing a `pinned` flag **directly on its message
 /// map** (which always exists); so concurrent pins of different messages never conflict and a
 /// pin/unpin race on one message is a clean last-writer-wins. Returns whether the message was found.
 fn set_pin_in_doc(doc: &mut AutoCommit, id: &str, pinned: bool) -> Result<bool, AutomergeError> {
-    let Some((Value::Object(ObjType::List), list)) = doc.get(ROOT, MESSAGES)? else {
+    let Some(location) = resolve_message(doc, id)? else {
         return Ok(false);
     };
-    for i in 0..doc.length(&list) {
-        let Some((Value::Object(ObjType::Map), msg)) = doc.get(&list, i)? else {
-            continue;
-        };
-        if str_field(doc, &msg, MSG_ID) != id {
-            continue;
-        }
-        if pinned {
-            doc.put(&msg, PINNED, true)?;
-        } else {
-            doc.delete(&msg, PINNED)?;
-        }
-        return Ok(true);
+    if pinned {
+        doc.put(&location.object, PINNED, true)?;
+    } else {
+        doc.delete(&location.object, PINNED)?;
     }
-    Ok(false)
+    Ok(true)
 }
 
 /// Read a channel document's topic (empty when it was never set; every channel written before
@@ -1111,44 +1142,35 @@ fn valid_juke_link(link: &str) -> bool {
 }
 
 /// Edit the text of the message with `id` in a channel document, stamping `edited`. Returns
-/// whether a message was found + changed. (Honest-client own-message gating is the caller's job.)
+/// whether an unambiguous message was found + changed. (Honest-client own-message gating is the
+/// caller's job.) All conflicting first-writer containers remain addressable.
 fn edit_message_in_doc(
     doc: &mut AutoCommit,
     id: &str,
     new_text: &str,
     edited_ts: u64,
 ) -> Result<bool, AutomergeError> {
-    let Some((Value::Object(ObjType::List), list)) = doc.get(ROOT, MESSAGES)? else {
+    let Some(location) = resolve_message(doc, id)? else {
         return Ok(false);
     };
-    for i in 0..doc.length(&list) {
-        if let Some((Value::Object(ObjType::Map), msg)) = doc.get(&list, i)? {
-            if str_field(doc, &msg, MSG_ID) == id {
-                doc.put(&msg, TEXT, new_text)?;
-                doc.put(&msg, EDITED, edited_ts as i64)?;
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
+    doc.put(&location.object, TEXT, new_text)?;
+    doc.put(&location.object, EDITED, edited_ts as i64)?;
+    Ok(true)
 }
 
-/// Delete the message with `id` from a channel document. Returns whether one was removed. Ids are
-/// unique, so it removes (at most) the single matching element and returns.
+/// Delete the uniquely addressed message from a channel document. Missing, id-less and ambiguous
+/// duplicate ids return false without mutation; the signed history of the deleted row is retained.
 fn delete_message_in_doc(doc: &mut AutoCommit, id: &str) -> Result<bool, AutomergeError> {
-    let Some((Value::Object(ObjType::List), list)) = doc.get(ROOT, MESSAGES)? else {
+    let Some(location) = resolve_message(doc, id)? else {
         return Ok(false);
     };
-    for i in 0..doc.length(&list) {
-        if let Some((Value::Object(ObjType::Map), msg)) = doc.get(&list, i)? {
-            if str_field(doc, &msg, MSG_ID) == id {
-                doc.delete(&list, i)?;
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
+    doc.delete(&location.list, location.index)?;
+    Ok(true)
 }
+
+#[cfg(test)]
+#[path = "chat_history_tests.rs"]
+mod chat_history_tests;
 
 #[cfg(test)]
 mod message_list_conflict_tests {
@@ -4279,9 +4301,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
         let me = self.my_fingerprint();
         let Some(current) = self
-            .messages(channel)
-            .into_iter()
-            .find(|m| m.id == id && m.author == me)
+            .addressable_message(channel, id)
+            .filter(|m| m.author == me)
         else {
             return Err(AppError::Invalid(
                 "you can only edit your own messages".into(),
@@ -4316,7 +4337,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             ));
         }
         let me = self.my_fingerprint();
-        let Some(msg) = self.messages(channel).into_iter().find(|m| m.id == id) else {
+        let Some(msg) = self.addressable_message(channel, id) else {
             return Err(AppError::Invalid("no such message".into()));
         };
         let moderator = matches!(self.my_role(), Role::Owner | Role::Admin);
@@ -4356,7 +4377,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             ));
         }
         let me = self.my_fingerprint();
-        if !self.messages(channel).iter().any(|m| m.id == id) {
+        if self.addressable_message(channel, id).is_none() {
             return Err(AppError::Invalid("no such message".into()));
         }
         let id = id.to_string();
@@ -4387,7 +4408,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 "a message with no id cannot be addressed".into(),
             ));
         }
-        let Some(msg) = self.messages(channel).into_iter().find(|m| m.id == id) else {
+        let Some(msg) = self.addressable_message(channel, id) else {
             return Err(AppError::Invalid("no such message".into()));
         };
         if msg.pinned == pinned {
@@ -5761,6 +5782,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 
     pub fn finalized_member_peers(&self) -> Vec<PeerId> {
         self.sync.finalized_member_peers()
+    }
+
+    /// Successful outbound kind26 exchanges on the current live connections, for scheduling.
+    pub fn member_finalization_ready_peers(&self) -> Vec<PeerId> {
+        self.sync.member_finalization_ready_peers()
     }
 
     pub fn member_mesh_allowed(&self) -> bool {
@@ -7871,6 +7897,20 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// [`Self::with_messages`] and pay nothing per row.
     pub fn messages(&self, channel: u128) -> Vec<ChatMessage> {
         self.with_messages(channel, |msgs| msgs.to_vec())
+    }
+
+    /// Product authorization must address the same unique visible object as the writer. Reject
+    /// duplicated ids before posting: a false helper result otherwise republishes the previous
+    /// local change under the legacy replication API while incorrectly acknowledging success.
+    fn addressable_message(&self, channel: u128, id: &str) -> Option<ChatMessage> {
+        if id.is_empty() {
+            return None;
+        }
+        self.with_messages(channel, |messages| {
+            let mut matches = messages.iter().filter(|message| message.id == id);
+            let first = matches.next()?;
+            matches.next().is_none().then(|| first.clone())
+        })
     }
 
     /// Run `f` over the channel's current messages without copying them. The list is materialized

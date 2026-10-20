@@ -7057,6 +7057,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_peer_batch_cancelled_before_enqueue_releases_only_its_unsubmitted_permit() {
+        let mut service = MeshService::new_memory(None, &[]).unwrap();
+        let target = libp2p_peer();
+        let address = format!("/ip4/198.51.100.7/tcp/22487/p2p/{target}");
+        let (commands, mut receiver) = mpsc::channel(1);
+        // Control only the driver's command-consumption seam. The production public method
+        // still parses the batch and transfers its exact affine permits through its real send.
+        commands
+            .try_send(Command::Dial {
+                addr: address.parse().unwrap(),
+                permit: None,
+                reply: None,
+            })
+            .unwrap();
+        service.cmd_tx = commands;
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut waiting = Box::pin(service.dial_peer_permits(
+            phase0_peer_id(&target),
+            vec![Box::new(DropObservedPermit {
+                address,
+                drops: drops.clone(),
+            })],
+        ));
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(waiting);
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "only the unqueued reservation is released"
+        );
+        drop(receiver.recv().await.unwrap());
+        assert!(
+            receiver.try_recv().is_err(),
+            "the canceled sender cannot later queue a batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_peer_batch_cancelled_after_enqueue_leaves_one_driver_owned_submission() {
+        let mut service = MeshService::new_memory(None, &[]).unwrap();
+        let target = libp2p_peer();
+        let address = format!("/ip4/198.51.100.7/tcp/22487/p2p/{target}");
+        let (commands, mut receiver) = mpsc::channel(1);
+        service.cmd_tx = commands;
+        let commits = Arc::new(AtomicUsize::new(0));
+        let mut waiting = Box::pin(service.dial_peer_permits(
+            phase0_peer_id(&target),
+            vec![Box::new(CommitObservedPermit {
+                address,
+                commits: commits.clone(),
+            })],
+        ));
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        drop(waiting); // the actor's bounded acknowledgement wait expired
+        assert_eq!(commits.load(Ordering::SeqCst), 0);
+        let Command::DialPeerBatch {
+            peer,
+            permits: Some(permits),
+            reply,
+            ..
+        } = receiver.recv().await.unwrap()
+        else {
+            panic!("the exact batch remains driver-owned")
+        };
+        assert_eq!(peer, phase0_peer_id(&target));
+        assert!(reply.is_closed());
+        assert_eq!(permits.len(), 1);
+        assert!(permits
+            .into_iter()
+            .next()
+            .unwrap()
+            .commit_if_current()
+            .is_some());
+        assert_eq!(
+            commits.load(Ordering::SeqCst),
+            1,
+            "driver ownership can commit once after waiter loss"
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "no second command was manufactured"
+        );
+    }
+
+    #[tokio::test]
     async fn a_duplicate_infrastructure_dial_is_suppressed_before_its_permit_is_committed() {
         let service = MeshService::new_memory(None, &[]).unwrap();
         let target = libp2p_peer();

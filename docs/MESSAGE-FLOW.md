@@ -21,6 +21,15 @@ separate work.
 
 ---
 
+## Chat history adversarial continuation (20 October)
+
+MLS key epochs do not reset the chat operation graph. The additive ledger, causal edit/delete
+rules, newly found message-addressing and failed-page cursor defects, compatibility-conscious
+writer check, and remaining audit/equivocation limits are traced in
+[CHAT-HISTORY-CONVERGENCE](communication-recovery/CHAT-HISTORY-CONVERGENCE.md).
+Its ten-epoch test explicitly delivers recovery; it is not new automatic network acceptance.
+The dated evidence in the acceptance ledger takes precedence over older coverage summaries here.
+
 ## Quiet receipts and sole-owner responsiveness (19 October)
 
 A genuinely new bound member endpoint requests one coalesced reconciliation pass for documents
@@ -362,7 +371,7 @@ a user visiting a channel.
 | Original sender never returns | Authorship is carried in the op, not in the connection | Ops keep flowing |
 | Peers connect only briefly | The catch-up task outlives the attempt and is requeued on failure | Resumes |
 | Clocks disagree | Timestamps affect **display order only**, never which ops survive | Safe for convergence |
-| Membership or keys change during the partition | See section 8, H1 | **Not yet established** |
+| Membership or keys change during the partition | Current-key resealing/retained history tested across ten Adds and author removal; see the 20 October trace | Broad automatic network acceptance remains incomplete |
 
 The three-micelle case (B and C meet, then C and E meet, B and E never meet, several original
 authors gone) follows from the same property: every node's log is the union of what it has ever
@@ -446,7 +455,10 @@ guards, not merely by passing):
 
 **Still not covered by any test:**
 
-1. **Convergence across a membership change that happened inside one partition.** See section 8, P2.
+1. **The broader automatic network heal across a partition-local membership change.** The new
+   ten-epoch replication test covers unchanged signatures, retained branches, removal and restart
+   with explicitly delivered commits/history; it does not establish the automatic scheduler path.
+   See section 8, P2 and the dated acceptance ledger for scenario-specific network evidence.
 2. **Epidemic relay for the P1 document family**, which section 8 records as a deliberate scope
    limit rather than a defect. A test would pin the limit, not close it.
 3. **The remaining presentation surfaces downstream of the timestamp sort**: day dividers,
@@ -626,8 +638,11 @@ whether that is the intended product promise.
 ### P2. Membership change inside a partition
 
 If one micelle performs a removal while split, the two halves rotate labels independently and the
-control-plane semantics of the heal are not established anywhere I could find. Distinct from P0,
-which is about a member falling behind a *linear* commit chain. No test covers it.
+complete automatic control-plane heal is not established by the new replication test. That test
+crosses a linear ten-Add chain, removes an author and preserves their original signed history
+through current-key relay/restart, with explicit delivery. Independently conflicting membership
+branches and the broader automatic network matrix remain separate acceptance work. P0 concerns
+a member falling behind the available *linear* commit archive.
 
 ### P3. Ordering after a heal (was H5). Tested; better defended than expected.
 

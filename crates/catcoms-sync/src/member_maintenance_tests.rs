@@ -114,6 +114,116 @@ async fn detached_member_maintenance_authenticates_current_finalization() {
 }
 
 #[tokio::test]
+async fn finalization_readiness_requires_our_reply_and_repairs_inbound_only_connections() {
+    let (mut alice, mut bob) = pair(true);
+    let peer = alice.local_peer();
+    assert!(bob.member_finalization_work(&[]).is_empty(),
+        "a transport connection without a known member descriptor grants no repair work");
+    bob.ingest_peer_record(alice.self_record().unwrap().clone());
+    // There is no outbound listener evidence in this in-memory fixture. Actual connected
+    // current members must nevertheless get repair work; an arbitrary supplied peer must not.
+    assert_eq!(bob.member_finalization_work(&[]), vec![peer]);
+    assert_eq!(bob.member_finalization_work(&[PeerId::from_u64(99)]), vec![peer]);
+    let completed = detached_reply(&mut alice, &mut bob, MemberMaintenanceKind::Finalize).await;
+    assert_eq!(alice.finalized_member_peers(), vec![bob.local_peer()]);
+    assert!(alice.member_finalization_ready_peers().is_empty(),
+        "serving and even signing a response does not prove its receipt");
+    assert!(bob.member_finalization_ready_peers().is_empty());
+    assert!(bob.complete_member_maintenance(completed).unwrap());
+    assert_eq!(bob.member_finalization_ready_peers(), vec![peer]);
+    assert!(bob.member_finalization_work(&[]).is_empty());
+    assert_eq!(alice.member_finalization_work(&[]), vec![bob.local_peer()]);
+}
+
+#[tokio::test]
+async fn finalization_reconnect_renews_work_without_dropping_identity_conflict_pins() {
+    let (mut alice, mut bob) = pair(true);
+    let clock = Arc::new(ManualClock::new(1000));
+    alice.clock = clock.clone(); bob.clock = clock.clone();
+    let peer = alice.local_peer();
+    let completed = detached_reply(&mut alice, &mut bob, MemberMaintenanceKind::Finalize).await;
+    assert!(bob.complete_member_maintenance(completed).unwrap());
+    assert_eq!(bob.member_finalization_ready_peers(), vec![peer]);
+    alice.transport = Arc::new(alice.transport.rejoin());
+    assert!(bob.member_finalization_ready_peers().is_empty(),
+        "driver retirement precedes queued connection events");
+    assert_eq!(bob.member_finalization_work(&[]), vec![peer]);
+    bob.note_peer_disconnected(peer);
+    bob.promote_member_peer_bound(PeerId::from_u64(99), alice.device_id(), false);
+    assert_eq!(bob.finalized_member_peers(), vec![peer],
+        "a reconnect must not let weaker forwarded evidence replace the bound endpoint");
+    clock.advance_ms(MIN_PEX_INTERVAL_MS);
+    let current = detached_reply(&mut alice, &mut bob, MemberMaintenanceKind::Finalize).await;
+    bob.note_peer_disconnected(peer); // delayed old edge before completion
+    assert!(bob.complete_member_maintenance(current).unwrap());
+    bob.note_peer_disconnected(peer); // another old edge after completion
+    assert_eq!(bob.member_finalization_ready_peers(), vec![peer]);
+    assert!(bob.member_finalization_work(&[]).is_empty());
+}
+
+#[tokio::test]
+async fn finalization_lost_or_old_reply_keeps_repair_pending_through_serving_cooldown() {
+    let (mut alice, mut bob) = pair(true);
+    bob.ingest_peer_record(alice.self_record().unwrap().clone());
+    let clock = Arc::new(ManualClock::new(1000));
+    alice.clock = clock.clone(); bob.clock = clock.clone();
+    let peer = alice.local_peer();
+    let lost = detached_reply(&mut alice, &mut bob, MemberMaintenanceKind::Finalize).await;
+    drop(lost);
+    let refused = detached_reply(&mut alice, &mut bob, MemberMaintenanceKind::Finalize).await;
+    assert!(!bob.complete_member_maintenance(refused).unwrap());
+    assert!(bob.member_finalization_ready_peers().is_empty());
+    assert_eq!(bob.member_finalization_work(&[]), vec![peer]);
+    clock.advance_ms(MIN_PEX_INTERVAL_MS);
+    let old = detached_reply(&mut alice, &mut bob, MemberMaintenanceKind::Finalize).await;
+    alice.transport = Arc::new(alice.transport.rejoin());
+    assert!(matches!(bob.complete_member_maintenance(old), Err(MemberMaintenanceError::Superseded)));
+    assert!(bob.member_finalization_ready_peers().is_empty());
+    clock.advance_ms(MIN_PEX_INTERVAL_MS);
+    let current = detached_reply(&mut alice, &mut bob, MemberMaintenanceKind::Finalize).await;
+    assert!(bob.complete_member_maintenance(current).unwrap());
+    assert_eq!(bob.member_finalization_ready_peers(), vec![peer]);
+}
+
+#[tokio::test]
+async fn local_reconnect_wake_requires_actual_loss_of_a_bound_current_member() {
+    let (mut alice, mut bob) = pair(true);
+    let peer = alice.local_peer();
+    bob.note_peer_connected(peer);
+    bob.note_peer_disconnected(PeerId::from_u64(99));
+    assert!(!bob.take_local_reconnect_wake(), "unknown Noise endpoints grant no recovery work");
+    // A valid self-signed member descriptor is a candidate, not an endpoint-bound proof.
+    bob.ingest_peer_record(alice.self_record().unwrap().clone());
+    bob.note_peer_disconnected(peer);
+    assert!(!bob.take_local_reconnect_wake());
+    let completed = detached_reply(&mut alice, &mut bob, MemberMaintenanceKind::Finalize).await;
+    assert!(bob.complete_member_maintenance(completed).unwrap());
+    bob.note_peer_disconnected(peer);
+    assert!(!bob.take_local_reconnect_wake(), "an old edge cannot arm work while the driver is live");
+    // Move A off B's Hub, ending the actual aggregate lease without adding a replacement.
+    alice.transport = Arc::new(Hub::new().join(peer));
+    bob.note_peer_disconnected(peer);
+    bob.note_peer_disconnected(peer);
+    assert!(bob.take_local_reconnect_wake(), "one coalesced scheduling hint follows actual loss");
+    assert!(!bob.take_local_reconnect_wake());
+    assert_eq!(bob.finalized_member_peers(), vec![peer], "the identity conflict pin survives");
+    bob.note_peer_disconnected(peer);
+    assert!(!bob.take_local_reconnect_wake(), "a consumed old edge cannot solicit a later window");
+}
+
+#[tokio::test]
+async fn local_reconnect_wake_does_not_turn_removed_members_into_retry_authority() {
+    let (mut alice, mut bob) = pair(true);
+    let peer = bob.local_peer();
+    let completed = detached_reply(&mut alice, &mut bob, MemberMaintenanceKind::Finalize).await;
+    assert!(bob.complete_member_maintenance(completed).unwrap());
+    alice.request_remove(&bob.device_id()).await.unwrap();
+    bob.transport = Arc::new(Hub::new().join(peer));
+    alice.note_peer_disconnected(peer);
+    assert!(!alice.take_local_reconnect_wake());
+}
+
+#[tokio::test]
 async fn detached_member_maintenance_driver_reconnect_rejects_old_work_without_root_events() {
     for completed_first in [false, true] {
         let (mut alice, mut bob) = pair(true);

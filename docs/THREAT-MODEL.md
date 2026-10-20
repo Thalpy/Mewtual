@@ -1,5 +1,36 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Chat history admission and retained audit (20 October, continuation)
+
+Legacy operation ingress now refuses a 32-byte Automerge actor that differs from its verified
+signed author, before graph/log mutation. Historical actors of other lengths remain compatible,
+including actual pre-rebind 16-byte restore history. This prevents another signer occupying a
+modern device namespace; it does not repair previously poisoned graphs/snapshots, legacy actor
+collisions or same-device equivocation. Failed catch-up pages preserve their prior cursor and
+completion state; verified prefixes retain receipts and recovery work before a later error.
+
+The message resolver now addresses all visible first-writer lists and refuses duplicated IDs.
+This does not replace R6: raw channel operations still lack protocol-enforced message/moderator
+semantics. Legacy signatures also lack original-group/membership-epoch binding. Retained deleted
+content is available to members holding the history, not cryptographically restricted to a
+moderator UI. See [the trace and adversarial findings](communication-recovery/CHAT-HISTORY-CONVERGENCE.md)
+for current guarantees, explicit limitation tests, migration needs and acceptance boundaries.
+
+## Recovery through connection churn (20 October)
+
+Local bridge-connection retirement permits a bounded retry of an otherwise current read, never
+acceptance of the retired response. Opaque typed observations repeat original Root, native,
+membership/epoch and lifetime checks after authentication and AEAD. Both successful plaintext and
+failed-AEAD verdicts are discarded on route change, preventing an obsolete helper from storing
+bytes or selecting/blocking a saved variant. Original cancellation or membership retirement wins
+over route recovery. Retry sweeps and helper identities remain bounded; durable work is not
+refunded, and actual lower owners retain independent capacity after timeout/cancellation.
+
+Disabled V2 may accept a delayed positive ACK after a newer hedge only for the same immutable
+packet's exact authenticated target and still-live original flight. This grants no fresh session,
+deadline, retry budget or room-wide receipt. Root signature/request/peer/role checks remain
+mandatory, while obsolete negative/helper completions cannot lower confirmed evidence.
+
 ## Gate7 upload and session replacement boundaries (19 October)
 
 Browser batch admission bounds retained user-selected File objects to one batch of at most32,
@@ -236,7 +267,30 @@ Quiet discovery also polls the released membership-commit exchange before data r
 Its independently paced rotating bound-member selection cannot be suppressed by PEX backoff.
 The selector creates no new dial authority and changes neither request authentication nor PEX
 health. Coalesced poll/full-discovery/finalization obligations share the existing bounded queue.
-Its exact request/nonce/epoch signature remains unbound endpoint evidence. Only existing MLS
+
+Historical endpoint-bound identity proofs remain conflict pins after disconnect; clearing them
+would let weaker forwarded legacy evidence replace an offline member's transport binding.
+They do not prove that a restarted member remembers this endpoint. Separate bounded readiness
+records only verified outbound kind26 completion under its original live connection lease and
+member/device/epoch/policy. Serving an old request cannot stamp readiness, and a held old reply
+cannot adopt a replacement lease. Delayed disconnect events retain fresh live-generation readiness.
+Known current member candidates on inbound-only connections may receive connected-only repair
+work; arbitrary Noise peers gain no work, membership, file authorization or dial permission.
+Unsupported legacy transports keep event-fenced scheduling rather than exact driver-generation
+evidence. Listener persistence still requires actual local outbound Noise observations.
+
+Actual loss of a bound current member may expedite two existing consented local-route dial
+passes in the actor. One original 25s window and 60s re-arm cooldown coalesce member flaps without
+extension, queued events or quota refunds. Normally the passes occur 5s and 20s after loss; late
+owner polling cannot burst missed opportunities. Each due turn repeats current P2P/member
+eligibility and uses the released exact-route/roster checks and process-wide endpoint limits.
+Unknown Noise endpoints and stale driver-live disconnects cannot arm this hint. File reads
+themselves still cannot dial. A 250ms local driver-acknowledgement deadline bounds the owner wait,
+not the lifetime of an admitted command: its original driver-owned permits remain charged and
+may complete once after caller timeout. Existing submitted sockets cannot be recalled. Budget
+denial can still defer progress to normal discovery; this is bounded acceleration, not a promise
+of connection or delivery. No extra PEX or persistence work is scheduled by the retry timer.
+The membership-commit poll's exact request/nonce/epoch signature remains unbound endpoint evidence. Only existing MLS
 authorization applies commits; removed requesters fail the serving peer's current roster gate.
 Empty or failed probes cannot prove currency or suppress ordinary discovery. A separate 1024-
 record cap precedes per-record allocation, promotion and MLS processing, alongside the existing 16 MiB

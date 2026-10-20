@@ -467,7 +467,22 @@ impl SourceLedger {
         actor: &ActorOwner,
         routes: &[BoundRoute],
     ) -> Result<Vec<SourceJob>, VoiceError> {
+        self.take_ready_bounded(actor, routes, 4)
+    }
+
+    /// Root supplies its presently free route-registry positions before an attempt is spent.
+    /// This is synchronous admission under Root's exclusive borrow, not a refund mechanism.
+    pub(crate) fn take_ready_bounded(
+        &self,
+        actor: &ActorOwner,
+        routes: &[BoundRoute],
+        limit: usize,
+    ) -> Result<Vec<SourceJob>, VoiceError> {
         self.current(actor)?;
+        let limit = limit.min(4);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         if routes.len() > catcoms_rt::MAX_CONNECTED_PEER_SNAPSHOT {
             return Err(VoiceError::Bounds);
         }
@@ -622,14 +637,16 @@ impl SourceLedger {
                 }),
             });
             state.work = Some(key);
-            if jobs.len() >= 4 {
+            if jobs.len() >= limit {
                 break;
             }
         }
         Ok(jobs)
     }
-    /// A queued-helper ACK never settles final receipt. Late old completions cannot overwrite a
-    /// newer selected attempt; actual flight retirement is independent of this state transition.
+    /// A queued-helper ACK never settles final receipt. An authenticated positive response from
+    /// the exact still-current target is monotonic evidence even after a hedge was selected.
+    /// Older negative/helper completions cannot overwrite newer progress. Actual lower-flight
+    /// retirement remains independent of this transition.
     pub fn complete(&self, completed: SourceCompletion) -> Result<SourceOutcome, VoiceError> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let packet = state
@@ -643,17 +660,24 @@ impl SourceLedger {
         if !completed.flight.authority.authorized() {
             return Ok(SourceOutcome::Retired);
         }
-        if status.selected != completed.flight.attempt {
-            return Err(VoiceError::Reservation);
-        }
         if completed.status == Some(crate::VoiceTransportStatus::EndpointAdmitted) {
-            if !matches!(completed.flight.hop, SourceHop::Direct(_)) {
+            let SourceHop::Direct(recipient) = completed.flight.hop else {
                 return Err(VoiceError::Unauthorized);
+            };
+            if let Some(target) = packet.object.body().target() {
+                if recipient != target {
+                    return Err(VoiceError::Unauthorized);
+                }
+                status.confirmed = true;
+                return Ok(SourceOutcome::EndpointAdmitted);
             }
             // A room broadcast's direct ACK proves this one recipient only. It never prevents
             // remaining source submissions or claims whole-room convergence.
-            status.confirmed = packet.object.body().target().is_some();
-        } else if completed.status == Some(crate::VoiceTransportStatus::HelperQueued)
+        }
+        if status.selected != completed.flight.attempt {
+            return Err(VoiceError::Reservation);
+        }
+        if completed.status == Some(crate::VoiceTransportStatus::HelperQueued)
             && !matches!(completed.flight.hop, SourceHop::Helper(_))
         {
             return Err(VoiceError::Unauthorized);

@@ -1,5 +1,16 @@
 # Mewtual; Architecture
 
+## Chat history and MLS epoch separation (20 October, continuation)
+
+Chat retains the original signed Automerge operations across key epochs; current-key catch-up
+merges that history rather than replacing a branch. Edits/deletes change the live projection while
+their earlier content remains retained. Causality, not wall-clock timestamps, controls these
+operations. The continuation corrects all-visible-list message addressing and failed-page cursor
+commit ordering, and binds modern 32-byte writer actors to their verified signer at ingress.
+Historical actor compatibility and the existing R6/group-binding/equivocation limits remain.
+The [chat history trace](communication-recovery/CHAT-HISTORY-CONVERGENCE.md) distinguishes those
+implemented boundaries from the stronger authenticated/moderator-only audit design still needed.
+
 ## Protected browser derivation (19 October, inactive)
 
 The surviving browser broker v5 shares one closed derive/confirmation action driver. Protected
@@ -149,6 +160,30 @@ disconnect events cannot revoke a replacement lease. Unsupported legacy test tra
 event-driven fencing; upgraded voice refuses a transport without a live driver lease.
 Released wire encodings and public synchronous-owner async wrappers
 are unchanged. Explicit finalization commands use this same nonblocking actor scheduler.
+
+Historical dual-key bindings remain conflict pins across a disconnect. They do not establish
+that a restarted member remembers our identity. A separate session-only table (at most320 rows)
+records verified outbound kind26 completion for the original connection lease, member/device,
+epoch and policy. Same-peer reconnect owes a fresh exchange; a delayed old disconnect cannot
+erase completion on a replacement lease. Serving alone never settles our outbound obligation.
+Known current members on inbound-only connections are eligible without outbound dial evidence;
+unknown Noise endpoints are not. Native capture selects at most two fair repair targets per pass,
+through bounded connected-only maintenance independently of PEX backoff. Both endpoint orders
+pace the second attempt past the one-second serving rate limit. Only saving listener hints still
+requires actual successful outbound Noise observations; no repair query grants dial authority.
+Unsupported legacy transports retain event-fenced readiness rather than exact driver generations.
+
+Actual aggregate loss of a previously endpoint-bound current P2P member also sets one coalesced
+actor scheduling hint. Driver-live stale disconnect events do not clear replacement liveness.
+The actor owns two extra local-route retry opportunities, normally at +5s and +20s, inside one
+25-second window and a 60-second re-arm cooldown. Further losses do not extend/refill that window.
+Its absolute deadline participates in the existing fair timer source. Each due turn rechecks
+member-mesh eligibility and uses the existing sealed-route, current-roster and shared endpoint
+scheduler gates; unavailable budget stays unavailable. No file invocation grants a dial.
+A 250ms bounded local driver-acknowledgement wait prevents an indefinite owner stall. Unqueued
+permits may drop; an already queued driver command retains its actual permits and may complete
+once after that wait ends. No ambiguous submission is refunded. This starts no PEX, rendezvous,
+interface refresh or snapshot work; the native 45–75-second cadence remains the fallback.
 
 Two actual lower flights/server and four/process bound retained answers to 32 MiB/server and
 64 MiB/process for the released 16 MiB commit response; PEX remains capped at 512 KiB. Existing

@@ -129,7 +129,10 @@ impl Fixture {
         }
     }
     async fn new() -> Self {
-        let (_, mut roots, ids) = crate::tests::build_members(3).await;
+        Self::with_members(3).await
+    }
+    async fn with_members(count: u64) -> Self {
+        let (_, mut roots, ids) = crate::tests::build_members(count).await;
         crate::tests::converge_and_publish_test_routes(&mut roots);
         roots[0]
             .initialize_group_policy(GroupMode::PeerToPeer)
@@ -268,6 +271,136 @@ impl Fixture {
         .expect("actual helper/source service stalled");
         c[0].authenticate_blob_page(completed).unwrap()
     }
+}
+
+#[tokio::test]
+async fn replaced_helper_connection_discards_old_page_and_retries_same_sources() {
+    let mut f = Fixture::new().await;
+    let choice = f.choice();
+    let prepared = f.prepare(&choice);
+    let context = f.prepare(&choice).context;
+    let response = f.response(&context.grant);
+    let effect = context.effect_scope();
+    let old_grant = Grant::parse(&prepared.frame).unwrap();
+    let old_sources = old_grant.sources().to_vec();
+    let old_nonce = old_grant.nonce();
+    let deadline = prepared.deadline();
+    let pending = f.roots[2]
+        .commit_file_bridge_page(&mut f.catalog, prepared)
+        .unwrap();
+    // Same PeerId, new actual connection incarnation. No descriptor parity gate is required.
+    f.roots[1].transport = Arc::new(f.roots[1].transport.rejoin());
+    assert_eq!(
+        f.roots[2].blob_effect_status(&effect),
+        BlobEffectStatus::RouteChanged
+    );
+    assert!(matches!(
+        f.roots[2].authenticate_bridge_page(context, Ok(response.into())),
+        Ok(BlobPageOutcome::RouteChanged)
+    ));
+    drop(pending);
+    f.clock.advance_ms(REQUEST_INTERVAL_MS);
+    let refreshed = f.roots[2]
+        .refresh_file_bridge_choice(&mut f.catalog, &choice)
+        .unwrap();
+    let retry = f.prepare(&refreshed);
+    let grant = Grant::parse(&retry.frame).unwrap();
+    assert_eq!(grant.sources(), old_sources);
+    assert_ne!(grant.nonce(), old_nonce);
+    assert!(f.clock.monotonic_ms() < deadline);
+    let response = f.response(&retry.frame);
+    assert!(matches!(
+        f.roots[2].authenticate_bridge_page(retry.context, Ok(response.into())),
+        Ok(BlobPageOutcome::Page(_))
+    ));
+    assert!(f.roots[2].get_blob(&f.reference.ciphertext_cid).is_none());
+}
+
+#[tokio::test]
+async fn original_native_caller_and_deadline_retirement_win_over_changed_connection() {
+    for fault in ["native", "caller", "deadline"] {
+        let mut f = Fixture::new().await;
+        let choice = f.choice();
+        let prepared = f.prepare(&choice);
+        let response = f.response(&prepared.frame);
+        let effect = prepared.context.effect_scope();
+        f.roots[1].transport = Arc::new(f.roots[1].transport.rejoin());
+        match fault {
+            "native" => {
+                f.native.send_replace(true);
+            }
+            "caller" => {
+                f.caller.send_replace(true);
+            }
+            "deadline" => f.clock.set_ms(prepared.deadline()),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            f.roots[2].blob_effect_status(&effect),
+            BlobEffectStatus::Retired,
+            "{fault}"
+        );
+        assert!(
+            matches!(
+                f.roots[2].authenticate_bridge_page(prepared.context, Ok(response.into())),
+                Err(SyncError::Unauthorized)
+            ),
+            "{fault}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn unstarted_route_loss_preserves_proposal_and_fresh_d_precedes_waiting_for_b() {
+    let mut f = Fixture::with_members(4).await;
+    let b = f.roots[1].device.device_id();
+    let d = f.roots[3].device.device_id();
+    let d_peer = f.roots[3].local_peer();
+    let choice = f.choice();
+    assert_eq!(choice.0.helper.device, b);
+    let prepared = f.prepare(&choice);
+    let descriptor = f.roots[2].peer_records.remove(&b).unwrap();
+    assert!(matches!(
+        f.roots[2].refresh_file_bridge_choice(&mut f.catalog, &choice),
+        Err(BridgeError::Unavailable)
+    ));
+    assert!(matches!(
+        f.roots[2].prepare_file_bridge_page(&f.catalog, &choice, &f.reference, 0, MAX_PAGE_BYTES),
+        Err(BridgeError::Unavailable)
+    ));
+    assert!(matches!(
+        f.roots[2].commit_file_bridge_page(&mut f.catalog, prepared),
+        Err(BridgeError::Unavailable)
+    ));
+    assert!(
+        !f.catalog.committed,
+        "local refusal cannot consume the source cursor"
+    );
+    // D enters within the existing four-helper bound; this does not claim fifth-helper rotation.
+    crate::tests::prove_live_member(&mut f.roots[2], d_peer, d);
+    let mut selected_d = false;
+    for _ in 0..16 {
+        match f.roots[2]
+            .next_file_bridge_choice(&mut f.catalog, &[choice.variant()])
+            .unwrap()
+        {
+            BridgeStep::Ready(next) => {
+                assert_eq!(next.0.helper.device, d);
+                selected_d = true;
+                break;
+            }
+            BridgeStep::Yield | BridgeStep::Backoff => {}
+            BridgeStep::Exhausted => panic!("missing B cannot hide usable D"),
+        }
+    }
+    assert!(selected_d);
+    f.roots[2].peer_records.insert(b, descriptor);
+    assert!(
+        f.roots[2]
+            .refresh_file_bridge_choice(&mut f.catalog, &choice)
+            .is_err(),
+        "old B choice cannot revive after D selection"
+    );
 }
 
 #[tokio::test]

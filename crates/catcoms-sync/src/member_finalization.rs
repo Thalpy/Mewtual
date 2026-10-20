@@ -15,6 +15,16 @@ pub const MAX_MEMBER_FINALIZATION_OBSERVATIONS: usize =
 const PENDING_SNAPSHOT_VERSION: u8 = 1;
 const MAX_PENDING_SNAPSHOT_BYTES: usize = 5 + MAX_PEER_RECORDS * 72;
 
+/// Scheduling evidence only, never membership, listener or file-service authority. Only an
+/// authenticated response to OUR kind26 request settles this obligation: serving a request
+/// cannot establish that our reply reached the other endpoint. Nothing here survives restart.
+pub(super) struct ConnectionReady {
+    device: DeviceId,
+    epoch: u64,
+    policy: [u8; 32],
+    connection: Option<catcoms_rt::ConnectionLease>,
+}
+
 /// This sealed local tail retains an accepted admission correlation, never endpoint proof,
 /// a listener address or permission to dial. Descriptors already persist in the main snapshot.
 pub(super) fn decode_pending_snapshot(
@@ -194,12 +204,27 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if observed.len() > MAX_MEMBER_FINALIZATION_OBSERVATIONS {
             return Vec::new();
         }
-        let observed: HashSet<_> = observed.iter().copied().collect();
-        let finalized: HashSet<_> = self.finalized_member_peers().into_iter().collect();
+        // Inbound-only connections need the same bilateral repair as successful outbound
+        // dials. Host evidence is an additional hint, not a prerequisite or dial permission.
+        let observed: HashSet<_> = observed
+            .iter()
+            .copied()
+            .chain(
+                self.transport
+                    .connection_snapshot()
+                    .iter()
+                    .map(|row| row.peer),
+            )
+            .collect();
+        let finalized: HashSet<_> = self.member_finalization_ready_peers().into_iter().collect();
         let mut pending: Vec<_> = self
             .member_finalization_candidates()
             .into_iter()
-            .filter(|peer| observed.contains(peer) && !finalized.contains(peer))
+            .filter(|peer| {
+                observed.contains(peer)
+                    && self.peer_is_connected(*peer)
+                    && !finalized.contains(peer)
+            })
             .collect();
         if let Some(cursor) = self.member_finalization_cursor {
             let start = pending.partition_point(|peer| *peer <= cursor);
@@ -212,6 +237,96 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             self.member_finalization_cursor = Some(*last);
         }
         pending
+    }
+
+    /// Members whose outbound finalization completed on this exact live connection and MLS
+    /// view. Legacy transports without leases retain event-fenced readiness instead.
+    /// Historical bound proofs intentionally remain available for conflict protection and
+    /// reconnect-hint validation; they cannot suppress repair after a remote restart.
+    pub fn member_finalization_ready_peers(&self) -> Vec<PeerId> {
+        if !self.policy_allows_member_mesh() {
+            return Vec::new();
+        }
+        self.member_finalization_ready
+            .iter()
+            .filter(|(peer, ready)| {
+                ready.epoch == self.group.epoch()
+                    && Some(ready.policy) == self.group_policy_digest()
+                    && self.group.contains_device(&ready.device)
+                    && self
+                        .peer_records
+                        .get(&ready.device)
+                        .is_some_and(|record| record.peer_id == *peer.as_bytes())
+                    && self.peer_uniquely_claimed_by_current_member(**peer)
+                    && self.finalization_connection_current(**peer, ready.connection.as_ref())
+            })
+            .map(|(peer, _)| *peer)
+            .collect()
+    }
+
+    fn finalization_connection_current(
+        &self,
+        peer: PeerId,
+        original: Option<&catcoms_rt::ConnectionLease>,
+    ) -> bool {
+        if !self.peer_is_connected(peer) {
+            return false;
+        }
+        match original {
+            Some(original) => {
+                original.is_live()
+                    && self
+                        .transport
+                        .connection_lease(peer)
+                        .is_some_and(|current| original.is_same(&current) && current.is_live())
+            }
+            None => !self.transport.supports_connection_leases(),
+        }
+    }
+
+    fn remember_finalization_ready(
+        &mut self,
+        peer: PeerId,
+        device: DeviceId,
+        policy: [u8; 32],
+        connection: Option<catcoms_rt::ConnectionLease>,
+    ) {
+        // Prune before insertion. The table has one small row per current transport slot;
+        // revoked owners stay revoked and cannot be rebound by a delayed disconnect event.
+        let epoch = self.group.epoch();
+        self.member_finalization_ready.retain(|_, row| {
+            row.epoch == epoch
+                && row.policy == policy
+                && row.connection.as_ref().is_none_or(|lease| lease.is_live())
+        });
+        if self.member_finalization_ready.contains_key(&peer)
+            || self.member_finalization_ready.len() < MAX_CONNECTED_PEER_SNAPSHOT
+        {
+            self.member_finalization_ready.insert(
+                peer,
+                ConnectionReady {
+                    device,
+                    epoch,
+                    policy,
+                    connection,
+                },
+            );
+        }
+    }
+
+    pub(super) fn retire_finalization_connection(&mut self, peer: PeerId) {
+        if self
+            .member_finalization_ready
+            .get(&peer)
+            .is_some_and(|ready| {
+                ready
+                    .connection
+                    .as_ref()
+                    .is_none_or(|lease| !lease.is_live())
+            })
+        {
+            self.member_finalization_ready.remove(&peer);
+        }
     }
 
     /// Current dual-key bindings suitable for retaining LOCAL outbound listener observations.
@@ -270,6 +385,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if !self.policy_allows_member_mesh() || !self.peer_is_connected(peer) {
             return Ok(false);
         }
+        let connection = self.transport.connection_lease(peer);
+        if !self.finalization_connection_current(peer, connection.as_ref()) {
+            return Ok(false);
+        }
         let Some(record) = self.self_record() else {
             return Ok(false);
         };
@@ -294,7 +413,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 return Err(TransportError::Unreachable(peer).into())
             }
         };
-        self.apply_member_finalization_response(peer, &auth, request_digest, policy, response)
+        self.apply_member_finalization_response(
+            peer,
+            &auth,
+            request_digest,
+            policy,
+            response,
+            connection,
+        )
     }
 
     pub(super) fn apply_member_finalization_response(
@@ -304,7 +430,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         request_digest: [u8; 32],
         policy: [u8; 32],
         response: Bytes,
+        connection: Option<catcoms_rt::ConnectionLease>,
     ) -> Result<bool, SyncError> {
+        if !self.policy_allows_member_mesh()
+            || auth.epoch != self.group.epoch()
+            || self.group_policy_digest() != Some(policy)
+            || !self.finalization_connection_current(peer, connection.as_ref())
+        {
+            return Ok(false);
+        }
         let requester = self.transport.local_peer();
         if response.is_empty() {
             return Ok(false);
@@ -330,7 +464,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         let record =
             descriptor(&answer[32..], policy, requester, peer).ok_or(SyncError::Malformed)?;
-        Ok(self.accept_finalization_record(peer, &pubkey, record))
+        let device = DeviceId::from_public_key_bytes(&pubkey);
+        if !self.accept_finalization_record(peer, &pubkey, record) {
+            return Ok(false);
+        }
+        // Descriptor validation may reconcile other owners; repeat the exact connection check
+        // before publishing scheduling evidence. Never substitute a newly queried lease.
+        if !self.finalization_connection_current(peer, connection.as_ref()) {
+            return Ok(false);
+        }
+        self.remember_finalization_ready(peer, device, policy, connection);
+        Ok(true)
     }
 
     pub(super) fn serve_member_finalization(

@@ -384,7 +384,22 @@ impl HelperLedger {
         actor: &ActorOwner,
         routes: &[BoundRoute],
     ) -> Result<Vec<ForwardJob>, VoiceError> {
+        self.take_ready_bounded(actor, routes, BATCH)
+    }
+
+    /// The exclusive Root prepares no more jobs than its free route positions. Retained revoked
+    /// gates still occupy positions; local registry pressure must not spend forwarding attempts.
+    pub(crate) fn take_ready_bounded(
+        &self,
+        actor: &ActorOwner,
+        routes: &[BoundRoute],
+        limit: usize,
+    ) -> Result<Vec<ForwardJob>, VoiceError> {
         self.current(actor)?;
+        let limit = limit.min(BATCH);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let routes = checked_routes(routes)?;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         self.prune(&mut state);
@@ -453,7 +468,7 @@ impl HelperLedger {
                 flight,
             });
             state.work_cursor = Some(key);
-            if jobs.len() >= BATCH {
+            if jobs.len() >= limit {
                 break;
             }
         }

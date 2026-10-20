@@ -72,6 +72,10 @@ pub enum ReplError {
     /// An op's inner signature did not verify.
     #[error("op signature is invalid")]
     BadSignature,
+    /// A legacy change tried to use another device's modern 32-byte Automerge writer namespace.
+    /// Old implementation-generated actors remain compatible; see the admission rule in `doc`.
+    #[error("op writer does not match its signed author")]
+    ActorMismatch,
     /// An op was for a different document than the one ingesting it.
     #[error("op is for a different document")]
     WrongDocument,

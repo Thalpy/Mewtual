@@ -37,6 +37,7 @@ mod fair;
 mod fair_tests;
 mod file_transfers;
 mod member_maintenance;
+mod member_reconnect;
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
 const DISCOVERY_DRAIN_MS: u64 = 500;
@@ -662,6 +663,9 @@ pub enum AppCommand {
         reply: oneshot::Sender<catcoms_sync::RecoveryProgress>,
     },
     FinalizedMemberPeers {
+        reply: oneshot::Sender<Vec<PeerId>>,
+    },
+    MemberFinalizationReadyPeers {
         reply: oneshot::Sender<Vec<PeerId>>,
     },
     MemberMeshAllowed {
@@ -3973,6 +3977,16 @@ impl ServerActor {
         result.await.map_err(|_| "server stopped".to_string())
     }
 
+    /// Observe current-connection repair completion; historical identity proof is separate.
+    pub async fn member_finalization_ready_peers(&self) -> Result<Vec<PeerId>, String> {
+        let (reply, result) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::MemberFinalizationReadyPeers { reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        result.await.map_err(|_| "server stopped".to_string())
+    }
+
     pub async fn member_mesh_allowed(&self) -> Result<bool, String> {
         let (reply, result) = oneshot::channel();
         self.cmd_tx
@@ -4311,6 +4325,7 @@ where
         let mut file_transfers = file_transfers::FileTransfers::new();
         let file_source_reads = crate::file_source::runtime();
         let mut maintenance = member_maintenance::Maintenance::new();
+        let mut member_reconnect = member_reconnect::RetryWindow::default();
         let mut studio_preview_resets_open = true;
         // Startup persistence belongs to the host. Thereafter raw versions are independent of
         // the UI's change detector: an accepted signed operation can leave its projection equal.
@@ -4340,6 +4355,9 @@ where
             // permit a handoff job is holding until unrelated work happens by.
             let delivery_clock = server.runtime_clock();
             let wake_sampled_at = delivery_clock.monotonic_ms();
+            if server.sync.take_local_reconnect_wake() {
+                member_reconnect.note_loss(wake_sampled_at);
+            }
             let studio_wake = studio_receiver.signal_and_wake(&server, &studio_signal);
             #[cfg(test)]
             studio_preparation_signal.send_replace(studio_receiver.preparing_for_test());
@@ -4360,6 +4378,7 @@ where
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (only, None) | (None, only) => only,
             };
+            let delivery_due = [delivery_due, member_reconnect.next_due()].into_iter().flatten().min();
             let voice_wake = server.voice_housekeeping_wake();
             let turn = {
             let keep_session_changed = async {
@@ -5059,6 +5078,9 @@ where
                     }
                     Some(AppCommand::FinalizedMemberPeers { reply }) => {
                         let _ = reply.send(server.finalized_member_peers());
+                    }
+                    Some(AppCommand::MemberFinalizationReadyPeers { reply }) => {
+                        let _ = reply.send(server.member_finalization_ready_peers());
                     }
                     Some(AppCommand::MemberMeshAllowed { reply }) => {
                         let _ = reply.send(server.member_mesh_allowed());
@@ -5868,6 +5890,16 @@ where
                 // surfaced without waiting for unrelated traffic.
                 fair::Turn::Delivery => {
                     event_tx.idle();
+                    if member_reconnect.take_due(server.runtime_clock().monotonic_ms())
+                        && server.member_mesh_allowed()
+                    {
+                        let clock = server.runtime_clock();
+                        // Preparation stays on this original owner. Advancing the finite retry
+                        // window above survives cancellation; the existing transport owns any
+                        // submitted permits through actual driver admission and cannot refund
+                        // them merely because this bounded local acknowledgement wait ends.
+                        member_reconnect::submit_bounded(clock, server.dial_local_reconnect_routes()).await;
+                    }
                     for (channel, snapshot) in recompute_due_delivery(
                         &mut server,
                         &mut delivery,

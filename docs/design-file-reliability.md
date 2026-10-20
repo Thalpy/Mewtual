@@ -26,6 +26,16 @@ successful and failed AEAD outcomes repeat original read/effect/work authority b
 storage or bad-candidate decisions. These paths do not yet establish the full native restart,
 bridge-replacement, load or physical-network acceptance matrix.
 
+A lost helper connection is a local availability observation, distinct from cancellation of the
+original download. Its response is discarded without importing bytes or rejecting a wrapped key;
+fresh usable helpers receive turns before a bounded later sweep of the old helper's sources.
+Waiting for an offline cached helper preserves coverage and does not spend retry passes. This
+selection still admits at most four helper identities per read; it does not rotate a fifth helper
+into a full cache. Native/session, Root, membership/epoch and original deadline retirement remain
+terminal. The typed effect observation is checked again after AEAD; a discarded complete page
+does not refresh the quiet deadline or reset retry accounting. A post-debit route failure keeps
+that debit spent even when no transport request was submitted.
+
 `FetchFileChunk` and `ReadFileRange` prepare authenticated requests on the server actor, suspend
 only network I/O in tasks, and authenticate/open/store results back on the actor. Workers have no
 MLS owner, file keys, blob store or transport event consumer. A one-shot completion is bound to
@@ -51,8 +61,10 @@ the concurrent-attempt permits above. Each attempt has a twelve-second deadline 
 plus two seconds), beside a sixty-second quiet read/chunk deadline. Accepted page progress refreshes
 the quiet deadline. At most 1,024 accepted pages per chunk and six retry rounds after the initial
 search bound repeated partial work; retry rounds preserve rejected exact variants. Ordinary reads
-have no persistent execution budget; new-format Keep work adds the durable allowance below. Admission
-fails with a busy error instead of waiting on actor-owned capacity. Media ranges are at most one
+have no persistent execution budget; new-format Keep work adds the durable allowance below. Whole-job
+admission fails with a busy error when its bounded inventory is full. Once admitted, a read waits
+quietly for lower-attempt permits, retaining its exact candidate, deadline and remaining allowance.
+Cancellation cannot refund an older request's actual lower ownership. Media ranges are at most one
 `CHUNK_BYTES` window (8 MiB), including windows crossing two chunks.
 
 Queued actor commands take priority over transfer completions. Local kept copying yields between

@@ -5,7 +5,128 @@ are implemented and exercised; live V2, production member media relay, combined 
 independent physical audio/network acceptance are not complete. The dated sections distinguish
 current runtime paths from inactive prerequisites and experiments.
 
-## Combined checkpoint validation (20 October)
+Private Download resume preserves verified encrypted acquisition progress and its spent execution
+allowance across restart. External export uses a fresh destination; continuing a partly written
+external plaintext file at its old offset is not implemented.
+
+## Chat history adversarial checkpoint (20 October)
+
+This checkpoint adds 20 chat tests: 15 application cases, four signed-history
+boundary cases and one rejected-page case alongside three existing paging checks. The trace and
+compatibility/audit limits are in [CHAT-HISTORY-CONVERGENCE](CHAT-HISTORY-CONVERGENCE.md).
+
+Completed checks:
+
+| Check | Result | Local log under this checkout's `target/` |
+| --- | --- | --- |
+| Application chat history | 15 passed, 3.54s | `chat-history-adversarial-after-2.log` |
+| Signed-history boundaries | 4 passed, 0.17s | `chat-history-writer-boundaries-after-1.log` |
+| Replication document/index/paging | 14 passed, 61.35s | `chat-history-replication-doc-after-2.log` |
+| Requester paging | 4 passed, 143.46s | `chat-history-pages-after-1.log` |
+| Complete frontend | 2,067 passed, 77.36s | `chat-history-frontend-full.log` |
+| Root dependency policy | Passed | `chat-history-root-deny.log` |
+| Strict whole-root Clippy | Passed, 2m51s | `chat-history-root-clippy-2.log` |
+| Native check / debug build | Passed, 1m28s / 4m33s | `chat-history-native-check.log`, `chat-history-native-build.log` |
+| Actual native startup | Passed, original 20s deadline | `chat-history-native-startup.log` |
+| Rendered browser flows | 10 passed | `chat-history-frontend-flows.log` |
+| Corrected file-bridge fixture | 1 passed, 8.80s | `chat-history-file-bridge-after.log` |
+| Strict Clippy after fixture correction | Passed, 31.41s | `chat-history-root-clippy-3.log` |
+| Root dependency policy after fixture correction | Passed | `chat-history-root-deny-2.log` |
+| Disconnect fixtures and stale-event regressions | 6 passed | `chat-history-disconnect-fixtures.log` |
+| Strict Clippy after disconnect fixtures | Passed, 27.31s | `chat-history-root-clippy-4.log` |
+| Complete native | 430 library passed, 569.80s; 5 ACL passed | `chat-history-native-full.log` |
+| Complete frontend, final repeat | 2,067 passed, 68.63s | `chat-history-frontend-full-final.log` |
+| Complete root, final repeat | 3,073 passed, 0 failed, 24 existing ignored, 57 target summaries | `chat-history-root-full-4.log` |
+
+Two signed-history cases intentionally characterize still-open same-device equivocation and
+missing original-group signature binding. They are not passing security acceptance for those
+properties. The 20/50-member cases are deterministic semantic replicas; the ten-epoch MLS case
+explicitly delivers commits/history. Neither is independent physical or automatic 50-peer
+network acceptance.
+
+Before the fixes, the application run failed six of seven cases, the writer test accepted forged
+modern identity-first (3 pass/1 fail), and the rejected-page test incorrectly advanced cursor 7 to
+10 (0 pass/1 fail). Their logs end in `before.log` / `before-2.log`. An already-failed broader
+replication run was stopped during unrelated Studio cases. Existing synthetic-writer fixtures
+were migrated to actual signers, preserving their graph/assertions; the final document cases pass.
+
+The first strict root Clippy attempt selected an older library from the shared target and could
+not see ActorMismatch. Only first-party fingerprint metadata was preserved/invalidated for a
+correct-source rebuild; no target tree or third-party cache was deleted. Strict Clippy and native
+check/build/startup now pass. All three mandatory application suites pass after the failed
+attempts detailed below. Read-only adversarial review finds no new code issue;
+legacy schema authorization, actor namespaces, poisoned snapshots and audit limits remain explicit.
+
+The first complete-root command failed after the application binary: 1,199 passed, one failed,
+22 ignored, 4,432.38s (`chat-history-root-full.log`). The Studio archive-budget test failed during
+setup at `rotation/overlay.rs:166` with `Io("out of memory")`, before preservation/release or its
+budget assertions. Read-only review finds a resource-failed attempt, not a demonstrated code
+defect; the exact originating I/O operation and cause remain unknown. The same executable passes
+four exact standalone runs (26.34s, 47.55s, 82.20s, 109.16s; `chat-history-studio-budget-reproduction.log`
+and suffixes `-1` through `-3`). None of these clears the failed complete attempt.
+
+The second full attempt passed that archive case but failed the new file-bridge fixture's terminal
+drain (`chat-history-root-full-2.log`). Its exact standalone reproduction fails in 10.35s
+(`chat-history-file-bridge-reproduction.log`). Successful completion readied the reply and emptied
+the queue; the unbiased test select could unwrap the empty queue before observing success.
+Read-only review confirmed this fixture race. The already-failed full attempt was stopped and
+is not a complete result. The corrected drain prioritizes the terminal reply, retaining every
+error/prefix/deadline/budget/byte assertion; no production behavior or limit changed. Its focused
+case passes in 8.80s and the re-review has no findings.
+
+The third root attempt completed with 3,069 passed, four failed and 24 ignored across 57 result
+summaries (`chat-history-root-full-3.log`, two build jobs/eight test threads). All 1,200 application
+cases passed. The four failures were sync test fixtures delivering a disconnect while the actual
+Mem transport remained connected; the production guard correctly treats that event as stale.
+They now drop the endpoint and assert actual loss/revoked lease first. Reconnects retain a fresh
+registration and prove its live distinct lease; every prior assertion remains. Read-only re-review
+finds no issue. Existing separate tests cover stale old edges preserving replacement readiness
+and refusing artificial reconnect work. All six focused fixture/stale-event checks pass, as does
+strict Clippy. The corrected complete-root run passes 3,073 cases, zero failures and 24 existing
+ignored across 57 target summaries (`chat-history-root-full-4.log`). All four fixtures and both
+previously failed application cases pass inside this full run. Its application binary passes
+1,200 in 1,775.19s, replication 403 in 269.38s and sync 752 in 121.99s. The 10,000-operation
+cold-provider regression transfers one operation in one page, 590 payload bytes.
+
+The other session's full suite has stopped. Complete native testing passes 430 library cases in
+569.80s plus five ACL cases (`chat-history-native-full.log`, two build jobs/four test threads),
+including automatic notification receipt, onward-directory discovery and all active-read restart
+scenarios. The latest four fixture changes only compile in root unit tests, not native dependency
+builds. The final frontend repeat passes all 2,067 cases in 68.63s
+(`chat-history-frontend-full-final.log`). Runtime source is unchanged across the full attempts;
+only reviewed fixtures changed. Final tracked-diff and all four new source fingerprints match
+the frozen root inputs. These local passes do not assert hosted CI or completion of the programme.
+
+## Active-read recovery checkpoint (20 October)
+
+This continuation was developed in the local
+`M:\Git (local)\CatComs\target\communication-atomic-intake-worktree` checkout, following
+checkpoint `202c17f141fc58bcd3e3ee4ee5d1db073c6bc151`, for `chat-update-implementation`. See
+[the current handover](../HANDOVER.md) for the resume order and checkout boundaries.
+
+The first full native run passed 426/429 library cases. Its two new active-read failures exposed
+missing background reconnect work after the startup discovery pass; a third failure came from a
+fixture that had closed its supposedly connected unresponsive peers. The production correction
+adds a finite, bounded retry window for an authenticated member's actual connection loss, using
+only existing consented saved routes and shared dial budgets. The corrected fixture retains its
+connections and checks current outbound finalization readiness.
+
+All three focused real-TCP active-read cases now pass: Keep, private Download, and private
+Download with B returning after a confirmed local dial admission while absent. Each recovers the
+original invocation and exact file without another Resume request or replenishing durable work.
+Log: `communication-chaos-native-active-focused-7.log` (14.53s). Both focused reconnect-selection
+cases pass in `communication-chaos-native-capture-focused-2.log` (5.92s). All logs in this section
+are under the isolated atomic-intake checkout's `target/`.
+
+Local dial admission does not prove terminal socket failure: the admitted attempt may connect
+when B returns. A real failed first dial followed by a second successful dial is not established
+by that case. Separate injected-clock scheduling/deadline cases (three), actual command-custody
+cases (two), and current finalization/loss cases (27) pass. The actor prefix test checks retained
+bytes/accounting and exact eventual bytes; direct capture of its next signed wire offset remains
+a low-priority coverage follow-up. The complete root/native/frontend passes are recorded above;
+they do not complete live V2, media relay or independent physical audio/network acceptance.
+
+## Previous combined checkpoint validation — `202c17f1` (20 October)
 
 The integrated Gate7 UI, inactive token/origin transaction and standalone framing probe are
 validated together. Production root Rust is identical to frozen `5f5f20cc`; the full command

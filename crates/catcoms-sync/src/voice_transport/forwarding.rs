@@ -407,8 +407,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// production actor scheduling/request dispatch remains disabled until endpoint ownership.
     pub fn prepare_voice_forwards(&mut self) -> Result<Vec<PendingVoiceForward<T>>, VoiceError> {
         self.reconcile_voice_actor();
+        let free_routes = self.available_voice_routes()?;
         let helper = self.voice_transport_actor()?.helper()?;
-        let jobs = helper.take_ready(self.voice_transport_actor()?, &self.voice_bound_routes())?;
+        let jobs = helper.take_ready_bounded(
+            self.voice_transport_actor()?,
+            &self.voice_bound_routes(),
+            free_routes,
+        )?;
         let mut pending = Vec::new();
         for job in jobs {
             // take_ready reserves the attempt before signing. Local preparation failure burns
@@ -443,8 +448,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// immutable source attempt before framing, and sign a permit only for its selected helper.
     pub fn prepare_voice_sources(&mut self) -> Result<Vec<PendingVoiceSource<T>>, VoiceError> {
         self.reconcile_voice_actor();
+        let free_routes = self.available_voice_routes()?;
         let source = self.voice_transport_actor()?.source()?;
-        let jobs = source.take_ready(self.voice_transport_actor()?, &self.voice_bound_routes())?;
+        let jobs = source.take_ready_bounded(
+            self.voice_transport_actor()?,
+            &self.voice_bound_routes(),
+            free_routes,
+        )?;
         let mut pending = Vec::new();
         for job in jobs {
             let envelope = match job.hop() {
@@ -480,6 +490,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
         }
         Ok(pending)
+    }
+    fn available_voice_routes(&mut self) -> Result<usize, VoiceError> {
+        let voice = self
+            .voice_runtime
+            .as_mut()
+            .ok_or(VoiceError::Unauthorized)?;
+        // Revocation suppresses effects; only actual last-owner drop releases a registry row.
+        // Root's exclusive borrow spans scheduling and all synchronous preparations below, so
+        // another caller cannot insert a gate between this count and this bounded batch.
+        voice.routes.active.retain(|gate| gate.strong_count() > 0);
+        Ok(ROUTES.saturating_sub(voice.routes.active.len()))
     }
     fn prepare_voice_request(&mut self, job: Work) -> Result<PendingVoiceForward<T>, VoiceError> {
         let context = self.voice_v2_context(job.envelope().object().scope().room)?;

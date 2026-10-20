@@ -32,6 +32,8 @@ pub fn bridge_reference_variant(reference: &FileRef) -> Result<[u8; 32], BridgeE
 pub enum BridgeError {
     #[error("file bridge capacity is busy")]
     Busy,
+    #[error("file bridge connection changed")]
+    Unavailable,
     #[error("file bridge read is no longer authorized")]
     Stale,
     #[error("file bridge request exceeds its bounds")]
@@ -128,15 +130,35 @@ impl RequesterScope {
     pub(crate) fn deadline(&self) -> u64 {
         self.deadline
     }
+
+    fn status(&self) -> BlobEffectStatus {
+        // Clock is an injected seam and may itself retire an owner. Sample it BEFORE the last
+        // original-origin check. A changed connection never masks cancellation or expiry.
+        let now = self.clock.monotonic_ms();
+        if now >= self.deadline || !self.origin.authorized() {
+            BlobEffectStatus::Retired
+        } else if !*self.live.borrow()
+            || self.live.has_changed().is_err()
+            || !self.connection.is_live()
+        {
+            BlobEffectStatus::RouteChanged
+        } else {
+            BlobEffectStatus::Current
+        }
+    }
+
+    fn check(&self) -> Result<(), BridgeError> {
+        match self.status() {
+            BlobEffectStatus::Current => Ok(()),
+            BlobEffectStatus::RouteChanged => Err(BridgeError::Unavailable),
+            BlobEffectStatus::Retired => Err(BridgeError::Stale),
+        }
+    }
 }
 #[async_trait::async_trait]
 impl RequestAuthority for RequesterScope {
     fn authorized(&self) -> bool {
-        *self.live.borrow()
-            && self.live.has_changed().is_ok()
-            && self.origin.authorized()
-            && self.connection.is_live()
-            && self.clock.monotonic_ms() < self.deadline
+        self.status() == BlobEffectStatus::Current
     }
     async fn revoked(&self) {
         let mut live = self.live.clone();
@@ -165,6 +187,16 @@ pub(crate) struct BridgeContext {
     helper: MemberCatalogEntry,
     sources: Vec<MemberCatalogEntry>,
     pub(crate) scope: Arc<RequesterScope>,
+}
+impl BridgeContext {
+    pub(crate) fn effect_scope(&self) -> BlobEffectScope {
+        BlobEffectScope {
+            instance: self.instance.clone(),
+            view: self.view.clone(),
+            helper: self.helper.clone(),
+            scope: self.scope.clone(),
+        }
+    }
 }
 pub struct PreparedBridgePage {
     pub(crate) peer: PeerId,
@@ -386,6 +418,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
             search::Step::Yield => BridgeStep::Yield,
             search::Step::Backoff => BridgeStep::Backoff,
+            // A disconnected known helper may return. Search has already offered all usable
+            // helpers (including a fresh D) first; waiting here cannot hide those alternatives
+            // or spend another retry pass while B is absent. The parent read remains bounded.
+            search::Step::Exhausted if helpers.len() < catalog.helpers.len() => BridgeStep::Backoff,
             // Further bootstrap can still discover a newly connected D. Its original read
             // deadline/finite work allowance bounds this search, not a false global absence.
             search::Step::Exhausted if catalog.helpers.len() < HELPERS => BridgeStep::Yield,
@@ -416,7 +452,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .ok_or(BridgeError::Stale)?;
         let descriptor = self
             .bridge_helper_descriptor(entry)
-            .ok_or(BridgeError::Stale)?;
+            .ok_or_else(|| self.bridge_route_unavailable(catalog))?;
         let refreshed = catalog
             .search
             .refresh(
@@ -477,9 +513,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .clone();
         let descriptor = self
             .bridge_helper_descriptor(&helper)
-            .ok_or(BridgeError::Stale)?;
+            .ok_or_else(|| self.bridge_route_unavailable(catalog))?;
         if descriptor.peer != choice.helper_peer() {
-            return Err(BridgeError::Stale);
+            return Err(self.bridge_route_unavailable(catalog));
         }
         if !self.bridge_send_ready(descriptor.device, self.clock.monotonic_ms()) {
             return Err(BridgeError::Busy);
@@ -493,7 +529,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .transport
             .connection_lease(descriptor.peer)
             .filter(ConnectionLease::is_live)
-            .ok_or(BridgeError::Stale)?;
+            .ok_or_else(|| self.bridge_route_unavailable(catalog))?;
         let mut routes: RoutePlan = self.file_service.routes.source().ok_or(BridgeError::Busy)?;
         let deadline = self
             .clock
@@ -509,9 +545,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             deadline,
             _route: routes.take_scope().ok_or(BridgeError::Busy)?,
         });
-        if !scope.authorized() {
-            return Err(BridgeError::Stale);
-        }
+        scope.check()?;
         let mut nonce = [0; 16];
         self.rng.fill_bytes(&mut nonce);
         let sources: Vec<_> = choice
@@ -574,7 +608,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     ) -> Result<PendingBlobFetch<T>, BridgeError> {
         self.reconcile_file_requesters();
         if !self.bridge_catalog_current(catalog)
-            || !prepared.context.scope.authorized()
             || !catalog
                 .choice
                 .as_ref()
@@ -582,6 +615,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return Err(BridgeError::Stale);
         }
+        prepared.context.scope.check()?;
         let now = self.clock.monotonic_ms();
         let next = now
             .checked_add(REQUEST_INTERVAL_MS)
@@ -589,9 +623,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if !self.bridge_send_ready(prepared.choice.0.helper.device, now) {
             return Err(BridgeError::Busy);
         }
-        if !self.bridge_catalog_current(catalog) || !prepared.context.scope.authorized() {
+        if !self.bridge_catalog_current(catalog) {
             return Err(BridgeError::Stale);
         }
+        prepared.context.scope.check()?;
         if !catalog.committed {
             if !catalog.search.admitted(&prepared.choice.0) {
                 return Err(BridgeError::Stale);
@@ -630,53 +665,84 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
+    fn bridge_route_unavailable(&self, catalog: &BridgeCatalog) -> BridgeError {
+        if self.bridge_catalog_current(catalog) {
+            BridgeError::Unavailable
+        } else {
+            BridgeError::Stale
+        }
+    }
+
+    /// Classify only under the original Root, committed MLS observation and native invocation.
+    /// A local route failure can be retried; changing any of those original owners cannot.
+    pub fn blob_effect_status(&self, effect: &BlobEffectScope) -> BlobEffectStatus {
+        let status = effect.scope.status();
+        if !Arc::ptr_eq(&effect.instance, &self.blob_fetch_instance)
+            || effect.view.validate(&self.group).is_err()
+            || effect.helper.validate(&self.group).is_err()
+            || !self.group.is_active()
+            || !effect.scope.origin.authorized()
+        {
+            BlobEffectStatus::Retired
+        } else {
+            status
+        }
+    }
+
     pub(crate) fn authenticate_bridge_page(
         &self,
         context: BridgeContext,
         response: Result<Bytes, TransportError>,
     ) -> Result<BlobPageOutcome, SyncError> {
-        if !Arc::ptr_eq(&context.instance, &self.blob_fetch_instance)
-            || context.view.validate(&self.group).is_err()
-            || !context.scope.authorized()
-            || context.helper.validate(&self.group).is_err()
-        {
-            return Err(SyncError::Unauthorized);
+        let effect = context.effect_scope();
+        match self.blob_effect_status(&effect) {
+            BlobEffectStatus::Current => {}
+            BlobEffectStatus::RouteChanged => return Ok(BlobPageOutcome::RouteChanged),
+            BlobEffectStatus::Retired => return Err(SyncError::Unauthorized),
         }
-        let response = response?;
-        if response.is_empty() {
-            return Ok(BlobPageOutcome::Unsupported);
-        }
-        let grant = Grant::parse(&context.grant).map_err(|_| SyncError::Malformed)?;
-        let reply = HelperPage::parse(&response, &grant).map_err(|_| SyncError::Malformed)?;
-        if reply.public_key() != context.helper.signature_key() || !reply.verify_signature() {
-            return Err(SyncError::Unauthorized);
-        }
-        match reply.status() {
-            HelperStatus::Absent => Ok(BlobPageOutcome::Absent),
-            HelperStatus::Unavailable => Ok(BlobPageOutcome::Unavailable),
-            HelperStatus::Found => {
-                let page = reply.source().ok_or(SyncError::Malformed)?;
-                let entry = context
-                    .sources
-                    .iter()
-                    .find(|entry| entry.device_id() == page.source())
-                    .ok_or(SyncError::Unauthorized)?;
-                if entry.validate(&self.group).is_err()
-                    || page.public_key() != entry.signature_key()
-                    || !page.verify_signature()
-                    || !context.scope.authorized()
-                {
-                    return Err(SyncError::Unauthorized);
-                }
-                let offset = grant.window().offset;
-                Ok(BlobPageOutcome::Page(Box::new(BlobPage {
-                    bytes: page.page().to_vec(),
-                    offset,
-                    total: page.total(),
-                    more: offset as usize + page.page().len() < page.total() as usize,
-                    provider: roles::fingerprint(&page.source()),
-                })))
+        let result = (|| {
+            let response = response?;
+            if response.is_empty() {
+                return Ok(BlobPageOutcome::Unsupported);
             }
+            let grant = Grant::parse(&context.grant).map_err(|_| SyncError::Malformed)?;
+            let reply = HelperPage::parse(&response, &grant).map_err(|_| SyncError::Malformed)?;
+            if reply.public_key() != context.helper.signature_key() || !reply.verify_signature() {
+                return Err(SyncError::Unauthorized);
+            }
+            match reply.status() {
+                HelperStatus::Absent => Ok(BlobPageOutcome::Absent),
+                HelperStatus::Unavailable => Ok(BlobPageOutcome::Unavailable),
+                HelperStatus::Found => {
+                    let page = reply.source().ok_or(SyncError::Malformed)?;
+                    let entry = context
+                        .sources
+                        .iter()
+                        .find(|entry| entry.device_id() == page.source())
+                        .ok_or(SyncError::Unauthorized)?;
+                    if entry.validate(&self.group).is_err()
+                        || page.public_key() != entry.signature_key()
+                        || !page.verify_signature()
+                    {
+                        return Err(SyncError::Unauthorized);
+                    }
+                    let offset = grant.window().offset;
+                    Ok(BlobPageOutcome::Page(Box::new(BlobPage {
+                        bytes: page.page().to_vec(),
+                        offset,
+                        total: page.total(),
+                        more: offset as usize + page.page().len() < page.total() as usize,
+                        provider: roles::fingerprint(&page.source()),
+                    })))
+                }
+            }
+        })();
+        // Repeat after signature checks and copying. Route retirement discards EVERY outcome,
+        // including a corrupt response; stale data cannot reject the current encrypted variant.
+        match self.blob_effect_status(&effect) {
+            BlobEffectStatus::Current => result,
+            BlobEffectStatus::RouteChanged => Ok(BlobPageOutcome::RouteChanged),
+            BlobEffectStatus::Retired => Err(SyncError::Unauthorized),
         }
     }
 }

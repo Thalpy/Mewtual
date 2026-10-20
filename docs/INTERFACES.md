@@ -1,5 +1,33 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Chat writer and failed-page admission (20 October, continuation)
+
+Legacy replication now returns `ReplError::ActorMismatch` when a parsed change's 32-byte writer
+actor differs from its verified signed author. The refusal precedes graph/log mutation. Other
+historical actor lengths remain compatible; saved previously poisoned graphs are not migrated.
+The signed wire and persistence bytes are unchanged. Catch-up publishes a new page cursor or
+completion only after successful bundle import; an accepted prefix retains recovery work and
+invalidates earlier completeness answers even when a later frame is rejected. See
+[CHAT-HISTORY-CONVERGENCE](communication-recovery/CHAT-HISTORY-CONVERGENCE.md) for evidence and limits.
+
+## File route recovery observations (20 October)
+
+`CompletedBlobFetch::effect_scope` retains an opaque original bridge observation through AEAD.
+Only the original `ChannelSync::blob_effect_status` can classify it as Current, RouteChanged or
+Retired; callers cannot construct it or supply a replacement authority. Classification samples
+the injected clock before final original-origin checks and validates the Root instance, committed
+MLS view and helper identity. Full `RequestAuthority` remains false for both noncurrent states.
+`BlobPageOutcome::RouteChanged` carries no payload and is a local observation, not a wire status.
+`BridgeError::Unavailable` identifies proven pre-handoff route loss; no durable debit is refunded.
+The actor may retry a current parent operation, without accepting the old page or bad-key verdict.
+
+Inactive voice Root scheduling limits source/helper batches to its free route-registry positions
+before spending ledger attempts. Actual retained gates count even after revocation. This avoids
+registry-capacity attempt loss; it does not refund other preparation or ambiguous network failures.
+An exact authenticated target ACK from a still-current direct flight confirms its immutable packet
+even after a helper hedge. Old negative/helper responses cannot undo that confirmation; broadcast
+ACKs still establish only one recipient's admission. This does not enable live V2.
+
 ## Upload batch and asynchronous UI ownership (19 October)
 
 `canStartUpload` admits one review/upload batch of at most32 files. Pick/drop/paste paths check
@@ -257,6 +285,28 @@ seconds; a repeated command cannot accelerate it or forgive PEX failure. Poll-on
 autonomous, shares the existing flight/chain limits, and ends after Commits unless an explicit
 fresh finalization waiter exists. A pending new poll runs after the full chain's owed Offer;
 an upgrade past Commits preserves a full new discovery obligation.
+
+`member_finalization_ready_peers()` reports outbound kind26 completion for the original live
+connection lease, member/device, epoch and policy. Legacy transports without leases use existing
+event-fenced fallback. This session-only scheduling table has at most320 rows; serving alone does
+not mark readiness. Historical `finalized_member_peers()` retains its separate dual-key binding
+meaning for conflict protection and sealing authenticated outbound listener observations.
+`member_finalization_work()` also considers known members in the transport's actual connected
+snapshot, including inbound-only edges, without requiring outbound route evidence or starting a
+dial. It chooses at most two unmet targets per pass and preserves its fair cursor. The native
+capture worker uses current readiness for early skips and spaces its second try by at least the
+one-second serving interval on either peer order. Existing discovery capacity and rate gates apply.
+
+`take_local_reconnect_wake()` consumes one session-only scheduling hint from actual aggregate
+loss of a bound current P2P member. Unknown endpoints, duplicate consumed edges and stale edges
+while a replacement driver connection is live do not arm it. The product actor owns at most two
+additional local-route retry opportunities (+5s, +20s normally), with an original 25s expiry and
+60s re-arm cooldown; repeated hints neither extend nor replenish them. It spends each turn before
+awaiting and rechecks current member-mesh eligibility. The existing exact sealed-route/roster and
+shared endpoint budgets remain authoritative; no quota is reset. A local driver acknowledgement
+wait ends after 250ms, without reclaiming any permits already owned by a queued command. No file
+read, native session or retained manifest becomes dial authority. Ordinary native cadence remains
+the fallback, including when the endpoint's existing two-attempt/minute quota denies these turns.
 O(1) `peer_record_revision()` counts
 actual stored signed-descriptor changes and feeds `SnapshotNeeded`; ordinary liveness and exact
 duplicate descriptors do not increment it. The counter is ephemeral and adds no persistence field.
@@ -4049,8 +4099,10 @@ things the CRDT does not do for us, both of which reached users:
   only one, leaving the other member's posts in the document and unreachable. This is the defect
   the status feed escaped by moving to distinct root keys; channels did not. Reads now take every
   conflicting list. Writes still use the one `get` returns, so writers converge on a single list
-  as soon as they have seen each other. **Known limit:** editing, deleting and reacting still
-  resolve through `get`, so a row stranded in a losing list is visible but not yet mutable.
+  as soon as they have seen each other. Editing, deleting, reacting and pinning now resolve a
+  unique visible ID across every list, including a losing first-writer list. Ambiguous duplicate
+  IDs are refused before product authorization or mutation. If a non-list root conflict wins,
+  appending reuses an existing valid list instead of replacing and hiding observed history.
 - A send appends at the end of the list *as the sending replica sees it*, so a member that is
   behind appends after the last row it knows about. When the missing history arrives, the two are
   concurrent insertions and the merge orders them by a rule that knows nothing about when anything

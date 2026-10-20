@@ -99,7 +99,8 @@ pub use studio_exchange::StudioWatch;
 pub mod registry_seed;
 mod roles;
 pub use blob_fetch::{
-    BlobPage, BlobPageOutcome, CompletedBlobFetch, PendingBlobFetch, MAX_BLOB_FETCH_PEERS,
+    BlobEffectScope, BlobEffectStatus, BlobPage, BlobPageOutcome, CompletedBlobFetch,
+    PendingBlobFetch, MAX_BLOB_FETCH_PEERS,
 };
 pub use member_maintenance::{
     CompletedMemberMaintenance, MemberMaintenanceError, MemberMaintenanceKind,
@@ -4374,6 +4375,12 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     member_finalization_served_at: HashMap<DeviceId, u64>,
     member_finalization_pending: HashMap<DeviceId, PeerId>,
     member_finalization_cursor: Option<PeerId>,
+    /// Outbound kind26 completions for the exact live connection, separate from historical
+    /// dual-key proofs. A restarted remote may have forgotten us even while our proof remains.
+    member_finalization_ready: HashMap<PeerId, member_finalization::ConnectionReady>,
+    /// Coalesced scheduling hint after actual loss of a previously bound current member.
+    /// This carries no endpoint or dial authority and is never persisted.
+    local_reconnect_wake: bool,
     /// Recovery work to perform on the next async drain.
     catchup_queue: Vec<CatchupTask>,
     /// Periodic neighbour reconciliation is paced and rotates through open documents when the
@@ -4792,6 +4799,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             member_finalization_served_at: HashMap::new(),
             member_finalization_pending: HashMap::new(),
             member_finalization_cursor: None,
+            member_finalization_ready: HashMap::new(),
+            local_reconnect_wake: false,
             catchup_queue: Vec::new(),
             reconciliation_next_ms: 0,
             reconciliation_cursor: 0,
@@ -6273,6 +6282,24 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
     /// Apply the aggregate disconnect edge even if no path snapshot follows it.
     fn note_peer_disconnected(&mut self, peer: PeerId) {
+        if self.transport.supports_connection_leases() && self.peer_is_connected(peer) {
+            // The driver has already established a replacement aggregate connection. This old
+            // queued edge cannot clear its cached liveness or generate another recovery window.
+            return;
+        }
+        // A Noise-only endpoint cannot solicit recovery. Historical member proof remains a
+        // conflict pin, but only an ACTUAL aggregate loss owes this hint; delayed old events
+        // after a replacement connection must not manufacture another retry window.
+        if self.policy_allows_member_mesh()
+            && self.peer_has_bound_member_proof(peer)
+            && self.connected_peers.contains(&peer)
+            && !self.peer_is_connected(peer)
+        {
+            self.local_reconnect_wake = true;
+        }
+        // An old queued edge may arrive after a replacement connection completed kind26.
+        // Retire only its dead owner, never the new connection's readiness or bound identity.
+        self.retire_finalization_connection(peer);
         self.member_maintenance.disconnected(peer);
         if let Some(voice) = &self.voice_runtime {
             voice.routes.disconnected(peer);
@@ -8227,6 +8254,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 expires_at_ms,
             },
         ))
+    }
+
+    /// Consume one coalesced known-member-loss hint. This is scheduling evidence only; the
+    /// owning actor must pace and bound retries, and every actual dial still uses the existing
+    /// sealed local routes, current roster and shared endpoint scheduler. No file read arms it.
+    pub fn take_local_reconnect_wake(&mut self) -> bool {
+        std::mem::take(&mut self.local_reconnect_wake)
     }
 
     /// Retry the prior authenticated same-LAN route under the current roster and process-wide
@@ -12371,9 +12405,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 // It is finished with us, so an unbroken run of "ask me again" has ended, and the
                 // walk it was continuing is over. A stale position kept here would make the next
                 // pass resume past history this peer accepts after now.
+                let applied = self.apply_catchup_response(doc_type, doc_id, bundle)?;
+                // Completion is valid only after the complete offered bundle is accepted.
+                // A bad later frame must not erase the original walk or its retained work.
                 self.clear_catchup_stall(peer, doc_type, doc_id);
                 self.catchup_cursors.remove(&(doc_type, doc_id, peer));
-                let applied = self.apply_catchup_response(doc_type, doc_id, bundle)?;
                 // "That is everything I have" is only a completion of the gap when it comes from
                 // the peer that said there was more of it. Peer selection is group-wide, so the
                 // next drain can easily ask somebody who holds a prefix, or nothing; letting that
@@ -12447,7 +12483,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // older shape, which recomputes from the frontier every time and so can repeat itself
             // indefinitely; that is the behaviour the non-progress bound exists for.
             Some((marker @ (&CATCHUP_SINCE_MORE | &CATCHUP_SINCE_PAGE), rest)) => {
-                let (cursor_advanced, bundle) = if *marker == CATCHUP_SINCE_PAGE {
+                let (next_cursor, cursor_advanced, bundle) = if *marker == CATCHUP_SINCE_PAGE {
                     let Some(cursor) =
                         CatchupCursor::decode(rest.get(..CATCHUP_CURSOR_BYTES).unwrap_or_default())
                     else {
@@ -12455,19 +12491,24 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                         return Err(SyncError::Malformed);
                     };
                     let bundle = &rest[CATCHUP_CURSOR_BYTES..];
-                    let previous = self
-                        .catchup_cursors
-                        .insert((doc_type, doc_id, peer), cursor);
+                    let previous = self.catchup_cursors.get(&(doc_type, doc_id, peer)).copied();
                     // A position moves only within the same provider's walk. A peer changing its
                     // stamp cannot manufacture progress by comparing unrelated log positions.
                     let advanced = previous.map_or(cursor.position > 0, |old| {
                         cursor.provider == old.provider && cursor.position > old.position
                     });
-                    (advanced, bundle)
+                    (Some(cursor), advanced, bundle)
                 } else {
-                    (false, rest)
+                    (None, false, rest)
                 };
                 let applied = self.apply_catchup_response(doc_type, doc_id, bundle)?;
+                // Import applies a verified prefix before reporting a later error. Advance only
+                // after success, otherwise the unprocessed tail would be skipped on the next
+                // request. Retrying the old position is safe because accepted ops deduplicate.
+                if let Some(cursor) = next_cursor {
+                    self.catchup_cursors
+                        .insert((doc_type, doc_id, peer), cursor);
+                }
                 // A bounded scan can legitimately stop in a prefix the requester already holds.
                 // Grant only a finite empty-page allowance; advancing an invented cursor must
                 // still reach the existing non-progress cooldown even without network traffic.
@@ -12660,15 +12701,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // Import is intentionally prefix-applying. Queue receipts for that verified prefix before
         // returning a later frame's error; retrying would see the prefix as duplicate and could
         // never reconstruct its author/change attribution.
-        terminal?;
         // Whether to ask again belongs to the serving peer and is carried by the response marker
         // (see `CATCHUP_SINCE_MORE`), not decided here from how much was applied. The one shape
         // that cannot say it is the old whole-history serve, which has no marker: there, having
         // applied something means the frontier moved, so a follow-up can ask for the rest, and
         // that follow-up goes through the incremental path which does say.
         if applied_count > 0 {
+            // Even a partial import invalidates older completeness answers and needs another
+            // turn. Retain that obligation before propagating the rejected frame's error.
+            self.clear_sources_checked(doc_type, doc_id);
             self.enqueue_doc_catchup(doc_type, doc_id);
         }
+        terminal?;
         tracing::debug!(
             ?doc_type,
             doc_id,
@@ -20937,7 +20981,7 @@ mod tests {
     /// queues the document must not then exclude the very source whose return caused it.
     #[tokio::test]
     async fn a_reconnect_forgets_what_that_source_said_before_it_left() {
-        let (_hub, mut members, ids) = build_members(2).await;
+        let (hub, mut members, ids) = build_members(2).await;
         converge_and_publish_test_routes(&mut members);
         let mut bob = members.pop().unwrap();
         let mut alice = members.pop().unwrap();
@@ -20954,7 +20998,16 @@ mod tests {
         );
 
         // She leaves and comes back. What she said belonged to the connection that ended.
+        // Match the driver ordering: retire the actual transport before delivering its edge.
+        // An edge alone, while the endpoint is still live, is intentionally treated as stale.
+        let old_connection = bob.transport.connection_lease(alice_peer).unwrap();
+        drop(alice);
+        assert!(!bob.peer_is_connected(alice_peer));
+        assert!(!old_connection.is_live());
         bob.note_peer_disconnected(alice_peer);
+        let _returning_alice = hub.join(alice_peer);
+        let replacement = bob.transport.connection_lease(alice_peer).unwrap();
+        assert!(replacement.is_live() && !replacement.is_same(&old_connection));
         bob.note_peer_connected(alice_peer);
         assert!(
             bob.unchecked_source_exists(DocType::Channel, 101),
@@ -22099,12 +22152,18 @@ mod tests {
     async fn active_disconnect_promotes_one_random_passive_candidate_without_closing_others() {
         let (_hub, mut members, ids) = build_members(4).await;
         converge_and_publish_test_routes(&mut members);
-        let bob_peer = members[1].local_peer();
+        let bob = members.remove(1);
+        let bob_peer = bob.local_peer();
         let alice = &mut members[0];
         prove_live_member(alice, bob_peer, ids[1]);
         assert_eq!(alice.active_member_view().len(), 1);
         assert_eq!(alice.passive_member_view().len(), 2);
 
+        // A real aggregate loss precedes this event; a still-live endpoint would make it stale.
+        let connection = alice.transport.connection_lease(bob_peer).unwrap();
+        drop(bob);
+        assert!(!alice.peer_is_connected(bob_peer));
+        assert!(!connection.is_live());
         alice.note_peer_disconnected(bob_peer);
         assert!(alice.active_member_view().is_empty());
         assert!(alice.topology_promotions.contains(&ids[1]));
@@ -24855,6 +24914,10 @@ mod tests {
             MemberRouteHealth::ClaimedPeerConnectedRelay
         );
 
+        let connection = alice.transport.connection_lease(peer).unwrap();
+        drop(bob);
+        assert!(!alice.peer_is_connected(peer));
+        assert!(!connection.is_live());
         alice.note_peer_disconnected(peer);
         let route = &alice.member_routes()[0];
         assert!(!route.connected);
@@ -24876,7 +24939,7 @@ mod tests {
 
     #[tokio::test]
     async fn path_evidence_is_bounded_coherent_and_survives_connect_before_record() {
-        let (_hub, members, _ids) = build_members(2).await;
+        let (hub, members, _ids) = build_members(2).await;
         let mut it = members.into_iter();
         let mut alice = it.next().unwrap();
         let mut bob = it.next().unwrap();
@@ -24983,12 +25046,22 @@ mod tests {
         assert_eq!(alice.pairwise_reachability.len(), MAX_PEER_RECORDS);
 
         // A fresh connection generation clears path detail even when no new snapshot follows.
+        let old_connection = alice.transport.connection_lease(peer).unwrap();
+        drop(bob);
+        assert!(!alice.peer_is_connected(peer));
+        assert!(!old_connection.is_live());
         alice.note_peer_disconnected(peer);
+        let returning_bob = hub.join(peer);
+        let replacement = alice.transport.connection_lease(peer).unwrap();
+        assert!(replacement.is_live() && !replacement.is_same(&old_connection));
         alice.note_peer_connected(peer);
         assert_eq!(
             alice.member_routes()[0].health,
             MemberRouteHealth::ClaimedPeerConnectedOther
         );
+        drop(returning_bob);
+        assert!(!alice.peer_is_connected(peer));
+        assert!(!replacement.is_live());
         alice.note_peer_disconnected(peer);
         alice.note_peer_paths(peer, vec![direct_v4_quic()], Some(direct_v4_quic()));
         assert!(alice.member_routes()[0].active_paths.is_empty());

@@ -633,6 +633,108 @@ fn queued_source_offer(f: &mut VoiceForwardFixture) -> (voice_v2::presence::Loca
 }
 
 #[tokio::test]
+async fn voice_source_route_registry_pressure_preserves_attempts_and_limits_ready_batch() {
+    let mut f = VoiceForwardFixture::empty().await;
+    let (_watcher, first, activity) = queued_source_watch(&mut f, voice_v2::CallLease::default());
+    for message in [162, 163] {
+        let object = voice_v2::SignedObject::issue(first.scope(), &f._source.device,
+            [message; 32], first.issued(), first.expires(), first.body().clone()).unwrap();
+        f._source.queue_voice_source(object, activity.clone()).unwrap();
+    }
+    let route = f._source.voice_bound_routes().into_iter().find(|r| r.device == f.helper.device_id()).unwrap();
+    let mut held: Vec<_> = (0..64).map(|_| f._source.capture_voice_reply_route(route, Arc::new(())).unwrap()).collect();
+    let ledger = f._source.voice_transport_actor().unwrap().source().unwrap();
+    for _ in 0..5 {
+        assert!(f._source.prepare_voice_sources().unwrap().is_empty());
+        f.clock.advance_ms(500);
+    }
+    assert_eq!(ledger.counts(), (3, 0, 0), "local registry pressure spends no source attempt");
+    drop(held.pop());
+    let pending = f._source.prepare_voice_sources().unwrap();
+    assert_eq!(pending.len(), 1, "one free route cannot debit a four-job batch");
+    assert_eq!(ledger.counts(), (3, 1, 1));
+    drop(held);
+    drop(pending);
+    let pending = f._source.prepare_voice_sources().unwrap();
+    assert_eq!(pending.len(), 2, "other packets retain their fair first opportunity");
+    assert_eq!(ledger.counts(), (3, 3, 2));
+}
+
+#[tokio::test]
+async fn voice_helper_route_registry_pressure_does_not_exhaust_forwarding_before_handoff() {
+    let mut f = VoiceForwardFixture::new().await;
+    for message in [164, 165] {
+        let frame = incoming_helper_frame(&mut f, message);
+        assert!(f.helper.receive_voice_transport(f._source.local_peer(), &frame).is_some());
+    }
+    let route = f.helper.voice_bound_routes().into_iter().find(|r| r.device == f.recipient.device_id()).unwrap();
+    let mut held: Vec<_> = (0..64).map(|_| f.helper.capture_voice_reply_route(route, Arc::new(())).unwrap()).collect();
+    for _ in 0..5 {
+        assert!(f.helper.prepare_voice_forwards().unwrap().is_empty());
+        f.clock.advance_ms(500);
+    }
+    drop(held.pop());
+    let pending = f.helper.prepare_voice_forwards().unwrap();
+    assert_eq!(pending.len(), 1);
+    drop(held);
+    drop(pending);
+    let pending = f.helper.prepare_voice_forwards().unwrap();
+    assert_eq!(pending.len(), 3, "none of the three packet edges was exhausted by local pressure");
+}
+
+#[tokio::test]
+async fn delayed_authenticated_target_ack_confirms_after_helper_hedge_but_not_after_retirement() {
+    use voice_v2::source::SourceOutcome;
+    for retire in ["none", "end", "route", "deadline"] {
+        let mut f = VoiceForwardFixture::empty().await;
+        let parent = voice_v2::CallLease::default();
+        let (_watcher, original, _activity) = queued_source_watch(&mut f, parent.clone());
+        let (ok, served) = tokio::join!(f._source.finalize_member_connection(f.recipient.local_peer()), f.recipient.run_once());
+        assert!(ok.unwrap() && served.unwrap());
+        let pending = f._source.prepare_voice_sources().unwrap().pop().unwrap();
+        assert_eq!(pending.peer(), f.recipient.local_peer());
+        let (_publisher, signal) = tokio::sync::watch::channel(false);
+        let (direct, ()) = tokio::join!(pending.execute(signal), async {
+            loop {
+                if let Some(TransportEvent::Request { from, data, responder, .. }) = f.recipient.transport.next_event().await {
+                    responder.respond(Bytes::from(voice_answer(&f.recipient, from, &data, original.hash(), 1)));
+                    break;
+                }
+            }
+        });
+        f.clock.advance_ms(500);
+        let hedge = f._source.prepare_voice_sources().unwrap().pop().unwrap();
+        assert_eq!(hedge.peer(), f.helper.local_peer());
+        let (_publisher, signal) = tokio::sync::watch::channel(false);
+        let (helper, ()) = tokio::join!(hedge.execute(signal), async {
+            loop {
+                if let Some(TransportEvent::Request { from, data, responder, .. }) = f.helper.transport.next_event().await {
+                    responder.respond(Bytes::from(voice_answer(&f.helper, from, &data, original.hash(), 2)));
+                    break;
+                }
+            }
+        });
+        let replacement = match retire {
+            "end" => { parent.revoke(); None }
+            "route" => Some(f.recipient.transport.rejoin()),
+            "deadline" => { f.clock.advance_ms(3_000); None }
+            _ => None,
+        };
+        let result = f._source.complete_voice_source(direct);
+        if retire == "none" {
+            assert_eq!(result.unwrap(), (crate::VoiceTransportStatus::EndpointAdmitted, SourceOutcome::EndpointAdmitted));
+            assert_eq!(f._source.complete_voice_source(helper).unwrap(),
+                (crate::VoiceTransportStatus::HelperQueued, SourceOutcome::EndpointAdmitted));
+            f.clock.advance_ms(500);
+            assert!(f._source.prepare_voice_sources().unwrap().is_empty(), "confirmed target needs no third submission");
+        } else {
+            assert_eq!(result.map_err(|failure| failure.into_error()), Err(VoiceError::Unauthorized), "{retire}");
+        }
+        drop(replacement);
+    }
+}
+
+#[tokio::test]
 async fn root_prepares_and_submits_prepaid_sdp_with_the_ordinary_pool_full() {
     use voice_v2::resources::ResourceKind;
     let mut f = VoiceForwardFixture::empty().await;

@@ -384,6 +384,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 context.request_digest,
                 context.policy.ok_or(SyncError::Malformed)?,
                 response,
+                context.gate.connection.clone(),
             ),
         }?)
     }

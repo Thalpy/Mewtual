@@ -1378,6 +1378,20 @@ impl EncryptedDoc {
         // malformed or multi-change bytes fail closed exactly as load_incremental would.
         let parsed = Change::from_bytes(op.delta.clone())
             .map_err(|e| ReplError::Automerge(e.to_string()))?;
+        // Modern writers use their complete DeviceId as their actor. Letting another signer
+        // occupy that (actor, sequence) first permanently rejects the genuine writer's change,
+        // so replicas can disagree solely because they received the two envelopes in a different
+        // order. Refuse before touching Automerge, its pending dependency graph or the op log.
+        //
+        // Do not blanket-require equality for legacy v1 history: before restore_for_actor was
+        // deployed, an honest reopened document used Automerge's generated 16-byte actor. Other
+        // historical lengths remain legacy too. This protects the modern device namespace only;
+        // it is not same-device equivocation repair or a migration of previously poisoned graphs.
+        let actor = parsed.actor_id().to_bytes();
+        if actor.len() == op.author_device.as_bytes().len() && actor != op.author_device.as_bytes()
+        {
+            return Err(ReplError::ActorMismatch);
+        }
         let change = parsed.hash();
         let author_device = op.author_device;
         let outcome = self
@@ -1766,16 +1780,15 @@ mod tests {
             .unwrap();
         let seed = ancestor.export_catchup(&group, &author, &mut rng).unwrap();
 
-        // Concurrent writers. Distinct automerge actor ids are what make these changes
-        // concurrent; which device signs them is irrelevant to the frontier arithmetic under
-        // test here, and the sealing key is per group rather than per author.
+        // Concurrent writers use their own authenticated device actors. The founder re-seals
+        // their unchanged signatures, just as an ordinary relay serves third-party history.
         let mut every_op = seed.clone();
         for i in 0..BRANCHES {
-            let actor = DeviceId::from_public_key_bytes(&[(i as u8).wrapping_add(1); 32]);
-            let mut branch = EncryptedDoc::new(DocType::Channel, 5, &actor);
+            let writer = MlsDevice::generate().unwrap();
+            let mut branch = EncryptedDoc::new(DocType::Channel, 5, &writer.device_id());
             branch.import_catchup(&seed, &group, &author).unwrap();
             branch
-                .edit(&author, &group, &mut rng, |d| {
+                .edit(&writer, &group, &mut rng, |d| {
                     d.put(ROOT, format!("k{i}"), i as u64)
                 })
                 .unwrap();
@@ -1866,11 +1879,11 @@ mod tests {
 
         let mut every_op = seed.clone();
         for i in 0..BRANCHES {
-            let actor = DeviceId::from_public_key_bytes(&[(i as u8).wrapping_add(1); 32]);
-            let mut branch = EncryptedDoc::new(DocType::Channel, 6, &actor);
+            let writer = MlsDevice::generate().unwrap();
+            let mut branch = EncryptedDoc::new(DocType::Channel, 6, &writer.device_id());
             branch.import_catchup(&seed, &group, &author).unwrap();
             branch
-                .edit(&author, &group, &mut rng, |d| {
+                .edit(&writer, &group, &mut rng, |d| {
                     d.put(ROOT, format!("k{i}"), i as u64)
                 })
                 .unwrap();
@@ -1882,17 +1895,14 @@ mod tests {
         requester
             .import_catchup(&every_op, &group, &author)
             .unwrap();
-        let mut server = EncryptedDoc::new(
-            DocType::Channel,
-            6,
-            &DeviceId::from_public_key_bytes(&[0xBB; 32]),
-        );
+        let provider = MlsDevice::generate().unwrap();
+        let mut server = EncryptedDoc::new(DocType::Channel, 6, &provider.device_id());
         server.import_catchup(&every_op, &group, &author).unwrap();
 
         // The one thing the requester is actually missing, authored last and therefore last in
         // the server's log.
         server
-            .edit(&author, &group, &mut rng, |d| {
+            .edit(&provider, &group, &mut rng, |d| {
                 d.put(ROOT, "the_message_that_matters", "here")
             })
             .unwrap();
@@ -1958,11 +1968,11 @@ mod tests {
 
         let mut every_op = seed.clone();
         for i in 0..BRANCHES {
-            let actor = DeviceId::from_public_key_bytes(&[(i as u8).wrapping_add(1); 32]);
-            let mut branch = EncryptedDoc::new(DocType::Channel, 7, &actor);
+            let writer = MlsDevice::generate().unwrap();
+            let mut branch = EncryptedDoc::new(DocType::Channel, 7, &writer.device_id());
             branch.import_catchup(&seed, &group, &author).unwrap();
             branch
-                .edit(&author, &group, &mut rng, |d| {
+                .edit(&writer, &group, &mut rng, |d| {
                     d.put(ROOT, format!("k{i}"), i as u64)
                 })
                 .unwrap();
@@ -1974,14 +1984,11 @@ mod tests {
         requester
             .import_catchup(&every_op, &group, &author)
             .unwrap();
-        let mut server = EncryptedDoc::new(
-            DocType::Channel,
-            7,
-            &DeviceId::from_public_key_bytes(&[0xCC; 32]),
-        );
+        let provider = MlsDevice::generate().unwrap();
+        let mut server = EncryptedDoc::new(DocType::Channel, 7, &provider.device_id());
         server.import_catchup(&every_op, &group, &author).unwrap();
         server
-            .edit(&author, &group, &mut rng, |d| {
+            .edit(&provider, &group, &mut rng, |d| {
                 d.put(ROOT, "the_message_that_matters", "here")
             })
             .unwrap();

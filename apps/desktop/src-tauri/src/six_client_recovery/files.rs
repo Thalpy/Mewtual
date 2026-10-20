@@ -252,6 +252,217 @@ async fn interrupted_private_download_retains_spend_and_resumes_through_d_after_
     interrupted_saved_bridge(true).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn active_keep_survives_bridge_restart_without_a_second_user_request() {
+    active_bridge_restart(false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn active_private_download_survives_bridge_restart_without_manual_resume() {
+    active_bridge_restart(true, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn active_private_download_recovers_when_b_returns_after_the_first_reconnect_admission() {
+    active_bridge_restart(true, true).await;
+}
+
+/// Retire the actual B connection after its first signed response, while C's original native
+/// invocation is still active. Reopening B must recover that same intent; a new Resume call
+/// would hide the exact production stranding bug this scenario is meant to exercise.
+async fn active_bridge_restart(private: bool, later_return: bool) {
+    let mut scenario = Scenario::new(false);
+    scenario.admit_prefix_with_files(3, true).await;
+    // Consume the ordinary startup discovery pass before the restart. Depending on incidental
+    // setup speed let the old test pass by borrowing its first tick; recovery must also work
+    // just AFTER that tick, while the next periodic pass is still 45–75 seconds away.
+    bounded(
+        "initial native discovery completes before active bridge read",
+        async {
+            while (0..3).any(|index| scenario.online(index).passes.load(Ordering::Acquire) == 0) {
+                SystemClock.sleep(Duration::from_millis(20)).await;
+            }
+        },
+    )
+    .await;
+    let bytes: Vec<_> = (0..150_000).map(|i| (i % 233) as u8).collect();
+    let cid = scenario
+        .online(1)
+        .actor
+        .add_file(
+            "bridge-restart.bin".into(),
+            "application/octet-stream".into(),
+            String::new(),
+            bytes.clone(),
+        )
+        .await
+        .unwrap();
+    let raw = hex::decode(cid).unwrap();
+    bounded(
+        "file manifest reaches C before active bridge restart",
+        async {
+            while scenario
+                .online(2)
+                .actor
+                .file_download_plan(raw.clone())
+                .await
+                .is_none()
+            {
+                SystemClock.sleep(Duration::from_millis(20)).await;
+            }
+        },
+    )
+    .await;
+    let actor = scenario.online(2).actor.clone();
+    let origin = native_read(scenario.online(2)).await;
+    let (entered, held) = tokio::sync::oneshot::channel();
+    let (release, resume) = tokio::sync::oneshot::channel();
+    *scenario.rules.file_reply.lock().unwrap() = Some(transport::HeldFileReply {
+        entered,
+        release: resume,
+    });
+    let request = raw.clone();
+    let keeping = tokio::spawn(async move {
+        if private {
+            actor
+                .acquire_download(request, None, origin)
+                .await
+                .map(Some)
+        } else {
+            actor.keep_file(request, Some(origin)).await.map(|_| None)
+        }
+    });
+    bounded(
+        "first real signed bridge page held during connection replacement",
+        held,
+    )
+    .await
+    .unwrap();
+    let original = saved_state(private, scenario.online(2)).await;
+    assert!(original.running && original.verified_chunks == 0);
+    let dial_count = || {
+        scenario
+            .rules
+            .trace
+            .lock()
+            .unwrap()
+            .submitted_peer_dials
+            .get(&(2, 0))
+            .copied()
+            .unwrap_or(0)
+    };
+    let dials_before = dial_count();
+    scenario.close(&[0]).await;
+    if later_return {
+        bounded(
+            "C spends its first actual background reconnect opportunity while B is closed",
+            async {
+                while scenario
+                    .rules
+                    .trace
+                    .lock()
+                    .unwrap()
+                    .submitted_peer_dials
+                    .get(&(2, 0))
+                    .copied()
+                    .unwrap_or(0)
+                    <= dials_before
+                {
+                    SystemClock.sleep(Duration::from_millis(20)).await;
+                }
+            },
+        )
+        .await;
+        // Keep the listener absent beyond the confirmed local admission. Submission is not
+        // terminal failure: the original driver-owned attempt may still succeed when B returns.
+        // Either that path or a later scheduled opportunity may recover this same user request.
+        SystemClock.sleep(Duration::from_secs(1)).await;
+        assert!(!scenario
+            .online(2)
+            .actor
+            .member_routes()
+            .await
+            .iter()
+            .any(|row| row.peer_id == Some(*scenario.rules.peers[0].as_bytes()) && row.connected));
+    }
+    scenario.reopen_in(&[0], false).await;
+    assert_eq!(
+        scenario.online(0).actor.members().await.len(),
+        3,
+        "this scenario retains its original three-member roster"
+    );
+    let _ = release.send(()); // the canceled old observer may already have dropped its receiver
+    let ready = tokio::select! {
+        ready = keeping => ready,
+        _ = SystemClock.sleep(Duration::from_secs(30)) => {
+            let mut observations = Vec::new();
+            for index in 0..3 {
+                observations.push(scenario.recipient_diagnostic(
+                    index, channel_id("general"), &History::new(),
+                ).await);
+            }
+            let received = scenario.rules.trace.lock().unwrap().received_kinds.clone();
+            panic!("original active read did not recover through restarted B: {observations:?}; received kinds={received:?}");
+        }
+    }
+        .unwrap()
+        .unwrap();
+    if let Some(ready) = ready {
+        assert!(ready.is_current());
+        assert_eq!(ready.id().as_bytes(), &original.transfer);
+        let done = saved_state(true, scenario.online(2)).await;
+        assert_eq!(done.intent, original.intent);
+        assert_eq!(done.grant, original.grant);
+        assert!(
+            done.remaining.requests <= original.remaining.requests,
+            "bridge replacement must never refill spent durable work"
+        );
+        let ready = ready.with_export_custody(private_downloads::export_slot().unwrap());
+        let actual = scenario
+            .online(2)
+            .actor
+            .read_download_chunk(ready, 0, native_read(scenario.online(2)).await)
+            .await
+            .unwrap()
+            .into_bytes();
+        assert_eq!(
+            actual, bytes,
+            "the original private invocation recovered the exact file"
+        );
+    } else {
+        let kept = scenario.online(2).actor.kept_files().await;
+        assert_eq!(kept.files.len(), 1);
+        assert!(kept.files[0].checked);
+        assert_eq!(kept.files[0].plan, original.plan);
+        let (chunk, _) = scenario
+            .online(2)
+            .actor
+            .fetch_file_chunk(raw.clone(), 0)
+            .await
+            .unwrap();
+        assert_eq!(chunk, bytes);
+    }
+    assert!(
+        !scenario.online(0).actor.file_available(raw).await,
+        "B forwards ciphertext without gaining a retained copy"
+    );
+    assert!(
+        scenario
+            .rules
+            .trace
+            .lock()
+            .unwrap()
+            .received_kinds
+            .get(&(0, 2, 29))
+            .copied()
+            .unwrap_or(0)
+            >= 2,
+        "the original read must submit a fresh bridge request"
+    );
+    scenario.rules.assert_graph();
+    scenario.close(&[0, 1, 2]).await;
+}
+
 async fn saved_state(private: bool, running: &Running) -> catcoms_storage::kept::KeptTransfer {
     if private {
         running.actor.downloads().await.unwrap().remove(0).state

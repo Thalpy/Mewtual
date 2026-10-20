@@ -57,6 +57,33 @@ pub enum BlobPageOutcome {
     /// An authenticated helper could not complete this source batch. This is retryable
     /// availability evidence, never signed global absence or permission for legacy forwarding.
     Unavailable,
+    /// The captured helper connection changed locally. No returned payload is admitted; the
+    /// still-authorized parent read may search/retry within its original execution allowance.
+    RouteChanged,
+}
+
+/// Present-time observation of a completed bridge page's original effect scope. Route churn is
+/// separate from native/session/epoch retirement: it must not turn stale bytes into cache writes
+/// or a bad-key verdict, and it need not cancel an otherwise current user download.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlobEffectStatus {
+    Current,
+    RouteChanged,
+    Retired,
+}
+
+/// Opaque observing owner retained across AEAD and final storage admission. Only the original
+/// sync owner can classify it; possession grants no new read, connection or storage authority.
+pub struct BlobEffectScope {
+    pub(crate) instance: Arc<()>,
+    pub(crate) view: catcoms_mls::group::MemberCatalogView,
+    pub(crate) helper: catcoms_mls::group::MemberCatalogEntry,
+    pub(crate) scope: Arc<crate::file_service::requester::RequesterScope>,
+}
+impl fmt::Debug for BlobEffectScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("BlobEffectScope { .. }")
+    }
 }
 
 #[cfg(test)]
@@ -91,6 +118,14 @@ impl fmt::Debug for CompletedBlobFetch {
 }
 
 impl CompletedBlobFetch {
+    /// Preserve the typed route/global distinction through final CPU/storage effects.
+    pub fn effect_scope(&self) -> Option<BlobEffectScope> {
+        match &self.context {
+            FetchContext::Direct(_) => None,
+            FetchContext::Bridge(context) => Some(context.effect_scope()),
+        }
+    }
+
     /// Retain this exact response's observing gate through CPU verification and final effects.
     /// Earlier pages may expire after staging; the original whole-job native/Root owner remains
     /// mandatory independently and cannot be refreshed by switching helpers.

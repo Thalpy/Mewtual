@@ -514,6 +514,12 @@ impl ReadJob {
                 self.staged = Vec::new();
                 self.staged_cid = None;
                 self.pages = 0;
+                // Only accepted, verified chunk progress renews a crossing range's quiet
+                // deadline. A final page discarded by the route fence never reaches this edge.
+                self.deadline = server
+                    .runtime_clock()
+                    .monotonic_ms()
+                    .saturating_add(READ_MS);
                 return Some(self);
             }
             if let ReadReply::Range(reply) = self.reply {
@@ -1319,15 +1325,17 @@ impl FileTransfers {
                         self.before_storage_admission();
                         // Failed AEAD is also a durable effect when it rejects a Keep candidate.
                         // Check the original invocation after CPU work on BOTH result paths.
-                        if !job.current(server) {
-                            job.fail(server, "file download cancelled".into());
-                            return;
-                        }
                         if let Some(work) = &local_work {
                             if let Err(error) = server.sync.validate_keep_work(work) {
                                 job.fail(server, error.to_string());
                                 return;
                             }
+                        }
+                        // Work validation samples the injected Clock. No later Clock/native
+                        // callback may sit between this final owner check and storage/verdict.
+                        if !job.current(server) {
+                            job.fail(server, "file download cancelled".into());
+                            return;
                         }
                         if let Ok(bytes) = opened {
                             if let Some(keep) = &job.keep {
@@ -1396,6 +1404,12 @@ impl FileTransfers {
                             };
                             match server.sync.refresh_file_bridge_choice(catalog, &choice) {
                                 Ok(choice) => ReadCandidate::Bridge(reference, choice),
+                                Err(BridgeError::Unavailable) => {
+                                    // Relinquish this old route without parking it ahead of a
+                                    // usable D. The catalog retains its bounded later sweep.
+                                    server.sync.file_bridge_unavailable(catalog, &choice);
+                                    continue;
+                                }
                                 Err(_) => continue,
                             }
                         }
@@ -1406,6 +1420,11 @@ impl FileTransfers {
                     // it without spending a permit or creating a request that could redial from
                     // remembered routes.
                     if !server.sync.blob_peer_is_connected(peer) {
+                        if let ReadCandidate::Bridge(_, choice) = &candidate {
+                            if let Some(catalog) = job.bridge.as_mut() {
+                                server.sync.file_bridge_unavailable(catalog, choice);
+                            }
+                        }
                         continue;
                     }
                     if self.inflight.contains(&peer) {
@@ -1541,7 +1560,6 @@ impl FileTransfers {
                 self.fallback_or_fail(server, job, false, error);
                 return;
             };
-            let (reference, peer, bridge_choice) = candidate.into_parts();
             let permits = self
                 .slots
                 .clone()
@@ -1549,9 +1567,18 @@ impl FileTransfers {
                 .ok()
                 .zip(self.process.clone().try_acquire_owned().ok());
             let Some((local, global)) = permits else {
-                job.fail(server, "file transfers are busy; try again shortly".into());
+                // This read already owns a bounded whole-job slot. Older canceled requests
+                // may still hold every actual lower permit; local pressure is not a failed
+                // provider attempt. Keep the exact candidate and original deadline/allowance,
+                // then retry quietly after the actual lower owners have had time to retire.
+                job.candidates
+                    .as_mut()
+                    .expect("selected candidate inventory")
+                    .push_front(candidate);
+                self.delay_local(server, job, BUSY_PEER_BACKOFF_MS);
                 return;
             };
+            let (reference, peer, bridge_choice) = candidate.into_parts();
             let accounting: SharedRequestKeepalive = Arc::new(AttemptAccounting {
                 _server: local,
                 _process: global,
@@ -1626,6 +1653,14 @@ impl FileTransfers {
                         self.delay_local(server, job, BUSY_PEER_BACKOFF_MS);
                         return;
                     }
+                    Err(BridgeError::Unavailable) => {
+                        server
+                            .sync
+                            .file_bridge_unavailable(job.bridge.as_mut().unwrap(), choice);
+                        // No transport exists yet. Preserve search progress while allowing
+                        // another current helper before waiting for this connection to return.
+                        continue;
+                    }
                     Err(error) => Err(error.to_string()),
                 }
             } else if paged {
@@ -1682,6 +1717,25 @@ impl FileTransfers {
                     .commit_file_bridge_page(job.bridge.as_mut().unwrap(), prepared)
                 {
                     Ok(request) => request,
+                    Err(BridgeError::Busy) => {
+                        job.candidates
+                            .as_mut()
+                            .unwrap()
+                            .push_front(ReadCandidate::Bridge(reference, bridge_choice.unwrap()));
+                        // A durable debit already occurred; it remains spent. Waiting avoids
+                        // repeatedly charging an unavailable local pacing/route position.
+                        self.delay_local(server, job, BUSY_PEER_BACKOFF_MS);
+                        return;
+                    }
+                    Err(BridgeError::Unavailable) => {
+                        server.sync.file_bridge_unavailable(
+                            job.bridge.as_mut().unwrap(),
+                            bridge_choice.as_ref().unwrap(),
+                        );
+                        // This proven unstarted route refusal preserves the cursor, never
+                        // refunds the completed durable debit, and does not hide a fresh D.
+                        continue;
+                    }
                     Err(error) => {
                         job.error = error.to_string();
                         continue;
@@ -1829,7 +1883,11 @@ impl FileTransfers {
         let effect = result
             .as_ref()
             .ok()
-            .and_then(CompletedBlobFetch::effect_authority);
+            .and_then(CompletedBlobFetch::effect_scope);
+        // Previously accepted pages belong to the immutable ciphertext, independently of a
+        // later page's connection lease. A rejected new page may not discard that earned prefix
+        // and force finite saved-transfer allowance to pay for it all again.
+        let accepted_prefix = (job.staged.len(), job.pages, job.page_size);
         let outcome = match result {
             Err(error) => {
                 job.retryable = attempt_expired;
@@ -1838,7 +1896,6 @@ impl FileTransfers {
             Ok(completed) if paged => {
                 match server.sync.authenticate_blob_page(completed) {
                     Ok(catcoms_sync::BlobPageOutcome::Page(page)) => {
-                        job.bridge_retries = 0;
                         if job.keep.is_some()
                             && kept_ciphertext_bound(&reference)
                                 .is_ok_and(|bound| page.total as usize > bound)
@@ -1857,14 +1914,6 @@ impl FileTransfers {
                             .page_size
                             .saturating_mul(2)
                             .min(catcoms_sync::MAX_BLOB_PAGE);
-                        // Progress refreshes the read deadline. `READ_MS` was written as a bound
-                        // on one indivisible attempt; with pages it becomes a bound on going
-                        // *quiet*, which is the thing actually worth giving up on. The page
-                        // count below is what keeps that bounded.
-                        job.deadline = server
-                            .runtime_clock()
-                            .monotonic_ms()
-                            .saturating_add(READ_MS);
                         if page.more {
                             if usize::from(job.pages) >= MAX_PAGES_PER_CHUNK {
                                 job.fail(
@@ -1902,6 +1951,15 @@ impl FileTransfers {
                         job.error = "file helper is temporarily unavailable".into();
                         Ok(None)
                     }
+                    Ok(catcoms_sync::BlobPageOutcome::RouteChanged) => {
+                        if let (Some(catalog), Some(choice)) = (job.bridge.as_mut(), &bridge_choice)
+                        {
+                            server.sync.file_bridge_unavailable(catalog, choice);
+                        }
+                        // Payload-free local observation. Fresh helpers get their turn before
+                        // a bounded later sweep of the disconnected helper's original sources.
+                        Ok(None)
+                    }
                     Ok(catcoms_sync::BlobPageOutcome::Unsupported) => {
                         if let Some(choice) = &bridge_choice {
                             if let Some(catalog) = job.bridge.as_mut() {
@@ -1936,6 +1994,35 @@ impl FileTransfers {
         };
         job.retryable |= attempt_expired;
         if resume {
+            // Only retained partial bytes count as progress. A complete page whose route
+            // retires during AEAD must not renew the quiet deadline or reset retry accounting.
+            let next_deadline = server
+                .runtime_clock()
+                .monotonic_ms()
+                .saturating_add(READ_MS);
+            if let Some(effect) = &effect {
+                match server.sync.blob_effect_status(effect) {
+                    catcoms_sync::BlobEffectStatus::Current => {}
+                    catcoms_sync::BlobEffectStatus::Retired => {
+                        job.fail(server, "file download cancelled".into());
+                        return;
+                    }
+                    catcoms_sync::BlobEffectStatus::RouteChanged => {
+                        job.staged.truncate(accepted_prefix.0);
+                        job.pages = accepted_prefix.1;
+                        job.page_size = accepted_prefix.2;
+                        if let (Some(catalog), Some(choice)) = (job.bridge.as_mut(), &bridge_choice)
+                        {
+                            server.sync.file_bridge_unavailable(catalog, choice);
+                        }
+                        drop(_accounting);
+                        self.yield_local(job);
+                        return;
+                    }
+                }
+            }
+            job.deadline = next_deadline;
+            job.bridge_retries = 0;
             // Re-offer the provider this run is already mid-way through. Continuity is worth
             // preferring: another holder would serve the same bytes, but this one has a warm
             // path and the offset is only meaningful because the blob is immutable.
@@ -1952,15 +2039,39 @@ impl FileTransfers {
                 self.before_storage_admission();
                 // Rejecting a wrapped key changes durable selection just as storing good
                 // ciphertext does. Neither outcome may escape the original effect scope.
-                if !job.current(server) || effect.as_ref().is_some_and(|guard| !guard.authorized())
-                {
-                    job.fail(server, "file download cancelled".into());
-                    return;
-                }
                 if let Some(work) = &keep_work {
                     if let Err(error) = server.sync.validate_keep_work(work) {
                         job.fail(server, error.to_string());
                         return;
+                    }
+                }
+                if !job.current(server) {
+                    job.fail(server, "file download cancelled".into());
+                    return;
+                }
+                if let Some(effect) = &effect {
+                    match server.sync.blob_effect_status(effect) {
+                        catcoms_sync::BlobEffectStatus::Current => {}
+                        catcoms_sync::BlobEffectStatus::Retired => {
+                            job.fail(server, "file download cancelled".into());
+                            return;
+                        }
+                        catcoms_sync::BlobEffectStatus::RouteChanged => {
+                            job.staged = ciphertext;
+                            job.staged.truncate(accepted_prefix.0);
+                            job.pages = accepted_prefix.1;
+                            job.page_size = accepted_prefix.2;
+                            if let (Some(catalog), Some(choice)) =
+                                (job.bridge.as_mut(), &bridge_choice)
+                            {
+                                server.sync.file_bridge_unavailable(catalog, choice);
+                            }
+                            // Route loss during CPU work grants neither a storage write nor a
+                            // bad-key verdict. Keep the original read/budget and try fresh routes.
+                            drop(_accounting);
+                            self.yield_local(job);
+                            return;
+                        }
                     }
                 }
                 match opened {

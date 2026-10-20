@@ -122,16 +122,22 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .clone()
             .filter(|n| !n.session.is_cancelled() && n.actor.authorized())
         else {
+            tracing::debug!(stage = "native", "file helper request not admitted");
             return;
         };
         if !self.policy_allows_service() || !responder.is_current() {
+            tracing::debug!(
+                stage = "policy-or-request",
+                "file helper request not admitted"
+            );
             return;
         }
         let Some(sender) = self.file_ingress_peer(from) else {
+            tracing::debug!(stage = "bound-sender", "file helper request not admitted");
             return;
         };
         let admission = self.file_service.admission.clone();
-        let Ok(ticket) = admission.admit_ingress(
+        let ticket = match admission.admit_ingress(
             ServiceScope {
                 group: &self.group.group_id(),
                 epoch: self.group.epoch(),
@@ -143,8 +149,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             sender,
             Role::Helper,
             frame,
-        ) else {
-            return;
+        ) {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                tracing::debug!(
+                    stage = "ingress",
+                    ?error,
+                    "file helper request not admitted"
+                );
+                return;
+            }
         };
         let Ok(grant) = Grant::parse(frame) else {
             return;
@@ -160,9 +174,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // Reserve the COMPLETE parent+four-child route plan before irreversible admission.
         // Prior timed-out drivers may still hold all their scopes; no child needs a new slot.
         let Some(mut routes) = self.file_service.routes.helper() else {
+            tracing::debug!(stage = "route-capacity", "file helper request not admitted");
             return;
         };
         let Some(parent) = self.capture_file_scope(&proof, &native, &mut routes) else {
+            tracing::debug!(stage = "scope", "file helper request not admitted");
             return;
         };
         if let Err(error) = admission.preflight(&proof) {
