@@ -6,8 +6,8 @@
  * WebKitGTK's compositor and Skia GPU worker threads inside Mewtual's web process, and then the
  * driver's reset of the chip timed out, which took the display down with it (2026-10-20). The
  * failed reset is a driver bug, but the job it choked on was ours: the viewer showed the
- * full-resolution original in both modes, so every switch to "fit" had the GPU shrink a possibly
- * 50-megapixel photo again from scratch.
+ * full-resolution original in both modes, so every switch to "fit" had the GPU shrink a large
+ * photo (up to the native 25-megapixel bound) again from scratch.
  *
  * The fit view now shows a copy resampled once, when the viewer opens, to the size the screen can
  * actually show. Toggling only hides one element and shows the other, so the expensive shrink
