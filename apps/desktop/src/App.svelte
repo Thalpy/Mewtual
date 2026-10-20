@@ -254,6 +254,7 @@
   import { JamTakeSuppression } from "./jam-take-suppression.ts";
   import PixaCanvas from "./PixaCanvas.svelte";
   import PixaViewer from "./PixaViewer.svelte";
+  import LightboxPicture from "./LightboxPicture.svelte";
   import VideoEditor from "./VideoEditor.svelte";
   import { studioMusic } from "./clip-music.ts";
   import {
@@ -6494,6 +6495,9 @@
     profileCard = null;
     verifyFor = null;
     fileInfo = null;
+    // The image viewer holds the decoded <img> it was opened from (its fit copy is resampled from
+    // it), so it must not survive the lock and pop back up, pixels and all, after unlock.
+    closeLightbox();
     menu = null;
     closeSearch();
     navStack = []; // where you have been is part of what the lock screen takes off the screen
@@ -11642,9 +11646,11 @@
   }
 
   // --- image lightbox: click an inline image to fill the screen with it ----------------------
-  // The viewer reuses the data: URL the embed already holds, so opening it never refetches the
-  // blob; `cid` is kept so Properties/Download can look the file up in the index.
-  let lightbox = $state<{ cid: string; url: string; alt: string } | null>(null);
+  // The viewer reuses the catcoms-media: address the embed already loads from, so opening it never
+  // refetches the blob; `cid` is kept so Properties/Download can look the file up in the index.
+  // `source` is the decoded <img> itself: LightboxPicture resamples its pixels once into the fit
+  // view's copy (an element, so the $state proxy stores it as is rather than wrapping it).
+  let lightbox = $state<{ cid: string; url: string; alt: string; source: HTMLImageElement } | null>(null);
   let lightboxZoom = $state(false); // false = fit the window, true = 1:1 and scrollable
   const lightboxFile = $derived.by(() => {
     const lb = lightbox;
@@ -11656,6 +11662,7 @@
       cid: (el.getAttribute("data-embed-cid") ?? "").toLowerCase(),
       url: el.currentSrc || el.src,
       alt: el.alt,
+      source: el,
     };
     lightboxZoom = false;
   }
@@ -30957,14 +30964,18 @@
           role="presentation"
           use:dismissOnBackdrop={closeLightbox}
         >
-          <button
-            class="lightbox-img"
-            type="button"
-            title={lightboxZoom ? "Click to fit to the window" : "Click to view at actual size"}
-            onclick={() => (lightboxZoom = !lightboxZoom)}
-          >
-            <img src={lightbox.url} alt={lightbox.alt || lightboxFile?.name || "image"} />
-          </button>
+          <!-- Keyed on the opening: a new image gets a fresh picture and its own fit copy, and the
+               previous copy's buffer is released when its instance unmounts. -->
+          {#key lightbox}
+            <LightboxPicture
+              url={lightbox.url}
+              alt={lightbox.alt || lightboxFile?.name || "image"}
+              source={lightbox.source}
+              mime={lightboxFile?.mime ?? ""}
+              zoomed={lightboxZoom}
+              ontoggle={() => (lightboxZoom = !lightboxZoom)}
+            />
+          {/key}
         </div>
       </div>
     {/if}

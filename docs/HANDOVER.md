@@ -1,5 +1,74 @@
 # Mewtual; Handover
 
+## Image viewer: a screen-sized fit copy after a Linux GPU hang (2026-10-20)
+
+A Linux tester's whole laptop froze while they flipped an image in the full-screen viewer between
+"Fit to window" and "Actual size". Mewtual's own log was clean: the backend kept logging normally
+for about a minute and a half, and the file ends in NUL bytes from the forced power-off. Their
+`journalctl -b -1 -k` showed the cause. The Intel GPU's render engine timed out on preemption while
+running work from `eadedCompositor` (WebKit's `ThreadedCompositor`, cut to 15 characters), then
+`SkiaGPUWorker` threads in the same process timed out, then the driver's reset of the whole chip
+timed out and the display never came back. It is a hybrid Intel + NVIDIA laptop; the hang was on
+the Intel chip, which drives the panel. The failed reset is a driver bug, but the job it choked on
+was ours: the viewer showed the full-resolution original in both modes, so every switch to fit
+had the GPU shrink the whole photo again, and actual size drew it with a rounded clip and a 40px
+blurred shadow.
+
+What changed (frontend only; no CSP, protocol or native change):
+
+- `LightboxPicture.svelte` (new) renders the picture; App.svelte keys it on the opening
+  (`{#key lightbox}`) and `openLightbox` now keeps the decoded `<img>` it was opened from.
+- For a large still image (JPEG, PNG or WebP with at least twice the screen's pixels at full
+  scale), the fit view is a canvas copy sized to the screen, resampled once when the viewer opens
+  on a 2D context requested with `willReadFrequently` (a hint for a CPU-backed canvas). Both
+  elements stay mounted and the zoom flag only toggles `hidden`, so switching never resamples
+  again or reloads the original. Planning and painting live in `lightbox-image.ts`.
+- Actual size has no rounded corners and no shadow, for every image.
+- Locking the vault now closes the viewer. It previously survived the lock and popped back up
+  after unlock; with the decoded element held, that would also keep its pixels alive behind the
+  lock.
+
+Limits, stated plainly:
+
+- Nothing here has run on WebKitGTK or Linux; there is no Linux machine. Unverified: whether
+  WebKitGTK honours `willReadFrequently`, and what `screen` and `devicePixelRatio` report under
+  fractional scaling (if they overstate, copies stop being made and photos quietly take the old
+  path). Layout and behaviour were checked in headless Edge and in the jsdom component tests.
+- The one resample runs on the main thread and includes a full-size decode of the source.
+  Measured in headless Chromium on a fast desktop: about 20 ms for a 12-megapixel photo, 40 to
+  60 ms at 48 MP, and 0.4 to 1 s at 108 MP. Larger images or slower machines take longer, and
+  nothing caps the source size, so a peer can make whoever opens their image wait, once per
+  opening. Awaiting `img.decode()` first was tried and removed: Chromium's draw decodes again
+  anyway, so it only left the fit view blank and unclickable. `createImageBitmap` with a resize ran
+  synchronously too. A ceiling on source pixels would avoid the wait only by sending the largest
+  images back to the GPU shrink; it was left out, and is the owner's call. WebKitGTK is
+  unmeasured.
+- An animated APNG or WebP with at least twice the screen's pixels shows its first frame in the
+  fit view; "Actual size" still plays it. GIFs never get a copy.
+- Small images, GIFs and anything that falls back still use the GPU shrink and the fit-view
+  shadow. Inline images in the chat still render the full original scaled down: a possible
+  follow-up.
+- It reduces the work that triggered the hang; it cannot stop a driver from failing to recover.
+  For an affected user, launching with `WEBKIT_SKIA_ENABLE_CPU_RENDERING=1` moves WebKitGTK's
+  painting to the CPU entirely (field-reported, not officially documented). The owner chose not to
+  make that the default.
+- Pre-existing and untouched: `button:hover` outranks `.lightbox-img { background: none }`, so
+  hovering paints the accent colour behind letterboxed or transparent images.
+
+The same log showed a separate defect: the Linux build lets a user join a voice room although
+WebKitGTK exposes no `RTCPeerConnection` (the known limitation under "Found (predates Gate 5)"
+below). The join succeeds, nothing tells the user calls cannot work, and every heartbeat from
+another member throws an unhandled `ReferenceError` from `createPeer`. A capability check before
+joining was offered and has not been built.
+
+Tests: `lightbox-image.test.ts` and `lightbox-picture.test.ts` (with
+`scripts/fixtures/LightboxPictureHarness.svelte`). Mutation checks: unmounting the copy while
+zoomed, remounting the original, dropping `willReadFrequently`, allowing GIF, measuring the
+threshold against the copy, painting asynchronously and dropping the `complete` check each fail
+their named test. Adversarial review, two rounds: the threshold (high) and the lock (medium) are
+fixed; the main-thread decode (medium) is the measured limit above, after the attempted
+`decode()` fix was shown not to work in Chromium (high in the re-review) and removed.
+
 ## Clip maker: text, stickers, music, sounds, three videos, recorded motion (2026-10-20)
 
 The pre-upload video editor grew into a small "cartoon maker" (the user's brief: "think Spider-Man
