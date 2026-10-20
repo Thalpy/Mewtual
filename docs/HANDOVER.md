@@ -18,7 +18,12 @@ a full Rust build. These are failed attempts, not green validation. Native uploa
 all ten cases, and the single-job native check retry passes in 4m45s
 (`chat-bubbles-native-check-2.log`). The debug build passes in 11m53s and actual startup passes
 with the original 20-second deadline (`chat-bubbles-native-build.log`,
-`chat-bubbles-native-startup.log`). Final root/native suites and remaining static checks are pending.
+`chat-bubbles-native-startup.log`). The complete native suite now passes 438 library tests
+(880.98s) plus five ACL tests (`chat-bubbles-native-full.log`). This includes the upload/lock,
+automatic-notification receipt, onward channel discovery and chat-bubble regressions. Strict
+whole-root Clippy also passes with warnings denied (1m47s, `chat-bubbles-root-clippy.log`).
+After the other full suite stopped, the complete root retry started with one build job and four
+test workers (`chat-bubbles-root-full-2.log`); its final result is still pending.
 Remaining protocol and physical acceptance limits
 stay explicit below.
 
@@ -52,6 +57,10 @@ Next steps, in order:
    The next capacity prerequisite now protects actual packet positions from ordinary pressure:
    low-side 3-in/6-out or high-side 6-in/3-out, within the existing 32-row limits. Workflow close and
    actual row retirement remain separate. It does not implement the atomic Hello consumer.
+   The next-step read-only review also requires a nonblocking final origin transaction using
+   fresh time samples outside Group/Policy, and a first-result chain-epoch fence for protected
+   confirmation. Exact existing terminal receipts must remain recoverable. See the native-results
+   milestone for the concrete failure sequences and required regression boundaries.
 3. Implement and validate the member media relay and combined recovery/rollout scenarios in
    [CHAT-FILES-VOICE-PLAN](communication-recovery/CHAT-FILES-VOICE-PLAN.md).
    Only one physical desktop is available; independent native audio and separate-network
@@ -759,8 +768,8 @@ mediums and a low. Fixed with regression tests, each confirmed to fail without i
   uploads leaking staged chunks when a later quota check refused registration. The lost-caller
   test restores the actual saved server and compares the complete uploaded-file projection.
   Native check now passes in 4m45s with one compiler job after the earlier allocation failure;
-  debug build (11m53s) and actual startup also pass. The full native suite remains pending while
-  another full Rust suite runs. The separate Gate7 branch still needs this commit integrated.
+  debug build (11m53s), actual startup and the complete native suite (438 library plus five ACL
+  tests) also pass. The separate Gate7 branch still needs this correction integrated.
   Do not describe that branch's
   high finding as closed merely because the correction exists in this communication checkout.
 - Follow-ups: limits on added videos' size and length (a lying sample rate can still make one

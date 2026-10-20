@@ -68,8 +68,8 @@ orders, caller loss with actual saved-server restore, lock/unlock, uploads-map w
 replacement, quota/failure cleanup and persistence lock ordering. Native formatting and read-only
 re-review pass. The first compile attempt failed only in the new test helper (unavailable direct
 `futures::poll!` import); the corrected helper uses the standard library without a dependency change.
-Native check, debug build and actual startup subsequently pass as recorded below. The correction
-still needs the full native suite and integration into Gate7.
+Native check, debug build and actual startup subsequently pass as recorded below. The complete
+native suite now also passes; integration into Gate7 remains outstanding.
 
 The first complete-root attempt (`chat-bubbles-root-full.log`) stopped in the replication library
 with `memory allocation of 1787552 bytes failed`, without a reported test assertion failure.
@@ -80,9 +80,21 @@ allocation failures and concurrent load, not a proven source-level defect or a s
 run. The single-job native check retry passes in 4m45s (`chat-bubbles-native-check-2.log`);
 the single-job debug build also passes in 11m53s (`chat-bubbles-native-build.log`). Actual startup
 passes against that rebuilt executable, with the original 20-second deadline
-(`chat-bubbles-native-startup.log`). Another root full suite was still active at that point;
-duplicate full suites remain deferred until it stops. This continuation's final
-application gates remain incomplete and must not be inferred from the prior checkpoint below.
+(`chat-bubbles-native-startup.log`). The complete native suite then passes 438 library tests in
+880.98s plus five ACL tests (`chat-bubbles-native-full.log`, one build job/two test workers).
+It includes the ten upload/lock cases, automatic-notification endpoint receipt, onward channel
+discovery, chat bubbles, indirect files and durable resume. Strict whole-root Clippy passes with
+warnings denied in 1m47s (`chat-bubbles-root-clippy.log`).
+After the competing full suite stopped, the complete root retry began with one build job/four
+test workers (`chat-bubbles-root-full-2.log`). That final result is still pending; do not infer it
+from a prior checkpoint or from the failed first attempt.
+
+A read-only design review for the next protected Hello step identified two enablement gates,
+now recorded in [VOICE-NATIVE-RESULTS-NEXT](VOICE-NATIVE-RESULTS-NEXT.md): the existing origin
+seam still samples Clock under Group/Policy, and the confirmation first-result path lacks the
+protected chain-epoch check already used by derivation. No protected confirmation action or live
+V2 intake was enabled to bypass those gaps. These notes are design evidence, not new runtime
+acceptance.
 
 ## Chat history adversarial checkpoint (20 October)
 

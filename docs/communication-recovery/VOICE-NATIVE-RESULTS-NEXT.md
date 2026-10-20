@@ -62,14 +62,22 @@ These are prerequisites, not the atomic confirmation consumer: History/candidate
 publication and protected role consumers remain unimplemented. A future History fence must be
 nonblocking (`try_lock`, Busy without effects), or time/deadline validation must occur afresh
 before lending. Keep unstarted row owners outside the callback; dropping an unpublished row can
-otherwise block on History while Group/Policy are held. No engine, Clock or native reentry may run
-under that final fence. Focused verification passes 289 voice tests and strict sync Clippy.
+otherwise block on History while Group/Policy are held. The future protected final fence must
+run no engine, Clock or native reentry. The current `with_endpoint_origin` seam does not yet meet
+that stronger requirement: `route_operation` takes Group/Policy before sampling wall time, and
+its callback samples monotonic time under those locks. Use a separate short, nonblocking final
+transaction with samples taken outside the locks. Contention must return Busy without effects
+and retry with fresh samples; moving samples ahead of the existing blocking locks would permit
+stale-deadline admission. Do not enable the protected consumer using that shortcut.
+Focused verification passes 289 voice tests and strict sync Clippy.
 The combined checkpoint now passes 3,035 root, 427+5 native and 2,067 frontend cases plus required
 checks, as recorded in CHAT-FILES-VOICE-ACCEPTANCE. This does not implement the consumer below.
 
 Read-only composition review selects high-side `ConfirmHello` as the first protected consumer;
 low-side start/Hello encryption and Proof/Finish must remain refused until their role consumers
-exist. Current `HistoryState` has only a derive row, and ordinary confirmation packet preparation
+exist. A protected pair must explicitly refuse ordinary confirmation receive/action factories,
+including after protected preparation refuses; preserve those APIs for unprotected compatibility.
+Current `HistoryState` has only a derive row, and ordinary confirmation packet preparation
 still charges ordinary capacity. The consumer needs three candidate lanes independent of
 `pair.starts`, each retaining its Hello-decrypt/Proof-encrypt/Finish-decrypt claims, plus a private
 exact-chain preparation path for both retained packet/event copies. A malformed admitted Hello
@@ -83,6 +91,16 @@ apply body: quota refusal drops the unused closure under the locks, and RowIssue
 reenters History. All refusal destruction must run after those guards return. Admission receipts
 bind original call/pair/chain/room/member/epoch/lifetime, independently of consumed token and
 accepted-Hello sequence gates, so a valid delayed ACK survives its successful transition.
+
+Before admitting protected confirmation actions, also fence their first result to the chain's
+original epoch. `commit_confirmation_result` currently recovers an exact stored receipt first,
+then calls `with_result` without the `check_chain_epoch` that the derivation result path already
+uses. Add that check inside the first-result closure, before any nonce/token/Hello transition;
+keep exact accepted and rejected receipts recoverable before that check. Regression coverage
+must distinguish an epoch change before the first result (no effects) from recovery after an
+already recorded terminal result (the same receipt, no fresh grant). Protected confirmation
+actions are not yet constructed, so this is an enablement prerequisite rather than a claim of
+an active V2 regression.
 
 ## Browser derivation prerequisite (19 October, inactive)
 
