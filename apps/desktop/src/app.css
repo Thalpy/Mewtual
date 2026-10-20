@@ -8361,7 +8361,12 @@ button.you-panel:hover {
   cursor: zoom-in;
 }
 
-.lightbox-stage img {
+/* Fit view. The canvas is LightboxPicture's screen-sized copy of a large image. The visible
+   picture lands at the same size and place as the original's would. The element boxes match only
+   for images shaped like the stage: for others the <img> box is stretched and letterboxed by
+   object-fit while the canvas box hugs the picture, so the shadow and click target differ. */
+.lightbox-stage img,
+.lightbox-stage .lightbox-fit {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
@@ -8376,10 +8381,16 @@ button.you-panel:hover {
   cursor: zoom-out;
 }
 
+/* No rounded corners or shadow at actual size. Both can add GPU work that grows with the
+   picture's size, and here the picture can be tens of megapixels: the corners clip the whole image
+   and the shadow is blurred around its full outline. A Linux tester's Intel GPU hung while this view was
+   being toggled (see lightbox-image.ts); a full-screen 1:1 view does not need the decoration. */
 .lightbox-stage.zoomed img {
   max-width: none;
   max-height: none;
   object-fit: none;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 /* Inline embeds advertise the viewer. */
