@@ -1,5 +1,49 @@
 # Mewtual; Handover
 
+## Collaborative Score editing, stage 1: additions re-saved after an epoch move (2026-10-20, branch `score-composer-2`)
+
+The owner's decisions are recorded in INTERFACES.md (top section):
+
+- one note per sound per cell, as a format change;
+- additive merging: adds win and nothing blocks playback;
+- automatic re-save on an epoch move;
+- show/ghost/hide layers.
+
+The work is staged as follows:
+
+- S0: baselines, and the PIXA `v` gap.
+- S1: re-save. This entry.
+- S2: additive merge on today's format.
+- S3: per-sound note format, readers.
+- S4: authoring and the layer UI.
+
+Defaults taken for the plan's detail questions, any of which the owner may overturn:
+- legacy `c/` cells and sounds keep removal-wins;
+- a note running past the end is clipped;
+- drums are one layer;
+- re-save covers additions only;
+- hide does not mute, and visibility is per viewer;
+- a click acts on the selected sound;
+- readers and authoring ship in one build.
+
+**S1** is `scheduleAutoReauthor` in `studio-session.ts`, with its contract in INTERFACES.md. It
+also changed:
+- `reauthor(id, {pump})`;
+- `resaving(id)`;
+- the tally, `needsDecision`, `stuckBehind` and the banner, which treat a pending re-save as moving.
+
+Tests in `studio-auto-retry.test.ts`:
+- admission and native refusals;
+- the bound;
+- lane order across queued members;
+- a refused batch re-saved after one read, leaving as one batch again;
+- a later batch item, a clear and a closing history left with the member;
+- a reset during the read;
+- flipnote edits left manual.
+
+In `studio-score-batch.test.ts`, the member behind a retried record is now re-saved; that is the
+contract change.
+
 ## `[desync fixes]`: Studio saves resolve on their own, leaving never waits (2026-10-19, branch `score-composer-2`)
 
 **What the owner saw**, editing a Score alone: "studio_apply_batch not allowed. Command not found ·

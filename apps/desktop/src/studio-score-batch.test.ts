@@ -121,13 +121,18 @@ test("a retried record travels alone, so a member behind it still meets admissio
   // Shared history moves on before the member is ever sent.
   epoch = 2; await session.refreshDoc(object); await sync();
   ipc.on("studio_apply", view);
+  const memberNonce = (session.saves[1] as { request: { nonce: string } }).request.nonce;
   session.retry(first.id); await sync();
   assert.equal(ipc.calls.filter((c) => c.cmd === "studio_apply_batch").length, 0, "the retry does not carry the member");
-  assert.equal(session.saves.length, 1, "the exact retry landed on its own");
-  const member = session.saves[0];
-  assert.equal(member.status, "blocked");
-  assert.match(member.error, /Shared history changed/);
-  assert.equal(session.canReauthor(member.id), true);
+  // The member met admission against the current view and was refused ("Shared history changed"),
+  // so its stale request was never sent. Since the owner's 2026-10-20 decision a Score edit refused
+  // that way is then saved again on its own as a fresh edit in the current epoch.
+  const applied = ipc.calls.filter((c) => c.cmd === "studio_apply").map((c) => c.args);
+  assert.ok(!applied.some((a) => a.nonce === memberNonce), "the stale member request never went out");
+  const resaved = applied.at(-1)!;
+  assert.equal(resaved.epochId, id32(0xe2), "the re-saved member names the current epoch");
+  assert.equal(JSON.parse(String(resaved.body)).step, 1);
+  assert.equal(session.saves.length, 0, "both landed: the exact retry and the re-saved member");
 });
 
 test("a batch refused before execution is known not written, and the lane keeps its order and bounds", async () => {

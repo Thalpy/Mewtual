@@ -283,6 +283,11 @@ const BUSY_BACKOFF_MS = [250, 500, 1000];
 /// refused before dispatch never ran. Production only (`autosaveMs > 0`); the immediate test seam
 /// keeps every failure where the test left it.
 const AUTO_RETRY_MS = [1000, 2000, 4000, 8000, 15_000, 30_000, 60_000];
+/// Automatic re-saves of one Score edit into a history that moved under it (scheduleAutoReauthor)
+/// before it is left to the member: enough for an ordinary rotation, not a loop.
+const AUTO_REAUTHOR_MAX = 3;
+/// The Score operations that are additions, and so are re-saved on their own (scheduleAutoReauthor).
+const AUTO_REAUTHOR_OPS: ReadonlySet<string> = new Set(["set_cell", "set_patch"]);
 /// Refusals that no resend of the same request can change: the member decides (save as a new edit,
 /// where allowed, or discard). The native texts come from catcoms-app (store/epoch_studio.rs,
 /// studio.rs, studio_exchange.rs). An exact retry after "Shared history changed" would also skip
@@ -465,6 +470,13 @@ export class StudioSession {
   private readonly autoRounds = new Map<number, number>();
   /// The next automatic resend of a failed Save, per record: when it is due and how to cancel it.
   private readonly autoTimers = new Map<number, { at: number; cancel: () => void }>();
+  /// Automatic re-saves into a moved history already made in a record's chain (scheduleAutoReauthor),
+  /// keyed by the current replacement's id.
+  private readonly autoReauthors = new Map<number, number>();
+  /// Records whose automatic re-save is pending, and the pending re-save job per document (its
+  /// records, and whether it must re-read the document first): see scheduleAutoReauthor.
+  private readonly reauthoring = new Set<number>();
+  private readonly reauthorJobs = new Map<Hex32, { ids: Set<number>; stale: boolean }>();
   /// Documents left while their own lane still held edits: once that lane drains, their records in
   /// the shared Index lane (the Index half of a rename) are released too. Valued by the generation
   /// the departure happened in, so a reset never releases restored work nobody chose to send.
@@ -663,7 +675,8 @@ export class StudioSession {
     this.workers.clear(); this.running.clear(); // old workers find their tokens gone and stand down
     this.cooling.clear(); this.busyResends.clear();
     for (const timer of this.autoTimers.values()) timer.cancel();
-    this.autoTimers.clear(); this.autoRounds.clear(); this.releaseAfterDrain.clear();
+    this.autoTimers.clear(); this.autoRounds.clear(); this.autoReauthors.clear(); this.releaseAfterDrain.clear();
+    this.reauthoring.clear(); this.reauthorJobs.clear();
     this.receivePaused = false;
     this.receivePauseDetail = ""; this.syncObservation = null;
     // Queued jobs are dropped; started ones keep their slot until they actually finish.
@@ -1868,7 +1881,7 @@ export class StudioSession {
           // An awaited Save answers at the first failure, even one the session will resend on its
           // own: the caller (an explicit Save, the window close) reports it now, and the edit stays
           // queued for that resend whatever the caller does next.
-          else if (failure) reject(new StudioNativeError(this.autoTimers.has(failure.id)
+          else if (failure) reject(new StudioNativeError(this.autoTimers.has(failure.id) || this.reauthoring.has(failure.id)
             ? `A Studio edit is ${failure.mayHaveCommitted ? "not confirmed" : "not saved"} yet. The Studio is trying again on its own.`
             : failure.mayHaveCommitted
               ? "A Studio edit is not confirmed. Retry or discard it in the Studio."
@@ -1894,7 +1907,7 @@ export class StudioSession {
       for (const r of this.records) {
         if (r === s) break;
         if (ids.has(r.id) || laneOf(r) !== lane) continue;
-        if (((r.status === "blocked" || r.status === "uncertain") && !this.autoTimers.has(r.id)) || (r.status === "queued" && this.restoredHeld.has(r.id))) return r;
+        if (((r.status === "blocked" || r.status === "uncertain") && !this.autoTimers.has(r.id) && !this.reauthoring.has(r.id)) || (r.status === "queued" && this.restoredHeld.has(r.id))) return r;
       }
     }
     return null;
@@ -1969,7 +1982,8 @@ export class StudioSession {
   /// Explicit re-authoring: replace one proven-no-write entry with a NEW operation selected by
   /// the document's route *now*. This is deliberately not available for an ambiguous request.
   /// The replacement gets a fresh queue identity and, on the ordinary route, a fresh nonce.
-  reauthor(id: number): void {
+  /// `pump: false` is the automatic re-save's batch form (scheduleAutoReauthor).
+  reauthor(id: number, opts: { pump?: boolean } = {}): void {
     const at = this.records.findIndex((r) => r.id === id);
     const s = this.records[at];
     if (!s || !this.canReauthor(id)) return;
@@ -2007,6 +2021,7 @@ export class StudioSession {
     this.eligible.delete(s.id); this.restoredHeld.delete(s.id); this.forgetAutoRetry(s.id);
     this.eligible.add(replacement.id);
     this.settleRecord(s, "discarded");
+    if (opts.pump === false) return; // the caller re-authors several, then notifies and pumps once
     this.notify();
     this.pump();
   }
@@ -2055,7 +2070,7 @@ export class StudioSession {
   /// it, and surfaces should not offer Retry for it.
   needsDecision(id: number): boolean {
     const s = this.records.find(r => r.id === id);
-    return !!s && (s.status === "blocked" || s.status === "uncertain") && NEEDS_DECISION.some(pattern => pattern.test(s.error));
+    return !!s && !this.reauthoring.has(id) && (s.status === "blocked" || s.status === "uncertain") && NEEDS_DECISION.some(pattern => pattern.test(s.error));
   }
 
   /// Whether the member's retry would resend anything: a failed save whose retry identity is not a
@@ -2079,7 +2094,7 @@ export class StudioSession {
     let retrying = 0, stuck = 0;
     for (const s of this.records) {
       if (s.status !== "blocked" && s.status !== "uncertain") continue;
-      if (this.autoTimers.has(s.id)) retrying++; else stuck++;
+      if (this.autoTimers.has(s.id) || this.reauthoring.has(s.id)) retrying++; else stuck++;
     }
     return { left: this.records.length, retrying, stuck, discarded: this.discardedTotal };
   }
@@ -2350,9 +2365,66 @@ export class StudioSession {
       ? `${reason(e)}; an earlier attempt may already have committed, so the exact request remains uncertain`
       : reason(e)).slice(0, 512);
     this.scheduleAutoRetry(s);
+    this.scheduleAutoReauthor(s);
     this.settleRecord(s, s.mayHaveCommitted ? "uncertain" : "notWritten");
     this.notify();
   }
+
+  /// Owner decision (2026-10-20): a queued Score edit whose document history moved under it
+  /// ("Shared history changed" at admission, or native's retired-epoch refusal) is saved again into
+  /// the current epoch as a fresh edit, with no card. Score collaboration is additive, so the
+  /// member's addition is simply made again on the newer history.
+  ///
+  /// Additions only (placing a note, adding a sound). A clear, a header change or a sound removal
+  /// re-authored on the newer history could remove or override what a collaborator added there
+  /// unseen, so those keep their card. Only an ordinary Score Apply proven not written
+  /// (`canReauthor`), and only while the document's current route is ordinary. Bounded per edit
+  /// chain (AUTO_REAUTHOR_MAX), so a history that keeps moving cannot loop.
+  ///
+  /// It runs after this turn, because the worker that settled the refusal is still unwinding. After
+  /// the native refusal it first re-reads the document, because this renderer's view may still name
+  /// the retired epoch; a batch refused that way settles every member at once, and they share that
+  /// one read. While the re-save is pending the record counts as retrying, never as needing the
+  /// member (`resaving`).
+  private scheduleAutoReauthor(s: SaveEntry): void {
+    if (!this.autosaveMs || s.kind !== "apply" || s.request.objectKind !== "score") return;
+    if (!AUTO_REAUTHOR_OPS.has(s.op.op)) return;
+    if (!/Shared history changed|edit belongs to a retired epoch/.test(s.error) || !this.canReauthor(s.id)) return;
+    if ((this.autoReauthors.get(s.id) ?? 0) >= AUTO_REAUTHOR_MAX) return;
+    const object = s.object, stale = /edit belongs to a retired epoch/.test(s.error);
+    this.reauthoring.add(s.id);
+    // One job per document: every record settled this way before it runs joins it (a refused batch
+    // settles all its members in one turn), shares its single read, and is re-saved in lane order
+    // with one pump at the end, so the fresh edits can leave together as one batch again.
+    const job = this.reauthorJobs.get(object);
+    if (job) { job.ids.add(s.id); job.stale ||= stale; return; }
+    this.reauthorJobs.set(object, { ids: new Set([s.id]), stale });
+    const generation = this.generation;
+    this.schedule(() => {
+      const job = this.reauthorJobs.get(object);
+      if (generation !== this.generation || !job) return;
+      void (job.stale ? this.refreshDoc(object).catch(() => {}) : Promise.resolve()).then(() => {
+        if (this.reauthorJobs.get(object) === job) this.reauthorJobs.delete(object);
+        for (const id of job.ids) this.reauthoring.delete(id);
+        if (generation !== this.generation) return;
+        const route = this.editRoute(object);
+        if (!("refused" in route) && route.kind === "ordinary") {
+          for (const id of this.records.filter(r => job.ids.has(r.id)).map(r => r.id)) {
+            if (!this.canReauthor(id)) continue;
+            const used = this.autoReauthors.get(id) ?? 0, at = this.records.findIndex(r => r.id === id);
+            try { this.reauthor(id, { pump: false }); } catch { continue; }
+            const replacement = this.records[at];
+            if (replacement && replacement.id !== id) this.autoReauthors.set(replacement.id, used + 1);
+          }
+        }
+        this.notify();
+        this.pump();
+      });
+    }, 0);
+  }
+
+  /// A failed Score edit about to be saved again on its own (scheduleAutoReauthor): display only.
+  resaving(id: number): boolean { return this.reauthoring.has(id); }
 
   /// Resend a failed Save on its own after the next pause of AUTO_RETRY_MS, so a failure resolves
   /// without the member pressing anything. The resend is `retry`: the same complete request, nonce,
@@ -2396,6 +2468,7 @@ export class StudioSession {
   private forgetAutoRetry(id: number): void {
     this.cancelAutoRetry(id);
     this.autoRounds.delete(id);
+    this.autoReauthors.delete(id);
   }
 
   private heldView(object: Hex32): StudioObjectView | null {

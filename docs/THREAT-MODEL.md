@@ -118,6 +118,21 @@ under Copy, and exercises ordinary recipe recovery with exact retries and stale-
 It does not convert backups into PIXA, publication into peer custody, or test engines into
 audible hardware/platform evidence. Current UI obligations are in [GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md).
 
+## Score additions re-authored without a click (2026-10-20)
+
+This is a new behaviour, not just a resend. After an epoch move the renderer authors a fresh Score
+addition (new nonce, current epoch) for an edit the member made, without a click. That was the
+owner's choice for collaborative scores.
+
+- It grants no new authority. Native runs the full membership, epoch, gate and causal checks on the
+  new edit.
+- It is limited to additions (`set_cell`, `set_patch`) that are proven not written and on the
+  ordinary route. It is bounded to three per edit and never crosses a reset or lock.
+- It extends the design question in the next section. The re-authored addition is causally newer
+  than whatever a collaborator wrote meanwhile at the same cell, so it can override that value. The
+  member's working view showed their value throughout. Clears and header changes are not
+  re-authored, so nothing a collaborator added is removed unseen.
+
 ## Studio save resend and the batch grant (2026-10-19, `[desync fixes]`)
 
 - **ACL (SEC-IPC-001).** `studio_apply_batch` was registered but ungranted, so the app manifest

@@ -162,33 +162,144 @@ test("an edit that may already have been delivered never rides a fresh edit's ba
   assert.equal(h.calls("studio_apply").length, 2, "both went alone"); assert.equal(h.session.saves.length, 0);
 });
 
-// Review M1: the exact retry of a changed-history refusal skipped admission (no longer a first
-// delivery), sent the stale request, was refused as a retired epoch, and could then never be saved
-// as a new edit.
-test("a changed-history refusal is never resent, and stays one 'save as a new edit' away", async () => {
+// Owner decision 2026-10-20: a Score edit the history moved under is saved again on its own, as a
+// fresh edit in the current epoch. (Review M1 before it: an exact retry of such a refusal skipped
+// admission, sent the stale request, and could then never be saved as a new edit; `retry` still
+// refuses it.)
+test("a Score edit the history moved under is saved again into the current epoch on its own", async () => {
   const h = await harness();
   h.session.setScoreCell(score, 0, 0, { k: "d", pad: 1 });
+  const original = h.session.saves[0].kind === "apply" ? h.session.saves[0].request.nonce : "";
   h.ipc.on("studio_read", () => ({ ...ordinaryView(scoreContent(), { epochId: id32(0xe2) }), group }));
   await h.session.refreshDoc(score); // the document rotated before the deadline
+  h.session.retry(h.session.saves[0].id); // not failed yet: a retry of a queued edit does nothing
   await h.tick(5000);
-  const [refused] = h.session.saves;
-  assert.match(refused.error, /Shared history changed/);
-  assert.deepEqual([h.session.needsDecision(refused.id), h.session.canRetry(refused.id), h.session.canReauthor(refused.id)], [true, false, true]);
-  assert.equal(h.session.autoRetryAt(refused.id), null, "not resent on its own");
-  h.session.retry(refused.id); await settle(8);
-  assert.equal(h.calls("studio_apply").length, 0, "the member's retry sends nothing either");
-  assert.equal(h.session.canReauthor(refused.id), true, "and the way forward is still open");
-  await h.tick(10 * 60_000); assert.equal(h.calls("studio_apply").length, 0);
-  h.session.reauthor(refused.id); await settle(8);
   const sent = h.calls("studio_apply");
-  assert.equal(sent.length, 1); assert.equal(sent[0].args.epochId, id32(0xe2), "the new edit names the current epoch");
+  assert.equal(sent.length, 1, "the stale request was never sent; the re-saved edit was");
+  assert.equal(sent[0].args.epochId, id32(0xe2), "the new edit names the current epoch");
+  assert.notEqual(sent[0].args.nonce, original, "a fresh edit, not a replay");
+  assert.equal(h.session.saves.length, 0, "no card was left for the member");
+});
+
+test("after native's retired-epoch refusal, the Score edit is re-read and re-saved on its own", async () => {
+  const h = await harness(); let applies = 0, epoch = id32(0xe1);
+  h.ipc.on("studio_read", () => ({ ...ordinaryView(scoreContent(), { epochId: epoch }), group }));
+  h.ipc.on("studio_apply", () => {
+    if (++applies === 1) { epoch = id32(0xe2); throw "epoch studio: edit belongs to a retired epoch"; } // native rotated first
+    return { ...ordinaryView(scoreContent(), { epochId: epoch }), group };
+  });
+  h.session.setScoreCell(score, 0, 0, { k: "d", pad: 1 }); await h.tick(5000);
+  const [stale, fresh] = h.calls("studio_apply").map(c => c.args);
+  assert.equal(stale.epochId, id32(0xe1)); assert.equal(fresh?.epochId, id32(0xe2), "the document was read again first");
   assert.equal(h.session.saves.length, 0);
 });
 
-test("a refusal no resend can change is the member's at once: retired epoch, gone member or channel, existing id", async () => {
-  // A retired epoch is refused before native journals anything, so that one alone stays open to
-  // "Save as a new edit"; the others may follow a write and stay uncertain.
-  for (const [refusal, reauthor] of [["epoch studio: edit belongs to a retired epoch", true], ["Studio: Studio requires current membership", false],
+test("a history that keeps moving is re-saved a bounded number of times, then left to the member", async () => {
+  const h = await harness(); let epoch = 0xe1;
+  h.ipc.on("studio_read", () => ({ ...ordinaryView(scoreContent(), { epochId: id32(epoch) }), group }));
+  h.ipc.on("studio_apply", () => { epoch++; throw "epoch studio: edit belongs to a retired epoch"; });
+  h.session.setScoreCell(score, 0, 0, { k: "d", pad: 1 }); await h.tick(5000); await h.tick(10 * 60_000);
+  assert.equal(h.calls("studio_apply").length, 4, "the first send and three re-saves");
+  const [left] = h.session.saves;
+  assert.equal(left.status, "blocked"); assert.equal(h.session.canReauthor(left.id), true, "the member can still save it as a new edit");
+});
+
+test("edits queued behind a re-saved one are re-saved too, in lane order, each once", async () => {
+  const h = await harness();
+  for (let step = 0; step < 3; step++) h.session.setScoreCell(score, step, 0, { k: "d", pad: 1 });
+  const stale = new Set(h.session.saves.map(s => s.kind === "apply" ? s.request.nonce : ""));
+  const current = () => ({ ...ordinaryView(scoreContent(), { epochId: id32(0xe2) }), group });
+  h.ipc.on("studio_read", current); h.ipc.on("studio_apply", current); h.ipc.on("studio_apply_batch", current);
+  await h.session.refreshDoc(score);
+  await h.tick(5000);
+  const sent = [...h.calls("studio_apply"), ...h.calls("studio_apply_batch")].flatMap(c => c.cmd === "studio_apply"
+    ? [{ epochId: c.args.epochId, nonce: c.args.nonce, body: c.args.body }]
+    : (c.args.operations as { nonce: string; body: string }[]).map(o => ({ epochId: c.args.epochId, ...o })));
+  assert.deepEqual(sent.map(o => JSON.parse(String(o.body)).step), [0, 1, 2], "in lane order");
+  assert.ok(sent.every(o => o.epochId === id32(0xe2) && !stale.has(String(o.nonce))), "every one a fresh edit in the current epoch");
+  assert.equal(h.session.saves.length, 0);
+  assert.equal(h.session.saveTally().discarded, 0, "a re-save is never counted as a discard");
+});
+
+test("a batch refused at its first item for a retired epoch is re-saved after one shared read", async () => {
+  const h = await harness(); let hold: (() => void) | null = null, epoch = id32(0xe1);
+  h.ipc.on("studio_read", () => ({ ...ordinaryView(scoreContent(), { epochId: epoch }), group }));
+  h.ipc.on("studio_apply", () => new Promise(resolve => { hold = () => resolve({ ...ordinaryView(scoreContent(), { epochId: epoch }), group }); }));
+  h.session.setScoreCell(score, 0, 0, { k: "d", pad: 1 }); await h.tick(5000);
+  for (let step = 1; step <= 3; step++) h.session.setScoreCell(score, step, 0, { k: "d", pad: 1 });
+  await h.tick(5000);
+  let batches = 0;
+  h.ipc.on("studio_apply_batch", (args) => {
+    if (++batches === 1) { epoch = id32(0xe2); throw `Studio: batched Apply item 1 of 3 was refused (epoch studio: edit belongs to a retired epoch); the items before it are saved, so retry the same batch exactly or discard that item`; }
+    assert.equal(args.epochId, id32(0xe2)); return { ...ordinaryView(scoreContent(), { epochId: epoch }), group };
+  });
+  const reads = h.calls("studio_read").length;
+  hold!(); await settle(8); await h.tick(0);
+  assert.equal(h.calls("studio_read").length - reads, 1, "one read for the whole refused batch");
+  assert.equal(batches, 2, "the three re-saved edits left together again");
+  assert.equal(h.session.saves.length, 0);
+});
+
+test("only what is proven unsent is re-saved: a later batch item, a clear, and a closing history stay with the member", async () => {
+  // A later batch item may follow saved items, so it is uncertain and never becomes a new edit.
+  const later = await harness(); let hold: (() => void) | null = null;
+  later.ipc.on("studio_apply", () => new Promise(resolve => { hold = () => resolve({ ...ordinaryView(scoreContent()), group }); }));
+  later.session.setScoreCell(score, 0, 0, { k: "d", pad: 1 }); await later.tick(5000);
+  later.session.setScoreCell(score, 1, 0, { k: "d", pad: 1 }); later.session.setScoreCell(score, 2, 0, { k: "d", pad: 1 });
+  await later.tick(5000);
+  later.ipc.on("studio_apply_batch", () => { throw "Studio: batched Apply item 2 of 2 was refused (epoch studio: edit belongs to a retired epoch); the items before it are saved, so retry the same batch exactly or discard that item"; });
+  hold!(); await later.tick(10 * 60_000);
+  assert.deepEqual(later.session.saves.map(s => s.status), ["uncertain", "uncertain"]);
+  assert.equal(later.calls("studio_apply_batch").length, 1, "nothing re-saved");
+
+  // A clear re-authored on newer history could remove what a collaborator added there.
+  const clear = await harness();
+  clear.session.clearScoreCell(score, 0, 0);
+  clear.ipc.on("studio_read", () => ({ ...ordinaryView(scoreContent(), { epochId: id32(0xe2) }), group }));
+  await clear.session.refreshDoc(score); await clear.tick(5000); await clear.tick(60_000);
+  assert.equal(clear.calls("studio_apply").length, 0); assert.equal(clear.session.canReauthor(clear.session.saves[0].id), true);
+
+  // A rotation in progress: the document's route is not ordinary, so the card stays.
+  const closing = await harness();
+  closing.session.setScoreCell(score, 0, 0, { k: "d", pad: 1 });
+  closing.ipc.on("studio_read", () => ({ ...ordinaryView(scoreContent(), { phase: "closing" }), group }));
+  await closing.session.refreshDoc(score); await closing.tick(5000); await closing.tick(60_000);
+  assert.equal(closing.calls("studio_apply").length, 0);
+  assert.equal(closing.session.saves[0].status, "blocked"); assert.match(closing.session.saves[0].error, /Shared history changed/);
+});
+
+test("a reset while a re-save waits for its read re-saves nothing", async () => {
+  const h = await harness(); let release: (() => void) | null = null, refused = false;
+  h.ipc.on("studio_apply", () => { refused = true; throw "epoch studio: edit belongs to a retired epoch"; });
+  h.ipc.on("studio_read", () => refused ? new Promise(resolve => { release = () => resolve({ ...ordinaryView(scoreContent(), { epochId: id32(0xe2) }), group }); })
+    : { ...ordinaryView(scoreContent()), group });
+  h.session.setScoreCell(score, 0, 0, { k: "d", pad: 1 }); await h.tick(5000);
+  const [pending] = h.session.saves;
+  assert.equal(h.session.resaving(pending.id), true, "the re-save waits for its read");
+  assert.deepEqual(h.session.saveTally(), { left: 1, retrying: 1, stuck: 0, discarded: 0 }, "and counts as moving, not as needing the member");
+  assert.equal(h.session.needsDecision(pending.id), false);
+  h.session.reset();
+  release!(); await h.tick(60_000);
+  assert.equal(h.calls("studio_apply").length, 1, "nothing was sent after the reset");
+});
+
+test("a flipnote edit the history moved under stays the member's to save again", async () => {
+  const h = await harness();
+  h.session.open(flip); await settle(8);
+  h.session.setFps(flip, 7);
+  h.ipc.on("studio_read", () => ({ ...ordinaryView(flipnoteContent({ frames: [] }), { epochId: id32(0xe2) }), group }));
+  await h.session.refreshDoc(flip);
+  await h.tick(5000); await h.tick(10 * 60_000);
+  const [refused] = h.session.saves;
+  assert.match(refused.error, /Shared history changed/);
+  assert.deepEqual([h.session.canRetry(refused.id), h.session.canReauthor(refused.id)], [false, true]);
+  assert.equal(h.calls("studio_apply").length, 0, "nothing was sent on its own");
+});
+
+test("a refusal no resend can change is the member's at once: gone member or channel, existing id", async () => {
+  // These may follow a write, so they stay uncertain and cannot become a new edit. (A Score edit in a
+  // retired epoch is re-saved on its own instead: see the bounded re-save test above.)
+  for (const [refusal, reauthor] of [["Studio: Studio requires current membership", false],
     ["Studio: unknown Studio channel", false], ["Studio: object already exists; use Apply to edit it", false]] as const) {
     const h = await harness();
     h.ipc.on("studio_apply", () => { throw refusal; });

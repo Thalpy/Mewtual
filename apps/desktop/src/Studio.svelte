@@ -963,7 +963,7 @@
   // sent again, or nothing when only the member can move it. `tick` redraws the countdown each second.
   function retryState(s: SaveRecord): { retrying: boolean; next: string } {
     void tick; void studio.rev;
-    if (s.status === "queued" || s.status === "inflight") return { retrying: true, next: "Trying again now" };
+    if (s.status === "queued" || s.status === "inflight" || session.resaving(s.id)) return { retrying: true, next: "Trying again now" };
     const at = session.autoRetryAt(s.id);
     return at === null ? { retrying: false, next: "" } : { retrying: true, next: retryText(at, session.now()) };
   }
@@ -972,7 +972,7 @@
   // that lapses if that set changes.
   function stuckRecords(): SaveRecord[] {
     void studio.rev;
-    return session.saves.filter(s => (s.status === "blocked" || s.status === "uncertain") && session.autoRetryAt(s.id) === null);
+    return session.saves.filter(s => (s.status === "blocked" || s.status === "uncertain") && session.autoRetryAt(s.id) === null && !session.resaving(s.id));
   }
   const stuckArmKey = () => `stuck:${stuckRecords().map(armKey).join(",")}`;
   // Only what a retry can move: a spent local-draft ticket or a changed history would be a no-op.
@@ -1230,7 +1230,7 @@
       <div class="st-banner st-save" class:warn={!motion.retrying} title={head.error}>
         <span><b>{saveHeadline(head.label, { retrying: motion.retrying, uncertain: head.mayHaveCommitted, others: attention.length - 1 + blockedCount })}</b></span>
         <span class="micro wrap">{saveProblemText(head.error, head.mayHaveCommitted)}{motion.next ? ` ${motion.next}.` : ""}</span>
-        {#if head.status === "uncertain" || head.status === "blocked"}<span class="st-card-acts">
+        {#if (head.status === "uncertain" || head.status === "blocked") && !session.resaving(head.id)}<span class="st-card-acts">
           <!-- Retry only where a resend can change the outcome; after a changed history the way
                forward is a new edit (primary then), since the old request can no longer land. -->
           {#if session.canRetry(head.id)}

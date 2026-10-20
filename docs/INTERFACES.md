@@ -1,5 +1,27 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Score additions re-saved after an epoch move (2026-10-20)
+
+Owner decision. A queued Score addition (`set_cell`, `set_patch`) whose document history moved
+under it is saved again on its own: "Shared history changed" at admission, or native's
+"epoch studio: edit belongs to a retired epoch". It is saved into the current epoch as a fresh edit
+with a new nonce, in its lane position, with its label, and no card. This is an exception to the
+`NEEDS_DECISION` rule below for these Score records only (`scheduleAutoReauthor`).
+
+- It applies only to an ordinary Score Apply proven not written (`canReauthor`) while the
+  document's current route is ordinary.
+- After the native refusal it re-reads the document first.
+- One job per document collects every record refused in the same turn (a refused batch), shares
+  that one read, re-saves them in lane order and pumps once, so they leave as one batch again.
+- It is bounded to `AUTO_REAUTHOR_MAX` (3) per edit chain. After that the record is the member's,
+  with "Save as a new edit".
+- While it is pending, `resaving(id)` is true: `saveTally()` counts the record as retrying,
+  `needsDecision` is false, and the banner offers no buttons.
+- Clears, header changes and sound removals keep their card. Re-authored on a newer history, they
+  could remove or override a collaborator's addition unseen.
+- Flipnote and Index records keep their card.
+- A reset, lock or scope change drops pending jobs.
+
 ## Studio saves resolve on their own; navigation never waits for one (2026-10-19, `[desync fixes]`)
 
 This supersedes the "vetoed"/"must reach a definite receipt" wording in the departure section below.
