@@ -3,18 +3,20 @@
 ## Where to resume (2026-10-20)
 
 **The communication programme is not finished.** This continuation belongs to
-`chat-update-implementation` (PR48 targets `Gate7`), following pushed checkpoint `a0756821`.
+`chat-update-implementation` (PR48 targets `Gate7`), following pushed code checkpoint `10dc3d23`.
 It was developed in `M:\Git (local)\CatComs\target\communication-atomic-intake-worktree`;
 the branch checkout is `M:\Git (local)\CatComs\target\communication-review-worktree`.
 The prior `a0756821` checkpoint passed root 3,073, native 430+5 and frontend 2,067.
-The current chat-bubble/packet-capacity continuation passes focused checks. Its initial Gate7
-merge (`7e90f8b1`) passed 2,227 frontend cases plus check/build. The later `fd788d80` Gate7 merge
+The current chat-bubble/packet-capacity continuation passes focused checks. The final frontend
+at `10dc3d23` passes all 2,230 cases (two workers, 72.99s), Svelte check (zero errors/warnings),
+production build (1m12s) and all ten rendered Edge flows. The later `fd788d80` Gate7 merge also
 passes 54 focused send/upload-flow cases after correcting one review finding: a refusal on a
-retry cannot erase an earlier unknown send outcome. Its full frontend repeat is pending.
+retry cannot erase an earlier unknown send outcome.
 The first root full run stopped in replication with an explicit
 allocation failure; the native check also exhausted allocation, while another session was running
 a full Rust build. These are failed attempts, not green validation. Native upload focus passes
-all ten cases; final suites/checks are pending. Remaining protocol and physical acceptance limits
+all ten cases; final root/native suites and remaining native/static checks are pending.
+Remaining protocol and physical acceptance limits
 stay explicit below.
 
 The main checkout, `M:\Git (local)\CatComs`, remains on `Gate7` and contains

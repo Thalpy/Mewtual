@@ -46,11 +46,18 @@ composer regression fails before correction (15 passed/1 failed,
 `chat-bubbles-prior-send-before.log`). Separate prior uncertainty now survives both thrown and
 structured refusals, including manager recover/cancel and background warnings; first-attempt
 definite refusal stays failed. The final 54-case focused run passes in 1.86s
-(`chat-bubbles-prior-send-final.log`). Full frontend/check/build repeat for that later merge and
-correction is pending. Browser flows currently fail before assertions: the first
+(`chat-bubbles-prior-send-final.log`). The final complete frontend at `10dc3d23` passes 2,230
+tests with two workers in 72.99s (`chat-bubbles-frontend-final.log`), Svelte check with zero
+errors/warnings (`chat-bubbles-frontend-check-final.log`) and production build in 1m12s
+(`chat-bubbles-frontend-build-final.log`, ordinary chunk-size warning). All ten rendered Edge
+flows pass (`chat-bubbles-frontend-flows-final.log`), including send, search, friend acceptance,
+pending recovery and boot-failure surfaces.
+
+Earlier browser flows failed before assertions: the first
 attempt could not obtain its owned Edge debugger, and later attempts reached the document but
 not fixture readiness. Local network diagnostics show the App module request still pending,
-without an application exception. No deadline or readiness assertion was relaxed.
+without an application exception. The successful final run retains the same deadline, actual
+fixture readiness marker and all assertions. Earlier failures remain failed attempts.
 
 The merged base disclosed a native streamed-upload/lock race. The communication fix now retains
 original generation/actor/instance ownership and transfers final publication into an owned worker
