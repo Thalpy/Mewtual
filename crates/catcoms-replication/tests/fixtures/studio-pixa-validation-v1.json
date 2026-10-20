@@ -16,6 +16,11 @@
     {"name":"event_unknown_wave","patch":{"events":[{"ms":0,"lane":0,"n":60,"on":1,"w":"pulse","q":0}]},"accepted":false},
     {"name":"event_missing_recipe","patch":{"events":[{"ms":0,"lane":0,"n":60,"on":1,"w":"sine","p":0,"q":0}]},"accepted":false},
     {"name":"event_duplicate_sequence","patch":{"events":[{"ms":0,"lane":0,"n":60,"on":0,"q":1},{"ms":1,"lane":0,"n":60,"on":0,"q":1}]},"accepted":false},
+    {"name":"event_volume_valid","patch":{"events":[{"ms":0,"lane":0,"n":60,"on":1,"w":"sine","q":0,"v":1},{"ms":1,"lane":0,"n":61,"on":1,"w":"sine","q":1,"v":100}]},"accepted":true},
+    {"name":"event_volume_zero","patch":{"events":[{"ms":0,"lane":0,"n":60,"on":1,"w":"sine","q":0,"v":0}]},"accepted":false},
+    {"name":"event_volume_over","patch":{"events":[{"ms":0,"lane":0,"n":60,"on":1,"w":"sine","q":0,"v":101}]},"accepted":false},
+    {"name":"event_volume_text","patch":{"events":[{"ms":0,"lane":0,"n":60,"on":1,"w":"sine","q":0,"v":"50"}]},"accepted":false},
+    {"name":"event_volume_on_note_off","patch":{"events":[{"ms":0,"lane":0,"n":60,"on":0,"q":0,"v":50}]},"accepted":false},
     {"name":"unknown_root_field","patch":{"extra":1},"accepted":false}
   ]
 }
