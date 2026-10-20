@@ -1,5 +1,24 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native streamed-upload publication (20 October)
+
+`begin_file_upload` captures the native UI-session generation before actor awaits. Each registered
+token retains that generation and the exact original server actor/registry instance. Chunk, tail
+and publication admission cannot adopt a replacement unlocked session or server with the same ID.
+No command arguments or saved formats changed.
+
+Final admission acquires the owned UI-session commit guard before removing the token and repeats
+the original generation/actor checks after waiting for the uploads map. Refusal discards sealed
+chunks through the original actor. An opaque admitted upload moves directly into a detached
+publication worker, without another await. Losing the invoke waiter does not cancel that worker
+or release its guard; lock waits for actual actor publication or its failure cleanup.
+
+The worker releases commit before ordinary exact-instance persistence. `leave_server` acquires the
+per-server persistence lock before commit, so holding commit through that persistence would invert
+the lock order. Persistence remains owned by the worker after caller loss. Publication admission
+does not claim crash-atomic storage or guaranteed receipt by another peer. Retiring stale/replaced
+uploads cleans their actual staged chunks on quota refusal as well as successful registration.
+
 ## Chat writer and failed-page admission (20 October, continuation)
 
 Legacy replication now returns `ReplError::ActorMismatch` when a parsed change's 32-byte writer

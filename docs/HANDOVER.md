@@ -7,8 +7,12 @@
 It was developed in `M:\Git (local)\CatComs\target\communication-atomic-intake-worktree`;
 the branch checkout is `M:\Git (local)\CatComs\target\communication-review-worktree`.
 The prior `a0756821` checkpoint passed root 3,073, native 430+5 and frontend 2,067.
-The current chat-bubble/packet-capacity continuation passes focused checks; its full application
-suites are in progress. Remaining protocol and physical acceptance limits stay explicit below.
+The current chat-bubble/packet-capacity continuation passes focused checks. Its complete frontend
+passes 2,227 cases plus check/build. The first root full run stopped in replication with an explicit
+allocation failure; the native check also exhausted allocation, while another session was running
+a full Rust build. These are failed attempts, not green validation. Native upload focus passes
+all ten cases; final suites/checks are pending. Remaining protocol and physical acceptance limits
+stay explicit below.
 
 The main checkout, `M:\Git (local)\CatComs`, remains on `Gate7` and contains
 separate UI/clip-editor work. Preserve that work and continue the communication fixes here.
@@ -719,7 +723,7 @@ mediums and a low. Fixed with regression tests, each confirmed to fail without i
     pinned), and the outcome is reported before a move away ends the batch (but not behind the
     lock screen). Its 1500-case probes of the queue, with and without the stages, found the order
     and the bound held; its last check found nothing blocking.
-- **OPEN, HIGH, handed to the communication session (not fixed on this branch)**: the native
+- **HIGH follow-up from the Gate7 clip-editor review**: the native
   upload/lock race. `finish_file_upload` (`src-tauri/src/lib.rs`) reads the unlocked state, then
   awaits the uploads mutex, removes the reservation on that earlier answer, and awaits
   publication without the UI-session commit guard; once the reservation is gone, a lock finds
@@ -735,6 +739,14 @@ mediums and a low. Fixed with regression tests, each confirmed to fail without i
   - deterministic barrier tests around final admission and actor publication covering both
     orders and a lock/unlock cycle (the existing test passes a literal `true` to the helper and
     never exercises the race). That session owns the native tests and gates.
+  The communication continuation now implements this correction in `upload_session.rs` and
+  `lib.rs`, with ten passing real-actor/session/staged-file tests (2.18s,
+  `chat-bubbles-upload-focused-2.log`) and a clear read-only re-review. It also fixes retired
+  uploads leaking staged chunks when a later quota check refused registration. The lost-caller
+  test restores the actual saved server and compares the complete uploaded-file projection.
+  Full native/check/build/startup validation is pending after a compiler allocation failure;
+  the separate Gate7 branch still needs this commit integrated. Do not describe that branch's
+  high finding as closed merely because the correction exists in this communication checkout.
 - Follow-ups: limits on added videos' size and length (a lying sample rate can still make one
   export sound window about 120 MB), and the edited file name contract. Known residuals: emoji
   and built-in sounds skip the queue (small, but not admitted ahead); the previous editor's bin

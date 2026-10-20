@@ -80,6 +80,7 @@ mod shutdown;
 mod six_client_recovery;
 mod studio;
 mod tasks;
+mod upload_session;
 use errors::{codes, AppError, ErrorCode};
 
 /// Independent reasons an exact address belongs in this device's aggregate bootstrap set. The
@@ -560,8 +561,8 @@ struct AppState {
     /// One native monitor fans a coalesced generation out to every per-server discovery loop.
     /// Polling remains active, so monitor initialization failure affects latency, not correctness.
     network_changes: NetworkChangeSignal,
-    /// Streamed uploads in flight, keyed by `(server, upload id)`. See [`PendingUpload`].
-    uploads: Mutex<HashMap<UploadKey, PendingUpload>>,
+    /// Streamed uploads in flight, keyed by `(server, native token)`. See [`RegisteredUpload`].
+    uploads: Mutex<HashMap<UploadKey, RegisteredUpload>>,
 }
 
 /// Fixed-size keyed singleflight. Hash collisions only serialize two explicit scans; unlike a map
@@ -629,6 +630,27 @@ struct PendingUpload {
     chunk_total: usize,
     /// When this upload last made progress, for the idle sweep.
     touched_at: u64,
+}
+
+/// Native custody of a streamed upload, separate from its pure slice/parser state. Numeric
+/// server IDs and a later unlock cannot replace the actor/session that began this transfer.
+/// Keeping the original actor also makes cancellation cleanup independent of registry lookup.
+struct RegisteredUpload {
+    pending: PendingUpload,
+    generation: u64,
+    instance: u64,
+    actor: ServerActor,
+}
+impl std::ops::Deref for RegisteredUpload {
+    type Target = PendingUpload;
+    fn deref(&self) -> &Self::Target {
+        &self.pending
+    }
+}
+impl std::ops::DerefMut for RegisteredUpload {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.pending
+    }
 }
 
 // Manual Debug, redacting the buffer: it holds plaintext of the file being shared, and a derived
@@ -822,18 +844,16 @@ fn upload_chunk_count(size: u64) -> usize {
     (size.max(1) as usize).div_ceil(CHUNK_BYTES)
 }
 
-/// Drop a pending upload's sealed-but-unpublished chunk blobs. Uses the unchecked actor lookup so
-/// cleanup still runs when the vault has just been locked, which is one of the ways an upload ends.
+/// Drop a pending upload's sealed-but-unpublished chunk blobs through its original actor.
+/// Cleanup still runs after lock or registry replacement without adopting a different server.
 ///
 /// Awaited rather than fire-and-forget: cancel and lock report that the upload has been cleaned
 /// up, so they must not return while the blobs are still queued for deletion.
-async fn discard_pending_upload(state: &AppState, upload: PendingUpload) {
+async fn discard_pending_upload(upload: RegisteredUpload) {
     if upload.chunks.is_empty() {
         return;
     }
-    if let Ok(actor) = actor_of_unchecked(state, upload.server).await {
-        actor.discard_upload(upload.chunks).await;
-    }
+    upload.actor.discard_upload(upload.pending.chunks).await;
 }
 
 /// A fresh generation token for one `begin_file_upload`. See [`UploadKey`]: this is the identity
@@ -8025,9 +8045,13 @@ async fn begin_file_upload(
     );
     // Reaching the actor is both the session gate and proof the server exists, before this
     // reserves a slot for it.
-    let actor = actor_of(&state, server)
+    let generation = keep_session::invocation_generation(&state)
         .await
-        .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+    let (actor, instance) = actor_instance_of(&state, server)
+        .await
+        .map_err(|e| op.fail(e.code(), e.message()))?;
+    let actor = op.bind_actor(actor);
     if upload_id.is_empty()
         || upload_id.len() > MAX_UPLOAD_ID_BYTES
         || !upload_id
@@ -8049,56 +8073,31 @@ async fn begin_file_upload(
     let chunk_total = upload_chunk_count(size);
     let token = mint_upload_token();
     let now = SystemClock.now_ms();
-    let mut uploads = state.uploads.lock().await;
-    // Retire what this begin supersedes, in one pass:
-    //  - the previous generation of the same visible transfer (a restart). It is retired rather
-    //    than reused, so an earlier seal still in flight finds nothing to attach to and collects.
-    //  - anything untouched for long enough that its caller is plainly gone.
-    let retired: Vec<UploadKey> = uploads
-        .iter()
-        .filter(|(k, v)| {
-            (k.0 == server && v.upload_id == upload_id)
-                || v.idle_since(now.saturating_sub(UPLOAD_IDLE_TIMEOUT_MS))
-        })
-        .map(|(k, _)| k.clone())
-        .collect();
-    let retired: Vec<PendingUpload> = retired.iter().filter_map(|k| uploads.remove(k)).collect();
-    if uploads.len() >= MAX_PENDING_UPLOADS {
-        return Err(op.fail(
-            codes::FILE_UPLOAD_REFUSED,
-            "too many uploads are already in flight",
-        ));
-    }
-    // The entry cap does not bound vault growth; this does. Counted against what is already
-    // staged plus what this upload would add if it ran to the end and never finished.
-    let staged: u64 = uploads.values().map(PendingUpload::staged_bytes).sum();
-    if staged.saturating_add(chunk_total as u64 * CHUNK_BYTES as u64) > MAX_STAGED_UPLOAD_BYTES {
-        return Err(op.fail(
-            codes::FILE_UPLOAD_REFUSED,
-            "too much upload data is already waiting to be published",
-        ));
-    }
-    uploads.insert(
-        (server, token.clone()),
-        PendingUpload {
-            server,
-            upload_id,
-            mime,
-            address: CidHasher::new(),
-            buffer: Vec::new(),
-            chunks: Vec::new(),
-            sealing: None,
-            bytes_seen: 0,
-            declared_size: size,
-            chunk_total,
-            touched_at: now,
+    let superseded = upload_session::register(
+        &state,
+        token.clone(),
+        RegisteredUpload {
+            generation,
+            instance,
+            actor,
+            pending: PendingUpload {
+                server,
+                upload_id,
+                mime,
+                address: CidHasher::new(),
+                buffer: Vec::new(),
+                chunks: Vec::new(),
+                sealing: None,
+                bytes_seen: 0,
+                declared_size: size,
+                chunk_total,
+                touched_at: now,
+            },
         },
-    );
-    drop(uploads);
-    let superseded = retired.len();
-    for old in retired {
-        discard_pending_upload(&state, old).await;
-    }
+        now,
+    )
+    .await
+    .map_err(|e| op.fail(codes::FILE_UPLOAD_REFUSED, e))?;
     // Not a terminal phase: the upload has started, not finished. `finish` or `cancel` closes it,
     // and a trace with neither is the orphan.
     op.stage("FILE.UPLOAD.RESERVED");
@@ -8161,22 +8160,30 @@ async fn push_file_chunk(
     let key = (server, token);
     // Validate and buffer under the lock, then seal outside it: an actor round-trip must never
     // happen while holding a lock every other upload needs.
-    let (full_chunk, mime, chunk_total, upload_id) = {
+    let (full_chunk, mime, chunk_total, upload_id, generation) = {
         let mut uploads = state.uploads.lock().await;
         let up = uploads
             .get_mut(&key)
             .ok_or_else(|| "no such upload".to_string())?;
+        if ui_session_closed(&state)
+            || state.ui_session_generation.load(Ordering::Acquire) != up.generation
+            || !up.actor.same_instance(&actor)
+        {
+            return Err("this upload is no longer active".into());
+        }
         (
             up.admit_slice(offset, &bytes)?,
             up.mime.clone(),
             up.chunk_total,
             up.upload_id.clone(),
+            up.generation,
         )
     };
     let Some(chunk) = full_chunk else {
         return Ok(()); // buffered; the chunk it belongs to is not complete yet
     };
     let done = seal_pending_chunk(&state, &actor, &key, chunk, mime).await?;
+    let _progress_commit = require_ui_session_generation(&state, generation).await?;
     emit_tracked(
         &app,
         "upload-progress",
@@ -8191,38 +8198,6 @@ async fn push_file_chunk(
         external_progress_trace(trace.as_deref()),
     );
     Ok(())
-}
-
-/// Take an upload out of the map if, and only if, it may still be published.
-///
-/// The last gate before an irreversible, group-visible act, so it is deliberately one step: the
-/// upload is removed and returned, or it is removed and destroyed, and there is no state in
-/// between where a lock could arrive and find nothing to cancel. `locked` is read *after* the last
-/// seal, because an answer from before that await says nothing about the session now.
-///
-/// A locked session ends the upload rather than deferring it: the chunks are already sealed, and
-/// holding them across a lock would mean the vault carrying an unpublished transfer the user
-/// believes they closed. An incomplete upload is destroyed for a different reason: its chunks
-/// would be listed under the address of a whole file that was never sent, and every member would
-/// fail the reassembly check forever.
-async fn take_publishable_upload(
-    state: &AppState,
-    key: &UploadKey,
-    locked: bool,
-) -> Result<PendingUpload, String> {
-    let taken = state.uploads.lock().await.remove(key);
-    let Some(pending) = taken else {
-        return Err("no such upload".to_string());
-    };
-    if locked {
-        discard_pending_upload(state, pending).await;
-        return Err("the vault is locked".into());
-    }
-    if !pending.is_complete() {
-        discard_pending_upload(state, pending).await;
-        return Err("the upload did not send every chunk".into());
-    }
-    Ok(pending)
 }
 
 /// Seal one assembled chunk into the vault and record its reference against the pending upload;
@@ -8254,7 +8229,12 @@ async fn seal_pending_chunk(
         Ok(file_ref) => {
             let attached = uploads
                 .get_mut(key)
-                .filter(|up| up.can_accept(index))
+                .filter(|up| {
+                    up.can_accept(index)
+                        && !ui_session_closed(state)
+                        && state.ui_session_generation.load(Ordering::Acquire) == up.generation
+                        && up.actor.same_instance(actor)
+                })
                 .map(|up| up.chunk_sealed(file_ref.clone()));
             match attached {
                 Some(done) => Ok(done),
@@ -8271,7 +8251,7 @@ async fn seal_pending_chunk(
             let abandoned = uploads.remove(key);
             drop(uploads);
             if let Some(up) = abandoned {
-                discard_pending_upload(state, up).await;
+                discard_pending_upload(up).await;
             }
             Err(e)
         }
@@ -8312,6 +8292,12 @@ async fn finish_file_upload(
         let up = uploads
             .get_mut(&key)
             .ok_or_else(|| op.fail(codes::FILE_UPLOAD_FAILED, "no such upload"))?;
+        if ui_session_closed(&state)
+            || state.ui_session_generation.load(Ordering::Acquire) != up.generation
+            || !up.actor.same_instance(&actor)
+        {
+            return Err(op.fail(codes::FILE_UPLOAD_FAILED, "this upload is no longer active"));
+        }
         up.take_tail()
             .map_err(|e| op.fail(codes::FILE_UPLOAD_FAILED, e))?
             .map(|chunk| (chunk, up.mime.clone()))
@@ -8321,51 +8307,78 @@ async fn finish_file_upload(
             .await
             .map_err(|e| op.fail(codes::FILE_UPLOAD_FAILED, e))?;
     }
-    let locked = require_unlocked_session(&state).await.is_err();
-    let pending = take_publishable_upload(&state, &key, locked)
+    let admitted = upload_session::take(&state, &key)
         .await
         .map_err(|e| op.fail(codes::FILE_UPLOAD_FAILED, e))?;
-    let cid = pending.address.cid();
-    let chunk_total = pending.chunk_total;
-    let upload_id = pending.upload_id;
-    // Kept for the failure path: a failed publish must not leave sealed bytes nothing names.
-    let sealed = pending.chunks.clone();
-    let published = actor
-        .publish_upload(
-            name,
-            pending.mime,
-            path,
-            *cid.as_bytes(),
-            pending.declared_size,
-            pending.chunks,
-        )
-        .await;
-    let hex = match published {
-        Ok(hex) => hex,
-        Err(e) => {
-            actor.discard_upload(sealed).await;
-            // Sealed bytes existed and were thrown away. Distinguishable from a refusal at begin,
-            // where nothing had been written yet.
-            return Err(op.fail(codes::FILE_UPLOAD_FAILED, e));
-        }
-    };
-    emit_tracked(
-        &app,
-        "upload-progress",
-        UploadProgressEvt {
-            server,
-            upload_id,
-            done: chunk_total + 1,
-            total: chunk_total + 1,
+    let (actor, instance) = admitted.origin();
+    let actor = op.bind_actor(actor);
+    let persist_actor = actor.clone();
+    let op = Arc::new(op);
+    let settled_op = op.clone();
+    let settled_app = app.clone();
+    let progress_trace = op.trace;
+    // No await between admission/removal and transfer to the detached owner. Even a cancelled
+    // invoke waiter cannot release the commit fence while its actor command is still queued.
+    upload_session::spawn_publication(
+        admitted,
+        move |upload| async move {
+            let pending = upload.pending;
+            let cid = pending.address.cid();
+            let chunk_total = pending.chunk_total;
+            let upload_id = pending.upload_id;
+            let sealed = pending.chunks.clone();
+            let published = actor
+                .publish_upload(
+                    name,
+                    pending.mime,
+                    path,
+                    *cid.as_bytes(),
+                    pending.declared_size,
+                    pending.chunks,
+                )
+                .await;
+            let hex = match published {
+                Ok(hex) => hex,
+                Err(error) => {
+                    actor.discard_upload(sealed).await;
+                    return Err(error);
+                }
+            };
+            emit_tracked(
+                &app,
+                "upload-progress",
+                UploadProgressEvt {
+                    server,
+                    upload_id,
+                    done: chunk_total + 1,
+                    total: chunk_total + 1,
+                },
+                progress_trace,
+            );
+            Ok(hex)
         },
-        op.trace,
-    );
-    persist_server(&state, server).await;
-    // Deliberately after persistence, like every other operation here: an upload reported as
-    // succeeding before its index entry reached the disk is the shape of "it uploaded and then it
-    // was gone after a restart".
-    op.succeeded("FILE.UPLOAD.PUBLISHED");
-    Ok(hex)
+        move |outcome| async move {
+            let state = settled_app.state::<AppState>();
+            // Publication has settled before commit releases. Persistence is background-safe and
+            // exact-instance bound; it must run AFTER release to preserve leave's persist?commit
+            // lock order. A lock may complete during persistence, but never ahead of publication.
+            let _ = persist_server_instance(&state, server, instance, persist_actor).await;
+            match outcome {
+                Ok(hex) => {
+                    settled_op.succeeded("FILE.UPLOAD.PUBLISHED");
+                    Ok(hex)
+                }
+                Err(error) => Err(settled_op.fail(codes::FILE_UPLOAD_FAILED, error)),
+            }
+        },
+    )
+    .await
+    .map_err(|e| {
+        op.fail(
+            codes::FILE_UPLOAD_FAILED,
+            format!("upload worker failed: {e}"),
+        )
+    })?
 }
 
 /// Abandon a streamed upload and garbage-collect whatever it had already sealed. Called when the
@@ -8393,7 +8406,7 @@ async fn cancel_file_upload(
     let pending = state.uploads.lock().await.remove(&(server, token));
     let had_reservation = pending.is_some();
     if let Some(up) = pending {
-        discard_pending_upload(&state, up).await;
+        discard_pending_upload(up).await;
     }
     if had_reservation {
         op.succeeded("FILE.UPLOAD.CANCELLED");
@@ -15580,10 +15593,10 @@ async fn lock_session_with_generation_inner(
     state.storage_health.lock().await.clear();
     // An upload in flight is session state too. Dropping the reservations frees their slots and
     // garbage-collects the chunks they had sealed but will now never publish.
-    let abandoned: Vec<PendingUpload> =
+    let abandoned: Vec<RegisteredUpload> =
         state.uploads.lock().await.drain().map(|(_, v)| v).collect();
     for upload in abandoned {
-        discard_pending_upload(state, upload).await;
+        discard_pending_upload(upload).await;
     }
     (lock_generation, save_result)
 }
@@ -19687,85 +19700,9 @@ mod tests {
         assert!(downloads_empty(dir.path()));
     }
 
-    /// An `AppState` holding one pending upload under `key`, in the shape `finish` would see.
-    async fn state_with_upload(key: &UploadKey, up: PendingUpload) -> AppState {
-        let state = AppState::default();
-        state.uploads.lock().await.insert(key.clone(), up);
-        state
-    }
-
-    #[tokio::test]
-    async fn a_lock_before_the_index_post_ends_the_upload_instead_of_publishing_it() {
-        // The upload-side twin of the save race. Everything is sealed and complete, and the only
-        // step left is the group-visible one. A lock arriving here must end the transfer, not
-        // publish it a moment later; and it must take the upload with it rather than leaving a
-        // reservation nothing will ever close.
-        let key = (1u64, "tok".to_string());
-        let (complete, _) = stream(CHUNK_BYTES);
-        assert!(complete.is_complete(), "the upload was ready to publish");
-        let state = state_with_upload(&key, complete).await;
-
-        let err = take_publishable_upload(&state, &key, true)
-            .await
-            .unwrap_err();
-
-        assert!(err.contains("locked"), "{err}");
-        assert!(
-            state.uploads.lock().await.is_empty(),
-            "and the upload is gone, not left pending across the lock"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_complete_upload_publishes_and_an_incomplete_one_is_destroyed() {
-        let key = (1u64, "tok".to_string());
-        let (complete, _) = stream(CHUNK_BYTES * 2 + 3);
-        let state = state_with_upload(&key, complete).await;
-
-        let taken = take_publishable_upload(&state, &key, false).await.unwrap();
-        assert!(taken.is_complete());
-        assert!(state.uploads.lock().await.is_empty(), "taken, not copied");
-
-        // Removed twice is not publishable twice.
-        assert!(take_publishable_upload(&state, &key, false).await.is_err());
-
-        // A short upload is refused and destroyed rather than published under a whole-file address
-        // that was never sent.
-        let mut short = pending(CHUNK_BYTES as u64 * 2);
-        short
-            .admit_slice(0, &vec![0u8; UPLOAD_SLICE_BYTES])
-            .unwrap();
-        let state = state_with_upload(&key, short).await;
-        let err = take_publishable_upload(&state, &key, false)
-            .await
-            .unwrap_err();
-        assert!(err.contains("did not send every chunk"), "{err}");
-        assert!(state.uploads.lock().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn locking_the_session_drains_every_upload_in_flight() {
-        // Uploads are session state. A lock must not leave one holding a slot (and its staged
-        // chunks) into whatever comes next.
-        let state = AppState::default();
-        for token in ["a", "b"] {
-            let (up, _) = stream(CHUNK_BYTES);
-            state
-                .uploads
-                .lock()
-                .await
-                .insert((1, token.to_string()), up);
-        }
-        *state.session_resumable.lock().await = true;
-
-        lock_session_inner(&state, None).await.unwrap();
-
-        assert!(state.uploads.lock().await.is_empty(), "drained by the lock");
-        assert!(
-            !*state.session_resumable.lock().await,
-            "and the session closed"
-        );
-    }
+    // Streamed upload session/lock tests live beside the actual admission and publication
+    // worker in upload_session/tests.rs. They use real native sessions rather than a supplied
+    // `locked` boolean, which cannot authorize a publication across an await.
 
     #[tokio::test]
     async fn already_retired_stream_never_creates_staging_or_reports_initial_progress() {
@@ -21571,7 +21508,7 @@ mod tests {
         assert!(state.storage_health.lock().await.is_empty());
     }
 
-    fn snapshot_test_entry(
+    pub(super) fn snapshot_test_entry(
         instance: u64,
         actor: ServerActor,
         group_id: Vec<u8>,

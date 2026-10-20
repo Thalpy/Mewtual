@@ -43,6 +43,16 @@ mandatory, while obsolete negative/helper completions cannot lower confirmed evi
 
 ## Gate7 upload and session replacement boundaries (19 October)
 
+The 20 October native continuation binds streamed-upload tokens to the original UI-session
+generation and actual actor/registry instance. Final removal and publication hold the session
+commit guard, with a synchronous generation recheck after the uploads-map await. Lock requests
+publish their revocation before waiting for commit. Before admission they reject and clean the
+staged data; after admission lock waits for the owned worker's actual publication/failure cleanup,
+even when its caller disappears. A completed lock/unlock cannot revive an old token. Cleanup uses
+the original actor rather than a replacement registry entry. Quota refusal also cleans uploads it
+retired. Ordinary persistence follows guard release to preserve leave's existing lock order; the
+worker retains that task, but this is not an abrupt-crash transaction or remote-custody guarantee.
+
 Browser batch admission bounds retained user-selected File objects to one batch of at most32,
 with a separate16-request review-queue bound. These are renderer lifecycle bounds, not a byte
 bound on browser media decoders or the operating system. The native file limits remain independent.

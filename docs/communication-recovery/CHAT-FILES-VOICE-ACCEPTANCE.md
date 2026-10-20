@@ -32,8 +32,35 @@ cross-ledger refusal, replay/serial preservation, constructor/close and a retain
 growth guard within the existing 2 KiB allowance. This structural estimate excludes allocator slack
 and framework/engine heap. Read-only review has no remaining finding.
 Protected packet/event allocation, candidate history lanes and atomic high-side Hello remain
-unimplemented; no unsupported protected role or live V2 path is enabled. This continuation's full
-application suites are in progress and must not be inferred from the prior checkpoint below.
+unimplemented; no unsupported protected role or live V2 path is enabled.
+
+Gate7's newer clip-editor commits are merged locally with the communication session guards.
+The resulting frontend passes 2,227 tests in 85.92s, Svelte check (zero errors/warnings) and
+production build (`chat-bubbles-frontend-after-merge.log`, `chat-bubbles-frontend-check.log`,
+`chat-bubbles-frontend-build.log`). A focused 53-case frontend run includes the post-now outcome
+and session-retirement combinations. Browser flows currently fail before assertions: the first
+attempt could not obtain its owned Edge debugger, and later attempts reached the document but
+not fixture readiness. Local network diagnostics show the App module request still pending,
+without an application exception. No deadline or readiness assertion was relaxed.
+
+The merged base disclosed a native streamed-upload/lock race. The communication fix now retains
+original generation/actor/instance ownership and transfers final publication into an owned worker
+under session commit. It releases commit before ordinary persistence to preserve leave's lock
+order. Ten focused cases pass in 2.18s (`chat-bubbles-upload-focused-2.log`): both lock/publication
+orders, caller loss with actual saved-server restore, lock/unlock, uploads-map waits, server
+replacement, quota/failure cleanup and persistence lock ordering. Native formatting and read-only
+re-review pass. The first compile attempt failed only in the new test helper (unavailable direct
+`futures::poll!` import); the corrected helper uses the standard library without a dependency change.
+The correction still needs final native gates and integration into Gate7.
+
+The first complete-root attempt (`chat-bubbles-root-full.log`) stopped in the replication library
+with `memory allocation of 1787552 bytes failed`, without a reported test assertion failure.
+The native check also failed an allocation of 2 MiB (`chat-bubbles-native-check.log`). Another
+session was observed running full Rust builds during validation; after the failures, system
+committed memory was approximately 128 GiB against a 150 GiB limit. These observations identify
+allocation failures and concurrent load, not a proven source-level defect or a successful full
+run. Heavy retries are deferred until the competing suite stops. This continuation's final
+application gates remain incomplete and must not be inferred from the prior checkpoint below.
 
 ## Chat history adversarial checkpoint (20 October)
 
