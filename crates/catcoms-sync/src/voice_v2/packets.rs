@@ -50,6 +50,12 @@ impl PacketSlots {
     }
 }
 impl ConfirmationCapacity {
+    pub(super) fn hello_incoming_slot(
+        &self,
+        slots: &PacketSlots,
+    ) -> Result<slots::Slot, VoiceError> {
+        self.incoming.loan(&slots.incoming)
+    }
     pub(super) fn close(&self) {
         self.incoming.close();
         self.outgoing.close();
@@ -248,6 +254,30 @@ pub(super) struct PreparedTokenPublication<'a> {
     mono: u64,
 }
 impl PreparedTokenPublication<'_> {
+    /// Only this exclusive unpublished native token can construct its pending decrypt owner.
+    /// The inactive action remains private until the same origin transaction publishes both.
+    pub(super) fn crypto_authority(
+        &self,
+        clock: Arc<dyn Clock>,
+    ) -> Result<super::crypto_authority::CryptoAuthority, VoiceError> {
+        let grant = super::crypto_authority::CryptoAuthority::new(
+            self.admission.local.clone(),
+            self.admission.pair.clone(),
+            clock,
+            self.admission.deadline,
+            self.admission.expires.saturating_add(CLOCK_SKEW_MS),
+        )?
+        .with_pending(self.incoming.token.0.clone())?;
+        match self
+            .incoming
+            .confirmation
+            .as_ref()
+            .ok_or(VoiceError::Unauthorized)?
+        {
+            PendingConfirmation::Hello(gate) => grant.with_hello(gate.clone()),
+            PendingConfirmation::Attempt(attempt) => grant.with_pending(attempt.clone()),
+        }
+    }
     pub(super) fn admission(&self) -> &InboundAdmission {
         &self.admission
     }
@@ -464,6 +494,16 @@ redacted_debug!(
 );
 
 impl PacketLedger {
+    /// Protection is selected only before this exact pair has allocated or admitted any packet.
+    /// Counters survive cache pruning, so an expired ordinary action cannot look pristine later.
+    pub(super) fn confirmation_is_unused(
+        &self,
+        handshake: Nonce,
+        authority: &Authority<'_>,
+    ) -> Result<bool, VoiceError> {
+        let pair = self.pair(&handshake, authority)?;
+        Ok(pair.status == Status::Confirming && pair.next == 0 && pair.replay.highest == 0)
+    }
     pub fn new(
         context: &Context,
         join: Nonce,
@@ -1230,6 +1270,26 @@ impl PacketLedger {
         authority: &Authority<'_>,
         clock: &dyn Clock,
     ) -> Result<PreparedInbound, VoiceError> {
+        self.prepare_inbound_with_workflow(object, authority, clock, None)
+    }
+    /// Protected high-side Hello only. Both retained serialized copies borrow bytes and the
+    /// actual incoming-table position from the original workflow, never ordinary spare capacity.
+    pub(super) fn prepare_protected_hello(
+        &mut self,
+        object: SignedObject,
+        authority: &Authority<'_>,
+        clock: &dyn Clock,
+        workflow: Arc<super::chain::Workflow>,
+    ) -> Result<PreparedInbound, VoiceError> {
+        self.prepare_inbound_with_workflow(object, authority, clock, Some(workflow))
+    }
+    fn prepare_inbound_with_workflow(
+        &mut self,
+        object: SignedObject,
+        authority: &Authority<'_>,
+        clock: &dyn Clock,
+        workflow: Option<Arc<super::chain::Workflow>>,
+    ) -> Result<PreparedInbound, VoiceError> {
         self.prune(clock);
         let pair = self.inbound_pair(&object, authority, clock)?;
         let Body::Encrypted { header, ciphertext } = &object.body else {
@@ -1241,13 +1301,30 @@ impl PacketLedger {
         if self.incoming.len() >= RESERVATIONS {
             return Err(VoiceError::Capacity);
         }
-        let slot = self.packet_slots.incoming.charge(1)?;
+        let slot = if let Some(workflow) = &workflow {
+            workflow.hello_packet_slot(
+                &self.resources,
+                self.scope,
+                &self.lease,
+                &self.packet_slots,
+                &object,
+            )?
+        } else {
+            self.packet_slots.incoming.charge(1)?
+        };
         let token = self.serial.checked_add(1).ok_or(VoiceError::Reservation)?;
         let aad = object.aad()?;
         let exchange = self.sdp_owner(header, true)?;
         let bytes = 2 * (aad.len() + ciphertext.len()) + 256;
         let credit = Arc::new(if let Some(exchange) = &exchange {
             exchange.charge(Stage::RemotePacket, bytes)?
+        } else if let Some(workflow) = workflow {
+            super::resources::ByteBudget::Workflow(workflow).charge(
+                &self.resources,
+                self.scope.group,
+                bytes,
+                ResourceKind::Retained,
+            )?
         } else {
             self.resources
                 .charge(self.scope.group, bytes, ResourceKind::Retained)?

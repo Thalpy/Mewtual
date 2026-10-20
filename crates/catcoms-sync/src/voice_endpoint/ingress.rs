@@ -1,5 +1,6 @@
-//! Bounded native public-control intake. Announcements remain candidates; only the current
-//! native watch challenge/proof promotes presence. No encrypted input is admitted by this slice.
+//! Bounded native control intake with one public/encrypted identity namespace. Announcements
+//! remain candidates; only a current native watch challenge/proof promotes presence. Protected
+//! Hello admission is custody only, and does not establish confirmation or enable live dispatch.
 use super::*;
 use catcoms_rt::RequestAuthority;
 use voice_v2::helper::RoomAuthority;
@@ -18,8 +19,10 @@ enum Targets {
     Join(u64, CallLease),
 }
 
+mod encrypted;
 #[cfg(test)]
 mod tests;
+pub(crate) use encrypted::{EndpointReceipt, HelloReceipt};
 impl Targets {
     fn live(&self) -> bool {
         match self {
@@ -91,9 +94,30 @@ struct Work {
 #[derive(Default)]
 pub(super) struct PublicInbox {
     packets: BTreeMap<Key, Work>,
+    // Two work representations share ONE classifier and combined capacity. Never insert in
+    // either map before check_identity: public control cannot reuse an encrypted admission ID.
+    hellos: BTreeMap<Key, HelloReceipt>,
     cursor: Option<Key>,
 }
 impl PublicInbox {
+    fn check_identity(&self, object: &SignedObject) -> Result<(), VoiceError> {
+        let key = (object.issuer(), object.id());
+        if self
+            .packets
+            .get(&key)
+            .is_some_and(|work| work.packet.object != *object)
+            || self
+                .hellos
+                .get(&key)
+                .is_some_and(|receipt| receipt.object_hash() != object.hash())
+        {
+            return Err(VoiceError::RetryMismatch);
+        }
+        Ok(())
+    }
+    fn full(&self) -> bool {
+        self.packets.len() + self.hellos.len() >= PACKETS
+    }
     pub(super) fn prune(&mut self, clock: &dyn Clock) {
         let now = clock.now_ms();
         let mono = clock.monotonic_ms();
@@ -106,6 +130,10 @@ impl PublicInbox {
                 || mono < work.packet.deadline
                 || Arc::strong_count(&work.packet) > 1
         });
+        // At most three candidates per protected pair. Keep their immutable identities for
+        // the original call, including closed-rejected results; actual ACK holders may outlive
+        // End. This fixed metadata does not retain an action, engine or Workflow.
+        self.hellos.retain(|_, receipt| receipt.retain());
     }
 }
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
@@ -135,6 +163,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return Err(VoiceError::Unauthorized);
         }
         let key = (envelope.object().issuer(), envelope.object().id());
+        voice.endpoints.public.check_identity(envelope.object())?;
         if let Some(work) = voice.endpoints.public.packets.get(&key) {
             if work.packet.object != *envelope.object() {
                 return Err(VoiceError::RetryMismatch);
@@ -145,7 +174,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             ticket.check(actor, &envelope.encode())?;
             return Ok(PublicReceipt(work.packet.clone()));
         }
-        if voice.endpoints.public.packets.len() >= PACKETS {
+        if voice.endpoints.public.full() {
             return Err(VoiceError::Capacity);
         }
         let targets = match envelope.object().body() {

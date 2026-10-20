@@ -309,7 +309,49 @@ pub(super) struct Allocation {
     pub engine_bytes: usize,
 }
 
+/// Fully built but unpublished: no action Arc or engine admission escapes this private owner.
+pub(super) struct InactiveAction {
+    key: Key,
+    action: Arc<CryptoAction>,
+}
+
+#[cfg(test)]
+pub(super) fn fixed_record_layout_bytes() -> usize {
+    // Engine embeds terminal-result metadata; count it once through CryptoAction. Input/body
+    // buffers have their own credit. The 128-byte logical map/bookkeeping allowance, like the
+    // existing plan growth guard, excludes allocator slack and map-node spare capacity.
+    std::mem::size_of::<CryptoAction>()
+        + 2 * std::mem::size_of::<usize>()
+        + std::mem::size_of::<Key>()
+        + std::mem::size_of::<Arc<CryptoAction>>()
+        + 128
+}
+
 impl ActionQueue {
+    pub(super) fn build_chain_decrypt(
+        mut prepared: PreparedAction,
+        input: InboundPacket,
+        authority: CryptoAuthority,
+    ) -> Result<(super::chain::RowIssue, InactiveAction), VoiceError> {
+        let issue = prepared.chain_issue.take().ok_or(VoiceError::Scope)?;
+        let (key, action, exchange) =
+            Self::build(prepared, Input::Decrypt(Box::new(input)), authority);
+        assert!(
+            exchange.is_none(),
+            "confirmation history cannot adopt an SDP issue"
+        );
+        Ok((issue, InactiveAction { key, action }))
+    }
+    /// Called only in the infallible part of the native origin/History transaction.
+    pub(super) fn publish_inactive(&mut self, inactive: InactiveAction) -> Arc<CryptoAction> {
+        assert!(
+            self.actions
+                .insert(inactive.key, inactive.action.clone())
+                .is_none(),
+            "native action uniqueness"
+        );
+        inactive.action
+    }
     pub(super) fn with_slots(slots: Arc<slots::Slots>) -> Self {
         Self {
             slots,

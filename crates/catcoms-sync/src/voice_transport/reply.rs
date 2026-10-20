@@ -7,7 +7,7 @@ use voice_v2::runtime::VerificationReplyAuthority;
 
 pub(super) enum Receipt {
     Helper(HelperReceipt),
-    Endpoint(crate::voice_endpoint::PublicReceipt),
+    Endpoint(crate::voice_endpoint::EndpointReceipt),
 }
 impl Receipt {
     fn authorized_at(&self, wall: u64, mono: u64) -> bool {

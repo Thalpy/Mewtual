@@ -2,6 +2,7 @@ use super::*;
 use crate::voice_endpoint::tests::{attach, Node};
 use catcoms_rt::ManualClock;
 use voice_v2::runtime::Runtime;
+mod protected;
 
 async fn fixture() -> (Node, Node, Arc<Runtime>, Arc<ManualClock>) {
     let (_hub, mut nodes, _) = crate::tests::build_members(2).await;
@@ -13,6 +14,8 @@ async fn fixture() -> (Node, Node, Arc<Runtime>, Arc<ManualClock>) {
     nodes[0].publish_group_policy().unwrap();
     let policy = nodes[0].group_policy.as_ref().unwrap().encode();
     nodes[1].on_group_policy(&policy);
+    // Keep sender/receiver canonical for protected Hello tests without replacing either actor.
+    nodes.sort_by_key(|node| node.device_id());
     let mut receiver = nodes.pop().unwrap();
     let mut sender = nodes.pop().unwrap();
     let clock = Arc::new(ManualClock::new(1000));

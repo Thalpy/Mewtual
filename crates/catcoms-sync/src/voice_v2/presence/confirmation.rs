@@ -18,6 +18,7 @@ const MAX_PAIRS: usize = 16;
 const MAX_CONFIRMING: usize = 8;
 const PAIR_BYTES: usize = 6144;
 const CONFIRM_DOMAIN: &str = "mewtual/voice/key-confirm/v2";
+mod protected;
 
 #[derive(Default)]
 pub(super) struct Confirmations {
@@ -47,6 +48,9 @@ pub(super) struct Pair {
     // Permanent preparation stamp, including after close. Removing it would let the same pair
     // recreate candidate/operation capacity. The closed handle owns no idle progress capacity.
     chain: Option<Arc<super::super::chain::PreparedChain>>,
+    // Mode selection precedes capacity acquisition and never rolls back on local pressure.
+    // An ordinary action issued before selection cannot be adopted; a fresh pair is required.
+    protected_epoch: Option<u64>,
     _credit: Credit,
 }
 struct Action {
@@ -305,9 +309,38 @@ impl LocalJoin {
             chain.close();
             return Err(VoiceError::Unauthorized);
         }
-        // An ordinary action cannot be adopted into a prepaid chain with a different fence.
-        if self.actions.get(Key::Derive(handshake)).is_some() {
+        let pair = &self.confirmations.pairs[&handshake];
+        if pair
+            .protected_epoch
+            .is_some_and(|epoch| epoch != binding.epoch)
+        {
             return Err(VoiceError::Unauthorized);
+        }
+        if pair.protected_epoch.is_none() {
+            // Check native state, including permanent packet counters rather than only cached
+            // action rows. Otherwise an older ordinary CryptoAction could remain authorized
+            // after protection was selected, or an expired cache could permit late migration.
+            if self.actions.get(Key::Derive(handshake)).is_some()
+                || pair.starts != 0
+                || pair.action_serial != 0
+                || pair.action.is_some()
+                || pair.low_nonce.is_some()
+                || pair.high_nonce.is_some()
+                || pair.accepted_hello.is_some()
+                || pair.accepted_proof.is_some()
+                || pair.accepted_finish.is_some()
+                || pair.established
+                || !self.ledger.confirmation_is_unused(handshake, authority)?
+            {
+                return Err(VoiceError::Unauthorized);
+            }
+            // No fallback to ordinary factories after a valid selection, even if any of the
+            // following capacity reservations refuse. An exact protected retry may continue.
+            self.confirmations
+                .pairs
+                .get_mut(&handshake)
+                .expect("current pair")
+                .protected_epoch = Some(binding.epoch);
         }
         let chain = super::super::chain::PreparedChain::new(
             self.resources.clone(),
@@ -416,7 +449,10 @@ impl LocalJoin {
         budget: ByteBudget,
     ) -> Result<Arc<CryptoAction>, VoiceError> {
         self.pair_current(handshake, authority, clock.as_ref())?;
-        if self.confirmations.pairs[&handshake].chain.is_some() {
+        if self.confirmations.pairs[&handshake]
+            .protected_epoch
+            .is_some()
+        {
             return Err(VoiceError::Unauthorized);
         }
         let key = Key::Derive(handshake);
@@ -451,6 +487,7 @@ impl LocalJoin {
         clock: Arc<dyn Clock>,
         budget: ByteBudget,
     ) -> Result<Arc<CryptoAction>, VoiceError> {
+        self.require_ordinary_confirmation(flight.handshake)?;
         let pending = self.confirmation_encryption_authority(&flight, authority, clock)?;
         let key = Key::Encrypt(flight.handshake, flight.action, flight.reservation.id);
         if let Some(action) = self.actions.get(key) {
@@ -485,6 +522,7 @@ impl LocalJoin {
         clock: Arc<dyn Clock>,
         budget: ByteBudget,
     ) -> Result<Arc<CryptoAction>, VoiceError> {
+        self.require_ordinary_confirmation(event.header.handshake)?;
         if !crypto_actions::is_confirmation(event.header.kind) {
             return Err(VoiceError::Unauthorized);
         }
@@ -599,7 +637,10 @@ impl LocalJoin {
             return Err(VoiceError::Unauthorized);
         };
         action.with_result(ciphertext, claimed_tag, || {
-            let signed = self.submit_confirmation(
+            // Exact terminal history above survives epoch changes; a first protected seal
+            // must still belong to its original chain before it can sign or mutate a packet.
+            action.check_chain_epoch(authority.context.epoch)?;
+            let signed = self.submit_confirmation_inner(
                 FlightSubmission {
                     handshake: flight.handshake,
                     action: flight.action,
@@ -679,6 +720,9 @@ impl LocalJoin {
             return Err(VoiceError::Unauthorized);
         };
         action.with_result(plaintext, claimed_tag, || {
+            // Pending token authority alone does not bind a protected chain's MLS epoch.
+            // Check before any nonce/token/Hello transition; historical recovery stays first.
+            action.check_chain_epoch(authority.context.epoch)?;
             self.commit_confirmation_terminal(
                 OpenedFlight {
                     token: packet.token,
@@ -903,6 +947,7 @@ impl LocalJoin {
                 established: false,
                 retired: false,
                 chain: None,
+                protected_epoch: None,
                 _credit: credit,
             },
         );
@@ -964,6 +1009,7 @@ impl LocalJoin {
         clock: &dyn Clock,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<(), VoiceError> {
+        self.require_ordinary_confirmation(handshake)?;
         self.pair_current(handshake, authority, clock)?;
         let pair = self
             .confirmations
@@ -1005,6 +1051,7 @@ impl LocalJoin {
         clock: &dyn Clock,
         rng: &mut impl CryptoRngCore,
     ) -> Result<Option<ConfirmationOutput>, VoiceError> {
+        self.require_ordinary_confirmation(handshake)?;
         self.pair_current(handshake, authority, clock)?;
         let pair = self
             .confirmations
@@ -1077,6 +1124,7 @@ impl LocalJoin {
         authority: &Authority<'_>,
         clock: &dyn Clock,
     ) -> Result<(), VoiceError> {
+        self.require_ordinary_confirmation(handshake)?;
         self.pair_current(handshake, authority, clock)?;
         let pair = self
             .confirmations
@@ -1104,6 +1152,19 @@ impl LocalJoin {
     /// Atomically gate exact current action/reservation, pin ciphertext/signature, then establish
     /// the initiator ONLY for this Finish. Delayed crypto from a superseded attempt cannot sign.
     pub fn submit_confirmation(
+        &mut self,
+        submission: FlightSubmission<'_>,
+        signer: &dyn VoiceSigner,
+        authority: &Authority<'_>,
+        clock: &dyn Clock,
+    ) -> Result<SignedObject, VoiceError> {
+        self.require_ordinary_confirmation(submission.handshake)?;
+        self.submit_confirmation_inner(submission, signer, authority, clock)
+    }
+
+    /// Native result processing has already validated the exact action and original epoch.
+    /// The ordinary raw-submission wrapper above must never become a protected fallback.
+    fn submit_confirmation_inner(
         &mut self,
         submission: FlightSubmission<'_>,
         signer: &dyn VoiceSigner,
@@ -1164,6 +1225,7 @@ impl LocalJoin {
         if object.scope() != self.scope || !confirmation(header.kind) {
             return Err(VoiceError::Scope);
         }
+        self.require_ordinary_confirmation(header.handshake)?;
         self.pair_current(header.handshake, authority, clock)?;
         let pair = &self.confirmations.pairs[&header.handshake];
         if object.issuer() != pair.binding.peer
@@ -1216,6 +1278,17 @@ impl LocalJoin {
         clock: &dyn Clock,
         rng: &mut dyn CryptoRngCore,
     ) -> Result<(), VoiceError> {
+        // Resolve the actual retained token before inspecting its mode. A caller's AAD/header
+        // cannot choose another pair, and a refusal must not consume the original token.
+        let prepared = self.ledger.validate_inbound_commit(
+            opened.token,
+            opened.aad,
+            opened.sequence,
+            opened.ciphertext,
+            authority,
+            clock,
+        )?;
+        self.require_ordinary_confirmation(prepared.header.handshake)?;
         match self
             .commit_confirmation_terminal(opened, authority, clock, rng)?
             .outcome
@@ -1223,6 +1296,13 @@ impl LocalJoin {
             CryptoOutcome::Opened => Ok(()),
             CryptoOutcome::Rejected(error) => Err(error),
             _ => unreachable!("closed confirmation outcome"),
+        }
+    }
+
+    fn require_ordinary_confirmation(&self, handshake: Nonce) -> Result<(), VoiceError> {
+        match self.confirmations.pairs.get(&handshake) {
+            Some(pair) if pair.protected_epoch.is_none() => Ok(()),
+            _ => Err(VoiceError::Unauthorized),
         }
     }
     fn commit_confirmation_terminal(

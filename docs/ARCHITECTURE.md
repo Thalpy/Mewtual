@@ -6,8 +6,31 @@ Incoming and outgoing native V2 packets now each retain a position from their in
 32-row pools. Preparing a confirmation workflow protects three candidate lanes within those
 same limits: low-side 3 input/6 output, high-side 6 input/3 output. Fixed action history does not
 retain these progress claims. Workflow close returns unused positions; actual rows/loans retain
-their own positions until retirement, independently of retained decrypt-event bytes. No protected
-packet consumer or live V2 dispatch is enabled by these capacity changes.
+their own positions until retirement, independently of retained decrypt-event bytes. The first
+protected native consumer is high-side Hello below. Live V2 dispatch remains disabled.
+
+## Protected native Hello admission (20 October, inactive transport)
+
+High-side `ConfirmHello` now has a private Root intake consumer. Actual packet/token, decrypt
+event, inactive action and credited admission history are prepared before a single nonblocking
+Group -> Policy -> try-History publication. Clock samples precede the guards; contention refuses
+without origin quota, replay, token or candidate effects. Unpublished owners remain outside the
+callback so their destruction cannot reenter History while Group/Policy are held.
+
+Three candidate lanes remain spent after malformed decrypted results, independently of accepted
+confirmation nonces. A shared Root public/encrypted issuer/MessageId/hash classifier precedes
+token preparation; exact retries return original admission history without creating another
+decrypt. The fixed receipt owns original room/call/pair/chain/member/effect custody, without an
+action, input, engine or Workflow. Original Root reply-route authority independently fences epoch
+and connection changes. Consumed tokens and successful confirmation do not erase admission ACKs.
+The receipt and its actual effect allocation share the original 1,536-byte action row; the fixed
+metadata remains 2 KiB. These structural guards exclude allocator slack and framework copies.
+
+Protected mode is selected only for a pristine native pair and stays selected after a capacity
+refusal. Ordinary confirmation factories refuse selected pairs. First confirmation results check
+the original epoch before effects; exact accepted/rejected terminal history remains recoverable.
+Low-side start/encryption, Proof/Finish, SDP phase transfer, production IPC and RTC remain open.
+No normal kind28 dispatch, browser protected confirmation or whole-chain readiness is enabled.
 
 ## Chat history and MLS epoch separation (20 October, continuation)
 
@@ -212,8 +235,8 @@ the bounded rendezvous drain retain separate waits; this is not a universal late
 ## Voice V2 foundation in progress (2026-10-18)
 
 An inactive native confirmation plan now protects twelve fixed local history rows/slots and a
-provisional 96 KiB variable envelope, one Crypto lane and two Forward lanes. Only derivation
-consumes a protected row so far. One weak process/group Workflow index remains occupied through
+provisional 96 KiB variable envelope, one Crypto lane and two Forward lanes. At this checkpoint,
+only derivation consumed a protected row. One weak process/group Workflow index remains occupied through
 actual input/engine/lower custody after End; fixed history and retained closed control metadata
 stay independently charged without pinning progress. LocalJoin permanently stamps successful
 preparation per pair, including after close. Original resources/slots, scope/epoch, both join/key

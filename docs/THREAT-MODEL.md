@@ -7,8 +7,25 @@ Native V2 packet tables count actual rows and unused workflow claims in the same
 confirmation positions; reservations from a different table cannot be adopted. Close returns
 unused capacity, while actual retained rows/loans and their byte custody retire independently.
 This capacity prerequisite changes no signed wire/storage format or authorization check.
-Protected packet/event allocation, candidate admission history, atomic Hello intake and live V2
-remain open; slot reservation alone is not whole-chain progress or readiness evidence.
+Private high-side Hello now composes protected packet/event allocation, three candidate history
+lanes and atomic origin/token/action publication. The final fence samples native time before
+nonblocking Group/Policy/History locks; contention has no replay/candidate/quota effect. Refusal
+destruction runs outside those guards. Three malformed admitted Hellos still exhaust their lanes;
+successful confirmation nonces are not the admission counter.
+
+Public and encrypted IDs share one classifier before ledger effects. Admission ACK history binds
+the original call, room incarnation, pair, chain, member and actor, independently of consumed
+decrypt tokens. Root reply authority also enforces the original epoch/connection; the metadata
+receipt alone is not a current-epoch authority. Equal join bytes cannot transfer an old receipt
+to a replacement call. Room deletion/recreation and End permanently revoke original ownership.
+The receipt's conserved row includes its separately allocated effect owner. History owns no
+payload, engine or Workflow; actual retained work remains charged after cancellation.
+
+Protection is selected only before ordinary confirmation activity, and selection remains after
+capacity refusal. Both first confirmation-result directions reject an epoch change before any
+first effect, while exact accepted/rejected history remains recoverable. Production IPC, other
+protected roles, SDP transfer and live V2 remain open. Slot reservation or private Hello intake
+alone is not whole-chain progress, browser readiness, live signalling or media evidence.
 
 ## Chat history admission and retained audit (20 October, continuation)
 
@@ -109,8 +126,8 @@ closed control metadata do not hold it strongly. The shared fixed metadata owner
 plain 2 KiB charge until the last actual control/row/workflow owner drops. Quiet collection
 snapshots weak indices before entering control/action locks; close visits engine fences only
 after releasing control/history locks. `pair_current` inside first-result processing only
-revokes the pair pin; collection closes unused capacity outside that engine fence. Only derive
-uses protected rows currently; native/browser registration, complete confirmation/SDP intake,
+revokes the pair pin; collection closes unused capacity outside that engine fence. At this
+checkpoint only derive used protected rows; native/browser registration, complete confirmation/SDP intake,
 phase/copy accounting and live V2 remain open.
 
 Past accepted and closed-rejected action results remain metadata after End and actual engine

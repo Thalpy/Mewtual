@@ -1,7 +1,8 @@
 //! Inactive native confirmation capacity. This is NOT whole-chain readiness: protected native
 //! and browser registry rows, atomic encrypted intake, helper agreement and measured SDP/IPC
 //! phase transfer must still compose before live dispatch. Packet-table claims also protect the
-//! actual pair role's three confirmation candidates, but only derivation consumes a row here.
+//! actual pair role's three confirmation candidates. Derivation and high-side Hello have native
+//! consumers; the other protected roles still refuse and no live dispatch is enabled.
 //!
 //! Fixed history never owns Workflow, an engine lender or a native registry cell. Workflow owns
 //! capacity only and references its control weakly. Actual input/engine/lower credits keep retired
@@ -14,6 +15,10 @@ use std::sync::{Arc, Mutex, Weak};
 
 pub(super) const ROW_BYTES: usize = 1536;
 const ROWS: usize = 12;
+const NO_ROW: u8 = u8::MAX;
+mod admission;
+pub(crate) use admission::HelloAdmission;
+pub(super) use admission::HelloConsent;
 // Confirmation-only envelope. Stacking this on the existing SDP reserve is not whole-chain
 // readiness; the supported chain still needs a measured, explicit phase transfer.
 const VARIABLE_BYTES: usize = 96 * 1024;
@@ -73,16 +78,15 @@ impl std::ops::Deref for PlanBinding {
     }
 }
 
-#[derive(Clone, Copy)]
-enum RowState {
-    Available,
-    Prepared(u64),
-    Issued,
-}
 struct HistoryState {
     closed: bool,
     serial: u64,
-    derive: RowState,
+    // Only one unpublished row can cross a synchronous sole-LocalJoin transaction at a time.
+    // Published actions/candidates are independent. A global monotonic ticket prevents stale
+    // abandonment/publication while this compact mask keeps the original metadata allowance.
+    active_row: u8,
+    issued: u16,
+    candidates: [Option<Arc<HelloAdmission>>; 3],
 }
 struct HistoryPlan {
     resources: Arc<Resources>,
@@ -110,11 +114,12 @@ pub struct Workflow {
 struct Control {
     closed: bool,
     workflow: Option<Arc<Workflow>>,
-    actions: Vec<Weak<CryptoAction>>,
+    actions: [Weak<CryptoAction>; ROWS],
 }
 
 /// Opaque inactive native plan. Twelve local rows are protected (derive, three flights for
-/// each of three candidates, two SDP directions); only derive has a consumer in this slice.
+/// each of three candidates, two SDP directions). Derive and high-side Hello consume rows;
+/// the other roles remain reserved, without factories or readiness claims.
 /// This grants no network, engine, browser or RTC readiness. Close is irreversible.
 pub struct PreparedChain {
     binding: Arc<PlanBinding>,
@@ -134,6 +139,7 @@ pub(super) struct RowIssue {
     workflow: Weak<Workflow>,
     key: Key,
     ticket: u64,
+    row: usize,
     unpublished: bool,
 }
 impl RowIssue {
@@ -177,11 +183,12 @@ impl RowIssue {
         if state.closed
             || !self.plan.live.is_live()
             || !self.plan.binding.live()
-            || !matches!(state.derive, RowState::Prepared(ticket) if ticket == self.ticket)
+            || (state.active_row != self.row as u8 || state.serial != self.ticket)
         {
             return Err(VoiceError::Unauthorized);
         }
-        state.derive = RowState::Issued;
+        state.issued |= 1 << self.row;
+        state.active_row = NO_ROW;
         self.unpublished = false;
         Ok(apply())
     }
@@ -190,10 +197,8 @@ impl Drop for RowIssue {
     fn drop(&mut self) {
         if self.unpublished {
             let mut state = self.plan.state.lock().unwrap_or_else(|e| e.into_inner());
-            if !state.closed
-                && matches!(state.derive, RowState::Prepared(ticket) if ticket == self.ticket)
-            {
-                state.derive = RowState::Available;
+            if !state.closed && state.active_row == self.row as u8 && state.serial == self.ticket {
+                state.active_row = NO_ROW;
             }
         }
     }
@@ -207,11 +212,19 @@ impl HistoryPlan {
         if key != Key::Derive(self.binding.handshake) {
             return Err(VoiceError::Scope);
         }
+        self.prepare_row(0, key, workflow)
+    }
+    fn prepare_row(
+        self: &Arc<Self>,
+        row: usize,
+        key: Key,
+        workflow: &Arc<Workflow>,
+    ) -> Result<PreparedHistory, VoiceError> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.closed || !self.live.is_live() || !self.binding.live() {
             return Err(VoiceError::Unauthorized);
         }
-        if !matches!(state.derive, RowState::Available) {
+        if row >= ROWS || state.active_row != NO_ROW || state.issued & (1 << row) != 0 {
             return Err(VoiceError::Capacity);
         }
         let ticket = state.serial.checked_add(1).ok_or(VoiceError::Capacity)?;
@@ -223,7 +236,7 @@ impl HistoryPlan {
         )?;
         let slot = self.slots.loan(&self.pool)?;
         state.serial = ticket;
-        state.derive = RowState::Prepared(ticket);
+        state.active_row = row as u8;
         Ok(PreparedHistory {
             record,
             slot,
@@ -232,6 +245,7 @@ impl HistoryPlan {
                 workflow: Arc::downgrade(workflow),
                 key,
                 ticket,
+                row,
                 unpublished: true,
             },
         })
@@ -275,7 +289,9 @@ impl PreparedChain {
             state: Mutex::new(HistoryState {
                 closed: false,
                 serial: 0,
-                derive: RowState::Available,
+                active_row: NO_ROW,
+                issued: 0,
+                candidates: std::array::from_fn(|_| None),
             }),
         });
         let reserve = resources.reserve(binding.scope.group, VARIABLE_BYTES)?;
@@ -290,7 +306,7 @@ impl PreparedChain {
             history,
             control: Mutex::new(Control {
                 closed: false,
-                actions: Vec::with_capacity(ROWS),
+                actions: std::array::from_fn(|_| Weak::new()),
                 workflow: Some(Arc::new(Workflow {
                     resources: resources.clone(),
                     binding,
@@ -327,7 +343,7 @@ impl PreparedChain {
             self.live.revoke();
             (
                 control.workflow.take(),
-                std::mem::take(&mut control.actions),
+                std::mem::replace(&mut control.actions, std::array::from_fn(|_| Weak::new())),
             )
         };
         self.history.close();
@@ -372,11 +388,14 @@ impl PreparedChain {
         let closed = {
             let mut control = self.control.lock().unwrap_or_else(|e| e.into_inner());
             if !control.closed {
-                assert!(
-                    control.actions.len() < ROWS,
-                    "bounded prepared chain actions"
-                );
-                control.actions.push(Arc::downgrade(action));
+                // Fixed weak tracking needs no heap allocation and cannot form a custody cycle.
+                // Reusing a dead tracking entry never reopens its separately issued role bit.
+                let empty = control
+                    .actions
+                    .iter_mut()
+                    .find(|entry| entry.strong_count() == 0)
+                    .expect("bounded prepared chain actions");
+                *empty = Arc::downgrade(action);
             }
             control.closed
         };

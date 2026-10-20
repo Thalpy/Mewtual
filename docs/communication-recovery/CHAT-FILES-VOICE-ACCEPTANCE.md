@@ -9,6 +9,65 @@ Private Download resume preserves verified encrypted acquisition progress and it
 allowance across restart. External export uses a fresh destination; continuing a partly written
 external plaintext file at its old offset is not implemented.
 
+## Refreshed TLS audit correction (20 October)
+
+The audit database now reports rustls-webpki and webpki-root advisories. Both workspace locks
+move to verifier 0.103.16 and roots 1.0.10; the native DER bundle also moves to 1.0.10. No source,
+feature, licence or API changes accompany these patch releases. The 0.26.11 roots compatibility
+shim only re-exports the fixed parent; its advisory exception is paired with stable and explicit
+published-prerelease version bans. Root deny passes (`voice-hello-root-deny-final-2.log`); actual
+metadata-only vulnerable 1.0.9 and 0.26.0-alpha.2 fixtures are rejected by bans independently of
+the exception (`voice-hello-tls-downgrade-final.log`, `voice-hello-tls-prerelease-final.log`).
+Read-only review caught the ordinary-semver prerelease gap; the explicit family ban resolves it.
+See [the correction and limits](TLS-AUDIT-2026-10-20.md).
+
+The separate native audit still fails on existing h2/proc-macro-error/quick-xml/rust-unic/zip
+findings (`voice-hello-native-deny-final-2.log`). No new exception suppresses them. The separate
+IPC experiment audit also remains open. The first audit attempt was sandbox-blocked on the
+advisory-db lock, and the first native final attempt was offline before its new DER artifact
+was fetched. Those are not accepted audit results. The initial full Rust run was deliberately
+stopped before tests to avoid validating obsolete locks; final full gates below are pending.
+
+## Protected native Hello consumer (20 October, live dispatch disabled)
+
+The first protected high-side Hello consumer now composes original origin allowance, replay/token,
+decrypt action and credited admission receipt under one nonblocking final transaction. Root uses
+one public/encrypted immutable identity classifier and combined 256-entry limit. There are three
+independent candidate lanes, even when all plaintext results are malformed; metadata/history
+retains no Workflow or payload/engine. The fixed receipt split explicitly includes its allocated
+EffectAuthority and Arc counters, within the original 1,536-byte row and 2 KiB shared metadata.
+
+Final focused `voice_` tests pass 315/315 in 26.56s (`voice-live-integration-all-2.log`), including:
+
+- Actual Root signed outer request and endpoint-admission ACK, exact lost ACK after token use,
+  public/encrypted ID substitution in both orders, and equal-join replacement call refusal.
+- Real Root MLS addition with both endpoints still members: the queued driver reply immediately
+  loses authority, first result has no effect, and response/engine/reserved custody retire separately.
+- Actual Root document room deletion/recreation: old call, queued reply and decrypt cannot revive.
+- Three malformed candidates and fourth refusal without another replay/token/action/quota effect;
+  consumer plus actual engine admission under full ordinary pressure after a prepaid verification
+  ticket; final History contention with one remaining original allowance and exact fresh retry.
+- Clock outside final Group/Policy guards, nonblocking contention with fresh retry samples,
+  pristine-pair-only selection, no ordinary fallback after valid selection/capacity refusal,
+  and original-epoch first-result checks in both directions with exact terminal history recovery.
+
+Earlier focused attempts are retained: the Clock regression failed before correction
+(`voice-live-origin-clock-before.log`); a naive history layout exceeded 2 KiB and was replaced by
+compact row/ticket state plus fixed weak-action tracking (`voice-live-candidate-layout-2.log`).
+Root test compilation initially missed a test-only RngCore import (`voice-live-root-hello-1.log`).
+The next Root run passed 7/7 (`voice-live-root-hello-2.log`). A candidate test first confused pending
+pulls with retained terminal rows (`voice-live-protected-all-3.log`: 259 passed/1 failed), corrected to
+assert current pending actions and retained receipts separately. An epoch test first expected the
+live chain's reserved execution position to vanish at engine settlement (`voice-live-integration-
+all-1.log`: 313 passed/1 failed). It now verifies loan return to the still-admitted chain, then actual
+release at End. No runtime refusal, quota, row limit or assertion contract was relaxed.
+
+Read-only design/implementation review found no remaining functional blocker/high/medium in this
+Hello-only increment. Its requested effect-allocation accounting correction is included and its
+layout guard passes. Full root/native/frontend gates for this increment are pending.
+Production kind28 dispatch, low-side Hello and Proof/Finish, SDP phase transfer, native/browser
+IPC/RTC, helper compatibility, media relay and combined/physical acceptance remain unfinished.
+
 ## Native event-drain follow-up (20 October)
 
 A final production-lifecycle review found a HIGH missed by the earlier upload tests: the real

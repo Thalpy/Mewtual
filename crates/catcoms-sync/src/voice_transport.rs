@@ -428,7 +428,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                         }
                         Disposition::Deliver => {
                             let admitted =
-                                self.admit_voice_endpoint_public(ticket, envelope, &context, room)?;
+                                self.admit_voice_endpoint(ticket, envelope, &context, room)?;
                             if admitted.object_hash() != hash || !admitted.authorized() {
                                 return Err(VoiceError::Unauthorized);
                             }

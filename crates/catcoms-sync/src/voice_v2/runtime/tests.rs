@@ -735,6 +735,154 @@ fn endpoint_origin_loan_rechecks_session_actor_and_actual_driver_before_publicat
     }
 }
 
+/// Observe the real final admission locks through injected Clock calls. This detects lock
+/// reentry without blocking the test on the very defect it is meant to demonstrate.
+struct OriginClockProbe {
+    inner: ManualClock,
+    owners: Mutex<Option<(Weak<Group>, Weak<ActorGate>)>>,
+    outside: AtomicBool,
+    samples: AtomicU64,
+}
+redacted_debug!(OriginClockProbe);
+impl OriginClockProbe {
+    fn observe(&self) {
+        if let Some((group, actor)) = self.owners.lock().unwrap().as_ref() {
+            let group = group.upgrade().unwrap();
+            let actor = actor.upgrade().unwrap();
+            self.outside.fetch_and(
+                group.state.try_lock().is_ok() && actor.policy.try_lock().is_ok(),
+                Ordering::AcqRel,
+            );
+            self.samples.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+impl Clock for OriginClockProbe {
+    fn now_ms(&self) -> u64 {
+        self.observe();
+        self.inner.now_ms()
+    }
+    fn monotonic_ms(&self) -> u64 {
+        self.observe();
+        self.inner.monotonic_ms()
+    }
+    fn sleep(
+        &self,
+        duration: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        self.inner.sleep(duration)
+    }
+}
+
+fn endpoint_origin_input(
+    actor: &ActorOwner,
+) -> (super::super::Context, super::super::Envelope, IngressTicket) {
+    use super::super::{Body, Context, Envelope, JoinKey, Scope, SignedObject};
+    let context = Context {
+        scope: Scope {
+            group: [1; 32],
+            policy: Some([7; 32]),
+            room: 1,
+        },
+        local: device(1),
+        now: 1000,
+        epoch: 1,
+        indirect: true,
+    };
+    let signer = DeviceKeypair::from_seed(&[2; 32]);
+    let point = hex::decode("046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5").unwrap();
+    let envelope = Envelope::Direct(
+        SignedObject::issue(
+            context.scope,
+            &signer,
+            [81; 32],
+            1000,
+            31_000,
+            Body::Announcement {
+                key: JoinKey::new([2; 32], point.try_into().unwrap()).unwrap(),
+                epoch: 1,
+                renewal: 1,
+            },
+        )
+        .unwrap(),
+    );
+    let ticket = actor
+        .admit_transport_verification(device(2), &envelope.encode())
+        .unwrap();
+    (context, envelope, ticket)
+}
+
+#[test]
+fn endpoint_origin_samples_time_without_holding_group_or_policy() {
+    let clock = Arc::new(OriginClockProbe {
+        inner: ManualClock::new(1000),
+        owners: Mutex::new(None),
+        outside: AtomicBool::new(true),
+        samples: AtomicU64::new(0),
+    });
+    let runtime = Runtime::new(clock.clone());
+    let actor = active(&runtime, 1);
+    let (context, envelope, ticket) = endpoint_origin_input(&actor);
+    *clock.owners.lock().unwrap() =
+        Some((Arc::downgrade(&actor.group), Arc::downgrade(&actor.gate)));
+    actor
+        .with_endpoint_origin(&ticket, &envelope, &context, |_, _, origin| {
+            origin.publish(|| ())
+        })
+        .unwrap();
+    assert!(clock.samples.load(Ordering::Relaxed) > 0);
+    assert!(
+        clock.outside.load(Ordering::Acquire),
+        "final origin admission must not call the injected Clock while Group or Policy is held"
+    );
+}
+
+#[test]
+fn endpoint_origin_contention_is_retryable_without_origin_debit_or_stale_time() {
+    for policy_busy in [false, true] {
+        let clock = Arc::new(ManualClock::new(1000));
+        let runtime = Runtime::new(clock.clone());
+        let actor = active(&runtime, 1);
+        let (context, envelope, ticket) = endpoint_origin_input(&actor);
+        let attempt = || {
+            actor.with_endpoint_origin(&ticket, &envelope, &context, |_, _, origin| {
+                origin.publish(|| ())
+            })
+        };
+        // The test thread itself owns the contended mutex. A blocking implementation would
+        // deadlock here instead of returning an effect-free, retryable capacity refusal.
+        if policy_busy {
+            let _held = actor.gate.policy.lock().unwrap();
+            assert_eq!(attempt(), Err(VoiceError::Capacity));
+        } else {
+            let _held = actor.group.state.lock().unwrap();
+            assert_eq!(attempt(), Err(VoiceError::Capacity));
+        }
+        // The failed turn must not freeze its old clock samples for a later successful turn.
+        clock.advance_ms(60_000);
+        assert_eq!(attempt(), Err(VoiceError::Freshness));
+        let mut state = actor.group.state.lock().unwrap();
+        for _ in 0..8 {
+            state
+                .limits
+                .origin(
+                    device(2),
+                    super::super::limits::Traffic::Room,
+                    clock.monotonic_ms(),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            state.limits.origin(
+                device(2),
+                super::super::limits::Traffic::Room,
+                clock.monotonic_ms()
+            ),
+            Err(VoiceError::RateLimited)
+        );
+    }
+}
+
 impl Clock for RegisterObservedClock {
     fn now_ms(&self) -> u64 {
         if let Some(lease) = self.revoke_on_wall.lock().unwrap().take() {

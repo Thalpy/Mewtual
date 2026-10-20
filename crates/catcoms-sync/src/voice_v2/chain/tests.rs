@@ -65,12 +65,141 @@ fn fixed_metadata_allowance_covers_retained_owner_layouts() {
         + 3 * size_of::<WorkLane>()
         + 3 * size_of::<slots::Slots>()
         + 3 * size_of::<slots::ReservedSlots>()
-        + ROWS * size_of::<Weak<CryptoAction>>()
         + ARC_OWNERS * 2 * size_of::<usize>();
     assert!(
         bytes <= METADATA_BYTES,
         "retained native layouts need {bytes} bytes, allowance is {METADATA_BYTES}"
     );
+}
+
+#[test]
+fn hello_receipt_and_action_layouts_fit_the_original_single_row() {
+    let receipt = super::admission::ADMISSION_RECORD_BYTES;
+    let action = crate::voice_v2::crypto_actions::fixed_record_layout_bytes();
+    assert!(receipt < ROW_BYTES);
+    assert!(
+        action <= ROW_BYTES - receipt,
+        "fixed action {action} plus receipt {receipt} exceeds original {ROW_BYTES}-byte row"
+    );
+}
+
+#[test]
+fn hello_final_history_contention_spends_no_origin_or_candidate_and_exact_row_retries() {
+    use crate::voice_v2::runtime::{Runtime, View};
+    use crate::voice_v2::{Body, Context, EncryptedHeader, EncryptedKind, Envelope, SignedObject};
+    let clock = Arc::new(ManualClock::new(1000));
+    let runtime = Runtime::new(clock.clone());
+    let session = runtime.session_ticket();
+    runtime.activate_session(&session).unwrap();
+    let a = DeviceKeypair::from_seed(&[1; 32]);
+    let b = DeviceKeypair::from_seed(&[2; 32]);
+    let (low, high) = if a.device_id() < b.device_id() {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let mut bound = binding(8);
+    bound.local = high.device_id();
+    bound.peer = low.device_id();
+    bound.low = false;
+    let context = Context {
+        scope: bound.scope,
+        local: bound.local,
+        epoch: bound.epoch,
+        now: 1000,
+        indirect: true,
+    };
+    let (mut actor, registration) = runtime
+        .prepare_actor(bound.scope.group, bound.local, &session)
+        .unwrap();
+    registration.register().unwrap();
+    actor
+        .sync_view(View {
+            epoch: bound.epoch,
+            members: [bound.local, bound.peer].into(),
+            policy: bound.scope.policy,
+            eligible: true,
+            indirect: true,
+        })
+        .unwrap();
+    let pool = runtime.resources();
+    let chain = prepare_chain(
+        pool.clone(),
+        bound.clone(),
+        Arc::new(slots::Slots::default()),
+    )
+    .unwrap();
+    let object = SignedObject::issue(
+        bound.scope,
+        &low,
+        [74; 32],
+        1000,
+        16_000,
+        Body::Encrypted {
+            header: EncryptedHeader {
+                source_join: bound.peer_join,
+                target: bound.local,
+                target_join: bound.local_join,
+                source_key_ref: bound.peer_key,
+                target_key_ref: bound.local_key,
+                handshake: bound.handshake,
+                low_to_high: true,
+                kind: EncryptedKind::ConfirmHello,
+                sequence: 1,
+                offer: None,
+            },
+            ciphertext: vec![22; 32],
+        },
+    )
+    .unwrap();
+    let envelope = Envelope::Direct(object.clone());
+    let ticket = actor
+        .admit_transport_verification(bound.peer, &envelope.encode())
+        .unwrap();
+    let consent = || HelloConsent {
+        room: CallLease::default(),
+        _room_custody: None,
+        effect: actor
+            .effect(bound.peer, bound.local, object.expires())
+            .unwrap(),
+        clock: clock.clone(),
+    };
+    // Leave exactly one original setup allowance. Refused History contention must not debit it.
+    actor
+        .with_limits(|limits| {
+            for _ in 0..39 {
+                limits.origin(bound.peer, crate::voice_v2::limits::Traffic::Setup, 1000)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let (mut row, receipt, workflow) = chain.prepare_hello(&object, 1, consent()).unwrap();
+    let guard = chain.history.state.lock().unwrap();
+    let mut published = false;
+    let result = actor.with_endpoint_origin(&ticket, &envelope, &context, |wall, mono, origin| {
+        row.issue
+            .publish_hello(&receipt, origin, wall, mono, || published = true)
+    });
+    assert_eq!(result, Err(VoiceError::Capacity));
+    assert!(!published);
+    assert!(guard.candidates.iter().all(Option::is_none));
+    // The outer owner must be destroyed only after the final guards, including our test's
+    // deliberately held History guard. Otherwise RowIssue::drop would synchronously deadlock.
+    drop(guard);
+    drop((row, receipt, workflow));
+    let (mut row, receipt, _workflow) = chain.prepare_hello(&object, 1, consent()).unwrap();
+    assert_eq!(receipt.candidate(), 0);
+    actor
+        .with_endpoint_origin(&ticket, &envelope, &context, |wall, mono, origin| {
+            row.issue
+                .publish_hello(&receipt, origin, wall, mono, || published = true)
+        })
+        .unwrap();
+    assert!(published);
+    assert!(Arc::ptr_eq(
+        &chain.find_hello(&object).unwrap().unwrap(),
+        &receipt
+    ));
 }
 fn publish_unregistered(
     chain: &Arc<PreparedChain>,

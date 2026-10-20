@@ -39,6 +39,9 @@ pub(crate) struct EndpointOrigin<'a> {
     mono: u64,
 }
 impl EndpointOrigin<'_> {
+    pub(crate) fn epoch(&self) -> u64 {
+        self.context.epoch
+    }
     pub(crate) fn publish(self, apply: impl FnOnce()) -> Result<(), VoiceError> {
         // Session/actor/driver revocation wins atomically before it waits for Policy. The
         // caller may have acquired a nonblocking History fence since the loan was made; repeat
@@ -522,6 +525,9 @@ pub struct View {
 }
 redacted_debug!(View);
 impl ActorOwner {
+    pub(crate) fn uses_resources(&self, resources: &Arc<Resources>) -> bool {
+        Arc::ptr_eq(&self.resources, resources)
+    }
     pub(super) fn group_hash(&self) -> [u8; 32] {
         self.group.hash
     }
@@ -767,7 +773,10 @@ impl ActorOwner {
             origin.publish(|| ())
         })
     }
-    /// All time sampling/native revalidation precedes lending the origin transaction. A
+    /// This final endpoint path never waits for Group/Policy after sampling time. Contention
+    /// reports transient Capacity (the existing retryable transport vocabulary) without origin
+    /// debit; retry must enter again with fresh native samples. The general helper route path
+    /// deliberately remains separate. A
     /// protected consumer may then enter its short History/candidate fence, check pure leases
     /// using these samples, and atomically spend/publish without a later fallible row operation.
     /// It must use try_lock and abort on contention: blocking after the samples were frozen
@@ -781,35 +790,74 @@ impl ActorOwner {
         context: &super::Context,
         publish: impl FnOnce(u64, u64, EndpointOrigin<'_>) -> Result<(), VoiceError>,
     ) -> Result<(), VoiceError> {
-        self.route_operation(
-            ticket.requester(),
-            envelope,
-            context,
-            false,
-            |limits, native, disposition| {
-                if disposition != super::Disposition::Deliver {
-                    return Err(VoiceError::Unauthorized);
-                }
-                let now = self.clock.monotonic_ms();
-                ticket.check_at_commit(self, context, now)?;
-                // Lend native samples; final consent checks must not reenter a Clock seam or
-                // Runtime while Group/Policy are held. Check irreversible owner gates last.
-                publish(
-                    native.now,
-                    now,
-                    EndpointOrigin {
-                        limits,
-                        object: envelope.object(),
-                        actor: self,
-                        ticket,
-                        context,
-                        wall: native.now,
-                        mono: now,
-                    },
-                )
+        self.current()?;
+        // Clock is an injected callback and may itself inspect/revoke native state. Do not
+        // invoke it under admission guards, or reuse these samples after any blocking wait.
+        let wall = self.clock.now_ms();
+        let mono = self.clock.monotonic_ms();
+        let mut state = match self.group.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        let policy = match self.gate.policy.try_lock() {
+            Ok(policy) => policy,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        self.check_route_view(&state, &policy, ticket.requester(), context)?;
+        let native = super::Context {
+            now: wall,
+            ..*context
+        };
+        if envelope.authorize(ticket.requester(), &native, |id| {
+            state.members.contains_key(&id)
+        })? != super::Disposition::Deliver
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        ticket.check_at_commit(self, context, mono)?;
+        // Original request observers supplied by native ingress must be pure, bounded lifetime
+        // observations here. Production uses Responder -> ReplyLifetime -> IngressAuthority
+        // (connection/response gates), never a Clock-bearing application effect authority.
+        publish(
+            wall,
+            mono,
+            EndpointOrigin {
+                limits: &mut state.limits,
+                object: envelope.object(),
+                actor: self,
+                ticket,
+                context,
+                wall,
+                mono,
             },
         )
-        .map(|(_, result)| result)
+    }
+
+    /// Common pure route/view checks for both ordinary routing and final endpoint admission.
+    /// Keep authorization in one place so the nonblocking final path cannot drift from the
+    /// existing member, epoch, policy and exact actor-revision boundary.
+    fn check_route_view(
+        &self,
+        state: &GroupState,
+        policy: &Policy,
+        requester: DeviceId,
+        context: &super::Context,
+    ) -> Result<(), VoiceError> {
+        if state.revision != self.revision
+            || context.scope.group != self.group.hash
+            || context.local != self.gate.local
+            || Some(context.epoch) != state.epoch
+            || context.scope.policy != policy.pin
+            || context.indirect != policy.indirect
+            || !policy.eligible
+            || !policy.live.is_live()
+            || !state.members.contains_key(&requester)
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        self.current()
     }
     fn route_operation<T>(
         &self,
@@ -826,21 +874,7 @@ impl ActorOwner {
         self.current()?;
         let mut state = self.group.state.lock().unwrap_or_else(|e| e.into_inner());
         let policy = self.gate.policy.lock().unwrap_or_else(|e| e.into_inner());
-        if state.revision != self.revision
-            || context.scope.group != self.group.hash
-            || context.local != self.gate.local
-            || Some(context.epoch) != state.epoch
-            || context.scope.policy != policy.pin
-            || context.indirect != policy.indirect
-            || !policy.eligible
-            || !policy.live.is_live()
-        {
-            return Err(VoiceError::Unauthorized);
-        }
-        if !state.members.contains_key(&requester) {
-            return Err(VoiceError::Unauthorized);
-        }
-        self.current()?;
+        self.check_route_view(&state, &policy, requester, context)?;
         let now = self.clock.now_ms();
         if spend_requester {
             state

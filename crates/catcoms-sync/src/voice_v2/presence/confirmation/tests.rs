@@ -6,6 +6,7 @@ use catcoms_crypto::DeviceKeypair;
 use catcoms_rt::ManualClock;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
+mod protected;
 
 fn members(_: DeviceId) -> bool {
     true
@@ -289,6 +290,142 @@ fn prepared_chain_is_same_pair_idempotent_and_close_cannot_reset_it() {
             ByteBudget::Ordinary
         )
         .is_err());
+}
+
+#[test]
+fn protected_mode_survives_capacity_refusal_and_cannot_fall_back_to_ordinary_handshake() {
+    for high_side in [false, true] {
+        let mut f = fixture();
+        // The other endpoint may already have sent Hello; this endpoint is still pristine.
+        let incoming = high_side.then(|| hello(&mut f).1);
+        let pressure = f
+            .pool
+            .charge(
+                f.low.context.scope.group,
+                256 * 1024 - f.pool.counts().0,
+                ResourceKind::Retained,
+            )
+            .unwrap();
+        let end = if high_side { &mut f.high } else { &mut f.low };
+        let before = f.pool.counts();
+        assert_eq!(
+            end.join
+                .prepare_crypto_chain(f.id, &ca(&end.context, &end.lease), &f.clock)
+                .err(),
+            Some(VoiceError::Capacity)
+        );
+        let pair = &end.join.confirmations.pairs[&f.id];
+        assert_eq!(pair.protected_epoch, Some(end.context.epoch));
+        assert!(pair.chain.is_none());
+        assert_eq!(
+            f.pool.counts(),
+            before,
+            "failed capacity acquisition must return unused claims"
+        );
+        assert_eq!(
+            end.join
+                .derivation_action(
+                    f.id,
+                    &ca(&end.context, &end.lease),
+                    Arc::new(f.clock.clone()),
+                    ByteBudget::Ordinary
+                )
+                .err(),
+            Some(VoiceError::Unauthorized)
+        );
+        assert_eq!(
+            end.join
+                .prepare_confirmation(f.id, &ca(&end.context, &end.lease), &f.clock, &mut f.rng)
+                .err(),
+            Some(VoiceError::Unauthorized)
+        );
+        if let Some(incoming) = incoming {
+            assert_eq!(
+                end.receive(incoming, &f.clock).err(),
+                Some(VoiceError::Unauthorized)
+            );
+        } else {
+            assert_eq!(
+                end.start(f.id, &f.clock, &mut f.rng),
+                Err(VoiceError::Unauthorized)
+            );
+        }
+        drop(pressure);
+        let chain = end
+            .join
+            .prepare_crypto_chain(f.id, &ca(&end.context, &end.lease), &f.clock)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &chain,
+            end.join.confirmations.pairs[&f.id].chain.as_ref().unwrap()
+        ));
+        assert_eq!(end.join.confirmations.pairs[&f.id].starts, 0);
+    }
+}
+
+#[test]
+fn protected_selection_refuses_an_existing_ordinary_hello_or_decrypt_capability() {
+    let mut f = fixture();
+    f.low.start(f.id, &f.clock, &mut f.rng).unwrap();
+    let before = f.pool.counts();
+    assert_eq!(
+        f.low
+            .join
+            .prepare_crypto_chain(f.id, &ca(&f.low.context, &f.low.lease), &f.clock)
+            .err(),
+        Some(VoiceError::Unauthorized)
+    );
+    assert_eq!(f.pool.counts(), before);
+    assert!(f.low.join.confirmations.pairs[&f.id]
+        .protected_epoch
+        .is_none());
+    // Refusing migration does not damage the already selected ordinary handshake.
+    let flight = f.low.flight(f.id, &f.clock, &mut f.rng);
+    let signed = f.low.sign(&flight, &f.clock).unwrap();
+    let ReceiveProgress::Decrypt(event) = f.high.receive(signed, &f.clock).unwrap() else {
+        panic!("decrypt");
+    };
+    let action = f
+        .high
+        .join
+        .confirmation_decryption_action(
+            *event,
+            &ca(&f.high.context, &f.high.lease),
+            Arc::new(f.clock.clone()),
+            ByteBudget::Ordinary,
+        )
+        .unwrap();
+    assert_eq!(
+        f.high.join.confirmations.pairs[&f.id].starts, 0,
+        "a queued Hello has not changed decoded confirmation state"
+    );
+    let before = f.pool.counts();
+    assert_eq!(
+        f.high
+            .join
+            .prepare_crypto_chain(f.id, &ca(&f.high.context, &f.high.lease), &f.clock)
+            .err(),
+        Some(VoiceError::Unauthorized)
+    );
+    assert_eq!(f.pool.counts(), before);
+    assert!(f.high.join.confirmations.pairs[&f.id]
+        .protected_epoch
+        .is_none());
+    action.admit_engine(action.engine_bytes()).unwrap();
+    let receipt = f
+        .high
+        .join
+        .commit_confirmation_result(
+            &action,
+            &flight.plaintext,
+            action.output_tag(&flight.plaintext).unwrap(),
+            &ca(&f.high.context, &f.high.lease),
+            &f.clock,
+            &mut f.rng,
+        )
+        .unwrap();
+    assert_eq!(receipt.outcome, CryptoOutcome::Opened);
+    action.settle_engine();
 }
 
 #[test]

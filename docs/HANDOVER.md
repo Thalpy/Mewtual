@@ -56,18 +56,19 @@ Next steps, in order:
    legacy limitations cannot safely be fixed by timestamp ordering or current-roster filtering.
 2. Continue live V2 implementation using
    [VOICE-NATIVE-RESULTS-NEXT](communication-recovery/VOICE-NATIVE-RESULTS-NEXT.md).
-   The next scoped consumer is protected high-side `ConfirmHello`; token/origin transactions and
-   browser derivation are prerequisites already built, not a working call path. Complete the
+   Protected high-side `ConfirmHello` now has a private Root consumer: 315 focused voice-related
+   tests pass, including actual signed replies, epoch/room/call replacement, three malformed
+   candidates, ordinary pressure and final History contention. Full gates for this increment
+   are pending. Complete low-side start/Hello encryption, Proof/Finish, SDP transfer and the
    protected confirmation/SDP consumers, production native/browser IPC and RTC dispatch, compatible
    helper selection and legacy/V2 session isolation before enabling V2. Keep unsupported roles
    refused until their actual consumers exist.
-   The next capacity prerequisite now protects actual packet positions from ordinary pressure:
+   The capacity prerequisite protects actual packet positions from ordinary pressure:
    low-side 3-in/6-out or high-side 6-in/3-out, within the existing 32-row limits. Workflow close and
-   actual row retirement remain separate. It does not implement the atomic Hello consumer.
-   The next-step read-only review also requires a nonblocking final origin transaction using
-   fresh time samples outside Group/Policy, and a first-result chain-epoch fence for protected
-   confirmation. Exact existing terminal receipts must remain recoverable. See the native-results
-   milestone for the concrete failure sequences and required regression boundaries.
+   actual row retirement remain separate. The final origin transaction now samples time outside
+   nonblocking Group/Policy/History, and both first-result confirmation directions check the chain
+   epoch. Exact accepted/rejected terminal receipts remain recoverable. See the native-results
+   milestone for the remaining native/browser copy and phase-transfer boundaries.
 3. Implement and validate the member media relay and combined recovery/rollout scenarios in
    [CHAT-FILES-VOICE-PLAN](communication-recovery/CHAT-FILES-VOICE-PLAN.md).
    Only one physical desktop is available; independent native audio and separate-network

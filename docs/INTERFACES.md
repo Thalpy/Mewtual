@@ -106,9 +106,19 @@ work lanes. It also protects packet positions from the actual ledger's existing 
 low-side 3 input/6 output, high-side 6 input/3 output. The actual native pair role selects this
 profile. Ordinary rows share these pools and cannot consume reserved positions. Close releases
 only unused claims; a retained actual loan keeps its position until retirement. These are
-capacity claims, with no protected packet consumer yet.
+capacity claims. The private high-side Hello consumer now uses its original packet/event claims;
+other protected roles still have no consumer.
 Repeated live preparation returns the same owner; after close that pair cannot
-prepare again. Only `chain_derivation_action` consumes a protected row in this revision.
+prepare again. `chain_derivation_action` consumes row0; high-side Hello consumes one of rows1/4/7,
+at most once per candidate even if its plaintext is malformed. The fixed receipt owns no payload
+or Workflow and shares its row with the actual decrypt action, including its effect allocation.
+The Root's public and encrypted queues share issuer/MessageId/hash classification and 256 total
+entries. Exact Hello admission retries precede token/nonce-floor gates and return original custody,
+not a second action. Final Group -> Policy -> try-History refusal returns existing `Capacity`
+without origin debit; retry samples native time afresh. Unsupported encrypted roles still refuse.
+Selecting protection requires a pristine pair; a valid selection survives reservation refusal
+and ordinary confirmation APIs cannot process it. Both first-result directions require the
+captured chain epoch; exact stored terminal receipts are recovered before that pending check.
 Preparation grants no network/engine/browser/RTC readiness, candidate/origin debit or packet.
 `PreparedChain::close` revokes pending action eligibility, releases unused capacity and retires
 proven unstarted actions. Uncertain admitted work and actual input readers remain charged.

@@ -1,5 +1,60 @@
 # Next voice milestone: native result recovery
 
+## Protected high-side Hello (20 October, private native seam)
+
+The first protected consumer is implemented in LocalJoin and the Root endpoint/transport seam.
+It publishes original origin allowance, incoming token/replay, one decrypt action and credited
+admission history in a single Group -> Policy -> try-History transaction. Samples are taken before
+nonblocking locks. All fallible preparation precedes publication; outer unpublished owners are
+destroyed after guards return. Three high-side Hello lanes stay spent after malformed plaintext.
+The receipt's actual EffectAuthority allocation is included within the unchanged 1,536-byte row.
+Compact history and a fixed weak-action array keep the unchanged 2 KiB metadata allowance.
+
+Root public/encrypted issuer/MessageId/hash classification precedes token effects and shares one
+256-entry limit. Exact admission retries survive consumed tokens and terminal crypto outcomes,
+without another action, candidate or original quota debit. Their original room/call/pair/chain/
+member/actor custody cannot move to a replacement call with equal join bytes. Actual Root reply
+routes separately enforce current epoch and connection. Selected protected pairs refuse ordinary
+factories even after capacity refusal; ordinary-active pairs cannot migrate. First confirmation
+results check the chain epoch; accepted and rejected history remains recoverable before that gate.
+
+Focused `voice_` verification passes 315 cases, zero failures (26.56s,
+`target/voice-live-integration-all-2.log`). It covers actual Root signed ACKs, lost replies after
+token consumption, cross-public/encrypted ID substitution, equal-join replacement, real MLS epoch
+advance with queued driver custody, document room deletion/recreation, three malformed candidates,
+full-pool consumer/engine custody after a prepaid verification ticket, and final History contention
+with exactly one remaining original allowance. The earlier failed test assumptions are recorded
+in the acceptance ledger. Read-only review requested explicit effect accounting; that correction
+fits the original row. Final full-suite verification is pending for this increment.
+
+This is not live V2. Low-side start/Hello encryption, Proof/Finish, SDP phase transfer, production
+native/browser IPC, compatible helpers, RTC dispatch and legacy-session isolation remain open.
+The browser protected broker still supports derivation only. The historical prerequisite sections
+below describe earlier checkpoints; this section supersedes their native Hello/epoch-fence gaps.
+
+## Next protected consumer: low-side Hello start (design reviewed, not implemented)
+
+The next native increment must prepare an outgoing packet transaction without publishing its
+sequence, row or SDP identity. Ordinary reserve can wrap the same affine preparation/publish
+path. The low-side start then publishes its nonce/attempt/action, outgoing row and inactive
+encrypt action together under a fresh-sample Group -> Policy -> try-History fence. It requires
+actual local actor/epoch/call/room authority; it must not manufacture an ingress ticket for an
+unsigned local reservation. Original origin quota belongs to signed Source admission.
+
+Recover-current and explicit fresh-start need separate immutable native retry identities. A
+lost fresh-start reply cannot cause another nonce, reservation, candidate or engine admission.
+Use rows1/4/7 for at most three Hello identities, preserving the other three low-side outgoing
+claims for Finish. Do not re-reserve automatically after five seconds within an issued row.
+Keep action/attempt supersession, actual outgoing crypto and chain revocation independent.
+The current CryptoAuthority has only two pending positions and ordinary encryption fills both;
+resolve that finite composition explicitly and recheck the unchanged row layout before adding
+another gate. Keep inactive owners outside final guards and retire old engines after them.
+
+Required focused boundaries include each local refusal before publication, exact retry without
+RNG, three starts/fourth refusal/last retry, full ordinary pressure, epoch/room/call replacement,
+old running seal during supersession, construction expiry, actual retained input/engine drainage,
+and unchanged ordinary packet/SDP reservation semantics. This design enables no producer yet.
+
 ## Confirmation packet capacity (20 October, inactive)
 
 Preparing the native chain now reserves logical packet-table positions from the same immutable
@@ -15,7 +70,7 @@ reservation rollback and LocalJoin preparation/close. A structural growth guard 
 retained native owners within the existing 2 KiB metadata allowance on this target; it does not
 measure allocator slack or framework/engine memory. This is another capacity prerequisite.
 Protected packet/event allocation, three candidate history lanes and the atomic high-side Hello
-consumer below remain unimplemented. No V2 dispatch or protected role has been enabled.
+consumer are now implemented as described above. No live V2 dispatch has been enabled.
 
 ## Packaged loopback platform probe (19 October, experiment only)
 
