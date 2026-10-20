@@ -109,6 +109,11 @@ mediums and a low. Fixed with regression tests, each confirmed to fail without i
     pinned), and the outcome is reported before a move away ends the batch (but not behind the
     lock screen). Its 1500-case probes of the queue, with and without the stages, found the order
     and the bound held; its last check found nothing blocking.
+  - The external re-review of `09661b68` closed the resource high, the type/Backspace medium and
+    the image and emoji items, and found one more medium, fixed: the outcome read the pending
+    entry back after a failure, so recovering or stopping it in Pending messages while the
+    request was still out turned a possibly accepted message into "not sent". `send()` now keeps
+    its own evidence that the identity may have been dispatched.
 - **OPEN, HIGH, handed to the communication session (not fixed on this branch)**: the native
   upload/lock race. `finish_file_upload` (`src-tauri/src/lib.rs`) reads the unlocked state, then
   awaits the uploads mutex, removes the reservation on that earlier answer, and awaits

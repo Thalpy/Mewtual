@@ -209,6 +209,39 @@ test("a send that threw after sealing is uncertain, since its identity retries b
   assert.equal(await invalid.send(), "failed");
 });
 
+test("a request recovered or stopped while it is still out stays uncertain when its reply fails", async () => {
+  // Found in review: the outcome read the pending entry back after the failure, so resolving the
+  // entry in Pending messages while the request was out turned a possibly accepted message into
+  // "not sent", inviting the recovered text to be sent again under a new token.
+  for (const action of ["recover", "cancel"] as const) {
+    let reply!: (failure: Error) => void;
+    let submissions = 0;
+    const app = composer(() => { submissions++; return new Promise((_, reject) => { reply = reject; }); });
+    const sending = app.send();
+    for (let n = 0; n < 40 && !reply; n++) await Promise.resolve();
+    assert.ok(reply, `${action}: the request is out`);
+    const [token] = Object.keys(app.state().pendingSends);
+    await app.resolvePendingMessage(token, action);
+    assert.deepEqual(app.state().pendingSends, {}, `${action}: the entry is resolved while the request is out`);
+    reply(new Error("IPC response lost"));
+    assert.equal(await sending, "uncertain", `${action}: it may have been accepted`);
+    assert.equal(submissions, 1);
+    if (action === "recover") {
+      assert.equal(app.state().recoveredSendDrafts[token]?.text, "one message", "the recovery stands");
+      assert.equal(app.state().recoveredSendDrafts[token]?.acceptance, "ambiguous");
+    }
+  }
+
+  // A definite native refusal is still "failed", resolved entry or not.
+  let refuse!: (failure: Error) => void;
+  const refused = composer(() => new Promise((_, reject) => { refuse = reject; }));
+  const pending = refused.send();
+  for (let n = 0; n < 40 && !refuse; n++) await Promise.resolve();
+  await refused.resolvePendingMessage(Object.keys(refused.state().pendingSends)[0], "cancel");
+  refuse(new Error("CHAT_SEND_INVALID: length"));
+  assert.equal(await pending, "failed");
+});
+
 test("a send whose sealed identity is taken over before dispatch is uncertain, not refused", async () => {
   // A lock while the identity is being sealed: it was saved to the vault, and comes back to be
   // retried after unlock, so this press cannot call it unsent.

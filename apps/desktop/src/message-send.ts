@@ -21,8 +21,9 @@ export type SendMessageResult = {
  *   may have been posted before the error came back;
  * - `sent`: accepted and saved on this device;
  * - `uncertain`: may have gone, or will by itself (accepted without a durable save, a throw whose
- *   sealed identity stays pending and retries quietly, or one taken over by the pending-message
- *   work). Sending it again could create a duplicate.
+ *   sealed identity stays pending and retries quietly, a throw after the request was dispatched
+ *   even when Pending messages has since recovered or stopped it, or one taken over by a lock or
+ *   the pending-message work). Sending it again could create a duplicate.
  */
 export type SendOutcome = "refused" | "failed" | "sent" | "uncertain";
 

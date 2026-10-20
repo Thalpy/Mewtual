@@ -4148,8 +4148,12 @@ and every drop handler returns early on a drop that carries no files.
   (nothing submitted); `failed` (nothing sealed, or a sealed identity blocked from automatic
   retry, including a not-accepted superseded result); `sent` (accepted and saved durably);
   `uncertain` (may have gone or will by itself: accepted without a durable save, a not-accepted
-  pending result, a throw whose sealed identity stays pending and retries quietly, or an identity
-  taken over by a lock or the pending-message work). An announcement is never `uncertain`. The
+  pending result, a throw whose sealed identity stays pending and retries quietly, a throw after
+  dispatch that is not a definite native refusal even if Pending messages resolved the entry
+  meanwhile, or an identity taken over by a lock or the pending-message work). `send()` keeps
+  that evidence itself (`mayHaveGone`, set by `submitPendingSend`'s `onDispatch` or by reusing an
+  identity not marked `not_accepted`), never reading it back from `pendingSends`. An
+  announcement is never `uncertain`. The
   toast reports that outcome, before a move away ends the batch, and never the composer's
   contents, which cannot tell a sent message whose draft was kept from an unsent one: "sent",
   "not confirmed yet: don't send it again", "not sent" (an announcement: "may not have posted:
