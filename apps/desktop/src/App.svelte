@@ -38,7 +38,7 @@
     PageAdmission, planJump, planRefresh, planRevealNewer, planRevealOlder, reanchorByIndex,
     type MessagePage, type PageAnchor, type PageRequest, type PagedRowContext, type UnreadSummary,
   } from "./message-paging";
-  import { persistenceWarning, sendAndRefresh, type SendMessageResult } from "./message-send";
+  import { persistenceWarning, sendAndRefresh, sendOutcome, type SendMessageResult, type SendOutcome } from "./message-send";
   import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend, type PendingResolution, type PendingSend, type PendingSends } from "./pending-sends";
   import PendingSendManager from "./PendingSendManager.svelte";
   import { PendingSendRetry } from "./pending-send-retry";
@@ -8422,9 +8422,11 @@
   // post the same text while the first is still out. Set before the first await, so a caller can
   // tell from it whether its own call started a post (see `postFromComposer`).
   let statusPosting = false;
-  async function postStatus() {
+  // Resolves to what the press came to (`SendOutcome`; an announcement is never "uncertain", and
+  // one that threw may still have posted), for "post now" to report; every other caller ignores it.
+  async function postStatus(): Promise<SendOutcome> {
     const text = statusDraft.trim();
-    if (!text || activeServerId === null || statusPosting) return;
+    if (!text || activeServerId === null || statusPosting) return "refused";
     statusPosting = true;
     // Kept until the invoke returns, not cleared on the way in: a member posting into a feed that
     // is closed to them is now refused natively, and clearing first would take the words with it.
@@ -8432,8 +8434,10 @@
     try {
       await invokeDebugged("post_status", { server: activeServerId, text });
       if (statusDraft.trim() === text) statusDraft = "";
+      return "sent";
     } catch (e) {
       error = errorText(e);
+      return "failed";
     } finally {
       statusPosting = false;
     }
@@ -10984,9 +10988,6 @@
           } else if (!unchanged) {
             updateToast(tid, `Attached ${uploadName}, not sent: the message changed while it uploaded`, "info", 7000);
           } else {
-            // The message as a send puts it back when it fails: trimmed, with its reply target.
-            const unsentForm = () => target === "chat" ? `${replyingTo}\u0000${draft.trim()}` : statusDraft.trim();
-            const message = unsentForm();
             const posted = postFromComposer(target);
             if (!posted.started) {
               updateToast(tid, `Attached ${uploadName}, not sent yet: press Send when ready`, "info", 7000);
@@ -10994,14 +10995,21 @@
               updateToast(tid, `Attached ${uploadName}, sending`, "ok");
               // See the header: nothing more attaches until this send lets go of the composer, and
               // a move away while it ran ends the batch as any other move does.
-              await posted.settled;
+              const outcome = await posted.settled;
+              // Reported from what the send itself came to, never guessed from the composer: a
+              // sent message's draft can stay (edited meanwhile, even back to the same words), and
+              // telling the person to press Send then would send it twice (found in review). An
+              // uncertain one must not be sent again either, and an announcement that threw may
+              // have posted (it has no retry token to make a second post safe). Reported before a
+              // move away ends the batch, since the outcome is known either way, but not behind
+              // the lock screen, which explains itself (as the batch's own messages are not).
+              if (locked) { /* nothing shown while locked */ }
+              else if (outcome === "sent") updateToast(tid, `Attached ${uploadName}, sent`, "ok");
+              else if (outcome === "uncertain") updateToast(tid, `Attached ${uploadName}, not confirmed yet: don't send it again`, "info", 9000);
+              else if (outcome === "failed" && target === "status") updateToast(tid, `Attached ${uploadName}, may not have posted: check the feed before posting again`, "err", 9000);
+              else if (outcome === "failed") updateToast(tid, `Attached ${uploadName}, not sent`, "err", 9000);
+              else updateToast(tid, `Attached ${uploadName}, not sent yet: press Send when ready`, "info", 7000);
               if (!here()) { abandoned = items.length - i - 1; break; }
-              // A send that started can still end unsent (refused natively, failed and put back,
-              // or handed to the pending-message manager); the composer then still holds exactly
-              // this message. Say so rather than leave "sending" up (found in review).
-              if (unsentForm() === message) {
-                updateToast(tid, `Attached ${uploadName}, not sent yet: press Send when ready`, "info", 7000);
-              }
             }
           }
         } catch (e) {
@@ -11055,15 +11063,15 @@
   function composerState(target: "chat" | "status"): string {
     return target === "chat" ? `${replyingTo}\u0000${draft}` : statusDraft;
   }
-  // Send the composer as its own Send does, and report whether a send actually started, and when
-  // it has settled. Both sends set their in-flight flag before their first await, so reading it
-  // straight after the call tells a started send from one their own guards refused (a send already
-  // under way, a lock, the pending-message manager open). `settled` never rejects: each send reports
-  // its own failures, and the caller only needs to know the composer is free again.
+  // Send the composer as its own Send does, and report whether a send actually started, and what
+  // it came to once settled. Both sends set their in-flight flag before their first await, so
+  // reading it straight after the call tells a started send from one their own guards refused (a
+  // send already under way, a lock, the pending-message manager open). `settled` never rejects: it
+  // resolves to the send's own `SendOutcome` (each send shows its own errors), "failed" if it threw.
   // (A named type, not an inline one: video-embed-flow.test.ts runs this function's own text.)
-  type ComposerPost = { started: boolean; settled: Promise<void> };
+  type ComposerPost = { started: boolean; settled: Promise<SendOutcome> };
   function postFromComposer(target: "chat" | "status"): ComposerPost {
-    const quiet = (run: Promise<void>) => run.then(() => {}, () => {});
+    const quiet = (run: Promise<SendOutcome>): Promise<SendOutcome> => run.then((outcome) => outcome, () => "failed");
     if (target === "chat") {
       const wasSending = sending;
       const run = send();
@@ -19591,9 +19599,11 @@
     }
   }
 
-  async function send() {
+  // Resolves to what the press came to (`SendOutcome`), for "post now" to report; every other
+  // caller ignores it.
+  async function send(): Promise<SendOutcome> {
     const text = draft.trim();
-    if (!text || !cur?.active || activeServerId === null || sending || retryingPendingSends || locked || !uiStateReady || windowCloseInFlight || pendingSendResolution !== null || pendingManagerOpen) return;
+    if (!text || !cur?.active || activeServerId === null || sending || retryingPendingSends || locked || !uiStateReady || windowCloseInFlight || pendingSendResolution !== null || pendingManagerOpen) return "refused";
     const server = activeServerId;
     const channel = cur.active;
     const session = uiStateLoadGeneration;
@@ -19609,7 +19619,7 @@
       intent = matchingPendingSend(pendingSends, server, channel, text, reply_to);
       if (!intent) {
         const expectedContext = await invoke<string>("durable_send_context", { server });
-        if (!sessionCurrent() || pendingSendResolution !== null || pendingManagerOpen) return;
+        if (!sessionCurrent() || pendingSendResolution !== null || pendingManagerOpen) return "refused";
         intent = { token: crypto.randomUUID().replaceAll("-", ""), server, channel,
           text, replyTo: reply_to, expectedContext, acceptance: "not_accepted" };
         pendingSends = addPendingSend(pendingSends, intent);
@@ -19618,7 +19628,9 @@
       // barrier. A lock at either await captures the draft or this resumable intent.
       clearTimeout(uiStateSaveTimer);
       await queueUiStateSave(continuityJson);
-      if (!pendingSubmissionCurrent(intent, session)) return;
+      // The sealed identity was taken over (a lock, or the pending-message work): not submitted
+      // here, but no longer this press's to call unsent either.
+      if (!pendingSubmissionCurrent(intent, session)) return "uncertain";
       const sameDraft = !key || (draftRevisions[key] ?? 0) === draftRevision;
       if (sameDraft && activeServerId === server && cur?.active === channel && draft.trim() === text) {
         draft = "";
@@ -19644,12 +19656,20 @@
           if (sessionCurrent() && activeServerId === server && cur?.active === channel) await refresh();
         },
       );
-      if (!sessionCurrent()) return;
+      if (!sessionCurrent()) return sendOutcome(result);
       const warning = persistenceWarning(result);
       if (warning) toast(warning, "warn", 12000);
       if (refreshError) error = `Message result saved, but the conversation could not refresh: ${errorText(refreshError)}`;
+      return sendOutcome(result);
     } catch (e) {
-      if (!sessionCurrent()) return;
+      // A throw is not "failed" when the message's identity was sealed and stays pending without a
+      // retry block: native errors do not prove absence, and the quiet retry sends it by itself.
+      // Calling it unsent invited an edited resend under a new token beside it (found in review).
+      // Only a send that sealed nothing, or one blocked from retrying, failed. A lock (session
+      // gone) keeps a sealed identity in the vault to retry after unlock.
+      const kept = intent ? pendingSends[intent.token] : undefined;
+      const outcome: SendOutcome = !intent ? "failed" : !sessionCurrent() || (kept && !kept.retryBlock) ? "uncertain" : "failed";
+      if (!sessionCurrent()) return outcome;
       error = String(e);
       if (activeServerId === server && cur?.active === channel && messages.some((m) => m.id === pendingId)) {
         messages = messages.filter((m) => m.id !== pendingId);
@@ -19662,6 +19682,7 @@
         scheduleUiStateSave();
         replyingTo = reply_to;
       }
+      return outcome;
     } finally {
       if (pendingSendNonce === operation) sending = false;
     }

@@ -258,42 +258,96 @@ export class MediaBin {
   }
 }
 
+/** Where a queued job is, for whether its abort may release the queue early (see `JobQueue`). */
+export type JobStage = "light" | "heavy" | "pinned";
+
 /**
  * Runs the clip maker's heavy work (decoding a picture or a sound, rendering a song) one job at a
  * time, in the order asked. Without it, clicking down a list of songs started every render at
  * once, each allocating its whole output before any of them reached the bin's budget check.
  *
- * One queue is shared by every editor (see the module script in `VideoEditor.svelte`), so an
- * editor closing while its job runs does not let the next editor's job start alongside it.
+ * One queue is shared by every editor (see the module script in `VideoEditor.svelte`), and it
+ * bounds work across them, not just within one: closing an editor does not free what its job
+ * still holds, so the next editor's job must not simply start beside it (found in review).
  *
- * A job holds the queue until it settles OR its `signal` aborts (its editor answered or went).
- * Without the second, one job that never settled (a decoder stalled by a crafted file, say) would
- * hold up every later job in every later editor until the app restarted (found in review). A
- * released job may still be running; what it can hold was admitted against its own bin first.
- * The abort only skips that job's own turn: it never lets later jobs past one queued before it.
- * A job queued by an editor that has since closed should check that first and return straight
- * away.
+ * A job holds the queue until it settles. Its `signal` aborting (its editor answered, or the
+ * person stopped adding) can let go of it sooner, depending on its `stage()` at that moment:
+ * - `"pinned"`, an offline render: never. It cannot be interrupted, always ends on its own (the
+ *   engine's suspend callbacks and drum hashing all complete), and holds its whole output until
+ *   then, so it keeps its turn to the end however its editor went. Six editors closed one after
+ *   another mid-render therefore render one at a time, not six at once.
+ * - `"light"`, nothing large allocated yet (waiting on an IPC read, say): at once, uncounted. A
+ *   hung native read holds no media, and counting it would let two hung reads block every later
+ *   add in every editor until restart (found in re-review).
+ * - `"heavy"`, holding (or about to make) a decode's output: only while fewer than `looseLimit`
+ *   heavy jobs let go of early are unsettled. Without letting go at all, one decoder stalled by a
+ *   crafted file would hold up every later job until the app restarted; letting every one go
+ *   would leave no ceiling on what the stalled ones hold. A heavy job aborted while the allowance
+ *   is used up keeps its turn until a loose one settles, or until it settles itself.
+ * So at any moment at most 1 + `looseLimit` jobs holding media are unsettled, each bounded by
+ * `MEDIA_LIMITS` and admitted against its own bin before it allocated. Light jobs let go of hold
+ * at most what they read from a size-checked file.
+ *
+ * An abort never lets later jobs past one queued before it: a job's turn begins only when the one
+ * before it is released. A job queued by an editor that has since closed should check that first
+ * and return straight away.
  */
 export class JobQueue {
   #tail: Promise<void> = Promise.resolve();
+  readonly #looseLimit: number;
+  /** Heavy jobs let go of early that have not settled yet. */
+  #loose = 0;
+  /** The current job, aborted while the allowance was used up: retried when a loose job settles.
+   * Only the job whose turn it is can be waiting to be let go, so one slot is enough. */
+  #waiting: (() => void) | null = null;
 
-  /** Run `job` once every job queued before it has been released; resolves or rejects as it does. */
-  run<T>(job: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  constructor(looseLimit = 1) {
+    this.#looseLimit = looseLimit;
+  }
+
+  /** Heavy jobs let go of early and still unsettled (at most `looseLimit`). */
+  get loose(): number { return this.#loose; }
+
+  /**
+   * Run `job` once every job queued before it has been released; resolves or rejects as it does.
+   * `signal` and `stage` say when it may be released before it settles (see the class notes).
+   */
+  run<T>(job: () => Promise<T>, signal?: AbortSignal, stage: () => JobStage = () => "heavy"): Promise<T> {
     const previous = this.#tail;
     const result = previous.then(job);
     const settled = result.then(() => {}, () => {});
-    // Waits for `previous` first either way, so an abort cannot release the queue early.
-    this.#tail = signal ? previous.then(() => Promise.race([settled, abortOf(signal)])) : settled;
+    if (!signal) {
+      this.#tail = settled;
+      return result;
+    }
+    this.#tail = previous.then(() => new Promise<void>((release) => {
+      let released = false;
+      const letGo = () => {
+        const now = stage();
+        if (released || now === "pinned") return;
+        if (now === "heavy" && this.#loose >= this.#looseLimit) { this.#waiting = letGo; return; }
+        if (this.#waiting === letGo) this.#waiting = null;
+        released = true;
+        if (now === "heavy") {
+          this.#loose++;
+          void settled.then(() => {
+            this.#loose--;
+            const next = this.#waiting;
+            this.#waiting = null;
+            next?.();
+          });
+        }
+        release();
+      };
+      void settled.then(() => {
+        if (this.#waiting === letGo) this.#waiting = null;
+        if (!released) { released = true; release(); }
+      });
+      if (signal.aborted) letGo();
+      else signal.addEventListener("abort", letGo, { once: true });
+    }));
     return result;
   }
-}
-
-/** Resolves when `signal` aborts (at once if it already has). */
-function abortOf(signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    if (signal.aborted) resolve();
-    else signal.addEventListener("abort", () => resolve(), { once: true });
-  });
 }
 
 /** What an item costs in decoded memory: RGBA pictures, float samples. A video stays a file. */
@@ -311,10 +365,23 @@ export function decodedBytes(item: WithoutId<MediaItem>): number {
  * header cannot be read) is refused without being decoded. Browser-only.
  *
  * `admit` is asked, with the bytes the kept picture will hold, before anything is decoded; false
- * refuses it as "this clip holds as much as it can".
+ * refuses it as "this clip holds as much as it can". `signal` is checked after every await: a
+ * cancel never starts the next decode (found in review: a cancel during the full-size decode was
+ * followed by a resize), and every bitmap held is closed before the `AbortError` rejection.
  */
-export async function decodeImageFile(file: Blob, admit?: (bytes: number) => boolean): Promise<{ image: ImageBitmap; width: number; height: number }> {
+export async function decodeImageFile(
+  file: Blob,
+  admit?: (bytes: number) => boolean,
+  signal?: AbortSignal,
+): Promise<{ image: ImageBitmap; width: number; height: number }> {
+  const aborted = () => !!signal?.aborted;
+  const cancel = (...held: ImageBitmap[]): never => {
+    for (const bitmap of held) bitmap.close();
+    throw new DOMException("decode aborted", "AbortError");
+  };
+  if (aborted()) cancel();
   const bytes = new Uint8Array(await file.arrayBuffer());
+  if (aborted()) cancel();
   const size = imageSize(bytes);
   if (!size) throw new MediaRefusal("That picture could not be read.");
   if (size.width * size.height > MEDIA_LIMITS.imagePixels) throw new MediaRefusal("That picture is too big to use here.");
@@ -326,10 +393,12 @@ export async function decodeImageFile(file: Blob, admit?: (bytes: number) => boo
   // be the header's swapped. Scaling to the header's shape would squash it (found in review).
   // Rotation never changes the pixel count, so the check above still bounds this decode.
   const full = await createImageBitmap(new Blob([bytes]));
+  if (aborted()) cancel(full);
   const want = decodeSize(full.width, full.height);
   if (want.width === full.width && want.height === full.height) return { image: full, width: full.width, height: full.height };
   try {
     const image = await createImageBitmap(full, { resizeWidth: want.width, resizeHeight: want.height, resizeQuality: "high" });
+    if (aborted()) cancel(image);
     return { image, width: image.width, height: image.height };
   } finally {
     full.close();

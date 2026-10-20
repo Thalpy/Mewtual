@@ -90,9 +90,41 @@ mediums and a low. Fixed with regression tests, each confirmed to fail without i
   while the songs are checked at post now has a test proving no render starts. Its quick check of
   "stop adding" found one more low, fixed: stopping released the queue during a render (which
   cannot be interrupted), so a re-add could render beside it; a render now keeps its turn.
-- **Not fixed here, raised with the user**: the other high is native. `finish_file_upload`
-  (`src-tauri/src/lib.rs`) reads the lock state before it takes the uploads mutex, so a lock
-  landing between the two can still publish. It is in the communication session's area.
+- **Review of `dded8e20`** (two highs, one medium; the frontend ones fixed here with tests, each
+  confirmed to fail without its fix). Our earlier "nothing remains open" was wrong:
+  - **High**: closing an editor released its render's turn while the render still held its
+    output, so editors closed one after another stacked renders with no ceiling. A render now
+    keeps its turn to the end however its editor went; a stalled read or decode is let go of only
+    one at a time (`JobQueue` `holding` and `looseLimit`). A cancelled picture decode no longer
+    starts its resize, and closes what it holds.
+  - **Medium**: "post now" guessed the send's outcome from the composer, so a sent message whose
+    draft was kept (typed in and back out: same words, newer revision) said "press Send", which
+    sent it twice. `send()` and `postStatus()` now return a `SendOutcome` and the toast reports it.
+  - The emoji release now has a test (fake bitmaps; no drawing needed).
+  - A fresh re-review of those fixes (no blocker or high) found the send outcome wrong in one
+    place, fixed: a throw after the identity was sealed said "not sent", though it stays pending
+    and retries by itself, so it is `uncertain`. Also fixed: a not-accepted superseded result is
+    `failed` (it waits for review), a failed announcement says it may have posted, a hung read
+    that holds no media no longer uses up the stalled-job allowance (`JobStage` light, heavy,
+    pinned), and the outcome is reported before a move away ends the batch (but not behind the
+    lock screen). Its 1500-case probes of the queue, with and without the stages, found the order
+    and the bound held; its last check found nothing blocking.
+- **OPEN, HIGH, handed to the communication session (not fixed on this branch)**: the native
+  upload/lock race. `finish_file_upload` (`src-tauri/src/lib.rs`) reads the unlocked state, then
+  awaits the uploads mutex, removes the reservation on that earlier answer, and awaits
+  publication without the UI-session commit guard; once the reservation is gone, a lock finds
+  nothing to cancel while the publication is still outstanding. Acceptance criteria given to
+  that session, to land as its own separately reviewed commit and be integrated into Gate7
+  before this high counts as resolved:
+  - bind the pending upload to the UI-session generation it began in;
+  - order final publication against lock with `require_ui_session_generation`, in the existing
+    lock order;
+  - lock winning before final admission rejects publication and cleans up the sealed chunks;
+  - once publication is admitted, lock must not report completion ahead of it;
+  - a lock and unlock cycle never revives an upload from the earlier generation;
+  - deterministic barrier tests around final admission and actor publication covering both
+    orders and a lock/unlock cycle (the existing test passes a literal `true` to the helper and
+    never exercises the race). That session owns the native tests and gates.
 - Follow-ups: limits on added videos' size and length (a lying sample rate can still make one
   export sound window about 120 MB), and the edited file name contract. Known residuals: emoji
   and built-in sounds skip the queue (small, but not admitted ahead); the previous editor's bin

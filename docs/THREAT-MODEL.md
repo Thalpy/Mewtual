@@ -108,17 +108,24 @@ The properties above carry over, and for the same reasons:
   at most 64 media items and 1 GiB of decoded media. Counts in the document are bounded (24
   overlays, 32 sounds, 3 videos, 900 keys a path) and composed clips at 10 minutes and 1920 px.
   Those budgets are asked BEFORE anything large is made: decodes and song renders run one at a
-  time across every open editor, each admitted against the bin's remaining room before it
-  allocates its output, so rapid clicks cannot start several half-gigabyte renders at once. A
+  time through one queue shared by every editor (`JobQueue`), each admitted against its bin's
+  remaining room before it allocates its output. The bound holds across editors, not only within
+  one: closing an editor does not free what its running job holds, so an offline render (which
+  cannot be interrupted, and holds its whole output until it ends) keeps its turn to the end
+  however its editor went or whatever the person stopped. That rests on an assumption: a render
+  always ends, because the engine's suspend callbacks and drum hashing all complete; a render
+  that never ended would hold up every later heavy job until restart. A job that holds no media
+  yet (waiting on a Studio read, say) is let go of as soon as its editor gives up on it, however
+  many hang. A decode holding its output that stalls (a crafted file) can be let go of too, so it
+  cannot block every later editor, but only one such job at a time; a second waits until the
+  first ends, and since the queue runs in order, two stalled decodes block every later add in
+  every editor (song reads and renders too) until restart. At most two jobs
+  holding media are therefore unsettled at once, each within `MEDIA_LIMITS`. A
   cancelled editor starts no queued job, and a render, mix or decode cancelled part way never
-  reports success. A job still running when its editor closes stops holding the queue (so a
-  decoder stalled by a crafted file cannot block every later editor); it finishes on its own,
-  within what it was admitted for, possibly beside the next job. Posting waits until nothing is
-  still being added, or until the person stops what is still pending. Stopping releases the
-  queue from a read or decode that may hang, but not from an offline render, which cannot be
-  interrupted and always ends: the next render waits for it, so stopping and adding again cannot
-  stack renders. Added videos stay files in the bin (probed, decoded only frame by frame
-  while previewing or exporting); limits on their size and length are a recorded follow-up.
+  reports success, starts no further allocation, and releases the pictures it held. Posting waits
+  until nothing is still being added, or until the person stops what is still pending. Added
+  videos stay files in the bin (probed, decoded only frame by frame while previewing or
+  exporting); limits on their size and length are a recorded follow-up.
 - **Studio songs are peer-authored content** (the channel's Studio is shared). They go through the
   same validation and resolution as pressing play in the Studio (`scorePlaybackFromNative`,
   `planJamArchivalPlayback`, the take limits), and a song that cannot be resolved is refused with

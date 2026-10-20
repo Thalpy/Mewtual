@@ -3,7 +3,7 @@ import test from "node:test";
 import ts from "typescript";
 import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend } from "./pending-sends.ts";
 import { readFileSync } from "node:fs";
-import { persistenceWarning, sendAndRefresh, type SendMessageResult } from "./message-send.ts";
+import { persistenceWarning, sendAndRefresh, sendOutcome, type SendMessageResult } from "./message-send.ts";
 
 test("accepted pending send refreshes without becoming a rejection or a second submission", async () => {
   let submissions = 0;
@@ -41,11 +41,11 @@ test("a replaced conversation cannot claim persistence or suggest ordinary retry
 
 // Execute the actual composer and pending-send functions, with only their I/O replaced.
 function composer(submit: (args: Record<string, unknown>) => Promise<SendMessageResult>,
-  refresh = async () => {}, context = async () => "a".repeat(64)) {
+  refresh = async () => {}, context = async () => "a".repeat(64), onSeal: () => void = () => {}) {
   const source = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
   const body = ts.transpile(source.slice(source.indexOf("  async function submitPendingSend("),
     source.indexOf("  // Inline edit of one of your own messages.")), { target: ts.ScriptTarget.ES2022 });
-  return new Function("submit", "refresh", "context", "sendAndRefresh", "persistenceWarning", "addPendingSend", "matchingPendingSend", "pendingSendRetryBlock", "resolvePendingSend", `
+  return new Function("submit", "refresh", "context", "onSeal", "sendAndRefresh", "persistenceWarning", "sendOutcome", "addPendingSend", "matchingPendingSend", "pendingSendRetryBlock", "resolvePendingSend", `
     let draft = "one message", cur = { active: "1" }, activeServerId = 1, sending = false;
     let locked = false, uiStateLoadGeneration = 0, replyingTo = "", mentionQuery = null;
     let drafts = { room: draft }, draftRevisions = {}, pendingSendNonce = 0, chatStickToBottom = false;
@@ -58,7 +58,7 @@ function composer(submit: (args: Record<string, unknown>) => Promise<SendMessage
     const toast = text => warnings.push(text), errorText = String;
     const invoke = () => context();
     const continuityJson = () => JSON.stringify({drafts,pendingSends,recoveredSendDrafts});
-    const queueUiStateSave = async (json, afterSave = () => {}) => { sealed = JSON.parse(typeof json === "function" ? json() : json); afterSave(); };
+    const queueUiStateSave = async (json, afterSave = () => {}) => { sealed = JSON.parse(typeof json === "function" ? json() : json); afterSave(); onSeal(); };
     const saveUiStateImmediately = async () => { await queueUiStateSave(continuityJson()); return true; };
     const invokeDebugged = (_, args) => submit(args).then(value => ({ value }));
     ${body}
@@ -68,7 +68,7 @@ function composer(submit: (args: Record<string, unknown>) => Promise<SendMessage
       lock() { sealed = JSON.parse(continuityJson()); locked = true; uiStateLoadGeneration++; draft = ""; drafts = {}; pendingSends = {}; sending = false; pendingSendNonce++; },
       state() { return { draft, drafts, pendingSends, recoveredSendDrafts, sealed, warnings, error, sending }; }
     };
-  `)(submit, refresh, context, sendAndRefresh, persistenceWarning, addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend);
+  `)(submit, refresh, context, onSeal, sendAndRefresh, persistenceWarning, sendOutcome, addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend);
 }
 
 test("composer keeps the draft until its retry identity can be sealed", async () => {
@@ -156,6 +156,68 @@ test("a stale authoring context requires an explicit new-send decision", async (
   assert.equal(app.state().draft, "one message");
   await app.send();
   assert.notEqual(tokens[2], tokens[0]);
+});
+
+test("the actual send reports what it came to, which the composer's text cannot", async () => {
+  // Found in review: "post now" guessed the outcome from the composer. Here a send is accepted and
+  // saved while the person types and deletes a character: the draft is kept (its revision moved)
+  // with the very words that were sent, yet the outcome is "sent".
+  let finish!: (result: SendMessageResult) => void;
+  const kept = composer(() => new Promise(resolve => { finish = resolve; }));
+  const pending = kept.send();
+  for (let n = 0; n < 20 && !finish; n++) await Promise.resolve();
+  kept.type("one message!");
+  kept.type("one message");
+  finish({ accepted: true, persistence: { status: "durable" } });
+  assert.equal(await pending, "sent");
+  assert.equal(kept.state().draft, "one message", "the draft stayed, and still reads like an unsent one");
+
+  const outcome = async (submit: Parameters<typeof composer>[0]) => composer(submit).send();
+  assert.equal(await outcome(async () => ({ accepted: true, persistence: { status: "pending", reason: "write_failed" } })), "uncertain");
+  assert.equal(await outcome(async () => ({ accepted: false, persistence: { status: "pending", reason: "write_failed" } })), "uncertain");
+  assert.equal(await outcome(async () => ({ accepted: true, persistence: { status: "superseded" } })), "uncertain");
+  // Refused because the conversation moved on: never authored, held for review, not retried.
+  assert.equal(await outcome(async () => ({ accepted: false, persistence: { status: "superseded" } })), "failed");
+
+  const busy = composer(async () => ({ accepted: true, persistence: { status: "durable" } }));
+  busy.type("");
+  assert.equal(await busy.send(), "refused", "nothing to send");
+  let finishContext!: (value: string) => void;
+  const locked = composer(async () => ({ accepted: true, persistence: { status: "durable" } }), async () => {},
+    () => new Promise(resolve => { finishContext = resolve; }));
+  const locking = locked.send();
+  locked.lock();
+  finishContext("a".repeat(64));
+  assert.equal(await locking, "refused", "a lock before dispatch submitted nothing");
+});
+
+test("a send that threw after sealing is uncertain, since its identity retries by itself", async () => {
+  // Found in re-review: a lost IPC response was reported "not sent", but its sealed identity stays
+  // pending and the quiet retry sends it; an edited resend under a new token then made two.
+  const lost = composer(async () => { throw new Error("IPC response lost"); });
+  assert.equal(await lost.send(), "uncertain");
+  assert.equal(Object.keys(lost.state().pendingSends).length, 1, "still pending, to be retried with its own token");
+
+  // Nothing sealed: the authoring context could not be read, so nothing was or will be sent.
+  const noContext = composer(async () => ({ accepted: true, persistence: { status: "durable" } }), async () => {},
+    async () => { throw new Error("server unavailable"); });
+  assert.equal(await noContext.send(), "failed");
+  assert.deepEqual(noContext.state().pendingSends, {});
+
+  // Refused natively for good: blocked from automatic retry, so it waits for the person.
+  const invalid = composer(async () => { throw new Error("CHAT_SEND_INVALID: length"); });
+  assert.equal(await invalid.send(), "failed");
+});
+
+test("a send whose sealed identity is taken over before dispatch is uncertain, not refused", async () => {
+  // A lock while the identity is being sealed: it was saved to the vault, and comes back to be
+  // retried after unlock, so this press cannot call it unsent.
+  let lockDuringSeal = () => {};
+  const app = composer(async () => ({ accepted: true, persistence: { status: "durable" } }), async () => {},
+    async () => "a".repeat(64), () => lockDuringSeal());
+  lockDuringSeal = () => { lockDuringSeal = () => {}; app.lock(); };
+  assert.equal(await app.send(), "uncertain");
+  assert.equal(Object.keys(app.state().sealed.pendingSends).length, 1, "sealed in the vault before the lock");
 });
 
 test("a new identical draft survives the preceding send's acknowledgement", async () => {

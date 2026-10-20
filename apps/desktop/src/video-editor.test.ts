@@ -1167,6 +1167,126 @@ test("stopping a song mid-render does not let another render start beside it", a
   } finally { open(); restore(); await h.destroy(); }
 });
 
+test("closing an editor mid-render keeps the next editor's song waiting until that render ends", async () => {
+  // Found in review: closing released the render's turn while it still held its output, so each
+  // editor closed mid-render added another render running at once.
+  let open = () => {};
+  const restore = installSilentOffline(new Promise<void>((r) => { open = r; }));
+  const loads: string[] = [];
+  const music = (): ClipMusicSource => ({
+    list: async () => [{ id: "s1", title: "Night Drive" }],
+    load: async (id) => { loads.push(id); return { take: SILENT_TAKE, gridMs: 2000 }; },
+  });
+  const addSong = async (h: Awaited<ReturnType<typeof harness>>) => {
+    h.target.querySelector<HTMLButtonElement>('[data-tab="music"]')!.click();
+    await settle();
+    h.target.querySelector<HTMLButtonElement>('[data-add-song="s1"]')!.click();
+    await settle();
+  };
+  const first = await harness({ music: music() });
+  let second: Awaited<ReturnType<typeof harness>> | null = null;
+  try {
+    await addSong(first);
+    assert.deepEqual(loads, ["s1"], "the first editor's song is rendering");
+    first.click("close");
+    await settle();
+    assert.deepEqual(first.results, [{ kind: "skip" }]);
+    second = await harness({ music: music() });
+    await addSong(second);
+    assert.deepEqual(loads, ["s1"], "the next editor's song waits for the render its closed editor left running");
+    open();
+    for (let i = 0; i < 4; i++) await settle();
+    assert.deepEqual(loads, ["s1", "s1"], "then takes its turn");
+  } finally {
+    open();
+    restore();
+    await first.destroy();
+    await second?.destroy();
+  }
+});
+
+test("song reads that never answer, left by closed editors, do not block the next editor", async () => {
+  // Found in re-review: a hung read holds no media, but counted against the one-at-a-time
+  // allowance, so two hung reads (one native hang repeats) blocked every later add until restart.
+  const loads: string[] = [];
+  const hanging: ClipMusicSource = {
+    list: async () => [{ id: "s1", title: "Night Drive" }],
+    load: (id) => { loads.push(id); return new Promise(() => {}); },
+  };
+  const opened: Array<Awaited<ReturnType<typeof harness>>> = [];
+  try {
+    for (let editor = 1; editor <= 3; editor++) {
+      const h = await harness({ music: hanging });
+      opened.push(h);
+      h.target.querySelector<HTMLButtonElement>('[data-tab="music"]')!.click();
+      await settle();
+      h.target.querySelector<HTMLButtonElement>('[data-add-song="s1"]')!.click();
+      await settle();
+      assert.equal(loads.length, editor, `editor ${editor} gets its turn`);
+      h.click("close");
+      await settle();
+    }
+  } finally { for (const h of opened) await h.destroy(); }
+});
+
+test("a drawn emoji the clip cannot keep is released, whether the bin is full or the editor has gone", async () => {
+  // Found in review: both refusals in `addEmoji` dropped the drawn picture without closing it.
+  // Fake bitmaps stand in for drawing (jsdom has no OffscreenCanvas); only ownership is checked.
+  const g = globalThis as { createImageBitmap?: unknown; OffscreenCanvas?: unknown };
+  const saved = { createImageBitmap: g.createImageBitmap, OffscreenCanvas: g.OffscreenCanvas };
+  const closed: string[] = [];
+  let hold: Promise<void> = Promise.resolve();
+  g.OffscreenCanvas = class { getContext() { return { fillText() {}, font: "", textAlign: "", textBaseline: "" }; } };
+  g.createImageBitmap = async (source: unknown) => {
+    const kind = source instanceof Blob ? "picture" : "emoji";
+    if (kind === "emoji") await hold;
+    return { width: 10, height: 10, close: () => { closed.push(kind); } };
+  };
+  // A 10 x 10 PNG header: enough for the size check; the fake decoder does the rest.
+  const png = () => {
+    const b = new Uint8Array(33);
+    b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+    new DataView(b.buffer).setUint32(16, 10);
+    new DataView(b.buffer).setUint32(20, 10);
+    return b;
+  };
+  const emoji = (h: Awaited<ReturnType<typeof harness>>) => {
+    h.target.querySelector<HTMLButtonElement>('[data-tab="stickers"]')!.click();
+    flushSync();
+    h.target.querySelector<HTMLButtonElement>("[data-emoji]")!.click();
+  };
+  try {
+    const full = await harness();
+    try {
+      // The clip itself plus 63 pictures fill the bin's 64 places.
+      const drop = new w.Event("drop", { bubbles: true, cancelable: true });
+      const files = Array.from({ length: 63 }, (_, i) => new File([png()], `p${i}.png`, { type: "image/png" }));
+      Object.defineProperty(drop, "dataTransfer", { value: { types: ["Files"], files } });
+      full.target.querySelector('[role="dialog"]')!.dispatchEvent(drop);
+      for (let i = 0; i < 40; i++) await settle();
+      emoji(full);
+      for (let i = 0; i < 3; i++) await settle();
+      assert.deepEqual(closed.filter((k) => k === "emoji"), ["emoji"], "refused by a full bin, and released");
+    } finally { await full.destroy(); }
+
+    let draw = () => {};
+    hold = new Promise<void>((r) => { draw = r; });
+    const gone = await harness();
+    try {
+      emoji(gone);
+      await settle();
+      gone.click("close");
+      await settle();
+      draw();
+      for (let i = 0; i < 3; i++) await settle();
+      assert.deepEqual(closed.filter((k) => k === "emoji"), ["emoji", "emoji"], "drawn after the editor went, and released");
+    } finally { draw(); await gone.destroy(); }
+  } finally {
+    g.createImageBitmap = saved.createImageBitmap;
+    g.OffscreenCanvas = saved.OffscreenCanvas;
+  }
+});
+
 test("a cancel while the songs are checked at post starts no render", async () => {
   // Found missing in re-review: nothing pinned the cancel check between the list and the render.
   const restore = installSilentOffline();

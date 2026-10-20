@@ -74,7 +74,7 @@
   import { layerTargets, needsResync, soundStarts } from "./clip-preview.ts";
   import { LANE, axisSpan, keyframeMarks, laneLayout, layerAxisSpan, outputDelta, outputToAxis, packRows, thinMarks } from "./clip-timeline.ts";
   import {
-    BIN_FULL, MediaBin, MediaRefusal, decodeImageFile, decodeSoundFile, emojiImage, fileRefusal, fileRole, mediaName,
+    BIN_FULL, MediaBin, MediaRefusal, type JobStage, decodeImageFile, decodeSoundFile, emojiImage, fileRefusal, fileRole, mediaName,
     readTakeFile,
   } from "./clip-media.ts";
   import { renderSfx, sfxRecipe } from "./clip-sfx.ts";
@@ -710,11 +710,6 @@
     return () => finished || epoch !== addEpoch;
   }
 
-  /** The admission check every heavy job makes: room in the bin, for an add not given up. */
-  function admitFor(gone: () => boolean): (bytes: number) => boolean {
-    return (bytes) => !gone() && !!bin?.room(bytes);
-  }
-
   /** Counts `work` in `adding` until it settles (or is given up), so posting waits for it. */
   async function counting<T>(work: Promise<T>): Promise<T> {
     const epoch = addEpoch;
@@ -722,26 +717,35 @@
     try { return await work; } finally { if (epoch === addEpoch) adding--; }
   }
 
+  /** What `heavy` hands its job: the admission check to give the decoder or renderer, and the
+   * mark to make just before an offline render. */
+  type HeavyStep = { readonly admit: (bytes: number) => boolean; readonly rendering: () => void };
+
   /**
    * Run a heavy job in its turn (`heavyJobs`), counted in `adding`. The job's `signal` aborts when
-   * the editor answers or the person stops adding.
+   * the editor answers or the person stops adding (`gone`). Its `admit` is the bin's room check,
+   * refused once the add is given up; passing it is when the job starts to hold media. It calls
+   * `rendering()` just before an offline render.
    *
-   * What lets go of the queue is narrower. The editor answering always does (see `JobQueue`).
-   * "Stop adding" does only until the job calls `rendering()` just before an offline render: a
-   * read or a decode can hang, but a render cannot be interrupted and always ends on its own,
-   * holding its whole output until then. Letting go during one would let the next render run
-   * beside it, and stopping and re-adding could stack them (found in re-review). Posting does not
-   * wait for it either way: "stop adding" uncounts it at once.
+   * What lets go of the queue is narrower than the signal (see `JobQueue`): before it holds media
+   * a job is let go of at once (a hung read holds nothing); while it holds a decode's output, only
+   * within the queue's allowance; and in a render, never, whether the editor closed or the person
+   * stopped adding, because a render cannot be interrupted and holds its whole output until it
+   * ends. Letting go of renders let closed editors stack them without limit (found in review).
+   * Posting waits for none of this: "stop adding" uncounts the job at once.
    */
-  function heavy<T>(job: (signal: AbortSignal, rendering: () => void) => Promise<T>): Promise<T> {
-    const stop = addsAbort.signal;
-    const signal = AbortSignal.any([sessionAbort.signal, stop]);
-    let inRender = false;
-    const beforeRender = new AbortController();
-    if (stop.aborted) beforeRender.abort();
-    else stop.addEventListener("abort", () => { if (!inRender) beforeRender.abort(); }, { once: true });
-    const release = AbortSignal.any([sessionAbort.signal, beforeRender.signal]);
-    return counting(heavyJobs.run(() => job(signal, () => { inRender = true; }), release));
+  function heavy<T>(gone: () => boolean, job: (signal: AbortSignal, step: HeavyStep) => Promise<T>): Promise<T> {
+    const signal = AbortSignal.any([sessionAbort.signal, addsAbort.signal]);
+    let stage: JobStage = "light";
+    const step: HeavyStep = {
+      admit: (bytes) => {
+        const room = !gone() && !!bin?.room(bytes);
+        if (room && stage === "light") stage = "heavy";
+        return room;
+      },
+      rendering: () => { stage = "pinned"; },
+    };
+    return counting(heavyJobs.run(() => job(signal, step), signal, () => stage));
   }
 
   /**
@@ -772,14 +776,14 @@
       try {
         // The read and the render wait their turn together: several rows clicked in a row render
         // one after another, each admitted against what the ones before it left room for.
-        const buffer = await heavy(async (signal, rendering) => {
+        const buffer = await heavy(gone, async (signal, step) => {
           // Closed, rescoped or locked (or given up) while queued or reading: other members' song
           // content is not read or rendered for an editor that has already answered.
           if (gone()) return null;
           const playback = await source.load(song.id);
           if (gone()) return null;
-          rendering();
-          return renderTakeOffline(playback.take, { gridMs: playback.gridMs, maxMs: musicCapMs(), signal, admit: admitFor(gone) });
+          step.rendering();
+          return renderTakeOffline(playback.take, { gridMs: playback.gridMs, maxMs: musicCapMs(), signal, admit: step.admit });
         });
         if (!buffer || gone() || !bin) return;
         const id = bin.add({ kind: "sound", name: song.title, buffer, origin: "studio", key });
@@ -809,7 +813,7 @@
         if (role === "image") {
           // Decodes and renders wait their turn in `heavyJobs`, and each is admitted against the
           // bin before it allocates. A job reached after its add was given up does nothing.
-          const pic = await heavy(async () => (gone() ? null : decodeImageFile(f, admitFor(gone))));
+          const pic = await heavy(gone, async (signal, step) => (gone() ? null : decodeImageFile(f, step.admit, signal)));
           if (!pic) return;
           if (!bin || gone()) { pic.image.close(); return; }
           const id = bin.add({ kind: "image", name: mediaName(f.name), image: pic.image, width: pic.width, height: pic.height, origin: "file" });
@@ -830,13 +834,13 @@
         } else if (role === "audio" || role === "take") {
           // Decoded only as far as the clip can use (and within the sample cap), whatever the
           // file's length: see `decodeSoundFile`.
-          const buffer = await heavy(async (signal, rendering) => {
+          const buffer = await heavy(gone, async (signal, step) => {
             if (gone()) return null;
-            if (role === "audio") return decodeSoundFile(f, musicCapMs() / 1000, { admit: admitFor(gone), signal });
+            if (role === "audio") return decodeSoundFile(f, musicCapMs() / 1000, { admit: step.admit, signal });
             const take = await readTakeFile(f);
             if (gone()) return null;
-            rendering();
-            return renderTakeOffline(take, { maxMs: musicCapMs(), signal, admit: admitFor(gone) });
+            step.rendering();
+            return renderTakeOffline(take, { maxMs: musicCapMs(), signal, admit: step.admit });
           });
           if (!buffer || gone() || !bin) return;
           const asMusic = role === "take" || intent === "music" || (intent !== "sound" && buffer.duration > 8);

@@ -182,6 +182,105 @@ test("a job that never settles holds the queue only until its editor gives up on
   assert.deepEqual(started, ["stuck", "next"]);
 });
 
+test("renders keep their turn through their editor closing, so closed editors never stack them", async () => {
+  // Found in review: closing the editor released a render's turn while the render still held its
+  // output, so six editors closed one after another left six renders running at once.
+  const queue = new JobQueue();
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  let active = 0, most = 0;
+  const finish: (() => void)[] = [];
+  const renders: Promise<void>[] = [];
+  for (let editor = 0; editor < 6; editor++) {
+    const session = new AbortController();
+    renders.push(queue.run(() => {
+      active++;
+      most = Math.max(most, active);
+      return new Promise<void>((r) => { finish.push(() => { active--; r(); }); });
+    }, session.signal, () => "pinned"));
+    await flush();
+    session.abort(); // closed mid-render (or before its turn came)
+    await flush();
+  }
+  assert.equal(finish.length, 1, "only the first render has started");
+  assert.equal(queue.loose, 0, "and none was let go of");
+  for (let i = 0; i < 6; i++) { finish[i](); await flush(); }
+  await Promise.all(renders);
+  assert.equal(most, 1, "never two at once");
+});
+
+test("stalled jobs are let go of only within the allowance, and the next waits for one to end", async () => {
+  const queue = new JobQueue(1);
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  const started: string[] = [];
+  const end = new Map<string, () => void>();
+  const job = (name: string) => () => { started.push(name); return new Promise<void>((r) => { end.set(name, r); }); };
+  const a = new AbortController(), b = new AbortController();
+  void queue.run(job("a"), a.signal);
+  void queue.run(job("b"), b.signal);
+  void queue.run(job("c"));
+  await flush();
+  a.abort();
+  await flush();
+  assert.deepEqual(started, ["a", "b"], "the first stalled job is let go of");
+  assert.equal(queue.loose, 1);
+  b.abort();
+  await flush();
+  assert.deepEqual(started, ["a", "b"], "the second keeps its turn: the allowance is used up");
+  end.get("a")!();
+  await flush();
+  assert.deepEqual(started, ["a", "b", "c"], "once the first ends, the second is let go of in its place");
+  assert.equal(queue.loose, 1);
+  end.get("b")!();
+  end.get("c")!();
+  await flush();
+  assert.equal(queue.loose, 0);
+});
+
+test("jobs holding nothing yet are let go of freely, and never use up the allowance", async () => {
+  // Found in re-review: counting a hung read (which holds no media) against the allowance meant
+  // two hung native reads blocked every later add in every editor until restart.
+  const queue = new JobQueue(1);
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  const started: string[] = [];
+  const hung = (name: string) => () => { started.push(name); return new Promise<void>(() => {}); };
+  const a = new AbortController(), b = new AbortController();
+  void queue.run(hung("a"), a.signal, () => "light");
+  void queue.run(hung("b"), b.signal, () => "light");
+  const c = queue.run(async () => { started.push("c"); });
+  await flush();
+  a.abort();
+  await flush();
+  b.abort();
+  await c;
+  assert.deepEqual(started, ["a", "b", "c"]);
+  assert.equal(queue.loose, 0, "neither counted: they hold no media");
+});
+
+test("a picture decode cancelled part way starts nothing more and closes what it holds", async () => {
+  // Found in review: a cancel during the full-size decode was followed by a new resize.
+  const g = globalThis as { createImageBitmap?: unknown };
+  const previous = g.createImageBitmap;
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  const run = async (cancelDuring: "full" | "resize") => {
+    const calls: string[] = [], closed: string[] = [];
+    const abort = new AbortController();
+    g.createImageBitmap = (source: unknown) => {
+      const which = source instanceof Blob ? "full" : "resize";
+      calls.push(which);
+      const bitmap = which === "full" ? { width: 4096, height: 1024 } : { width: 2048, height: 512 };
+      if (which === cancelDuring) abort.abort();
+      return Promise.resolve({ ...bitmap, close: () => closed.push(which) });
+    };
+    await assert.rejects(decodeImageFile(new Blob([png(4096, 1024)]), () => true, abort.signal), { name: "AbortError" });
+    await flush();
+    return { calls, closed };
+  };
+  try {
+    assert.deepEqual(await run("full"), { calls: ["full"], closed: ["full"] }, "no resize after a cancel during the decode");
+    assert.deepEqual(await run("resize"), { calls: ["full", "resize"], closed: ["resize", "full"] }, "both released after a cancel during the resize");
+  } finally { g.createImageBitmap = previous; }
+});
+
 test("an abort skips only that job's turn, never one queued before it", async () => {
   const queue = new JobQueue();
   const flush = () => new Promise((r) => setTimeout(r, 0));
