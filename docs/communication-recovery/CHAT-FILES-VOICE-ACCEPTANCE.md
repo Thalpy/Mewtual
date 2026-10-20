@@ -9,6 +9,61 @@ Private Download resume preserves verified encrypted acquisition progress and it
 allowance across restart. External export uses a fresh destination; continuing a partly written
 external plaintext file at its old offset is not implemented.
 
+## Native event-drain follow-up (20 October)
+
+A final production-lifecycle review found a HIGH missed by the earlier upload tests: the real
+Studio/Settlement event branch waited for UI-session commit, while admitted upload publication
+could own that guard and wait behind a saturated actor event sink. Lock then joined the cycle.
+The new exact-name regression fails before correction (0 passed/1 failed, 0.35s,
+`upload-event-drain-before-exact.log`). The earlier short-name `--exact` invocation matched zero
+tests and is not regression evidence.
+
+Separate commit `985c1f1d` gives Studio event emission a short fence. Generation is captured before any await,
+and current generation/closed state/registry incarnation are checked before synchronous emission.
+Lock revokes voice/mapping/inline-read owners before its first await, crosses and drops the event
+fence, then waits for command publication. A review correction preserved that pre-await revocation
+ordering. Studio still drops its vault lease before any EventSink wait.
+
+The initial 14 upload tests pass in 3.43s (`upload-event-drain-focused-2.log`), including a genuine actor
+Studio event, a saturated sink, admitted publication and actual lock with automatic forwarding
+rather than a manual drain. Tests also cover old authorization after waiting for the short fence
+and actual lock waiting for synchronous emission. The extended real voice bridge test verifies
+call lease, mapping owner and inline cancellation are revoked while both fences remain held;
+it passes (0.36s, `upload-event-drain-revocation.log`). Old-incarnation/locked event checks also
+pass (0.36s, `upload-event-drain-incarnation.log`). Re-review has no remaining findings. The first
+expanded test compile failed on two fixture-only type/capture issues, corrected without dependencies.
+
+The complete root retry passes 3,079 tests, zero failures, 24 existing ignored across 57 summaries
+(`chat-bubbles-root-full-2.log`). Root sources are unchanged by this native-only follow-up. The first
+native follow-up run (`upload-event-drain-native-full.log`) was deliberately stopped, and is not accepted
+validation: re-review found that the event wait preceded native pending-snapshot registration.
+Cancelling that waiting lock could lose its JSON and let a later snapshot-less close succeed.
+The wait now follows snapshot registration and nonresumable state, before the long commit.
+The strengthened valid snapshot test uses actual lock preparation/cancellation and verifies exact
+disk bytes before close; a new malformed case requires an error, no destruction and retained debt.
+Re-review closes that MEDIUM. The final 14 upload cases pass in 6.19s
+(`upload-event-drain-final-focused-2.log`); valid cancelled-lock, malformed cancelled-lock and
+pre-await owner-revocation cases each pass (`upload-event-drain-valid-close-2.log`,
+`upload-event-drain-malformed-close-final.log`, `upload-event-drain-final-revocation.log`).
+The malformed fixture first expected an absent first-run file to error, contrary to the store's
+documented empty-state contract (`upload-event-drain-malformed-close.log`). It now starts with
+valid saved continuity and requires byte-for-byte preservation on refusal. A second short-name
+`--exact` invocation matched zero cases (`upload-event-drain-malformed-close-2.log`); only the
+subsequent fully named run counts. No runtime check or rejection assertion was weakened.
+The fresh complete native run passes 443 library tests in 895.76s plus five ACL cases, zero
+failures (`upload-event-drain-native-full-2.log`, one compiler job/two test workers). Native
+check passes in 43.62s (`upload-event-drain-native-check.log`) and debug rebuild in 1m55s
+(`upload-event-drain-native-build.log`). Actual startup passes with normal OS access and the
+original 20-second deadline (`upload-event-drain-native-startup-2.log`). The first sandboxed
+startup timed out without the setup marker (`upload-event-drain-native-startup.log`); its
+owned leftover Vite processes were identified and stopped before the unchanged retry. No
+source, deadline, assertion or application security setting changed between these attempts.
+The final complete frontend
+passes all 2,254 tests in 84.44s (`upload-event-drain-frontend-full.log`). Its source/scripts/manifests
+remain identical to the image-viewer integration, so the zero-warning Svelte check, production
+build and ten rendered flows below still cover that frontend. The earlier native/build/startup
+evidence below precedes this correction and must not stand in for its final native gates.
+
 ## Automatic chat bubbles and V2 packet capacity (20 October, continuation)
 
 The new native TCP scenario passes twice (81.59s then 78.07s after an additional dependency-closure
@@ -59,6 +114,23 @@ not fixture readiness. Local network diagnostics show the App module request sti
 without an application exception. The successful final run retains the same deadline, actual
 fixture readiness marker and all assertions. Earlier failures remain failed attempts.
 
+Gate7 subsequently advanced to `f87058f0` with the image-viewer changes. Integration commit
+`88b87dfe` preserves those changes and both handover sections; the App merge leaves communication
+handlers unchanged. At `88b87dfe`, `git diff --quiet 10dc3d23 88b87dfe -- Cargo.toml Cargo.lock
+crates bins apps/desktop/src-tauri` passes, so the earlier native/full-root results apply to that
+integration's identical backend sources. The later native event-drain correction has its own gates above.
+The complete merged frontend passes 2,254 tests in 102.20s
+(`chat-bubbles-frontend-lightbox-merge.log`), Svelte check with zero errors/warnings
+(`chat-bubbles-frontend-lightbox-check.log`), production build in 47.64s
+(`chat-bubbles-frontend-lightbox-build.log`) and all ten rendered flows
+(`chat-bubbles-frontend-lightbox-flows-2.log`). The first flow attempt lost its Edge debugger
+during `Runtime.enable`, before application assertions (`chat-bubbles-frontend-lightbox-flows.log`).
+The unchanged retry adds debugger tracing; deadlines, fixture markers and assertions are intact.
+Refreshed native build passes in 1m38s (`chat-bubbles-native-lightbox-build.log`), as does actual
+startup with the original 20-second deadline (`chat-bubbles-native-lightbox-startup.log`).
+Read-only integration review has no findings. The image-viewer's Linux/WebKitGTK, main-thread
+resampling and silent-canvas-failure limits remain documented in HANDOVER.
+
 The merged base disclosed a native streamed-upload/lock race. Separate pushed commit
 [`c4005b89`](https://github.com/Thalpy/Mewtual/commit/c4005b89) retains
 original generation/actor/instance ownership and transfers final publication into an owned worker
@@ -69,7 +141,8 @@ replacement, quota/failure cleanup and persistence lock ordering. Native formatt
 re-review pass. The first compile attempt failed only in the new test helper (unavailable direct
 `futures::poll!` import); the corrected helper uses the standard library without a dependency change.
 Native check, debug build and actual startup subsequently pass as recorded below. The complete
-native suite now also passes; integration into Gate7 remains outstanding.
+native suite at that checkpoint also passed; integration of both native corrections into Gate7
+remains outstanding. Final event-drain validation is recorded above.
 
 The first complete-root attempt (`chat-bubbles-root-full.log`) stopped in the replication library
 with `memory allocation of 1787552 bytes failed`, without a reported test assertion failure.
@@ -85,9 +158,9 @@ passes against that rebuilt executable, with the original 20-second deadline
 It includes the ten upload/lock cases, automatic-notification endpoint receipt, onward channel
 discovery, chat bubbles, indirect files and durable resume. Strict whole-root Clippy passes with
 warnings denied in 1m47s (`chat-bubbles-root-clippy.log`).
-After the competing full suite stopped, the complete root retry began with one build job/four
-test workers (`chat-bubbles-root-full-2.log`). That final result is still pending; do not infer it
-from a prior checkpoint or from the failed first attempt.
+After the competing full suite stopped, the complete root retry passes 3,079 tests with zero
+failures and 24 existing ignored across 57 target summaries (`chat-bubbles-root-full-2.log`, one
+build job/four test workers). This successful result is separate from the failed first attempt.
 
 A read-only design review for the next protected Hello step identified two enablement gates,
 now recorded in [VOICE-NATIVE-RESULTS-NEXT](VOICE-NATIVE-RESULTS-NEXT.md): the existing origin

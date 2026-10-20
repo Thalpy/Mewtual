@@ -1,12 +1,12 @@
 # Chat history across partitions and MLS epochs
 
-Status, 20 October 2026: the prior pushed `a0756821` checkpoint on `chat-update-implementation`
-passed complete suites: root 3,073, native 430+5 and frontend 2,067, alongside lint, build, startup
-and rendered flows. The new automatic three-bubble case passes its focused checks; complete
-application validation for this continuation is in progress. Earlier attempts exposed a Studio setup
-memory error, a file-bridge fixture completion race and four disconnect fixtures that retained
-live transports. Corrected fixtures keep their original assertions; the failed attempts and
-remaining limits are recorded in the acceptance ledger. The communication programme remains open.
+Status, 20 October 2026: current source `985c1f1d` on `chat-update-implementation` passes
+complete suites: root 3,079 (24 existing ignored), native 443+5 and frontend 2,254, alongside
+formatting, strict root Clippy, root dependency checks, builds, actual startup and ten rendered flows.
+The automatic three-bubble case passes focused checks and the complete native suite. The
+[acceptance ledger](CHAT-FILES-VOICE-ACCEPTANCE.md) records exact evidence, intermediate failures
+and the distinction between graceful saved reopen and abrupt-crash custody. The communication
+programme remains open; these chat results do not enable live V2 or production media relay.
 
 ## The ledger and the conversation are different views
 

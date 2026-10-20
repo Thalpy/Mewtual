@@ -2,30 +2,37 @@
 
 ## Where to resume (2026-10-20)
 
-**The communication programme is not finished.** This continuation belongs to
-`chat-update-implementation` (PR48 targets `Gate7`), following pushed code checkpoint `10dc3d23`.
-It was developed in `M:\Git (local)\CatComs\target\communication-atomic-intake-worktree`;
-the branch checkout is `M:\Git (local)\CatComs\target\communication-review-worktree`.
-The prior `a0756821` checkpoint passed root 3,073, native 430+5 and frontend 2,067.
-The current chat-bubble/packet-capacity continuation passes focused checks. The final frontend
-at `10dc3d23` passes all 2,230 cases (two workers, 72.99s), Svelte check (zero errors/warnings),
-production build (1m12s) and all ten rendered Edge flows. The later `fd788d80` Gate7 merge also
-passes 54 focused send/upload-flow cases after correcting one review finding: a refusal on a
-retry cannot erase an earlier unknown send outcome.
-The first root full run stopped in replication with an explicit
-allocation failure; the native check also exhausted allocation, while another session was running
-a full Rust build. These are failed attempts, not green validation. Native upload focus passes
-all ten cases, and the single-job native check retry passes in 4m45s
-(`chat-bubbles-native-check-2.log`). The debug build passes in 11m53s and actual startup passes
-with the original 20-second deadline (`chat-bubbles-native-build.log`,
-`chat-bubbles-native-startup.log`). The complete native suite now passes 438 library tests
-(880.98s) plus five ACL tests (`chat-bubbles-native-full.log`). This includes the upload/lock,
-automatic-notification receipt, onward channel discovery and chat-bubble regressions. Strict
-whole-root Clippy also passes with warnings denied (1m47s, `chat-bubbles-root-clippy.log`).
-After the other full suite stopped, the complete root retry started with one build job and four
-test workers (`chat-bubbles-root-full-2.log`); its final result is still pending.
-Remaining protocol and physical acceptance limits
-stay explicit below.
+**The communication programme is not finished.** Current source `985c1f1d` belongs to
+`chat-update-implementation` (PR48 targets `Gate7`) and includes Gate7's image-viewer changes
+through `f87058f0`, merged at `88b87dfe`. Development checkout:
+`M:\Git (local)\CatComs\target\communication-atomic-intake-worktree`; branch checkout:
+`M:\Git (local)\CatComs\target\communication-review-worktree`.
+
+The separately reviewed native upload/lock fix is `c4005b89`. Its required follow-up,
+`985c1f1d`, removes a production deadlock between admitted publication and the saturated actor
+event queue by using a short Studio-emission fence. Lock preserves immediate detached-owner
+revocation, captures pending continuity before either fence wait and cannot overtake an admitted
+emission or publication. Fourteen upload regressions plus actual cancelled-lock and owner-revocation
+cases pass; malformed continuity preserves prior saved bytes and refuses destruction on retry.
+Read-only re-review has no remaining findings. Gate7 still needs both native corrections integrated.
+
+Final complete suites: root **3,079 passed**, zero failures, 24 existing ignored across 57 summaries;
+native **443 library plus five ACL passed**, zero failures (895.76s for the library); frontend
+**2,254 passed**, zero failures (84.44s). Root crates are unchanged by the native-only follow-up.
+The unchanged frontend also passes Svelte check (zero errors/warnings), production build (47.64s)
+and all ten rendered Edge flows. Strict whole-root Clippy, root/native formatting, ambient gate
+and root dependency policy pass. Native check passes in 43.62s, debug build in 1m55s and actual
+startup passes with the original 20-second deadline. The first sandboxed startup timed out;
+the retry with normal OS access passed against the same binary. These final gates supersede
+the earlier native 438+5/build/startup evidence for this correction.
+
+The [acceptance ledger](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md) records exact logs,
+intermediate failures and coverage limits. The first root run and native check failed allocation;
+the root retry above passed after competing full suites stopped. Earlier browser setup failures,
+the deliberately stopped first event-drain native run and corrected fixture-only failures remain
+recorded as failed/unaccepted attempts. No deadline or production rejection was loosened.
+The separate packaged IPC experiment's dependency audit still fails on its recorded pinned
+advisories; root cargo-deny passing does not clear it.
 
 The main checkout, `M:\Git (local)\CatComs`, remains on `Gate7` and contains
 separate UI/clip-editor work. Preserve that work and continue the communication fixes here.
@@ -849,9 +856,13 @@ mediums and a low. Fixed with regression tests, each confirmed to fail without i
   `chat-bubbles-upload-focused-2.log`) and a clear read-only re-review. It also fixes retired
   uploads leaking staged chunks when a later quota check refused registration. The lost-caller
   test restores the actual saved server and compares the complete uploaded-file projection.
-  Native check now passes in 4m45s with one compiler job after the earlier allocation failure;
-  debug build (11m53s), actual startup and the complete native suite (438 library plus five ACL
-  tests) also pass. The separate Gate7 branch still needs this correction integrated.
+  The reviewed follow-up [`985c1f1d`](https://github.com/Thalpy/Mewtual/commit/985c1f1d)
+  is also required: it separates Studio event emission from the publication guard so an actor
+  behind a saturated event sink cannot deadlock publication and lock. Fourteen upload cases
+  and actual cancelled-lock/owner-revocation regressions pass. The final native suite passes
+  443 library plus five ACL tests; native check, debug build and actual startup also pass above.
+  These gates supersede the earlier 438+5 native results recorded in the acceptance ledger.
+  The separate Gate7 branch still needs both native corrections integrated.
   Do not describe that branch's
   high finding as closed merely because the correction exists in this communication checkout.
 - Follow-ups: limits on added videos' size and length (a lying sample rate can still make one
