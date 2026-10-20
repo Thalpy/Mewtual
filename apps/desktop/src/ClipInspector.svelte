@@ -93,8 +93,11 @@
     <span class="badge" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M2 4.5h8.5v7H2zM10.5 7l3.5-2v6l-3.5-2z"></path></svg></span>
     <span class="name" title={target.name}>{target.name}</span>
     <span class="ve-chip"><i></i><span class="micro">{target.label}</span></span>
-    {@render mute(layer.muted, () => { onlayer({ muted: !layer.muted }); onsettle(); }, target.label)}
-    {@render volume(layer.volume, (v) => onlayer({ volume: v }))}
+    <!-- As for V1: a video with no sound has nothing to mute or turn down. -->
+    {#if target.hasAudio || layer.muted || layer.volume < 1}
+      {@render mute(layer.muted, () => { onlayer({ muted: !layer.muted }); onsettle(); }, target.label)}
+      {@render volume(layer.volume, (v) => onlayer({ volume: v }))}
+    {/if}
     <label class="pair"><span class="micro">size</span>
       <input type="range" min="10" max="100" value={pct(layer.box.w)} disabled={locked} data-field="layer-size" aria-label="Size"
         oninput={(e) => onlayer({ size: num(e) / 100 })} onchange={onsettle} /></label>

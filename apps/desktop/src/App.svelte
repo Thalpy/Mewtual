@@ -10937,7 +10937,9 @@
   //
   // `asIs` (Shift held through the drop or the picker click) skips the editor for the batch.
   // "Post now" in the editor sends the message (or posts the announcement) as soon as that file is
-  // attached; files after it in the batch then attach to the emptied composer as usual.
+  // attached; files after it in the batch then attach to the emptied composer as usual. The batch
+  // waits for that send to settle first: until it does, the send owns the composer, and a file
+  // appended meanwhile would leave the sent text and video behind in the draft beside it.
   async function embedMedia(target: "chat" | "status", items: { file: File; name: string }[], asIs = false) {
     if (items.length === 0 || activeServerId === null) return;
     const review = videoReviewPlan(items.map(({ file }) => file), asIs);
@@ -10981,10 +10983,26 @@
             updateToast(tid, `Attached ${uploadName}`, "ok");
           } else if (!unchanged) {
             updateToast(tid, `Attached ${uploadName}, not sent: the message changed while it uploaded`, "info", 7000);
-          } else if (postFromComposer(target)) {
-            updateToast(tid, `Attached ${uploadName}, sending`, "ok");
           } else {
-            updateToast(tid, `Attached ${uploadName}, not sent yet: press Send when ready`, "info", 7000);
+            // The message as a send puts it back when it fails: trimmed, with its reply target.
+            const unsentForm = () => target === "chat" ? `${replyingTo}\u0000${draft.trim()}` : statusDraft.trim();
+            const message = unsentForm();
+            const posted = postFromComposer(target);
+            if (!posted.started) {
+              updateToast(tid, `Attached ${uploadName}, not sent yet: press Send when ready`, "info", 7000);
+            } else {
+              updateToast(tid, `Attached ${uploadName}, sending`, "ok");
+              // See the header: nothing more attaches until this send lets go of the composer, and
+              // a move away while it ran ends the batch as any other move does.
+              await posted.settled;
+              if (!here()) { abandoned = items.length - i - 1; break; }
+              // A send that started can still end unsent (refused natively, failed and put back,
+              // or handed to the pending-message manager); the composer then still holds exactly
+              // this message. Say so rather than leave "sending" up (found in review).
+              if (unsentForm() === message) {
+                updateToast(tid, `Attached ${uploadName}, not sent yet: press Send when ready`, "info", 7000);
+              }
+            }
           }
         } catch (e) {
           updateToast(tid, `Upload of ${uploadName} failed: ${e}`, "err", 9000);
@@ -11037,19 +11055,23 @@
   function composerState(target: "chat" | "status"): string {
     return target === "chat" ? `${replyingTo}\u0000${draft}` : statusDraft;
   }
-  // Send the composer as its own Send does, and report whether a send actually started. Both
-  // sends set their in-flight flag before their first await, so reading it straight after the call
-  // tells a started send from one their own guards refused (a send already under way, a lock, the
-  // pending-message manager open).
-  function postFromComposer(target: "chat" | "status"): boolean {
+  // Send the composer as its own Send does, and report whether a send actually started, and when
+  // it has settled. Both sends set their in-flight flag before their first await, so reading it
+  // straight after the call tells a started send from one their own guards refused (a send already
+  // under way, a lock, the pending-message manager open). `settled` never rejects: each send reports
+  // its own failures, and the caller only needs to know the composer is free again.
+  // (A named type, not an inline one: video-embed-flow.test.ts runs this function's own text.)
+  type ComposerPost = { started: boolean; settled: Promise<void> };
+  function postFromComposer(target: "chat" | "status"): ComposerPost {
+    const quiet = (run: Promise<void>) => run.then(() => {}, () => {});
     if (target === "chat") {
       const wasSending = sending;
-      void send();
-      return !wasSending && sending;
+      const run = send();
+      return { started: !wasSending && sending, settled: quiet(run) };
     }
     const wasPosting = statusPosting;
-    void postStatus();
-    return !wasPosting && statusPosting;
+    const run = postStatus();
+    return { started: !wasPosting && statusPosting, settled: quiet(run) };
   }
   // One file's way to its upload: through the editor when `position` says it is reviewed, else
   // unchanged. Null means the person chose not to upload it. An edited file takes its container's

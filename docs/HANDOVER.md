@@ -56,6 +56,49 @@ its fix is removed:
   anything soft-clips the clip's own peaks above about -2 dBFS. Expired songs are no longer
   offered.
 
+A second, external adversarial review of the pushed work (`0191581c`) found two highs, five
+mediums and a low. Fixed with regression tests, each confirmed to fail without its fix:
+- **High**: media budgets were asked only after the work: several song rows clicked at once each
+  rendered (and allocated its whole output) in parallel before the bin refused it. Heavy jobs now
+  run one at a time across editors (`JobQueue`), each admitted against the bin first
+  (`MediaBin.room`), and a full bin refuses before anything starts.
+- **Medium**: "post now" inside a multi-file batch could leave the sent text in the next draft.
+  `postFromComposer` now returns `{started, settled}`; the batch waits for the send and stops if
+  the person moves away meanwhile. The "Discard this clip?" question did not hold focus, and Enter
+  on the post button behind it started the export; it now traps Tab, everything behind it is
+  `inert`, and posting is refused while it shows. Song renders, sound decodes and the mix did not
+  stop between steps once cancelled; each now checks before allocating, between loads and before
+  returning. A silent recording with only a sticker needed an audio encoder. A tall timeline
+  (many overlapping bars) pushed the stage and the post button out of the card; it now stops at
+  220 px and scrolls, checked in Edge at 900 x 640 with 24 stacked bars, including an export
+  started while scrolled down.
+- **Low**: a soundless clip could still be muted from the library's layer list, which sent an
+  untouched clip through a re-render.
+- **Design question, done**: a song is checked against the index again when it is loaded and
+  again when the clip is posted, so one that expired while the editor stayed open is not posted.
+- **Re-review of these fixes** (no blocker or high; all fixed with tests, each confirmed to fail
+  without its fix): the expiry check covered only the load, not the post; a job that never
+  settled would have held the shared queue for every later editor (it now lets go when its editor
+  closes); posting while something was still being added dropped it with a false "no more
+  sounds fit" (posting now waits); a file dropped behind the discard question still landed on the
+  clip; a post-now send that started but did not go out still said "sending"; the inspector still
+  offered mute and volume for a soundless second video; a refused emoji leaked its picture. The
+  emoji leak has no test (jsdom has no `OffscreenCanvas`).
+- **Second re-review** (no blocker, high or medium): waiting for pending adds meant one add that
+  never ended disabled posting for good, so the footer now offers "stop adding"; a failed send
+  puts the draft back trimmed, so the "not sent yet" check compares trimmed text; and a cancel
+  while the songs are checked at post now has a test proving no render starts. Its quick check of
+  "stop adding" found one more low, fixed: stopping released the queue during a render (which
+  cannot be interrupted), so a re-add could render beside it; a render now keeps its turn.
+- **Not fixed here, raised with the user**: the other high is native. `finish_file_upload`
+  (`src-tauri/src/lib.rs`) reads the lock state before it takes the uploads mutex, so a lock
+  landing between the two can still publish. It is in the communication session's area.
+- Follow-ups: limits on added videos' size and length (a lying sample rate can still make one
+  export sound window about 120 MB), and the edited file name contract. Known residuals: emoji
+  and built-in sounds skip the queue (small, but not admitted ahead); the previous editor's bin
+  is freed on unmount, so two can be alive for a moment; a post-now batch also waits for the
+  send's conversation refresh before the next review.
+
 Not explained: in headless Edge, Chromium dropped pointer capture mid-drag on the stage (a bare
 test element keeps it). The stage now ignores a lost capture while the button is down and ends
 on any release, so it does not matter there; it has not been seen with a real mouse.

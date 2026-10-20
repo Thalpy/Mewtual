@@ -248,6 +248,38 @@ function failingFactory(mode: "always" | "render") {
   };
 }
 
+test("a cancelled render allocates nothing, and a cancel after the last event is still a cancel", async () => {
+  // Found in review: an already-aborted take with no events, and an abort after the final event,
+  // both resolved successfully, the first after building a full-length context.
+  const { made, createContext } = fakeFactory();
+  const gone = new AbortController();
+  gone.abort();
+  const empty: JamTake = { ...noteTake([]), events: [] };
+  await assert.rejects(renderTakeOffline(empty, { createContext, signal: gone.signal, gridMs: 600_000 }), { name: "AbortError" });
+  assert.equal(made.length, 0, "no ten-minute context was made for it");
+
+  const late = new AbortController();
+  const original = FakeOffline.prototype.startRendering;
+  FakeOffline.prototype.startRendering = async function (this: FakeOffline) {
+    const done = await original.call(this);
+    late.abort(); // after the last stop
+    return done;
+  };
+  try {
+    await assert.rejects(renderTakeOffline(noteTake([0]), { createContext, signal: late.signal }), { name: "AbortError" });
+  } finally {
+    FakeOffline.prototype.startRendering = original;
+  }
+});
+
+test("a render the caller has no room for is refused before anything is allocated", async () => {
+  const { made, createContext } = fakeFactory();
+  const asked: number[] = [];
+  await assert.rejects(renderTakeOffline(noteTake([0]), { createContext, gridMs: 4000, admit: (bytes) => { asked.push(bytes); return false; } }), TakeRenderError);
+  assert.deepEqual(asked, [4 * RATE * 2 * 4], "asked for exactly the output's size");
+  assert.equal(made.length, 0);
+});
+
 test("a synthesis failure while playing rejects instead of returning quieter music", async () => {
   const { made, createContext } = failingFactory("render");
   await assert.rejects(renderTakeOffline(noteTake([0, 500]), { createContext }), TakeRenderError);

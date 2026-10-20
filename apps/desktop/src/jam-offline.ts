@@ -105,7 +105,13 @@ export type TakeRenderOptions = {
   readonly signal?: AbortSignal;
   /** Test seam: the context to render into. */
   readonly createContext?: (channels: number, frames: number, sampleRate: number) => OfflineAudioContext;
+  /** Asked, with the output's size in bytes, before anything is allocated; false refuses the render. */
+  readonly admit?: (bytes: number) => boolean;
 };
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new DOMException("render aborted", "AbortError");
+}
 
 export class TakeRenderError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -127,6 +133,10 @@ export async function renderTakeOffline(take: unknown, options: TakeRenderOption
   const cap = Math.min(TAKE_MAX_DURATION_MS + 10_000, options.maxMs ?? Number.POSITIVE_INFINITY);
   const lengthMs = Math.min(takeLengthMs(plan, options.gridMs), cap);
   const frames = Math.max(RENDER_QUANTUM, Math.ceil(lengthMs * rate / 1000));
+  // Nothing is allocated for a render that is already cancelled, or that the caller has no room
+  // for: the output alone is `frames` stereo float samples, and it is made in one piece.
+  throwIfAborted(options.signal);
+  if (options.admit && !options.admit(frames * 2 * 4)) throw new TakeRenderError("This clip holds as much as it can.");
   const make = options.createContext ?? ((channels, length, sampleRate) => new OfflineAudioContext({ numberOfChannels: channels, length, sampleRate }));
   const offline = make(2, frames, rate);
   let engine: JamEngine;
@@ -138,6 +148,7 @@ export async function renderTakeOffline(take: unknown, options: TakeRenderOption
   }
   try {
     const capability = await engine.prepareArchivalPlayback(plan.take, undefined);
+    throwIfAborted(options.signal);
     const admitted = capability ? engine.archivalPlaybackPlan(capability) : null;
     if (!capability || !admitted) throw new TakeRenderError("This music's instruments could not be prepared.");
     const steps = renderSteps(admitted.events, rate, frames);
@@ -172,6 +183,9 @@ export async function renderTakeOffline(take: unknown, options: TakeRenderOption
       if (failure instanceof TakeRenderError) throw failure;
       throw new TakeRenderError("This music could not be rendered.", { cause: failure });
     }
+    // Cancelled after the last stop (or a take with no stops at all, which never looks): the
+    // render finished, but nobody wants it.
+    throwIfAborted(options.signal);
     return rendered;
   } finally {
     engine.dispose();

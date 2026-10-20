@@ -88,7 +88,7 @@ export const TEXT_COLOURS: readonly { readonly hex: string; readonly name: strin
 export type InspectorTarget =
   | { readonly kind: "overlay"; readonly overlay: Overlay; readonly placement: Placement; readonly name: string }
   | { readonly kind: "audio"; readonly item: AudioItem; readonly name: string; readonly origin: string }
-  | { readonly kind: "layer"; readonly layer: VideoLayer; readonly label: string; readonly name: string; readonly first: boolean; readonly last: boolean }
+  | { readonly kind: "layer"; readonly layer: VideoLayer; readonly label: string; readonly name: string; readonly first: boolean; readonly last: boolean; readonly hasAudio: boolean }
   | { readonly kind: "base"; readonly layer: VideoLayer; readonly name: string; readonly hasAudio: boolean };
 
 /** The word a new text overlay starts with; selected at once so typing replaces it. */

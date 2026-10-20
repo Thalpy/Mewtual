@@ -39,6 +39,10 @@ const image = (name: string) => new File([new Uint8Array(4)], name, { type: "ima
 type Scripted = {
   review?: (file: File, state: State) => Promise<VideoEditorResult>;
   upload?: (file: File, name: string, state: State) => Promise<void>;
+  /** The rest of a started send or post, after it marked itself in flight (App's own waits and
+   * its clear-if-unchanged); resolves when it settles. */
+  send?: (state: State) => Promise<void>;
+  post?: (state: State) => Promise<void>;
 };
 type State = Record<string, unknown> & {
   scope: string; epoch: number; draft: string; statusDraft: string; uploads: Array<[string, string]>;
@@ -85,12 +89,12 @@ function harness(script: Scripted = {}) {
     send: () => {
       if (state.sending) return Promise.resolve();
       state.sending = true; state.sends++; state.sentTexts.push(state.draft);
-      return Promise.resolve().then(() => { state.sending = false; });
+      return (script.send ? script.send(state) : Promise.resolve()).then(() => { state.sending = false; });
     },
     postStatus: () => {
       if (state.statusPosting) return Promise.resolve();
-      state.statusPosting = true; state.statusPosts++;
-      return Promise.resolve().then(() => { state.statusPosting = false; });
+      state.statusPosting = true; state.statusPosts++; state.sentTexts.push(state.statusDraft);
+      return (script.post ? script.post(state) : Promise.resolve()).then(() => { state.statusPosting = false; });
     },
     toast: (text: string) => { state.toasts.push(text); return state.toasts.length; },
     updateToast: (_id: number, text: string) => { state.toasts.push(text); },
@@ -249,6 +253,95 @@ test("post now from the announcement composer posts the announcement", async () 
   assert.equal(state.statusDraft, "![a.mp4](cid:cid1)");
   assert.equal(state.statusPosts, 1);
   assert.equal(state.sends, 0);
+});
+
+/** App's sends keep the composer until their persistence wait is over, then clear it only if it
+ * still holds what was sent (its draft-revision protection). `gate` holds that wait open. */
+function slowSend(field: "draft" | "statusDraft", gate: Promise<void>) {
+  return async (s: State) => {
+    const sent = s[field];
+    await gate;
+    if (s[field] === sent) s[field] = "";
+  };
+}
+async function flush() { for (let i = 0; i < 20; i++) await Promise.resolve(); }
+
+test("post now in a batch sends the video's message, then attaches the next file to the emptied composer", async () => {
+  // Found in review: the batch attached the next file while the send still owned the composer, so
+  // the send's protection kept the draft, and the sent text and video stayed behind beside it.
+  for (const target of ["chat", "status"] as const) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const field = target === "chat" ? "draft" : "statusDraft";
+    const { state, embedMedia } = harness({
+      review: async () => ({ kind: "original", post: true }),
+      ...(target === "chat" ? { send: slowSend(field, gate) } : { post: slowSend(field, gate) }),
+    });
+    state[field] = "look at these";
+    const run = embedMedia(target, items(video("a.mp4"), image("b.png")));
+    await flush();
+    assert.deepEqual(state.sentTexts, ["look at these ![a.mp4](cid:cid1)"], `${target}: one message, the text and the video`);
+    assert.equal(state.uploads.length, 1, `${target}: the image waits while the send owns the composer`);
+    release();
+    await run;
+    assert.equal(state[field], "![b.png](cid:cid2)", `${target}: the next draft holds only the image`);
+  }
+});
+
+test("a post-now send that started but did not go out says so instead of 'sending'", async () => {
+  // Found in review: a send refused natively, or failed and put back, left "sending" on screen.
+  for (const sends of [true, false]) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const { state, embedMedia } = harness({
+      review: async () => ({ kind: "original", post: true }),
+      // Either App's send (clears the draft once sent), or one that ends with the draft put back.
+      send: sends ? slowSend("draft", gate) : async () => { await gate; },
+    });
+    state.draft = "look";
+    const run = embedMedia("chat", items(video("a.mp4")));
+    await flush();
+    release();
+    await run;
+    assert.equal(state.toasts.at(-1), sends ? "Attached a.mp4, sending" : "Attached a.mp4, not sent yet: press Send when ready");
+  }
+});
+
+test("a failed post-now send is told apart even when the draft comes back trimmed", async () => {
+  // Found in re-review: App's send clears the composer, and a failure puts back the TRIMMED text
+  // with its reply target, so a draft that began with a space never matched and stayed "sending".
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const { state, embedMedia } = harness({
+    review: async () => ({ kind: "original", post: true }),
+    send: async (s: State) => {
+      const text = s.draft.trim(), reply = s.replyingTo;
+      s.draft = ""; s.replyingTo = "";
+      await gate;
+      s.draft = text; s.replyingTo = reply;
+    },
+  });
+  state.draft = "  look";
+  state.replyingTo = "m7";
+  const run = embedMedia("chat", items(video("a.mp4")));
+  await flush();
+  release();
+  await run;
+  assert.equal(state.toasts.at(-1), "Attached a.mp4, not sent yet: press Send when ready");
+});
+
+test("a move away while a post-now send runs ends the batch there", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const { state, embedMedia } = harness({ review: async () => ({ kind: "original", post: true }), send: slowSend("draft", gate) });
+  state.draft = "look";
+  const run = embedMedia("chat", items(video("a.mp4"), image("b.png"), image("c.png")));
+  await flush();
+  move(state, "open|1|1:elsewhere");
+  release();
+  await run;
+  assert.equal(state.uploads.length, 1, "nothing more is uploaded for a channel that is no longer on screen");
+  assert.ok(state.toasts.some((t) => /2 files were not attached/.test(t)));
 });
 
 test("an ordinary attach does not send", async () => {

@@ -135,7 +135,8 @@ export function chunkPlacement(start: number, rate: number, length: number, chun
  * seconds in. Null means the source has no sound (a video without an audio track).
  */
 export type LoadedSound = { readonly buffer: AudioBuffer; readonly offset: number } | null;
-export type SoundLoader = (piece: SoundPiece, from: number, length: number) => Promise<LoadedSound>;
+/** Loads one window of a piece's sound. `signal` is the mix's own, so a decoder can stop early. */
+export type SoundLoader = (piece: SoundPiece, from: number, length: number, signal?: AbortSignal) => Promise<LoadedSound>;
 
 export type MixOptions = {
   readonly sampleRate?: number;
@@ -162,8 +163,11 @@ export async function mixClipSound(
   const totalFrames = Math.round(duration * rate);
   const segmentFrames = Math.round(MIX_SEGMENT_SECONDS * rate);
   const curve = softClipCurve();
+  // Checked before every stage that starts new work (each load, each render), not only once a
+  // segment: a cancel during the first of several loads must not start the rest.
+  const stop = () => { if (options.signal?.aborted) throw new DOMException("mix aborted", "AbortError"); };
   for (let first = 0; first < totalFrames; first += segmentFrames) {
-    if (options.signal?.aborted) throw new DOMException("mix aborted", "AbortError");
+    stop();
     const frames = Math.min(segmentFrames, totalFrames - first);
     // Frame-exact segment edges, so consecutive segments tile the output with no gap or overlap.
     const start = first / rate, end = (first + frames) / rate;
@@ -172,7 +176,8 @@ export async function mixClipSound(
     shaper.curve = curve;
     shaper.connect(context.destination);
     for (const windowed of piecesInWindow(pieces, start, end)) {
-      const sound = await load(windowed.piece, windowed.from, windowed.length);
+      const sound = await load(windowed.piece, windowed.from, windowed.length, options.signal);
+      stop();
       if (!sound) continue;
       const source = context.createBufferSource();
       source.buffer = sound.buffer;
@@ -191,7 +196,10 @@ export async function mixClipSound(
       source.connect(gain).connect(shaper);
       source.start(windowed.when, sound.offset, windowed.length);
     }
-    await onSegment(await context.startRendering());
+    stop();
+    const rendered = await context.startRendering();
+    stop();
+    await onSegment(rendered);
   }
   return true;
 }

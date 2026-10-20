@@ -37,7 +37,8 @@
     hasStudio: boolean;
     /** Ids of sounds and songs already on the clip, shown ticked. */
     onClip: ReadonlySet<string>;
-    layers: readonly { id: string; label: string; name: string; muted: boolean; detail: string }[];
+    /** `silent`: the video has no sound, so there is nothing to mute (the button is disabled). */
+    layers: readonly { id: string; label: string; name: string; muted: boolean; silent: boolean; detail: string }[];
     layersFull: boolean;
     /** The sound currently auditioned, by key, so its button can stop it. */
     auditioning: string | null;
@@ -244,7 +245,9 @@
         <div class="row tall">
           <span class="layer-tag">{layer.label}</span>
           <span class="row-main"><span class="row-name" title={layer.name}>{layer.name}</span><span class="row-sub">{layer.detail}</span></span>
-          <button type="button" class="st-tool sm ol" class:on={layer.muted} aria-pressed={layer.muted} title={layer.muted ? "Unmute layer" : "Mute layer"} aria-label={`${layer.muted ? "Unmute" : "Mute"} ${layer.label}`} onclick={() => onlayermute(layer.id)}>
+          <button type="button" class="st-tool sm ol" class:on={layer.muted} aria-pressed={layer.muted} data-layer-mute={layer.label}
+            title={layer.muted ? "Unmute layer" : layer.silent ? "This video has no sound" : "Mute layer"} aria-label={`${layer.muted ? "Unmute" : "Mute"} ${layer.label}`}
+            disabled={layer.silent && !layer.muted} onclick={() => onlayermute(layer.id)}>
             {#if layer.muted}<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 6h2.5l3.5-3v10L5 10H2.5z"></path><path d="M11 6l3 4M14 6l-3 4"></path></svg>
             {:else}<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 6h2.5l3.5-3v10L5 10H2.5z"></path><path d="M11 5.5a3.5 3.5 0 0 1 0 5M12.8 3.8a6 6 0 0 1 0 8.4"></path></svg>{/if}
           </button>

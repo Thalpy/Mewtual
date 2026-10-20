@@ -813,6 +813,27 @@ test("muting the clip's own sound re-renders it; muting and unmuting again posts
   } finally { await back.destroy(); }
 });
 
+test("a clip with no sound cannot be muted from the library either, so untouched it still posts its original", async () => {
+  // Found in review: the V1 lane's mute was disabled for a soundless clip, but the library's layer
+  // list still muted it, and the untouched clip then went through a full re-render.
+  const h = await harness({ probe: async () => ({ ...READY, hasAudio: false }) });
+  try {
+    h.target.querySelector<HTMLButtonElement>('[data-tab="video"]')!.click();
+    flushSync();
+    const mute = h.target.querySelector<HTMLButtonElement>('[data-layer-mute="V1"]')!;
+    assert.equal(mute.disabled, true);
+    assert.equal(mute.title, "This video has no sound");
+    // The handler refuses too, whatever reaches it.
+    mute.disabled = false;
+    mute.click();
+    flushSync();
+    assert.equal(h.action("mute-v1")!.getAttribute("aria-pressed"), "false");
+    h.click("upload");
+    assert.deepEqual(h.results, [{ kind: "original" }]);
+    assert.equal(h.compositions.length + h.exports.length, 0, "no re-render");
+  } finally { await h.destroy(); }
+});
+
 test("the Music tab lists the channel's Studio songs and shows a song's refusal in its own words", async () => {
   let listed = 0;
   const music: ClipMusicSource = {
@@ -832,6 +853,41 @@ test("the Music tab lists the channel's Studio songs and shows a song's refusal 
     assert.match(lib(), /Resolve score conflicts before playback\/export/);
     assert.deepEqual(h.bars(), [], "a song that cannot play as written is not added as something else");
   } finally { await h.destroy(); }
+});
+
+test("songs clicked in a row are read and rendered one at a time, and a closed editor's turn is skipped", async () => {
+  // Found in review: every clicked row read and rendered at once, each render allocating its whole
+  // output before the bin's budget was asked.
+  const loads: string[] = [];
+  const gates = new Map<string, () => void>();
+  const music: ClipMusicSource = {
+    list: async () => ["s1", "s2", "s3"].map((id) => ({ id, title: id })),
+    load: (id) => {
+      loads.push(id);
+      return new Promise((resolve) => { gates.set(id, () => resolve({ take: null, gridMs: 0 })); });
+    },
+  };
+  const h = await harness({ music });
+  try {
+    h.target.querySelector<HTMLButtonElement>('[data-tab="music"]')!.click();
+    await settle();
+    for (const id of ["s1", "s2", "s3"]) h.target.querySelector<HTMLButtonElement>(`[data-add-song="${id}"]`)!.click();
+    await settle();
+    assert.deepEqual(loads, ["s1"], "the second waits for the first");
+    gates.get("s1")!();
+    await settle();
+    assert.deepEqual(loads, ["s1", "s2"], "then takes its turn");
+    assert.match(h.target.querySelector(".lib")!.textContent ?? "", /This music could not be read/, "the first one's outcome shows");
+    h.click("close");
+    await settle();
+    assert.deepEqual(h.results, [{ kind: "skip" }]);
+    gates.get("s2")!();
+    await settle();
+    assert.deepEqual(loads, ["s1", "s2"], "the closed editor's last song is never read");
+  } finally {
+    for (const open of gates.values()) open();
+    await h.destroy();
+  }
 });
 
 test("undo is refused while recording, and an edit mid-recording drops the live drag and its trail", async () => {
@@ -878,6 +934,33 @@ test("a release anywhere ends a stage drag, even one the stage never hears", asy
   } finally { await h.destroy(); }
 });
 
+test("while the discard question is up, Tab stays in it and nothing behind it can post", async () => {
+  // Found in review: Shift+Tab from "keep editing" reached the post button behind the question,
+  // and Enter there started the export while the question was still showing.
+  const h = await harness({ context: "chat" });
+  try {
+    h.key("o"); // an edit, so closing asks
+    h.click("close");
+    await settle();
+    const keep = h.action("keep-editing")!, discard = h.action("discard")!;
+    assert.equal(document.activeElement, keep);
+    keep.dispatchEvent(new w.KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true, cancelable: true }));
+    assert.equal(document.activeElement, discard, "Shift+Tab wraps within the question");
+    discard.dispatchEvent(new w.KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+    assert.equal(document.activeElement, keep, "and so does Tab");
+    for (const section of ["header", ".middle", ".transport", ".timeline", "footer"]) {
+      assert.equal(h.target.querySelector<HTMLElement>(section)!.inert, true, `${section} is inert behind the question`);
+    }
+    h.action("upload")!.click();
+    flushSync();
+    await settle();
+    assert.equal(h.exports.length + h.compositions.length, 0, "no export started");
+    assert.equal(h.results.length, 0);
+    h.click("keep-editing");
+    assert.equal(h.target.querySelector<HTMLElement>("footer")!.inert, false, "the editor is live again");
+  } finally { await h.destroy(); }
+});
+
 test("a passed push-to-talk key still types into the text field", async () => {
   // Found in review: with push-to-talk on Space (or V), the editor prevented the key everywhere,
   // so a text overlay could not hold a space (or a v) during a call.
@@ -918,6 +1001,231 @@ test("a song list that cannot be read is asked once, then waits for the person t
     await settle();
     assert.match(empty.target.querySelector(".lib")!.textContent ?? "", /none yet/, "an empty Studio says so, it is not loading forever");
   } finally { await empty.destroy(); }
+});
+
+/**
+ * Just enough of an `OfflineAudioContext` for `renderTakeOffline` to render a take with no notes:
+ * every node is inert and the render is silence of the asked length. jsdom has none of Web Audio.
+ * `gate`, when given, holds every render open until it resolves.
+ */
+function installSilentOffline(gate: Promise<void> = Promise.resolve()): () => void {
+  const g = globalThis as { OfflineAudioContext?: unknown };
+  const previous = g.OfflineAudioContext;
+  const node = () => ({ connect: (to: unknown) => to, disconnect() {} });
+  const param = () => ({ value: 0, setValueAtTime() {}, linearRampToValueAtTime() {}, exponentialRampToValueAtTime() {}, setTargetAtTime() {}, cancelScheduledValues() {}, cancelAndHoldAtTime() {} });
+  const source = () => ({ ...node(), start() {}, stop() {}, onended: null });
+  g.OfflineAudioContext = class {
+    readonly length: number;
+    readonly sampleRate: number;
+    readonly destination = node();
+    readonly currentTime = 0;
+    readonly state = "suspended";
+    constructor(o: { length: number; sampleRate: number }) { this.length = o.length; this.sampleRate = o.sampleRate; }
+    createGain() { return { ...node(), gain: param() }; }
+    createBiquadFilter() { return { ...node(), type: "lowpass", frequency: param(), Q: param(), detune: param(), gain: param() }; }
+    createDelay() { return { ...node(), delayTime: param() }; }
+    createDynamicsCompressor() { return { ...node(), threshold: param(), knee: param(), ratio: param(), attack: param(), release: param() }; }
+    createWaveShaper() { return { ...node(), curve: null, oversample: "none" }; }
+    createStereoPanner() { return { ...node(), pan: param() }; }
+    createConstantSource() { return { ...source(), offset: param() }; }
+    createOscillator() { return { ...source(), type: "sine", frequency: param(), detune: param() }; }
+    createBufferSource() { return { ...source(), buffer: null, loop: false, playbackRate: param() }; }
+    createBuffer(_channels: number, length: number) { const data = new Float32Array(length); return { length, getChannelData: () => data }; }
+    suspend() { return Promise.resolve(); }
+    resume() { return Promise.resolve(); }
+    async startRendering() {
+      await gate;
+      return { length: this.length, sampleRate: this.sampleRate, numberOfChannels: 2, duration: this.length / this.sampleRate };
+    }
+  };
+  return () => { g.OfflineAudioContext = previous; };
+}
+const SILENT_TAKE = {
+  v: 1, group: "group", call: "call", met: { bpm: 120, bpb: 4 }, parts: ["author"], lanes: [{ src: 0, sn: "a".repeat(16) }], patches: [], events: [],
+};
+
+test("posting waits for a song still being added, and a song that expired meanwhile stops the post", async () => {
+  // Found in review: posting while a song was still rendering dropped it with a false "no more
+  // sounds fit"; and a song was checked only when added, so one that expired with the editor
+  // open was still posted.
+  const restore = installSilentOffline();
+  const run = async (expires: boolean) => {
+    let offered = true;
+    let release = () => {};
+    const music: ClipMusicSource = {
+      list: async () => (offered ? [{ id: "s1", title: "Night Drive" }] : []),
+      load: () => new Promise((resolve) => { release = () => resolve({ take: SILENT_TAKE, gridMs: 2000 }); }),
+    };
+    const h = await harness({ music, context: "chat" });
+    try {
+      h.target.querySelector<HTMLButtonElement>('[data-tab="music"]')!.click();
+      await settle();
+      h.target.querySelector<HTMLButtonElement>('[data-add-song="s1"]')!.click();
+      await settle();
+      assert.equal(h.action("upload")!.disabled, true, "not while the song is still being added");
+      assert.equal(h.action("upload")!.title, "Still adding to the clip");
+      release();
+      for (let i = 0; i < 3; i++) await settle();
+      assert.equal(h.action("upload")!.disabled, false);
+      assert.equal(h.bars().filter((b) => b.startsWith("audio:")).length, 1, "the song is on the clip");
+      if (expires) offered = false;
+      h.click("upload");
+      for (let i = 0; i < 3; i++) await settle();
+      return { compositions: h.compositions.length, results: h.results.map((r) => r.kind), alert: h.target.querySelector(".alert")?.textContent ?? "" };
+    } finally { await h.destroy(); }
+  };
+  try {
+    assert.deepEqual(await run(false), { compositions: 1, results: ["edited"], alert: "" }, "still offered: it posts");
+    const gone = await run(true);
+    assert.equal(gone.compositions, 0, "nothing was rendered");
+    assert.deepEqual(gone.results, []);
+    assert.match(gone.alert, /A song in this clip is not here anymore/);
+  } finally { restore(); }
+});
+
+test("an add that never finishes can be stopped, and posting works again", async () => {
+  // Found in re-review: posting waits for pending adds, so one decode or probe that never ended
+  // disabled the post for good, and the only way out threw the clip away.
+  let answer: ((probe: VideoProbe) => void) | null = null;
+  const h = await harness({ probe: (f: Blob) => (f instanceof File && f.name === "second.mp4" ? new Promise<VideoProbe>((r) => { answer = r; }) : Promise.resolve(READY)) });
+  try {
+    h.key("o"); // something to post
+    const drop = new w.Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", { value: { types: ["Files"], files: [new File(["x"], "second.mp4", { type: "video/mp4" })] } });
+    h.target.querySelector('[role="dialog"]')!.dispatchEvent(drop);
+    await settle();
+    assert.equal(h.action("upload")!.disabled, true, "waiting for the video");
+    h.click("stop-adding");
+    assert.equal(h.action("upload")!.disabled, false, "posting works again");
+    assert.equal(h.action("stop-adding"), null);
+    answer!(READY);
+    for (let i = 0; i < 3; i++) await settle();
+    assert.deepEqual(h.bars().filter((b) => b.startsWith("layer:")), [], "the video given up on is not added when it finally answers");
+    h.click("upload");
+    await settle();
+    assert.equal(h.exports.length, 1, "and the clip posts");
+  } finally { await h.destroy(); }
+});
+
+test("stopping a song still loading frees its row and the queue for the next one", async () => {
+  const loads: string[] = [];
+  const gates = new Map<string, () => void>();
+  const music: ClipMusicSource = {
+    list: async () => ["s1", "s2"].map((id) => ({ id, title: id })),
+    load: (id) => {
+      loads.push(id);
+      return new Promise((resolve) => { gates.set(id, () => resolve({ take: null, gridMs: 0 })); });
+    },
+  };
+  const h = await harness({ music });
+  try {
+    h.target.querySelector<HTMLButtonElement>('[data-tab="music"]')!.click();
+    await settle();
+    h.target.querySelector<HTMLButtonElement>('[data-add-song="s1"]')!.click();
+    await settle();
+    assert.equal(h.target.querySelector<HTMLButtonElement>('[data-add-song="s1"]')!.disabled, true, "rendering");
+    h.click("stop-adding");
+    assert.equal(h.target.querySelector<HTMLButtonElement>('[data-add-song="s1"]')!.disabled, false, "the row is free again");
+    h.target.querySelector<HTMLButtonElement>('[data-add-song="s2"]')!.click();
+    await settle();
+    assert.deepEqual(loads, ["s1", "s2"], "the stuck song no longer holds the queue");
+    gates.get("s1")!();
+    await settle();
+    assert.doesNotMatch(h.target.querySelector(".lib")!.textContent ?? "", /could not be read.*could not be read/s, "the stopped song reports nothing");
+  } finally {
+    for (const open of gates.values()) open();
+    await h.destroy();
+  }
+});
+
+test("stopping a song mid-render does not let another render start beside it", async () => {
+  // Found in re-review: "stop adding" also let go of the queue during a render, which cannot be
+  // interrupted, so stopping and adding again ran two renders (and two outputs) at once.
+  let open = () => {};
+  const restore = installSilentOffline(new Promise<void>((r) => { open = r; }));
+  const loads: string[] = [];
+  const music: ClipMusicSource = {
+    list: async () => [{ id: "s1", title: "Night Drive" }],
+    load: async (id) => { loads.push(id); return { take: SILENT_TAKE, gridMs: 2000 }; },
+  };
+  const h = await harness({ music });
+  try {
+    h.target.querySelector<HTMLButtonElement>('[data-tab="music"]')!.click();
+    await settle();
+    h.target.querySelector<HTMLButtonElement>('[data-add-song="s1"]')!.click();
+    await settle();
+    assert.deepEqual(loads, ["s1"], "rendering");
+    h.click("stop-adding");
+    assert.equal(h.action("upload")!.disabled, false, "posting does not wait for it");
+    h.target.querySelector<HTMLButtonElement>('[data-add-song="s1"]')!.click();
+    await settle();
+    assert.deepEqual(loads, ["s1"], "the second waits for the render still running");
+    open();
+    for (let i = 0; i < 4; i++) await settle();
+    assert.deepEqual(loads, ["s1", "s1"], "then takes its turn");
+    assert.equal(h.bars().filter((b) => b.startsWith("audio:")).length, 1, "only the second lands on the clip");
+  } finally { open(); restore(); await h.destroy(); }
+});
+
+test("a cancel while the songs are checked at post starts no render", async () => {
+  // Found missing in re-review: nothing pinned the cancel check between the list and the render.
+  const restore = installSilentOffline();
+  let release = () => {};
+  let holdList = false;
+  const music: ClipMusicSource = {
+    list: () => (holdList ? new Promise((resolve) => { release = () => resolve([{ id: "s1", title: "Night Drive" }]); }) : Promise.resolve([{ id: "s1", title: "Night Drive" }])),
+    load: async () => ({ take: SILENT_TAKE, gridMs: 2000 }),
+  };
+  const h = await harness({ music });
+  try {
+    h.target.querySelector<HTMLButtonElement>('[data-tab="music"]')!.click();
+    await settle();
+    h.target.querySelector<HTMLButtonElement>('[data-add-song="s1"]')!.click();
+    for (let i = 0; i < 3; i++) await settle();
+    holdList = true;
+    h.click("upload");
+    await settle();
+    assert.equal(h.state(), "exporting");
+    h.click("cancel-export");
+    release();
+    for (let i = 0; i < 3; i++) await settle();
+    assert.equal(h.compositions.length, 0, "the composer never started");
+    assert.equal(h.state(), "ready");
+    assert.deepEqual(h.results, []);
+  } finally { restore(); await h.destroy(); }
+});
+
+test("a file dropped while the discard question is up does not change the clip behind it", async () => {
+  let probes = 0;
+  const h = await harness({ probe: async () => { probes++; return READY; } });
+  try {
+    h.key("o");
+    h.click("close");
+    await settle();
+    assert.ok(h.action("keep-editing"), "the question is up");
+    const drop = new w.Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", { value: { types: ["Files"], files: [new File(["x"], "second.mp4", { type: "video/mp4" })] } });
+    h.target.querySelector(".ve-confirm")!.dispatchEvent(drop);
+    for (let i = 0; i < 3; i++) await settle();
+    assert.equal(drop.defaultPrevented, true, "still kept from the page behind");
+    assert.equal(probes, 1, "only the clip itself was ever probed");
+    assert.deepEqual(h.bars(), []);
+  } finally { await h.destroy(); }
+});
+
+test("an added video with no sound offers no mute or volume anywhere", async () => {
+  const h = await harness({ probe: async () => ({ ...READY, hasAudio: false }) });
+  try {
+    const drop = new w.Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", { value: { types: ["Files"], files: [new File(["x"], "second.mp4", { type: "video/mp4" })] } });
+    h.target.querySelector('[role="dialog"]')!.dispatchEvent(drop);
+    for (let i = 0; i < 3; i++) await settle();
+    assert.equal(h.inspector(), "layer", "the new video is selected");
+    assert.equal(h.target.querySelector('[data-inspector] [data-action="mute-item"]'), null, "no mute in the inspector");
+    assert.equal(h.field("volume"), null, "and no volume");
+    const lane = [...h.target.querySelectorAll<HTMLButtonElement>("[data-lane-head] button")].find((b) => b.getAttribute("aria-label") === "Mute V2")!;
+    assert.equal(lane.disabled, true, "its lane's mute is off too");
+  } finally { await h.destroy(); }
 });
 
 test("a dropped file that cannot go on a clip is refused in the footer, and the drop stays in the editor", async () => {

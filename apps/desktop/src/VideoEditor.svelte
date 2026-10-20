@@ -1,4 +1,12 @@
 <script module lang="ts">
+  import { JobQueue } from "./clip-media.ts";
+
+  /**
+   * Song renders and picture and sound decodes, one at a time across every editor (see
+   * `JobQueue`). Each can hold hundreds of megabytes while it runs.
+   */
+  const heavyJobs = new JobQueue();
+
   /**
    * Where focus goes back to when the editing session ends, shared across instances. Reviews are
    * queued, and the next editor mounts while the previous one is still in the page, so the next
@@ -66,12 +74,14 @@
   import { layerTargets, needsResync, soundStarts } from "./clip-preview.ts";
   import { LANE, axisSpan, keyframeMarks, laneLayout, layerAxisSpan, outputDelta, outputToAxis, packRows, thinMarks } from "./clip-timeline.ts";
   import {
-    MediaBin, MediaRefusal, decodeImageFile, decodeSoundFile, emojiImage, fileRefusal, fileRole, mediaName, readTakeFile,
+    BIN_FULL, MediaBin, MediaRefusal, decodeImageFile, decodeSoundFile, emojiImage, fileRefusal, fileRole, mediaName,
+    readTakeFile,
   } from "./clip-media.ts";
   import { renderSfx, sfxRecipe } from "./clip-sfx.ts";
   import { CLIP_SAMPLE_RATE, TakeRenderError, renderTakeOffline } from "./jam-offline.ts";
   import { collectTextEffectCss, isAnimated, prepareText, snapshotImage, type PreparedText } from "./text-fx-raster.ts";
-  import type { ClipMusicSource, ClipSong } from "./clip-music.ts";
+  import { checkSongsOffered, songKey, songOfKey, type ClipMusicSource, type ClipSong } from "./clip-music.ts";
+  import { soundPieces } from "./clip-audio.ts";
   import { carriesFiles } from "./drop-guard.ts";
   import {
     NEW_TEXT, editorWords, type ClipSelection, type FileIntent, type InspectorTarget, type LibraryTab, type SongState,
@@ -160,6 +170,7 @@
   /** The "Discard this clip?" question is showing (see `closeRequest`). */
   let confirmingDiscard = $state(false);
   let keepButton = $state<HTMLButtonElement | null>(null);
+  let confirmBox = $state<HTMLDivElement | null>(null);
   /** Filmstrip tiles as they arrive; `null` until a tile is decoded. */
   let tiles = $state.raw<(CanvasImageSource | null)[]>([]);
   let libraryOpen = $state(true);
@@ -181,6 +192,12 @@
   let musicFileIds = $state.raw<string[]>([]);
   let soundFileIds = $state.raw<string[]>([]);
   let auditioning = $state<string | null>(null);
+  /** This editor's adds still pending (see `counting`); posting waits for them. */
+  let adding = $state(0);
+  /** Bumped by "stop adding" (`stopAdding`); adds started before it drop what they were making. */
+  let addEpoch = 0;
+  /** Aborted (then replaced) by "stop adding": stops the renders and decodes of the adds it ends. */
+  let addsAbort = new AbortController();
   /** The stage's size in CSS px (a ResizeObserver keeps it). */
   let stageSize = $state({ w: 0, h: 0 });
   /** While a drag is being recorded: its samples so far, and where the overlay is right now. */
@@ -193,6 +210,7 @@
   let card = $state<HTMLDivElement | null>(null);
   let videoEl = $state<HTMLVideoElement | null>(null);
   let trackEl = $state<HTMLDivElement | null>(null);
+  let timelineEl = $state<HTMLDivElement | null>(null);
   let stageEl = $state<HTMLDivElement | null>(null);
   let canvasEl = $state<HTMLCanvasElement | null>(null);
   /** One hidden element per added video, by layer id; they play under the base video's clock.
@@ -292,11 +310,14 @@
     || doc.overlays.length > 0 || doc.audio.length > 0 || doc.layers.length > 1));
   /** Whether the clip itself has sound to mute. Muting a silent clip would only force a re-render. */
   const baseHasAudio = $derived.by(() => { void mediaRev; return bin?.video("base")?.hasAudio ?? false; });
-  const uploadDisabled = $derived(!editing || draining || recording || kept.length === 0 || (untouched && originalTooBig));
+  // Not while something is still being added: it would finish after the post began and be left
+  // out of the clip (found in review; the queue can keep a job waiting for a while).
+  const uploadDisabled = $derived(!editing || draining || recording || adding > 0 || kept.length === 0 || (untouched && originalTooBig));
   const uploadTitle = $derived(
     kept.length === 0 ? "Nothing is kept"
       : draining ? "Finishing the cancelled export"
       : recording ? "Stop recording first"
+      : adding > 0 ? "Still adding to the clip"
       : untouched && originalTooBig ? `Over this server's ${formatBytes(capBytes)} limit: trim it to fit`
       : untouched ? `${words.Verb} the original video`
       : `${words.Verb} the edited video (re-encoded)`,
@@ -334,7 +355,7 @@
     if (selLayerIndex > 0) {
       const layer = doc.layers[selLayerIndex];
       return { kind: "layer", layer, label: `V${selLayerIndex + 1}`, name: bin?.video(layer.source)?.name ?? "video",
-        first: selLayerIndex === 1, last: selLayerIndex === doc.layers.length - 1 };
+        first: selLayerIndex === 1, last: selLayerIndex === doc.layers.length - 1, hasAudio: hasSound(layer.source) };
     }
     return { kind: "base", layer: baseLayer(doc), name: mediaName(file.name), hasAudio: baseHasAudio };
   });
@@ -353,7 +374,7 @@
   const libLayers = $derived.by(() => {
     void mediaRev;
     return (doc?.layers ?? []).map((l, i) => ({
-      id: l.id, label: `V${i + 1}`, muted: l.muted,
+      id: l.id, label: `V${i + 1}`, muted: l.muted, silent: !hasSound(l.source),
       name: i === 0 ? mediaName(file.name) : bin?.video(l.source)?.name ?? "video",
       detail: i === 0 ? `base ${formatClock(keptSeconds)}` : `pip ${formatClock(keptDuration(l.edit))}`,
     }));
@@ -437,7 +458,10 @@
    */
   function keepFocus(e: FocusEvent) {
     const target = e.target as Element | null;
-    if (finished || destroyed || !root || !card || !target || root.contains(target)) return;
+    if (finished || destroyed || !root || !card || !target) return;
+    // The discard question holds focus inside itself the way the editor holds it inside the card.
+    if (confirmingDiscard && root.contains(target) && !confirmBox?.contains(target)) { keepButton?.focus(); return; }
+    if (root.contains(target)) return;
     if (target.closest?.("[data-video-editor]")) return;
     card.focus();
   }
@@ -452,6 +476,10 @@
     setTimeout(() => {
       if (finished || destroyed || !root || !card) return;
       const now = document.activeElement;
+      if (confirmingDiscard) {
+        if (!now || !confirmBox?.contains(now)) keepButton?.focus();
+        return;
+      }
       if (now && now !== document.body && (root.contains(now) || now.closest?.("[data-video-editor]"))) return;
       card.focus();
     }, 0);
@@ -595,11 +623,13 @@
     if (!bin || !editing) return;
     let m = bin.byKey(`emoji:${glyph}`);
     if (!m) {
+      const gone = addGone();
       try {
-        const pic = await emojiImage(glyph);
-        if (!bin) return;
+        const pic = await counting(emojiImage(glyph));
+        // A drawn emoji not kept is released at once (found in review: both refusals leaked it).
+        if (!bin || gone()) { pic.image.close(); return; }
         const id = bin.add({ kind: "image", name, image: pic.image, width: pic.width, height: pic.height, origin: "emoji", key: `emoji:${glyph}` });
-        if (!id) { notify("This clip holds as much as it can."); return; }
+        if (!id) { pic.image.close(); notify(BIN_FULL); return; }
         m = bin.get(id); mediaRev++;
       } catch { notify("Emoji can't be drawn in this window."); return; }
     }
@@ -628,11 +658,12 @@
     const key = `sfx:${id}`;
     let m = bin.byKey(key);
     if (!m) {
+      const gone = addGone();
       try {
-        const buffer = await sfxBuffer(id);
-        if (!bin) return;
+        const buffer = await counting(sfxBuffer(id));
+        if (!bin || gone()) return;
         const added = bin.add({ kind: "sound", name: sfxRecipe(id)?.name ?? id, buffer, origin: "builtin", key });
-        if (!added) { notify("This clip holds as much as it can."); return; }
+        if (!added) { notify(BIN_FULL); return; }
         m = bin.get(added); mediaRev++;
       } catch { notify("Sounds can't be made in this window."); return; }
     }
@@ -670,22 +701,89 @@
     }
   }
 
+  /**
+   * Taken when an add starts: whether it has since been given up, because the editor answered or
+   * the person pressed "stop adding". A given-up add drops whatever it was making.
+   */
+  function addGone(): () => boolean {
+    const epoch = addEpoch;
+    return () => finished || epoch !== addEpoch;
+  }
+
+  /** The admission check every heavy job makes: room in the bin, for an add not given up. */
+  function admitFor(gone: () => boolean): (bytes: number) => boolean {
+    return (bytes) => !gone() && !!bin?.room(bytes);
+  }
+
+  /** Counts `work` in `adding` until it settles (or is given up), so posting waits for it. */
+  async function counting<T>(work: Promise<T>): Promise<T> {
+    const epoch = addEpoch;
+    adding++;
+    try { return await work; } finally { if (epoch === addEpoch) adding--; }
+  }
+
+  /**
+   * Run a heavy job in its turn (`heavyJobs`), counted in `adding`. The job's `signal` aborts when
+   * the editor answers or the person stops adding.
+   *
+   * What lets go of the queue is narrower. The editor answering always does (see `JobQueue`).
+   * "Stop adding" does only until the job calls `rendering()` just before an offline render: a
+   * read or a decode can hang, but a render cannot be interrupted and always ends on its own,
+   * holding its whole output until then. Letting go during one would let the next render run
+   * beside it, and stopping and re-adding could stack them (found in re-review). Posting does not
+   * wait for it either way: "stop adding" uncounts it at once.
+   */
+  function heavy<T>(job: (signal: AbortSignal, rendering: () => void) => Promise<T>): Promise<T> {
+    const stop = addsAbort.signal;
+    const signal = AbortSignal.any([sessionAbort.signal, stop]);
+    let inRender = false;
+    const beforeRender = new AbortController();
+    if (stop.aborted) beforeRender.abort();
+    else stop.addEventListener("abort", () => { if (!inRender) beforeRender.abort(); }, { once: true });
+    const release = AbortSignal.any([sessionAbort.signal, beforeRender.signal]);
+    return counting(heavyJobs.run(() => job(signal, () => { inRender = true; }), release));
+  }
+
+  /**
+   * "Stop adding": give up on every add still pending. Posting is possible again at once, and each
+   * of those adds drops its result if it ever arrives. Without this, one decode that never ended
+   * disabled posting for good, and the only way out lost the clip (found in re-review).
+   */
+  function stopAdding() {
+    addEpoch++;
+    adding = 0;
+    addsAbort.abort();
+    addsAbort = new AbortController();
+    // Song rows still showing "rendering" go back to plain rows.
+    songState = Object.fromEntries(Object.entries(songState).filter(([, s]) => s.state !== "rendering"));
+  }
+
   async function addSong(song: ClipSong) {
-    if (!bin || !music || !editing) return;
-    const key = `studio:${song.id}`;
+    const source = music;
+    if (!bin || !source || !editing) return;
+    const key = songKey(song.id);
     let m = bin.byKey(key);
     if (!m) {
+      const gone = addGone();
+      const fail = (message: string) => { if (!gone()) songState = { ...songState, [song.id]: { state: "error", message } }; };
+      // Refused before anything is read or rendered when nothing more can be kept.
+      if (bin.full) { fail(BIN_FULL); return; }
       songState = { ...songState, [song.id]: { state: "rendering" } };
-      const fail = (message: string) => { if (!finished) songState = { ...songState, [song.id]: { state: "error", message } }; };
       try {
-        const playback = await music.load(song.id);
-        // Closed, rescoped or locked meanwhile: other members' song content is not rendered for
-        // an editor that has already answered.
-        if (finished) return;
-        const buffer = await renderTakeOffline(playback.take, { gridMs: playback.gridMs, maxMs: musicCapMs(), signal: sessionAbort.signal });
-        if (finished || !bin) return;
+        // The read and the render wait their turn together: several rows clicked in a row render
+        // one after another, each admitted against what the ones before it left room for.
+        const buffer = await heavy(async (signal, rendering) => {
+          // Closed, rescoped or locked (or given up) while queued or reading: other members' song
+          // content is not read or rendered for an editor that has already answered.
+          if (gone()) return null;
+          const playback = await source.load(song.id);
+          if (gone()) return null;
+          rendering();
+          return renderTakeOffline(playback.take, { gridMs: playback.gridMs, maxMs: musicCapMs(), signal, admit: admitFor(gone) });
+        });
+        if (!buffer || gone() || !bin) return;
         const id = bin.add({ kind: "sound", name: song.title, buffer, origin: "studio", key });
-        if (!id) { fail("This clip holds as much as it can."); return; }
+        if (!id) { fail(BIN_FULL); return; }
         m = bin.get(id); mediaRev++;
         songState = { ...songState, [song.id]: { state: "ready", seconds: buffer.duration } };
       } catch (e) {
@@ -698,27 +796,33 @@
 
   /** Files picked in the library or dropped on the editor. `intent` is the tab they came from. */
   async function addFiles(files: File[], intent: FileIntent | null) {
+    // "Stop adding" ends the rest of these files too.
+    const gone = addGone();
     for (const f of files) {
-      if (!bin || finished || !editing) return;
+      if (!bin || gone() || !editing) return;
       const role = fileRole(f.name, f.type);
       if (!role) { notify("That kind of file can't go on a clip."); continue; }
       const refusal = fileRefusal(role, f.size);
       if (refusal) { notify(refusal); continue; }
+      if (bin.full) { notify(BIN_FULL); continue; }
       try {
         if (role === "image") {
-          const pic = await decodeImageFile(f);
-          if (!bin) return;
+          // Decodes and renders wait their turn in `heavyJobs`, and each is admitted against the
+          // bin before it allocates. A job reached after its add was given up does nothing.
+          const pic = await heavy(async () => (gone() ? null : decodeImageFile(f, admitFor(gone))));
+          if (!pic) return;
+          if (!bin || gone()) { pic.image.close(); return; }
           const id = bin.add({ kind: "image", name: mediaName(f.name), image: pic.image, width: pic.width, height: pic.height, origin: "file" });
-          if (!id) { pic.image.close(); notify("This clip holds as much as it can."); continue; }
+          if (!id) { pic.image.close(); notify(BIN_FULL); continue; }
           mediaRev++;
           addPicture(id);
         } else if (role === "video") {
           if (!doc || doc.layers.length >= MAX_VIDEO_LAYERS) { notify("Three videos is the limit."); continue; }
-          const probed = await probe(f);
-          if (!bin) return;
+          const probed = await counting(probe(f));
+          if (!bin || gone()) return;
           if (!probed.ok) { notify(probed.reason); continue; }
           const id = bin.add({ kind: "video", name: mediaName(f.name), file: f, duration: probed.duration, width: probed.width, height: probed.height, hasAudio: probed.hasAudio });
-          if (!id) { notify("This clip holds as much as it can."); continue; }
+          if (!id) { notify(BIN_FULL); continue; }
           const url = objectUrl(f);
           if (url) layerUrls.set(id, url);
           mediaRev++;
@@ -726,19 +830,24 @@
         } else if (role === "audio" || role === "take") {
           // Decoded only as far as the clip can use (and within the sample cap), whatever the
           // file's length: see `decodeSoundFile`.
-          const buffer = role === "take"
-            ? await renderTakeOffline(await readTakeFile(f), { maxMs: musicCapMs(), signal: sessionAbort.signal })
-            : await decodeSoundFile(f, musicCapMs() / 1000);
-          if (finished || !bin) return;
+          const buffer = await heavy(async (signal, rendering) => {
+            if (gone()) return null;
+            if (role === "audio") return decodeSoundFile(f, musicCapMs() / 1000, { admit: admitFor(gone), signal });
+            const take = await readTakeFile(f);
+            if (gone()) return null;
+            rendering();
+            return renderTakeOffline(take, { maxMs: musicCapMs(), signal, admit: admitFor(gone) });
+          });
+          if (!buffer || gone() || !bin) return;
           const asMusic = role === "take" || intent === "music" || (intent !== "sound" && buffer.duration > 8);
           const id = bin.add({ kind: "sound", name: mediaName(f.name), buffer, origin: "file" });
-          if (!id) { notify("This clip holds as much as it can."); continue; }
+          if (!id) { notify(BIN_FULL); continue; }
           if (asMusic) musicFileIds = [...musicFileIds, id]; else soundFileIds = [...soundFileIds, id];
           mediaRev++;
           addSound(id, asMusic ? "music" : "sfx");
         }
       } catch (e) {
-        if (finished) return;
+        if (gone()) return;
         notify(e instanceof MediaRefusal || e instanceof TakeRenderError ? e.message
           : role === "image" ? "That picture could not be read." : role === "video" ? "That video could not be read."
           : role === "take" ? "That music file could not be played." : "That sound file could not be read.");
@@ -746,17 +855,21 @@
     }
   }
 
+  /** Whether a dropped file may go onto the clip now: not while "Discard this clip?" is asked,
+   * which would change the clip behind the question (found in review). */
+  const takesDrops = $derived(editing && !confirmingDiscard);
   function onDragOver(e: DragEvent) {
     if (!carriesFiles(e)) return;
     e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = editing ? "copy" : "none";
+    if (e.dataTransfer) e.dataTransfer.dropEffect = takesDrops ? "copy" : "none";
   }
   function onDrop(e: DragEvent) {
     if (!carriesFiles(e)) return;
-    // The editor is modal: a file dropped on it is for the clip, never for the page behind.
+    // The editor is modal: a file dropped on it is for the clip, never for the page behind, even
+    // when the clip is not taking files right now.
     e.preventDefault();
     const files = [...(e.dataTransfer?.files ?? [])];
-    if (editing && files.length) void addFiles(files, null);
+    if (takesDrops && files.length) void addFiles(files, null);
   }
 
   // --- Inspector ----------------------------------------------------------------------------------
@@ -783,9 +896,20 @@
       : undefined;
     apply(updateLayer(doc, layer.id, { volume: patch.volume, muted: patch.muted, ...(box ? { box } : {}) }), `layer:${layer.id}`);
   }
+  /** Whether a video in the bin has a sound track (unknown counts as none). */
+  function hasSound(source: string): boolean {
+    return bin?.video(source)?.hasAudio ?? false;
+  }
+  /**
+   * Mute or unmute a video layer. A layer with no sound is never muted: the mute would change
+   * nothing anyone hears, but would still count as an edit and send an untouched clip through a
+   * re-render instead of as its original bytes (found in review, via the library's layer list).
+   * Unmuting is always allowed, so a mute that somehow exists can be taken back.
+   */
   function toggleLayerMute(id: string) {
     const layer = doc?.layers.find((l) => l.id === id);
-    if (doc && layer) apply(updateLayer(doc, id, { muted: !layer.muted }));
+    if (!doc || !layer || (!layer.muted && !hasSound(layer.source))) return;
+    apply(updateLayer(doc, id, { muted: !layer.muted }));
   }
   /** The A lane's mute: everything added mutes together, or unmutes together if all were muted. */
   function toggleAudioLane() {
@@ -1231,6 +1355,9 @@
   }
   function onTimelineDown(e: PointerEvent) {
     if (!editing || !edit || !doc || e.button !== 0) return;
+    // A press on the timeline's own scrollbar (past its client width) is scrolling, not scrubbing.
+    const box = e.currentTarget as HTMLElement;
+    if (e.target === box && box.clientWidth > 0 && e.offsetX >= box.clientWidth) return;
     const t = timeAt(e);
     const target = e.target as Element | null;
     if (target?.closest("[data-lane-head]")) return;
@@ -1348,7 +1475,8 @@
    * bytes, a cut-only one through the light exporter, anything else through the compositor.
    */
   async function upload() {
-    if (!doc || !editing || uploadDisabled) return;
+    // Never while "Discard this clip?" is up: the answer to that question is not "post it".
+    if (!doc || !editing || uploadDisabled || confirmingDiscard) return;
     const post = words.posts;
     if (untouched) { finish(post ? { kind: "original", post: true } : { kind: "original" }); return; }
     pause();
@@ -1357,10 +1485,20 @@
     exportAbort = controller;
     progress = 0;
     phase = "exporting";
+    // The progress row (with its cancel) covers the timeline's top; a timeline scrolled down
+    // through many rows would hide it. Back to the top, held there by `.exporting` until it ends.
+    if (timelineEl) timelineEl.scrollTop = 0;
     const onProgress = (fraction: number) => { if (exportAbort === controller) progress = fraction; };
+    const posting = doc;
+    // The Studio songs this clip would sound are checked against the channel's list again first:
+    // one may have expired while the editor stayed open (see `checkSongsOffered`). Only a composed
+    // clip can hold a song.
     const running = composed
-      ? composer(doc, clipMedia(), { capBytes, signal: controller.signal, onProgress, container: editableContainer(file.type) ?? "mp4", name: file.name })
-      : exporter(file, baseLayer(doc).edit, { capBytes, signal: controller.signal, onProgress });
+      ? checkSongsOffered(music, songsInClip(posting)).then(() => {
+        if (controller.signal.aborted) throw new ExportCanceledError();
+        return composer(posting, clipMedia(), { capBytes, signal: controller.signal, onProgress, container: editableContainer(file.type) ?? "mp4", name: file.name });
+      })
+      : exporter(file, baseLayer(posting).edit, { capBytes, signal: controller.signal, onProgress });
     exportSettled = running.then(() => {}, () => {});
     try {
       const result = await running;
@@ -1384,6 +1522,16 @@
       phase = "failed";
     }
   }
+  /** The Studio songs `d` would sound when posted (muted ones and ones past the end are silent). */
+  function songsInClip(d: ClipDoc): string[] {
+    const ids = new Set<string>();
+    for (const piece of soundPieces(d)) {
+      // By the bin's key, not the piece's kind: a song is a song however it was laid down.
+      const id = piece.kind === "video" ? null : songOfKey(bin?.sound(piece.source)?.key);
+      if (id) ids.add(id);
+    }
+    return [...ids];
+  }
   /** The last export's settlement, whatever its outcome; what a cancel waits on before Upload returns. */
   let exportSettled: Promise<void> = Promise.resolve();
   /** Cancel answers at once; the export's own rejection then finds itself superseded. */
@@ -1398,7 +1546,7 @@
   }
   /** The original bytes, when the editor cannot open the file or the export failed. Never re-encodes. */
   function sendOriginal() {
-    if (originalTooBig || finished) return;
+    if (originalTooBig || finished || confirmingDiscard) return;
     finish(words.posts ? { kind: "original", post: true } : { kind: "original" });
   }
   /**
@@ -1494,8 +1642,11 @@
    * Only the wrap-around edges are handled; in between, the natural order stays inside the card.
    */
   function trapTab(e: KeyboardEvent) {
-    if (!card) return;
-    const focusable = [...card.querySelectorAll<HTMLElement>(
+    // While "Discard this clip?" is up it is the dialog: Tab cycles its two answers only, never
+    // back into the editor behind it (whose post button Shift+Tab from "keep editing" reached).
+    const scope = confirmingDiscard ? confirmBox : card;
+    if (!scope) return;
+    const focusable = [...scope.querySelectorAll<HTMLElement>(
       'button:not([disabled]), [href], input:not([disabled]):not([type="file"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')];
     if (!focusable.length) { e.preventDefault(); return; }
     const index = focusable.indexOf(document.activeElement as HTMLElement);
@@ -1563,7 +1714,8 @@
 <div class="video-editor" data-video-editor role="presentation" bind:this={root} onkeydown={onKey} onmousedown={onBackdropDown}
   onfocusout={onFocusOut} oncontextmenu={(e) => e.preventDefault()} ondragover={onDragOver} ondrop={onDrop}>
   <div class="card" role="dialog" aria-modal="true" aria-label="Edit video before upload" tabindex="-1" data-state={phase} bind:this={card}>
-    <header class="head">
+    <!-- Everything but the discard question is inert while it is up (see `trapTab`). -->
+    <header class="head" inert={confirmingDiscard}>
       <svg class="film" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="3" width="13" height="10" rx="1"></rect><path d="M4.5 3v10M11.5 3v10M1.5 6.5h3M11.5 6.5h3M1.5 9.5h3M11.5 9.5h3"></path></svg>
       <h2 class="title" title={file.name}>{file.name}</h2>
       <span class="facts">
@@ -1579,7 +1731,7 @@
       <button type="button" class="st-btn ghost x" data-action="close" aria-label={phase === "exporting" ? "Cancel export" : "Don't upload"} title={phase === "exporting" ? "Cancel export (Esc)" : "Don't upload (Esc)"} onclick={closeRequest}><svg viewBox="0 0 16 16" class="ol" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"></path></svg></button>
     </header>
 
-    <div class="middle">
+    <div class="middle" inert={confirmingDiscard}>
       <div class="left">
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="ve-stage" class:grab={stageHover !== null} class:rec={recording} bind:this={stageEl}
@@ -1639,7 +1791,7 @@
     {#if phase === "unavailable"}
       <p class="alert" role="alert">{message}</p>
     {:else if edit && doc}
-      <div class="transport">
+      <div class="transport" inert={confirmingDiscard}>
         <!-- The visible text is exactly "Play" or "Pause": scripts and screen readers rely on it. -->
         <button type="button" class="st-tool play" class:on={playing} data-action="play" disabled={phase === "exporting"} title={playing ? "Pause (Space)" : "Play (Space)"} onclick={togglePlay}>{#if playing}<svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M3.5 2.5h3.5v11H3.5zM9 2.5h3.5v11H9z"></path></svg>{:else}<svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M4 2.5 13 8 4 13.5z"></path></svg>{/if}<span class="vh">{playing ? "Pause" : "Play"}</span></button>
         <button type="button" class="st-tool sm" data-action="back" disabled={!editing} title="Back 0.1 s (Left, Shift for 1 s)" onclick={() => nudge(-NUDGE)}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M3 3h1.5v10H3zM12.5 3 6 8l6.5 5z"></path></svg><span class="vh">Back</span></button>
@@ -1671,7 +1823,8 @@
       <!-- The timeline is the playhead's slider for assistive tech: the arrow keys (handled on the
            overlay) move the playhead, and the value reads as a clock. Cuts, handles and bars are
            pointer affordances; their keyboard equivalents are S, I, O and Delete. -->
-      <div class="timeline" class:blade={bladeMode} class:locked={!editing} role="slider" tabindex="0" data-timeline
+      <div class="timeline" class:blade={bladeMode} class:locked={!editing} class:exporting={phase === "exporting"} role="slider" tabindex="0" data-timeline inert={confirmingDiscard}
+        bind:this={timelineEl}
         aria-label="Playhead" aria-valuemin={0} aria-valuemax={Math.round(duration * 10) / 10}
         aria-valuenow={Math.round(playhead * 10) / 10} aria-valuetext={formatClock(playhead)}
         onpointerdown={onTimelineDown} onpointermove={onTimelineMove} onpointerup={onTimelineUp} onpointercancel={onTimelineUp}
@@ -1690,9 +1843,10 @@
             <button type="button" class="st-tool tiny ol" class:on={baseLayer(doc).muted} data-action="mute-v1" aria-pressed={baseLayer(doc).muted} title={!baseHasAudio ? "This clip has no sound" : baseLayer(doc).muted ? "Unmute the clip's sound" : "Mute the clip's sound"} disabled={!editing || (!baseHasAudio && !baseLayer(doc).muted)} onclick={() => toggleLayerMute(baseLayer(doc).id)}>{@render speaker(baseLayer(doc).muted)}</button>
           </div>
           {#each doc.layers.slice(1) as layer, i (layer.id)}
+            {@const silent = !layer.muted && !hasSound(layer.source)}
             <div class="lane-head" data-lane-head style:top="{lanes.layers[i]}px" style:height="{LANE.layer}px">
               <span class="lane-name">V{i + 2}</span>
-              <button type="button" class="st-tool tiny ol" class:on={layer.muted} aria-pressed={layer.muted} title={layer.muted ? "Unmute layer" : "Mute layer"} aria-label={`${layer.muted ? "Unmute" : "Mute"} V${i + 2}`} disabled={!editing} onclick={() => toggleLayerMute(layer.id)}>{@render speaker(layer.muted)}</button>
+              <button type="button" class="st-tool tiny ol" class:on={layer.muted} aria-pressed={layer.muted} title={layer.muted ? "Unmute layer" : silent ? "This video has no sound" : "Mute layer"} aria-label={`${layer.muted ? "Unmute" : "Mute"} V${i + 2}`} disabled={!editing || silent} onclick={() => toggleLayerMute(layer.id)}>{@render speaker(layer.muted)}</button>
             </div>
           {/each}
           <div class="lane-head" data-lane-head title="Text and stickers" style:top="{lanes.overlays}px" style:height="{lanes.overlayHeight}px">
@@ -1790,7 +1944,7 @@
       <div class="timeline placeholder" aria-hidden="true"></div>
     {/if}
 
-    <footer class="foot">
+    <footer class="foot" inert={confirmingDiscard}>
       {#if edit && phase !== "unavailable"}
         {#if kept.length === 0}
           <span class="ve-chip warn"><i></i><span class="micro">nothing kept</span></span>
@@ -1810,6 +1964,10 @@
       {#if phase === "failed"}
         <button type="button" class="st-btn ghost" data-action="back-to-edit" onclick={backToEditing}>back to editing</button>
       {/if}
+      <!-- Posting waits while something is still being added; this gives up on it instead. -->
+      {#if adding > 0 && phase === "ready"}
+        <button type="button" class="st-btn ghost" data-action="stop-adding" onclick={stopAdding}>stop adding</button>
+      {/if}
       <!-- One action, as the user asked: post (or embed, or upload) what is on the timeline. An
            untouched clip goes up as its original bytes, with no re-encode. Leaving is the ×/Esc,
            which asks first when there is work to lose. -->
@@ -1826,7 +1984,7 @@
     {#if confirmingDiscard}
       <!-- Inside the card, so the dialog's focus trap and key isolation still hold; no browser
            confirm(), which would block the whole window. -->
-      <div class="ve-confirm" role="alertdialog" aria-modal="true" aria-label="Discard this clip?">
+      <div class="ve-confirm" role="alertdialog" aria-modal="true" aria-label="Discard this clip?" bind:this={confirmBox}>
         <div class="ve-confirm-box">
           <h3>Discard this clip?</h3>
           <div class="ve-confirm-actions">
@@ -1939,7 +2097,12 @@
 
   /* Timeline: the ruler over the lanes. Every lane's positions are percentages of the same width
      (V1's track), so nothing depends on a measured width and one pointer mapping serves them all. */
-  .timeline { position: relative; flex: none; padding: 2px 14px 8px; border-top: 1px solid var(--border-soft); background: color-mix(in oklab, var(--bg-0) 35%, var(--panel)); user-select: none; touch-action: none; outline: none; }
+  /* Lanes grow a row for every overlapping bar, so the timeline's height is capped and it scrolls
+     past that (found in review: overlapping text and stickers, up to 24 rows, and sounds, up to 32,
+     pushed the stage and the footer, with the post button, out of the 640 px card). The ruler
+     scrolls with the lanes so the two always share one width, scrollbar or not. */
+  .timeline { position: relative; flex: none; max-height: min(220px, 35%); overflow-x: hidden; overflow-y: auto; scrollbar-width: thin; padding: 2px 14px 8px; border-top: 1px solid var(--border-soft); background: color-mix(in oklab, var(--bg-0) 35%, var(--panel)); user-select: none; touch-action: none; outline: none; }
+  .timeline.exporting { overflow-y: hidden; }
   .timeline:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
   .timeline.placeholder, .transport.placeholder { min-height: 40px; }
   .timeline.placeholder { min-height: 120px; }

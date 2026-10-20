@@ -41,6 +41,9 @@ export const MEDIA_LIMITS = {
   bytes: 1024 * 1024 * 1024,
 } as const;
 
+/** The refusal when the session's media is at its count or byte limit. */
+export const BIN_FULL = "This clip holds as much as it can.";
+
 /** A refusal whose message is a sentence for the person. */
 export class MediaRefusal extends Error {
   constructor(message: string) { super(message); this.name = "MediaRefusal"; }
@@ -214,10 +217,19 @@ export class MediaBin {
   /** Decoded bytes held. */
   get bytes(): number { return this.#bytes; }
 
+  /**
+   * Whether one more item costing `bytes` would be kept. Asked before decoding or rendering, so
+   * nothing large is made only to be refused by `add` afterwards (found in review: a song was
+   * rendered in full, then dropped for want of room).
+   */
+  room(bytes: number): boolean {
+    return !this.full && Number.isFinite(bytes) && bytes >= 0 && this.#bytes + bytes <= this.#budget;
+  }
+
   /** Keep `item`; returns its new id, or null when the bin is full (by count or by bytes). */
   add(item: WithoutId<MediaItem>): string | null {
     const cost = decodedBytes(item);
-    if (this.full || this.#bytes + cost > this.#budget) return null;
+    if (!this.room(cost)) return null;
     const id = `m${++this.#seq}`;
     this.#items.set(id, { ...item, id } as MediaItem);
     this.#bytes += cost;
@@ -246,6 +258,44 @@ export class MediaBin {
   }
 }
 
+/**
+ * Runs the clip maker's heavy work (decoding a picture or a sound, rendering a song) one job at a
+ * time, in the order asked. Without it, clicking down a list of songs started every render at
+ * once, each allocating its whole output before any of them reached the bin's budget check.
+ *
+ * One queue is shared by every editor (see the module script in `VideoEditor.svelte`), so an
+ * editor closing while its job runs does not let the next editor's job start alongside it.
+ *
+ * A job holds the queue until it settles OR its `signal` aborts (its editor answered or went).
+ * Without the second, one job that never settled (a decoder stalled by a crafted file, say) would
+ * hold up every later job in every later editor until the app restarted (found in review). A
+ * released job may still be running; what it can hold was admitted against its own bin first.
+ * The abort only skips that job's own turn: it never lets later jobs past one queued before it.
+ * A job queued by an editor that has since closed should check that first and return straight
+ * away.
+ */
+export class JobQueue {
+  #tail: Promise<void> = Promise.resolve();
+
+  /** Run `job` once every job queued before it has been released; resolves or rejects as it does. */
+  run<T>(job: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const previous = this.#tail;
+    const result = previous.then(job);
+    const settled = result.then(() => {}, () => {});
+    // Waits for `previous` first either way, so an abort cannot release the queue early.
+    this.#tail = signal ? previous.then(() => Promise.race([settled, abortOf(signal)])) : settled;
+    return result;
+  }
+}
+
+/** Resolves when `signal` aborts (at once if it already has). */
+function abortOf(signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) resolve();
+    else signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+}
+
 /** What an item costs in decoded memory: RGBA pictures, float samples. A video stays a file. */
 export function decodedBytes(item: WithoutId<MediaItem>): number {
   if (item.kind === "image") return item.width * item.height * 4;
@@ -259,12 +309,18 @@ export function decodedBytes(item: WithoutId<MediaItem>): number {
  * Decode a picture file, kept at most `MEDIA_LIMITS.imageEdge` on its long side. Its size is read
  * from the header first, and a picture that would decode over `MEDIA_LIMITS.imagePixels` (or whose
  * header cannot be read) is refused without being decoded. Browser-only.
+ *
+ * `admit` is asked, with the bytes the kept picture will hold, before anything is decoded; false
+ * refuses it as "this clip holds as much as it can".
  */
-export async function decodeImageFile(file: Blob): Promise<{ image: ImageBitmap; width: number; height: number }> {
+export async function decodeImageFile(file: Blob, admit?: (bytes: number) => boolean): Promise<{ image: ImageBitmap; width: number; height: number }> {
   const bytes = new Uint8Array(await file.arrayBuffer());
   const size = imageSize(bytes);
   if (!size) throw new MediaRefusal("That picture could not be read.");
   if (size.width * size.height > MEDIA_LIMITS.imagePixels) throw new MediaRefusal("That picture is too big to use here.");
+  // The kept size from the header's shape. EXIF rotation may swap the sides, never the area.
+  const kept = decodeSize(size.width, size.height);
+  if (admit && !admit(kept.width * kept.height * 4)) throw new MediaRefusal(BIN_FULL);
   // Decoded at full size first (at most the pixel cap), then scaled from what was DECODED: a
   // phone photo's EXIF orientation is applied by the decode, so its upright width and height can
   // be the header's swapped. Scaling to the header's shape would squash it (found in review).
@@ -305,8 +361,18 @@ export function soundDecodeSeconds(capSeconds: number, duration: number, rate: n
  * Decode a sound file, but only its first `capSeconds` (the caller passes what the clip can use)
  * and never past `MEDIA_LIMITS.soundFrames` samples per channel, so a long or very low-bitrate
  * file cannot decode to gigabytes. Up to two channels are kept. Browser-only.
+ *
+ * `admit` is asked with the output's size in bytes before it is allocated (false refuses it), and
+ * `signal` is checked before that and after every decoded chunk; a cancel rejects with an
+ * `AbortError` and leaves the decoder (ending the loop ends the sink's iterator).
  */
-export async function decodeSoundFile(file: Blob, capSeconds: number): Promise<AudioBuffer> {
+export async function decodeSoundFile(
+  file: Blob,
+  capSeconds: number,
+  options: { readonly admit?: (bytes: number) => boolean; readonly signal?: AbortSignal } = {},
+): Promise<AudioBuffer> {
+  const stop = () => { if (options.signal?.aborted) throw new DOMException("decode aborted", "AbortError"); };
+  stop();
   const mb = await loadLibrary();
   const input = new mb.Input({ source: new mb.BlobSource(file), formats: mb.ALL_FORMATS });
   try {
@@ -317,8 +383,11 @@ export async function decodeSoundFile(file: Blob, capSeconds: number): Promise<A
     const seconds = soundDecodeSeconds(capSeconds, await input.computeDuration([track]), rate);
     const frames = Math.ceil(seconds * rate);
     if (frames < 1) throw new MediaRefusal("That sound file is empty.");
+    stop();
+    if (options.admit && !options.admit(frames * channels * 4)) throw new MediaRefusal(BIN_FULL);
     const out = new AudioBuffer({ length: frames, numberOfChannels: channels, sampleRate: rate });
     for await (const chunk of new mb.AudioBufferSink(track).buffers(0, seconds)) {
+      stop();
       const at = Math.round(chunk.timestamp * rate);
       const from = Math.max(0, -at), to = Math.max(0, at);
       const count = Math.min(chunk.buffer.length - from, frames - to);

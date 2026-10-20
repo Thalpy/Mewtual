@@ -183,6 +183,32 @@ test("a source with no sound is skipped, and a loader that fails fails the mix",
   await assert.rejects(mixClipSound([piece], 10, async () => { throw new Error("decode failed"); }, () => {}, { createContext: make }), /decode failed/);
 });
 
+test("a cancel during a load starts no further load, render or segment", async () => {
+  // Found in review: an abort during the first of three loads still saw two more loads, a render
+  // and a segment handed on.
+  const { sizes, make } = recordingFactory();
+  const abort = new AbortController();
+  const three: SoundPiece[] = ["a", "b", "c"].map((source) => ({ ...piece, source, at: 0, length: 5 }));
+  const loads: string[] = [];
+  let segments = 0, rendered = 0;
+  const counting = (channels: number, frames: number, rate: number) => {
+    const ctx = make(channels, frames, rate);
+    const render = ctx.startRendering.bind(ctx);
+    ctx.startRendering = async () => { rendered++; return render(); };
+    return ctx;
+  };
+  await assert.rejects(mixClipSound(three, 10, async (p, _from, _length, signal) => {
+    loads.push(p.source);
+    assert.equal(signal, abort.signal, "the loader is given the mix's signal");
+    if (p.source === "a") abort.abort();
+    return { buffer: {} as AudioBuffer, offset: 0 };
+  }, () => { segments++; }, { createContext: counting, signal: abort.signal }), { name: "AbortError" });
+  assert.deepEqual(loads, ["a"]);
+  assert.equal(rendered, 0);
+  assert.equal(segments, 0);
+  assert.equal(sizes.length, 1);
+});
+
 test("an aborted mix stops before the next segment", async () => {
   const { sizes, make } = recordingFactory();
   const abort = new AbortController();

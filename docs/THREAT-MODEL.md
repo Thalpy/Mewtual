@@ -107,10 +107,25 @@ The properties above carry over, and for the same reasons:
   played some other way. The session holds
   at most 64 media items and 1 GiB of decoded media. Counts in the document are bounded (24
   overlays, 32 sounds, 3 videos, 900 keys a path) and composed clips at 10 minutes and 1920 px.
+  Those budgets are asked BEFORE anything large is made: decodes and song renders run one at a
+  time across every open editor, each admitted against the bin's remaining room before it
+  allocates its output, so rapid clicks cannot start several half-gigabyte renders at once. A
+  cancelled editor starts no queued job, and a render, mix or decode cancelled part way never
+  reports success. A job still running when its editor closes stops holding the queue (so a
+  decoder stalled by a crafted file cannot block every later editor); it finishes on its own,
+  within what it was admitted for, possibly beside the next job. Posting waits until nothing is
+  still being added, or until the person stops what is still pending. Stopping releases the
+  queue from a read or decode that may hang, but not from an offline render, which cannot be
+  interrupted and always ends: the next render waits for it, so stopping and adding again cannot
+  stack renders. Added videos stay files in the bin (probed, decoded only frame by frame
+  while previewing or exporting); limits on their size and length are a recorded follow-up.
 - **Studio songs are peer-authored content** (the channel's Studio is shared). They go through the
   same validation and resolution as pressing play in the Studio (`scorePlaybackFromNative`,
   `planJamArchivalPlayback`, the take limits), and a song that cannot be resolved is refused with
-  the Studio's sentence, never replaced by another version. They are rendered by the real
+  the Studio's sentence, never replaced by another version. Expired songs are not offered. A song
+  is checked against the channel's index again when it is loaded and again when the clip is
+  posted (`checkSongsOffered`), so one that expired or was deleted while the editor stayed open is
+  not posted; one that expires while the clip itself is being exported still is. They are rendered by the real
   `JamEngine` into an `OfflineAudioContext` that is never connected to the speakers; the
   `runningView` proxy only tells that offline engine its context is running. Putting a song into
   a clip posted elsewhere on the same server is the person's own act, like quoting a message.

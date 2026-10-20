@@ -4140,7 +4140,10 @@ and every drop handler returns early on a drop that carries no files.
 - A result with `post: true` makes `embedMedia` snapshot the composer (`composerState`: text, and
   for chat the reply target) when the editor answers, attach the file, and then call
   `postFromComposer` only if the composer is unchanged; that runs `send()` or `postStatus()` and
-  reports whether a send actually started (each sets its in-flight flag before its first await).
+  returns `{started, settled}`: whether a send actually started (each sets its in-flight flag
+  before its first await), and a promise that settles (never rejects) when it is over. In a batch
+  the next file waits for `settled`, so it is attached to the emptied composer, not added to the
+  message being sent; a move away while the send runs ends the batch there (2026-10-20 review).
   Every outcome has its own toast: sending, "not sent: the message changed", "not sent yet".
   `postStatus()` now refuses re-entry (`statusPosting`) and clears the box only if it still holds
   what was posted.
@@ -4190,7 +4193,11 @@ file). The host contract is unchanged except for one optional prop and one test 
 
 - `music?: ClipMusicSource | null` (`clip-music.ts`): `list()` gives the channel's visible Studio
   songs `{id, title}`; `load(id)` gives `{take, gridMs}` from `scorePlaybackFromNative`, or rejects
-  with the Studio's own sentence (unresolved conflicts, missing recipe). App builds it with
+  with the Studio's own sentence (unresolved conflicts, missing recipe). `load` lists the index
+  again first and refuses a song that is no longer offered (expired or deleted since the list was
+  shown) before reading its content, and the editor asks `list` once more when a composed clip is
+  posted (`checkSongsOffered`), refusing the post with a sentence if a song the clip sounds is gone
+  or the list cannot be read. Songs are kept in the bin under `songKey(id)`. App builds it with
   `studioMusic(ipc, {server, channel}, myIdentity)` for the active channel when there is one and an
   identity; the editor is closed by `videoEditorScope` on any channel change, so a review never
   reads another channel. Read only when the Music tab opens.
@@ -4204,6 +4211,19 @@ file). The host contract is unchanged except for one optional prop and one test 
   inspector's fields, sliders or the effect list are theirs: no editor shortcut fires.
 - Files dropped on the editor go onto the clip (by type; refused types and over-size files get a
   footer notice) and never reach the page behind it.
+- Heavy work (a song's read and render, a picture, sound or `.jamtake` decode) runs one job at a
+  time across every editor (`JobQueue` in `clip-media.ts`, one instance in `VideoEditor.svelte`'s
+  module script). Each job is admitted against the bin before it allocates (`MediaBin.room`, passed
+  as `admit` to `renderTakeOffline`, `decodeSoundFile` and `decodeImageFile`), and a job reached
+  after its editor answered does nothing. `JobQueue.run(job, signal)` holds the queue until the
+  job settles or `signal` (the editor's session) aborts, so a job that never settles holds it
+  only while its editor is open; an abort never lets later jobs past one queued before it. The
+  post button is disabled ("Still adding to the clip") while any add is pending, with a "stop
+  adding" button beside it that gives up on every pending add (each drops its result and its
+  job's signal aborts; the queue is released unless the job has started an offline render, which
+  always ends on its own). A file dropped while "Discard this clip?" shows is kept from the page
+  but not added. `mixClipSound`'s
+  `SoundLoader` now receives the mix's `signal`.
 
 ## 13. Call identity and Flipnote frame claims  *(Gate 5; desktop WebRTC; docs/GATE5-DESIGN.md)*
 

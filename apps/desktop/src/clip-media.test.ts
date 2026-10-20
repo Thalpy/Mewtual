@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { decodedBytes, decodeSize, fileRefusal, fileRole, imageSize, MEDIA_LIMITS, MediaBin, mediaName, readTakeFile, soundDecodeSeconds } from "./clip-media.ts";
+import {
+  BIN_FULL, decodedBytes, decodeImageFile, decodeSize, decodeSoundFile, fileRefusal, fileRole, imageSize, JobQueue, MEDIA_LIMITS,
+  MediaBin, MediaRefusal, mediaName, readTakeFile, soundDecodeSeconds,
+} from "./clip-media.ts";
 
 test("files are sorted by what they are, by type first and extension second; SVG never counts as a picture", () => {
   assert.equal(fileRole("cat.png", "image/png"), "image");
@@ -115,8 +118,86 @@ test("the bin refuses what would take it past its decoded-bytes budget", () => {
   assert.ok(bin.add(sound(100)));
   assert.equal(bin.bytes, 800);
   assert.equal(bin.add(sound(100)), null, "800 more would pass 1000");
+  assert.ok(bin.room(200) && !bin.room(201), "room is asked before decoding, against the same budget");
+  assert.ok(!bin.room(Number.NaN) && !bin.room(-1), "a size that is not a size never fits");
   assert.ok(bin.add({ kind: "image", name: "p", image: {} as CanvasImageSource, width: 5, height: 10, origin: "file" }), "200 more fits");
   assert.equal(bin.bytes, 1000);
+  assert.ok(bin.room(0), "a full byte budget still has room for nothing");
+});
+
+test("a picture the bin has no room for is refused before it is decoded, at its kept size", async () => {
+  const asked: number[] = [];
+  // 4096 x 1024 is kept at 2048 x 512; the full decode never starts (there is no decoder here).
+  await assert.rejects(decodeImageFile(new Blob([png(4096, 1024)]), (bytes) => { asked.push(bytes); return false; }), (e: Error) => e instanceof MediaRefusal && e.message === BIN_FULL);
+  assert.deepEqual(asked, [2048 * 512 * 4]);
+});
+
+test("a cancelled sound decode reads nothing", async () => {
+  const abort = new AbortController();
+  abort.abort();
+  let read = false;
+  const file = { arrayBuffer: async () => { read = true; return new ArrayBuffer(0); } } as unknown as Blob;
+  await assert.rejects(decodeSoundFile(file, 10, { signal: abort.signal }), { name: "AbortError" });
+  assert.equal(read, false);
+});
+
+test("heavy jobs run one at a time in the order asked, and a failure does not hold up the next", async () => {
+  const queue = new JobQueue();
+  const log: string[] = [];
+  const gates: (() => void)[] = [];
+  const job = (name: string, fail = false) => () => {
+    log.push(`start ${name}`);
+    return new Promise<string>((resolve, reject) => {
+      gates.push(() => { log.push(`end ${name}`); if (fail) reject(new Error(name)); else resolve(name); });
+    });
+  };
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  const a = queue.run(job("a", true)), b = queue.run(job("b")), c = queue.run(job("c"));
+  await flush();
+  assert.deepEqual(log, ["start a"]);
+  gates[0]();
+  await assert.rejects(a, /a/);
+  await flush();
+  assert.deepEqual(log, ["start a", "end a", "start b"], "a failure hands over like a success");
+  gates[1]();
+  assert.equal(await b, "b");
+  await flush();
+  gates[2]();
+  assert.equal(await c, "c");
+  assert.deepEqual(log, ["start a", "end a", "start b", "end b", "start c", "end c"]);
+});
+
+test("a job that never settles holds the queue only until its editor gives up on it", async () => {
+  // Found in review: one stuck decode held every later job, in every later editor, for good.
+  const queue = new JobQueue();
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  const closed = new AbortController();
+  const started: string[] = [];
+  void queue.run(() => { started.push("stuck"); return new Promise<void>(() => {}); }, closed.signal);
+  const next = queue.run(async () => { started.push("next"); return "next"; });
+  await flush();
+  assert.deepEqual(started, ["stuck"], "it holds the queue while its editor is open");
+  closed.abort();
+  assert.equal(await next, "next");
+  assert.deepEqual(started, ["stuck", "next"]);
+});
+
+test("an abort skips only that job's turn, never one queued before it", async () => {
+  const queue = new JobQueue();
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  const started: string[] = [];
+  let finishFirst = () => {};
+  const first = queue.run(() => { started.push("first"); return new Promise<void>((r) => { finishFirst = r; }); });
+  const gone = new AbortController();
+  gone.abort();
+  void queue.run(async () => { started.push("gone"); }, gone.signal);
+  const last = queue.run(async () => { started.push("last"); });
+  await flush();
+  assert.deepEqual(started, ["first"], "the already-aborted job did not let the last one past the first");
+  finishFirst();
+  await first;
+  await last;
+  assert.deepEqual(started, ["first", "gone", "last"]);
 });
 
 test("the bin hands out fresh ids, finds things by kind and key, and stops at its limit", () => {
@@ -124,17 +205,20 @@ test("the bin hands out fresh ids, finds things by kind and key, and stops at it
   assert.equal(bin.video("base")?.duration, 10);
   const closed: string[] = [];
   const image = { close: () => closed.push("pic") } as unknown as CanvasImageSource;
+  // A sized buffer: one whose size is unknown (NaN bytes) is refused, see `MediaBin.room`.
+  const tiny = { length: 1, numberOfChannels: 1 } as AudioBuffer;
   const a = bin.add({ kind: "image", name: "🐱", image, width: 256, height: 256, origin: "emoji", key: "emoji:🐱" })!;
-  const b = bin.add({ kind: "sound", name: "Pow", buffer: {} as AudioBuffer, origin: "builtin", key: "sfx:pow" })!;
+  const b = bin.add({ kind: "sound", name: "Pow", buffer: tiny, origin: "builtin", key: "sfx:pow" })!;
   assert.deepEqual([a, b], ["m1", "m2"]);
   assert.equal(bin.image(a)?.name, "🐱");
   assert.equal(bin.sound(a), null, "a picture is not a sound");
   assert.equal(bin.byKey("sfx:pow")?.id, b);
   assert.equal(bin.byKey("sfx:zap"), null);
   assert.deepEqual(bin.list("sound").map((s) => s.id), [b]);
-  while (!bin.full) bin.add({ kind: "sound", name: "x", buffer: {} as AudioBuffer, origin: "file" });
+  while (!bin.full) assert.ok(bin.add({ kind: "sound", name: "x", buffer: tiny, origin: "file" }));
   assert.equal(bin.size, MEDIA_LIMITS.items);
-  assert.equal(bin.add({ kind: "sound", name: "y", buffer: {} as AudioBuffer, origin: "file" }), null);
+  assert.equal(bin.add({ kind: "sound", name: "y", buffer: tiny, origin: "file" }), null);
+  assert.equal(bin.room(0), false, "a full bin has no room even for nothing");
   bin.dispose();
   assert.deepEqual(closed, ["pic"], "decoded pictures are released");
   assert.equal(bin.get(a), null);

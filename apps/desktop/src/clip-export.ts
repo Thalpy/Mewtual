@@ -148,7 +148,14 @@ export async function exportClip(doc: ClipDoc, media: ClipMedia, options: ClipEx
     const videoSource = new mb.CanvasSource(canvas, { codec: videoCodec, bitrate: mb.QUALITY_HIGH });
     output.addVideoTrack(videoSource, { frameRate: fps });
 
-    const pieces = soundPieces(doc);
+    // A video without an audio track has nothing to mix. Its pieces are dropped before deciding
+    // whether the clip needs a sound track at all: a silent recording with only a sticker added
+    // must not need (or be refused for want of) an audio encoder.
+    const audioTracks = new Map<string, InputAudioTrack | null>();
+    for (const piece of soundPieces(doc)) {
+      if (piece.kind === "video" && !audioTracks.has(piece.source)) audioTracks.set(piece.source, await inputFor(piece.source).getPrimaryAudioTrack());
+    }
+    const pieces = soundPieces(doc).filter((piece) => piece.kind !== "video" || audioTracks.get(piece.source));
     let audioSource: InstanceType<Mediabunny["AudioBufferSource"]> | null = null;
     if (pieces.length) {
       const audioCodec = await mb.getFirstEncodableAudioCodec(format.getSupportedAudioCodecs(), { numberOfChannels: 2, sampleRate: CLIP_SAMPLE_RATE });
@@ -219,16 +226,14 @@ export async function exportClip(doc: ClipDoc, media: ClipMedia, options: ClipEx
     // --- Sound --------------------------------------------------------------------------------------
     if (audioSource) {
       const source = audioSource;
-      const audioTracks = new Map<string, InputAudioTrack | null>();
-      const load = async (piece: SoundPiece, from: number, length: number): Promise<LoadedSound> => {
+      const load = async (piece: SoundPiece, from: number, length: number, signal?: AbortSignal): Promise<LoadedSound> => {
         if (piece.kind !== "video") {
           const buffer = media.sound(piece.source);
           if (!buffer) throw new ExportRefusal("A sound in this clip is missing.");
           return { buffer, offset: from };
         }
-        if (!audioTracks.has(piece.source)) audioTracks.set(piece.source, await inputFor(piece.source).getPrimaryAudioTrack());
         const track = audioTracks.get(piece.source);
-        return track ? decodeWindow(mb, track, from, length) : null;
+        return track ? decodeWindow(mb, track, from, length, signal) : null;
       };
       let mixed = 0;
       await mixClipSound(pieces, total, load, async (segment) => {
@@ -257,14 +262,21 @@ export async function exportClip(doc: ClipDoc, media: ClipMedia, options: ClipEx
   return new File([bytes.toBlob(mime)], editedFileName(options.name, options.container), { type: mime });
 }
 
-/** Decode `length` seconds of a video's sound from source time `from` into one buffer starting exactly there. */
-async function decodeWindow(mb: Mediabunny, track: InputAudioTrack, from: number, length: number): Promise<LoadedSound> {
+/**
+ * Decode `length` seconds of a video's sound from source time `from` into one buffer starting
+ * exactly there. Checks `signal` before allocating and after every decoded chunk, so a cancel stops
+ * the decoder within one chunk (leaving the loop ends the sink's iterator, which stops decoding).
+ */
+async function decodeWindow(mb: Mediabunny, track: InputAudioTrack, from: number, length: number, signal?: AbortSignal): Promise<LoadedSound> {
+  const stop = () => { if (signal?.aborted) throw new ExportCanceledError(); };
   const rate = await track.getSampleRate();
   const channels = Math.min(2, Math.max(1, await track.getNumberOfChannels()));
   const frames = Math.max(1, Math.ceil(length * rate));
+  stop();
   const out = new AudioBuffer({ length: frames, numberOfChannels: channels, sampleRate: rate });
   const sink = new mb.AudioBufferSink(track);
   for await (const chunk of sink.buffers(from, from + length)) {
+    stop();
     const place = chunkPlacement(from, rate, frames, chunk.timestamp, chunk.buffer.length);
     if (!place) continue;
     for (let c = 0; c < channels; c++) {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { addLayer, newClipDoc, updateLayer, withBaseEdit, type ClipDoc } from "./clip-doc.ts";
+import { addImage, addLayer, newClipDoc, updateLayer, withBaseEdit, type ClipDoc } from "./clip-doc.ts";
 import { initialEdit, setRemoved, splitAt } from "./video-edit.ts";
 import { DEFAULT_FPS, exportClip, layerSchedule, MAX_FPS, MAX_OUTPUT_EDGE, outputFps, outputSize, type ClipMedia } from "./clip-export.ts";
 import { ExportCanceledError, OutputTooLargeError, type Mediabunny } from "./video-export.ts";
@@ -52,9 +52,10 @@ test("an extra layer shows only from its start until its kept time runs out", ()
 // Found missing in review: what `exportClip` actually asks the decoders for and draws per frame was
 // only checked in a scratch browser harness. A fake library records both.
 
-type Log = { requested: Record<string, number[]>; added: number[]; drawn: string[][]; cancelled: number; outputs: number };
+type Log = { requested: Record<string, number[]>; added: number[]; drawn: string[][]; cancelled: number; outputs: number; audioTracks?: number };
 
-function fakeLibrary(log: Log, outputBytes = 64): Mediabunny {
+/** `audioCodec: null` is a window that cannot encode sound at all. */
+function fakeLibrary(log: Log, outputBytes = 64, audioCodec: string | null = "aac"): Mediabunny {
   class Track {
     readonly name: string;
     constructor(name: string) { this.name = name; }
@@ -81,7 +82,7 @@ function fakeLibrary(log: Log, outputBytes = 64): Mediabunny {
     Output: class {
       readonly target: { writable: WritableStream };
       constructor(o: { target: { writable: WritableStream } }) { this.target = o.target; log.outputs++; }
-      addVideoTrack() {} addAudioTrack() {}
+      addVideoTrack() {} addAudioTrack() { log.audioTracks = (log.audioTracks ?? 0) + 1; }
       async start() {}
       async finalize() {
         const writer = this.target.writable.getWriter();
@@ -91,7 +92,7 @@ function fakeLibrary(log: Log, outputBytes = 64): Mediabunny {
       async cancel() { log.cancelled++; }
     },
     getFirstEncodableVideoCodec: async () => "avc",
-    getFirstEncodableAudioCodec: async () => "aac",
+    getFirstEncodableAudioCodec: async () => audioCodec,
     CanvasSource: class { async add(t: number) { log.added.push(Math.round(t * 1000) / 1000); } },
     AudioBufferSource: class { async add() {} },
     CanvasSink: class {
@@ -154,6 +155,21 @@ test("every frame is drawn from kept times only, and the second video only insid
     const withPip = log.drawn.map((frame, k) => [k, frame.some((tag) => tag.startsWith("pip@"))] as const).filter(([, has]) => has).map(([k]) => k);
     assert.deepEqual(withPip, Array.from({ length: 20 }, (_, i) => 40 + i), "drawn on frames 40..59 and no others");
     assert.equal(log.cancelled, 0);
+  } finally { restore(); }
+});
+
+test("a silent recording with only a sticker added needs no sound encoder and gets no sound track", async () => {
+  // Found in review: the base layer's sound piece was counted before anyone looked for an audio
+  // track, so a soundless video with a sticker was refused in a window without an audio encoder.
+  const log: Log = { requested: {}, added: [], drawn: [], cancelled: 0, outputs: 0 };
+  const restore = installCanvas(log);
+  try {
+    const doc = addImage(newClipDoc("base", 2), 0, "cat", 1);
+    assert.equal(doc.layers[0].muted, false, "the base is not muted; it simply has no sound");
+    const file = await exportClip(doc, media, { capBytes: 1 << 20, container: "mp4", name: "quiet.mp4", library: fakeLibrary(log, 64, null) });
+    assert.equal(file.type, "video/mp4");
+    assert.equal(log.audioTracks ?? 0, 0);
+    assert.equal(log.added.length, 20);
   } finally { restore(); }
 });
 
