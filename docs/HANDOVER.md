@@ -23,6 +23,11 @@ What changed (frontend only; no CSP, protocol or native change):
   on a 2D context requested with `willReadFrequently` (a hint for a CPU-backed canvas). Both
   elements stay mounted and the zoom flag only toggles `hidden`, so switching never resamples
   again or reloads the original. Planning and painting live in `lightbox-image.ts`.
+- The copy belongs to the opening. An image opened while still loading gets its copy when its
+  `load` event arrives (the component listens; `complete` is not reactive). Once made, the plan is
+  kept, so the file being unlisted and relisted while the viewer is open neither drops the copy
+  nor draws it again; a MIME that is unknown at opening still gets its one chance when the index
+  arrives.
 - Actual size has no rounded corners and no shadow, for every image.
 - Locking the vault now closes the viewer. It previously survived the lock and popped back up
   after unlock; with the decoded element held, that would also keep its pixels alive behind the
@@ -34,17 +39,22 @@ Limits, stated plainly:
   WebKitGTK honours `willReadFrequently`, and what `screen` and `devicePixelRatio` report under
   fractional scaling (if they overstate, copies stop being made and photos quietly take the old
   path). Layout and behaviour were checked in headless Edge and in the jsdom component tests.
-- The one resample runs on the main thread and includes a full-size decode of the source.
-  Measured in headless Chromium on a fast desktop: about 20 ms for a 12-megapixel photo, 40 to
-  60 ms at 48 MP, and 0.4 to 1 s at 108 MP. Larger images or slower machines take longer, and
-  nothing caps the source size, so a peer can make whoever opens their image wait, once per
-  opening. Awaiting `img.decode()` first was tried and removed: Chromium's draw decodes again
-  anyway, so it only left the fit view blank and unclickable. `createImageBitmap` with a resize ran
-  synchronously too. A ceiling on source pixels would avoid the wait only by sending the largest
-  images back to the GPU shrink; it was left out, and is the owner's call. WebKitGTK is
-  unmeasured.
-- An animated APNG or WebP with at least twice the screen's pixels shows its first frame in the
-  fit view; "Actual size" still plays it. GIFs never get a copy.
+- The one resample runs on the main thread and includes a full-size decode of the source. The
+  source is bounded upstream: shared images reach the viewer only through `serve_media`, which
+  decodes them in Rust and serves a PNG the app produced, refusing anything over 25 megapixels or
+  16384 pixels a side (`DecodeBounds::DEFAULT` in `src-tauri/src/media_decode.rs`). The source
+  is therefore always a PNG. Measured in headless Chromium on a fast desktop: 71 to 173 ms at
+  12 MP and 145 to 418 ms at 25 MP, from flat to grainy content; a real photo (the encoder writes
+  about 1.9 bytes a pixel) falls between, so opening a large photo costs roughly 0.1 to 0.4 s once,
+  more on a slower machine. WebKitGTK is unmeasured. Awaiting `img.decode()` first was tried and
+  removed: Chromium's draw decodes again anyway, so it only left the fit view blank and
+  unclickable. `createImageBitmap` with a resize ran synchronously too.
+- Only GIF and animated WebP reach the webview animated (the native path serves them as APNG and
+  flattens PNG input, including APNG, to a still). GIFs never get a copy. An animated WebP with at
+  least twice the screen's pixels shows its first frame in the fit view, and "Actual size" still
+  plays it; at that size the native 24-megapixel animation budget leaves it a handful of frames at
+  most. Eligibility reads the declared MIME from the file index, never the served `Content-Type`,
+  which is always `image/png`.
 - Small images, GIFs and anything that falls back still use the GPU shrink and the fit-view
   shadow. Inline images in the chat still render the full original scaled down: a possible
   follow-up.
@@ -64,10 +74,14 @@ joining was offered and has not been built.
 Tests: `lightbox-image.test.ts` and `lightbox-picture.test.ts` (with
 `scripts/fixtures/LightboxPictureHarness.svelte`). Mutation checks: unmounting the copy while
 zoomed, remounting the original, dropping `willReadFrequently`, allowing GIF, measuring the
-threshold against the copy, painting asynchronously and dropping the `complete` check each fail
-their named test. Adversarial review, two rounds: the threshold (high) and the lock (medium) are
-fixed; the main-thread decode (medium) is the measured limit above, after the attempted
-`decode()` fix was shown not to work in Chromium (high in the re-review) and removed.
+threshold against the copy, painting asynchronously, dropping the `complete` check, the load
+listener, its removal on close, and the kept plan each fail their named test. Adversarial review,
+two rounds: the threshold (high) and the lock (medium) are fixed; the main-thread decode (medium)
+is the limit above, after the attempted `decode()` fix was shown not to work in Chromium (high in
+the re-review) and removed. An external review of `c3696754` found the two opening-lifetime
+defects (loading images, index churn; both medium, fixed with regressions shown failing first) and
+corrected the size claim: the native 25 MP bound applies. The test harness now binds each prop
+separately, as App does, because replacing one props object on every update hid the first defect.
 
 ## Clip maker: text, stickers, music, sounds, three videos, recorded motion (2026-10-20)
 

@@ -40,11 +40,37 @@ type HarnessProps = Parameters<InstanceType<typeof Harness>["set"]>[0];
  * progressive image reports its size before it has finished loading.
  */
 function decodedImage(width: number, height: number, opts: { complete?: boolean } = {}): HTMLImageElement {
+  return loadingImage(width, height, opts.complete ?? true).img;
+}
+
+/**
+ * An <img> whose loading the test finishes by hand, the way the browser would: `complete` and the
+ * natural size change as plain DOM properties, and only the `load`/`error` event announces it.
+ */
+function loadingImage(width: number, height: number, complete = false) {
   const img = document.createElement("img");
-  Object.defineProperty(img, "complete", { value: opts.complete ?? true });
-  Object.defineProperty(img, "naturalWidth", { value: width });
-  Object.defineProperty(img, "naturalHeight", { value: height });
-  return img;
+  const state = { complete, width: complete ? width : 0, height: complete ? height : 0 };
+  Object.defineProperty(img, "complete", { get: () => state.complete });
+  Object.defineProperty(img, "naturalWidth", { get: () => state.width });
+  Object.defineProperty(img, "naturalHeight", { get: () => state.height });
+  // Count what the component leaves attached: the <img> belongs to the chat and outlives the viewer.
+  const attached = new Map<string, number>();
+  const add = img.addEventListener.bind(img), remove = img.removeEventListener.bind(img);
+  img.addEventListener = ((type: string, fn: EventListener) => {
+    attached.set(type, (attached.get(type) ?? 0) + 1);
+    add(type, fn);
+  }) as typeof img.addEventListener;
+  img.removeEventListener = ((type: string, fn: EventListener) => {
+    attached.set(type, (attached.get(type) ?? 0) - 1);
+    remove(type, fn);
+  }) as typeof img.removeEventListener;
+  return {
+    img,
+    /** Listeners the component has attached and not removed. */
+    listeners: () => [...attached.values()].reduce((sum, n) => sum + n, 0),
+    load() { Object.assign(state, { complete: true, width, height }); img.dispatchEvent(new w.Event("load")); flushSync(); },
+    fail() { Object.assign(state, { complete: true, width: 0, height: 0 }); img.dispatchEvent(new w.Event("error")); flushSync(); },
+  };
 }
 
 /** Synchronous on purpose: whatever the component does at mount has happened when this returns. */
@@ -200,6 +226,77 @@ test("a browser that will not give a context, or fails the draw, falls back to t
     } finally {
       await h.destroy();
       contextMode = "ok";
+    }
+  }
+});
+
+test("an image opened while still loading gets its copy once it loads, exactly once", async () => {
+  // Found in review: `complete` and the natural size are plain DOM properties, so a plan made
+  // before the load was never revisited and the opening kept the original's fit path for good.
+  contextMode = "ok";
+  const pending = loadingImage(4032, 3024);
+  const h = harness({ source: pending.img });
+  try {
+    assert.equal(h.canvas(), null, "the original stands in while loading");
+    assert.equal(h.img().hidden, false);
+    pending.load();
+    const canvas = h.canvas();
+    assert.ok(canvas, "the copy is made when the load event arrives");
+    assert.equal(canvas.hidden, false);
+    assert.equal(h.img().hidden, true);
+    assert.equal(calls.draw.length, 1);
+    for (let i = 0; i < 5; i++) { h.set({ zoomed: true }); h.set({ zoomed: false }); }
+    assert.equal(h.canvas(), canvas, "the same canvas through every toggle");
+    assert.equal(calls.draw.length, 1, "and no further draws");
+  } finally {
+    await h.destroy();
+  }
+});
+
+test("an image that fails to load keeps the original, and a load after close does nothing", async () => {
+  contextMode = "ok";
+  const failing = loadingImage(4032, 3024);
+  const a = harness({ source: failing.img });
+  try {
+    failing.fail();
+    assert.equal(a.canvas(), null);
+    assert.equal(a.img().hidden, false);
+    assert.equal(calls.draw.length, 0);
+  } finally {
+    await a.destroy();
+  }
+  // Closed (or locked, which closes it) before the image finished loading: the late event must not
+  // reach a destroyed viewer.
+  const late = loadingImage(4032, 3024);
+  const b = harness({ source: late.img });
+  assert.ok(late.listeners() > 0, "the viewer listens while the image loads");
+  await b.destroy();
+  assert.equal(late.listeners(), 0, "and leaves nothing attached to the chat's image when it closes");
+  late.load();
+  assert.equal(calls.draw.length, 0, "no copy for a viewer that is gone");
+  assert.equal(calls.getContext.length, 0);
+});
+
+test("the copy belongs to the opening: the file index coming and going does not redraw it", async () => {
+  // Found in review: `mime` follows the live index, so an owner unlisting and relisting the file
+  // while the viewer was open dropped the copy (back to the original's fit path) and resampled it
+  // again on relisting.
+  contextMode = "ok";
+  for (const zoomed of [false, true]) {
+    const h = harness({ zoomed });
+    try {
+      const canvas = h.canvas();
+      assert.ok(canvas);
+      for (let i = 0; i < 3; i++) {
+        h.set({ mime: "" });
+        assert.equal(h.canvas(), canvas, `zoomed=${zoomed}: the copy survives the listing going away`);
+        assert.equal(h.img().hidden, !zoomed, `zoomed=${zoomed}: and still stands in for the original in fit view`);
+        h.set({ mime: "image/jpeg" });
+        assert.equal(h.canvas(), canvas, `zoomed=${zoomed}: and is the same one when it returns`);
+      }
+      assert.equal(calls.draw.length, 1, `zoomed=${zoomed}: one draw for the whole opening`);
+    } finally {
+      await h.destroy();
     }
   }
 });

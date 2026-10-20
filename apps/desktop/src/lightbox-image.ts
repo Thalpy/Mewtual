@@ -25,13 +25,19 @@ export type PixelSize = { width: number; height: number };
 
 /**
  * The formats a fit copy may be made for. A canvas holds one still frame, so a format that can
- * animate would show frozen in the fit view. GIF is excluded outright because it is the format
- * animations usually arrive in. PNG (APNG) and WebP can also animate, but an animation with at
- * least twice the screen's pixels (see `MIN_PIXEL_SAVING`) is rare enough that leaving every large
- * screenshot and photo on the expensive path would be the worse trade. If one does arrive, its
- * fit view shows the first frame and "Actual size" still plays it. The label is the uploader's
- * declared MIME, and the media protocol refuses bodies whose signature does not match it, so a
- * mislabelled file cannot reach the viewer at all.
+ * animate would show frozen in the fit view. What reaches the webview animated is decided natively:
+ * `serve_media` decodes every shared image in Rust and serves a PNG it produced, and only GIF and
+ * animated WebP come out as APNG; PNG input (including an uploaded APNG) is always flattened to a
+ * still (`media_decode.rs`). GIF is excluded here outright. An animated WebP qualifies only with at
+ * least twice the screen's pixels (see `MIN_PIXEL_SAVING`), and the native animation budget keeps
+ * at most 24 million pixels of frames, so at that size it has a handful of frames at most; leaving
+ * every large photo on the expensive path to spare that would be the worse trade. If one does
+ * arrive, its fit view shows the first frame and "Actual size" still plays it.
+ *
+ * Eligibility must stay on the declared MIME from the file index, never the served `Content-Type`:
+ * that header is always `image/png`, so switching to it would freeze every GIF. The native decoder
+ * is also chosen by the declared MIME, so a mislabelled file fails to decode rather than reaching
+ * the viewer as something else.
  */
 export const PRESCALE_MIMES: ReadonlySet<string> = new Set(["image/jpeg", "image/png", "image/webp"]);
 
@@ -126,15 +132,17 @@ export function planFitCopy(input: { mime: string; naturalWidth: number; natural
  * guarantee; an engine that ignores it does the shrink on the GPU, which is still once per
  * opening instead of once per switch.
  *
- * Cost, measured in review (headless Chromium): the draw runs on the main thread and includes a
- * full-size decode of the source, because the chat only ever needed the image small. About 20 ms
- * for a 12-megapixel photo, 40 to 60 ms at 48 MP, and 0.4 to 1 s at 108 MP on a fast desktop.
- * Larger images or slower machines take longer, and nothing caps the source size, so a peer can
- * make whoever opens their image wait, once per opening. Awaiting `img.decode()`
- * first does not help in Chromium (its draw decodes again) and `createImageBitmap` with a resize
- * ran synchronously too, so neither is used. WebKitGTK is unmeasured. A ceiling on source pixels
- * would avoid the wait only by sending the largest images back to the GPU shrink this exists to
- * avoid, so there is none.
+ * Cost: the draw runs on the main thread and includes a full-size decode of the source, because
+ * the chat only ever needed the image small. The source is bounded upstream: shared images reach
+ * the viewer only through the native `catcoms-media:` handler, which decodes them in Rust and
+ * serves a PNG it produced, refusing anything over 25 megapixels or 16384 pixels a side
+ * (`DecodeBounds::DEFAULT` in `src-tauri/src/media_decode.rs`). Because the source is always that
+ * PNG, the decode is a PNG decode. Measured in review in headless Chromium on a fast desktop: 71 to
+ * 173 ms at 12 MP and 145 to 418 ms at 25 MP, from flat to grainy content (the native encoder
+ * writes about 1.9 bytes a pixel for photos, between those two). So opening a large photo costs
+ * roughly 0.1 to 0.4 s once, more on a slower machine. WebKitGTK is unmeasured. Awaiting
+ * `img.decode()` first does not help in Chromium (its draw decodes again) and `createImageBitmap`
+ * with a resize ran synchronously too, so neither is used.
  */
 export function paintFitCopy(canvas: HTMLCanvasElement, source: CanvasImageSource, size: PixelSize): boolean {
   // Size first: assigning width/height clears the canvas, and must happen before the first draw.
