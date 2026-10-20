@@ -46,8 +46,9 @@ publication and protected role consumers remain unimplemented. A future History 
 nonblocking (`try_lock`, Busy without effects), or time/deadline validation must occur afresh
 before lending. Keep unstarted row owners outside the callback; dropping an unpublished row can
 otherwise block on History while Group/Policy are held. No engine, Clock or native reentry may run
-under that final fence. Focused verification passes289 voice tests and strict sync Clippy; full
-combined validation remains required before handoff of this continuation.
+under that final fence. Focused verification passes 289 voice tests and strict sync Clippy.
+The combined checkpoint now passes 3,035 root, 427+5 native and 2,067 frontend cases plus required
+checks, as recorded in CHAT-FILES-VOICE-ACCEPTANCE. This does not implement the consumer below.
 
 Read-only composition review selects high-side `ConfirmHello` as the first protected consumer;
 low-side start/Hello encryption and Proof/Finish must remain refused until their role consumers

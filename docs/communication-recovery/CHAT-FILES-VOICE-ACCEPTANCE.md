@@ -5,6 +5,31 @@ are implemented and exercised; live V2, production member media relay, combined 
 independent physical audio/network acceptance are not complete. The dated sections distinguish
 current runtime paths from inactive prerequisites and experiments.
 
+## Combined checkpoint validation (20 October)
+
+The integrated Gate7 UI, inactive token/origin transaction and standalone framing probe are
+validated together. Production root Rust is identical to frozen `5f5f20cc`; the full command
+completed there with exit 0, **3,035 passed, zero failed, 24 existing ignored, 56 target summaries**
+(`communication-native-origin-root-full.log`, driver checkout). Strict whole-root Clippy passes
+(`communication-native-origin-root-clippy.log`, 82s); root formatting, ambient-dependency gate
+and root cargo-deny pass. The initial deny attempt could not obtain its advisory-cache lock in
+the sandbox; the authorized retry passed, without changing policy.
+
+The combined application checks pass 427 native library + 5 ACL cases, native check/build/startup,
+2,067 frontend cases, Svelte 0 errors/0 warnings, production frontend build, ten standard rendered
+flows and the separate Download/Keep/Gate7 flows. Final native and frontend logs are
+`communication-combined-origin-native-full.log` and `communication-combined-origin-frontend-full.log`
+in the integration checkout's `target/`; native startup is `communication-combined-origin-startup.log`.
+The standalone probe separately passes 9 Rust and 17 Node tests, strict fixture Clippy, real packaged
+framing/keyless-takeover runs and cleanup-fault checks. Its **additional dependency audit fails**
+as described below; it is not included in the passing root cargo-deny claim. Existing frontend
+bundle-size warnings remain. No remaining code-review finding exists in these included increments.
+
+The user's 20 October priority is graceful functional recovery under valid delay, duplication,
+reordering and bridge churn. Subsequent review found production file-route/capacity stranding
+and disabled-V2 retry/late-positive-ACK gaps. Those fixes are a separate isolated continuation,
+not part of this validation. Live V2, production media relay and physical acceptance remain open.
+
 ## Packaged IPC platform experiment (19 October)
 
 The subsequent encrypted-framing fixture also passes on actual packaged WebView2. Two8192-byte
@@ -85,8 +110,8 @@ attempt reached its behavioral acceptance. Initial focused invocation omitted th
 the corrected command passes. Intermediate close-fixture dependency and declaration-order
 failures were fixed without relaxing their assertions. Production bundle-size warnings remain.
 
-Root Rust source is unchanged from the3,033-pass full checkpoint below. The separately reviewed
-unpublished token/origin prerequisite is not part of this integration result. Live V2, production
+At the original UI merge, root Rust source was unchanged from the 3,033-pass checkpoint below.
+The later token/origin prerequisite is covered by the combined 3,035-pass result above. Live V2, production
 media relay and independent-network/audible acceptance remain open.
 
 ## Validated checkpoint 3691bd25 (19 October)

@@ -29,6 +29,16 @@ criteria to this communication programme.
 
 ## Intended behavior
 
+20 October implementation priority: valid delays, duplicate/reordered delivery, disappearing
+bridges and temporary replica disagreement are expected operating conditions. Keep the app
+usable, retain current work and reconcile quietly through available authorized paths. Exact
+replica parity is useful recovery evidence, not a prerequisite for displaying/sending usable
+chat or accepting an exact current positive result. A stale page/ACK may be discarded while its
+still-current parent operation retries. Local congestion must not consume a network attempt.
+Preserve authentication, immutable retry identity, stale-call exclusion, actual lower ownership
+and documented finite execution allowances; these requirements protect recovery rather than
+demanding perfectly ordered peers. Tests should exercise useful completion after real churn.
+
 | Surface | Required outcome | Evidence needed |
 | --- | --- | --- |
 | Connections | Recover through permitted direct or indirect paths without repeated invite codes or an always-online founder. | Asymmetric links, changed listeners, bridge replacement, sleep and restart scenarios. |

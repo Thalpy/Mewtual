@@ -1,5 +1,20 @@
 # Mewtual; Handover
 
+## Combined validated checkpoint and recovery priority (2026-10-20)
+
+Complete root testing passes 3,035 cases, zero failures, 24 existing ignored; strict whole-root
+Clippy, formatting, ambient and root deny checks pass. Combined native 427+5 and frontend 2,067
+checks, native/frontend builds, actual startup, ten standard browser flows and three additional
+Download/Keep/Gate7 flows pass. The separate IPC probe passes 9 Rust/17 Node cases and real
+framing/takeover/cleanup acceptance, with its dependency-audit failure explicitly retained below.
+The communication ledger records exact source/log boundaries; this is separate from hosted CI.
+
+The user prioritizes graceful functional progress through delayed, duplicated/reordered traffic
+and changing member bridges. Routine disagreement must not gate usable chat or produce errors.
+New production file reconnect/capacity and disabled-V2 retry/late-positive-ACK findings are being
+addressed in an isolated continuation; this checkpoint does not contain or validate those fixes.
+Live V2, production media relay and independent physical audio/network acceptance remain open.
+
 ## Packaged IPC feasibility probe (2026-10-19)
 
 The standalone loopback experiment passes on actual packaged Windows WebView2 with normal
@@ -38,9 +53,8 @@ established by that test. The test fixture opens no HMR WebSocket listener.
 Integration validation passes2,067 frontend cases,427 native library +5 ACL cases, Svelte0/0,
 production frontend build, native check/build/startup, ten standard browser flows and the separate
 private-download, retained-copy and Gate7 Studio/playback/close flows. The root Rust sources are
-identical to the previously fully tested3,033-pass checkpoint. The next unpublished native V2
-transaction prerequisite has its own complete root run in progress; this entry does not claim
-that continuation's validation. Existing production bundle-size warnings remain.
+identical at the original UI merge to the 3,033-pass checkpoint. The subsequent native transaction
+prerequisite now has the 3,035-pass combined result above. Existing production bundle-size warnings remain.
 
 ## Validated communication checkpoint 3691bd25 (2026-10-19)
 
