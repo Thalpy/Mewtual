@@ -71,13 +71,27 @@ separation. V2 must authenticate each endpoint's exact SDP fingerprint and negot
 substituting the bridge's fingerprint must fail before RTC work. A transport forward or queue
 ACK is neither remote signalling acceptance nor an audio connection.
 
-Native must bind each gateway/allocation and bridge grant to the full group, endpoint device
-identities, call/join incarnations, pair/negotiation generation, chosen helper and original
-connection leases. Consent and current membership apply at both endpoints and B. End, lock,
-room/member/policy replacement, expiry and connection replacement revoke queued and actual
-effects. A later helper D requires fresh scoped ownership and an explicit ICE restart policy;
-it cannot revive B's old allocation. No call state, TURN credentials, SDP, audio or synthetic
-allocation addresses are saved across restart.
+Native must distinguish three owners before implementation:
+
+- The endpoint allocation binds the exact account, server entry/actor, group, endpoint devices,
+  call/join incarnations, pair and ICE negotiation generation. It owns the stable synthetic tuple.
+- A replaceable helper route binds that allocation pair to B's explicit hosting consent, current
+  membership/policy, exact authenticated connections, expiry and resource reservation. B receives
+  no endpoint RTC connection, A/C signing authority or endpoint media key. Its own device signer
+  may authenticate scoped relay control; the opaque forwarding worker needs none of those keys.
+- A browser credential accesses only that existing endpoint allocation. It cannot create a call,
+  choose a destination or change relay consent.
+
+Consent and current membership apply at both endpoints and B. End, lock, room/member/policy
+replacement and expiry revoke queued and actual effects. An exact connection's retirement
+irrevocably ends its helper route; a later D requires fresh grants and cannot adopt B's queues.
+Those old queues stay charged until actual drainage. Prefer retaining the endpoint tuple and
+DTLS/SCTP transport across a short route outage, so replacing B need not itself restart ICE.
+This replaces the earlier candidate's helper-bound allocation model; it is still unimplemented.
+If ICE has failed or the allocation/tuple changes, automatic recovery needs a fresh OfferId and
+negotiation generation. The current one-shot V2 Exchange does not yet provide that restart
+capacity. No call state, TURN credentials, SDP, audio or synthetic allocation addresses are
+saved across restart.
 
 The only allowed destination is the exact paired synthetic allocation. Enforce it for
 permission creation, channel binding, Send indications, inbound datagrams and every queued
@@ -92,6 +106,14 @@ an audio-only shortcut or send PCM through the signalling actor. A library decis
 licence/advisory/MSRV review and proof of per-packet policy enforcement. The TURN crate offers a
 custom relay-address/connection seam, but that alone proves none of these authorization rules.
 [TURN relay interface](https://docs.rs/turn/latest/turn/relay/trait.RelayAddressGenerator.html).
+
+Before creating a protected RTC peer, native/browser dispatch must fix its V2 session mode and
+authenticated remote join, pair and negotiation owner. All legacy offer/answer/ICE, heartbeat
+and bye ingress must be excluded from that session, including after rollback. Existing browser
+object/join fences remain necessary but cannot authenticate a delayed network message. Jukebox
+controls and microphone/video/recording repair currently use legacy signals too; move those
+closed controls to V2 application delivery or the confirmed RTC channel. Keeping legacy ingress
+enabled for companion controls would defeat the session boundary.
 
 Use a dedicated bounded media stream/datagram capability in the mesh driver, separate from
 Root request/response handling. Captured current connection ownership must be checked at the
