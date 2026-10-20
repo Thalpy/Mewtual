@@ -1,8 +1,9 @@
 # Chat history across partitions and MLS epochs
 
-Status, 20 October 2026: implemented and validated on `chat-update-implementation`, following
-checkpoint `202c17f1`. Complete application suites pass: root 3,073, native 430+5 and frontend
-2,067, alongside lint, build, startup and rendered flows. Earlier attempts exposed a Studio setup
+Status, 20 October 2026: the prior pushed `a0756821` checkpoint on `chat-update-implementation`
+passed complete suites: root 3,073, native 430+5 and frontend 2,067, alongside lint, build, startup
+and rendered flows. The new automatic three-bubble case passes its focused checks; complete
+application validation for this continuation is in progress. Earlier attempts exposed a Studio setup
 memory error, a file-bridge fixture completion race and four disconnect fixtures that retained
 live transports. Corrected fixtures keep their original assertions; the failed attempts and
 remaining limits are recorded in the acceptance ledger. The communication programme remains open.
@@ -148,9 +149,20 @@ and the explicit same-device/group-binding limitations. `catcoms-sync/src/catchu
 checks rejected pages against signed responses, prefix custody, cursor/completeness state and
 later corrected pages.
 
+`six_client_recovery/chat_bubbles.rs` now adds actual native TCP recovery. Three isolated pairs
+write from the same saved base with gossip dropped. One pair removes a member and advances MLS,
+another concurrently edits messages that the owner deleted or pinned, and a third retains a
+previously unseen post signed before its author was removed. Automatic recovery joins their
+original signed-operation union through a replacement bridge, then serves two returning members
+while the original A/B authors are offline. Assertions cover explicit visible edit/delete results,
+pins and reactor identities, the operation dependency graph and heads, membership/epoch, and
+solo saved reopen. No history or manual catch-up result is injected into a live recipient.
+
 These are deterministic semantic/crypto/scheduler tests, not a 50-device physical network test.
 The ten-epoch test uses real MLS and replication but explicitly delivers commits/catch-up; it
 does not establish automatic networking across an evicted key window. The acceptance ledger
-records the completed runs and their source/coverage boundaries. The next broader acceptance should combine
-three automatically reconnecting bubbles, membership changes, dropped gossip, paged history and
-bridge restarts, comparing signed-operation unions as well as the visible conversation.
+records the completed runs and their source/coverage boundaries. The new TCP scenario uses six
+devices, one removal/epoch, small unpaged history and graceful freeze/save barriers. Its isolated
+pairs run sequentially to establish independent causal branches; it does not simulate 50 active
+network endpoints or prove abrupt-crash custody. Multiple membership transitions, paged bubble
+history and abrupt crashes remain broader acceptance work.

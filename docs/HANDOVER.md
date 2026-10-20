@@ -2,12 +2,13 @@
 
 ## Where to resume (2026-10-20)
 
-**The communication programme is not finished.** This validated continuation belongs to
-`chat-update-implementation` (PR48 targets `Gate7`), following checkpoint `202c17f1`.
+**The communication programme is not finished.** This continuation belongs to
+`chat-update-implementation` (PR48 targets `Gate7`), following pushed checkpoint `a0756821`.
 It was developed in `M:\Git (local)\CatComs\target\communication-atomic-intake-worktree`;
 the branch checkout is `M:\Git (local)\CatComs\target\communication-review-worktree`.
-Complete application validation now passes: root 3,073, native 430+5 and frontend 2,067,
-with the remaining protocol and physical acceptance limits below kept explicit.
+The prior `a0756821` checkpoint passed root 3,073, native 430+5 and frontend 2,067.
+The current chat-bubble/packet-capacity continuation passes focused checks; its full application
+suites are in progress. Remaining protocol and physical acceptance limits stay explicit below.
 
 The main checkout, `M:\Git (local)\CatComs`, remains on `Gate7` and contains
 separate UI/clip-editor work. Preserve that work and continue the communication fixes here.
@@ -21,8 +22,11 @@ and spent work. Prefer automatic recovery over unnecessary error prompts for val
 
 Next steps, in order:
 
-1. Continue the user's chat-history investigation with automatic multi-bubble recovery acceptance,
-   comparing original signed-operation unions as well as rendered rows. Before claiming hostile-
+1. Automatic three-bubble native TCP chat acceptance now passes twice, including one MLS removal,
+   conflicting edit/delete, a previously unseen original removed-author operation, replacement
+   bridge/onward service, exact signatures/heads/projection and solo saved reopen. This is six
+   devices, small unpaged history and graceful close; multiple transitions, paging and abrupt
+   crash custody remain broader coverage. Before claiming hostile-
    member or moderator-audit correctness, design/review a versioned typed-message contract with
    group/historical authorization and a writer-incarnation/equivocation rule. The documented
    legacy limitations cannot safely be fixed by timestamp ordering or current-roster filtering.
@@ -33,6 +37,9 @@ Next steps, in order:
    protected confirmation/SDP consumers, production native/browser IPC and RTC dispatch, compatible
    helper selection and legacy/V2 session isolation before enabling V2. Keep unsupported roles
    refused until their actual consumers exist.
+   The next capacity prerequisite now protects actual packet positions from ordinary pressure:
+   low-side 3-in/6-out or high-side 6-in/3-out, within the existing 32-row limits. Workflow close and
+   actual row retirement remain separate. It does not implement the atomic Hello consumer.
 3. Implement and validate the member media relay and combined recovery/rollout scenarios in
    [CHAT-FILES-VOICE-PLAN](communication-recovery/CHAT-FILES-VOICE-PLAN.md).
    Only one physical desktop is available; independent native audio and separate-network

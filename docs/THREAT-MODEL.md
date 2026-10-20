@@ -1,5 +1,15 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Inactive confirmation packet capacity (20 October)
+
+Native V2 packet tables count actual rows and unused workflow claims in the same immutable
+32-position limits. Role-specific claims prevent ordinary packet pressure consuming promised
+confirmation positions; reservations from a different table cannot be adopted. Close returns
+unused capacity, while actual retained rows/loans and their byte custody retire independently.
+This capacity prerequisite changes no signed wire/storage format or authorization check.
+Protected packet/event allocation, candidate admission history, atomic Hello intake and live V2
+remain open; slot reservation alone is not whole-chain progress or readiness evidence.
+
 ## Chat history admission and retained audit (20 October, continuation)
 
 Legacy operation ingress now refuses a 32-byte Automerge actor that differs from its verified

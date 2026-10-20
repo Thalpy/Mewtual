@@ -292,6 +292,41 @@ fn prepared_chain_is_same_pair_idempotent_and_close_cannot_reset_it() {
 }
 
 #[test]
+fn prepared_chain_protects_real_packet_capacity_and_close_returns_only_unused_claims() {
+    let mut f = fixture();
+    let chain = f
+        .low
+        .join
+        .prepare_crypto_chain(f.id, &ca(&f.low.context, &f.low.lease), &f.clock)
+        .unwrap();
+    let mut reserve = || {
+        f.low.join.ledger.reserve(
+            f.low.signer.verifying_key().to_bytes(),
+            ReserveRequest {
+                handshake: f.id,
+                kind: EncryptedKind::ConfirmHello,
+                offer: None,
+                ciphertext_bytes: 32,
+            },
+            &ca(&f.low.context, &f.low.lease),
+            &f.clock,
+            &mut f.rng,
+        )
+    };
+    for _ in 0..26 {
+        reserve().unwrap();
+    }
+    assert_eq!(reserve().err(), Some(VoiceError::Capacity));
+    chain.close();
+    for _ in 0..6 {
+        reserve().unwrap();
+    }
+    assert_eq!(reserve().err(), Some(VoiceError::Capacity));
+    // Closing a low-side workflow returns its six unused output claims, not any ordinary rows
+    // already published in this exact ledger. The original total limit remains unchanged.
+}
+
+#[test]
 fn prepared_chain_derive_uses_protected_capacity_and_refuses_replacement_or_other_join() {
     let mut f = fixture();
     let chain = f

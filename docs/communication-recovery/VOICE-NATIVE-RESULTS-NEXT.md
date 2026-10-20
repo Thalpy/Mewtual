@@ -1,5 +1,22 @@
 # Next voice milestone: native result recovery
 
+## Confirmation packet capacity (20 October, inactive)
+
+Preparing the native chain now reserves logical packet-table positions from the same immutable
+32-row pools used by ordinary incoming and outgoing packets. The actual native role selects
+three incoming/six outgoing positions for the low side, or six incoming/three outgoing for the
+high side, covering three confirmation candidates. These claims belong to Workflow, not fixed
+history. Close returns unused claims; an actual loan retains its position until retirement.
+Ordinary rows retain their own positions through removal, independently of decrypt-event byte
+custody. Partial preparation failure returns its unused claims without changing replay/sequence.
+
+Focused tests cover actual ordinary packet APIs under pressure, cross-ledger refusal, partial
+reservation rollback and LocalJoin preparation/close. A structural growth guard covers the
+retained native owners within the existing 2 KiB metadata allowance on this target; it does not
+measure allocator slack or framework/engine memory. This is another capacity prerequisite.
+Protected packet/event allocation, three candidate history lanes and the atomic high-side Hello
+consumer below remain unimplemented. No V2 dispatch or protected role has been enabled.
+
 ## Packaged loopback platform probe (19 October, experiment only)
 
 The standalone `experiments/loopback-ipc` harness now passes on actual packaged Windows

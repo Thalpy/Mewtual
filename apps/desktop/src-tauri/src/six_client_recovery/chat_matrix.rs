@@ -87,7 +87,7 @@ impl Scenario {
 
     /// Compare full device identities, including absence, rather than equating roster counts or
     /// four-byte display fingerprints. An epoch transition must not leave a removed peer present.
-    async fn converge_members(&self, indices: &[usize], member_indices: &[usize]) {
+    pub(super) async fn converge_members(&self, indices: &[usize], member_indices: &[usize]) {
         eprintln!("membership phase: observers={indices:?} expected={member_indices:?}");
         let expected: BTreeSet<_> = member_indices
             .iter()

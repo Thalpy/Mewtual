@@ -73,7 +73,12 @@ Any future serialized chain ID must resolve to the original native registered ob
 
 `LocalJoin::prepare_crypto_chain` returns an opaque inactive native plan for one proven pair.
 It reserves twelve local fixed rows/slots, a confirmation-only 96 KiB variable envelope and
-work lanes. Repeated live preparation returns the same owner; after close that pair cannot
+work lanes. It also protects packet positions from the actual ledger's existing 32-row tables:
+low-side 3 input/6 output, high-side 6 input/3 output. The actual native pair role selects this
+profile. Ordinary rows share these pools and cannot consume reserved positions. Close releases
+only unused claims; a retained actual loan keeps its position until retirement. These are
+capacity claims, with no protected packet consumer yet.
+Repeated live preparation returns the same owner; after close that pair cannot
 prepare again. Only `chain_derivation_action` consumes a protected row in this revision.
 Preparation grants no network/engine/browser/RTC readiness, candidate/origin debit or packet.
 `PreparedChain::close` revokes pending action eligibility, releases unused capacity and retires

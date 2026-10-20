@@ -1,6 +1,7 @@
 //! Inactive native confirmation capacity. This is NOT whole-chain readiness: protected native
 //! and browser registry rows, atomic encrypted intake, helper agreement and measured SDP/IPC
-//! phase transfer must still compose before live dispatch. Only derivation consumes a row here.
+//! phase transfer must still compose before live dispatch. Packet-table claims also protect the
+//! actual pair role's three confirmation candidates, but only derivation consumes a row here.
 //!
 //! Fixed history never owns Workflow, an engine lender or a native registry cell. Workflow owns
 //! capacity only and references its control weakly. Actual input/engine/lower credits keep retired
@@ -103,6 +104,7 @@ pub struct Workflow {
     reserve: Arc<Reservation>,
     crypto: Arc<WorkLane>,
     lowers: [Arc<WorkLane>; 2],
+    packets: super::packets::ConfirmationCapacity,
     closed: Mutex<bool>,
 }
 struct Control {
@@ -248,10 +250,12 @@ impl PreparedChain {
         resources: Arc<Resources>,
         binding: Binding,
         slots: Arc<slots::Slots>,
+        packet_slots: &super::packets::PacketSlots,
     ) -> Result<Arc<Self>, VoiceError> {
         if !binding.live() {
             return Err(VoiceError::Unauthorized);
         }
+        let packets = packet_slots.reserve_confirmation(binding.low)?;
         let binding = Arc::new(PlanBinding {
             _metadata: resources.charge(
                 binding.scope.group,
@@ -295,6 +299,7 @@ impl PreparedChain {
                     reserve,
                     crypto,
                     lowers,
+                    packets,
                     closed: Mutex::new(false),
                 })),
             }),
@@ -445,6 +450,7 @@ impl Workflow {
         for lane in &self.lowers {
             lane.close();
         }
+        self.packets.close();
     }
 }
 impl Drop for Workflow {

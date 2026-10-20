@@ -801,6 +801,141 @@ fn send(f: &mut Fixture) -> (ReservedPacket, SignedObject, InboundPacket) {
 }
 
 #[test]
+fn confirmation_packet_claims_share_the_actual_outgoing_table_limit() {
+    let mut f = fixture();
+    let capacity = f.a.ledger.packet_slots.reserve_confirmation(false).unwrap();
+    for _ in 0..29 {
+        f.a.reserve(&f.clock, &mut f.rng).unwrap();
+    }
+    assert_eq!(f.a.ledger.outgoing.len(), 29);
+    assert_eq!(
+        f.a.reserve(&f.clock, &mut f.rng).err(),
+        Some(VoiceError::Capacity)
+    );
+    assert_eq!(f.a.ledger.pairs[&HANDSHAKE].next, 29);
+    // Model a protected preparation retaining one actual loan across workflow close. No
+    // protected consumer is enabled by this test; ordinary publication above is the real API.
+    let actual = capacity
+        .outgoing
+        .loan(&f.a.ledger.packet_slots.outgoing)
+        .unwrap();
+    capacity.close();
+    drop(capacity);
+    for _ in 0..2 {
+        f.a.reserve(&f.clock, &mut f.rng).unwrap();
+    }
+    assert!(f.a.reserve(&f.clock, &mut f.rng).is_err());
+    drop(actual);
+    f.a.reserve(&f.clock, &mut f.rng).unwrap();
+    assert_eq!(f.a.ledger.outgoing.len(), RESERVATIONS);
+    assert!(f.a.reserve(&f.clock, &mut f.rng).is_err());
+    // Native row expiry/removal returns the actual slots; a caller's stale ReservedPacket
+    // descriptor is not a second owner of its native table entry.
+    f.a.ledger.outgoing.clear();
+    assert!(f
+        .a
+        .ledger
+        .packet_slots
+        .outgoing
+        .charge(RESERVATIONS)
+        .is_ok());
+}
+
+#[test]
+fn confirmation_packet_claims_leave_rejected_inbound_replay_and_serial_unchanged() {
+    let mut f = fixture();
+    let capacity = f.c.ledger.packet_slots.reserve_confirmation(false).unwrap();
+    let mut events = Vec::new();
+    for _ in 0..26 {
+        events.push(send(&mut f).2);
+    }
+    let draft = f.a.reserve(&f.clock, &mut f.rng).unwrap();
+    let signed = f.a.submit(&draft, &[42; 32], &f.clock).unwrap();
+    let before = f.resources.counts();
+    assert_eq!(
+        f.c.admit(signed.clone(), &f.clock).err(),
+        Some(VoiceError::Capacity)
+    );
+    assert_eq!(f.c.ledger.serial, 26);
+    assert_eq!(f.c.ledger.pairs[&HANDSHAKE].replay.highest, 26);
+    assert_eq!(f.c.ledger.incoming.len(), 26);
+    assert_eq!(f.resources.counts(), before);
+    let actual = capacity
+        .incoming
+        .loan(&f.c.ledger.packet_slots.incoming)
+        .unwrap();
+    assert_eq!(
+        capacity
+            .incoming
+            .loan(&f.a.ledger.packet_slots.incoming)
+            .err(),
+        Some(VoiceError::Scope),
+        "another ledger cannot adopt the reservation"
+    );
+    capacity.close();
+    drop(capacity);
+    events.push(f.c.admit(signed, &f.clock).unwrap());
+    for _ in 0..4 {
+        events.push(send(&mut f).2);
+    }
+    assert_eq!(f.c.ledger.incoming.len(), 31);
+    let draft = f.a.reserve(&f.clock, &mut f.rng).unwrap();
+    let signed = f.a.submit(&draft, &[42; 32], &f.clock).unwrap();
+    assert_eq!(
+        f.c.admit(signed.clone(), &f.clock).err(),
+        Some(VoiceError::Capacity)
+    );
+    drop(actual);
+    events.push(f.c.admit(signed, &f.clock).unwrap());
+    assert_eq!(f.c.ledger.incoming.len(), RESERVATIONS);
+    f.c.ledger.incoming.clear();
+    assert!(f
+        .c
+        .ledger
+        .packet_slots
+        .incoming
+        .charge(RESERVATIONS)
+        .is_ok());
+    assert!(
+        f.resources.counts().0 > 0,
+        "events still retain their separate byte custody"
+    );
+}
+
+#[test]
+fn partial_confirmation_packet_reservation_returns_all_unused_claims() {
+    let f = fixture();
+    let outgoing = f.a.ledger.packet_slots.outgoing.charge(30).unwrap();
+    assert_eq!(
+        f.a.ledger.packet_slots.reserve_confirmation(false).err(),
+        Some(VoiceError::Capacity)
+    );
+    let incoming =
+        f.a.ledger
+            .packet_slots
+            .incoming
+            .charge(RESERVATIONS)
+            .unwrap();
+    drop((incoming, outgoing));
+    let capacity = f.a.ledger.packet_slots.reserve_confirmation(false).unwrap();
+    capacity.close();
+    assert!(f
+        .a
+        .ledger
+        .packet_slots
+        .outgoing
+        .charge(RESERVATIONS)
+        .is_ok());
+    assert!(f
+        .a
+        .ledger
+        .packet_slots
+        .incoming
+        .charge(RESERVATIONS)
+        .is_ok());
+}
+
+#[test]
 fn prepared_ingress_origin_refusal_does_not_consume_replay_or_native_token() {
     let mut f = fixture();
     let reserved = f.a.reserve(&f.clock, &mut f.rng).unwrap();

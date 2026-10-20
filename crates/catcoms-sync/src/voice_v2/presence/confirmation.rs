@@ -287,6 +287,8 @@ impl LocalJoin {
     /// Prepare inactive native confirmation capacity for one proven pair. Repeated live calls
     /// return the same owner; after close this exact pair cannot prepare again. No readiness,
     /// packet, candidate debit, signing, engine permit or browser capacity is granted here.
+    /// The actual native role selects three input/six output table claims for the low side,
+    /// or six input/three output claims for the high side, within the existing 32-row limits.
     pub fn prepare_crypto_chain(
         &mut self,
         handshake: Nonce,
@@ -311,6 +313,7 @@ impl LocalJoin {
             self.resources.clone(),
             binding.clone(),
             slots.clone(),
+            self.ledger.packet_slots(),
         )?;
         self.confirmations
             .pairs

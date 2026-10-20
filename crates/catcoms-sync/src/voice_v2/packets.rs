@@ -3,6 +3,7 @@
 //! nonces and OfferId retirement belong to the endpoint state machine above this ledger; creating
 //! a pair record here does not prove any of them. No public IPC may expose register/establish.
 
+use super::crypto_actions::slots;
 use super::negotiation::{Binding as ExchangeBinding, Exchange, Stage};
 use super::resources::{Credit, ResourceKind, Resources};
 use super::*;
@@ -14,6 +15,46 @@ use std::sync::Arc;
 const PAIRS: usize = 16;
 const RESERVATIONS: usize = 32;
 const CONSTRUCTION_MS: u64 = 5000;
+
+/// The two native packet tables have independent limits. Capacity reservations and actual
+/// rows draw from the same pools, so ordinary traffic cannot occupy a promised continuation.
+pub(super) struct PacketSlots {
+    incoming: Arc<slots::Slots>,
+    outgoing: Arc<slots::Slots>,
+}
+/// Capacity only, owned by the confirmation workflow rather than permanent action history.
+/// Each of three candidate lanes needs two Hello/Finish rows and one Proof row. Direction is
+/// selected from the actual native pair role, never from a received descriptor. This does not
+/// authorize any of those roles; their protected intake/publication consumers are separate.
+pub(super) struct ConfirmationCapacity {
+    incoming: Arc<slots::ReservedSlots>,
+    outgoing: Arc<slots::ReservedSlots>,
+}
+impl PacketSlots {
+    pub(super) fn new() -> Self {
+        Self {
+            incoming: Arc::new(slots::Slots::with_limit(RESERVATIONS)),
+            outgoing: Arc::new(slots::Slots::with_limit(RESERVATIONS)),
+        }
+    }
+    pub(super) fn reserve_confirmation(
+        &self,
+        local_is_low: bool,
+    ) -> Result<ConfirmationCapacity, VoiceError> {
+        // If the second reservation refuses, dropping the first returns its unused claims.
+        // Neither table, sequence nor replay window has been published at this point.
+        Ok(ConfirmationCapacity {
+            incoming: self.incoming.reserve(if local_is_low { 3 } else { 6 })?,
+            outgoing: self.outgoing.reserve(if local_is_low { 6 } else { 3 })?,
+        })
+    }
+}
+impl ConfirmationCapacity {
+    pub(super) fn close(&self) {
+        self.incoming.close();
+        self.outgoing.close();
+    }
+}
 
 /// A current actor-turn view, not a capability that can be captured over an await.
 pub struct Authority<'a> {
@@ -81,6 +122,8 @@ struct Outgoing {
     crypto: RevocationOwner,
     _credit: Credit,
     exchange: Option<Arc<Exchange>>,
+    // Native table custody, separate from retained bytes and actual transport copies.
+    _slot: slots::Slot,
 }
 #[derive(Clone)]
 pub(super) enum PendingConfirmation {
@@ -102,6 +145,7 @@ struct Incoming {
     confirmation: Option<PendingConfirmation>,
     _credit: Arc<Credit>,
     exchange: Option<Arc<Exchange>>,
+    _slot: slots::Slot,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -135,6 +179,7 @@ pub struct PacketLedger {
     serial: u64,
     sdp: Option<SdpExchange>,
     action_slots: Arc<super::crypto_actions::slots::Slots>,
+    packet_slots: PacketSlots,
 }
 pub struct ReserveRequest {
     pub handshake: [u8; 32],
@@ -440,6 +485,7 @@ impl PacketLedger {
             serial: 0,
             sdp: None,
             action_slots: Arc::new(super::crypto_actions::slots::Slots::default()),
+            packet_slots: PacketSlots::new(),
         })
     }
     /// Root transport regressions begin at an established native pair without claiming an
@@ -539,6 +585,9 @@ impl PacketLedger {
     }
     pub(super) fn action_slots(&self) -> Arc<super::crypto_actions::slots::Slots> {
         self.action_slots.clone()
+    }
+    pub(super) fn packet_slots(&self) -> &PacketSlots {
+        &self.packet_slots
     }
     fn sdp_owner(
         &self,
@@ -814,6 +863,7 @@ impl PacketLedger {
         if self.outgoing.len() >= RESERVATIONS {
             return Err(VoiceError::Capacity);
         }
+        let slot = self.packet_slots.outgoing.charge(1)?;
         if request.ciphertext_bytes < 16
             || request.ciphertext_bytes > request.kind.max_plaintext() + 16
         {
@@ -886,6 +936,7 @@ impl PacketLedger {
                 crypto: RevocationOwner::default(),
                 _credit: credit,
                 exchange,
+                _slot: slot,
             },
         );
         Ok(ReservedPacket {
@@ -1190,6 +1241,7 @@ impl PacketLedger {
         if self.incoming.len() >= RESERVATIONS {
             return Err(VoiceError::Capacity);
         }
+        let slot = self.packet_slots.incoming.charge(1)?;
         let token = self.serial.checked_add(1).ok_or(VoiceError::Reservation)?;
         let aad = object.aad()?;
         let exchange = self.sdp_owner(header, true)?;
@@ -1237,6 +1289,7 @@ impl PacketLedger {
                 confirmation: None,
                 _credit: credit,
                 exchange,
+                _slot: slot,
             },
             event,
             serial: self.serial,

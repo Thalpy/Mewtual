@@ -25,6 +25,20 @@ fn binding(seed: u8) -> Binding {
         low: true,
     }
 }
+/// These tests isolate history/action/workflow custody; real ledger sharing is covered by
+/// packet and LocalJoin regressions. Each fixture still uses the production fixed-size pools.
+fn prepare_chain(
+    resources: Arc<Resources>,
+    bound: Binding,
+    slots: Arc<slots::Slots>,
+) -> Result<Arc<PreparedChain>, VoiceError> {
+    PreparedChain::new(
+        resources,
+        bound,
+        slots,
+        &super::super::packets::PacketSlots::new(),
+    )
+}
 fn publish(
     chain: &Arc<PreparedChain>,
     pool: &Arc<Resources>,
@@ -33,6 +47,30 @@ fn publish(
     let (queue, action) = publish_unregistered(chain, pool, slots);
     chain.register_action(&action);
     (queue, action)
+}
+
+#[test]
+fn fixed_metadata_allowance_covers_retained_owner_layouts() {
+    use std::mem::size_of;
+    // Conservative structural accounting: include the shared ledger slot pools too, all
+    // reservation/lane owners and their Arc counters, and the preallocated weak-action list.
+    // Actual action/input/result rows have separate credits. This is a growth guard for our
+    // retained Rust owners, not an allocator-slack or framework/engine heap measurement.
+    const ARC_OWNERS: usize = 4 + 2 + 3 + 3 + 3;
+    let bytes = size_of::<PlanBinding>()
+        + size_of::<HistoryPlan>()
+        + size_of::<PreparedChain>()
+        + size_of::<Workflow>()
+        + 2 * size_of::<Reservation>()
+        + 3 * size_of::<WorkLane>()
+        + 3 * size_of::<slots::Slots>()
+        + 3 * size_of::<slots::ReservedSlots>()
+        + ROWS * size_of::<Weak<CryptoAction>>()
+        + ARC_OWNERS * 2 * size_of::<usize>();
+    assert!(
+        bytes <= METADATA_BYTES,
+        "retained native layouts need {bytes} bytes, allowance is {METADATA_BYTES}"
+    );
 }
 fn publish_unregistered(
     chain: &Arc<PreparedChain>,
@@ -87,22 +125,21 @@ fn idle_close_releases_every_unused_byte_and_slot_despite_retained_handles() {
     let pool = Arc::new(Resources::default());
     let slots = Arc::new(slots::Slots::default());
     let bound = binding(8);
-    let chain = PreparedChain::new(pool.clone(), bound.clone(), slots.clone()).unwrap();
+    let chain = prepare_chain(pool.clone(), bound.clone(), slots.clone()).unwrap();
     assert_eq!(
         pool.counts(),
         (ROWS * ROW_BYTES + VARIABLE_BYTES + METADATA_BYTES, 1)
     );
     let ordinary = slots.charge(20).unwrap();
     assert!(slots.charge(1).is_err(), "all twelve future rows protected");
-    assert!(PreparedChain::new(pool.clone(), binding(9), slots.clone()).is_err());
+    assert!(prepare_chain(pool.clone(), binding(9), slots.clone()).is_err());
     chain.close();
     chain.close();
     assert_eq!(pool.counts(), (METADATA_BYTES, 0));
     assert!(!chain.matches(&bound, &pool, &slots, 1000));
     assert!(chain.prepare_derive().is_err());
     let remaining = slots.charge(12).unwrap();
-    let other =
-        PreparedChain::new(pool.clone(), binding(9), Arc::new(slots::Slots::default())).unwrap();
+    let other = prepare_chain(pool.clone(), binding(9), Arc::new(slots::Slots::default())).unwrap();
     assert!(
         chain.prepare_derive().is_err(),
         "old handle never adopts replacement capacity"
@@ -119,7 +156,7 @@ fn idle_close_releases_every_unused_byte_and_slot_despite_retained_handles() {
 fn abandoned_unpublished_row_returns_once_but_stale_issue_cannot_publish_or_pin_progress() {
     let pool = Arc::new(Resources::default());
     let slots = Arc::new(slots::Slots::default());
-    let chain = PreparedChain::new(pool.clone(), binding(8), slots.clone()).unwrap();
+    let chain = prepare_chain(pool.clone(), binding(8), slots.clone()).unwrap();
     let (row, budget) = chain.prepare_derive().unwrap();
     assert!(chain.prepare_derive().is_err());
     drop((row, budget));
@@ -127,8 +164,7 @@ fn abandoned_unpublished_row_returns_once_but_stale_issue_cannot_publish_or_pin_
     drop(budget);
     chain.close();
     assert_eq!(pool.counts(), (ROW_BYTES + METADATA_BYTES, 0));
-    let other =
-        PreparedChain::new(pool.clone(), binding(9), Arc::new(slots::Slots::default())).unwrap();
+    let other = prepare_chain(pool.clone(), binding(9), Arc::new(slots::Slots::default())).unwrap();
     assert!(row
         .issue
         .publish(|| panic!("closed row must not publish"))
@@ -147,7 +183,7 @@ fn actual_input_reader_and_uncertain_engine_keep_old_progress_until_last_retirem
     for admitted in [false, true] {
         let pool = Arc::new(Resources::default());
         let slots = Arc::new(slots::Slots::default());
-        let chain = PreparedChain::new(pool.clone(), binding(8), slots.clone()).unwrap();
+        let chain = prepare_chain(pool.clone(), binding(8), slots.clone()).unwrap();
         let (_queue, action) = publish(&chain, &pool, &slots);
         let input = action.input().unwrap();
         if admitted {
@@ -161,21 +197,19 @@ fn actual_input_reader_and_uncertain_engine_keep_old_progress_until_last_retirem
             "End fences already-admitted effects too"
         );
         assert!(
-            PreparedChain::new(pool.clone(), binding(9), Arc::new(slots::Slots::default()))
-                .is_err()
+            prepare_chain(pool.clone(), binding(9), Arc::new(slots::Slots::default())).is_err()
         );
         drop(input);
         if admitted {
             assert!(
-                PreparedChain::new(pool.clone(), binding(9), Arc::new(slots::Slots::default()))
-                    .is_err(),
+                prepare_chain(pool.clone(), binding(9), Arc::new(slots::Slots::default())).is_err(),
                 "uncertain engine still owns progress"
             );
             action.settle_engine();
         }
         assert_eq!(pool.counts(), (ROW_BYTES + METADATA_BYTES, 0));
-        let other = PreparedChain::new(pool.clone(), binding(9), Arc::new(slots::Slots::default()))
-            .unwrap();
+        let other =
+            prepare_chain(pool.clone(), binding(9), Arc::new(slots::Slots::default())).unwrap();
         other.close();
         drop(other);
         assert_eq!(
@@ -191,7 +225,7 @@ fn lost_ack_history_outlives_flow_without_rearming_any_operation() {
     for rejected in [false, true] {
         let pool = Arc::new(Resources::default());
         let slots = Arc::new(slots::Slots::default());
-        let chain = PreparedChain::new(pool.clone(), binding(8), slots.clone()).unwrap();
+        let chain = prepare_chain(pool.clone(), binding(8), slots.clone()).unwrap();
         let (_queue, action) = publish(&chain, &pool, &slots);
         action.admit_engine(action.engine_bytes()).unwrap();
         let receipt = action
@@ -218,8 +252,7 @@ fn lost_ack_history_outlives_flow_without_rearming_any_operation() {
             "settled terminal with lost ACK is not unstarted"
         );
         assert!(
-            PreparedChain::new(pool.clone(), binding(9), Arc::new(slots::Slots::default()))
-                .is_err()
+            prepare_chain(pool.clone(), binding(9), Arc::new(slots::Slots::default())).is_err()
         );
         action.acknowledge_result(&receipt).unwrap();
         assert!(action.input().is_err());
@@ -230,8 +263,8 @@ fn lost_ack_history_outlives_flow_without_rearming_any_operation() {
         assert!(recovered.same_transition(&receipt));
         assert!(recovered.retired);
         assert_eq!(pool.counts(), (ROW_BYTES + METADATA_BYTES, 0));
-        let other = PreparedChain::new(pool.clone(), binding(9), Arc::new(slots::Slots::default()))
-            .unwrap();
+        let other =
+            prepare_chain(pool.clone(), binding(9), Arc::new(slots::Slots::default())).unwrap();
         assert!(chain.prepare_derive().is_err());
         assert!(action.admit_engine(action.engine_bytes()).is_err());
         other.close();
@@ -243,7 +276,7 @@ fn row_rejects_other_resource_slot_call_key_and_budget_owners_before_charging() 
     let pool = Arc::new(Resources::default());
     let slots = Arc::new(slots::Slots::default());
     let bound = binding(8);
-    let chain = PreparedChain::new(pool.clone(), bound.clone(), slots.clone()).unwrap();
+    let chain = prepare_chain(pool.clone(), bound.clone(), slots.clone()).unwrap();
     let (row, budget) = chain.prepare_derive().unwrap();
     let before = pool.counts();
     let key = Key::Derive(bound.handshake);
@@ -321,11 +354,10 @@ fn concurrent_preparations_install_only_one_group_workflow_and_loser_returns_all
     let (first, second) = std::thread::scope(|scope| {
         let first = scope.spawn(|| {
             barrier.wait();
-            PreparedChain::new(pool.clone(), binding(8), Arc::new(slots::Slots::default()))
+            prepare_chain(pool.clone(), binding(8), Arc::new(slots::Slots::default()))
         });
         barrier.wait();
-        let second =
-            PreparedChain::new(pool.clone(), binding(9), Arc::new(slots::Slots::default()));
+        let second = prepare_chain(pool.clone(), binding(9), Arc::new(slots::Slots::default()));
         (first.join().unwrap(), second)
     });
     assert_ne!(first.is_ok(), second.is_ok());
@@ -386,7 +418,7 @@ fn failed_preparation_returns_partial_bytes_and_slots_at_each_resource_boundary(
             );
         }
         let before = pool.counts();
-        assert!(PreparedChain::new(pool.clone(), bound, slots.clone()).is_err());
+        assert!(prepare_chain(pool.clone(), bound, slots.clone()).is_err());
         assert_eq!(
             pool.counts(),
             before,
@@ -406,7 +438,7 @@ fn quiet_expiry_or_parent_revocation_closes_idle_capacity_with_old_control_retai
         let pool = runtime.resources();
         let slots = Arc::new(slots::Slots::default());
         let bound = binding(8);
-        let chain = PreparedChain::new(pool.clone(), bound.clone(), slots.clone()).unwrap();
+        let chain = prepare_chain(pool.clone(), bound.clone(), slots.clone()).unwrap();
         if end {
             bound.call.revoke();
         }
@@ -428,7 +460,7 @@ fn close_racing_row_publication_or_engine_admission_never_restores_work() {
         for _ in 0..8 {
             let pool = Arc::new(Resources::default());
             let slots = Arc::new(slots::Slots::default());
-            let chain = PreparedChain::new(pool.clone(), binding(8), slots.clone()).unwrap();
+            let chain = prepare_chain(pool.clone(), binding(8), slots.clone()).unwrap();
             let barrier = std::sync::Barrier::new(2);
             if engine {
                 let (_queue, action) = publish(&chain, &pool, &slots);
@@ -478,7 +510,7 @@ fn close_racing_row_publication_or_engine_admission_never_restores_work() {
 fn close_in_publication_registration_gap_fences_effects_before_retiring_unstarted_input() {
     let pool = Arc::new(Resources::default());
     let slots = Arc::new(slots::Slots::default());
-    let chain = PreparedChain::new(pool.clone(), binding(8), slots.clone()).unwrap();
+    let chain = prepare_chain(pool.clone(), binding(8), slots.clone()).unwrap();
     let (_queue, action) = publish_unregistered(&chain, &pool, &slots);
     chain.close();
     assert!(
@@ -488,15 +520,12 @@ fn close_in_publication_registration_gap_fences_effects_before_retiring_unstarte
     assert!(!action.is_pending());
     assert!(action.admit_engine(action.engine_bytes()).is_err());
     assert!(action.with_pending(|| Ok(())).is_err());
-    assert!(
-        PreparedChain::new(pool.clone(), binding(9), Arc::new(slots::Slots::default())).is_err()
-    );
+    assert!(prepare_chain(pool.clone(), binding(9), Arc::new(slots::Slots::default())).is_err());
     chain.register_action(&action);
     assert!(action.is_settled());
     assert!(action.input().is_err());
     assert_eq!(pool.counts(), (ROW_BYTES + METADATA_BYTES, 0));
-    let other =
-        PreparedChain::new(pool.clone(), binding(9), Arc::new(slots::Slots::default())).unwrap();
+    let other = prepare_chain(pool.clone(), binding(9), Arc::new(slots::Slots::default())).unwrap();
     other.close();
     drop((other, chain));
     assert_eq!(pool.counts(), (ROW_BYTES, 0));

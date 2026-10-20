@@ -1,10 +1,18 @@
-//! The per-join combined pending/terminal action limit, including prepaid SDP continuations.
-//! Reservations protect future records; actual actions keep their slots through retirement.
+//! Bounded native table slots, including prepaid action and packet continuations. Each table
+//! has its own immutable limit and pool identity. Reservations protect future records; actual
+//! rows keep their slots through retirement, even after their reservation owner closes.
 use super::super::VoiceError;
 use std::sync::{Arc, Mutex};
 
-#[derive(Default)]
-pub(crate) struct Slots(Mutex<usize>);
+pub(crate) struct Slots {
+    used: Mutex<usize>,
+    limit: usize,
+}
+impl Default for Slots {
+    fn default() -> Self {
+        Self::with_limit(super::ACTIONS)
+    }
+}
 pub(crate) struct Slot {
     pool: Arc<Slots>,
     count: usize,
@@ -21,9 +29,17 @@ struct State {
 }
 redacted_debug!(Slots, Slot, ReservedSlots);
 impl Slots {
+    /// The native table selects this limit. An untrusted descriptor cannot enlarge its pool,
+    /// and a reserved slot from a different table cannot be loaned into this one.
+    pub(crate) fn with_limit(limit: usize) -> Self {
+        Self {
+            used: Mutex::new(0),
+            limit,
+        }
+    }
     pub(crate) fn charge(self: &Arc<Self>, count: usize) -> Result<Slot, VoiceError> {
-        let mut used = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if count == 0 || count > super::ACTIONS || *used > super::ACTIONS - count {
+        let mut used = self.used.lock().unwrap_or_else(|e| e.into_inner());
+        if count == 0 || count > self.limit || *used > self.limit - count {
             return Err(VoiceError::Capacity);
         }
         *used += count;
@@ -86,10 +102,10 @@ impl Slot {
     fn release(&mut self, count: usize) {
         assert!(
             self.reserve.is_none() && count <= self.count,
-            "native action backing slot"
+            "native table backing slot"
         );
         self.count -= count;
-        *self.pool.0.lock().unwrap_or_else(|e| e.into_inner()) -= count;
+        *self.pool.used.lock().unwrap_or_else(|e| e.into_inner()) -= count;
     }
 }
 impl Drop for Slot {
@@ -122,9 +138,9 @@ mod tests {
         let replacement = pool.charge(1).unwrap();
         assert!(reserve.loan(&pool).is_err());
         drop(reserve);
-        assert_eq!(*pool.0.lock().unwrap(), 32);
+        assert_eq!(*pool.used.lock().unwrap(), 32);
         drop((ordinary, replacement, second));
-        assert_eq!(*pool.0.lock().unwrap(), 0);
+        assert_eq!(*pool.used.lock().unwrap(), 0);
     }
     #[test]
     fn abandoned_preparation_returns_to_exact_reserve_and_another_join_cannot_borrow() {
@@ -134,8 +150,30 @@ mod tests {
         assert_eq!(reserve.loan(&other).err(), Some(VoiceError::Scope));
         drop(reserve.loan(&pool).unwrap());
         drop(reserve.loan(&pool).unwrap());
-        assert_eq!(*pool.0.lock().unwrap(), 2);
+        assert_eq!(*pool.used.lock().unwrap(), 2);
         reserve.close();
-        assert_eq!(*pool.0.lock().unwrap(), 0);
+        assert_eq!(*pool.used.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn smaller_packet_tables_keep_reserved_and_actual_rows_in_the_same_limit() {
+        let pool = Arc::new(Slots::with_limit(3));
+        let reserved = pool.reserve(2).unwrap();
+        let ordinary = pool.charge(1).unwrap();
+        assert!(pool.charge(1).is_err());
+        let actual = reserved.loan(&pool).unwrap();
+        reserved.close(); // only the other, unused reserved position is free
+        let replacement = pool.charge(1).unwrap();
+        assert!(pool.charge(1).is_err());
+        drop(reserved);
+        assert!(
+            pool.charge(1).is_err(),
+            "the actual row still owns its position"
+        );
+        drop(actual);
+        let last = pool.charge(1).unwrap();
+        assert!(pool.charge(1).is_err());
+        drop((ordinary, replacement, last));
+        assert_eq!(*pool.used.lock().unwrap(), 0);
     }
 }

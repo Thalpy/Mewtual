@@ -1,5 +1,14 @@
 # Mewtual; Architecture
 
+## Confirmation packet tables (20 October, inactive)
+
+Incoming and outgoing native V2 packets now each retain a position from their independent
+32-row pools. Preparing a confirmation workflow protects three candidate lanes within those
+same limits: low-side 3 input/6 output, high-side 6 input/3 output. Fixed action history does not
+retain these progress claims. Workflow close returns unused positions; actual rows/loans retain
+their own positions until retirement, independently of retained decrypt-event bytes. No protected
+packet consumer or live V2 dispatch is enabled by these capacity changes.
+
 ## Chat history and MLS epoch separation (20 October, continuation)
 
 Chat retains the original signed Automerge operations across key epochs; current-key catch-up

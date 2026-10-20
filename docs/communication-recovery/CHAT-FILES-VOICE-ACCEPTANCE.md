@@ -9,6 +9,32 @@ Private Download resume preserves verified encrypted acquisition progress and it
 allowance across restart. External export uses a fresh destination; continuing a partly written
 external plaintext file at its old offset is not implemented.
 
+## Automatic chat bubbles and V2 packet capacity (20 October, continuation)
+
+The new native TCP scenario passes twice (81.59s then 78.07s after an additional dependency-closure
+assertion; `chat-bubbles-native-first.log`, `chat-bubbles-native-final.log`). Three isolated pairs
+write from one saved base with all gossip dropped. It combines owner deletion against a concurrent
+author edit, an independent retained edit/pin/three reactors, an MLS removal and automatic recovery
+of a previously unseen original pre-removal signature. A replacement bridge serves returning
+members with the original A/B authors offline. Assertions compare original signed-operation unions, an
+independently assembled visible projection, dependency-derived heads, current membership/epoch,
+and production freeze/save followed by solo reopen. Read-only review has no remaining finding.
+This is six devices and one membership transition, small unpaged history, sequential causally
+independent pairs and graceful close. It does not establish 50 simultaneous network peers or
+abrupt-crash custody. See [the coverage trace](CHAT-HISTORY-CONVERGENCE.md).
+
+The inactive V2 native chain now also protects logical packet-table positions, using the actual
+pair role and the existing 32-row limits: low 3-in/6-out, high 6-in/3-out. Actual ordinary incoming/
+outgoing rows own positions separately from bytes; close returns unused reservations, not actual
+loans. Partial reservation failure returns unused claims. The focused V2 run passes 249 cases in
+10.65s (`voice-v2-packet-capacity-final.log`), including actual ordinary packet APIs under pressure,
+cross-ledger refusal, replay/serial preservation, constructor/close and a retained-owner layout
+growth guard within the existing 2 KiB allowance. This structural estimate excludes allocator slack
+and framework/engine heap. Read-only review has no remaining finding.
+Protected packet/event allocation, candidate history lanes and atomic high-side Hello remain
+unimplemented; no unsupported protected role or live V2 path is enabled. This continuation's full
+application suites are in progress and must not be inferred from the prior checkpoint below.
+
 ## Chat history adversarial checkpoint (20 October)
 
 This checkpoint adds 20 chat tests: 15 application cases, four signed-history

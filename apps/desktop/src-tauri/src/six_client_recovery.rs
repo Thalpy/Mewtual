@@ -8,6 +8,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod chat_bubbles;
 mod chat_matrix;
 mod files;
 mod runtime;
