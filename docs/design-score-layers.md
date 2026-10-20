@@ -203,7 +203,11 @@ slots, and `readiness.headerConflicts` against "more than one distinct header va
   global 64-voice ceiling and tail stealing are unchanged. A recipient playing the same take as a
   jukebox deck keeps the 16 cap and may drop holds the author heard; frame sounds share the part-0
   owner and can be refused while a score holds 48. Notes beyond the cap are refused by the
-  allocator and counted, not hidden.
+  allocator and counted, not hidden: `StudioPlaybackController.refused` counts each attack refused
+  `source-held` or `room-held` once per start (releases, `duplicate` and `sequence` are not lost
+  notes), only for the playback still current. `StudioAudioState.refused` is the larger of the pass
+  under way and the pass before it, so a loop neither sums its passes nor reads 0 after each
+  restart, and the composer shows "N not played" while the score plays (review of `e7250d48`, L1).
 - Nothing refuses Play, download, share or post on readiness any more; issues are listed to review.
 
 ## 8. Composer: layers
@@ -222,11 +226,27 @@ slots, and `readiness.headerConflicts` against "more than one distinct header va
   Notes of a sound that is gone are drawn in a "missing sound" layer that is always shown.
 - A slot with several live values (concurrent edits) shows its `shown()` value with a mark that
   says more than one version plays (the `conflict` flag); the same for a legacy conflict.
+- Such a layered slot (more than one DIFFERENT live value) is never moved, resized or rewritten
+  from the grid: a write or clear of its key replaces every value the member has seen, so the
+  versions they cannot see would go silently. The composer refuses the gesture and points to the
+  review list, where choosing a version rewrites the slot to that one value. The member's own erase
+  on the grid (a gesture of clears alone) is allowed and removes the note in every version. An undo
+  or redo is held to the rule like any edit (its clears would remove versions added since), and the
+  review list exempts only the one key it acts on. "Several values" is readiness `conflict`, which
+  counts a queued choice as the only value. Identical values are one value and edit normally.
+  Legacy cells are unaffected: their losing values never play (review of `e7250d48`, design
+  question 1, and its re-review M-A, M-B, L-A).
 - Visibility is per viewer and per document, held in the composer, never written to the document.
   Hide does not mute.
 - Editing a legacy note (move, resize, volume, sound) authors `set_note` first, then `clear_cell`
-  (review M3). The composer checks the new note locally before authoring either: its `len` is
-  clipped to `steps - step`, its sound is admitted, and the 4096 slot cap has room. A failure of
+  (review M3). The composer checks the new note locally before authoring either: its `len` fits
+  `steps - step`, its sound is admitted, and the 4096 slot cap has room. A hold that runs past the
+  end (the score was shortened under it) plays clipped, but no edit shortens it on its own: a move,
+  volume or sound change of it is refused until the member shortens it, and one Shorten press brings
+  it to the end, or lengthens the score. The authored length so survives a score that is shortened
+  and grown back (review of `e7250d48`, design question 2; this applies to layered notes too).
+  Undoing that Shorten, or an erase of such a hold, puts the overrun back exactly; an undo that
+  would put back a hold that fitted when it was recorded and no longer does stays refused. A failure of
   the second op leaves both notes, which is additive and visible, never a lost note. `set_note` is
   re-saved on its own after an epoch move; `clear_cell` keeps its card until the member decides.
   Undo restores exactly where a value lived: a legacy cell the composer cleared comes back as that
@@ -241,6 +261,13 @@ slots, and `readiness.headerConflicts` against "more than one distinct header va
   refused write removes the gesture's later records; after a restore, which drops the links, the
   restored note edits behind it are held for the member instead (adversarial review M1/M2 and the
   re-review's H1/M1/M2).
+- A legacy cell behind the shown layered note of the same sound is cleared with it only when it is
+  the same note (pitch, length and volume, `len: 1` and `vol: 100` equal to absent); a distinct one
+  is a note in its own right and stays. A gesture the host refuses midway is put back newest first
+  and the put-back stops at its first refusal, since an older inverse can depend on a newer one;
+  the prefix left keeps every note. A drag binds each carried note's key and value at pointer-down
+  and moves nothing if a collaborator changed one meanwhile. Every write, undo and review action
+  included, reaches only shown sounds (review of `e7250d48`, H1, H2, M1, M2).
 
 ## 9. Tests (minimum)
 

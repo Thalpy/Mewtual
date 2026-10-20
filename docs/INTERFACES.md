@@ -22,13 +22,19 @@ contract is `docs/design-score-layers.md`; this is the interface summary.
   means distinct values, `overlap` only within one row and one sound, computed by an O(n) sweep.
   Nothing refuses Play, download, share or post. `ScorePlayback.skipped` counts what does not sound.
 - Bridge DTO: a score with layer slots adds `layers: {"S:R/L": {cleared, register}}` and
-  `readiness.layers`; a score without them keeps the exact earlier shape.
+  `readiness.layers`; a score without them keeps the exact earlier shape. The renderer refuses a
+  view whose `readiness.layers[key].conflict` disagrees with that slot's distinct live values
+  (absent counts as false), since the composer's several-versions guard reads that flag.
 - Exporter input: `notes: {step,row,value}[]` (or the older `cells` record). Overlapping holds of
   one pitch each take the lowest free lane (lane `k >= 1` nonce from `catcoms-score-voice:v1`);
   a clean score exports byte-identically.
 - Studio playback of a document may hold 48 notes at once (`JAM_DOCUMENT_HELD_MAX`); jukebox decks
   and received takes keep 16 per performer. Under the 64-voice ceiling that leaves 16 held voices
-  for all live performers together while a document plays locally.
+  for all live performers together while a document plays locally. Attacks refused for want of a
+  voice (`source-held`, `room-held`) are counted once each per start
+  (`StudioPlaybackController.refused`); `StudioAudioState.refused` is the larger of the pass under
+  way and the one before it (0 when nothing plays), and `ScoreEditor`'s `refused` prop shows it as
+  "N not played" (`data-score-refused`) while the score plays.
 - A Flipnote's linked Score resolves the same additive way: its PIXA carries what the score plays
   instead of refusing on the score's readiness (declared change; the Flipnote's own frames and
   sound still refuse on conflicts).
@@ -45,7 +51,12 @@ contract is `docs/design-score-layers.md`; this is the interface summary.
   moves it into its layer (`set_note`, then
   `clear_cell`); undo restores a legacy cell where it was (`set_cell`). Visibility is per viewer,
   never written, and hiding does not mute. Only a shown sound takes new notes; a ghosted sound is
-  outlines that other sounds can be written over.
+  outlines that other sounds can be written over. Every write, undo, redo and review action
+  included, reaches only shown sounds. A layered slot with several different live values is not
+  moved, resized, rewritten, undone or redone over (`scoreOpSeveralValues`, read from readiness
+  `conflict`); choosing a version in the review list (which exempts only that key) or erasing it on
+  the grid is how it changes. A hold past the end is not edited until it is shortened (one Shorten
+  press brings it to the end, and undo puts the overrun back) or the score is lengthened.
 
 ## Score additions re-saved after an epoch move (2026-10-20)
 

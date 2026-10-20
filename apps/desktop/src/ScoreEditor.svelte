@@ -47,7 +47,7 @@
     scoreOnsetsIn, scoreOverlappingNotes, scorePadForRow,
     scorePatchOrder, scorePatchUsage, scorePitch, scorePlayheadStep, scoreRepeatBar, scoreReplay, scoreRowIsBlack, scoreScaleRows, scoreSlotDiagnostic, scoreSnapStart,
     scoreTapTempo, scoreTimeLabel, scoreExtent, scoreFreeRun,
-    SCORE_VISIBILITY_NEXT, scoreGestureId, scoreGhostCells, scoreHeaderOthers, scoreIssuesAt, scoreLayerOf, scoreSurface, scoreSurfaceOps, scoreVisibilityOf,
+    SCORE_VISIBILITY_NEXT, scoreGestureId, scoreGhostCells, scoreHeaderOthers, scoreIssuesAt, scoreLayerOf, scoreOpLayers, scoreOpSeveralValues, scoreRestoresPastEnd, scoreSurface, scoreSurfaceOps, scoreVisibilityOf,
     type ScoreDiagnostic, type ScoreGhostCell, type ScoreHold, type ScoreScaleKind, type ScoreSurface, type ScoreVisibility,
   } from "./score-editor.ts";
 
@@ -83,6 +83,9 @@
     playing?: boolean;
     /** Edits made during this loop pass are waiting for the next one. */
     nextPass?: boolean;
+    /** Notes of this playback pass that did not sound: more held at once than playback has voices
+     *  for (StudioAudioState.refused). 0 when nothing is playing. */
+    refused?: number;
     /** Milliseconds into document playback, or null when nothing is playing. */
     positionMs?: number | null;
     loop?: boolean;
@@ -109,7 +112,7 @@
   // write is translated into layered operations at the one place writes leave (`sendAll`).
   let {
     model: docModel, readonlyReason, loading, error, patchLibrary, library = [], who = (id: string) => id.slice(0, 8), tint = () => "var(--muted)",
-    onop, onroom, selection = null, onselection, onaddpatch, onplay, onstop, playing = false, nextPass = false, positionMs = null, loop = false, onloop, onaudition, onauditionpad, onnew, onexport, onshare, onpost,
+    onop, onroom, selection = null, onselection, onaddpatch, onplay, onstop, playing = false, nextPass = false, refused = 0, positionMs = null, loop = false, onloop, onaudition, onauditionpad, onnew, onexport, onshare, onpost,
     mediaBusy = false, history, onnotice,
   }: Props = $props();
 
@@ -124,7 +127,11 @@
   let dense = $state(false);
   // Undo and redo for this mounted document: each entry is one gesture's operations and the
   // operations that put the previous values back. Bounded; dropped with the component.
-  type Gesture = { label: string; forward: ScoreOp[]; inverse: ScoreOp[] };
+  /** `pastEnd`: indices into `inverse` of the writes that put back a hold which already ran past the
+   *  end when the gesture was sent, so only those may exceed `steps` on undo (`scoreReplay`, see
+   *  `scoreRestoresPastEnd`). Indices, not op objects: the history stacks are deep `$state`, so a
+   *  read gives proxies that would never match an identity set. */
+  type Gesture = { label: string; forward: ScoreOp[]; inverse: ScoreOp[]; pastEnd: number[] };
   const HISTORY_MAX = 64;
   let undoStack = $state<Gesture[]>([]);
   let redoStack = $state<Gesture[]>([]);
@@ -175,7 +182,10 @@
     // whether that destination is free of every other note along the hold. `keys` is every onset
     // carried (the picked phrase when the pressed note is part of it, else just this one) and
     // `delta` the offset the phrase has been carried by.
-    | { kind: "move"; pointerId: number; onset: string; cell: ScoreCell; len: number; offset: number; to: { step: number; row: number }; fits: boolean; reason: string; moved: boolean; keys: string[]; delta: { step: number; row: number } }
+    // `bound` is every carried note as pointer-down saw it: its cell, the document note behind that
+    // cell and its value. The grid keeps notes by cell, so a remote edit during the drag could
+    // otherwise put another note (another sound's, or a changed value) under a carried cell.
+    | { kind: "move"; pointerId: number; onset: string; cell: ScoreCell; len: number; offset: number; to: { step: number; row: number }; fits: boolean; reason: string; moved: boolean; keys: string[]; bound: { cell: string; key: string; bytes: string }[]; delta: { step: number; row: number } }
     // Shift+drag: a rectangle whose onsets become the phrase on release.
     | { kind: "marquee"; pointerId: number; from: { step: number; row: number }; to: { step: number; row: number }; moved: boolean };
   let drag = $state<Drag | null>(null);
@@ -503,7 +513,7 @@
    * replays exactly the values each operation replaced. A gesture the host refuses midway is
    * recorded for the operations that were accepted, so even that much can be undone.
    */
-  function sendAll(make: (current: ScoreModel) => ScoreOp[], label: string, space: "surface" | "document" = "surface"): Gesture | null {
+  function sendAll(make: (current: ScoreModel) => ScoreOp[], label: string, space: "surface" | "document" = "surface", resolving: string | null = null): Gesture | null {
     if (blocked || !model || !docModel || !view) return null;
     // `surface` gestures are built against the grid's one-note-per-cell surface and translated to
     // layered document operations here; `document` ones (undo, redo, a retained value) already are
@@ -512,6 +522,23 @@
     let ops: ScoreOp[];
     try { ops = space === "surface" ? scoreSurfaceOps(docModel, view, make(model)) : make(docModel); } catch (cause) { onnotice(message(cause), "error"); return null; }
     if (!ops.length) return null;
+    // Only a shown sound's notes change. Undo, redo, a retained value and an attention clear carry
+    // document keys and skip the surface, so the rule is enforced here, for the whole gesture; the
+    // history entry stays for when the sound is shown again (review of e7250d48, MEDIUM 2).
+    if ([...scoreOpLayers(docModel, ops)].some((layer) => scoreVisibilityOf(visibility, layer) !== "show")) {
+      onnotice("Show that sound to change its notes.", "info");
+      return null;
+    }
+    // A note with several different live versions plays them all, and the grid shows one. Moving,
+    // resizing or rewriting it would drop the versions the member cannot see, so only the member's
+    // own erase on the grid (a surface gesture of clears alone) or the review list acting on that
+    // one key (`resolving`) may change it. An undo or redo is neither: its clears would remove
+    // versions added since (design question 1 of the review of e7250d48 and its re-review M-A,
+    // M-B; docs/design-score-layers.md section 8).
+    if (scoreOpSeveralValues(docModel, ops, space === "surface", resolving).length) {
+      onnotice("More than one version of this note plays. Choose one in the review list first, or erase it.", "info");
+      return null;
+    }
     // A gesture the host cannot queue whole is refused before anything is sent: a phrase moved
     // half way, or cleared without room for the restore, is worse than a refusal.
     const room = onroom?.();
@@ -524,28 +551,40 @@
     let working = docModel;
     const gesture = scoreGestureId();
     const queue = (op: ScoreOp): boolean => { try { return onop(op, gesture) !== false; } catch (cause) { onnotice(message(cause), "error"); return false; } };
+    const overruns: boolean[] = []; // overruns[i]: undos[i] puts back a hold already past the end
     for (const op of ops) {
       const undo = scoreInverse(working, op);
       if (!queue(op)) break;
-      forward.push(op); undos.push(undo);
+      forward.push(op); undos.push(undo); overruns.push(scoreRestoresPastEnd(working, undo));
       working = scoreApplyLocal(working, op);
     }
     if (!forward.length) return null;
     sent++;
-    const newestFirst = (list: (ScoreOp | null)[]) => list.filter((op): op is ScoreOp => op !== null).reverse();
+    // The first `count` inverses, newest first as an undo replays them, with the indices (in that
+    // order) of those that put back an overrun. Computed for what is kept, so a write rolled back
+    // after a refusal lends its mark to nothing (re-review of e7250d48, LOW-1).
+    const history = (count: number) => {
+      const kept = undos.slice(0, count).map((op, i) => ({ op, overrun: overruns[i] }))
+        .filter((entry): entry is { op: ScoreOp; overrun: boolean } => entry.op !== null).reverse();
+      return { inverse: kept.map((entry) => entry.op), pastEnd: kept.flatMap((entry, i) => entry.overrun ? [i] : []) };
+    };
     if (forward.length < ops.length) {
       // The host refused an operation after accepting earlier ones (its queue is full, or it
-      // changed under the gesture). A half gesture (a move's clear without its set) must not stay:
-      // put the accepted operations back, newest first, and record only what could not be undone.
-      const kept: ScoreOp[] = [], keptUndos: (ScoreOp | null)[] = [];
-      for (let i = forward.length - 1; i >= 0; i--) {
+      // changed under the gesture). A half gesture is put back, newest first. The compensation
+      // STOPS at its first refusal: an older inverse may depend on a newer one (a move's restore of
+      // its source, then the clear of its destination), and running it after the restore failed
+      // clears the last copy of a note (review of e7250d48, HIGH 2). What is left is a prefix of the
+      // gesture, which keeps every note (scoreSurfaceOps orders it so), and it stays undoable.
+      let i = forward.length - 1;
+      for (; i >= 0; i--) {
         const back = undos[i];
-        if (back && !queue(back)) { kept.unshift(forward[i]); keptUndos.unshift(back); }
+        if (back && !queue(back)) break;
       }
+      const kept = forward.slice(0, i + 1);
       onnotice(kept.length ? "that change could only partly be made; undo it or save and retry" : "that change could not be made right now; nothing was changed", "error");
-      return kept.length ? { label, forward: kept, inverse: newestFirst(keptUndos) } : null;
+      return kept.length ? { label, forward: kept, ...history(i + 1) } : null;
     }
-    return { label, forward, inverse: newestFirst(undos) };
+    return { label, forward, ...history(forward.length) };
   }
   function send(make: () => ScoreOp, label = "edit"): boolean {
     const gesture = sendAll(() => [make()], label);
@@ -563,15 +602,16 @@
   function undo() {
     const gesture = undoStack.at(-1);
     if (!gesture || blocked) return;
-    const sent = sendAll((current) => scoreReplay(current, gesture.inverse), gesture.label, "document");
+    const sent = sendAll((current) => scoreReplay(current, gesture.inverse, gesture.pastEnd), gesture.label, "document");
     if (!sent) return;
     undoStack = undoStack.slice(0, -1);
-    redoStack = [...redoStack.slice(-(HISTORY_MAX - 1)), { label: gesture.label, forward: sent.inverse, inverse: sent.forward }];
+    // The redo sends what this undo replaced, so it inherits this send's own past-the-end mark.
+    redoStack = [...redoStack.slice(-(HISTORY_MAX - 1)), { label: gesture.label, forward: sent.inverse, inverse: sent.forward, pastEnd: sent.pastEnd }];
   }
   function redo() {
     const gesture = redoStack.at(-1);
     if (!gesture || blocked) return;
-    const sent = sendAll((current) => scoreReplay(current, gesture.forward), gesture.label, "document");
+    const sent = sendAll((current) => scoreReplay(current, gesture.forward, gesture.pastEnd), gesture.label, "document");
     if (!sent) return;
     redoStack = redoStack.slice(0, -1);
     undoStack = [...undoStack.slice(-(HISTORY_MAX - 1)), sent];
@@ -639,10 +679,15 @@
     if (to.step === s && to.row === r) return;
     moveOnset(selected, to);
   }
-  /** Carry the whole phrase by an offset as one gesture; the phrase stays picked at its new place. */
-  function moveGroup(dStep: number, dRow: number): boolean {
-    if (!model || !phrase) return false;
-    const keys = group;
+  /** Whether every note a drag picked up is still, under its cell, the same document note with the
+   *  same value. */
+  function boundStill(bound: readonly { cell: string; key: string; bytes: string }[]): boolean {
+    return !!model && bound.every((b) => !!model!.cells[b.cell] && realKey(b.cell) === b.key && canonicalJson(model!.cells[b.cell]) === b.bytes);
+  }
+  /** Carry the whole phrase (or exactly the notes a drag picked up) by an offset as one gesture;
+   *  the phrase stays picked at its new place. */
+  function moveGroup(dStep: number, dRow: number, keys: string[] = group): boolean {
+    if (!model || keys.length < 2) return false;
     if (keys.some((key) => folded.has(Number(key.split(":")[1]) + dRow))) { onnotice("that would land on a row the scale view folds away", "info"); return false; }
     const gesture = sendAll((current) => scoreMoveSelection(current, keys, dStep, dRow), "move the phrase");
     if (!gesture) return false;
@@ -683,7 +728,7 @@
     record(gesture);
     // Notes the composer would never author (overlapping holds, past the end, a sound that is
     // gone) can be cleared but not put back as they were: say so now, not at the undo.
-    try { scoreReplay(gesture.forward.reduce((m, op) => scoreApplyLocal(m, op), docModel!), gesture.inverse); }
+    try { scoreReplay(gesture.forward.reduce((m, op) => scoreApplyLocal(m, op), docModel!), gesture.inverse, gesture.pastEnd); }
     catch (cause) { onnotice(`cleared · undo cannot restore every note as it was (${message(cause)})`, "info"); }
     picked = new Set(); selected = null;
   }
@@ -812,7 +857,8 @@
       const onsetStep = Number(onset.split(":")[0]);
       // Pressing a note of the phrase carries the whole phrase; any other note travels alone.
       const keys = phrase && picked.has(onset) ? group : [onset];
-      drag = { kind: "move", pointerId: event.pointerId, onset, cell: carried, len: carried.k === "n" ? (carried.len ?? 1) : 1, offset: step - onsetStep, to: { step: onsetStep, row }, fits: true, reason: "", moved: false, keys, delta: { step: 0, row: 0 } };
+      const bound = keys.map((k) => ({ cell: k, key: realKey(k), bytes: canonicalJson(model!.cells[k]) }));
+      drag = { kind: "move", pointerId: event.pointerId, onset, cell: carried, len: carried.k === "n" ? (carried.len ?? 1) : 1, offset: step - onsetStep, to: { step: onsetStep, row }, fits: true, reason: "", moved: false, keys, bound, delta: { step: 0, row: 0 } };
       return;
     }
     if (mode !== "note" || !selectedPatch || !placeable) return;
@@ -844,7 +890,7 @@
       // write decides, so a phrase that overlaps itself or a note whose sound is gone shows red
       // here instead of being refused on release. Folded rows are the view's own rule.
       const carried = drag.keys.filter((k) => model!.cells[k]);
-      let fits = carried.length === drag.keys.length, reason = fits ? "" : "the phrase changed while you were moving it";
+      let fits = carried.length === drag.keys.length && boundStill(drag.bound), reason = fits ? "" : "the phrase changed while you were moving it";
       if (fits && carried.some((k) => folded.has(Number(k.split(":")[1]) + delta.row))) { fits = false; reason = "that row is folded away by the scale view"; }
       if (fits) {
         try { if (carried.length > 1) scoreMoveSelection(model, carried, delta.step, delta.row); else scoreMoveOperations(model, drag.onset, { step, row: r }); }
@@ -899,11 +945,13 @@
       const [s, r] = gesture.onset.split(":").map(Number);
       // No movement, or back where it started: the click selects the note as before.
       if (!gesture.moved || (gesture.to.step === s && gesture.to.row === r)) { dragged = false; return; }
-      // Release revalidates against the model as it is now, not as the press saw it.
-      if (JSON.stringify(model.cells[gesture.onset]) !== JSON.stringify(gesture.cell)) { onnotice("that note changed while you were moving it", "info"); return; }
+      // Release revalidates against the model as it is now, not as the press saw it: every carried
+      // note must still be the same document note with the same value, or nothing moves (review of
+      // e7250d48, MEDIUM 1: a collaborator's note that replaced a carried one used to move instead).
+      if (!boundStill(gesture.bound)) { onnotice(gesture.keys.length > 1 ? "the phrase changed while you were moving it" : "that note changed while you were moving it", "info"); return; }
       if (!gesture.fits) { onnotice(gesture.reason || "that cannot land there", "info"); return; }
-      // The phrase may have shrunk under the drag; what is left of it still moves, or the pressed note alone.
-      if (gesture.keys.length > 1 && phrase) moveGroup(gesture.delta.step, gesture.delta.row);
+      // Exactly the notes the press picked up move, never whatever the phrase is now.
+      if (gesture.keys.length > 1) moveGroup(gesture.delta.step, gesture.delta.row, gesture.keys);
       else moveOnset(gesture.onset, gesture.to);
       return;
     }
@@ -955,11 +1003,19 @@
   }
   // The selected panel rewrites one field of a note at a time; the others travel unchanged, so a
   // longer hold keeps its level and a quieter note keeps its hold and recipe.
+  // A hold that runs past the end (the score was shortened under it) plays clipped, but no edit
+  // shortens it on its own: every other edit of it is refused until the member shortens it or
+  // lengthens the score, so the authored length survives a score that is shortened and grown back.
+  // Shorten is that explicit step, and it brings such a hold to the end in one press; one step at a
+  // time would be refused until the last (review of e7250d48, design question 2). Its undo puts the
+  // overrun back exactly (the gesture's `pastEnd`). A length the end forced is not a deliberately
+  // chosen one, so it is not remembered as `hold` for the next placement.
   function resizeSelected(delta: number) {
     if (!model || !selected || selectedCell?.k !== "n") return;
-    const [step, row] = selected.split(":").map(Number), cell = selectedCell;
-    const len = Math.max(1, (cell.len ?? 1) + delta);
-    if (send(() => scoreCellOperation(model!, step, row, { mode: "note", patch: cell.p, len, volume: cell.vol ?? SCORE_VOLUME_MAX }), "resize a note")) hold = len;
+    const [step, row] = selected.split(":").map(Number), cell = selectedCell, authored = cell.len ?? 1;
+    const toEnd = delta < 0 && step + authored > model.steps;
+    const len = toEnd ? Math.max(1, model.steps - step) : Math.max(1, authored + delta);
+    if (send(() => scoreCellOperation(model!, step, row, { mode: "note", patch: cell.p, len, volume: cell.vol ?? SCORE_VOLUME_MAX }), "resize a note") && !toEnd) hold = len;
   }
   function reassignSelected(recipe: string) {
     if (!model || !selected || selectedCell?.k !== "n" || !recipe || recipe === selectedCell.p) return;
@@ -978,14 +1034,14 @@
     if (send(() => scoreCellOperation(model!, step, row, { mode: "note", patch: cell.p, len: cell.len ?? 1, volume: level }), "change a note's volume")) { volume = level; if (!playing) audition(cell.p, row, cell.len ?? 1, level); }
   }
   function useAlternative(item: ScoreDiagnostic, index: number) {
-    const gesture = sendAll((current) => scoreDiagnosticOperation(current, item, index), "choose a retained value", "document");
+    const gesture = sendAll((current) => scoreDiagnosticOperation(current, item, index), "choose a retained value", "document", item.key);
     if (gesture) record(gesture);
   }
   /** Clear a slot the attention list names by its own note key (legacy or layered), shown or not. */
   function clearSlot(key: string) {
     const at = parseNoteKey(key);
     if (!at) return;
-    const gesture = sendAll((current) => scoreReplay(current, [at.layer === null ? { op: "clear_cell", step: at.step, row: at.row } : { op: "clear_note", step: at.step, row: at.row, layer: at.layer }]), "clear", "document");
+    const gesture = sendAll((current) => scoreReplay(current, [at.layer === null ? { op: "clear_cell", step: at.step, row: at.row } : { op: "clear_note", step: at.step, row: at.row, layer: at.layer }]), "clear", "document", key);
     if (gesture) record(gesture);
   }
   /** One sound's (or the kit's) visibility steps show, ghost, hide. A ghosted or hidden layer
@@ -1573,6 +1629,7 @@
       <button type="button" class="sc-tool sm" aria-label="Last page" disabled={currentPage + 1 >= pages} onclick={() => show(pages - 1)}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M2 3l6 5-6 5zM8 3l6 5-6 5z"></path></svg></button>
       <button type="button" class="sc-tool sm" class:on={loop} class:next={nextPass} aria-pressed={loop} aria-label="Loop playback" title={loop ? nextPass ? "looping · your changes play on the next pass" : "looping the whole score" : "play once"} disabled={playing || !onloop} onclick={() => onloop?.(!loop)}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8a5 5 0 015-5h4M13 8a5 5 0 01-5 5H4"></path><path d="M10.5 1.5 12 3l-1.5 1.5M5.5 11.5 4 13l1.5 1.5"></path></svg></button>
       {#if nextPass}<span class="chip ok" data-score-next-pass title="changes made during this pass play on the next one"><i></i><span class="micro">next pass</span></span>{/if}
+      {#if playing && refused > 0}<span class="chip warn" data-score-refused title="more notes at once than playback has voices for, so {refused === 1 ? 'one did' : `${refused} did`} not sound"><i></i><span class="micro">{refused} not played</span></span>{/if}
       <span class="mono strong">{cursor + 1} <span class="dim">/ {model.steps}</span></span>
       <span class="micro">{scoreTimeLabel(cursorMs)} <span class="dim">of {scoreTimeLabel(totalMs)}</span> · bar {scoreBarBeat(cursor, model.bpb).bar} · beat {scoreBarBeat(cursor, model.bpb).beat}</span>
       <span class="grow"></span>

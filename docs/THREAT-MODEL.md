@@ -152,7 +152,19 @@ admitted through the same membership, epoch, gate, causal-predecessor and one-en
   It applies only to the local Studio owner of an archival playback; jukebox decks and received
   takes keep 16 per performer. Under the 64-voice ceiling, 48 leaves 16 held voices for all live
   performers together while a document plays locally, not 16 each. A recipient may hear fewer
-  simultaneous holds than the author heard; the take is unchanged.
+  simultaneous holds than the author heard; the take is unchanged. Holds playback refuses for want
+  of a voice are counted per pass and shown while the score plays ("N not played"); a held voice
+  is still never stolen, so a room full of live performers' holds can silence a document's notes,
+  and that is now visible rather than silent.
+- **The composer does not overwrite versions the member has not seen.** A layered slot with several
+  different live values shows one; a write or clear of its key replaces every value the member saw.
+  The composer refuses any gesture that would do that (a move, resize, rewrite, and an undo or redo,
+  whose clears would remove versions added since), unless it is the member's own erase on the grid
+  or the review list acting on that one key. A member who stacks many values on a key can so make
+  that note editable only through the review list or an erase. "Several values" is read from
+  readiness, which counts a queued choice as the only value. The guard is in this composer only: a
+  modified client, or native admission, accepts such a write as an ordinary edit of the key, as it
+  always did.
 - **Mixed versions.** The first layered note pauses Studio sync for every older-build member of the
   server, and an older-build tenure owner cannot close the epoch. Accepted; release notes say so.
 

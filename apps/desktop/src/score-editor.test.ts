@@ -2,14 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { JamPatch } from "./jam-contract.ts";
 import type { ScoreModel, ScoreSlot, Valued, IndexSource } from "./studio-native.ts";
-import { parseNoteKey, type ScoreCell } from "./studio-contract.ts";
+import { canonicalJson, parseNoteKey, type ScoreCell } from "./studio-contract.ts";
 import type { ScoreSelection } from "./score-selection.ts";
 import { admittedSounds, scoreVoices } from "./score-voices.ts";
+import { workingScore } from "./studio-working.ts";
 import {
   PAD_CODES, PAD_NAMES, SCORE_DEFAULT_HOLD, SCORE_PAGE_STEPS, SCORE_WIDE_PAGE_STEPS, scoreApplyLocal, scoreAttention, scoreBarBeat, scoreCellOperation, scoreContinuations,
   scoreDiagnosticOperation, scoreDiagnostics, scoreDurationMs, scoreExtent, scoreHeaderOperation, scoreHolds, scoreLastSoundingStep,
   scoreNotesAt, scoreOccupiedSteps, scoreOnsetAt, scorePadForRow, scorePage, scorePatchOrder, scorePatchUsage, scorePitch, scorePlayheadStep,
-  scoreRowIsBlack, scoreScaleRows, scoreSlotDiagnostic, scoreSnapStart, scoreTapTempo, scoreTimeLabel,
+  scoreOpSeveralValues, scoreRowIsBlack, scoreScaleRows, scoreSlotDiagnostic, scoreSnapStart, scoreTapTempo, scoreTimeLabel,
 } from "./score-editor.ts";
 
 export const PATCH_ID = "a".repeat(64);
@@ -182,14 +183,14 @@ type Surface = ReturnType<typeof surface>;
 // The composer derives its layer surface from the prop, so a test that changes the score under a
 // mounted composer and then clicks it must hand over a new model (the Harness fixture's `update`),
 // as the host does; an in-place change is seen only by document-space work (undo, redo).
-function surface(m: ScoreModel, options: { readonlyReason?: string; loading?: boolean; onaddpatch?: () => Promise<string>; onaudition?: (patch: JamPatch, note: number, durationMs: number, level?: number) => void; onauditionpad?: (pad: number) => void; playing?: boolean; nextPass?: boolean; positionMs?: number | null; loop?: boolean; onpost?: () => void; refuse?: (op: ScoreOp) => boolean; apply?: boolean; onroom?: () => number; selection?: ScoreSelection | null; onselection?: (selection: ScoreSelection) => void } = {}) {
+function surface(m: ScoreModel, options: { readonlyReason?: string; loading?: boolean; onaddpatch?: () => Promise<string>; onaudition?: (patch: JamPatch, note: number, durationMs: number, level?: number) => void; onauditionpad?: (pad: number) => void; playing?: boolean; nextPass?: boolean; refused?: number; positionMs?: number | null; loop?: boolean; onpost?: () => void; refuse?: (op: ScoreOp) => boolean; apply?: boolean; onroom?: () => number; selection?: ScoreSelection | null; onselection?: (selection: ScoreSelection) => void } = {}) {
   const target = document.createElement("div"); document.body.appendChild(target);
   const ops: unknown[] = [], notices: string[] = [], loops: boolean[] = [];
   const instance = mount(ScoreEditor, { target, props: {
     model: m, readonlyReason: options.readonlyReason ?? "", loading: options.loading ?? false, error: "", patchLibrary: [{ name: "SYNTH", patch: PATCH }],
     library: [{ name: "SYNTH", patch: PATCH, shelf: "preset" }, { name: "OTHER", patch: { ...PATCH, o: [{ w: 1, t: 0, c: 0, l: 80 }] }, shelf: "mine" }],
     onop: (op: ScoreOp) => { if (options.refuse?.(op)) return false; ops.push(op); if (options.apply) { const next = scoreApplyLocal(m, op); Object.assign(m, next, { cells: next.notes }); } }, onnotice: (text: string) => { notices.push(text); }, onaddpatch: options.onaddpatch ?? (async () => PATCH_ID),
-    onaudition: options.onaudition, playing: options.playing ?? false, nextPass: options.nextPass ?? false, positionMs: options.positionMs ?? null, loop: options.loop ?? false, onloop: (v: boolean) => { loops.push(v); },
+    onaudition: options.onaudition, playing: options.playing ?? false, nextPass: options.nextPass ?? false, refused: options.refused ?? 0, positionMs: options.positionMs ?? null, loop: options.loop ?? false, onloop: (v: boolean) => { loops.push(v); },
     onpost: options.onpost, onauditionpad: options.onauditionpad, onroom: options.onroom, selection: options.selection ?? null, onselection: options.onselection,
   } }); flushSync();
   return { target, ops, notices, loops,
@@ -512,6 +513,35 @@ test("a drag whose start cell another edit filled meanwhile is refused instead o
     assert.match(notices[0], /another edit/);
     assert.ok(cell("2:5").classList.contains("n"), "and it is what the grid now shows");
   } finally { doc.elementFromPoint = original; await unmount(harness); target.remove(); }
+});
+
+// Review of e7250d48, MEDIUM 1: a phrase drag kept only cells. A collaborator's note that replaced
+// a carried (non-anchor) note during the drag was moved instead, with no warning.
+test("a phrase drag whose carried note a collaborator replaced meanwhile moves nothing", async () => {
+  const { default: Harness } = await import("../scripts/fixtures/ScoreEditorHarness.svelte");
+  const doc = (second: ScoreCell | null) => {
+    // The anchor is two steps long, so pressing its onset carries it (a one-step note's only cell is its resize handle).
+    const m = layered({ [`0:0/${PATCH_ID}`]: { k: "n", p: PATCH_ID, len: 2 }, ...(second ? { [`2:2/${second.k === "n" ? second.p : "d"}`]: second } : {}) });
+    m.steps = 16; return m;
+  };
+  for (const [name, second] of [["another sound", { k: "n", p: OTHER, vol: 30 } as ScoreCell], ["a changed value", { k: "n", p: PATCH_ID, len: 1, vol: 40 } as ScoreCell], ["removal", null]] as const) {
+    const ops: unknown[] = [], notices: string[] = [];
+    const target = document.createElement("div"); document.body.appendChild(target);
+    const harness = mount(Harness, { target, props: { props: { model: doc({ k: "n", p: PATCH_ID, len: 1 }), readonlyReason: "", loading: false, error: "", patchLibrary: [{ name: "SYNTH", patch: PATCH }], onop: (op: unknown) => { ops.push(op); }, onaddpatch: async () => PATCH_ID, onnotice: (t: string) => { notices.push(t); } } } }); flushSync();
+    const pointer = (type: string, el: EventTarget, init: PointerEventInit = {}) => { el.dispatchEvent(new w.PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, button: 0, ...init })); flushSync(); };
+    const cell = (key: string) => target.querySelector<HTMLButtonElement>(`[data-score-cell="${key}"]`)!;
+    const docRef = document as unknown as { elementFromPoint: (x: number, y: number) => Element | null };
+    const original = docRef.elementFromPoint;
+    try {
+      cell("0:0").focus(); cell("0:0").dispatchEvent(new w.KeyboardEvent("keydown", { key: "a", ctrlKey: true, bubbles: true, cancelable: true })); flushSync();
+      let under: Element | null = null; docRef.elementFromPoint = () => under;
+      pointer("pointerdown", cell("0:0")); under = cell("4:0"); pointer("pointermove", window);
+      (harness as unknown as { update: (next: ScoreModel) => void }).update(doc(second)); flushSync();
+      pointer("pointerup", window);
+      assert.deepEqual(ops, [], `${name}: nothing was moved`);
+      assert.match(notices.at(-1) ?? "", /changed while you were moving it/, name);
+    } finally { docRef.elementFromPoint = original; await unmount(harness); target.remove(); }
+  }
 });
 
 test("keyboard navigation keeps DOM focus with the selection across a page boundary", async () => {
@@ -1081,6 +1111,33 @@ test("a gesture the host refuses midway is rolled back, so a move is never left 
   } finally { await ui.done(); }
 });
 
+// Review of e7250d48, HIGH 2: rollback kept running older inverses after a newer one was refused.
+// A phrase move [set 9 <- pad 2, set 1 <- pad 1, clear 0, clear 8] refused at "clear 8" put back
+// "set 0 <- pad 1" (refused, the queue is full), then ran "clear 1", the only copy of pad 1 left.
+test("a rollback stops at its first refused step, so it never clears the last copy of a note", async () => {
+  const m = model(); m.steps = 16; m.notes = { "0:0/d": { k: "d", pad: 1 }, "8:0/d": { k: "d", pad: 2 } };
+  const attempts: ScoreOp[] = [];
+  const ui = surface(m, { refuse: (op) => {
+    attempts.push(op);
+    return (op.op === "clear_note" && op.step === 8) || (op.op === "set_note" && op.step === 0);
+  } });
+  const key = (k: string, init: KeyboardEventInit = {}) => { ui.cell("0:0").focus(); ui.cell("0:0").dispatchEvent(new w.KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, ...init })); flushSync(); };
+  try {
+    key("a", { ctrlKey: true });
+    ui.click('[aria-label="Move the phrase later"]');
+    const accepted = ui.ops as ScoreOp[];
+    assert.deepEqual(accepted, [
+      { op: "set_note", step: 9, row: 0, value: { k: "d", pad: 2 } }, { op: "set_note", step: 1, row: 0, value: { k: "d", pad: 1 } },
+      { op: "clear_note", step: 0, row: 0, layer: "d" },
+    ], "the forward prefix, and nothing the failed rollback depended on");
+    assert.equal(attempts.some((op) => op.op === "clear_note" && op.step === 1), false, "the clear of pad 1's only copy was never attempted");
+    const after = accepted.reduce(scoreApplyLocal, m).notes;
+    assert.deepEqual(Object.values(after).filter((c) => c.k === "d").map((c) => (c as { pad: number }).pad).sort(), [1, 2, 2], "pad 1 survives (at its new place)");
+    assert.match(ui.notices.at(-1) ?? "", /only partly/);
+    assert.match(ui.target.querySelector<HTMLButtonElement>("[data-score-undo]")!.title, /move the phrase/, "the surviving part stays undoable");
+  } finally { await ui.done(); }
+});
+
 test("the right part of a note's last cell is the resize handle and the rest of the note moves it", async () => {
   const m = model(); m.steps = 16; m.cells["2:5"] = { k: "n", p: PATCH_ID, len: 3 };
   const ui = surface(m);
@@ -1352,6 +1409,18 @@ test("the grid stays editable while the score plays: a placed note is written bu
   } finally { await ui.done(); }
 });
 
+// Review of e7250d48, LOW 1: notes playback had no voice for are counted, and shown, not hidden.
+test("notes that did not sound for want of a voice are shown while the score plays, and only then", async () => {
+  for (const [playing, refused, shown] of [[true, 2, "2 not played"], [true, 0, null], [false, 3, null]] as const) {
+    const ui = surface(model(), { playing, refused });
+    try {
+      const chip = ui.target.querySelector("[data-score-refused]");
+      assert.equal(chip?.textContent?.trim() ?? null, shown, `playing=${playing} refused=${refused}`);
+      if (chip) assert.match(chip.getAttribute("title") ?? "", /2 did not sound/);
+    } finally { await ui.done(); }
+  }
+});
+
 // Owner decisions 2026-10-20: one note per sound per cell, and every sound (and the drum kit) can
 // be shown, ghosted or hidden. Ghost is outlines only and never interactive, so other sounds can be
 // written over it; only a shown sound takes new notes; the toggle is a symbol, never a word.
@@ -1407,6 +1476,187 @@ test("ghosting a sound drops the selection on it; identical concurrent values ar
   } finally { await ui.done(); }
 });
 
+// Review of e7250d48, design question 1: a slot with several DIFFERENT live values plays them all
+// and the grid shows one. Moving or rewriting it would drop the versions the member cannot see, so
+// it is refused; an erase (clears alone) or an explicit choice among the versions is the way out.
+const severalSource = (n: number) => ({ opId: n.toString(16).padStart(64, "0"), author: "e".repeat(64), nonce: n.toString(16).padStart(32, "0") });
+function severalValues(second: ScoreCell = { k: "n", p: PATCH_ID, len: 3 }): ScoreModel {
+  const key = `4:2/${PATCH_ID}`, m = layered({ [key]: { k: "n", p: PATCH_ID, len: 1 } });
+  m.layerSlots = { [key]: { cleared: false, register: { selected: { value: { k: "n", p: PATCH_ID, len: 1 }, source: severalSource(1) }, conflicts: [{ value: second, source: severalSource(2) }] } } };
+  const distinct = canonicalJson(second) !== canonicalJson({ k: "n", p: PATCH_ID, len: 1 });
+  m.readiness.layers = { [key]: { count: false, extent: false, recipe: false, overlap: distinct, conflict: distinct } };
+  return m;
+}
+
+test("the keys a gesture would move or rewrite while they hold several different live values", () => {
+  const m = severalValues(), at = { step: 4, row: 2 }, key = `4:2/${PATCH_ID}`;
+  const clear: ScoreOp = { op: "clear_note", ...at, layer: PATCH_ID };
+  assert.deepEqual(scoreOpSeveralValues(m, [{ op: "set_note", ...at, value: { k: "n", p: PATCH_ID, len: 2 } }]), [key], "a rewrite in place");
+  assert.deepEqual(scoreOpSeveralValues(m, [{ op: "set_note", step: 4, row: 3, value: { k: "n", p: PATCH_ID, len: 1 } }, clear], true), [key], "a move away, even from the grid");
+  assert.deepEqual(scoreOpSeveralValues(m, [clear], true), [], "the member's own erase removes every version by intent");
+  // Re-review M-A: an undo's clears remove the member's own edit, not versions added since.
+  assert.deepEqual(scoreOpSeveralValues(m, [clear]), [key], "clears alone that are not an erase");
+  assert.deepEqual(scoreOpSeveralValues(m, [{ op: "set_note", ...at, value: { k: "n", p: PATCH_ID, len: 3 } }], false, key), [], "the review list resolving that key");
+  // Re-review M-B: resolving a legacy cell does not exempt the layered slot its choice writes.
+  assert.deepEqual(scoreOpSeveralValues(m, [{ op: "set_note", ...at, value: { k: "n", p: PATCH_ID, vol: 50 } }, { op: "clear_cell", ...at }], false, "4:2"), [key],
+    "only the reviewed key is exempt");
+  assert.deepEqual(scoreOpSeveralValues(m, [{ op: "set_note", ...at, value: { k: "n", p: OTHER, len: 1 } }]), [], "another sound's layer in the same cell");
+  assert.deepEqual(scoreOpSeveralValues(severalValues({ k: "n", p: PATCH_ID, len: 1 }), [{ op: "set_note", ...at, value: { k: "n", p: PATCH_ID, len: 2 } }]), [], "the same note twice is one note");
+  // Re-review L-A: the guard reads readiness, which the working projection recomputes for a queued
+  // choice; the raw slots still hold both values until readback.
+  const chosen = severalValues(); chosen.readiness.layers = {};
+  assert.deepEqual(scoreOpSeveralValues(chosen, [{ op: "set_note", step: 4, row: 3, value: { k: "n", p: PATCH_ID, len: 1 } }, clear]), [], "a version chosen and still saving is the only one");
+});
+
+test("the working projection of a queued choice leaves one version, so the grid may edit the note again", () => {
+  const key = `4:2/${PATCH_ID}`, base = severalValues();
+  const choose = { kind: "apply", object: "x", op: { op: "set_note", step: 4, row: 2, value: { k: "n", p: PATCH_ID, len: 3 } }, label: "choose", id: 1, status: "queued",
+    attempts: 0, error: "", epochChanged: false, mayHaveCommitted: false, request: { object: "x", epochId: "y", nonce: "z", body: "" } };
+  const working = workingScore(base, [choose as unknown as Parameters<typeof workingScore>[1][number]]);
+  assert.equal(base.readiness.layers?.[key]?.conflict, true);
+  assert.deepEqual(scoreOpSeveralValues(working, [{ op: "set_note", step: 4, row: 3, value: { k: "n", p: PATCH_ID, len: 3 } }, { op: "clear_note", step: 4, row: 2, layer: PATCH_ID }]), []);
+});
+
+test("a note with several different versions is never moved or rewritten: erase it, or choose a version first", async () => {
+  const ui = surface(severalValues());
+  try {
+    ui.click('[data-score-cell="4:2"]');
+    ui.click('[aria-label="Move this note up"]');
+    assert.deepEqual(ui.ops, [], "a move would drop the version that is not shown");
+    assert.match(ui.notices.at(-1) ?? "", /More than one version of this note plays/);
+    ui.click('[data-score-alt="1"]');
+    assert.equal(ui.ops.length, 1, "choosing a version is how it is resolved");
+    assert.deepEqual(ui.ops[0], { op: "set_note", step: 4, row: 2, value: (ui.ops[0] as { value: ScoreCell }).value });
+  } finally { await ui.done(); }
+  const erase = surface(severalValues());
+  try {
+    erase.click('[data-score-cell="4:2"]');
+    erase.click('[aria-label="Clear this note"]');
+    assert.deepEqual(erase.ops, [{ op: "clear_note", step: 4, row: 2, layer: PATCH_ID }], "an erase removes the note in every version");
+  } finally { await erase.done(); }
+  const same = surface(severalValues({ k: "n", p: PATCH_ID, len: 1 }));
+  try {
+    same.click('[data-score-cell="4:2"]');
+    same.click('[aria-label="Move this note up"]');
+    assert.deepEqual(same.ops, [{ op: "set_note", step: 4, row: 3, value: { k: "n", p: PATCH_ID, len: 1 } }, { op: "clear_note", step: 4, row: 2, layer: PATCH_ID }], "two members' identical note moves as one");
+  } finally { await same.done(); }
+});
+
+// Re-review M-A: an undo whose operations are all clears took the erase exemption and removed a
+// version a collaborator added meanwhile, which the member never saw.
+test("undoing a placement is refused once a collaborator's different version shares the slot, and stays on the stack", async () => {
+  const m = layered({}), ui = surface(m, { apply: true }), key = `4:1/${PATCH_ID}`;
+  try {
+    ui.click('[data-score-cell="4:1"]');
+    assert.equal(ui.ops.length, 1);
+    const mine = (ui.ops[0] as { value: ScoreCell }).value;
+    m.layerSlots = { [key]: { cleared: false, register: { selected: { value: mine, source: severalSource(1) }, conflicts: [{ value: { k: "n", p: PATCH_ID, len: 5, vol: 20 }, source: severalSource(2) }] } } };
+    m.readiness = { ...m.readiness, layers: { [key]: { count: false, extent: false, recipe: false, overlap: true, conflict: true } } };
+    ui.click("[data-score-undo]");
+    assert.equal(ui.ops.length, 1, "the undo's clear would have removed the collaborator's version too");
+    assert.match(ui.notices.at(-1) ?? "", /More than one version of this note plays/);
+    assert.equal(ui.target.querySelector<HTMLButtonElement>("[data-score-undo]")!.disabled, false, "the history entry stays");
+  } finally { await ui.done(); }
+});
+
+// Re-review M-B: `resolving` exempted every key of the gesture. Choosing a removed legacy cell's
+// retained value writes its layered key, which here holds two versions nobody chose between.
+test("choosing a legacy cell's retained value never overwrites a layered slot with several versions", async () => {
+  for (const several of [true, false]) {
+    const key = `0:3/${PATCH_ID}`, A: ScoreCell = { k: "n", p: PATCH_ID, len: 2 }, B: ScoreCell = { k: "n", p: PATCH_ID, len: 4, vol: 30 };
+    const m = layered({ [key]: A });
+    m.cellSlots["0:3"] = slot<ScoreCell>(null, [{ k: "n", p: PATCH_ID, vol: 50 }]); // removed, with a retained value to review
+    m.layerSlots = { [key]: { cleared: false, register: { selected: { value: A, source: severalSource(1) }, conflicts: several ? [{ value: B, source: severalSource(2) }] : [] } } };
+    m.readiness.layers = { [key]: { count: false, extent: false, recipe: false, overlap: several, conflict: several } };
+    const ui = surface(m);
+    try {
+      ui.click('[data-score-tab="score"]'); ui.click('[data-score-evidence="cell/0:3"]'); ui.click('[data-score-alt="1"]');
+      if (several) {
+        assert.deepEqual(ui.ops, [], "both layered versions stay");
+        assert.match(ui.notices.at(-1) ?? "", /More than one version of this note plays/);
+      } else assert.deepEqual(ui.ops.map((op) => (op as ScoreOp).op), ["set_note", "clear_cell"], "with one version the choice goes through");
+    } finally { await ui.done(); }
+  }
+});
+
+// Re-review L-B: undoing the one-press Shorten (or an erase) of a hold past the end replayed a
+// length that does not fit and was refused, which also blocked every older undo.
+test("a Shorten or an erase of a hold past the end is undone exactly; a hold that fitted when recorded is still refused", async () => {
+  const overrun = () => { const m = model(); m.steps = 4; m.cells["2:0"] = { k: "n", p: PATCH_ID, len: 8 }; return m; };
+  const shorten = surface(overrun(), { apply: true });
+  try {
+    shorten.click('[data-score-cell="2:0"]'); shorten.click('[aria-label="Shorten this note"]');
+    assert.equal(shorten.ops.length, 2);
+    shorten.click("[data-score-undo]");
+    assert.deepEqual(shorten.ops.slice(2), [{ op: "set_cell", step: 2, row: 0, value: { k: "n", p: PATCH_ID, len: 8 } }, { op: "clear_note", step: 2, row: 0, layer: PATCH_ID }],
+      "the overrun comes back as it was");
+    shorten.click("[data-score-redo]");
+    assert.deepEqual(shorten.ops.slice(4), [{ op: "set_note", step: 2, row: 0, value: { k: "n", p: PATCH_ID, len: 2 } }, { op: "clear_cell", step: 2, row: 0 }], "and the redo shortens it again");
+    shorten.click("[data-score-undo]");
+    assert.equal(shorten.ops.length, 8, "the redo's own undo restores the overrun too");
+  } finally { await shorten.done(); }
+  const erase = surface(overrun(), { apply: true });
+  try {
+    erase.click('[data-score-cell="2:0"]'); erase.click('[aria-label="Clear this note"]');
+    erase.click("[data-score-undo]");
+    assert.deepEqual(erase.ops.at(-1), { op: "set_cell", step: 2, row: 0, value: { k: "n", p: PATCH_ID, len: 8 } });
+  } finally { await erase.done(); }
+  // The rule this relaxes only for an overrun the member had: a hold that fitted when its gesture
+  // was sent, and no longer does because the score was shortened since, still is not put back.
+  const m = model(); m.cells["2:0"] = { k: "n", p: PATCH_ID, len: 8 };
+  const shrunk = surface(m, { apply: true });
+  try {
+    shrunk.click('[data-score-cell="2:0"]'); shrunk.click('[aria-label="Clear this note"]');
+    m.steps = 4; shrunk.click("[data-score-undo]");
+    assert.equal(shrunk.ops.length, 1, "refused"); assert.match(shrunk.notices.at(-1) ?? "", /must fit/);
+  } finally { await shrunk.done(); }
+});
+
+// Re-review LOW-1: the past-the-end mark was one per gesture, so undoing a phrase clear also put
+// back a sibling note that fitted when it was recorded and no longer did.
+test("undoing a phrase clear may put back only the note that already ran past the end", async () => {
+  for (const shrink of [false, true]) {
+    const m = model(); m.steps = 8; m.cells["2:0"] = { k: "n", p: PATCH_ID, len: 8 }; m.cells["4:3"] = { k: "n", p: PATCH_ID, len: 4 };
+    const ui = surface(m, { apply: true });
+    const pointer = (type: string, target: EventTarget, init: PointerEventInit = {}) => { target.dispatchEvent(new w.PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, button: 0, ...init })); flushSync(); };
+    const shiftClick = (key: string) => { pointer("pointerdown", ui.cell(key), { shiftKey: true }); pointer("pointerup", window, { shiftKey: true }); ui.cell(key).dispatchEvent(new w.MouseEvent("click", { bubbles: true, shiftKey: true })); flushSync(); };
+    try {
+      ui.click('[data-score-cell="2:0"]'); shiftClick("4:3");
+      ui.click('[aria-label="Clear the phrase"]');
+      assert.equal(ui.ops.length, 2, `shrink=${shrink}`);
+      assert.ok(!ui.notices.some((n) => /undo cannot restore/.test(n)), `shrink=${shrink}: the clear's own check agrees the undo can restore both`);
+      if (shrink) m.steps = 6; // a collaborator shortens the score: the hold at 4 no longer fits
+      ui.click("[data-score-undo]");
+      if (shrink) {
+        assert.equal(ui.ops.length, 2, "the sibling that fitted when recorded is not put back past the end");
+        assert.match(ui.notices.at(-1) ?? "", /must fit/);
+      } else {
+        assert.deepEqual(ui.ops.slice(2).map((op) => (op as { step: number }).step).sort(), [2, 4], "both come back, the overrun one included");
+      }
+    } finally { await ui.done(); }
+  }
+});
+
+// Review of e7250d48, design question 2: a hold past the end plays clipped, and no edit shortens it
+// on its own, so its authored length survives a score that is shortened and grown back. Shorten is
+// the explicit step, and one press brings the hold to the end (one step at a time was refused).
+test("a hold past the end is never shortened on its own: other edits are refused, Shorten brings it to the end", async () => {
+  const m = model(); m.steps = 4; m.cells["2:0"] = { k: "n", p: PATCH_ID, len: 8 };
+  const ui = surface(m);
+  try {
+    ui.click('[data-score-cell="2:0"]');
+    ui.click('[aria-label="Move this note up"]');
+    assert.deepEqual(ui.ops, [], "a move keeps the length, so it is refused");
+    assert.match(ui.notices.at(-1) ?? "", /past the end/);
+    const volume = ui.target.querySelector<HTMLInputElement>('[aria-label="Volume of this note"]')!;
+    volume.value = "40"; volume.dispatchEvent(new w.Event("change", { bubbles: true })); flushSync();
+    assert.deepEqual(ui.ops, [], "and so is a volume change");
+    ui.click('[aria-label="Shorten this note"]');
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 2, row: 0, value: { k: "n", p: PATCH_ID, len: 2 } }, { op: "clear_cell", step: 2, row: 0 }],
+      "one press shortens it to the end, written into its layer");
+  } finally { await ui.done(); }
+});
+
 // Third review L2: the playing voices are clipped to the end, so "fit to last note" read 15 for a
 // hold from 14 to 21 and was disabled; it must still offer to cover the hold.
 test("fit to last note still covers a hold that crosses the end", async () => {
@@ -1419,6 +1669,39 @@ test("fit to last note still covers a hold that crosses the end", async () => {
     fit.click(); flushSync();
     assert.deepEqual(ui.ops.at(-1), { op: "set_header", field: "steps", value: 22 });
   } finally { await ui.done(); }
+});
+
+// Review of e7250d48, MEDIUM 2: undo, redo and the attention list's actions carry document keys and
+// skipped the surface, so they wrote into ghosted and hidden sounds.
+test("undo, redo and attention actions never write a ghosted or hidden sound's notes, and keep their history", async () => {
+  const m = layered({}), source = (n: number) => ({ opId: n.toString(16).padStart(64, "0"), author: "e".repeat(64), nonce: n.toString(16).padStart(32, "0") });
+  const ui = surface(m, { apply: true });
+  const key = (k: string, init: KeyboardEventInit = {}) => { ui.cell("0:0").focus(); ui.cell("0:0").dispatchEvent(new w.KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, ...init })); flushSync(); };
+  try {
+    ui.click('[data-score-cell="4:1"]');
+    assert.equal(ui.ops.length, 1);
+    ui.click(`[data-score-visibility="${PATCH_ID}"]`); // ghost
+    key("z", { ctrlKey: true });
+    assert.equal(ui.ops.length, 1, "undo did not clear the ghosted note"); assert.match(ui.notices.at(-1) ?? "", /Show that sound/);
+    assert.equal(ui.target.querySelector<HTMLButtonElement>("[data-score-undo]")!.disabled, false, "the history entry stays");
+    ui.click(`[data-score-visibility="${PATCH_ID}"]`); ui.click(`[data-score-visibility="${PATCH_ID}"]`); // hide, then show
+    key("z", { ctrlKey: true });
+    assert.deepEqual(ui.ops.at(-1), { op: "clear_note", step: 4, row: 1, layer: PATCH_ID }, "shown again, the undo runs");
+    ui.click(`[data-score-visibility="${PATCH_ID}"]`); ui.click(`[data-score-visibility="${PATCH_ID}"]`); // ghost, hide
+    key("z", { ctrlKey: true, shiftKey: true });
+    assert.equal(ui.ops.length, 2, "redo did not write into the hidden sound");
+  } finally { await ui.done(); }
+  // An attention row expanded while the sound was shown cannot clear it once it is ghosted.
+  const flagged = layered({ [`2:0/${PATCH_ID}`]: { k: "n", p: PATCH_ID, len: 1 } });
+  flagged.layerSlots = { [`2:0/${PATCH_ID}`]: { cleared: false, register: { selected: { value: { k: "n", p: PATCH_ID, len: 1 }, source: source(1) }, conflicts: [] } } };
+  flagged.readiness.layers = { [`2:0/${PATCH_ID}`]: { count: false, extent: false, recipe: false, overlap: true, conflict: false } };
+  const review = surface(flagged);
+  try {
+    review.click('[data-score-tab="score"]'); review.click(`[data-score-evidence="note/2:0/${PATCH_ID}"]`);
+    review.click('[data-score-tab="sounds"]'); review.click(`[data-score-visibility="${PATCH_ID}"]`); review.click('[data-score-tab="score"]');
+    review.button("clear").click(); flushSync();
+    assert.deepEqual(review.ops, [], "the ghosted note was not cleared"); assert.match(review.notices.at(-1) ?? "", /Show that sound/);
+  } finally { await review.done(); }
 });
 
 test("only a shown sound takes new notes: ghosting or hiding the chosen sound turns placement off", async () => {

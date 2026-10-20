@@ -1743,11 +1743,16 @@ export class StudioSession {
     }
   }
 
-  private enqueue(rec: NewSave): SaveEntry {
+  /** `settle` hears the record's first outcome. It is installed before the record can be pumped:
+   *  a recovery apply is eligible at once, and an admission refusal can settle it synchronously,
+   *  inside this call (review of e7250d48, MEDIUM 4: installed afterwards, that outcome was lost
+   *  and the recovery walk stayed "applying"). */
+  private enqueue(rec: NewSave, settle?: (outcome: SaveOutcome) => void): SaveEntry {
     if (this.closeHeld) throw new StudioNativeError("The window is closing. Wait for saving to finish.");
     if (this.restoredDraft) throw new StudioNativeError("Open the channel with your restored Studio edits before making more changes.");
     this.mediaEpoch++;
     const record = { ...rec, label: rec.label.slice(0, 256), id: ++this.saveSeq, status: "queued", attempts: 0, error: "", epochChanged: false, mayHaveCommitted: false } as SaveEntry;
+    if (settle) record.settle = settle;
     if (record.kind === "apply" || record.kind === "applyIndex" || record.kind === "overlayApply") {
       const family = record.kind === "applyIndex" || record.object === null ? "index" : this.objectKind(record.object);
       validateDraftOperation(record.op, family);
@@ -2311,6 +2316,8 @@ export class StudioSession {
               operations: [s, ...batch].map((r) => ({ nonce: r.request.nonce, body: r.request.body })) });
             if (!this.current(gen)) return;
             await this.landed(s.object, view, docRead);
+            // The reconciliation read can outlive a lock and restore (MEDIUM 3): finish nothing then.
+            if (!this.current(gen)) return;
             for (const r of batch) this.finish(r);
           } catch (e) {
             if (!this.current(gen)) return;
@@ -2672,9 +2679,14 @@ export class StudioSession {
     while (this.views.size > RECENT_VIEWS) this.views.delete(this.views.keys().next().value as Hex32);
   }
   private finish(s: SaveEntry): void {
-    this.eligible.delete(s.id); this.restoredHeld.delete(s.id); this.busyResends.delete(s.id); this.forgetAutoRetry(s.id);
+    // Only the exact record object still in the queue. A lock restores records as NEW objects under
+    // the same ids, so an old continuation finishing its own object must not touch the restored
+    // record's id-keyed state (eligibility, timers): that stranded it queued with nothing to send it
+    // (review of e7250d48, MEDIUM 3).
     const at = this.records.indexOf(s);
-    if (at >= 0) this.records.splice(at, 1);
+    if (at < 0) return;
+    this.eligible.delete(s.id); this.restoredHeld.delete(s.id); this.busyResends.delete(s.id); this.forgetAutoRetry(s.id);
+    this.records.splice(at, 1);
     this.settleRecord(s, "landed");
     this.releaseDrained();
     this.notify();
@@ -3021,9 +3033,11 @@ export class StudioSession {
         item.state = "applying";
         publish();
         const edit: RecoveryApplyEdit = { snapshot, choice: item.choice, mode, epochId: preview.epochId, expectedProjection: preview.expectedProjection, nonce: this.newId(), body: preview.body };
+        let settled!: (outcome: SaveOutcome) => void;
+        const outcomeOf = new Promise<SaveOutcome>((resolve) => { settled = resolve; });
         const record = this.enqueue({ kind: "recoveryApply", object,
-          ...(target.objectKind === "score" ? { objectKind: "score" as const } : {}), edit, applied: null, label: `${mode}: ${item.label}` });
-        const outcome = await new Promise<SaveOutcome>((resolve) => { record.settle = resolve; });
+          ...(target.objectKind === "score" ? { objectKind: "score" as const } : {}), edit, applied: null, label: `${mode}: ${item.label}` }, settled);
+        const outcome = await outcomeOf;
         if (!live()) return;
         if (outcome !== "landed") {
           // The complete payload is on the save record; only its exact retry may finish it. Each

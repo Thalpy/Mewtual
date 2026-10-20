@@ -63,8 +63,10 @@ export const SCORE_ISSUE_LABELS: Readonly<Record<keyof ScoreCellIssues, string>>
 /** A note entry's `volume` is 1..100; omitted or 100 writes no `vol`, the format's full level. */
 export type ScoreEntry = { mode: "note"; patch: string; len: number; volume?: number } | { mode: "drum"; pad: number } | { mode: "clear" };
 
-/** Clear stays available beyond a shrunken header, at capacity, and with missing recipes. */
-export function scoreCellOperation(model: ScoreModel, step: number, row: number, entry: ScoreEntry): ScoreOp {
+/** Clear stays available beyond a shrunken header, at capacity, and with missing recipes.
+ *  `pastEnd`: this write is an undo or redo putting back a hold that already ran past the end when
+ *  its gesture was sent (`scoreRestoresPastEnd`); its length is bounded by the format, not `steps`. */
+export function scoreCellOperation(model: ScoreModel, step: number, row: number, entry: ScoreEntry, pastEnd = false): ScoreOp {
   if (!integer(step, 0, SCORE_MAX_STEPS - 1) || !integer(row, 0, SCORE_ROWS - 1)) throw new Error("Cell is outside the score coordinate bounds.");
   if (entry.mode === "clear") return { op: "clear_cell", step, row };
   if (step >= model.steps) throw new Error("Cell is beyond the authored score length. Clear it or extend the score first.");
@@ -74,7 +76,7 @@ export function scoreCellOperation(model: ScoreModel, step: number, row: number,
     return { op: "set_cell", step, row, value: { k: "d", pad: entry.pad } };
   }
   if (!/^[0-9a-f]{64}$/.test(entry.patch) || !Object.hasOwn(model.patches, entry.patch)) throw new Error("Choose a sound this score holds. A sound still being saved is not available until it is read back.");
-  if (!integer(entry.len, 1, model.steps - step)) throw new Error("The authored hold must fit the remaining sixteenth steps. No note is shortened automatically.");
+  if (!integer(entry.len, 1, (pastEnd ? SCORE_MAX_STEPS : model.steps) - step)) throw new Error("The authored hold must fit the remaining sixteenth steps. No note is shortened automatically.");
   if (entry.volume !== undefined && !integer(entry.volume, SCORE_VOLUME_MIN, SCORE_VOLUME_MAX)) throw new Error(`Volume is ${SCORE_VOLUME_MIN} to ${SCORE_VOLUME_MAX}.`);
   for (const [key, cell] of Object.entries(model.cells)) {
     const [otherStep, otherRow] = key.split(":").map(Number);
@@ -587,22 +589,28 @@ export function scoreClearSelection(model: ScoreModel, keys: readonly string[]):
  * through the list) with the same guards a hand edit gets, so an undo or redo can never write
  * an overlap, a note past the end or a note without its sound after a collaborator moved
  * things. Throws on the first operation that can no longer be replayed; nothing is sent then.
+ * `pastEnd` lists the indices into `ops` of the writes that put back a hold which already ran past
+ * the end when the gesture was sent (`scoreRestoresPastEnd`): undoing a Shorten or an erase of
+ * such a hold restores exactly what the member had, so that write's length is bounded by the
+ * format, not by `steps`. Per write, not per gesture: any other note of the same gesture that
+ * fitted when it was recorded and no longer does (the score was shortened since) is still refused.
  */
-export function scoreReplay(model: ScoreModel, ops: readonly ScoreOp[]): ScoreOp[] {
+export function scoreReplay(model: ScoreModel, ops: readonly ScoreOp[], pastEnd: readonly number[] = []): ScoreOp[] {
   // Every note this list clears is lifted out before any of its notes is checked, the way a move is
   // checked against the score with the moving note lifted out: a gesture sends its writes before
   // its clears (so a refused write never leaves a note deleted), and its undo is the same shape,
   // so a nudge's undo would otherwise collide with the very note it is about to clear.
   let working = ops.reduce((m, op) => op.op === "clear_cell" || op.op === "clear_note" ? scoreApplyLocal(m, op) : m, model);
   const checked: ScoreOp[] = [];
-  for (const op of ops) {
+  for (const [index, op] of ops.entries()) {
     let next: ScoreOp = op;
+    const overrun = pastEnd.includes(index);
     if (op.op === "set_cell") {
       const value = op.value;
       next = scoreCellOperation(working, op.step, op.row, value.k === "d" ? { mode: "drum", pad: value.pad }
-        : { mode: "note", patch: value.p, len: value.len ?? 1, ...(value.vol === undefined ? {} : { volume: value.vol }) });
+        : { mode: "note", patch: value.p, len: value.len ?? 1, ...(value.vol === undefined ? {} : { volume: value.vol }) }, overrun);
     } else if (op.op === "set_note") {
-      scoreNoteCheck(working, op.step, op.row, op.value);
+      scoreNoteCheck(working, op.step, op.row, op.value, overrun);
     } else if (op.op === "set_header") {
       next = scoreHeaderOperation(op.field, String(op.value));
     }
@@ -616,14 +624,15 @@ export function scoreReplay(model: ScoreModel, ops: readonly ScoreOp[]): ScoreOp
  * The guard a layered note gets before it is written: inside the grid and the authored length, a
  * sound the score holds, a valid level, and no overlap with another hold of the SAME sound on its
  * row (other sounds overlapping is what layers are for). Throws with the reason; returns nothing.
+ * `pastEnd` as for `scoreCellOperation`.
  */
-export function scoreNoteCheck(model: ScoreModel, step: number, row: number, value: ScoreCell): void {
+export function scoreNoteCheck(model: ScoreModel, step: number, row: number, value: ScoreCell, pastEnd = false): void {
   if (!integer(step, 0, SCORE_MAX_STEPS - 1) || !integer(row, 0, SCORE_ROWS - 1)) throw new Error("Cell is outside the score coordinate bounds.");
   if (step >= model.steps) throw new Error("Cell is beyond the authored score length. Clear it or extend the score first.");
   if (value.k === "d") { if (!integer(value.pad, 0, 9)) throw new Error("Drum pad must be 0–9."); return; }
   if (!/^[0-9a-f]{64}$/.test(value.p) || !Object.hasOwn(model.patches, value.p)) throw new Error("Choose a sound this score holds. A sound still being saved is not available until it is read back.");
   const len = value.len ?? 1;
-  if (!integer(len, 1, model.steps - step)) throw new Error("The authored hold must fit the remaining sixteenth steps. No note is shortened automatically.");
+  if (!integer(len, 1, (pastEnd ? SCORE_MAX_STEPS : model.steps) - step)) throw new Error("The authored hold must fit the remaining sixteenth steps. No note is shortened automatically.");
   if (value.vol !== undefined && !integer(value.vol, SCORE_VOLUME_MIN, SCORE_VOLUME_MAX)) throw new Error(`Volume is ${SCORE_VOLUME_MIN} to ${SCORE_VOLUME_MAX}.`);
   const own = noteKey(step, row, value.p);
   for (const [key, cell] of Object.entries(model.notes ?? model.cells)) {
@@ -697,6 +706,63 @@ export function scoreLayerOf(model: Pick<ScoreModel, "patches">, cell: ScoreCell
 }
 export function scoreVisibilityOf(visibility: Readonly<Record<string, ScoreVisibility>>, layer: string): ScoreVisibility {
   return layer === SCORE_MISSING_LAYER ? "show" : Object.hasOwn(visibility, layer) ? visibility[layer] : "show";
+}
+
+/**
+ * The composer layers whose notes `ops` write or clear, so the one place writes leave can refuse
+ * a gesture that reaches a ghosted or hidden sound (undo, redo, a retained value or an attention
+ * clear carry document keys and never pass through the surface). A legacy clear's sound comes from
+ * the document's value at that cell (its retained values when it is removed); a clear of nothing
+ * touches no layer.
+ */
+export function scoreOpLayers(doc: Pick<ScoreModel, "patches" | "cells" | "cellSlots">, ops: readonly ScoreOp[]): Set<string> {
+  const layers = new Set<string>();
+  const ofLayer = (layer: string) => layer === SCORE_DRUM_LAYER || Object.hasOwn(doc.patches, layer) ? layer : SCORE_MISSING_LAYER;
+  for (const op of ops) {
+    if (op.op === "set_note" || op.op === "set_cell") layers.add(scoreLayerOf(doc, op.value));
+    else if (op.op === "clear_note") layers.add(ofLayer(op.layer));
+    else if (op.op === "clear_cell") {
+      const key = `${op.step}:${op.row}`, slot = doc.cellSlots?.[key];
+      const value = doc.cells[key] ?? [slot?.register.selected, ...(slot?.register.conflicts ?? [])].find((a) => a && a.value !== null)?.value ?? null;
+      if (value) layers.add(scoreLayerOf(doc, value));
+    }
+  }
+  return layers;
+}
+
+/**
+ * The layered note keys a gesture would move, resize, rewrite or clear while they hold more than one
+ * DIFFERENT live value (concurrent edits, every one of which plays; identical values are one). The
+ * grid edits only the shown value, and a write or clear of the key replaces every value the member
+ * has seen, so such an edit would silently remove versions they cannot see (review of e7250d48,
+ * design question 1, and its re-review M-A, M-B, L-A).
+ * - `erase`: the gesture is the member's own erase on the grid (the erase tool, Delete, a Clear
+ *   button), which removes the note in every version by intent, so a gesture of clears alone lists
+ *   nothing. An undo or redo is never an erase: its clears remove the member's own edit, not
+ *   versions they never saw, so they are listed like any write.
+ * - `except`: the one key the review list is resolving (choosing a version, or clearing that slot).
+ *   Only that key is exempt; any other key the same gesture writes is still checked.
+ * "Several values" is read from readiness (`conflict`), which the working projection recomputes for
+ * queued edits, so a version chosen and still being saved already counts as the only one. Legacy
+ * cells are removal wins: their losing values never play, so moving one drops nothing audible and
+ * none is listed.
+ */
+export function scoreOpSeveralValues(doc: Pick<ScoreModel, "readiness">, ops: readonly ScoreOp[], erase = false, except: string | null = null): string[] {
+  if (erase && !ops.some((op) => op.op === "set_note" || op.op === "set_cell")) return [];
+  const keys = new Set<string>();
+  for (const op of ops) {
+    const key = op.op === "set_note" ? noteKey(op.step, op.row, layerOf(op.value)) : op.op === "clear_note" ? noteKey(op.step, op.row, op.layer) : null;
+    if (key !== null && key !== except && doc.readiness.layers?.[key]?.conflict) keys.add(key);
+  }
+  return [...keys];
+}
+
+/** True when `undo` (an inverse taken against `model` before its gesture was sent) puts back a
+ *  note whose hold already ran past the end then. Undoing it restores exactly what the member had,
+ *  so that one write's replay may exceed `steps` (its index in `scoreReplay`'s `pastEnd`). */
+export function scoreRestoresPastEnd(model: Pick<ScoreModel, "steps">, undo: ScoreOp | null): boolean {
+  if (!undo || (undo.op !== "set_note" && undo.op !== "set_cell") || undo.value.k !== "n") return false;
+  return undo.step < model.steps && undo.step + (undo.value.len ?? 1) > model.steps;
 }
 
 export type ScoreGhost = { key: string; step: number; row: number; cell: ScoreCell };
@@ -784,12 +850,15 @@ export function scoreSurfaceOps(doc: ScoreModel, surface: Pick<ScoreSurface, "ke
   for (const op of ops) {
     if (op.op !== "set_cell" && op.op !== "clear_cell") { other.push(op); continue; }
     const at = `${op.step}:${op.row}`, behind = keyOf.get(at);
-    // A stale legacy copy of the shown layered note's sound in this cell (a discarded clear of it
-    // left it behind) is the same note. Editing, moving or clearing the shown note takes the copy
-    // with it: left alone it would overlap an edit (which is then refused), or reappear and play
-    // after a clear or a move.
-    const legacy = notes[at];
-    const staleCopy = behind !== undefined && behind !== at && legacy !== undefined && behind.endsWith(`/${layerOf(legacy)}`);
+    // A legacy cell holding EXACTLY the shown layered note (same sound, length and level, however
+    // spelled) is a duplicate of it, one voice: editing, moving or clearing the shown note takes
+    // that copy with it, or it would reappear and play on its own. A legacy note that differs is a
+    // distinct note, which plays separately and was not picked: it is left alone, and an edit that
+    // would then overlap it is refused by the same-sound guard (review of e7250d48, HIGH 1: the
+    // same sound alone is no evidence that it is a leftover copy).
+    const legacy = notes[at], shown = behind !== undefined ? notes[behind] : undefined;
+    const staleCopy = behind !== undefined && behind !== at && legacy !== undefined && shown !== undefined &&
+      layerOf(legacy) === layerOf(shown) && noteIdentity(legacy) === noteIdentity(shown);
     if (op.op === "set_cell") {
       const key = noteKey(op.step, op.row, layerOf(op.value));
       // The surface holds one note per cell, so a cell can look free while a note of THIS sound sits
@@ -813,6 +882,12 @@ export function scoreSurfaceOps(doc: ScoreModel, surface: Pick<ScoreSurface, "ke
   return scoreReplay(doc, [...other, ...orderWrites(doc, writes), ...clears]);
 }
 
+/** The same note however it is spelled: a gesture re-authors `{p}` as `{len: 1, p}`, and a full
+ *  level is written as no `vol` at all. Used by `orderWrites` and by `scoreSurfaceOps`' stale-copy
+ *  test (review of e7250d48, H1), which must never take a distinct legacy note for a copy. */
+const noteIdentity = (cell: ScoreCell) => cell.k === "d" ? canonicalJson(cell)
+  : canonicalJson({ p: cell.p, len: cell.len ?? 1, vol: cell.vol ?? SCORE_VOLUME_MAX });
+
 /**
  * Writes in an order that avoids overwriting a note before its value has landed at its new place
  * (review M2). Sliding notes A at 2 and B at 4 two steps later is "4 <- A, 6 <- B": written in that
@@ -828,10 +903,7 @@ export function scoreSurfaceOps(doc: ScoreModel, surface: Pick<ScoreSurface, "ke
  */
 function orderWrites(doc: ScoreModel, writes: readonly ScoreOp[]): ScoreOp[] {
   const notes = doc.notes ?? doc.cells;
-  // The same note however it is spelled: a gesture re-authors `{p}` as `{len: 1, p}`, and a full
-  // level is written as no `vol` at all.
-  const identity = (cell: ScoreCell) => cell.k === "d" ? canonicalJson(cell)
-    : canonicalJson({ p: cell.p, len: cell.len ?? 1, vol: cell.vol ?? SCORE_VOLUME_MAX });
+  const identity = noteIdentity;
   const items = writes.map((op) => {
     const value = op.op === "set_note" ? op.value : null, written = value ? identity(value) : "";
     const current = value && op.op === "set_note" ? notes[noteKey(op.step, op.row, layerOf(value))] : undefined;

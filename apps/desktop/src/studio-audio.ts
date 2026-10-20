@@ -4,8 +4,12 @@ import { planJamArchivalPlayback } from "./jam-archival-plan.ts";
 import { decodePixa, encodePixa } from "./pixa.ts";
 import type { ScorePlayback } from "./studio-export.ts";
 
-/** `nextPass`: a looping Score has edits waiting for its next pass (being prepared, or ready). */
-export type StudioAudioState = Readonly<{ state: StudioPlaybackState; elapsedMs: number; nextPass?: boolean }>;
+/** `nextPass`: a looping Score has edits waiting for its next pass (being prepared, or ready).
+ *  `refused`: notes of this press that did not sound because playback had no voice for them (more
+ *  held at once than its cap). Per pass, not summed over a loop: the pass under way, or the pass
+ *  before it while that one refused more, so a loop's count neither grows without bound nor drops
+ *  to 0 at each restart. 0 once nothing is playing. */
+export type StudioAudioState = Readonly<{ state: StudioPlaybackState; elapsedMs: number; nextPass?: boolean; refused?: number }>;
 export type StudioAudioActions = {
   /** `document`: the Studio's own editor Play of the open document (a layered score may hold more
    * notes at once). Received content (chat's PIXA viewer, inline playback) leaves it false. */
@@ -31,6 +35,8 @@ type Active = {
   dirty: boolean;
   refreshing: boolean;
   failures: number;
+  /** The controller's refusal count for the pass that ended at the last loop restart. */
+  lastPassRefused: number;
 };
 
 /** Gesture/preparation/loop coordinator around the SAME bounded archival controller and synth. */
@@ -48,7 +54,8 @@ export class StudioAudioSession {
   get state(): StudioAudioState {
     const active = this.active;
     return { state: this.preparing ? "preparing" : this.controller.state, elapsedMs: this.controller.state === "playing" ? this.controller.elapsedMs : this.elapsed,
-      nextPass: !!active && (active.dirty || active.refreshing || active.next !== null) };
+      nextPass: !!active && (active.dirty || active.refreshing || active.next !== null),
+      refused: active ? Math.max(active.lastPassRefused, this.controller.refused) : 0 };
   }
   setScope(scope: StudioPlaybackScope | null, deafened: boolean): void {
     const key = scope ? `${scope.generation}:${scope.server}:${scope.channel}:${scope.membership}` : "";
@@ -82,7 +89,7 @@ export class StudioAudioSession {
       const started = kind === "score" ? await this.controller.startTake(value as JamTake, offsetMs, gridMs) : await this.controller.startPixa(value as Uint8Array, offsetMs);
       if (!current()) return false;
       if (started) this.active = { kind, value, gridMs, loop: loop && (kind !== "score" || (value as JamTake).events.length > 0), generation, document,
-        prepare: kind === "score" ? prepare : null, next: null, dirty: false, refreshing: false, failures: 0 };
+        prepare: kind === "score" ? prepare : null, next: null, dirty: false, refreshing: false, failures: 0, lastPassRefused: 0 };
       return started;
     } finally { if (current()) this.preparing = false; }
   }
@@ -138,6 +145,8 @@ export class StudioAudioSession {
         // a preparation still under way lands the pass after.
         const next = active.next;
         if (next) { active.value = next.value; active.gridMs = next.gridMs; active.next = null; }
+        // Read before the restart resets the controller's count for the new pass.
+        active.lastPassRefused = this.controller.refused;
         this.controller.document = active.document;
         const started = active.kind === "score" ? await this.controller.startTake(active.value as JamTake, 0, active.gridMs) : await this.controller.startPixa(active.value as Uint8Array);
         if (this.active !== active || active.generation !== this.generation) return;

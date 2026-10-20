@@ -1500,7 +1500,7 @@
         <ScoreEditor model={score} readonlyReason={readOnlyWhy} loading={doc?.loading ?? false} error={doc?.error ?? ""} {patchLibrary} library={patchShelves} {who} {tint}
           onop={(op, gesture) => guard(() => session.applyScoreOp(objectId, op, gesture))} onroom={() => session.draftRoom()} onaddpatch={addStudioPatch}
           selection={scoreSelectionMemory.recall(objectId)} onselection={(selection) => scoreSelectionMemory.remember(objectId, selection)}
-          onplay={audioActions ? toggleStudioPlay : undefined} onstop={() => audioActions?.stop()} {playing} nextPass={playing && !!audioState.nextPass} positionMs={playing ? audioState.elapsedMs : null}
+          onplay={audioActions ? toggleStudioPlay : undefined} onstop={() => audioActions?.stop()} {playing} nextPass={playing && !!audioState.nextPass} refused={playing ? audioState.refused ?? 0 : 0} positionMs={playing ? audioState.elapsedMs : null}
           {loop} onloop={(next) => { loop = next; }} onaudition={audioActions ? auditionSound : undefined} onauditionpad={audioActions ? auditionPad : undefined} onnew={openSoundfont}
           onexport={() => downloadMedia()} onshare={onshareScore ? () => downloadMedia("share") : undefined} onpost={onpostScore ? () => downloadMedia("post") : undefined} {mediaBusy}
           history={scoreHistory} onnotice={(text, kind) => onnotice(text, kind === "error" ? "error" : "info")} />

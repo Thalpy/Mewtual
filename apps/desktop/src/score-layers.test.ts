@@ -37,22 +37,31 @@ test("the surface shows one note per cell: the chosen sound's first, else by not
   assert.deepEqual(scoreSurface(m, shown(), B), scoreSurface({ ...m, notes: Object.fromEntries(Object.entries(m.notes).reverse()) }, shown(), B), "map order never decides");
 });
 
-// Review L3: after a discarded legacy clear the note sits in both places; the layered copy is the
-// newer one, and the grid must show and edit that, not the stale legacy value.
-test("where a note sits in a legacy cell and its layer, the grid shows and edits the layered copy", () => {
-  const m = score({ "1:1": note(A, 2), [`1:1/${A}`]: note(A, 4) });
-  const view = scoreSurface(m, shown(), A);
-  assert.deepEqual(view.model.cells["1:1"], note(A, 4));
-  assert.equal(view.keyOf.get("1:1"), `1:1/${A}`);
-  assert.ok(view.stacked.has("1:1"), "the legacy copy is still there, behind it");
-  assert.deepEqual(scoreSurfaceOps(m, view, [{ op: "set_cell", step: 1, row: 1, value: note(A, 3) }]),
-    [{ op: "set_note", step: 1, row: 1, value: note(A, 3) }, { op: "clear_cell", step: 1, row: 1 }],
-    "an edit replaces the layered copy and merges the stale legacy copy into it, written first");
-  // Clearing or moving the shown note takes the stale copy too, or it would reappear and play.
-  assert.deepEqual(scoreSurfaceOps(m, view, [{ op: "clear_cell", step: 1, row: 1 }]),
-    [{ op: "clear_note", step: 1, row: 1, layer: A }, { op: "clear_cell", step: 1, row: 1 }]);
-  assert.deepEqual(scoreSurfaceOps(m, view, scoreMoveOperations(view.model, "1:1", { step: 6, row: 1 })),
-    [{ op: "set_note", step: 6, row: 1, value: note(A, 4) }, { op: "clear_note", step: 1, row: 1, layer: A }, { op: "clear_cell", step: 1, row: 1 }]);
+// A legacy cell and a layered note of one sound in one cell. Only an exact duplicate of the shown
+// note (one voice) goes with it; a distinct legacy note plays on its own, was not picked, and stays
+// (review of e7250d48, HIGH 1: this test used to call a different-length legacy note stale and
+// expect it deleted).
+test("a legacy duplicate of the shown note goes with it; a distinct legacy note of that sound is never touched", () => {
+  const duplicate = score({ "1:1": { k: "n", p: A, len: 1 }, [`1:1/${A}`]: note(A) }); // `len: 1` and no `len` are one note
+  const view = scoreSurface(duplicate, shown(), A);
+  assert.equal(view.keyOf.get("1:1"), `1:1/${A}`, "the layered copy is the one shown");
+  assert.deepEqual(scoreSurfaceOps(duplicate, view, [{ op: "set_cell", step: 1, row: 1, value: note(A, 3) }]),
+    [{ op: "set_note", step: 1, row: 1, value: note(A, 3) }, { op: "clear_cell", step: 1, row: 1 }], "an edit merges the duplicate, written first");
+  assert.deepEqual(scoreSurfaceOps(duplicate, view, [{ op: "clear_cell", step: 1, row: 1 }]),
+    [{ op: "clear_note", step: 1, row: 1, layer: A }, { op: "clear_cell", step: 1, row: 1 }], "a clear takes the duplicate too");
+  assert.deepEqual(scoreSurfaceOps(duplicate, view, scoreMoveOperations(view.model, "1:1", { step: 6, row: 1 })),
+    [{ op: "set_note", step: 6, row: 1, value: { k: "n", p: A, len: 1 } }, { op: "clear_note", step: 1, row: 1, layer: A }, { op: "clear_cell", step: 1, row: 1 }]);
+
+  // The reviewer's case: a legacy note (vol 35) and a different layered note (len 3, vol 80).
+  const quiet: ScoreCell = { k: "n", p: A, vol: 35 }, loud: ScoreCell = { k: "n", p: A, len: 3, vol: 80 };
+  const distinct = score({ "0:0": quiet, [`0:0/${A}`]: loud }), at = scoreSurface(distinct, shown(), A);
+  const moved = scoreSurfaceOps(distinct, at, scoreMoveOperations(at.model, "0:0", { step: 4, row: 0 }));
+  assert.deepEqual(moved, [{ op: "set_note", step: 4, row: 0, value: loud }, { op: "clear_note", step: 0, row: 0, layer: A }], "only the picked note moves");
+  assert.deepEqual(moved.reduce(scoreApplyLocal, distinct).notes["0:0"], quiet, "the vol 35 note still plays where it was");
+  assert.deepEqual(scoreSurfaceOps(distinct, at, [{ op: "clear_cell", step: 0, row: 0 }]), [{ op: "clear_note", step: 0, row: 0, layer: A }]);
+  assert.throws(() => scoreSurfaceOps(distinct, at, [{ op: "set_cell", step: 0, row: 0, value: { ...loud, vol: 60 } }]), /overlaps/,
+    "an in-place edit that would overlap the distinct note is refused, never resolved by deleting it");
+
   // Another sound's legacy note in that cell is a different note and stays.
   const mixed = score({ "1:1": note(B, 2), [`1:1/${A}`]: note(A, 4) });
   assert.deepEqual(scoreSurfaceOps(mixed, scoreSurface(mixed, shown(), A), [{ op: "set_cell", step: 1, row: 1, value: note(A, 3) }]), [{ op: "set_note", step: 1, row: 1, value: note(A, 3) }]);
@@ -185,17 +194,26 @@ test("a move never replaces a note it did not pick, even one stacked behind anot
   // Changing a shown note's sound onto a cell where that sound already has a note is refused too.
   assert.throws(() => scoreSurfaceOps(m, view, [{ op: "set_cell", step: 1, row: 5, value: bass() }]), /in the way/);
 
-  // Property: random two-sound scores, random picks and moves. Whatever is sent never changes a note
-  // that was not picked.
+  // Property: random two-sound scores with drums, legacy cells and layered notes mixed (some legacy
+  // cells exact duplicates of a layered note, some distinct), random picks and moves. Whatever is
+  // sent never changes a note that was not picked; only an exact duplicate of a picked note (one
+  // voice with it) may go with it. Every prefix of the writes keeps every note, too.
+  const same = (a: ScoreCell, b: ScoreCell) => a.k === "d" ? b.k === "d" && a.pad === b.pad
+    : b.k === "n" && a.p === b.p && (a.len ?? 1) === (b.len ?? 1) && (a.vol ?? 100) === (b.vol ?? 100);
   let seed = 11;
   const next = (n: number) => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
-  for (let round = 0; round < 3000; round++) {
+  let moves = 0;
+  for (let round = 0; round < 4000; round++) {
     const notes: Record<string, ScoreCell> = {};
-    for (let i = 0; i < 6; i++) {
-      const sound = next(3) === 0 ? B : A, at = `${next(5)}:${next(3)}`;
-      notes[`${at}/${sound}`] = { k: "n", p: sound, ...(next(2) ? { vol: 10 + next(9) * 10 } : {}) };
+    for (let i = 0; i < 7; i++) {
+      const at = `${next(5)}:${next(3)}`, kind = next(4);
+      const value: ScoreCell = kind === 3 ? { k: "d", pad: next(3) } : { k: "n", p: kind === 0 ? B : A, ...(next(2) ? { len: 1 + next(2) } : {}), ...(next(2) ? { vol: 10 + next(3) * 10 } : {}) };
+      const layer = value.k === "d" ? "d" : value.p;
+      if (next(3) === 0) notes[at] = value; else notes[`${at}/${layer}`] = value; // legacy or layered
+      const companion = next(4);
+      if (companion === 0 && !notes[at]) notes[at] = { ...value }; // an exact legacy duplicate of it
+      if (companion === 1 && !notes[at]) notes[at] = value.k === "d" ? { k: "d", pad: (value.pad + 1) % 3 } : { ...value, vol: 95 }; // a distinct one
     }
-    if (next(2)) notes[`${next(5)}:${next(3)}/d`] = { k: "d", pad: next(10) };
     const doc = score(notes, 16), chosen = [A, B, "d"][next(3)];
     const surface = scoreSurface(doc, shown(), chosen), cells = [...surface.keyOf.keys()];
     const pickedCells = cells.filter(() => next(2) === 0);
@@ -203,11 +221,28 @@ test("a move never replaces a note it did not pick, even one stacked behind anot
     const picked = new Set(pickedCells.map((cell) => surface.keyOf.get(cell)!));
     let ops: ScoreOp[];
     try { ops = scoreSurfaceOps(doc, surface, scoreMoveSelection(surface.model, pickedCells, next(5) - 2, next(3) - 1)); } catch { continue; }
+    moves++;
     const after = ops.reduce(scoreApplyLocal, doc).notes;
     for (const [key, value] of Object.entries(notes)) {
-      if (!picked.has(key)) assert.deepEqual(after[key], value, `round ${round}: ${key} was not picked`);
+      if (picked.has(key)) continue;
+      const duplicateOfPicked = !key.includes("/") && [...picked].some((p) => p.startsWith(`${key}/`) && same(notes[p], value));
+      if (!duplicateOfPicked) assert.deepEqual(after[key], value, `round ${round}: ${key} was not picked`);
+    }
+    // Every original voice survives every prefix of the writes (a multiset of note identities).
+    const tally = (cells: Iterable<ScoreCell>) => { const t = new Map<string, number>(); for (const c of cells) { const k = JSON.stringify(c.k === "d" ? c : { p: c.p, len: c.len ?? 1, vol: c.vol ?? 100 }); t.set(k, (t.get(k) ?? 0) + 1); } return t; };
+    const voicesOf = (all: Record<string, ScoreCell>) => {
+      // A legacy cell and a layered note holding the same note are one voice.
+      const out: ScoreCell[] = [];
+      for (const [key, value] of Object.entries(all)) if (key.includes("/") || !Object.entries(all).some(([k, v]) => k.startsWith(`${key}/`) && same(v, value))) out.push(value);
+      return tally(out);
+    };
+    const before = voicesOf(notes), writes = ops.filter((op) => op.op === "set_note");
+    for (let landed = 0; landed <= writes.length; landed++) {
+      const got = voicesOf(writes.slice(0, landed).reduce(scoreApplyLocal, doc).notes);
+      for (const [k, count] of before) assert.ok((got.get(k) ?? 0) >= count, `round ${round}: after ${landed} writes ${k} kept ${got.get(k) ?? 0} of ${count}`);
     }
   }
+  assert.ok(moves > 500, `${moves} moves checked`);
 });
 
 test("a gesture's length change lands before its notes, and a full score refuses before anything is sent", () => {

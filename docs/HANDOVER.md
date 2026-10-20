@@ -103,7 +103,89 @@ Third review pass (no blocker or high). Fixed:
 - L4: a cell's "another value by" marks drop while an edit of that note is queued.
 - L5: Discard's confirmation says how many edits go (`discardCount`).
 
+Owner's review of `e7250d48` (no blocker; two high, four medium, one low). Fixed, each with a
+regression that fails when its fix is reverted:
+- H1: `staleCopy` cleared any legacy cell of the shown note's sound, so moving a layered note
+  deleted a distinct legacy note behind it. It now needs the same note identity (`noteIdentity`,
+  module level in `score-editor.ts`: pitch, len, vol, with `len: 1`/`vol: 100` equal to absent).
+  A distinct legacy note stays where it is and the same-sound overlap guard (`scoreNoteCheck`)
+  refuses an edit that would overlap it.
+  The random property now mixes legacy and layered keys, drums and distinct companions.
+- H2: a rollback after a host refusal ran every inverse, so after one inverse was refused an older
+  one could clear the last copy of a note. `sendAll` stops the rollback at its first refusal and
+  keeps the prefix (which keeps every note) as the undoable gesture.
+- M1: a phrase drag captured its keys at pointer-down and could move a collaborator's replacement
+  note. The drag binds each carried cell's document key and bytes (`bound`, `boundStill`) and
+  moves nothing if any changed; a multi-key drag moves exactly its captured keys.
+- M2: undo, redo and the review list's actions skipped the surface and wrote into ghosted or
+  hidden sounds. `sendAll` refuses any gesture whose ops reach a sound that is not shown
+  (`scoreOpLayers`); the history entry stays.
+- M3: an old batch's reconciliation read could outlive a lock and restore and clear the restored
+  records' eligibility. `finish` acts only on a record still in the queue, and the batch path
+  checks the session generation after `landed`.
+- M4: a recovery apply is eligible at once, so an admission refusal (Index unread, server group
+  changed) settled it inside `enqueue`, before the walk had installed its callback; the walk stayed
+  "applying". `enqueue(rec, settle)` installs the callback before the record can be pumped
+  (`studio-auto-retry.test.ts`, both refusals).
+- L1: attacks the voice allocator refused (`source-held`, `room-held`) were not counted.
+  `StudioPlaybackController.refused` counts them once each for the current start (releases,
+  `duplicate` and `sequence` are not counted; a stale playback's late result never counts);
+  `StudioAudioState.refused` reports the pass under way or the one before it, whichever is larger,
+  so a loop neither sums passes nor drops to 0 at each restart. The composer shows "N not played"
+  while the score plays (`data-score-refused`). Real-engine tests: 49 document notes give 48 held
+  and 1 counted, 17 shared ones 16 and 1, and a room full of held live voices counts both notes.
+- Design question 1 (several live values): the grid shows one value of a slot that holds several
+  different ones, so moving, resizing or rewriting it would drop the others unseen. `sendAll`
+  refuses such a gesture (`scoreOpSeveralValues`) and points to the review list, where choosing a
+  version rewrites the slot to it; the member's own erase on the grid (a surface gesture of clears
+  alone) removes every version. Identical values are one value and edit normally. Legacy cells are
+  unchanged (removal wins).
+- Design question 2 (hold past the end): the contract said an edit clips the length, the editor
+  refused. Kept the refusal (the authored length survives a score shortened and grown back) and
+  made it practical: Shorten brings a hold that runs past the end to the end in one press (one
+  step at a time was refused until the last). The design doc now says so.
+
+Re-review of those fixes (no blocker or high). Fixed, each verified by breaking it:
+- M-A: an undo or redo of clears alone took the erase exemption and removed a version a
+  collaborator added since. The exemption is now for surface gestures only (`erase`).
+- M-B: `resolving` exempted every key of the gesture, so choosing a removed legacy cell's value
+  overwrote a layered slot with two versions. `resolving` is now the reviewed key and only that
+  key is exempt; the review list's "clear" passes its key too.
+- L-A: the guard read the raw `layerSlots`, which keep both values until readback, so a queued
+  choice left the note uneditable while the review list showed nothing. It reads readiness
+  `conflict`, which the working projection recomputes.
+- L-B: undoing a one-press Shorten (or an erase) of a hold past the end was refused, which also
+  blocked every older undo. A gesture whose inverse puts back a hold that already ran past the end
+  carries `pastEnd`, and its undo or redo replays with the length bounded by the format
+  (`scoreReplay`'s `pastEnd`); a hold that fitted when recorded and no longer does is still
+  refused (the score-gestures contract). A length the end forced is no longer remembered as `hold`.
+- L-D: THREAT-MODEL's wording, this entry's guard name, and `noteIdentity`'s place above
+  `orderWrites`'s comment.
+
+A second short re-review confirmed those (no blocker, high or medium) and found two lows, fixed:
+- LOW-1: the past-the-end mark was one per gesture and survived a partial rollback, so undoing a
+  phrase clear also put back a sibling that fitted when recorded and no longer did.
+  `Gesture.pastEnd` is now the indices of the inverses that restore an overrun, computed for the
+  kept prefix; `scoreReplay` relaxes only those writes.
+- LOW-2: the guard trusted native readiness with no evidence check. `parseScoreContent` now
+  refuses a score whose `readiness.layers[key].conflict` disagrees with the distinct live values
+  of that slot (as it already did for `headerConflicts`), so a disagreeing native build fails
+  closed instead of letting a grid edit drop versions.
+- L-C (not changed): the chip keeps the previous pass's count for one pass after an overload is
+  fixed, by design, so it does not flicker to 0 at each restart; and the composer reads the one
+  app-wide audio session, so an inline chat PIXA playing meanwhile would show its own refusals (as
+  `playing` and `positionMs` already did).
+- Test gap: a maximal layered export (4096 notes as 64 sounds stacked on each of the 64 latest
+  cells, so 64 lanes, `v` on every attack, 64 maximal recipes, a 256-byte group) is 510,915 bytes
+  against the 524,288 cap, pinned above 500,000 so the case stays near the margin. The reviewer's
+  probe with enlarged metadata measured 516,557.
+- Correction: `test:startup` does not run in CI (the earlier review request said it did). It has
+  not been run on this branch; nothing here touches `setup` or process spawning.
+
 Follow-ups (not done):
+- The review's remaining test gaps: the Rust maximal combined seed (L10 below), the overlay-route
+  discard cascade (below), and a randomized Rust/TypeScript parity run plus an old/new binary
+  interoperability session, neither of which exists.
 - L1: the exporter's lane skips (`ScorePlayback.skipped` beyond voice skips) are not shown
   anywhere; the composer's export list shows voice skips only.
 - L5: at the 4096 cap a move or a legacy edit is refused, since it needs a free place between its

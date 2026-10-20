@@ -7,7 +7,7 @@ import test from "node:test";
 import { StudioSession } from "./studio-session.ts";
 import { decodeStudioDraft } from "./studio-draft.ts";
 import { decodePixa } from "./pixa.ts";
-import { CHANNEL, ME, SERVER, b64, fakeIpc, flipnoteContent, id32, id64, indexContent, indexEntry, ordinaryView, pixBytes, previewView, settle } from "./studio-testkit.ts";
+import { CHANNEL, ME, SERVER, b64, deferred, fakeIpc, flipnoteContent, id32, id64, indexContent, indexEntry, ordinaryView, pixBytes, previewView, recoveryListing, settle, version } from "./studio-testkit.ts";
 
 const score = id32(42), flip = id32(43), frame = id32(44), group = "deadbeef";
 /** The exact refusal from the field report: Tauri's ACL turning the batch command away. */
@@ -17,16 +17,18 @@ function scoreContent(cells: Record<string, unknown> = {}) {
   return { kind: "score", title: null, bpm: null, bpb: null, steps: null, cells, patches: {}, readiness: { cells: {}, patches: {}, headerConflicts: false } };
 }
 
-async function harness(opts: { autosaveMs?: number } = {}) {
+/** `list` replaces the channel Index read, which the session makes before opening the score. */
+async function harness(opts: { autosaveMs?: number; list?: () => unknown } = {}) {
   const ipc = fakeIpc(), timers = new Set<{ due: number; fn: () => void }>();
   let now = 0, seq = 100;
-  ipc.on("studio_list", () => ({ ...ordinaryView(indexContent({ objects: { [score]: indexEntry({ kind: "score", title: "song" }), [flip]: indexEntry({ title: "cat" }) } })), group }));
+  ipc.on("studio_list", opts.list ?? (() => ({ ...ordinaryView(indexContent({ objects: { [score]: indexEntry({ kind: "score", title: "song" }), [flip]: indexEntry({ title: "cat" }) } })), group })));
   ipc.on("studio_read", (args) => args.objectKind === "score" ? { ...ordinaryView(scoreContent()), group } : { ...ordinaryView(flipnoteContent({ frames: [] })), group });
   ipc.on("studio_apply", (args) => args.objectKind === "score" ? { ...ordinaryView(scoreContent()), group } : { ...ordinaryView(flipnoteContent({ frames: [] })), group });
   const session = new StudioSession({ ipc, me: ME, now: () => now, newId: () => id32(++seq), autosaveMs: opts.autosaveMs ?? 5000,
     schedule: (fn, ms) => { const timer = { due: now + ms, fn }; timers.add(timer); return () => { timers.delete(timer); }; } });
   session.setScope({ server: SERVER, channel: CHANNEL }); session.flush(); await settle(8);
-  session.open(score); await settle(8);
+  // The family is named because a `list` override may leave no Index to look it up in.
+  session.open(score, { objectKind: "score" }); await settle(8);
   const tick = async (ms: number) => {
     const end = now + ms;
     for (;;) {
@@ -493,6 +495,77 @@ test("discarding a restored write cancels the automatic resend of a failed resto
   assert.equal(h.calls("studio_apply").length, 0, "nothing was resent on its own");
   assert.equal(h.session.autoRetryAt(h.session.saves[0].id), null);
   assert.match(h.session.saves[0].error, /earlier edit was discarded/);
+});
+
+// Review of e7250d48, MEDIUM 3: a batch's ACK waited on a reconciliation read; a lock and restore
+// happened meanwhile, re-creating the records under the same ids. When the old read finished, the
+// old continuation cleared the restored second record's eligibility, and it never went.
+test("an old batch's late reconciliation cannot strand restored records after a lock", async () => {
+  const h = await harness();
+  const ack = deferred<unknown>(), reconcile = deferred<unknown>(), first = deferred<unknown>();
+  let holdRead = false;
+  const readView = () => ({ ...ordinaryView(scoreContent()), group });
+  h.ipc.on("studio_read", () => { if (holdRead) { holdRead = false; return reconcile.promise; } return readView(); });
+  h.ipc.on("studio_apply_batch", () => ack.promise);
+  h.session.applyScoreOp(score, { op: "set_note", step: 1, row: 0, value: { k: "d", pad: 1 } }, 41);
+  h.session.applyScoreOp(score, { op: "set_note", step: 2, row: 0, value: { k: "d", pad: 2 } }, 42);
+  await h.tick(5000); await settle(8);
+  assert.equal(h.calls("studio_apply_batch").length, 1, "both left as one batch");
+  await h.session.refreshDoc(score); // another read advances the document's read serial
+  holdRead = true;
+  ack.resolve(readView()); await settle(8); // landed() now waits on the held reconciliation read
+  const draft = decodeStudioDraft(h.session.draftSnapshot()!);
+  h.session.reset(); h.session.restoreDraft(draft); h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); await settle(8);
+  h.session.open(score); await settle(8);
+  h.ipc.on("studio_apply", () => first.promise);
+  for (const s of h.session.saves) h.session.retry(s.id);
+  await settle(8);
+  assert.equal(h.calls("studio_apply").length, 1, "the first restored record is in flight, the second waits");
+  reconcile.resolve(readView()); await settle(8); // the old continuation wakes up
+  h.ipc.on("studio_apply", () => readView());
+  first.resolve(readView()); await settle(8); await h.tick(1000);
+  assert.equal(h.calls("studio_apply").length, 2, "the second restored record was still eligible and went");
+  assert.equal(h.session.saves.length, 0);
+});
+
+// Review of e7250d48, MEDIUM 4: a recovery apply is eligible at once, so a refusal at admission (the
+// channel Index unread, or the server group changed) settles it synchronously, inside enqueue. The
+// walk installed its settlement callback only after enqueue returned, never heard that outcome,
+// and showed the choice as "applying" for good.
+test("a recovery apply refused at admission stops the walk at once: not written, kept, nothing sent", async () => {
+  const otherServer = () => ({ ...ordinaryView(indexContent({ objects: { [score]: indexEntry({ kind: "score", title: "song" }) } })), group: "cafebabe" });
+  const cases = [
+    { label: "the Index is unavailable", list: () => { throw new Error("index unavailable"); }, refusal: /has not read this channel's index/ },
+    { label: "the server group changed", list: otherServer, refusal: /server for these saved edits changed/ },
+  ];
+  for (const { label, list, refusal } of cases) {
+    const h = await harness({ list });
+    const snap = id64(0x501), source = { opId: id64(7), author: ME, nonce: id32(7) };
+    const body = JSON.stringify({ op: "set_note", step: 0, row: 0, value: { k: "d", pad: 1 } });
+    const historical = { ...scoreContent(), layers: { "0:0/d": { cleared: false, register: { selected: { value: { k: "d", pad: 1 }, source }, conflicts: [] } } },
+      readiness: { cells: {}, patches: {}, headerConflicts: false, layers: {} } };
+    h.ipc.on("studio_recovery_list", () => recoveryListing({ object: score, versions: [version(1)] }));
+    h.ipc.on("studio_recovery_read", () => ({ v: 1, kind: "recoveryVersion", historical: true, version: version(1), channel: CHANNEL, content: historical }));
+    h.ipc.on("studio_recovery_preview", () => ({ v: 1, kind: "recoveryPreview", snapshot: snap, epochId: id32(0xe1), expectedProjection: id64(0x70),
+      disposition: "ready", body, originalAuthor: ME }));
+    h.ipc.on("studio_recovery_apply", () => { throw new Error("must not be sent"); });
+    h.session.watchRecovery(score); await settle(8);
+    let finished = false;
+    void h.session.runRecovery(snap, "restore").then(() => { finished = true; });
+    await settle(16);
+    assert.equal(finished, true, `${label}: the walk heard the refusal instead of waiting for good`);
+    const run = h.session.recoveryRun!;
+    assert.equal(run.status, "stopped", label);
+    assert.match(run.error, /not written/, label);
+    assert.deepEqual(run.items.map((i) => i.state), ["error"], label);
+    assert.match(run.items[0].error, /not written; retry or discard/, label);
+    assert.equal(h.calls("studio_recovery_apply").length, 0, `${label}: nothing was sent`);
+    const [kept] = h.session.saves;
+    assert.equal(h.session.saves.length, 1, `${label}: the exact request stays for retry or discard`);
+    assert.equal(kept.kind, "recoveryApply", label); assert.equal(kept.status, "blocked", label);
+    assert.match(kept.error, refusal, label);
+    assert.equal(kept.kind === "recoveryApply" ? kept.edit.body : null, body, `${label}: the exact payload is kept`);
+  }
 });
 
 test("a batch refused at one item: the others land on their own, the refused one stays and holds its lane", async () => {

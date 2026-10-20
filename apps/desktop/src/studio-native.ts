@@ -11,7 +11,7 @@
 
 import type { NativeInvoker } from "./native-download.ts";
 import { PIX_MAX_BYTES, SCORE_MAX_STEPS, SCORE_ROWS, SCORE_VOLUME_MAX, SCORE_VOLUME_MIN, layerOf, parseNoteKey, type ScoreCell, type FlipnoteOp } from "./studio-contract.ts";
-import { admittedSounds, scoreVoices, type ScoreVoices, type ScoreVoiceSlot } from "./score-voices.ts";
+import { admittedSounds, distinctCells, scoreVoices, type ScoreVoices, type ScoreVoiceSlot } from "./score-voices.ts";
 import { PIXA_MAX_BYTES } from "./pixa.ts";
 import type { JamPatch } from "./jam-contract.ts";
 import { validateJamPatch } from "./jam-patch.ts";
@@ -744,11 +744,20 @@ export function parseScoreContent(v: unknown, what = "content"): ScoreContent {
     !!header && new Set([header.selected, ...header.conflicts].map((alternative) => JSON.stringify(alternative.value))).size > 1;
   if (headerConflicts !== [title, bpm, bpb, steps].some(distinctHeader)) fail("score header readiness disagrees with retained conflicts");
   const issueKeys = ["count", "extent", "recipe", "overlap", "conflict"] as const;
+  const layerIssues = layers ? issueMap<ScoreCellIssues>(ready.layers, `${what}.readiness.layers`, issueKeys, layers, (key) => key) : undefined;
+  // The composer refuses to move or rewrite a layered slot whose `conflict` says it holds several
+  // different live values (score-editor.ts `scoreOpSeveralValues`), so that flag must agree with
+  // the slot's own evidence, as `headerConflicts` must above: an under-reported flag would let a
+  // grid edit drop versions the member never saw (re-review of e7250d48, LOW-2).
+  if (layers) for (const [key, slot] of Object.entries(layers)) {
+    const several = distinctCells([slot.register.selected.value, ...slot.register.conflicts.map((c) => c.value)]).length > 1;
+    if (several !== (layerIssues![key]?.conflict ?? false)) fail(`${what}.readiness.layers conflict disagrees with the values ${key} holds`);
+  }
   return { kind: "score", title, bpm, bpb, steps, cells, ...(layers ? { layers } : {}), patches, readiness: {
     cells: issueMap<ScoreCellIssues>(ready.cells, `${what}.readiness.cells`, issueKeys, cells, (key) => { scoreAddress(key); return key; }),
     patches: issueMap<ScorePatchIssues>(ready.patches, `${what}.readiness.patches`, ["count", "conflict"], patches, (key) => hex64(key, "score patch issue id")),
     headerConflicts,
-    ...(layers ? { layers: issueMap<ScoreCellIssues>(ready.layers, `${what}.readiness.layers`, issueKeys, layers, (key) => key) } : {}),
+    ...(layerIssues ? { layers: layerIssues } : {}),
   } };
 }
 

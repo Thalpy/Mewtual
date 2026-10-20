@@ -39,6 +39,10 @@ type Active = {
  * `channel`, `invalid`, `muted`, or none given) means the take is not being rendered as authored.
  */
 const DROPPED_EVENT: ReadonlySet<JamPlayResult["reason"]> = new Set(["room-held", "source-held", "duplicate", "sequence"]);
+/** The dropped-event refusals that are lost notes: the allocator had no voice for an attack.
+ *  `duplicate` and `sequence` are bookkeeping of an event already handled, not a note that failed
+ *  to sound, so they are never counted. */
+const CAPACITY_REFUSAL: ReadonlySet<JamPlayResult["reason"]> = new Set(["room-held", "source-held"]);
 
 /**
  * Natural EOF: every authored release has finished AND any authored length the take format cannot
@@ -66,6 +70,7 @@ export class StudioPlaybackController {
   private active: Active | null = null;
   private stateValue: StudioPlaybackState = "stopped";
   private completedValue = false;
+  private refusedValue = 0;
   private lastTick = 0;
 
   private readonly engine: StudioPlaybackEngine;
@@ -79,6 +84,13 @@ export class StudioPlaybackController {
   get state(): StudioPlaybackState { return this.stateValue; }
   /** True only for natural horizon completion; cancellation/revocation/render failure is not EOF. */
   get completed(): boolean { return this.completedValue; }
+  /** Attacks of the latest start the voice allocator refused for capacity (review of e7250d48,
+   *  LOW 1): notes that should have sounded and did not, once each, including reconstructed seek
+   *  voices. Releases and `duplicate`/`sequence` refusals are not counted. Every start resets it;
+   *  a stop keeps it, so whoever restarts a loop can still read the pass that just ended. Only a
+   *  result for the playback still current is counted, so an old playback's late refusal never
+   *  counts against a newer one. */
+  get refused(): number { return this.refusedValue; }
   get elapsedMs(): number {
     const active = this.active;
     return active ? active.offset + Math.max(0, this.nowMs() - active.origin) : 0;
@@ -131,6 +143,7 @@ export class StudioPlaybackController {
   private async start(take: unknown, animation: JamArchivalAnimation | undefined, offsetMs: number, horizonMs: number, offsetAtStart?: () => number): Promise<boolean> {
     const document = this.document;
     this.stop();
+    this.refusedValue = 0;
     if (!this.scope || this.deafened || !Number.isFinite(offsetMs) || offsetMs < 0 ||
       !Number.isSafeInteger(horizonMs) || horizonMs < 0 || horizonMs > TAKE_MAX_DURATION_MS) return false;
     let plan: JamArchivalPlan;
@@ -210,6 +223,7 @@ export class StudioPlaybackController {
         if (attack && event.offMs! <= elapsed) continue;
         const result = await this.engine.playArchivalEvent(active.capability, index, attack ? Math.max(0, elapsed - event.ms) : 0);
         if (this.active !== active || active.generation !== this.generation) return count;
+        if (!result.ok && attack && CAPACITY_REFUSAL.has(result.reason)) this.refusedValue++;
         // A resolved refusal is as much a render failure as a rejection: stop without EOF so a
         // shared deck cannot advance past a take that never sounded.
         if (!result.ok && !DROPPED_EVENT.has(result.reason)) { this.stop(); return count; }
