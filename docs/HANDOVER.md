@@ -610,6 +610,146 @@ intact. See [the revision ledger](communication-recovery/PR48-REVIEW-REVISION.md
 actor/driver progress, provider rotation, the narrow native SDP resource contract and final branch
 verification. The wider native/browser/file/media acceptance remains outstanding.
 
+## Clip maker: text, stickers, music, sounds, three videos, recorded motion (2026-10-20)
+
+The pre-upload video editor grew into a small "cartoon maker" (the user's brief: "think Spider-Man
+cartoon maker"), from a mockup the user approved (canvas `JFAFBfH968afztVV6Uu2YV`). Everything in
+the cut-only editor still works the same way; on top of it:
+
+- **Text** in any of the 47 chat text effects (or plain, in six colours), **stickers** (pictures
+  from disk, emoji), up to **three videos** (the clip plus two picture-in-picture clips, each
+  movable, resizable, mutable, with its own volume and order), **music** (this channel's Studio
+  songs, or sound and `.jamtake` files from disk), **sound effects** (12 built-in cartoon sounds, or
+  files). Each sits on a timeline lane (V1 to V3, T, A) and can be moved or trimmed there.
+- **Recorded motion**: R (or the record tool) plays the clip, and dragging the selected text or
+  sticker records its path; dragging it while paused just moves it at that moment. Paths are
+  simplified (`simplifyPath`, 0.4% of the frame) and capped at 900 keys.
+- **One action, no needless re-render**: untouched posts the original bytes; only cut uses the old
+  cut-only exporter; anything added or any sound changed goes through the new compositor.
+- **Discard** asks first whenever anything was cut, added or changed.
+
+Files (all `apps/desktop/src`): the document `clip-doc.ts`; drawing `clip-render.ts` (the stage
+and the export share `drawClipFrame`, so the stage shows the posted clip); the compositor
+`clip-export.ts`; sound `clip-audio.ts` (mix in 20 s segments, stateless soft clip);
+`jam-offline.ts` (Studio takes rendered by the real `JamEngine` through `OfflineAudioContext`
+suspend/resume); `clip-sfx.ts`; `text-fx-raster.ts` (text effects frozen at time t as SVG
+foreignObject data URLs); `clip-media.ts` (the session's media bin and file limits);
+`clip-timeline.ts`, `clip-stage.ts`, `clip-preview.ts` (pure geometry and preview decisions);
+`clip-music.ts` (the Studio song source App passes in as `music`); UI in `VideoEditor.svelte`,
+`ClipLibrary.svelte`, `ClipInspector.svelte`. Small exports were added to `video-export.ts` and
+`studio-playback.ts`, and `video-edit.ts`'s history became generic.
+
+Verification: unit tests for every module above and the editor (jsdom), including the
+compositor's wiring over a fake media library (what it decodes and draws per frame); headless Edge
+runs of all 47 effects (rendered, animated, never tainting the canvas), the offline music render,
+the sound effects' levels, a composed export checked frame by frame and by frequency (MP4 and
+WebM, cancel, cap), the text snapshot under the shipped CSP with Tauri's nonce, and the full UI
+flow through real mouse input (text, emoji, picture, sound, second video, music file, a paused
+drag, a recorded drag, post).
+
+Adversarial review (no blocker), all fixed with regression tests, each confirmed to fail when
+its fix is removed:
+- **High**: a Studio listing that failed (likely in any channel without a Studio index) asked
+  again forever. It is now asked once and offers "try again", and no index means no songs.
+- **Medium**: volume or mute changes cut a sound to a shorter clip for good, and could leave a
+  negative length. Push-to-talk keys could not be typed into the text field during a call. An
+  undo or edit during a recording left a stale overlay position and trail on the stage (undo is
+  now refused while recording). Decoded sizes were unbounded: pictures are now sized from their
+  header first, sounds decoded only as far as the clip needs, and the bin has a 1 GiB budget. The
+  compositor's wiring had no checked-in test.
+- **Low**: song renders stop when the editor answers; a full bin no longer leaves a song stuck;
+  a release anywhere ends a stage drag; items past the clip's end and muted sounds no longer force
+  a re-render, and muting a soundless clip is off; raw parser text no longer reaches the person;
+  reset keeps ids unique; the text picture cache is pruned; the drawn trail is capped.
+- Design notes left as they are: Files, wiki and announcements list the current chat channel's
+  songs; the preview plays through Deafen like the plain video preview always has; adding
+  anything soft-clips the clip's own peaks above about -2 dBFS. Expired songs are no longer
+  offered.
+
+A second, external adversarial review of the pushed work (`0191581c`) found two highs, five
+mediums and a low. Fixed with regression tests, each confirmed to fail without its fix:
+- **High**: media budgets were asked only after the work: several song rows clicked at once each
+  rendered (and allocated its whole output) in parallel before the bin refused it. Heavy jobs now
+  run one at a time across editors (`JobQueue`), each admitted against the bin first
+  (`MediaBin.room`), and a full bin refuses before anything starts.
+- **Medium**: "post now" inside a multi-file batch could leave the sent text in the next draft.
+  `postFromComposer` now returns `{started, settled}`; the batch waits for the send and stops if
+  the person moves away meanwhile. The "Discard this clip?" question did not hold focus, and Enter
+  on the post button behind it started the export; it now traps Tab, everything behind it is
+  `inert`, and posting is refused while it shows. Song renders, sound decodes and the mix did not
+  stop between steps once cancelled; each now checks before allocating, between loads and before
+  returning. A silent recording with only a sticker needed an audio encoder. A tall timeline
+  (many overlapping bars) pushed the stage and the post button out of the card; it now stops at
+  220 px and scrolls, checked in Edge at 900 x 640 with 24 stacked bars, including an export
+  started while scrolled down.
+- **Low**: a soundless clip could still be muted from the library's layer list, which sent an
+  untouched clip through a re-render.
+- **Design question, done**: a song is checked against the index again when it is loaded and
+  again when the clip is posted, so one that expired while the editor stayed open is not posted.
+- **Re-review of these fixes** (no blocker or high; all fixed with tests, each confirmed to fail
+  without its fix): the expiry check covered only the load, not the post; a job that never
+  settled would have held the shared queue for every later editor (it now lets go when its editor
+  closes); posting while something was still being added dropped it with a false "no more
+  sounds fit" (posting now waits); a file dropped behind the discard question still landed on the
+  clip; a post-now send that started but did not go out still said "sending"; the inspector still
+  offered mute and volume for a soundless second video; a refused emoji leaked its picture. The
+  emoji leak has no test (jsdom has no `OffscreenCanvas`).
+- **Second re-review** (no blocker, high or medium): waiting for pending adds meant one add that
+  never ended disabled posting for good, so the footer now offers "stop adding"; a failed send
+  puts the draft back trimmed, so the "not sent yet" check compares trimmed text; and a cancel
+  while the songs are checked at post now has a test proving no render starts. Its quick check of
+  "stop adding" found one more low, fixed: stopping released the queue during a render (which
+  cannot be interrupted), so a re-add could render beside it; a render now keeps its turn.
+- **Review of `dded8e20`** (two highs, one medium; the frontend ones fixed here with tests, each
+  confirmed to fail without its fix). Our earlier "nothing remains open" was wrong:
+  - **High**: closing an editor released its render's turn while the render still held its
+    output, so editors closed one after another stacked renders with no ceiling. A render now
+    keeps its turn to the end however its editor went; a stalled read or decode is let go of only
+    one at a time (`JobQueue` `holding` and `looseLimit`). A cancelled picture decode no longer
+    starts its resize, and closes what it holds.
+  - **Medium**: "post now" guessed the send's outcome from the composer, so a sent message whose
+    draft was kept (typed in and back out: same words, newer revision) said "press Send", which
+    sent it twice. `send()` and `postStatus()` now return a `SendOutcome` and the toast reports it.
+  - The emoji release now has a test (fake bitmaps; no drawing needed).
+  - A fresh re-review of those fixes (no blocker or high) found the send outcome wrong in one
+    place, fixed: a throw after the identity was sealed said "not sent", though it stays pending
+    and retries by itself, so it is `uncertain`. Also fixed: a not-accepted superseded result is
+    `failed` (it waits for review), a failed announcement says it may have posted, a hung read
+    that holds no media no longer uses up the stalled-job allowance (`JobStage` light, heavy,
+    pinned), and the outcome is reported before a move away ends the batch (but not behind the
+    lock screen). Its 1500-case probes of the queue, with and without the stages, found the order
+    and the bound held; its last check found nothing blocking.
+- **OPEN, HIGH, handed to the communication session (not fixed on this branch)**: the native
+  upload/lock race. `finish_file_upload` (`src-tauri/src/lib.rs`) reads the unlocked state, then
+  awaits the uploads mutex, removes the reservation on that earlier answer, and awaits
+  publication without the UI-session commit guard; once the reservation is gone, a lock finds
+  nothing to cancel while the publication is still outstanding. Acceptance criteria given to
+  that session, to land as its own separately reviewed commit and be integrated into Gate7
+  before this high counts as resolved:
+  - bind the pending upload to the UI-session generation it began in;
+  - order final publication against lock with `require_ui_session_generation`, in the existing
+    lock order;
+  - lock winning before final admission rejects publication and cleans up the sealed chunks;
+  - once publication is admitted, lock must not report completion ahead of it;
+  - a lock and unlock cycle never revives an upload from the earlier generation;
+  - deterministic barrier tests around final admission and actor publication covering both
+    orders and a lock/unlock cycle (the existing test passes a literal `true` to the helper and
+    never exercises the race). That session owns the native tests and gates.
+- Follow-ups: limits on added videos' size and length (a lying sample rate can still make one
+  export sound window about 120 MB), and the edited file name contract. Known residuals: emoji
+  and built-in sounds skip the queue (small, but not admitted ahead); the previous editor's bin
+  is freed on unmount, so two can be alive for a moment; a post-now batch also waits for the
+  send's conversation refresh before the next review.
+
+Not explained: in headless Edge, Chromium dropped pointer capture mid-drag on the stage (a bare
+test element keeps it). The stage now ignores a lost capture while the button is down and ends
+on any release, so it does not matter there; it has not been seen with a real mouse.
+
+Known limits: fonts are the sender's own (recipients get pixels). Offline music is the same
+music on every render but not bit-identical (about -140 dB). Composed clips are capped at 10
+minutes and 1920 px. Server stickers and shared Files media are not offered yet: they are other
+people's bytes and need the native CORS change plus their own review first.
+
 ## Readable text on dark accents and member colours (2026-10-19)
 
 User report: a dark custom accent left near-black text on accent buttons (a dark red "EXPORT .WAV").

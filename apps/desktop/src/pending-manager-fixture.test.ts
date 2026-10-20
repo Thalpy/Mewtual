@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend } from "./pending-sends.ts";
 import { MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity.ts";
-import { persistenceWarning, sendAndRefresh } from "./message-send.ts";
+import { persistenceWarning, sendAndRefresh, sendOutcome } from "./message-send.ts";
 import { NativeVaultLockCoordinator } from "./window-close.ts";
 import { VideoReviewQueue } from "./video-review.ts";
 
@@ -31,7 +31,7 @@ function productionCloseCallback() {
 /** Shared test fixture for real App save queue, hydration, decisions and submit/retry. */
 export function pendingManagerApp(initial: unknown) {
   const dependencies = { initial, addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend,
-    MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity, persistenceWarning, sendAndRefresh, NativeVaultLockCoordinator, VideoReviewQueue };
+    MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity, persistenceWarning, sendAndRefresh, sendOutcome, NativeVaultLockCoordinator, VideoReviewQueue };
   return new Function(...Object.keys(dependencies), `
     let locked = false, uiStateReady = false, uiStateLoadGeneration = 1, uiStateSaveTimer;
     let uiStateSaveChain = Promise.resolve(), uiStateSaveFailed = false, uiStateFailureToast = 0;

@@ -199,12 +199,13 @@ export type VideoProbe =
   | { ok: true; duration: number; width: number; height: number; hasAudio: boolean }
   | { ok: false; reason: string };
 
-type Mediabunny = typeof import("mediabunny");
+export type Mediabunny = typeof import("mediabunny");
 
 let library: Promise<Mediabunny> | null = null;
 
-/** Load Mediabunny once, on first use. A failed load is retried on the next call. */
-function loadLibrary(): Promise<Mediabunny> {
+/** Load Mediabunny once, on first use. A failed load is retried on the next call. Shared with the
+ * clip maker's export (`clip-export.ts`), so the library is loaded once for both. */
+export function loadLibrary(): Promise<Mediabunny> {
   library ??= import("mediabunny").catch((error: unknown) => {
     library = null;
     throw error;
@@ -212,7 +213,7 @@ function loadLibrary(): Promise<Mediabunny> {
   return library;
 }
 
-function openInput(mb: Mediabunny, file: Blob): Input {
+export function openInput(mb: Mediabunny, file: Blob): Input {
   // Only the containers `EDITABLE_CONTAINERS` admits. Anything else is refused by the demuxer
   // rather than being sniffed into some other format the editor was never meant to open.
   return new mb.Input({ source: new mb.BlobSource(file), formats: [mb.MP4, mb.QTFF, mb.WEBM, mb.MATROSKA] });
@@ -334,14 +335,14 @@ export type ExportOptions = {
  * and muxer internals ("Failed to construct 'Worker'", codec strings) are not something to show.
  * The original stays on `cause` for debugging.
  */
-class ExportRefusal extends Error {
+export class ExportRefusal extends Error {
   constructor(message: string) {
     super(message);
     this.name = "ExportRefusal";
   }
 }
 
-const EXPORT_FAILED = "The edited video could not be made in this window.";
+export const EXPORT_FAILED = "The edited video could not be made in this window.";
 
 /** A sentence for a track the conversion had to leave out. */
 function discardReason(discarded: DiscardedTrack): string {

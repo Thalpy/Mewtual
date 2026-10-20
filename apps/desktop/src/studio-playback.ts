@@ -36,13 +36,15 @@ type Active = {
  * budget, a same-note overlap and an already-consumed index. Any other refusal (`audio`, a lost
  * `channel`, `invalid`, `muted`, or none given) means the take is not being rendered as authored.
  */
-const DROPPED_EVENT: ReadonlySet<JamPlayResult["reason"]> = new Set(["room-held", "source-held", "duplicate", "sequence"]);
+// Exported for the clip maker's offline render (`jam-offline.ts`), which must drop and fail on
+// exactly the same reasons so a clip's music matches what Studio plays.
+export const DROPPED_EVENT: ReadonlySet<JamPlayResult["reason"]> = new Set(["room-held", "source-held", "duplicate", "sequence"]);
 
 /**
  * Natural EOF: every authored release has finished AND any authored length the take format cannot
  * carry (a Score's trailing rests and empty bars) has elapsed. A release crossing that length wins.
  */
-function completionMs(plan: JamArchivalPlan, horizonMs: number): number {
+export function completionMs(plan: JamArchivalPlan, horizonMs: number): number {
   return Math.max(horizonMs, plan.endMs + archivalReleaseTailMs(plan) + 5);
 }
 

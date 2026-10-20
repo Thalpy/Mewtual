@@ -17,6 +17,7 @@ import { stripTypeScriptTypes } from "node:module";
 import { editableContainer, editedFileName, type VideoEditorResult } from "./video-export.ts";
 import { pushToTalkEvent, type PushToTalkSettings } from "./push-to-talk.ts";
 import { carriesFiles } from "./drop-guard.ts";
+import type { SendOutcome } from "./message-send.ts";
 
 const source = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
 
@@ -39,6 +40,10 @@ const image = (name: string) => new File([new Uint8Array(4)], name, { type: "ima
 type Scripted = {
   review?: (file: File, state: State) => Promise<VideoEditorResult>;
   upload?: (file: File, name: string, state: State) => Promise<void>;
+  /** The rest of a started send or post, after it marked itself in flight (App's own waits and
+   * its clear-if-unchanged); resolves when it settles, to its outcome ("sent" when it gives none). */
+  send?: (state: State) => Promise<SendOutcome | void>;
+  post?: (state: State) => Promise<SendOutcome | void>;
 };
 type State = Record<string, unknown> & {
   scope: string; epoch: number; draft: string; statusDraft: string; uploads: Array<[string, string]>;
@@ -90,15 +95,15 @@ function harness(script: Scripted = {}) {
     get statusPosting() { return state.statusPosting; },
     // App's contract for both: refuse while one is out; otherwise mark it out before the first
     // await, send what is in the composer, and clear the mark when it settles.
-    send: () => {
-      if (state.sending) return Promise.resolve();
+    send: (): Promise<SendOutcome> => {
+      if (state.sending) return Promise.resolve("refused");
       state.sending = true; state.sends++; state.sentTexts.push(state.draft);
-      return Promise.resolve().then(() => { state.sending = false; });
+      return (script.send ? script.send(state) : Promise.resolve()).then((outcome) => { state.sending = false; return outcome ?? "sent"; });
     },
-    postStatus: () => {
-      if (state.statusPosting) return Promise.resolve();
-      state.statusPosting = true; state.statusPosts++;
-      return Promise.resolve().then(() => { state.statusPosting = false; });
+    postStatus: (): Promise<SendOutcome> => {
+      if (state.statusPosting) return Promise.resolve("refused");
+      state.statusPosting = true; state.statusPosts++; state.sentTexts.push(state.statusDraft);
+      return (script.post ? script.post(state) : Promise.resolve()).then((outcome) => { state.statusPosting = false; return outcome ?? "sent"; });
     },
     toast: (text: string) => { state.toasts.push(text); return state.toasts.length; },
     updateToast: (_id: number, text: string) => { state.toasts.push(text); },
@@ -259,10 +264,126 @@ test("post now from the announcement composer posts the announcement", async () 
   assert.equal(state.sends, 0);
 });
 
+/** App's sends keep the composer until their persistence wait is over, then clear it only if it
+ * still holds what was sent (its draft-revision protection). `gate` holds that wait open. */
+function slowSend(field: "draft" | "statusDraft", gate: Promise<void>) {
+  return async (s: State) => {
+    const sent = s[field];
+    await gate;
+    if (s[field] === sent) s[field] = "";
+  };
+}
+async function flush() { for (let i = 0; i < 20; i++) await Promise.resolve(); }
+
+test("post now in a batch sends the video's message, then attaches the next file to the emptied composer", async () => {
+  // Found in review: the batch attached the next file while the send still owned the composer, so
+  // the send's protection kept the draft, and the sent text and video stayed behind beside it.
+  for (const target of ["chat", "status"] as const) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const field = target === "chat" ? "draft" : "statusDraft";
+    const { state, embedMedia } = harness({
+      review: async () => ({ kind: "original", post: true }),
+      ...(target === "chat" ? { send: slowSend(field, gate) } : { post: slowSend(field, gate) }),
+    });
+    state[field] = "look at these";
+    const run = embedMedia(target, items(video("a.mp4"), image("b.png")));
+    await flush();
+    assert.deepEqual(state.sentTexts, ["look at these ![a.mp4](cid:cid1)"], `${target}: one message, the text and the video`);
+    assert.equal(state.uploads.length, 1, `${target}: the image waits while the send owns the composer`);
+    release();
+    await run;
+    assert.equal(state[field], "![b.png](cid:cid2)", `${target}: the next draft holds only the image`);
+  }
+});
+
+test("a post-now send is reported from what it came to, whatever the composer holds afterwards", async () => {
+  // Found in review: the outcome was guessed from the composer's text. A sent message whose draft
+  // was kept (typed in and back out while it sent: same words, newer revision) was called "not
+  // sent yet: press Send", which sent it twice; an announcement refused after more was typed
+  // still said "sending".
+  // `typed`: more text typed while it was out, which a composer guess would read as "sent".
+  const cases: Array<[SendOutcome, boolean, string]> = [
+    ["sent", false, "Attached a.mp4, sent"],
+    ["uncertain", false, "Attached a.mp4, not confirmed yet: don't send it again"],
+    ["failed", true, "Attached a.mp4, not sent"],
+    ["refused", false, "Attached a.mp4, not sent yet: press Send when ready"],
+  ];
+  for (const target of ["chat", "status"] as const) {
+    for (const [outcome, typed, chatToast] of cases) {
+      if (target === "status" && outcome === "uncertain") continue; // an announcement is never uncertain
+      // An announcement has no retry token: one that threw may have posted, so no "not sent".
+      const toast = target === "status" && outcome === "failed" ? "Attached a.mp4, may not have posted: check the feed before posting again" : chatToast;
+      const field = target === "chat" ? "draft" : "statusDraft";
+      const settle = async (s: State): Promise<SendOutcome> => { if (typed) s[field] += " and more"; return outcome; };
+      const { state, embedMedia } = harness({
+        review: async () => ({ kind: "original", post: true }),
+        ...(target === "chat" ? { send: settle } : { post: settle }),
+      });
+      // The draft is left exactly as it was sent: only the outcome can say what happened.
+      state[field] = "look";
+      await embedMedia(target, items(video("a.mp4")));
+      assert.equal(state.toasts.at(-1), toast, `${target}, ${outcome}`);
+    }
+  }
+});
+
+test("a move away while a post-now send runs ends the batch there", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const { state, embedMedia } = harness({ review: async () => ({ kind: "original", post: true }), send: slowSend("draft", gate) });
+  state.draft = "look";
+  const run = embedMedia("chat", items(video("a.mp4"), image("b.png"), image("c.png")));
+  await flush();
+  move(state, "open|1|1:elsewhere");
+  release();
+  await run;
+  assert.equal(state.uploads.length, 1, "nothing more is uploaded for a channel that is no longer on screen");
+  assert.ok(state.toasts.some((t) => /2 files were not attached/.test(t)));
+  assert.ok(state.toasts.includes("Attached a.mp4, sent"), "the send's own outcome is still reported");
+});
+
+test("a lock during a post-now send shows no outcome behind the lock screen", async () => {
+  // Found in re-review: the outcome toast fired behind the lock screen, unlike the batch's others.
+  const { state, embedMedia } = harness({
+    review: async () => ({ kind: "original", post: true }),
+    send: async (s: State): Promise<SendOutcome> => { s.locked = true; move(s, "locked|1|1:general"); return "uncertain"; },
+  });
+  state.draft = "look";
+  await embedMedia("chat", items(video("a.mp4"), image("b.png")));
+  assert.deepEqual(state.toasts.filter((t) => /not confirmed|sent$|not sent|attached:/.test(t)), [], state.toasts.join(" | "));
+  assert.equal(state.uploads.length, 1, "and the batch stopped");
+});
+
 test("an ordinary attach does not send", async () => {
   const { state, embedMedia } = harness();
   await embedMedia("chat", items(video("a.mp4")));
   assert.equal(state.sends, 0);
+});
+
+test("a post-now result cannot notify a replacement or closing UI session", async () => {
+  for (const target of ["chat", "status"] as const) {
+    for (const retire of ["session", "close", "loading"] as const) {
+      for (const outcome of ["sent", "failed", "uncertain"] as const) {
+        if (target === "status" && outcome === "uncertain") continue;
+        const settle = async (s: State): Promise<SendOutcome> => {
+          // A lock/unlock round trip can finish before this delayed result arrives. Testing
+          // only `locked` would then notify a new session about the old session's attachment.
+          if (retire === "session") { s.uiStateLoadGeneration += 2; s.locked = false; }
+          if (retire === "close") s.windowCloseInFlight = true;
+          if (retire === "loading") s.uiStateReady = false;
+          return outcome;
+        };
+        const { state, embedMedia } = harness({
+          review: async () => ({ kind: "original", post: true }),
+          send: settle, post: settle,
+        });
+        await embedMedia(target, items(video("a.mp4"), image("b.png")));
+        assert.equal(state.uploads.length, 1, `${target}/${retire}/${outcome}: no next upload`);
+        assert.equal(state.toasts.at(-1), "Attached a.mp4, sending", `${target}/${retire}/${outcome}: no stale result`);
+      }
+    }
+  }
 });
 
 test("post now does not send once the person has moved on", async () => {
@@ -396,16 +517,22 @@ test("an announcement is posted once even when post now and Enter overlap, and n
     errorText: String,
   };
   const js = stripTypeScriptTypes(functionText("postStatus"), { mode: "strip" }).trim();
-  const { postStatus } = new Function("state", `with (state) { const postStatus = (${js}); return { postStatus }; }`)(scope) as { postStatus: () => Promise<void> };
+  const { postStatus } = new Function("state", `with (state) { const postStatus = (${js}); return { postStatus }; }`)(scope) as { postStatus: () => Promise<SendOutcome> };
   const first = postStatus();
   assert.equal(scope.statusPosting, true, "marked out before the first await");
-  await postStatus(); // Enter while the first is out
+  assert.equal(await postStatus(), "refused", "Enter while the first is out posts nothing");
   assert.deepEqual(posted, ["news ![a.mp4](cid:1)"]);
   scope.statusDraft = "next announcement";
   release();
-  await first;
+  assert.equal(await first, "sent", "the actual post reports its outcome for post now");
   assert.equal(scope.statusPosting, false);
   assert.equal(scope.statusDraft, "next announcement", "text typed meanwhile is not cleared");
+
+  scope.invokeDebugged = async () => { throw new Error("members may not post here"); };
+  assert.equal(await postStatus(), "failed");
+  assert.equal(scope.error, "Error: members may not post here");
+  scope.statusDraft = "   ";
+  assert.equal(await postStatus(), "refused", "nothing to post");
 });
 
 test("status posting refuses close/loading and old replies cannot clear or expose a replacement draft", async () => {

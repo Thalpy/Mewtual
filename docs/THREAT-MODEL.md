@@ -524,6 +524,73 @@ What it does not claim:
   disk; the editor never touches it.
 - Re-encoding is lossy and may change codec (QuickTime becomes MP4/H.264; WebM becomes VP9/Opus).
 
+Clip maker (2026-10-20). A clip with anything added (text, stickers, other videos, music, sounds)
+or its own sound changed is drawn and mixed frame by frame by `exportClip` (`clip-export.ts`).
+The properties above carry over, and for the same reasons:
+
+- **Cut-out time is still absent.** Frames are drawn only at kept output times, from each video's
+  kept source times (`layerSchedule`), and sound comes only from kept ranges (`soundPieces`).
+  Checked in headless Edge frame by frame and by frequency, not only in unit tests. The file is
+  written fresh from pixels and samples; no packet, tag or file name of any source reaches it (the
+  output keeps the picked file's stem as its name, as before).
+- **Media is local.** The clip maker reads files the person picks or drops from their own disk,
+  emoji drawn by this window, sounds synthesised here (`clip-sfx.ts`), and Studio songs read from
+  this device's own Studio store. Nothing is fetched and no `catcoms-media:` URL is read; server
+  stickers and shared Files media are deliberately not offered yet. SVG and AVIF are refused as
+  pictures. Every file is size-checked before decoding (`MEDIA_LIMITS`), and because bytes say
+  little about decoded size, each is also bounded by what it decodes to, before decoding: a
+  picture's dimensions are read from its header (`imageSize`; for a GIF, its screen grown to hold
+  every frame, since the browser decodes a frame larger than the screen at the frame's size) and
+  anything over 40 megapixels is refused, then kept at most 2048 px; a sound is decoded only as
+  far as the clip can use (its length plus 30 s) and never past ten and a half minutes of samples
+  at 48 kHz. Sound files are demuxed by Mediabunny (all its containers) and decoded by WebCodecs,
+  the same surface as the video path; a codec WebCodecs lacks (ALAC, ADPCM) is refused, not
+  played some other way. The session holds
+  at most 64 media items and 1 GiB of decoded media. Counts in the document are bounded (24
+  overlays, 32 sounds, 3 videos, 900 keys a path) and composed clips at 10 minutes and 1920 px.
+  Those budgets are asked BEFORE anything large is made: decodes and song renders run one at a
+  time through one queue shared by every editor (`JobQueue`), each admitted against its bin's
+  remaining room before it allocates its output. The bound holds across editors, not only within
+  one: closing an editor does not free what its running job holds, so an offline render (which
+  cannot be interrupted, and holds its whole output until it ends) keeps its turn to the end
+  however its editor went or whatever the person stopped. That rests on an assumption: a render
+  always ends, because the engine's suspend callbacks and drum hashing all complete; a render
+  that never ended would hold up every later heavy job until restart. A job that holds no media
+  yet (waiting on a Studio read, say) is let go of as soon as its editor gives up on it, however
+  many hang. A decode holding its output that stalls (a crafted file) can be let go of too, so it
+  cannot block every later editor, but only one such job at a time; a second waits until the
+  first ends, and since the queue runs in order, two stalled decodes block every later add in
+  every editor (song reads and renders too) until restart. At most two jobs
+  holding media are therefore unsettled at once, each within `MEDIA_LIMITS`. A
+  cancelled editor starts no queued job, and a render, mix or decode cancelled part way never
+  reports success, starts no further allocation, and releases the pictures it held. Posting waits
+  until nothing is still being added, or until the person stops what is still pending. Added
+  videos stay files in the bin (probed, decoded only frame by frame while previewing or
+  exporting); limits on their size and length are a recorded follow-up.
+- **Studio songs are peer-authored content** (the channel's Studio is shared). They go through the
+  same validation and resolution as pressing play in the Studio (`scorePlaybackFromNative`,
+  `planJamArchivalPlayback`, the take limits), and a song that cannot be resolved is refused with
+  the Studio's sentence, never replaced by another version. Expired songs are not offered. A song
+  is checked against the channel's index again when it is loaded and again when the clip is
+  posted (`checkSongsOffered`), so one that expired or was deleted while the editor stayed open is
+  not posted; one that expires while the clip itself is being exported still is. They are rendered by the real
+  `JamEngine` into an `OfflineAudioContext` that is never connected to the speakers; the
+  `runningView` proxy only tells that offline engine its context is running. Putting a song into
+  a clip posted elsewhere on the same server is the person's own act, like quoting a message.
+- **Text effects** are drawn from the app's own stylesheet rules, frozen per frame into SVG
+  `foreignObject` images loaded as `data:` URLs (a `blob:` one would taint the canvas). Layout
+  happens in an off-screen shadow root outside `<body>`, so the chat effect runtime never adopts
+  it and nothing makes sound; the library's previews sit in `.text-fx-key-preview`, the runtime's
+  silent picker-preview class. The page itself styles only through CSSOM and constructed
+  stylesheets, which the shipped CSP allows. Each snapshot carries its own `<style>` element and
+  `style=""` attribute INSIDE the SVG image: an image document is not governed by the page's
+  `style-src`. Checked in Edge under the shipped policy with Tauri's runtime nonce added (the
+  page's own inline style was refused in the same run, while the snapshot's styling applied).
+
+It does not claim that recipients can tell how a clip was made, that emoji and text look the
+same on every machine (they are drawn with the sender's fonts), or that two renders of the same
+music are bit-identical (they differ by float rounding, about -140 dB).
+
 ## Volatile Studio edits and orderly lock recovery (2026-10-18)
 
 Working editor projections are unconfirmed local intentions. They never replace authenticated

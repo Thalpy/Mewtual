@@ -4637,8 +4637,21 @@ and every drop handler returns early on a drop that carries no files.
 - A result with `post: true` makes `embedMedia` snapshot the composer (`composerState`: text, and
   for chat the reply target) when the editor answers, attach the file, and then call
   `postFromComposer` only if the composer is unchanged; that runs `send()` or `postStatus()` and
-  reports whether a send actually started (each sets its in-flight flag before its first await).
-  Every outcome has its own toast: sending, "not sent: the message changed", "not sent yet".
+  returns `{started, settled}`: whether a send actually started (each sets its in-flight flag
+  before its first await), and a promise that resolves (never rejects) to what it came to. In a
+  batch the next file waits for `settled`, so it is attached to the emptied composer, not added to
+  the message being sent; a move away while the send runs ends the batch there (2026-10-20
+  review). `send()` and `postStatus()` resolve to a `SendOutcome` (`message-send.ts`): `refused`
+  (nothing submitted); `failed` (nothing sealed, or a sealed identity blocked from automatic
+  retry, including a not-accepted superseded result); `sent` (accepted and saved durably);
+  `uncertain` (may have gone or will by itself: accepted without a durable save, a not-accepted
+  pending result, a throw whose sealed identity stays pending and retries quietly, or an identity
+  taken over by a lock or the pending-message work). An announcement is never `uncertain`. The
+  toast reports that outcome, before a move away ends the batch, and never the composer's
+  contents, which cannot tell a sent message whose draft was kept from an unsent one: "sent",
+  "not confirmed yet: don't send it again", "not sent" (an announcement: "may not have posted:
+  check the feed before posting again", since `post_status` has no retry token), "not sent yet:
+  press Send when ready", besides "not sent: the message changed" before a send.
   `postStatus()` now refuses re-entry (`statusPosting`) and clears the box only if it still holds
   what was posted.
 - `VIDEO_EDITOR_SHORTCUTS` (`video-editor-ui.ts`) is the Keybinds page's "Video editor" list.
@@ -4677,6 +4690,52 @@ and every drop handler returns early on a drop that carries no files.
   person; library errors are replaced by a generic sentence and kept on `cause`.
 - Mediabunny (MPL-2.0, pinned 1.61.3) is imported dynamically, so it is a separate chunk loaded
   only when an editor opens. See the threat model's pre-upload video editing boundary.
+
+**Clip maker (2026-10-20).** The editor edits a `ClipDoc` (`clip-doc.ts`): `layers[0]` is the
+picked video with its cut list and defines the output timeline; `layers[1..2]` are added videos,
+picture in picture; `overlays` (text in a chat text effect, or a picture) carry keyframes; `audio`
+items are music or sound effects. All times except layer 0's own are OUTPUT time. Media is
+referenced by `source` id into the session's `MediaBin` (`clip-media.ts`; `"base"` is the picked
+file). The host contract is unchanged except for one optional prop and one test seam:
+
+- `music?: ClipMusicSource | null` (`clip-music.ts`): `list()` gives the channel's visible Studio
+  songs `{id, title}`; `load(id)` gives `{take, gridMs}` from `scorePlaybackFromNative`, or rejects
+  with the Studio's own sentence (unresolved conflicts, missing recipe). `load` lists the index
+  again first and refuses a song that is no longer offered (expired or deleted since the list was
+  shown) before reading its content, and the editor asks `list` once more when a composed clip is
+  posted (`checkSongsOffered`), refusing the post with a sentence if a song the clip sounds is gone
+  or the list cannot be read. Songs are kept in the bin under `songKey(id)`. App builds it with
+  `studioMusic(ipc, {server, channel}, myIdentity)` for the active channel when there is one and an
+  identity; the editor is closed by `videoEditorScope` on any channel change, so a review never
+  reads another channel. Read only when the Music tab opens.
+- `composer?` defaults to `exportClip(doc, media, {capBytes, signal, onProgress, container, name})`
+  (`clip-export.ts`), with the same rejections as `exportEditedVideo`.
+- Outcome rule: `isUntouched(doc)` gives `original`; `!needsCompositor(doc)` (only layer 0's cuts
+  changed) gives `edited` from `exportEditedVideo(file, layers[0].edit)`; anything else gives
+  `edited` from `composer`. `VideoEditorResult` is unchanged.
+- Keys added: R (record motion for the selected overlay), L (library), and Delete removes the
+  selected overlay, sound or layer before it falls back to the piece. Keys typed into the
+  inspector's fields, sliders or the effect list are theirs: no editor shortcut fires.
+- Files dropped on the editor go onto the clip (by type; refused types and over-size files get a
+  footer notice) and never reach the page behind it.
+- Heavy work (a song's read and render, a picture, sound or `.jamtake` decode) runs one job at a
+  time across every editor (`JobQueue` in `clip-media.ts`, one instance in `VideoEditor.svelte`'s
+  module script). Each job is admitted against the bin before it allocates (`MediaBin.room`, passed
+  as `admit` to `renderTakeOffline`, `decodeSoundFile` and `decodeImageFile`), and a job reached
+  after its editor answered does nothing. `JobQueue.run(job, signal, stage)` holds the queue
+  until the job settles. `signal` aborting (the editor answered, or "stop adding") lets go of it
+  sooner by its `JobStage` at that moment: `"light"` (nothing large allocated yet, e.g. waiting
+  on an IPC read) at once and uncounted; `"heavy"` (admitted, holding a decode's output) only
+  while fewer than `looseLimit` (1) heavy jobs let go of early are unsettled, otherwise it keeps
+  its turn until one ends or it settles itself; `"pinned"` (an offline render) never. The
+  editor's `heavy(gone, job)` hands the job a `HeavyStep`: `admit` (the bin's room check; passing
+  it makes the job heavy) and `rendering()` (pins it). An abort never lets later jobs past one
+  queued before it. `JobQueue.loose` reports the unsettled early releases. The post button is
+  disabled ("Still adding to the clip") while any add is pending, with a "stop adding" button
+  beside it that gives up on every pending add (each drops its result and its job's signal
+  aborts). A file dropped while "Discard this clip?" shows is kept from the page but not added.
+  `decodeImageFile(file, admit?, signal?)` checks `signal` after every await and closes what it
+  holds before rejecting. `mixClipSound`'s `SoundLoader` now receives the mix's `signal`.
 
 ## 13. Call identity and Flipnote frame claims  *(Gate 5; desktop WebRTC; docs/GATE5-DESIGN.md)*
 
