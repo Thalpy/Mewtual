@@ -7,8 +7,11 @@
 It was developed in `M:\Git (local)\CatComs\target\communication-atomic-intake-worktree`;
 the branch checkout is `M:\Git (local)\CatComs\target\communication-review-worktree`.
 The prior `a0756821` checkpoint passed root 3,073, native 430+5 and frontend 2,067.
-The current chat-bubble/packet-capacity continuation passes focused checks. Its complete frontend
-passes 2,227 cases plus check/build. The first root full run stopped in replication with an explicit
+The current chat-bubble/packet-capacity continuation passes focused checks. Its initial Gate7
+merge (`7e90f8b1`) passed 2,227 frontend cases plus check/build. The later `fd788d80` Gate7 merge
+passes 54 focused send/upload-flow cases after correcting one review finding: a refusal on a
+retry cannot erase an earlier unknown send outcome. Its full frontend repeat is pending.
+The first root full run stopped in replication with an explicit
 allocation failure; the native check also exhausted allocation, while another session was running
 a full Rust build. These are failed attempts, not green validation. Native upload focus passes
 all ten cases; final suites/checks are pending. Remaining protocol and physical acceptance limits
@@ -723,6 +726,11 @@ mediums and a low. Fixed with regression tests, each confirmed to fail without i
     pinned), and the outcome is reported before a move away ends the batch (but not behind the
     lock screen). Its 1500-case probes of the queue, with and without the stages, found the order
     and the bound held; its last check found nothing blocking.
+  - The external re-review of `09661b68` closed the resource high, the type/Backspace medium and
+    the image and emoji items, and found one more medium, fixed: the outcome read the pending
+    entry back after a failure, so recovering or stopping it in Pending messages while the
+    request was still out turned a possibly accepted message into "not sent". `send()` now keeps
+    its own evidence that the identity may have been dispatched.
 - **HIGH follow-up from the Gate7 clip-editor review**: the native
   upload/lock race. `finish_file_upload` (`src-tauri/src/lib.rs`) reads the unlocked state, then
   awaits the uploads mutex, removes the reservation on that earlier answer, and awaits

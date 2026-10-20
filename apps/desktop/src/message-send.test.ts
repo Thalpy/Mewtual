@@ -209,6 +209,39 @@ test("a send that threw after sealing is uncertain, since its identity retries b
   assert.equal(await invalid.send(), "failed");
 });
 
+test("a request recovered or stopped while it is still out stays uncertain when its reply fails", async () => {
+  // Found in review: the outcome read the pending entry back after the failure, so resolving the
+  // entry in Pending messages while the request was out turned a possibly accepted message into
+  // "not sent", inviting the recovered text to be sent again under a new token.
+  for (const action of ["recover", "cancel"] as const) {
+    let reply!: (failure: Error) => void;
+    let submissions = 0;
+    const app = composer(() => { submissions++; return new Promise((_, reject) => { reply = reject; }); });
+    const sending = app.send();
+    for (let n = 0; n < 40 && !reply; n++) await Promise.resolve();
+    assert.ok(reply, `${action}: the request is out`);
+    const [token] = Object.keys(app.state().pendingSends);
+    await app.resolvePendingMessage(token, action);
+    assert.deepEqual(app.state().pendingSends, {}, `${action}: the entry is resolved while the request is out`);
+    reply(new Error("IPC response lost"));
+    assert.equal(await sending, "uncertain", `${action}: it may have been accepted`);
+    assert.equal(submissions, 1);
+    if (action === "recover") {
+      assert.equal(app.state().recoveredSendDrafts[token]?.text, "one message", "the recovery stands");
+      assert.equal(app.state().recoveredSendDrafts[token]?.acceptance, "ambiguous");
+    }
+  }
+
+  // A definite native refusal is still "failed", resolved entry or not.
+  let refuse!: (failure: Error) => void;
+  const refused = composer(() => new Promise((_, reject) => { refuse = reject; }));
+  const pending = refused.send();
+  for (let n = 0; n < 40 && !refuse; n++) await Promise.resolve();
+  await refused.resolvePendingMessage(Object.keys(refused.state().pendingSends)[0], "cancel");
+  refuse(new Error("CHAT_SEND_INVALID: length"));
+  assert.equal(await pending, "failed");
+});
+
 test("a send whose sealed identity is taken over before dispatch is uncertain, not refused", async () => {
   // A lock while the identity is being sealed: it was saved to the vault, and comes back to be
   // retried after unlock, so this press cannot call it unsent.
@@ -218,6 +251,51 @@ test("a send whose sealed identity is taken over before dispatch is uncertain, n
   lockDuringSeal = () => { lockDuringSeal = () => {}; app.lock(); };
   assert.equal(await app.send(), "uncertain");
   assert.equal(Object.keys(app.state().sealed.pendingSends).length, 1, "sealed in the vault before the lock");
+});
+
+test("a refused retry cannot disprove an earlier ambiguous send, even after pending resolution", async () => {
+  for (const response of ["context", "invalid", "superseded"] as const) {
+    for (const action of [undefined, "recover", "cancel"] as const) {
+      const tokens: unknown[] = [];
+      let resolve!: (result: SendMessageResult) => void;
+      let reject!: (error: Error) => void;
+      const app = composer(async args => {
+        tokens.push(args.retryToken);
+        if (tokens.length === 1) throw new Error("IPC response lost after possible acceptance");
+        return new Promise<SendMessageResult>((yes, no) => { resolve = yes; reject = no; });
+      });
+      assert.equal(await app.send(), "uncertain");
+      const retry = app.send();
+      for (let n = 0; n < 40 && !reject; n++) await Promise.resolve();
+      assert.ok(reject, "the same identity's retry is dispatched");
+      assert.equal(tokens.length, 2);
+      assert.equal(tokens[0], tokens[1]);
+      if (action) await app.resolvePendingMessage(Object.keys(app.state().pendingSends)[0], action);
+      if (response === "superseded") resolve({ accepted: false, persistence: { status: "superseded" } });
+      else reject(new Error(response === "context" ? "CHAT_SEND_CONTEXT_CHANGED: conversation replaced" : "CHAT_SEND_INVALID: length"));
+      assert.equal(await retry, "uncertain", `${response}/${action ?? "kept"}: this refusal concerns the retry, not its lost predecessor`);
+      assert.equal(tokens.length, 2, "classification never submits another identity");
+      if (response === "superseded") {
+        assert.match(app.state().warnings.at(-1), /earlier attempt may have sent/i);
+        assert.doesNotMatch(app.state().warnings.at(-1), /move it to a draft to start a new send/i);
+      }
+    }
+  }
+});
+
+test("background retry warns about earlier possible acceptance when the conversation changes", async () => {
+  const tokens: unknown[] = [];
+  const app = composer(async args => {
+    tokens.push(args.retryToken);
+    if (tokens.length === 1) throw new Error("IPC response lost");
+    return { accepted: false, persistence: { status: "superseded" } };
+  });
+  assert.equal(await app.send(), "uncertain");
+  await app.retryPendingSends();
+  assert.equal(tokens.length, 2);
+  assert.equal(tokens[0], tokens[1]);
+  assert.match(app.state().error, /earlier attempt may have sent/i);
+  assert.doesNotMatch(app.state().error, /move it to a draft to start a new send/i);
 });
 
 test("a new identical draft survives the preceding send's acknowledgement", async () => {

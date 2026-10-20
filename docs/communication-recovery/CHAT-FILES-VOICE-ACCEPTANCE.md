@@ -34,11 +34,20 @@ and framework/engine heap. Read-only review has no remaining finding.
 Protected packet/event allocation, candidate history lanes and atomic high-side Hello remain
 unimplemented; no unsupported protected role or live V2 path is enabled.
 
-Gate7's newer clip-editor commits are merged locally with the communication session guards.
-The resulting frontend passes 2,227 tests in 85.92s, Svelte check (zero errors/warnings) and
+Gate7's newer clip-editor commits were merged at `7e90f8b1` with the communication session guards.
+That frontend passes 2,227 tests in 85.92s, Svelte check (zero errors/warnings) and
 production build (`chat-bubbles-frontend-after-merge.log`, `chat-bubbles-frontend-check.log`,
 `chat-bubbles-frontend-build.log`). A focused 53-case frontend run includes the post-now outcome
-and session-retirement combinations. Browser flows currently fail before assertions: the first
+and session-retirement combinations. A subsequent merge of Gate7 `fd788d80` retains dispatch
+evidence when Pending messages removes an in-flight entry; its initial 52 focused send/upload-flow
+cases pass (`chat-bubbles-latest-base-focused.log`). Read-only review then found a remaining
+ambiguity: a definite refusal of a retry could erase an older lost-response outcome. A new actual
+composer regression fails before correction (15 passed/1 failed,
+`chat-bubbles-prior-send-before.log`). Separate prior uncertainty now survives both thrown and
+structured refusals, including manager recover/cancel and background warnings; first-attempt
+definite refusal stays failed. The final 54-case focused run passes in 1.86s
+(`chat-bubbles-prior-send-final.log`). Full frontend/check/build repeat for that later merge and
+correction is pending. Browser flows currently fail before assertions: the first
 attempt could not obtain its owned Edge debugger, and later attempts reached the document but
 not fixture readiness. Local network diagnostics show the App module request still pending,
 without an application exception. No deadline or readiness assertion was relaxed.

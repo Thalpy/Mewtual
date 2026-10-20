@@ -19742,7 +19742,9 @@
     });
   }
 
-  async function submitPendingSend(intent: PendingSend, session: number, originalDraftRevision: number | undefined = undefined): Promise<SendMessageResult> {
+  // `onDispatch` is told just before the request leaves for the native side: from then on it may
+  // have committed whatever comes back (see `send`).
+  async function submitPendingSend(intent: PendingSend, session: number, originalDraftRevision: number | undefined = undefined, onDispatch: () => void = () => {}): Promise<SendMessageResult> {
     const draftKey = chatScopeKey(intent.server, intent.channel);
     const draftRevision = originalDraftRevision ?? draftRevisions[draftKey] ?? 0;
     let result: SendMessageResult;
@@ -19756,6 +19758,7 @@
       if (!(await saveUiStateImmediately()) || !pendingSubmissionCurrent(intent, session)) {
         throw new Error("Save the pending message in this vault before retrying it.");
       }
+      onDispatch();
       result = (await invokeDebugged<SendMessageResult>("send_message", {
         server: intent.server, channel: intent.channel, text: intent.text, replyTo: intent.replyTo,
         retryToken: intent.token, expectedContext: intent.expectedContext,
@@ -19885,10 +19888,12 @@
         if (locked || windowCloseInFlight || session !== uiStateLoadGeneration || pendingSendResolution !== null || (automatic && pendingManagerOpen)) return;
         if (!pendingSubmissionCurrent(intent, session)) continue;
         if (automatic && intent.retryBlock) continue;
+        // A refusal now cannot establish absence of an older invocation whose reply was lost.
+        const priorMayHaveGone = intent.acceptance !== "not_accepted";
         try {
           const result = await submitPendingSend(intent, session);
           if (locked || session !== uiStateLoadGeneration) return;
-          const warning = persistenceWarning(result);
+          const warning = persistenceWarning(result, priorMayHaveGone);
           if (warning) error = warning;
         } catch (failure) {
           if (locked || session !== uiStateLoadGeneration) return;
@@ -19917,8 +19922,15 @@
     const operation = ++pendingSendNonce;
     const pendingId = `pending:${operation}`;
     let intent: PendingSend | undefined;
+    // Keep earlier-attempt uncertainty separately: a definite refusal of this press cannot
+    // disprove a previous invocation. Neither fact can be read from `pendingSends` after a
+    // failure: the pending-message manager can recover or stop the entry while the request is
+    // still out, and its absence then proves nothing about whether it committed (found in review).
+    let mayHaveGone = false;
+    let priorMayHaveGone = false;
     try {
       intent = matchingPendingSend(pendingSends, server, channel, text, reply_to);
+      if (intent) priorMayHaveGone = intent.acceptance !== "not_accepted";
       if (!intent) {
         const expectedContext = await invoke<string>("durable_send_context", { server });
         if (!sessionCurrent() || pendingSendResolution !== null || pendingManagerOpen) return "refused";
@@ -19953,24 +19965,32 @@
       }
       replyingToRow = undefined;
       const { result, refreshError } = await sendAndRefresh(
-        () => submitPendingSend(intent!, session, draftRevision),
+        () => submitPendingSend(intent!, session, draftRevision, () => { mayHaveGone = true; }),
         async () => {
           if (sessionCurrent() && activeServerId === server && cur?.active === channel) await refresh();
         },
       );
-      if (!sessionCurrent()) return sendOutcome(result);
-      const warning = persistenceWarning(result);
+      if (!sessionCurrent()) return sendOutcome(result, priorMayHaveGone);
+      const warning = persistenceWarning(result, priorMayHaveGone);
       if (warning) toast(warning, "warn", 12000);
       if (refreshError) error = `Message result saved, but the conversation could not refresh: ${errorText(refreshError)}`;
-      return sendOutcome(result);
+      return sendOutcome(result, priorMayHaveGone);
     } catch (e) {
-      // A throw is not "failed" when the message's identity was sealed and stays pending without a
-      // retry block: native errors do not prove absence, and the quiet retry sends it by itself.
-      // Calling it unsent invited an edited resend under a new token beside it (found in review).
-      // Only a send that sealed nothing, or one blocked from retrying, failed. A lock (session
-      // gone) keeps a sealed identity in the vault to retry after unlock.
+      // A throw is not "failed" when the message may still go or may already have gone: native
+      // errors do not prove absence. It is "uncertain" when its sealed identity stays pending
+      // without a retry block (the quiet retry sends it by itself), when a lock kept it in the
+      // vault to retry after unlock, or when it may have been dispatched (`mayHaveGone`) and the
+      // error is not a definite native refusal, even if the pending-message manager has since
+      // recovered or stopped the entry. An older ambiguous attempt remains uncertain even when
+      // this invocation is definitely refused: only exact historical evidence could resolve it.
+      // Calling those unsent invited a second send under a new token (found in review).
       const kept = intent ? pendingSends[intent.token] : undefined;
-      const outcome: SendOutcome = !intent ? "failed" : !sessionCurrent() || (kept && !kept.retryBlock) ? "uncertain" : "failed";
+      const refusedForGood = pendingSendRetryBlock(errorText(e)) !== undefined;
+      const outcome: SendOutcome = !intent ? "failed"
+        : !sessionCurrent() || (kept && !kept.retryBlock) ? "uncertain"
+        : priorMayHaveGone ? "uncertain"
+        : mayHaveGone && !refusedForGood ? "uncertain"
+        : "failed";
       if (!sessionCurrent()) return outcome;
       error = String(e);
       if (activeServerId === server && cur?.active === channel && messages.some((m) => m.id === pendingId)) {

@@ -4661,11 +4661,17 @@ and every drop handler returns early on a drop that carries no files.
   batch the next file waits for `settled`, so it is attached to the emptied composer, not added to
   the message being sent; a move away while the send runs ends the batch there (2026-10-20
   review). `send()` and `postStatus()` resolve to a `SendOutcome` (`message-send.ts`): `refused`
-  (nothing submitted); `failed` (nothing sealed, or a sealed identity blocked from automatic
-  retry, including a not-accepted superseded result); `sent` (accepted and saved durably);
+  (nothing submitted); `failed` (nothing sealed, or a definite refusal with no earlier ambiguous
+  attempt, including a fresh not-accepted superseded result); `sent` (accepted and saved durably);
   `uncertain` (may have gone or will by itself: accepted without a durable save, a not-accepted
-  pending result, a throw whose sealed identity stays pending and retries quietly, or an identity
-  taken over by a lock or the pending-message work). An announcement is never `uncertain`. The
+  pending result, a throw whose sealed identity stays pending and retries quietly, a throw after
+  dispatch that is not a definite native refusal even if Pending messages resolved the entry
+  meanwhile, an earlier ambiguous attempt even when this retry is definitely refused, or an
+  identity taken over by a lock or the pending-message work). `send()` keeps this press's dispatch
+  evidence (`mayHaveGone`, set by `submitPendingSend`'s `onDispatch`) separate from its original
+  prior-attempt uncertainty (`priorMayHaveGone`), never reconstructing either from a later queue
+  lookup. Composer and background retry warnings retain that earlier uncertainty too. An
+  announcement is never `uncertain`. The
   toast reports that outcome, before a move away ends the batch, and never the composer's
   contents, which cannot tell a sent message whose draft was kept from an unsent one: "sent",
   "not confirmed yet: don't send it again", "not sent" (an announcement: "may not have posted:
