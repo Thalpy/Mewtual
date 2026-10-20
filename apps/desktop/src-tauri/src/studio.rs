@@ -472,22 +472,30 @@ async fn receive_once(
 
 /// Retain exact UI/incarnation custody through synchronous emission, after source leases have
 /// dropped. Delayed old-actor events cannot invalidate a replacement server's Studio views.
+/// The bounded actor-event consumer must never await the long command commit mutex: an upload
+/// can own it while queued behind that very consumer. Lock instead crosses a short event fence.
 pub(crate) async fn forward_if_current(
     state: &AppState,
     server: u64,
     instance: u64,
     emit: impl FnOnce(),
 ) -> bool {
-    let Ok(generation) = unlocked_ui_session_generation(state).await else {
+    // Capture before ANY await so a delayed event cannot adopt a replacement UI authorization.
+    let generation = state.ui_session_generation.load(Ordering::Acquire);
+    if require_unlocked_session(state).await.is_err() {
         return false;
-    };
-    let Ok(_commit) = require_ui_session_generation(state, generation).await else {
-        return false;
-    };
+    }
     let entries = state.servers.lock().await;
+    let _event = state.ui_event_commit.lock().await;
     if entries.get(&server).is_none_or(|e| e.instance != instance) {
         return false;
     }
+    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::Acquire) != generation
+    {
+        return false;
+    }
+    // Both final guards cover this synchronous emit. No callback or await may reacquire native
+    // state here. An admitted emit may finish after lock is requested, but never after it returns.
     emit();
     true
 }

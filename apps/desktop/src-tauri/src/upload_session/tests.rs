@@ -97,6 +97,36 @@ impl Fixture {
             actor: self.actor.clone(),
         }
     }
+    /// Produce a genuine Studio event before saturating the sink. Match native Ready custody;
+    /// only the eventual Tauri emitter is substituted by the regression's observation closure.
+    async fn queue_studio_update(&self) {
+        use catcoms_app::studio::{StudioRequest, StudioVaultLease};
+        let channel = self.actor.create_channel("event drain").await.unwrap();
+        let ready = self
+            .actor
+            .studio_begin(StudioRequest::Create {
+                channel: channel.id.to_be_bytes(),
+                object: [42; 16],
+                nonce: [43; 16],
+                title: "event drain".into(),
+                ts: 1_000,
+            })
+            .await
+            .unwrap();
+        let persist = persist_lock_for(&self.state, 1).try_lock_owned().unwrap();
+        let commit = self
+            .state
+            .ui_session_commit
+            .clone()
+            .try_lock_owned()
+            .unwrap();
+        let store = self.state.store.clone().try_lock_owned().unwrap();
+        let registry = self.state.servers.clone().try_lock_owned().unwrap();
+        ready
+            .execute(StudioVaultLease::new(store, 1, (persist, commit, registry)))
+            .await
+            .unwrap();
+    }
     fn staged(&self, chunk: &FileRef) -> std::path::PathBuf {
         self.root
             .path()
@@ -337,6 +367,163 @@ async fn admitted_publication_keeps_lock_waiting_even_after_outer_waiter_is_drop
             .collect::<Vec<_>>(),
         "the exact saved projection must include the accepted upload, not an older snapshot"
     );
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn studio_event_forwarding_does_not_wait_for_admitted_upload_publication() {
+    let f = Fixture::new().await;
+    let key = (1, "event-drain".into());
+    let upload = f
+        .upload("event-drain", b"must not stop the event consumer")
+        .await;
+    f.state.uploads.lock().await.insert(key.clone(), upload);
+    let admitted = take(&f.state, &key).await.unwrap();
+    let mut event = Box::pin(crate::studio::forward_if_current(&f.state, 1, 70, || {}));
+    // This is the same native branch awaited by forward_events for Studio/Settlement events.
+    // A command may own session commit while queued behind the bounded actor event sink; its
+    // consumer must be able to complete this branch without waiting for that command's guard.
+    assert_eq!(poll_once(event.as_mut()).await, Poll::Ready(true));
+    drop(event);
+    spawn_publication(admitted, publish, |result| async move { result.unwrap() })
+        .await
+        .unwrap();
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn studio_event_drain_unblocks_saturated_publication_and_actual_lock() {
+    let mut f = Fixture::held_events().await;
+    let key = (1, "automatic-event-drain".into());
+    let upload = f
+        .upload(
+            "automatic-event-drain",
+            b"drain without waiting on publication",
+        )
+        .await;
+    f.queue_studio_update().await;
+    let mut sequence = 0;
+    while f.events.as_ref().unwrap().capacity() > 0 {
+        f.actor
+            .set_server_name(format!("event drain {sequence}"))
+            .await
+            .unwrap();
+        sequence += 1;
+    }
+    let barrier_actor = f.actor.clone();
+    let mut barrier = Box::pin(async move {
+        barrier_actor
+            .set_server_name("queued before publication".into())
+            .await
+    });
+    assert!(poll_once(barrier.as_mut()).await.is_pending());
+    f.state.uploads.lock().await.insert(key.clone(), upload);
+    let admitted = take(&f.state, &key).await.unwrap();
+    let (allow_publish, publication_ready) = oneshot::channel();
+    let worker = spawn_publication(
+        admitted,
+        move |upload| async move {
+            publication_ready.await.unwrap();
+            publish(upload).await
+        },
+        |result| async move { result },
+    );
+
+    let (checked, first_event) = oneshot::channel();
+    let (resume, resumed) = oneshot::channel();
+    let state = f.state.clone();
+    let mut events = f.events.take().unwrap();
+    f.drain = Some(tokio::spawn(async move {
+        let mut checked = Some(checked);
+        let mut resumed = Some(resumed);
+        while let Some(event) = events.recv().await {
+            // The production prelude and Studio/Settlement forwarding guard, including both
+            // native session and incarnation checks. The callback replaces only Tauri emission.
+            note_event_for_persistence(&state, 1, 70, &event.event).await;
+            if require_unlocked_session(&state).await.is_err() {
+                continue;
+            }
+            if matches!(
+                event.event,
+                AppEvent::StudioUpdated { .. }
+                    | AppEvent::StudioReceivePaused
+                    | AppEvent::StudioSyncState(_)
+                    | AppEvent::SettlementChanged { .. }
+            ) {
+                let mut forwarding =
+                    Box::pin(crate::studio::forward_if_current(&state, 1, 70, || {
+                        assert!(!ui_session_closed(&state), "locked Studio event escaped");
+                    }));
+                if let Some(checked) = checked.take() {
+                    // Fail immediately with the old cyclic guard, rather than hanging the test.
+                    let progress = poll_once(forwarding.as_mut()).await;
+                    checked.send(progress).unwrap();
+                    assert_eq!(progress, Poll::Ready(true));
+                    resumed.take().unwrap().await.unwrap();
+                } else {
+                    forwarding.await;
+                }
+            }
+        }
+    }));
+    assert_eq!(first_event.await.unwrap(), Poll::Ready(true));
+    let locking_state = f.state.clone();
+    let mut locking = Box::pin(lock_session_inner(&locking_state, None));
+    assert!(poll_once(locking.as_mut()).await.is_pending());
+    allow_publish.send(()).unwrap();
+    resume.send(()).unwrap();
+    worker.await.unwrap().unwrap();
+    locking.await.unwrap();
+    barrier.await.unwrap();
+    assert_eq!(f.actor.files_view().await.files.len(), 1);
+    // No manual drain: the same forwarding guard that previously formed the cycle owns Rx.
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn an_event_waiting_on_its_short_fence_cannot_adopt_new_authorization() {
+    let f = Fixture::new().await;
+    let fence = f.state.ui_event_commit.lock().await;
+    let mut old = Box::pin(crate::studio::forward_if_current(&f.state, 1, 70, || {
+        panic!("an old event adopted a replacement authorization")
+    }));
+    assert!(poll_once(old.as_mut()).await.is_pending());
+    let replacement = register_ui_lock_request(&f.state);
+    // Exercise the harder ABA condition with an open replacement authorization, not just the
+    // closed flag. Actual lock/unlock and original-upload custody are tested separately below.
+    f.state
+        .ui_authorized_generation
+        .store(replacement, Ordering::Release);
+    f.state
+        .session_lock_requested
+        .store(false, Ordering::Release);
+    drop(fence);
+    assert!(!old.await);
+    assert!(crate::studio::forward_if_current(&f.state, 1, 70, || {}).await);
+    f.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actual_lock_waits_for_an_already_admitted_studio_emission() {
+    let f = Fixture::new().await;
+    let (entered, emitting) = oneshot::channel();
+    let (release, released) = std::sync::mpsc::sync_channel(0);
+    let state = f.state.clone();
+    let emitter = tokio::spawn(async move {
+        crate::studio::forward_if_current(&state, 1, 70, move || {
+            entered.send(()).unwrap();
+            // Hold the actual synchronous emission boundary on the other runtime worker.
+            // Channel rendezvous controls ordering without wall sleeps or timing assumptions.
+            released.recv().unwrap();
+        })
+        .await
+    });
+    emitting.await.unwrap();
+    let mut locking = Box::pin(lock_session_inner(&f.state, None));
+    assert!(poll_once(locking.as_mut()).await.is_pending());
+    release.send(()).unwrap();
+    assert!(emitter.await.unwrap());
+    locking.await.unwrap();
     f.stop().await;
 }
 

@@ -53,6 +53,19 @@ the original actor rather than a replacement registry entry. Quota refusal also 
 retired. Ordinary persistence follows guard release to preserve leave's existing lock order; the
 worker retains that task, but this is not an abrupt-crash transaction or remote-custody guarantee.
 
+Studio/Settlement notifications use a separate short event-emission fence. Their bounded actor
+event consumer never waits for the long command commit guard, whose owner may itself need that
+consumer to drain before publication can run. It captures the UI generation before any await,
+then repeats generation/closed/incarnation checks under registry and event guards through
+synchronous emission. Lock revokes call/mapping/read owners before its first await, crosses and
+releases the event fence, then waits for command publication. An already admitted emission may
+finish after a lock request; lock completion cannot overtake it. Native Studio vault custody must
+still be dropped before any EventSink await, as the actor's Ready path already requires.
+The pending UI snapshot and nonresumable state precede both fence waits. Cancelling that native
+future cannot make a later snapshot-less close silently forget valid bytes or authorize destruction
+after malformed state. This establishes the native cancellation boundary; WebView reload cancelling
+a Tauri invoke is not assumed or demonstrated.
+
 Browser batch admission bounds retained user-selected File objects to one batch of at most32,
 with a separate16-request review-queue bound. These are renderer lifecycle bounds, not a byte
 bound on browser media decoders or the operating system. The native file limits remain independent.

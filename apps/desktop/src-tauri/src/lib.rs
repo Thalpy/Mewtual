@@ -496,6 +496,10 @@ struct AppState {
     /// The lock-request atomic closes new IPC immediately; this mutex makes it impossible for a
     /// reply event or server registration to occur after `lock_session` itself has completed.
     ui_session_commit: Arc<Mutex<()>>,
+    /// Short fence for synchronous actor-event emission only. Event consumers must not wait for
+    /// `ui_session_commit`: its holder can be waiting for this same bounded event sink to drain.
+    /// Never retain this guard across actor/store/registry awaits; lock crosses it separately.
+    ui_event_commit: Mutex<()>,
     /// The newest exact Ctrl+L/close snapshot registered before either command waits on the shared
     /// commit mutex. A remounted close can consume it even though its JS coordinator is gone.
     pending_ui_lock_snapshot: Mutex<Option<PendingUiLockSnapshot>>,
@@ -15499,7 +15503,7 @@ async fn lock_session_with_generation_inner(
     state: &AppState,
     ui_state_json: Option<String>,
 ) -> (u64, Result<(), String>) {
-    // Invalidate old work before awaiting anything. The commit mutex is acquired next so, once
+    // Revoke old work before any await, then cross the separate event and command fences. Once
     // this function returns, an old join can neither emit its private reply nor register/persist.
     let lock_generation = register_ui_lock_request(state);
     state
@@ -15532,6 +15536,13 @@ async fn lock_session_with_generation_inner(
         }
     }
     *state.session_resumable.lock().await = false;
+    // Native snapshot custody must precede BOTH publication fences. If this future disappears
+    // while waiting for an emission, a later snapshot-less close still owns the exact bytes.
+    // Detached owners were revoked before the first await above. Release this short guard
+    // before waiting for command publication so the actor's event sink can continue draining.
+    {
+        let _events = state.ui_event_commit.lock().await;
+    }
     let _session_commit = state.ui_session_commit.lock().await;
     // Close the registration/early-sweep race as a second line of defence. Registration itself
     // checks `session_lock_requested` while holding the cancellation table, but this post-commit
@@ -21428,21 +21439,49 @@ mod tests {
         assert!(state.vault_window_close_debt.lock().await.is_none());
     }
 
-    #[tokio::test]
-    async fn remounted_close_consumes_the_exact_native_pending_lock_snapshot() {
+    const BEFORE_CANCELLED_LOCK_UI_STATE: &str =
+        r#"{"version":1,"drafts":{"room":"saved draft"},"readMarks":{}}"#;
+
+    /// Cancel the real native lock at a held emission fence, leaving native-owned continuity.
+    /// The command fence is held too so this cannot pass by completing some other lock path.
+    async fn cancelled_lock_at_emission_fence(latest: &str) -> (tempfile::TempDir, AppState) {
         let root = tempfile::tempdir().unwrap();
         let state = AppState::default();
         let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        store
+            .save_ui_state(BEFORE_CANCELLED_LOCK_UI_STATE.as_bytes(), &mut OsCryptoRng)
+            .unwrap();
         *state.store.lock().await = Some(store);
         *state.session_resumable.lock().await = true;
-        let latest = r#"{"version":1,"drafts":{"room":"before remount"},"readMarks":{}}"#;
+        let events = state.ui_event_commit.lock().await;
+        let commands = state.ui_session_commit.lock().await;
+        let mut locking = Box::pin(lock_session_inner(&state, Some(latest.into())));
+        std::future::poll_fn(|cx| {
+            assert!(locking.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(
+            state
+                .pending_ui_lock_snapshot
+                .lock()
+                .await
+                .as_ref()
+                .map(|s| s.json.as_str()),
+            Some(latest)
+        );
+        assert!(!*state.session_resumable.lock().await);
+        drop(locking); // Native future cancellation, without assuming WebView reload cancels IPC.
+        drop(commands);
+        drop(events);
+        (root, state)
+    }
 
-        // This is the native transaction left behind after the Ctrl+L webview was remounted. The
-        // new component has no JS snapshot and therefore calls close with `None`.
-        *state.pending_ui_lock_snapshot.lock().await = Some(PendingUiLockSnapshot {
-            generation: 1,
-            json: latest.into(),
-        });
+    #[tokio::test]
+    async fn remounted_close_consumes_the_exact_native_pending_lock_snapshot() {
+        let latest = r#"{"version":1,"drafts":{"room":"before remount"},"readMarks":{}}"#;
+        let (_root, state) = cancelled_lock_at_emission_fence(latest).await;
+        // A fresh component has no JS snapshot; the cancelled native invocation retained it.
         let (outcome, may_destroy) = close_vault_window_plan_inner(&state, None, false).await;
         assert!(outcome.continuity_error.is_none());
         assert!(may_destroy);
@@ -21459,6 +21498,32 @@ mod tests {
             "snapshot-less remounted close must finish the exact pending native transaction",
         );
         assert!(state.pending_ui_lock_snapshot.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_lock_emission_wait_keeps_malformed_snapshot_from_authorizing_close() {
+        let (_root, state) = cancelled_lock_at_emission_fence("not valid UI state").await;
+        let (outcome, may_destroy) = close_vault_window_plan_inner(&state, None, false).await;
+        assert!(outcome.continuity_error.is_some());
+        assert!(!may_destroy);
+        assert_eq!(
+            state
+                .store
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .load_ui_state()
+                .unwrap(),
+            BEFORE_CANCELLED_LOCK_UI_STATE.as_bytes(),
+            "refusing malformed continuity must preserve the previous saved draft",
+        );
+        let (retry, may_destroy) = close_vault_window_plan_inner(&state, None, false).await;
+        assert_eq!(retry.continuity_error, outcome.continuity_error);
+        assert!(
+            !may_destroy,
+            "a snapshot-less retry cannot erase the unacknowledged loss"
+        );
     }
 
     #[tokio::test]
@@ -21638,17 +21703,55 @@ mod tests {
                 .is_err()
         );
         state.servers.lock().await.get_mut(&7).unwrap().instance = 1;
+        let (_download, download_cancelled) = claim_internal_inline_download(&state).unwrap();
+        let mapping_owner = {
+            let mut mappings = state.media_mappings.lock().unwrap();
+            let controller = mappings
+                .prepare(
+                    call_mappings::CandidateKind::Controller {
+                        generation: state.ui_session_generation.load(Ordering::Acquire),
+                    },
+                    0,
+                )
+                .unwrap();
+            assert!(mappings.activate(&controller, 0).unwrap().is_empty());
+            let owner = mappings
+                .prepare(
+                    call_mappings::CandidateKind::Call {
+                        controller,
+                        binding: call_mappings::Binding {
+                            generation: state.ui_session_generation.load(Ordering::Acquire),
+                            server: 7,
+                            instance: 1,
+                            group: vec![4; 16],
+                            room: channel_id("general").to_string(),
+                        },
+                    },
+                    0,
+                )
+                .unwrap();
+            assert!(mappings.activate(&owner, 0).unwrap().is_empty());
+            owner
+        };
         let boundary = state.ui_session_commit.lock().await;
+        let event_boundary = state.ui_event_commit.lock().await;
         let (late_lock, ()) = tokio::join!(biased;
             admit_voice_crypto_inner(&state, second.owner.clone(), "generate".into(), 128),
             async {
                 actor.member_count().await;
-                // Poll the production lock first: it revokes synchronously before waiting for
-                // the held commit mutex. Releasing it cannot let the older charge slip through.
-                let (locked, ()) = tokio::join!(biased;
-                    lock_session_inner(&state, None), async { drop(boundary); }
-                );
-                locked.unwrap();
+                // Even a withheld event emission cannot postpone detached-owner revocation.
+                // These are the actual call lease, mapping owner and charged read cancellation.
+                let mut locking = Box::pin(lock_session_inner(&state, None));
+                std::future::poll_fn(|cx| {
+                    assert!(locking.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                }).await;
+                assert!(!current_lease.is_live());
+                assert!(*download_cancelled.borrow());
+                assert!(state.media_mappings.lock().unwrap().binding(&mapping_owner).is_none());
+                drop(event_boundary);
+                drop(boundary);
+                locking.await.unwrap();
             }
         );
         assert!(late_lock.is_err());

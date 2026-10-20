@@ -13,6 +13,16 @@ chunks through the original actor. An opaque admitted upload moves directly into
 publication worker, without another await. Losing the invoke waiter does not cancel that worker
 or release its guard; lock waits for actual actor publication or its failure cleanup.
 
+The actor-event drain uses a separate short fence for Studio/Settlement emission. It never waits
+for the long publication guard. It captures the UI generation before awaiting native state and
+holds exact registry/event guards through synchronous emission. Lock revokes detached owners
+before awaiting that fence, crosses and releases it, then waits for publication. Thus a full
+actor event sink cannot deadlock an admitted upload against its own event consumer. An emission
+already admitted can finish after the request, but must finish before lock completion.
+An incoming close snapshot enters native pending custody and the session becomes nonresumable
+before either fence wait. Cancelling the native lock future there leaves the exact bytes for a
+later snapshot-less close; malformed state still refuses destruction until loss is acknowledged.
+
 The worker releases commit before ordinary exact-instance persistence. `leave_server` acquires the
 per-server persistence lock before commit, so holding commit through that persistence would invert
 the lock order. Persistence remains owned by the worker after caller loss. Publication admission
