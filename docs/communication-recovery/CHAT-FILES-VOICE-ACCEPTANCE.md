@@ -59,7 +59,8 @@ not fixture readiness. Local network diagnostics show the App module request sti
 without an application exception. The successful final run retains the same deadline, actual
 fixture readiness marker and all assertions. Earlier failures remain failed attempts.
 
-The merged base disclosed a native streamed-upload/lock race. The communication fix now retains
+The merged base disclosed a native streamed-upload/lock race. Separate pushed commit
+[`c4005b89`](https://github.com/Thalpy/Mewtual/commit/c4005b89) retains
 original generation/actor/instance ownership and transfers final publication into an owned worker
 under session commit. It releases commit before ordinary persistence to preserve leave's lock
 order. Ten focused cases pass in 2.18s (`chat-bubbles-upload-focused-2.log`): both lock/publication
@@ -67,7 +68,8 @@ orders, caller loss with actual saved-server restore, lock/unlock, uploads-map w
 replacement, quota/failure cleanup and persistence lock ordering. Native formatting and read-only
 re-review pass. The first compile attempt failed only in the new test helper (unavailable direct
 `futures::poll!` import); the corrected helper uses the standard library without a dependency change.
-The correction still needs final native gates and integration into Gate7.
+Native check, debug build and actual startup subsequently pass as recorded below. The correction
+still needs the full native suite and integration into Gate7.
 
 The first complete-root attempt (`chat-bubbles-root-full.log`) stopped in the replication library
 with `memory allocation of 1787552 bytes failed`, without a reported test assertion failure.
@@ -75,7 +77,11 @@ The native check also failed an allocation of 2 MiB (`chat-bubbles-native-check.
 session was observed running full Rust builds during validation; after the failures, system
 committed memory was approximately 128 GiB against a 150 GiB limit. These observations identify
 allocation failures and concurrent load, not a proven source-level defect or a successful full
-run. Heavy retries are deferred until the competing suite stops. This continuation's final
+run. The single-job native check retry passes in 4m45s (`chat-bubbles-native-check-2.log`);
+the single-job debug build also passes in 11m53s (`chat-bubbles-native-build.log`). Actual startup
+passes against that rebuilt executable, with the original 20-second deadline
+(`chat-bubbles-native-startup.log`). Another root full suite was still active at that point;
+duplicate full suites remain deferred until it stops. This continuation's final
 application gates remain incomplete and must not be inferred from the prior checkpoint below.
 
 ## Chat history adversarial checkpoint (20 October)

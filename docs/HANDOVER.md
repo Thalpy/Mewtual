@@ -15,7 +15,10 @@ retry cannot erase an earlier unknown send outcome.
 The first root full run stopped in replication with an explicit
 allocation failure; the native check also exhausted allocation, while another session was running
 a full Rust build. These are failed attempts, not green validation. Native upload focus passes
-all ten cases; final root/native suites and remaining native/static checks are pending.
+all ten cases, and the single-job native check retry passes in 4m45s
+(`chat-bubbles-native-check-2.log`). The debug build passes in 11m53s and actual startup passes
+with the original 20-second deadline (`chat-bubbles-native-build.log`,
+`chat-bubbles-native-startup.log`). Final root/native suites and remaining static checks are pending.
 Remaining protocol and physical acceptance limits
 stay explicit below.
 
@@ -749,13 +752,16 @@ mediums and a low. Fixed with regression tests, each confirmed to fail without i
   - deterministic barrier tests around final admission and actor publication covering both
     orders and a lock/unlock cycle (the existing test passes a literal `true` to the helper and
     never exercises the race). That session owns the native tests and gates.
-  The communication continuation now implements this correction in `upload_session.rs` and
+  The separate, pushed communication commit [`c4005b89`](https://github.com/Thalpy/Mewtual/commit/c4005b89)
+  implements this correction in `upload_session.rs` and
   `lib.rs`, with ten passing real-actor/session/staged-file tests (2.18s,
   `chat-bubbles-upload-focused-2.log`) and a clear read-only re-review. It also fixes retired
   uploads leaking staged chunks when a later quota check refused registration. The lost-caller
   test restores the actual saved server and compares the complete uploaded-file projection.
-  Full native/check/build/startup validation is pending after a compiler allocation failure;
-  the separate Gate7 branch still needs this commit integrated. Do not describe that branch's
+  Native check now passes in 4m45s with one compiler job after the earlier allocation failure;
+  debug build (11m53s) and actual startup also pass. The full native suite remains pending while
+  another full Rust suite runs. The separate Gate7 branch still needs this commit integrated.
+  Do not describe that branch's
   high finding as closed merely because the correction exists in this communication checkout.
 - Follow-ups: limits on added videos' size and length (a lying sample rate can still make one
   export sound window about 120 MB), and the edited file name contract. Known residuals: emoji
