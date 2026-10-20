@@ -5,7 +5,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { JamPatch } from "./jam-contract.ts";
 import type { ScoreModel } from "./studio-native.ts";
-import type { ScoreCell, ScoreOp } from "./studio-contract.ts";
+import { parseNoteKey, type ScoreCell, type ScoreOp } from "./studio-contract.ts";
+import { admittedSounds, scoreVoices } from "./score-voices.ts";
 import {
   SCORE_MISSING_LAYER, scoreAttention, scoreDiagnosticOperation, scoreDiagnostics, scoreGhostCells, scoreInverse, scoreApplyLocal, scoreLayerOf, scoreMoveOperations, scoreMoveSelection,
   scoreNoteCheck, scoreReplay, scoreSurface, scoreSurfaceOps, scoreVisibilityOf, type ScoreVisibility,
@@ -65,6 +66,37 @@ test("a legacy duplicate of the shown note goes with it; a distinct legacy note 
   // Another sound's legacy note in that cell is a different note and stays.
   const mixed = score({ "1:1": note(B, 2), [`1:1/${A}`]: note(A, 4) });
   assert.deepEqual(scoreSurfaceOps(mixed, scoreSurface(mixed, shown(), A), [{ op: "set_cell", step: 1, row: 1, value: note(A, 3) }]), [{ op: "set_note", step: 1, row: 1, value: note(A, 3) }]);
+});
+
+/** How many notes playback hears, by the real voice rule (score-voices.ts, mirrored in Rust). */
+const playing = (notes: Record<string, ScoreCell>, steps = 16) => scoreVoices(Object.entries(notes).map(([key, value]) => {
+  const at = parseNoteKey(key)!; return { key, step: at.step, row: at.row, layer: at.layer, values: [value] };
+}), steps, admittedSounds([A, B])).play.length;
+
+// Re-review of 73b68ada, HIGH 1: no `vol` and `vol: 100` are two voices to playback (and to Rust),
+// so a legacy note spelled one way behind a layered note spelled the other is a note of its own.
+// The stale-copy test equated them and deleted it.
+test("a legacy note that differs from the shown layered note only by how full level is spelled is never taken with it", () => {
+  const pairs: [ScoreCell, ScoreCell][] = [[{ k: "n", p: A }, { k: "n", p: A, vol: 100 }], [{ k: "n", p: A, vol: 100 }, { k: "n", p: A }]];
+  for (const [legacy, layered] of pairs) {
+    const label = `legacy ${JSON.stringify(legacy)}, layered ${JSON.stringify(layered)}`;
+    const two = score({ "0:0": legacy, [`0:0/${A}`]: layered }), view = scoreSurface(two, shown(), A);
+    assert.equal(view.keyOf.get("0:0"), `0:0/${A}`, `${label}: the layered note is the one shown`);
+    assert.equal(playing(two.notes), 2, `${label}: playback hears two notes`);
+    const moved = scoreSurfaceOps(two, view, scoreMoveOperations(view.model, "0:0", { step: 2, row: 0 }));
+    assert.ok(!moved.some((op) => op.op === "clear_cell"), `${label}: a move never clears the legacy note`);
+    const after = moved.reduce(scoreApplyLocal, two).notes;
+    assert.deepEqual(after["0:0"], legacy, `${label}: it is unchanged`);
+    assert.equal(playing(after), 2, `${label}: both still play`);
+    const erased = scoreSurfaceOps(two, view, [{ op: "clear_cell", step: 0, row: 0 }]);
+    assert.deepEqual(erased, [{ op: "clear_note", step: 0, row: 0, layer: A }], `${label}: an erase takes the shown note only`);
+    assert.equal(playing(erased.reduce(scoreApplyLocal, two).notes), 1, `${label}: the legacy note still plays`);
+  }
+  // A longer note clipped by a shortened score plays as one voice with a short one, but it is a
+  // note of its own whose length returns when the score grows: not a copy either.
+  const clipped = score({ "2:0": { k: "n", p: A, len: 8 }, [`2:0/${A}`]: { k: "n", p: A, len: 2 } }, 4);
+  const clippedView = scoreSurface(clipped, shown(), A);
+  assert.ok(!scoreSurfaceOps(clipped, clippedView, [{ op: "clear_cell", step: 2, row: 0 }]).some((op) => op.op === "clear_cell"));
 });
 
 test("ghosted layers are outlines and never on the surface; hidden ones are nowhere; a gone sound is always shown", () => {
@@ -195,11 +227,17 @@ test("a move never replaces a note it did not pick, even one stacked behind anot
   assert.throws(() => scoreSurfaceOps(m, view, [{ op: "set_cell", step: 1, row: 5, value: bass() }]), /in the way/);
 
   // Property: random two-sound scores with drums, legacy cells and layered notes mixed (some legacy
-  // cells exact duplicates of a layered note, some distinct), random picks and moves. Whatever is
-  // sent never changes a note that was not picked; only an exact duplicate of a picked note (one
-  // voice with it) may go with it. Every prefix of the writes keeps every note, too.
+  // cells exact duplicates of a layered note, some distinct, some differing only in how full level
+  // is spelled), random picks and moves. Whatever is sent never changes a note that was not picked;
+  // only a duplicate of a picked note that playback hears as ONE voice with it may go with it. Every
+  // prefix of the writes keeps every note, too.
+  // One voice, as score-voices.ts decides it: an absent `len` is 1, but `vol` counts exactly as
+  // authored, so `vol: 100` and no `vol` are two voices (re-review of 73b68ada, HIGH 1: this oracle
+  // used to equate them, as the code did). Checked against the real rule below.
   const same = (a: ScoreCell, b: ScoreCell) => a.k === "d" ? b.k === "d" && a.pad === b.pad
-    : b.k === "n" && a.p === b.p && (a.len ?? 1) === (b.len ?? 1) && (a.vol ?? 100) === (b.vol ?? 100);
+    : b.k === "n" && a.p === b.p && (a.len ?? 1) === (b.len ?? 1) && a.vol === b.vol;
+  assert.equal(playing({ "0:0": { k: "n", p: A }, [`0:0/${A}`]: { k: "n", p: A, len: 1 } }), 1, "the oracle's len rule is playback's");
+  assert.equal(playing({ "0:0": { k: "n", p: A }, [`0:0/${A}`]: { k: "n", p: A, vol: 100 } }), 2, "and so is its vol rule");
   let seed = 11;
   const next = (n: number) => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
   let moves = 0;
@@ -207,12 +245,16 @@ test("a move never replaces a note it did not pick, even one stacked behind anot
     const notes: Record<string, ScoreCell> = {};
     for (let i = 0; i < 7; i++) {
       const at = `${next(5)}:${next(3)}`, kind = next(4);
-      const value: ScoreCell = kind === 3 ? { k: "d", pad: next(3) } : { k: "n", p: kind === 0 ? B : A, ...(next(2) ? { len: 1 + next(2) } : {}), ...(next(2) ? { vol: 10 + next(3) * 10 } : {}) };
+      const value: ScoreCell = kind === 3 ? { k: "d", pad: next(3) } : { k: "n", p: kind === 0 ? B : A, ...(next(2) ? { len: 1 + next(2) } : {}), ...(next(2) ? { vol: [10, 20, 30, 100][next(4)] } : {}) };
       const layer = value.k === "d" ? "d" : value.p;
       if (next(3) === 0) notes[at] = value; else notes[`${at}/${layer}`] = value; // legacy or layered
       const companion = next(4);
       if (companion === 0 && !notes[at]) notes[at] = { ...value }; // an exact legacy duplicate of it
       if (companion === 1 && !notes[at]) notes[at] = value.k === "d" ? { k: "d", pad: (value.pad + 1) % 3 } : { ...value, vol: 95 }; // a distinct one
+      if (companion === 2 && !notes[at] && value.k === "n") { // full level spelled the other way: a voice of its own
+        const { vol, ...rest } = value;
+        notes[at] = vol === undefined ? { ...rest, vol: 100 } : vol === 100 ? rest : { ...value };
+      }
     }
     const doc = score(notes, 16), chosen = [A, B, "d"][next(3)];
     const surface = scoreSurface(doc, shown(), chosen), cells = [...surface.keyOf.keys()];
@@ -229,6 +271,8 @@ test("a move never replaces a note it did not pick, even one stacked behind anot
       if (!duplicateOfPicked) assert.deepEqual(after[key], value, `round ${round}: ${key} was not picked`);
     }
     // Every original voice survives every prefix of the writes (a multiset of note identities).
+    // `same` decides what was ONE voice; the count itself ignores spelling, since a move re-authors
+    // its note (`len: 1`, full level as no `vol`), and the moved note is still that note.
     const tally = (cells: Iterable<ScoreCell>) => { const t = new Map<string, number>(); for (const c of cells) { const k = JSON.stringify(c.k === "d" ? c : { p: c.p, len: c.len ?? 1, vol: c.vol ?? 100 }); t.set(k, (t.get(k) ?? 0) + 1); } return t; };
     const voicesOf = (all: Record<string, ScoreCell>) => {
       // A legacy cell and a layered note holding the same note are one voice.

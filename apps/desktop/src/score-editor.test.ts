@@ -1527,12 +1527,15 @@ test("a note with several different versions is never moved or rewritten: erase 
     ui.click('[data-score-alt="1"]');
     assert.equal(ui.ops.length, 1, "choosing a version is how it is resolved");
     assert.deepEqual(ui.ops[0], { op: "set_note", step: 4, row: 2, value: (ui.ops[0] as { value: ScoreCell }).value });
+    assert.match(ui.notices.at(-1) ?? "", /Undo brings back only the one that was shown/, "a choice replaces the other versions too, and says so");
   } finally { await ui.done(); }
   const erase = surface(severalValues());
   try {
     erase.click('[data-score-cell="4:2"]');
     erase.click('[aria-label="Clear this note"]');
     assert.deepEqual(erase.ops, [{ op: "clear_note", step: 4, row: 2, layer: PATCH_ID }], "an erase removes the note in every version");
+    // Re-review of 73b68ada, design question: its undo can only write the shown value back.
+    assert.match(erase.notices.at(-1) ?? "", /Undo brings back only the one that was shown/, "and says what undo can restore");
   } finally { await erase.done(); }
   const same = surface(severalValues({ k: "n", p: PATCH_ID, len: 1 }));
   try {
@@ -1579,60 +1582,71 @@ test("choosing a legacy cell's retained value never overwrites a layered slot wi
   }
 });
 
-// Re-review L-B: undoing the one-press Shorten (or an erase) of a hold past the end replayed a
-// length that does not fit and was refused, which also blocked every older undo.
-test("a Shorten or an erase of a hold past the end is undone exactly; a hold that fitted when recorded is still refused", async () => {
-  const overrun = () => { const m = model(); m.steps = 4; m.cells["2:0"] = { k: "n", p: PATCH_ID, len: 8 }; return m; };
-  const shorten = surface(overrun(), { apply: true });
-  try {
-    shorten.click('[data-score-cell="2:0"]'); shorten.click('[aria-label="Shorten this note"]');
-    assert.equal(shorten.ops.length, 2);
-    shorten.click("[data-score-undo]");
-    assert.deepEqual(shorten.ops.slice(2), [{ op: "set_cell", step: 2, row: 0, value: { k: "n", p: PATCH_ID, len: 8 } }, { op: "clear_note", step: 2, row: 0, layer: PATCH_ID }],
-      "the overrun comes back as it was");
-    shorten.click("[data-score-redo]");
-    assert.deepEqual(shorten.ops.slice(4), [{ op: "set_note", step: 2, row: 0, value: { k: "n", p: PATCH_ID, len: 2 } }, { op: "clear_cell", step: 2, row: 0 }], "and the redo shortens it again");
-    shorten.click("[data-score-undo]");
-    assert.equal(shorten.ops.length, 8, "the redo's own undo restores the overrun too");
-  } finally { await shorten.done(); }
-  const erase = surface(overrun(), { apply: true });
-  try {
-    erase.click('[data-score-cell="2:0"]'); erase.click('[aria-label="Clear this note"]');
-    erase.click("[data-score-undo]");
-    assert.deepEqual(erase.ops.at(-1), { op: "set_cell", step: 2, row: 0, value: { k: "n", p: PATCH_ID, len: 8 } });
-  } finally { await erase.done(); }
-  // The rule this relaxes only for an overrun the member had: a hold that fitted when its gesture
-  // was sent, and no longer does because the score was shortened since, still is not put back.
-  const m = model(); m.cells["2:0"] = { k: "n", p: PATCH_ID, len: 8 };
-  const shrunk = surface(m, { apply: true });
-  try {
-    shrunk.click('[data-score-cell="2:0"]'); shrunk.click('[aria-label="Clear this note"]');
-    m.steps = 4; shrunk.click("[data-score-undo]");
-    assert.equal(shrunk.ops.length, 1, "refused"); assert.match(shrunk.notices.at(-1) ?? "", /must fit/);
-  } finally { await shrunk.done(); }
+// Re-review of 73b68ada, MEDIUM 1: a legacy key is shared by every sound, so an undo putting back
+// sound A's legacy note replaces whatever the cell holds now. It wrote over a collaborator's B while
+// B was ghosted or hidden, because only A was checked.
+test("an undo that would put a legacy note back over another sound waits while that sound is not shown", async () => {
+  const cases: [ScoreCell, ScoreCell, string][] = [
+    [{ k: "n", p: PATCH_ID, len: 1 }, { k: "n", p: OTHER, len: 2 }, OTHER],
+    [{ k: "n", p: OTHER, len: 1 }, { k: "n", p: PATCH_ID, len: 2 }, PATCH_ID],
+    [{ k: "n", p: PATCH_ID, len: 1 }, { k: "d", pad: 3 }, "d"],
+  ];
+  for (const [mine, theirs, toggle] of cases) {
+    const label = `${JSON.stringify(mine)} under ${JSON.stringify(theirs)}`;
+    const m = model(); m.patches[OTHER] = { ...PATCH, o: [{ w: 2, t: 0, c: 0, l: 80 }] }; m.patchSlots[OTHER] = slot(m.patches[OTHER]);
+    m.cells["0:0"] = mine;
+    const ui = surface(m, { apply: true });
+    try {
+      ui.click('[data-score-cell="0:0"]'); ui.click('[aria-label="Clear this note"]');
+      assert.deepEqual(ui.ops, [{ op: "clear_cell", step: 0, row: 0 }], label);
+      m.cells["0:0"] = theirs; // a collaborator writes another sound into the cell
+      ui.click(`[data-score-visibility="${toggle}"]`); // ghosted
+      ui.click("[data-score-undo]");
+      assert.equal(ui.ops.length, 1, `${label}: not while their sound is ghosted`);
+      assert.match(ui.notices.at(-1) ?? "", /Show that sound/);
+      ui.click(`[data-score-visibility="${toggle}"]`); // hidden
+      ui.click("[data-score-undo]");
+      assert.equal(ui.ops.length, 1, `${label}: nor hidden`);
+      assert.equal(ui.target.querySelector<HTMLButtonElement>("[data-score-undo]")!.disabled, false, `${label}: the history entry stays`);
+      ui.click(`[data-score-visibility="${toggle}"]`); // shown again
+      ui.click("[data-score-undo]");
+      assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 0, row: 0, value: mine }, `${label}: shown, the undo runs as an ordinary edit`);
+      ui.click("[data-score-redo]");
+      assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 0, row: 0, value: theirs }, `${label}: and the redo puts their note back`);
+    } finally { await ui.done(); }
+  }
 });
 
-// Re-review LOW-1: the past-the-end mark was one per gesture, so undoing a phrase clear also put
-// back a sibling note that fitted when it was recorded and no longer did.
-test("undoing a phrase clear may put back only the note that already ran past the end", async () => {
-  for (const shrink of [false, true]) {
-    const m = model(); m.steps = 8; m.cells["2:0"] = { k: "n", p: PATCH_ID, len: 8 }; m.cells["4:3"] = { k: "n", p: PATCH_ID, len: 4 };
+// Re-review of 73b68ada, MEDIUM 2: native refuses a set whose hold runs past the score's current
+// length (`change.rs`: `step + len <= effective_steps`), so an undo that would put an overrun back
+// must wait until the score is lengthened. Declared contract change: the previous version of this
+// test expected such an undo to write the overrun back at once, which native then refused at Save.
+test("undo never queues a hold past the end: refused with what to do, kept, and it works once the score is longer", async () => {
+  // Every set the composer emits must fit the score as it is when it is emitted, as native requires.
+  const fits = (ops: unknown[], steps: number) => ops.every((op) => {
+    const o = op as ScoreOp;
+    return (o.op !== "set_cell" && o.op !== "set_note") || o.value.k !== "n" || o.step + (o.value.len ?? 1) <= steps;
+  });
+  for (const how of ["Shorten this note", "Clear this note"]) {
+    const m = model(); m.steps = 4; m.cells["2:0"] = { k: "n", p: PATCH_ID, len: 8 };
     const ui = surface(m, { apply: true });
-    const pointer = (type: string, target: EventTarget, init: PointerEventInit = {}) => { target.dispatchEvent(new w.PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, button: 0, ...init })); flushSync(); };
-    const shiftClick = (key: string) => { pointer("pointerdown", ui.cell(key), { shiftKey: true }); pointer("pointerup", window, { shiftKey: true }); ui.cell(key).dispatchEvent(new w.MouseEvent("click", { bubbles: true, shiftKey: true })); flushSync(); };
     try {
-      ui.click('[data-score-cell="2:0"]'); shiftClick("4:3");
-      ui.click('[aria-label="Clear the phrase"]');
-      assert.equal(ui.ops.length, 2, `shrink=${shrink}`);
-      assert.ok(!ui.notices.some((n) => /undo cannot restore/.test(n)), `shrink=${shrink}: the clear's own check agrees the undo can restore both`);
-      if (shrink) m.steps = 6; // a collaborator shortens the score: the hold at 4 no longer fits
+      ui.click('[data-score-cell="2:0"]'); ui.click(`[aria-label="${how}"]`);
+      const sent = ui.ops.length;
+      assert.ok(sent > 0 && fits(ui.ops, 4), how);
+      if (how === "Shorten this note") assert.match(ui.notices.at(-1) ?? "", /full length of 8 only once the score is long enough/, "the press says what undo can do");
       ui.click("[data-score-undo]");
-      if (shrink) {
-        assert.equal(ui.ops.length, 2, "the sibling that fitted when recorded is not put back past the end");
-        assert.match(ui.notices.at(-1) ?? "", /must fit/);
-      } else {
-        assert.deepEqual(ui.ops.slice(2).map((op) => (op as { step: number }).step).sort(), [2, 4], "both come back, the overrun one included");
-      }
+      assert.equal(ui.ops.length, sent, `${how}: nothing native would refuse is queued`);
+      assert.match(ui.notices.at(-1) ?? "", /Lengthen the score, then undo again/);
+      assert.equal(ui.target.querySelector<HTMLButtonElement>("[data-score-undo]")!.disabled, false, `${how}: the history entry stays`);
+      ui.click('[data-score-cell="0:5"]');
+      assert.equal(ui.ops.length, sent + 1, `${how}: a later edit still goes out`);
+      ui.click("[data-score-undo]"); // undoes that placement
+      m.steps = 16; // the score is lengthened (by a collaborator here)
+      ui.click("[data-score-undo]");
+      assert.deepEqual(ui.ops.find((op) => (op as ScoreOp).op === "set_cell"), { op: "set_cell", step: 2, row: 0, value: { k: "n", p: PATCH_ID, len: 8 } },
+        `${how}: now the original length comes back`);
+      assert.ok(fits(ui.ops.slice(sent + 2), 16));
     } finally { await ui.done(); }
   }
 });

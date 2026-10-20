@@ -56,7 +56,10 @@ contract is `docs/design-score-layers.md`; this is the interface summary.
   moved, resized, rewritten, undone or redone over (`scoreOpSeveralValues`, read from readiness
   `conflict`); choosing a version in the review list (which exempts only that key) or erasing it on
   the grid is how it changes. A hold past the end is not edited until it is shortened (one Shorten
-  press brings it to the end, and undo puts the overrun back) or the score is lengthened.
+  press brings it to the end) or the score is lengthened; an undo or redo that would write a hold
+  past the current end is refused before it is queued (native refuses it too) and waits for a
+  longer score. A legacy `set_cell` counts as reaching both the sound it writes and the sound the
+  cell holds now.
 
 ## Score additions re-saved after an epoch move (2026-10-20)
 

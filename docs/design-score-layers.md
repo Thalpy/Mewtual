@@ -245,8 +245,12 @@ slots, and `readiness.headerConflicts` against "more than one distinct header va
   volume or sound change of it is refused until the member shortens it, and one Shorten press brings
   it to the end, or lengthens the score. The authored length so survives a score that is shortened
   and grown back (review of `e7250d48`, design question 2; this applies to layered notes too).
-  Undoing that Shorten, or an erase of such a hold, puts the overrun back exactly; an undo that
-  would put back a hold that fitted when it was recorded and no longer does stays refused. A failure of
+  Native admits no `set_cell`/`set_note` whose hold runs past the current length (`change.rs`,
+  `step + len <= effective_steps`), so an undo or redo that would write such a hold (undoing that
+  Shorten, or an erase of an overrun) is refused before anything is queued, with "Lengthen the
+  score, then undo again", and keeps its history entry; once the score is long enough it restores
+  the original length. Shorten says so when it trims (re-review of `73b68ada`, MEDIUM 2: an
+  earlier exception queued writes native refused). A failure of
   the second op leaves both notes, which is additive and visible, never a lost note. `set_note` is
   re-saved on its own after an epoch move; `clear_cell` keeps its card until the member decides.
   Undo restores exactly where a value lived: a legacy cell the composer cleared comes back as that
@@ -261,13 +265,19 @@ slots, and `readiness.headerConflicts` against "more than one distinct header va
   refused write removes the gesture's later records; after a restore, which drops the links, the
   restored note edits behind it are held for the member instead (adversarial review M1/M2 and the
   re-review's H1/M1/M2).
-- A legacy cell behind the shown layered note of the same sound is cleared with it only when it is
-  the same note (pitch, length and volume, `len: 1` and `vol: 100` equal to absent); a distinct one
-  is a note in its own right and stays. A gesture the host refuses midway is put back newest first
-  and the put-back stops at its first refusal, since an older inverse can depend on a newer one;
-  the prefix left keeps every note. A drag binds each carried note's key and value at pointer-down
-  and moves nothing if a collaborator changed one meanwhile. Every write, undo and review action
-  included, reaches only shown sounds (review of `e7250d48`, H1, H2, M1, M2).
+- A legacy cell behind the shown layered note of the same sound is cleared with it only when
+  playback hears the two as one voice (section 3's identity: an absent `len` is 1, `vol` exactly as
+  authored, so `vol: 100` and no `vol` are two voices), compared on the raw length (a longer note
+  clipped by a shortened score is still its own note). Anything else is a note in its own right and
+  stays. A gesture the host refuses midway is put back newest first and the put-back stops at its
+  first refusal, since an older inverse can depend on a newer one; the prefix left keeps every note.
+  A drag binds each carried note's key and value at pointer-down and moves nothing if a
+  collaborator changed one meanwhile. Every write, undo and review action included, reaches only
+  shown sounds; a legacy `set_cell` also reaches the sound the cell holds now, which it replaces
+  (review of `e7250d48`, H1, H2, M1, M2, and the re-review of `73b68ada`, HIGH 1 and MEDIUM 1).
+- An erase of a slot with several versions, or choosing one of them, replaces them all; its undo
+  can write back only the one value that was shown (sequential edits cannot recreate concurrent
+  versions), and the composer says so when it happens.
 
 ## 9. Tests (minimum)
 

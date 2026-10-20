@@ -47,7 +47,7 @@
     scoreOnsetsIn, scoreOverlappingNotes, scorePadForRow,
     scorePatchOrder, scorePatchUsage, scorePitch, scorePlayheadStep, scoreRepeatBar, scoreReplay, scoreRowIsBlack, scoreScaleRows, scoreSlotDiagnostic, scoreSnapStart,
     scoreTapTempo, scoreTimeLabel, scoreExtent, scoreFreeRun,
-    SCORE_VISIBILITY_NEXT, scoreGestureId, scoreGhostCells, scoreHeaderOthers, scoreIssuesAt, scoreLayerOf, scoreOpLayers, scoreOpSeveralValues, scoreRestoresPastEnd, scoreSurface, scoreSurfaceOps, scoreVisibilityOf,
+    SCORE_VISIBILITY_NEXT, scoreGestureId, scoreGhostCells, scoreHeaderOthers, scoreIssuesAt, scoreLayerOf, scoreOpLayers, scoreOpSeveralValues, scoreSurface, scoreSurfaceOps, scoreVisibilityOf,
     type ScoreDiagnostic, type ScoreGhostCell, type ScoreHold, type ScoreScaleKind, type ScoreSurface, type ScoreVisibility,
   } from "./score-editor.ts";
 
@@ -127,11 +127,7 @@
   let dense = $state(false);
   // Undo and redo for this mounted document: each entry is one gesture's operations and the
   // operations that put the previous values back. Bounded; dropped with the component.
-  /** `pastEnd`: indices into `inverse` of the writes that put back a hold which already ran past the
-   *  end when the gesture was sent, so only those may exceed `steps` on undo (`scoreReplay`, see
-   *  `scoreRestoresPastEnd`). Indices, not op objects: the history stacks are deep `$state`, so a
-   *  read gives proxies that would never match an identity set. */
-  type Gesture = { label: string; forward: ScoreOp[]; inverse: ScoreOp[]; pastEnd: number[] };
+  type Gesture = { label: string; forward: ScoreOp[]; inverse: ScoreOp[] };
   const HISTORY_MAX = 64;
   let undoStack = $state<Gesture[]>([]);
   let redoStack = $state<Gesture[]>([]);
@@ -539,6 +535,11 @@
       onnotice("More than one version of this note plays. Choose one in the review list first, or erase it.", "info");
       return null;
     }
+    // An erase or a choice that passed the rule above still replaces every version, and its undo
+    // can only write the one value that was shown: sequential edits cannot recreate concurrent
+    // versions. Say so when it happens rather than promise an exact undo (re-review of 73b68ada,
+    // design question).
+    const replacesVersions = scoreOpSeveralValues(docModel, ops).length > 0;
     // A gesture the host cannot queue whole is refused before anything is sent: a phrase moved
     // half way, or cleared without room for the restore, is worse than a refusal.
     const room = onroom?.();
@@ -551,23 +552,15 @@
     let working = docModel;
     const gesture = scoreGestureId();
     const queue = (op: ScoreOp): boolean => { try { return onop(op, gesture) !== false; } catch (cause) { onnotice(message(cause), "error"); return false; } };
-    const overruns: boolean[] = []; // overruns[i]: undos[i] puts back a hold already past the end
     for (const op of ops) {
       const undo = scoreInverse(working, op);
       if (!queue(op)) break;
-      forward.push(op); undos.push(undo); overruns.push(scoreRestoresPastEnd(working, undo));
+      forward.push(op); undos.push(undo);
       working = scoreApplyLocal(working, op);
     }
     if (!forward.length) return null;
     sent++;
-    // The first `count` inverses, newest first as an undo replays them, with the indices (in that
-    // order) of those that put back an overrun. Computed for what is kept, so a write rolled back
-    // after a refusal lends its mark to nothing (re-review of e7250d48, LOW-1).
-    const history = (count: number) => {
-      const kept = undos.slice(0, count).map((op, i) => ({ op, overrun: overruns[i] }))
-        .filter((entry): entry is { op: ScoreOp; overrun: boolean } => entry.op !== null).reverse();
-      return { inverse: kept.map((entry) => entry.op), pastEnd: kept.flatMap((entry, i) => entry.overrun ? [i] : []) };
-    };
+    const newestFirst = (list: (ScoreOp | null)[]) => list.filter((op): op is ScoreOp => op !== null).reverse();
     if (forward.length < ops.length) {
       // The host refused an operation after accepting earlier ones (its queue is full, or it
       // changed under the gesture). A half gesture is put back, newest first. The compensation
@@ -580,11 +573,13 @@
         const back = undos[i];
         if (back && !queue(back)) break;
       }
-      const kept = forward.slice(0, i + 1);
+      const kept = forward.slice(0, i + 1), keptUndos = undos.slice(0, i + 1);
       onnotice(kept.length ? "that change could only partly be made; undo it or save and retry" : "that change could not be made right now; nothing was changed", "error");
-      return kept.length ? { label, forward: kept, ...history(i + 1) } : null;
+      if (kept.length && replacesVersions) onnotice("This note had more than one version. Undo brings back only the one that was shown.", "info");
+      return kept.length ? { label, forward: kept, inverse: newestFirst(keptUndos) } : null;
     }
-    return { label, forward, ...history(forward.length) };
+    if (replacesVersions) onnotice("This note had more than one version. Undo brings back only the one that was shown.", "info");
+    return { label, forward, inverse: newestFirst(undos) };
   }
   function send(make: () => ScoreOp, label = "edit"): boolean {
     const gesture = sendAll(() => [make()], label);
@@ -602,16 +597,16 @@
   function undo() {
     const gesture = undoStack.at(-1);
     if (!gesture || blocked) return;
-    const sent = sendAll((current) => scoreReplay(current, gesture.inverse, gesture.pastEnd), gesture.label, "document");
+    // A refusal (`scoreReplay`'s `history` check among them) leaves the entry on the stack.
+    const sent = sendAll((current) => scoreReplay(current, gesture.inverse, true), gesture.label, "document");
     if (!sent) return;
     undoStack = undoStack.slice(0, -1);
-    // The redo sends what this undo replaced, so it inherits this send's own past-the-end mark.
-    redoStack = [...redoStack.slice(-(HISTORY_MAX - 1)), { label: gesture.label, forward: sent.inverse, inverse: sent.forward, pastEnd: sent.pastEnd }];
+    redoStack = [...redoStack.slice(-(HISTORY_MAX - 1)), { label: gesture.label, forward: sent.inverse, inverse: sent.forward }];
   }
   function redo() {
     const gesture = redoStack.at(-1);
     if (!gesture || blocked) return;
-    const sent = sendAll((current) => scoreReplay(current, gesture.forward, gesture.pastEnd), gesture.label, "document");
+    const sent = sendAll((current) => scoreReplay(current, gesture.forward, true), gesture.label, "document");
     if (!sent) return;
     redoStack = redoStack.slice(0, -1);
     undoStack = [...undoStack.slice(-(HISTORY_MAX - 1)), sent];
@@ -728,7 +723,7 @@
     record(gesture);
     // Notes the composer would never author (overlapping holds, past the end, a sound that is
     // gone) can be cleared but not put back as they were: say so now, not at the undo.
-    try { scoreReplay(gesture.forward.reduce((m, op) => scoreApplyLocal(m, op), docModel!), gesture.inverse, gesture.pastEnd); }
+    try { scoreReplay(gesture.forward.reduce((m, op) => scoreApplyLocal(m, op), docModel!), gesture.inverse, true); }
     catch (cause) { onnotice(`cleared · undo cannot restore every note as it was (${message(cause)})`, "info"); }
     picked = new Set(); selected = null;
   }
@@ -1007,15 +1002,18 @@
   // shortens it on its own: every other edit of it is refused until the member shortens it or
   // lengthens the score, so the authored length survives a score that is shortened and grown back.
   // Shorten is that explicit step, and it brings such a hold to the end in one press; one step at a
-  // time would be refused until the last (review of e7250d48, design question 2). Its undo puts the
-  // overrun back exactly (the gesture's `pastEnd`). A length the end forced is not a deliberately
-  // chosen one, so it is not remembered as `hold` for the next placement.
+  // time would be refused until the last (review of e7250d48, design question 2). Its undo would
+  // write the overrun back, which native refuses while the score is that short (`change.rs`), so
+  // the undo waits until the score is lengthened, and the press says so. A length the end forced is
+  // not a deliberately chosen one, so it is not remembered as `hold` for the next placement.
   function resizeSelected(delta: number) {
     if (!model || !selected || selectedCell?.k !== "n") return;
     const [step, row] = selected.split(":").map(Number), cell = selectedCell, authored = cell.len ?? 1;
     const toEnd = delta < 0 && step + authored > model.steps;
     const len = toEnd ? Math.max(1, model.steps - step) : Math.max(1, authored + delta);
-    if (send(() => scoreCellOperation(model!, step, row, { mode: "note", patch: cell.p, len, volume: cell.vol ?? SCORE_VOLUME_MAX }), "resize a note") && !toEnd) hold = len;
+    if (!send(() => scoreCellOperation(model!, step, row, { mode: "note", patch: cell.p, len, volume: cell.vol ?? SCORE_VOLUME_MAX }), "resize a note")) return;
+    if (toEnd) onnotice(`Shortened to fit the score. Undo can bring back its full length of ${authored} only once the score is long enough again.`, "info");
+    else hold = len;
   }
   function reassignSelected(recipe: string) {
     if (!model || !selected || selectedCell?.k !== "n" || !recipe || recipe === selectedCell.p) return;

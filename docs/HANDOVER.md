@@ -106,10 +106,10 @@ Third review pass (no blocker or high). Fixed:
 Owner's review of `e7250d48` (no blocker; two high, four medium, one low). Fixed, each with a
 regression that fails when its fix is reverted:
 - H1: `staleCopy` cleared any legacy cell of the shown note's sound, so moving a layered note
-  deleted a distinct legacy note behind it. It now needs the same note identity (`noteIdentity`,
-  module level in `score-editor.ts`: pitch, len, vol, with `len: 1`/`vol: 100` equal to absent).
-  A distinct legacy note stays where it is and the same-sound overlap guard (`scoreNoteCheck`)
-  refuses an edit that would overlap it.
+  deleted a distinct legacy note behind it. It needed the same note identity, but that identity
+  equated `vol: 100` with no `vol`, which playback hears as two voices: only partly fixed, see the
+  re-review of `73b68ada` below (it now uses `copyIdentity`). A distinct legacy note stays where it
+  is and the same-sound overlap guard (`scoreNoteCheck`) refuses an edit that would overlap it.
   The random property now mixes legacy and layered keys, drums and distinct companions.
 - H2: a rollback after a host refusal ran every inverse, so after one inverse was refused an older
   one could clear the last copy of a note. `sendAll` stops the rollback at its first refusal and
@@ -119,7 +119,8 @@ regression that fails when its fix is reverted:
   moves nothing if any changed; a multi-key drag moves exactly its captured keys.
 - M2: undo, redo and the review list's actions skipped the surface and wrote into ghosted or
   hidden sounds. `sendAll` refuses any gesture whose ops reach a sound that is not shown
-  (`scoreOpLayers`); the history entry stays.
+  (`scoreOpLayers`); the history entry stays. Only partly fixed: a legacy `set_cell` replacing
+  another sound was missed (re-review of `73b68ada`, MEDIUM 1, below).
 - M3: an old batch's reconciliation read could outlive a lock and restore and clear the restored
   records' eligibility. `finish` acts only on a record still in the queue, and the batch path
   checks the session generation after `landed`.
@@ -155,18 +156,16 @@ Re-review of those fixes (no blocker or high). Fixed, each verified by breaking 
   choice left the note uneditable while the review list showed nothing. It reads readiness
   `conflict`, which the working projection recomputes.
 - L-B: undoing a one-press Shorten (or an erase) of a hold past the end was refused, which also
-  blocked every older undo. A gesture whose inverse puts back a hold that already ran past the end
-  carries `pastEnd`, and its undo or redo replays with the length bounded by the format
-  (`scoreReplay`'s `pastEnd`); a hold that fitted when recorded and no longer does is still
-  refused (the score-gestures contract). A length the end forced is no longer remembered as `hold`.
+  blocked every older undo. WITHDRAWN: the `pastEnd` exception added here queued writes that
+  native refuses (`change.rs` requires `step + len <= effective_steps`), so it was removed in the
+  re-review of `73b68ada` (MEDIUM 2, below). Kept from it: a length the end forced is not
+  remembered as `hold`.
 - L-D: THREAT-MODEL's wording, this entry's guard name, and `noteIdentity`'s place above
   `orderWrites`'s comment.
 
 A second short re-review confirmed those (no blocker, high or medium) and found two lows, fixed:
-- LOW-1: the past-the-end mark was one per gesture and survived a partial rollback, so undoing a
-  phrase clear also put back a sibling that fitted when recorded and no longer did.
-  `Gesture.pastEnd` is now the indices of the inverses that restore an overrun, computed for the
-  kept prefix; `scoreReplay` relaxes only those writes.
+- LOW-1: the past-the-end mark was one per gesture and survived a partial rollback. Moot: the
+  mark itself was removed with L-B's exception (re-review of `73b68ada`, MEDIUM 2).
 - LOW-2: the guard trusted native readiness with no evidence check. `parseScoreContent` now
   refuses a score whose `readiness.layers[key].conflict` disagrees with the distinct live values
   of that slot (as it already did for `headerConflicts`), so a disagreeing native build fails
@@ -176,11 +175,36 @@ A second short re-review confirmed those (no blocker, high or medium) and found 
   app-wide audio session, so an inline chat PIXA playing meanwhile would show its own refusals (as
   `playing` and `positionMs` already did).
 - Test gap: a maximal layered export (4096 notes as 64 sounds stacked on each of the 64 latest
-  cells, so 64 lanes, `v` on every attack, 64 maximal recipes, a 256-byte group) is 510,915 bytes
-  against the 524,288 cap, pinned above 500,000 so the case stays near the margin. The reviewer's
-  probe with enlarged metadata measured 516,557.
+  cells, so 64 lanes, `v` on every attack, 64 maximal recipes, a 256-byte group) was 510,915 bytes
+  against the 524,288 cap. Strengthened below.
 - Correction: `test:startup` does not run in CI (the earlier review request said it did). It has
   not been run on this branch; nothing here touches `setup` or process spawning.
+
+Owner's re-review of `73b68ada` (no blocker; one high, two medium, one design question). Fixed:
+- HIGH 1: the stale-copy test equated `vol: 100` with no `vol`, so moving or erasing a layered note
+  deleted a legacy note spelled the other way, which playback (`score-voices.ts`, Rust
+  `voices.rs`) hears as a second voice. It now uses `copyIdentity`: playback's spelling (absent
+  `len` is 1, `vol` exactly as authored) on the raw length, so a clipped longer note is not a copy
+  either. `noteIdentity` stays for `orderWrites` only. The regression checks both orientations with
+  the real `scoreVoices`; the random property now generates explicit `vol: 100` and companions
+  that differ only in that spelling, and its oracle uses playback's rule (it had copied the bug).
+- MEDIUM 1: `scoreOpLayers` took a legacy `set_cell` to reach only the sound it writes, so an undo
+  putting sound A back over a collaborator's B wrote into B while B was ghosted or hidden. It now
+  also counts the sound the cell holds now (mounted test: two sound orders and a drum, ghost and
+  hide, then shown: undo runs and redo puts B back).
+- MEDIUM 2: L-B's `pastEnd` exception is gone. `scoreReplay(model, ops, history)` refuses an undo
+  or redo whose hold would run past the current end ("Lengthen the score, then undo again")
+  before anything is queued; the entry stays and works once the score is long enough. Shorten
+  says so when it trims. The replaced test had pinned the invalid op (declared in the test).
+- Design question (undo after replacing several versions): an erase or a review-list choice of a
+  slot with several versions replaces them all, and its undo can only write the shown value back;
+  the composer now says so when it happens.
+- Test gap: the maximal export now uses explicit `vol: 100` (`v: 100`) and a group of 256 control
+  characters (six-byte JSON escapes), the reviewer's 516,557-byte case, pinned above 514,000.
+- Not covered by a test: native admission itself (no shared frontend/native case drives a Save of
+  the refused undo); the frontend test asserts no emitted set ever exceeds the score's length.
+- Verification: at the owner's instruction this round ran no local tests or checks at all; CI on
+  the pushed head is the evidence.
 
 Follow-ups (not done):
 - The review's remaining test gaps: the Rust maximal combined seed (L10 below), the overlay-route
