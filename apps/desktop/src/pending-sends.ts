@@ -87,6 +87,21 @@ export function matchingPendingSend(current: PendingSends, server: number, chann
     && entry.text === text && entry.replyTo === replyTo);
 }
 
+/**
+ * Whether a native refusal proves that this request was never accepted. A different question
+ * from `pendingSendRetryBlock` (should automatic retry stop?), and the two differ: the native
+ * preparation looks a token's receipt up first and returns it when one exists (receipts are never
+ * evicted), so a refusal it makes after that lookup and before writing a new preparation proves no
+ * record of the token exists. That is true of the permanent refusals `pendingSendRetryBlock`
+ * names, and of two temporary ones it deliberately leaves out so a retained entry keeps retrying:
+ * capacity, and a channel's outstanding preparation (`prepare_chat` in
+ * `crates/catcoms-sync/src/durable_chat.rs`). Found in review: once Pending messages had resolved
+ * the entry, those two were reported "don't send it again" though nothing would retry them.
+ */
+export function sendRefusedUnaccepted(message: string): boolean {
+  return pendingSendRetryBlock(message) !== undefined || /\bCHAT_SEND_CAPACITY\b|\bCHAT_SEND_DOCUMENT_PENDING\b/.test(message);
+}
+
 /** Native CHAT.SEND.REJECTED also wraps temporary storage refusals; classify the inner reason. */
 export function pendingSendRetryBlock(message: string): PendingSendRetryBlock | undefined {
   if (/\bCHAT_SEND_CONTEXT_CHANGED\b|The conversation changed before this message could be saved/.test(message)) return "context_changed";

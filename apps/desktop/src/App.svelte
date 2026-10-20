@@ -39,7 +39,7 @@
     type MessagePage, type PageAnchor, type PageRequest, type PagedRowContext, type UnreadSummary,
   } from "./message-paging";
   import { persistenceWarning, sendAndRefresh, sendOutcome, type SendMessageResult, type SendOutcome } from "./message-send";
-  import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend, type PendingResolution, type PendingSend, type PendingSends } from "./pending-sends";
+  import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend, sendRefusedUnaccepted, type PendingResolution, type PendingSend, type PendingSends } from "./pending-sends";
   import PendingSendManager from "./PendingSendManager.svelte";
   import { PendingSendRetry } from "./pending-send-retry";
   import { ImageSrcCache } from "./image-src";
@@ -19682,15 +19682,16 @@
       // errors do not prove absence. It is "uncertain" when its sealed identity stays pending
       // without a retry block (the quiet retry sends it by itself), when a lock kept it in the
       // vault to retry after unlock, or when it may have been dispatched (`mayHaveGone`) and the
-      // error is not a definite native refusal, even if the pending-message manager has since
+      // native side has not proved it unaccepted, even if the pending-message manager has since
       // recovered or stopped the entry. Calling those unsent invited a second send under a new
       // token (found in review). Only a send that sealed nothing, never reached the native side,
-      // or was refused there for good, failed.
+      // or that the native side proved unaccepted (`sendRefusedUnaccepted`, which is wider than
+      // the retry block: capacity refuses unaccepted yet a retained entry still retries), failed.
       const kept = intent ? pendingSends[intent.token] : undefined;
-      const refusedForGood = pendingSendRetryBlock(errorText(e)) !== undefined;
+      const provenUnaccepted = sendRefusedUnaccepted(errorText(e));
       const outcome: SendOutcome = !intent ? "failed"
         : !sessionCurrent() || (kept && !kept.retryBlock) ? "uncertain"
-        : mayHaveGone && !refusedForGood ? "uncertain"
+        : mayHaveGone && !provenUnaccepted ? "uncertain"
         : "failed";
       if (!sessionCurrent()) return outcome;
       error = String(e);

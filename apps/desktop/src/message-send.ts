@@ -15,9 +15,10 @@ export type SendMessageResult = {
  * draft is kept when it was edited meanwhile, even back to the same text (its revision moved), and
  * a failed one is put back (found in review).
  * - `refused`: nothing was submitted (a guard, or the session moved on before dispatch);
- * - `failed`: not sent, and nothing will send it by itself: it sealed no identity, or its
- *   identity is blocked from automatic retry (refused natively; it waits in Pending messages);
- *   the app shows why. An announcement that threw is `failed` too, though with no retry token it
+ * - `failed`: not sent, and nothing will send it by itself: it sealed no identity, its identity is
+ *   blocked from automatic retry (refused natively; it waits in Pending messages), or the native
+ *   side proved it unaccepted (`sendRefusedUnaccepted`) and no entry is left to retry it; the app
+ *   shows why. An announcement that threw is `failed` too, though with no retry token it
  *   may have been posted before the error came back;
  * - `sent`: accepted and saved on this device;
  * - `uncertain`: may have gone, or will by itself (accepted without a durable save, a throw whose

@@ -4152,7 +4152,11 @@ and every drop handler returns early on a drop that carries no files.
   dispatch that is not a definite native refusal even if Pending messages resolved the entry
   meanwhile, or an identity taken over by a lock or the pending-message work). `send()` keeps
   that evidence itself (`mayHaveGone`, set by `submitPendingSend`'s `onDispatch` or by reusing an
-  identity not marked `not_accepted`), never reading it back from `pendingSends`. An
+  identity not marked `not_accepted`), never reading it back from `pendingSends`. "Not a
+  definite native refusal" means `sendRefusedUnaccepted` (`pending-sends.ts`) is false. That
+  classifier answers a different question from `pendingSendRetryBlock`: it also counts
+  `CHAT_SEND_CAPACITY` and `CHAT_SEND_DOCUMENT_PENDING`, which the native side raises only for a
+  token it holds no record of, yet which leave a retained entry retrying. An
   announcement is never `uncertain`. The
   toast reports that outcome, before a move away ends the batch, and never the composer's
   contents, which cannot tell a sent message whose draft was kept from an unsent one: "sent",
