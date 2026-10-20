@@ -987,7 +987,8 @@ test("G6-UI-001: native Score composer routes real drum edits and retains exact 
     m.target.querySelector<HTMLButtonElement>('[data-score-mode="drum"]')!.click(); flushSync();
     m.target.querySelector<HTMLButtonElement>('[data-score-cell="0:0"]')!.click(); flushSync(); await settled(300);
     const first = ipc.calls.find(c => c.cmd === "studio_apply")!.args;
-    assert.equal(first.objectKind, "score"); assert.equal(JSON.parse(String(first.body)).op, "set_cell");
+    // New builds author every placement as a layered note (docs/design-score-layers.md).
+    assert.equal(first.objectKind, "score"); assert.equal(JSON.parse(String(first.body)).op, "set_note");
     assert.match(m.text(), /Not confirmed: /); m.click("button", "Retry now"); await settled(300);
     assert.deepEqual(ipc.calls.filter(c => c.cmd === "studio_apply")[1].args, first);
     assert.match(m.text(), /history/); assert.equal(m.count("studio_recovery_list"), 1);
@@ -1147,11 +1148,18 @@ test("G7-UI: placing a note keeps the audition it started; a source change from 
   ipc.on("studio_list", () => ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ kind: "score", title: "music" }) } })));
   ipc.on("studio_read", () => ({ ...ordinaryView(score), group: "deadbeef" }));
   ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ }));
-  // A faithful backend echoes the applied cell, so the readback equals the working projection and
-  // bumps nothing; a fake that forgot the cell would read as a source change and stop the audition.
+  // A faithful backend echoes the applied note, so the readback equals the working projection and
+  // bumps nothing; a fake that forgot the note would read as a source change and stop the audition.
+  // A placement is a layered note: native's DTO then carries `layers` and `readiness.layers`.
   ipc.on("studio_apply", (args) => {
-    const body = JSON.parse(String(args.body)) as { op: string; step: number; row: number; value: unknown };
-    if (body.op === "set_cell") score = { ...score, cells: { ...(score.cells as object), [`${body.step}:${body.row}`]: { removed: false, register: { selected: { value: body.value, source: { opId: id64(0x53), author: ME, nonce: id32(0x53) } }, conflicts: [] } } } };
+    const body = JSON.parse(String(args.body)) as { op: string; step: number; row: number; value: { k: string; p?: string } };
+    const register = { selected: { value: body.value, source: { opId: id64(0x53), author: ME, nonce: id32(0x53) } }, conflicts: [] };
+    if (body.op === "set_cell") score = { ...score, cells: { ...(score.cells as object), [`${body.step}:${body.row}`]: { removed: false, register } } };
+    if (body.op === "set_note") {
+      const key = `${body.step}:${body.row}/${body.value.k === "d" ? "d" : body.value.p}`;
+      score = { ...score, layers: { ...(score.layers as object ?? {}), [key]: { cleared: false, register } },
+        readiness: { ...(score.readiness as object), layers: {} } };
+    }
     return { ...ordinaryView(score), group: "deadbeef" };
   });
   const plans = new Map<JamArchivalPlayback, ReturnType<typeof planJamArchivalPlayback>>();

@@ -11,7 +11,9 @@ export type StudioPlaybackState = "stopped" | "preparing" | "playing";
 /** Small injectable engine seam; production passes the existing JamEngine, never another synth. */
 export interface StudioPlaybackEngine {
   readonly context: Pick<AudioContext, "state" | "resume">;
-  prepareArchivalPlayback(take: unknown, animation: JamArchivalAnimation | undefined, isCurrent: () => boolean): Promise<JamArchivalPlayback | null>;
+  /** `document`: this is the Studio's own document, which may hold more notes at once than a
+   * shared take (JAM_DOCUMENT_HELD_MAX in jam-contract.ts). */
+  prepareArchivalPlayback(take: unknown, animation: JamArchivalAnimation | undefined, isCurrent: () => boolean, opts?: { document?: boolean }): Promise<JamArchivalPlayback | null>;
   archivalPlaybackPlan(playback: JamArchivalPlayback): JamArchivalPlan | null;
   playArchivalEvent(playback: JamArchivalPlayback, index: number, ageMs?: number): JamPlayResult | Promise<JamPlayResult>;
   revokeArchivalPlayback(playback: JamArchivalPlayback): boolean;
@@ -121,7 +123,13 @@ export class StudioPlaybackController {
     return this.start(take, animation, offsetMs, 0, offsetAtStart);
   }
 
+  /** Set by the caller before a start: that start plays the Studio's own document (the editor's
+   * Play), which may hold more notes at once than received content (JAM_DOCUMENT_HELD_MAX). Read
+   * once, when the start begins; chat's viewers and the shared deck leave it false. */
+  document = false;
+
   private async start(take: unknown, animation: JamArchivalAnimation | undefined, offsetMs: number, horizonMs: number, offsetAtStart?: () => number): Promise<boolean> {
+    const document = this.document;
     this.stop();
     if (!this.scope || this.deafened || !Number.isFinite(offsetMs) || offsetMs < 0 ||
       !Number.isSafeInteger(horizonMs) || horizonMs < 0 || horizonMs > TAKE_MAX_DURATION_MS) return false;
@@ -141,7 +149,7 @@ export class StudioPlaybackController {
     try {
       capability = await this.preparation.submit(async () => {
         if (!await resumed) return null;
-        return current() ? this.engine.prepareArchivalPlayback(plan.take, plan.animation, current) : null;
+        return current() ? this.engine.prepareArchivalPlayback(plan.take, plan.animation, current, document ? { document } : undefined) : null;
       });
     } catch { capability = null; }
     if (!capability || !current()) {

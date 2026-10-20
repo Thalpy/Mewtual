@@ -5,9 +5,12 @@ use super::*;
 
 mod state;
 pub use state::{
-    score_document, ScoreAddress, ScoreCellIssues, ScorePatchIssues, ScoreProjection,
-    ScoreReadiness, ScoreRegister, ScoreSlot, ScoreSource, ScoreValue,
+    score_document, ScoreAddress, ScoreCellIssues, ScoreLayerSlot, ScoreNoteAddress,
+    ScorePatchIssues, ScoreProjection, ScoreReadiness, ScoreRegister, ScoreSlot, ScoreSource,
+    ScoreValue,
 };
+mod voices;
+pub use voices::{ScoreVoice, ScoreVoices};
 mod snapshot;
 pub(in crate::studio) use snapshot::SCORE_PAYLOAD;
 mod change;
@@ -55,7 +58,56 @@ impl std::fmt::Debug for ScoreCell {
     }
 }
 
+/// The layer a note lives in (docs/design-score-layers.md section 1): a note's layer is its sound
+/// id; every drum is in the single drum layer. Layered notes are keyed `n/{step}:{row}/{layer}`,
+/// so one cell holds at most one note per sound plus one drum, and two members placing different
+/// sounds in one cell never touch the same register.
+///
+/// `Ord` puts `Drums` first, then sounds by raw id bytes (equal to lowercase-hex order). This is
+/// the projection's map order and the snapshot trailer's entry order; it is NOT the canonical voice
+/// order, which compares canonical JSON bytes of the note itself.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ScoreLayer {
+    Drums,
+    Sound(ContentId),
+}
+
+impl std::fmt::Debug for ScoreLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Recipe ids are content hashes of private descriptors; keep Debug as redacted as cells.
+        f.debug_struct("ScoreLayer").finish_non_exhaustive()
+    }
+}
+
+impl ScoreLayer {
+    /// The key/body spelling: `d`, or the 64 lowercase hex characters of the sound id.
+    pub fn key(&self) -> String {
+        match self {
+            Self::Drums => "d".into(),
+            Self::Sound(id) => hex(id),
+        }
+    }
+    /// Exact inverse of [`Self::key`]: anything that is not `d` or 64 LOWERCASE hex is refused,
+    /// so one layer has exactly one spelling in a key, a body or a bridge argument.
+    pub fn parse(value: &str) -> Result<Self, ReplError> {
+        if value == "d" {
+            Ok(Self::Drums)
+        } else {
+            Ok(Self::Sound(fixed_hex(value)?))
+        }
+    }
+}
+
 impl ScoreCell {
+    /// The layer this value belongs to. A `set_note`'s key is derived from this, so a note can
+    /// never be filed under another sound's layer (the reader re-derives and compares it).
+    pub fn layer(&self) -> ScoreLayer {
+        match self {
+            Self::Note { patch, .. } => ScoreLayer::Sound(*patch),
+            Self::Drum { .. } => ScoreLayer::Drums,
+        }
+    }
+
     fn value(&self, step: u16) -> Result<Value, ReplError> {
         match self {
             Self::Note { patch, len, volume } => {
@@ -128,6 +180,18 @@ impl std::fmt::Debug for ScoreHeader {
 /// Complete score body grammar from creative design 2.8/2.9. Construction is not validation:
 /// encode/decode enforce static ranges; no aggregate cap, patch availability or author authority
 /// follows from a successful decode. In particular, overlapping holds require stateful checks.
+///
+/// Two note families coexist, and they MERGE DIFFERENTLY (docs/design-score-layers.md section 2):
+/// - `SetCell`/`ClearCell` (`c/{step}:{row}`, legacy): removal wins and only the register's
+///   selected value plays. Still readable and admissible forever; new composers only author
+///   `ClearCell`, to remove a legacy note.
+/// - `SetNote`/`ClearNote` (`n/{step}:{row}/{layer}`): add wins, and every distinct live value
+///   plays. A clear removes only the values its author observed (its Automerge predecessors).
+///
+/// Compatibility floor: a build without `set_note`/`clear_note` rejects a body, checkpoint or seed
+/// carrying one as malformed (the fail-closed rule already used for `vol`), which pauses that
+/// build's Studio sync for the server. Every member of a group must run a layer-aware build before
+/// anyone authors one.
 #[derive(Clone, PartialEq, Eq)]
 pub enum ScoreOp {
     SetCell {
@@ -138,6 +202,20 @@ pub enum ScoreOp {
     ClearCell {
         step: u16,
         row: u8,
+    },
+    /// A layered note. Its layer is `value.layer()`; it has no separate layer field, so a body
+    /// cannot name one layer while carrying another sound's note.
+    SetNote {
+        step: u16,
+        row: u8,
+        value: ScoreCell,
+    },
+    /// Clear the layer's note at this cell. Always admissible (cleanup must stay possible), even
+    /// for an absent slot or a layer whose sound is gone.
+    ClearNote {
+        step: u16,
+        row: u8,
+        layer: ScoreLayer,
     },
     SetPatch {
         patch: ContentId,
@@ -173,6 +251,16 @@ impl ScoreOp {
             Self::ClearCell { step, row } => {
                 address(*step, *row)?;
                 json!({"op":"clear_cell", "step":step, "row":row})
+            }
+            // `value` is exactly the set_cell grammar and static bounds (len within the global
+            // extent from this step, vol 1..=100, pad 0..=9).
+            Self::SetNote { step, row, value } => {
+                address(*step, *row)?;
+                json!({"op":"set_note", "step":step, "row":row, "value":value.value(*step)?})
+            }
+            Self::ClearNote { step, row, layer } => {
+                address(*step, *row)?;
+                json!({"op":"clear_note", "step":step, "row":row, "layer":layer.key()})
             }
             Self::SetPatch { patch, descriptor } => {
                 if *patch != descriptor.id() {
@@ -232,6 +320,22 @@ impl ScoreOp {
             "clear_cell" => {
                 let (step, row) = coordinate()?;
                 Self::ClearCell { step, row }
+            }
+            "set_note" => {
+                let (step, row) = coordinate()?;
+                Self::SetNote {
+                    step,
+                    row,
+                    value: ScoreCell::read(field(obj, "value")?)?,
+                }
+            }
+            "clear_note" => {
+                let (step, row) = coordinate()?;
+                Self::ClearNote {
+                    step,
+                    row,
+                    layer: ScoreLayer::parse(text(obj, "layer")?)?,
+                }
             }
             "set_patch" => Self::SetPatch {
                 patch: fixed_hex(text(obj, "patch")?)?,

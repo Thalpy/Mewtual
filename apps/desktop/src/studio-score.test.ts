@@ -6,22 +6,27 @@ import test from "node:test";
 import { jamPatchId } from "./jam-patch.ts";
 import { canonicalJson, SCORE_MAX_CELLS, SCORE_MAX_PATCHES, SCORE_MAX_STEPS, SCORE_ROWS, type ScoreCell, type ScoreOp } from "./studio-contract.ts";
 import { exportScoreTake } from "./studio-export.ts";
+import { validateDraftOperation } from "./studio-draft.ts";
 
 const vectors = JSON.parse(readFileSync(new URL("../../../crates/catcoms-replication/tests/fixtures/studio-score-ops-v1.json", import.meta.url), "utf8")) as {
   version: number; patch_id: string; cases: { name: string; body: string }[];
 };
 const read = (name: string): ScoreOp => JSON.parse(vectors.cases.find((row) => row.name === name)!.body);
 
+// Declared contract change 2026-10-20 (docs/design-score-layers.md section 9): five layered-note
+// vectors (`set_note`, `clear_note`) joined the original 18, and every body is also one the
+// renderer's own draft validator accepts, so a retained draft holding it survives a restart.
 test("score Rust vectors match frontend canonical operation bytes and every operation family", () => {
   assert.equal(vectors.version, 1);
-  assert.equal(vectors.cases.length, 18);
+  assert.equal(vectors.cases.length, 23);
   const families = new Set<string>();
   for (const row of vectors.cases) {
     const op: ScoreOp = JSON.parse(row.body);
     assert.equal(canonicalJson(op), row.body, row.name);
+    validateDraftOperation(op, "score");
     families.add(op.op);
   }
-  assert.deepEqual([...families].sort(), ["clear_cell", "remove_patch", "set_cell", "set_header", "set_patch"]);
+  assert.deepEqual([...families].sort(), ["clear_cell", "clear_note", "remove_patch", "set_cell", "set_header", "set_note", "set_patch"]);
   assert.deepEqual([SCORE_MAX_STEPS, SCORE_ROWS, SCORE_MAX_CELLS, SCORE_MAX_PATCHES], [256, 25, 4096, 64]);
 });
 

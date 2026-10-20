@@ -32,8 +32,9 @@ class FakeEngine implements StudioPlaybackEngine {
   /** What dispatch resolves to; `sync` returns it directly, as the engine does for note events. */
   outcome: JamPlayResult = { ok: true };
   sync = false;
-  async prepareArchivalPlayback(input: unknown, animation: JamArchivalAnimation | undefined): Promise<JamArchivalPlayback> {
-    this.prepared++;
+  documents: boolean[] = [];
+  async prepareArchivalPlayback(input: unknown, animation: JamArchivalAnimation | undefined, _current?: () => boolean, opts?: { document?: boolean }): Promise<JamArchivalPlayback> {
+    this.prepared++; this.documents.push(opts?.document === true);
     const plan = planJamArchivalPlayback(input, animation);
     if (this.preparing) await this.preparing;
     this.plan = plan;
@@ -77,6 +78,16 @@ test("explicit local Play resumes immediately and late/seek attacks use remainin
   assert.equal(await controller.tick(), 0);
   assert.equal(controller.state, "stopped");
   assert.equal(controller.completed, true);
+});
+
+test("only a start the caller marks as the Studio's own document asks the engine for the document voice cap", async () => {
+  const { engine, controller } = setup();
+  assert.equal(await controller.startTake(take()), true);
+  controller.document = true;
+  assert.equal(await controller.startTake(take()), true);
+  controller.document = false;
+  assert.equal(await controller.startTake(take()), true);
+  assert.deepEqual(engine.documents, [false, true, false]);
 });
 
 test("only natural completion marks EOF; manual, revoked and render-failed ownership never does", async () => {

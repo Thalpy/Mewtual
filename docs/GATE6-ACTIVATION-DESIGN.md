@@ -89,8 +89,9 @@ musical value. Header fields are title/bpm/bpb/steps. Restore is additive: no ex
 Unchanged. Retained destination-history removals block resurrection. Copy explicitly resolves
 a selected alternative/removal through the ordinary fresh-operation Save gate. Recipes must be
 recovered before notes, and note extent uses current authored steps. Copy may introduce the
-same visible overlap/conflict readiness state as an ordinary edit; export/playback must refuse
-unready content, not silently trim it. Source/destination family, full group and channel remain
+same visible overlap/conflict readiness state as an ordinary edit. Superseded 2026-10-20
+(docs/design-score-layers.md): Score export/playback no longer refuses on readiness; what cannot
+play is skipped and counted, never silently presented as the whole score. Source/destination family, full group and channel remain
 mandatory; manual recovery does not grant old membership or automatic replay authority.
 
 Required tests include legacy wrapper/query byte compatibility; wrong/unknown family and object

@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { JamPatch } from "./jam-contract.ts";
 import type { ScoreModel, ScoreSlot, Valued, IndexSource } from "./studio-native.ts";
-import type { ScoreCell } from "./studio-contract.ts";
+import { parseNoteKey, type ScoreCell } from "./studio-contract.ts";
 import type { ScoreSelection } from "./score-selection.ts";
+import { admittedSounds, scoreVoices } from "./score-voices.ts";
 import {
   PAD_CODES, PAD_NAMES, SCORE_DEFAULT_HOLD, SCORE_PAGE_STEPS, SCORE_WIDE_PAGE_STEPS, scoreApplyLocal, scoreAttention, scoreBarBeat, scoreCellOperation, scoreContinuations,
   scoreDiagnosticOperation, scoreDiagnostics, scoreDurationMs, scoreExtent, scoreHeaderOperation, scoreHolds, scoreLastSoundingStep,
@@ -15,8 +16,15 @@ export const PATCH_ID = "a".repeat(64);
 export const PATCH: JamPatch = { v: 1, o: [{ w: 0, t: 0, c: 0, l: 80 }], e: { a: 10, d: 40, s: 70, r: 120 }, f: { m: 0, c: 18000, q: 0, e: 0 }, l: { r: 1, d: 0, t: 0 }, x: { c: 0, d: 0, r: 0 } };
 export function alternative<T>(value: T, n = 1): Valued<T, IndexSource> { return { value, source: { opId: n.toString(16).padStart(64, "0"), author: "b".repeat(64), nonce: n.toString(16).padStart(32, "0") } }; }
 export function slot<T>(value: T | null, conflicts: (T | null)[] = []): ScoreSlot<T> { return { removed: [value, ...conflicts].includes(null), register: { selected: alternative(value), conflicts: conflicts.map((c, i) => alternative(c, i + 2)) } }; }
+/** A legacy-only score, the shape tests have always built. `notes` is the same object as `cells`
+ * (every legacy cell is a note under its own key), so a test that sets `m.cells[k]` sets the note
+ * the composer's surface reads; `voices` follows from it as studio-native computes it. */
 export function model(): ScoreModel {
-  return { title: "", bpm: 120, bpb: 4, steps: 16, cells: {}, patches: { [PATCH_ID]: PATCH }, cellSlots: {}, patchSlots: { [PATCH_ID]: slot(PATCH) }, headers: { title: null, bpm: null, bpb: null, steps: null }, readiness: { cells: {}, patches: {}, headerConflicts: false }, ready: true };
+  const cells: Record<string, ScoreCell> = {};
+  return { title: "", bpm: 120, bpb: 4, steps: 16, cells, notes: cells, layerSlots: {}, patches: { [PATCH_ID]: PATCH }, cellSlots: {}, patchSlots: { [PATCH_ID]: slot(PATCH) },
+    get voices() { return scoreVoices(Object.entries(this.notes).map(([key, value]) => { const at = parseNoteKey(key)!; return { key, step: at.step, row: at.row, layer: at.layer, values: [value] }; }), this.steps, admittedSounds(Object.keys(this.patches))); },
+    set voices(_derived) { /* always derived from notes; the apply harness's copy is ignored */ },
+    headers: { title: null, bpm: null, bpb: null, steps: null }, readiness: { cells: {}, patches: {}, headerConflicts: false }, ready: true };
 }
 
 test("score pitch and pages cover all 25 chromatic rows and the partial 256-step boundary", () => {
@@ -41,6 +49,8 @@ test("header operations use authored scalar text and native musical bounds witho
 
 test("note and drum placement preserve authored holds and need an active recipe only for notes", () => {
   const m = model();
+  // scoreCellOperation builds the composer's surface ops (one note per cell); scoreSurfaceOps turns
+  // them into layered document ops (the layer tests below).
   assert.deepEqual(scoreCellOperation(m, 0, 24, { mode: "note", patch: PATCH_ID, len: 16 }), { op: "set_cell", step: 0, row: 24, value: { k: "n", p: PATCH_ID, len: 16 } });
   assert.deepEqual(scoreCellOperation(m, 15, 0, { mode: "note", patch: PATCH_ID, len: 1 }), { op: "set_cell", step: 15, row: 0, value: { k: "n", p: PATCH_ID, len: 1 } });
   for (const len of [0, 2, 1.5, NaN]) assert.throws(() => scoreCellOperation(m, 15, 0, { mode: "note", patch: PATCH_ID, len }));
@@ -134,10 +144,11 @@ test("diagnostics preserve every raw alternative, removal, overflow, out-of-leng
   assert.deepEqual(cell.alternatives.map(v => v.source.opId), [1, 2, 3].map(n => n.toString(16).padStart(64, "0")));
   assert.equal(cell.removed, true); assert.deepEqual(cell.issues, ["count", "extent", "recipe", "overlap", "conflict"]);
   assert.equal(recipe.removed, true); assert.equal(recipe.alternatives[0].value, PATCH);
-  assert.deepEqual(scoreDiagnosticOperation(m, cell, 1), { op: "clear_cell", step: 255, row: 24 });
+  // A chosen value is a list of operations now: choosing a legacy cell's value moves it into its layer.
+  assert.deepEqual(scoreDiagnosticOperation(m, cell, 1), [{ op: "clear_cell", step: 255, row: 24 }]);
   assert.throws(() => scoreDiagnosticOperation(m, cell, 0), /authored/);
-  assert.deepEqual(scoreDiagnosticOperation(m, recipe, 1), { op: "remove_patch", patch: PATCH_ID });
-  assert.deepEqual(scoreDiagnosticOperation(m, evidence[0], 1), { op: "set_header", field: "bpm", value: 140 });
+  assert.deepEqual(scoreDiagnosticOperation(m, recipe, 1), [{ op: "remove_patch", patch: PATCH_ID }]);
+  assert.deepEqual(scoreDiagnosticOperation(m, evidence[0], 1), [{ op: "set_header", field: "bpm", value: 140 }]);
   assert.throws(() => scoreDiagnosticOperation(m, cell, 3), /no longer/);
   assert.deepEqual(scoreSlotDiagnostic(m, "cell", "255:24"), cell); assert.equal(scoreSlotDiagnostic(m, "cell", "0:0"), null);
 });
@@ -166,14 +177,18 @@ type Surface = ReturnType<typeof surface>;
 // `apply` makes the harness behave like the host's working projection: every accepted operation
 // is folded into the model object in place, so a later gesture (an undo) sees what was written.
 // The DOM is not re-rendered for it (the prop identity is unchanged), which is enough for tests
-// that assert the operations sent.
+// that assert the operations sent. `cells` stays the same object as `notes` (see `model()`).
+//
+// The composer derives its layer surface from the prop, so a test that changes the score under a
+// mounted composer and then clicks it must hand over a new model (the Harness fixture's `update`),
+// as the host does; an in-place change is seen only by document-space work (undo, redo).
 function surface(m: ScoreModel, options: { readonlyReason?: string; loading?: boolean; onaddpatch?: () => Promise<string>; onaudition?: (patch: JamPatch, note: number, durationMs: number, level?: number) => void; onauditionpad?: (pad: number) => void; playing?: boolean; nextPass?: boolean; positionMs?: number | null; loop?: boolean; onpost?: () => void; refuse?: (op: ScoreOp) => boolean; apply?: boolean; onroom?: () => number; selection?: ScoreSelection | null; onselection?: (selection: ScoreSelection) => void } = {}) {
   const target = document.createElement("div"); document.body.appendChild(target);
   const ops: unknown[] = [], notices: string[] = [], loops: boolean[] = [];
   const instance = mount(ScoreEditor, { target, props: {
     model: m, readonlyReason: options.readonlyReason ?? "", loading: options.loading ?? false, error: "", patchLibrary: [{ name: "SYNTH", patch: PATCH }],
     library: [{ name: "SYNTH", patch: PATCH, shelf: "preset" }, { name: "OTHER", patch: { ...PATCH, o: [{ w: 1, t: 0, c: 0, l: 80 }] }, shelf: "mine" }],
-    onop: (op: ScoreOp) => { if (options.refuse?.(op)) return false; ops.push(op); if (options.apply) Object.assign(m, scoreApplyLocal(m, op)); }, onnotice: (text: string) => { notices.push(text); }, onaddpatch: options.onaddpatch ?? (async () => PATCH_ID),
+    onop: (op: ScoreOp) => { if (options.refuse?.(op)) return false; ops.push(op); if (options.apply) { const next = scoreApplyLocal(m, op); Object.assign(m, next, { cells: next.notes }); } }, onnotice: (text: string) => { notices.push(text); }, onaddpatch: options.onaddpatch ?? (async () => PATCH_ID),
     onaudition: options.onaudition, playing: options.playing ?? false, nextPass: options.nextPass ?? false, positionMs: options.positionMs ?? null, loop: options.loop ?? false, onloop: (v: boolean) => { loops.push(v); },
     onpost: options.onpost, onauditionpad: options.onauditionpad, onroom: options.onroom, selection: options.selection ?? null, onselection: options.onselection,
   } }); flushSync();
@@ -204,9 +219,12 @@ test("compiled composer renders 25 pitches on a 16-step page and authors note, c
     ui.click('[aria-label="Erase"]'); ui.click('[data-score-cell="1:0"]');
     ui.click('[aria-label="Place"]'); ui.click('[data-score-mode="drum"]'); ui.click('[data-score-pad="9"]'); ui.click('[data-score-cell="15:24"]');
     ui.change('[aria-label="Score BPM"]', "240");
+    // [desync fixes] contract change, owner decision 2026-10-20 (one note per sound per cell): new
+    // notes and hits are layered `set_note`s; the legacy note the test seeded clears as the legacy
+    // cell it is.
     assert.deepEqual(ui.ops, [
-      { op: "set_cell", step: 4, row: 1, value: { k: "n", p: PATCH_ID, len: 4 } },
-      { op: "clear_cell", step: 0, row: 0 }, { op: "set_cell", step: 15, row: 24, value: { k: "d", pad: 9 } },
+      { op: "set_note", step: 4, row: 1, value: { k: "n", p: PATCH_ID, len: 4 } },
+      { op: "clear_cell", step: 0, row: 0 }, { op: "set_note", step: 15, row: 24, value: { k: "d", pad: 9 } },
       { op: "set_header", field: "bpm", value: 240 },
     ]);
     assert.equal(heard.length, 1, "pads and clears do not audition");
@@ -222,11 +240,12 @@ test("compiled composer selects an existing note on click and clears it on right
     assert.ok(ui.cell("4:0").classList.contains("sel")); assert.ok(ui.cell("6:0").classList.contains("sel"));
     assert.match(ui.target.textContent!, /C4/);
     ui.click('[aria-label="Lengthen this note"]');
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 4, row: 0, value: { k: "n", p: PATCH_ID, len: 4 } });
+    // Editing a legacy note moves it into its layer: the layered note first, then the legacy clear.
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 4, row: 0, value: { k: "n", p: PATCH_ID, len: 4 } }, { op: "clear_cell", step: 4, row: 0 }]);
     ui.click('[aria-label="Clear this note"]');
     assert.deepEqual(ui.ops.at(-1), { op: "clear_cell", step: 4, row: 0 });
     ui.cell("6:0").dispatchEvent(new w.MouseEvent("contextmenu", { bubbles: true, cancelable: true })); flushSync();
-    assert.deepEqual(ui.ops.at(-1), { op: "clear_cell", step: 4, row: 0 }); assert.equal(ui.ops.length, 3);
+    assert.deepEqual(ui.ops.at(-1), { op: "clear_cell", step: 4, row: 0 }); assert.equal(ui.ops.length, 4);
   } finally { await ui.done(); }
 });
 
@@ -251,7 +270,7 @@ test("compiled composer refuses missing recipes, invalid holds and read-only wri
     ui.click('[data-score-snap="1"]');
     ui.input('[aria-label="Note length in sixteenth steps"]', "2");
     ui.click('[data-score-cell="15:0"]');
-    assert.deepEqual(ui.ops, [{ op: "set_cell", step: 15, row: 0, value: { k: "n", p: PATCH_ID, len: 1 } }]);
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 15, row: 0, value: { k: "n", p: PATCH_ID, len: 1 } }]);
     assert.equal(ui.notices.length, 0);
     assert.match(ui.target.querySelector(".micro.hi")!.textContent!, /eighth/, "a forced fit is not remembered as the next hold");
   } finally { await ui.done(); }
@@ -265,15 +284,15 @@ test("a real pointer click writes exactly the previewed hold, snapping only move
   try {
     ui.input('[aria-label="Note length in sixteenth steps"]', "1");
     click("3:2");
-    assert.deepEqual(ui.ops, [{ op: "set_cell", step: 2, row: 2, value: { k: "n", p: PATCH_ID, len: 1 } }], "an eighth snap moves the start; the hold stays one step");
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 2, row: 2, value: { k: "n", p: PATCH_ID, len: 1 } }], "an eighth snap moves the start; the hold stays one step");
     assert.match(ui.target.querySelector(".micro.hi")!.textContent!, /sixteenth/, "the click did not rewrite the hold");
     ui.input('[aria-label="Note length in sixteenth steps"]', "2"); ui.click('[data-score-snap="4"]');
     click("7:4");
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 7, row: 4, value: { k: "n", p: PATCH_ID, len: 2 } }, "the snapped run 4..7 crosses the note at 5, so the exact cell is meant");
+    assert.deepEqual(ui.ops.at(-1), { op: "set_note", step: 7, row: 4, value: { k: "n", p: PATCH_ID, len: 2 } }, "the snapped run 4..7 crosses the note at 5, so the exact cell is meant");
     ui.cell("6:6").dispatchEvent(new w.PointerEvent("pointerover", { bubbles: true })); flushSync();
     assert.ok(ui.cell("6:6").classList.contains("target") && !ui.cell("7:6").classList.contains("target"), "the preview shows the one free cell between two notes");
     click("6:6");
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 6, row: 6, value: { k: "n", p: PATCH_ID, len: 1 } }, "fitted to the gap, never an overlap refusal");
+    assert.deepEqual(ui.ops.at(-1), { op: "set_note", step: 6, row: 6, value: { k: "n", p: PATCH_ID, len: 1 } }, "fitted to the gap, never an overlap refusal");
     assert.equal(ui.notices.length, 0); assert.match(ui.target.querySelector(".micro.hi")!.textContent!, /eighth/);
   } finally { await ui.done(); }
 });
@@ -290,13 +309,15 @@ test("lengthen is unavailable at the authored end, and the pad lane never folds 
     assert.equal(ui.cell("3:1").classList.contains("fold"), false, "C♯4 is the snare lane in pads mode");
     assert.equal(ui.cell("3:1").classList.contains("off"), false);
     ui.click('[data-score-cell="3:1"]');
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 3, row: 1, value: { k: "d", pad: 1 } });
+    assert.deepEqual(ui.ops.at(-1), { op: "set_note", step: 3, row: 1, value: { k: "d", pad: 1 } });
     assert.ok(ui.cell("3:13").classList.contains("fold"), "C♯5 is outside the scale and outside the lane, so it still folds");
   } finally { await ui.done(); }
 });
 
 test("pointer jitter inside the pressed cell is a click: the note gets the previewed hold and the hold is unchanged", async () => {
   const m = model(); m.steps = 16;
+  // A neighbour for the forced-fit case at the end (row 7 only; the earlier rows never meet it).
+  m.cells["4:7"] = { k: "n", p: PATCH_ID, len: 1 };
   const ui = surface(m);
   const pointer = (type: string, target: EventTarget, init: PointerEventInit = {}) => { target.dispatchEvent(new w.PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, button: 0, ...init })); flushSync(); };
   const doc = document as unknown as { elementFromPoint: (x: number, y: number) => Element | null };
@@ -309,25 +330,24 @@ test("pointer jitter inside the pressed cell is a click: the note gets the previ
       const row = hold; // a fresh row per hold
       pointer("pointerdown", ui.cell(`2:${row}`)); under = ui.cell(`2:${row}`); pointer("pointermove", window); pointer("pointermove", window);
       pointer("pointerup", window); ui.cell(`2:${row}`).click(); flushSync();
-      assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 2, row, value: { k: "n", p: PATCH_ID, len: hold } }, `a jittered click writes the previewed ${hold}-step hold`);
+      assert.deepEqual(ui.ops.at(-1), { op: "set_note", step: 2, row, value: { k: "n", p: PATCH_ID, len: hold } }, `a jittered click writes the previewed ${hold}-step hold`);
       assert.match(ui.target.querySelector(".micro.hi")!.textContent!, hold === 2 ? /eighth/ : /quarter/, "the hold is still the chosen one");
       // Moving back inside the preview after lengthening never shortens below the preview.
       pointer("pointerdown", ui.cell(`8:${row}`)); under = ui.cell(`12:${row}`); pointer("pointermove", window); under = ui.cell(`9:${row}`); pointer("pointermove", window);
       pointer("pointerup", window);
-      assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 8, row, value: { k: "n", p: PATCH_ID, len: hold } });
+      assert.deepEqual(ui.ops.at(-1), { op: "set_note", step: 8, row, value: { k: "n", p: PATCH_ID, len: hold } });
     }
     assert.equal(ui.ops.length, 4);
-    // A preview forced shorter than the hold by a neighbour: drifting one cell inside it writes
-    // the preview and leaves the hold alone; only lengthening beyond the preview changes it.
-    m.cells["4:7"] = { k: "n", p: PATCH_ID, len: 1 };
+    // A preview forced shorter than the hold by a neighbour (4:7): drifting one cell inside it
+    // writes the preview and leaves the hold alone; only lengthening beyond the preview changes it.
     ui.input('[aria-label="Note length in sixteenth steps"]', "4");
     pointer("pointerdown", ui.cell("2:7")); under = ui.cell("3:7"); pointer("pointermove", window); pointer("pointerup", window);
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 2, row: 7, value: { k: "n", p: PATCH_ID, len: 2 } });
+    assert.deepEqual(ui.ops.at(-1), { op: "set_note", step: 2, row: 7, value: { k: "n", p: PATCH_ID, len: 2 } });
     assert.match(ui.target.querySelector(".micro.hi")!.textContent!, /quarter/, "a forced fit plus drift is not a chosen length");
     pointer("pointerdown", ui.cell("8:7")); under = ui.cell("13:7"); pointer("pointermove", window); under = ui.cell("8:7"); pointer("pointermove", window);
     assert.ok(!ui.cell("13:7").classList.contains("drag") && ui.cell("11:7").classList.contains("drag"), "returning to the pressed cell returns to the preview, even past skipped cells");
     pointer("pointerup", window);
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 8, row: 7, value: { k: "n", p: PATCH_ID, len: 4 } });
+    assert.deepEqual(ui.ops.at(-1), { op: "set_note", step: 8, row: 7, value: { k: "n", p: PATCH_ID, len: 4 } });
   } finally { doc.elementFromPoint = original; await ui.done(); }
 });
 
@@ -364,7 +384,7 @@ test("a press cancelled with Escape is over: its release and click place nothing
     assert.deepEqual(ui.ops, []); assert.deepEqual(heard, [], "the cancelled press's completion click is swallowed");
     await new Promise((r) => setTimeout(r, 5));
     pointer("pointerdown", ui.cell("4:5")); pointer("pointerup", window); ui.cell("4:5").click(); flushSync();
-    assert.deepEqual(ui.ops, [{ op: "set_cell", step: 4, row: 5, value: { k: "n", p: PATCH_ID, len: SCORE_DEFAULT_HOLD } }], "a genuinely new press places as usual");
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 4, row: 5, value: { k: "n", p: PATCH_ID, len: SCORE_DEFAULT_HOLD } }], "a genuinely new press places as usual");
     assert.deepEqual(heard, [65]);
   } finally { await ui.done(); }
 });
@@ -396,24 +416,24 @@ test("keyboard navigation keeps focus when the destination is a folded or past-t
 
 test("placement snaps to the chosen unit, remembers the last hold, and the pad lane places its row's pad", async () => {
   const m = model(); m.steps = 32;
+  m.cells["8:4"] = { k: "n", p: PATCH_ID, len: 1 }; // the occupied snap target on row 4, below
   const ui = surface(m);
   try {
     ui.click('[data-score-cell="5:2"]');
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 4, row: 2, value: { k: "n", p: PATCH_ID, len: SCORE_DEFAULT_HOLD } }, "an eighth snap lands the click on the even step for the default eighth hold");
+    assert.deepEqual(ui.ops.at(-1), { op: "set_note", step: 4, row: 2, value: { k: "n", p: PATCH_ID, len: SCORE_DEFAULT_HOLD } }, "an eighth snap lands the click on the even step for the default eighth hold");
     ui.click('[data-score-snap="4"]'); ui.click('[data-score-cell="7:3"]');
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 4, row: 3, value: { k: "n", p: PATCH_ID, len: 2 } });
-    m.cells["8:4"] = { k: "n", p: PATCH_ID, len: 1 };
+    assert.deepEqual(ui.ops.at(-1), { op: "set_note", step: 4, row: 3, value: { k: "n", p: PATCH_ID, len: 2 } });
     ui.click('[data-score-snap="2"]'); ui.click('[data-score-cell="9:4"]');
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 9, row: 4, value: { k: "n", p: PATCH_ID, len: 2 } }, "an occupied snap target means the exact cell was meant");
+    assert.deepEqual(ui.ops.at(-1), { op: "set_note", step: 9, row: 4, value: { k: "n", p: PATCH_ID, len: 2 } }, "an occupied snap target means the exact cell was meant");
     ui.input('[aria-label="Note length in sixteenth steps"]', "4"); ui.click('[data-score-cell="12:5"]');
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 12, row: 5, value: { k: "n", p: PATCH_ID, len: 4 } });
+    assert.deepEqual(ui.ops.at(-1), { op: "set_note", step: 12, row: 5, value: { k: "n", p: PATCH_ID, len: 4 } });
     assert.match(ui.target.querySelector(".sc-foot")!.textContent!, /quarter/, "the footer names the remembered hold");
     ui.click('[data-score-mode="drum"]'); ui.click('[data-score-pad="9"]');
     ui.click('[data-score-cell="3:3"]');
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 3, row: 3, value: { k: "d", pad: 3 } }, "rows C4..A4 are the pad lane: the row decides the pad");
+    assert.deepEqual(ui.ops.at(-1), { op: "set_note", step: 3, row: 3, value: { k: "d", pad: 3 } }, "rows C4..A4 are the pad lane: the row decides the pad");
     assert.equal(ui.target.querySelector(".sc-lab.lane")!.textContent, "CR"); assert.match(ui.target.querySelector(".sc-lab.lane")!.getAttribute("title")!, /crash/);
     ui.click('[data-score-cell="3:20"]');
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 3, row: 20, value: { k: "d", pad: 9 } }, "elsewhere the chosen pad is placed");
+    assert.deepEqual(ui.ops.at(-1), { op: "set_note", step: 3, row: 20, value: { k: "d", pad: 9 } }, "elsewhere the chosen pad is placed");
   } finally { await ui.done(); }
 });
 
@@ -465,7 +485,7 @@ test("a cancelled drag writes nothing: pointercancel, Escape and a foreign point
     assert.ok(ui.cell("6:5").classList.contains("drag"), "another pointer's release is not this gesture's");
     assert.equal(ui.ops.length, 0);
     pointer("pointerup", window);
-    assert.deepEqual(ui.ops, [{ op: "set_cell", step: 2, row: 5, value: { k: "n", p: PATCH_ID, len: 5 } }]);
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 2, row: 5, value: { k: "n", p: PATCH_ID, len: 5 } }]);
   } finally { doc.elementFromPoint = original; await ui.done(); }
 });
 
@@ -484,7 +504,8 @@ test("a drag whose start cell another edit filled meanwhile is refused instead o
     doc.elementFromPoint = () => under;
     pointer("pointerdown", cell("2:5")); under = cell("6:5"); pointer("pointermove", window);
     const other = "c".repeat(64);
-    const arrived = { ...model(), steps: 16, patches: { ...model().patches, [other]: PATCH }, cells: { "2:5": { k: "n", p: other, len: 1 } as ScoreCell } };
+    const cells = { "2:5": { k: "n", p: other, len: 1 } as ScoreCell };
+    const arrived = { ...model(), steps: 16, patches: { ...model().patches, [other]: PATCH }, cells, notes: cells };
     (harness as unknown as { update: (next: ScoreModel) => void }).update(arrived); flushSync();
     pointer("pointerup", window);
     assert.deepEqual(ops, [], "the newcomer's note is not overwritten");
@@ -528,13 +549,14 @@ test("dragging a note's last cell resizes it, remembers the length, and the insp
     pointer("pointerdown", ui.cell("4:5")); under = ui.cell("7:5"); pointer("pointermove", window);
     assert.ok(ui.cell("6:5").classList.contains("drag"));
     pointer("pointerup", window);
-    assert.deepEqual(ui.ops, [{ op: "set_cell", step: 2, row: 5, value: { k: "n", p: PATCH_ID, len: 6, vol: 60 } }], "a drag-resize keeps the note's level");
+    // The seeded note is a legacy cell: an edit writes it into its layer, then clears the legacy cell.
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 2, row: 5, value: { k: "n", p: PATCH_ID, len: 6, vol: 60 } }, { op: "clear_cell", step: 2, row: 5 }], "a drag-resize keeps the note's level");
     assert.match(ui.target.querySelector(".micro.hi")!.textContent!, /6 \/ 16$/, "the resized length is the new remembered hold");
     pointer("pointerdown", ui.cell("4:5")); pointer("pointerup", window);
-    assert.equal(ui.ops.length, 1, "a release without movement is not a resize");
+    assert.equal(ui.ops.length, 2, "a release without movement is not a resize");
     ui.click('[data-score-cell="3:5"]');
     ui.change('[aria-label="Sound of this note"]', other);
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 2, row: 5, value: { k: "n", p: other, len: 3, vol: 60 } });
+    assert.deepEqual(ui.ops.slice(-2), [{ op: "set_note", step: 2, row: 5, value: { k: "n", p: other, len: 3, vol: 60 } }, { op: "clear_cell", step: 2, row: 5 }], "a new sound is a new layer");
     assert.deepEqual(heard, ["other"], "a reassigned note is auditioned with its new sound");
   } finally { doc.elementFromPoint = original; await ui.done(); }
 });
@@ -585,7 +607,8 @@ test("compiled composer keeps cells past a shortened length visible, hatched and
     assert.equal(ui.cell("21:3"), null, "the extent ends with the last live cell");
     ui.click('[aria-label="Erase"]'); past.click(); flushSync();
     assert.deepEqual(ui.ops, [{ op: "clear_cell", step: 20, row: 3 }]);
-    assert.match(ui.target.querySelector(".sc-head")!.textContent!, /1 to fix/);
+    // Owner decision 2026-10-20: nothing blocks playing or exporting, so a flag is to review, never to fix.
+    assert.match(ui.target.querySelector(".sc-head")!.textContent!, /1 to review/);
   } finally { await ui.done(); }
 });
 
@@ -596,7 +619,7 @@ test("compiled attention list exposes removed losing values, re-authors a chosen
   const ui = surface(m);
   try {
     ui.click('[data-score-tab="score"]');
-    assert.match(ui.target.textContent!, /1 to fix/);
+    assert.match(ui.target.textContent!, /1 to review/);
     ui.click('[data-score-evidence="cell/255:24"]');
     const body = ui.target.querySelector(".sc-attbody")!;
     assert.match(body.textContent!, /cleared/); assert.equal(body.querySelectorAll(".sc-alt").length, 2);
@@ -623,7 +646,8 @@ test("compiled attention list pages 24 at a time and alternatives 8 at a time wi
     assert.equal(ui.target.querySelectorAll(".sc-alt").length, 2);
     assert.ok(ui.target.querySelector('[data-score-alt="9"]'));
     ui.click('[data-score-alt="9"]');
-    assert.deepEqual(ui.ops, [{ op: "set_cell", step: 24, row: 0, value: { k: "d", pad: 1 } }]);
+    // Choosing a legacy cell's retained value moves it into its layer, then clears the legacy cell.
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 24, row: 0, value: { k: "d", pad: 1 } }, { op: "clear_cell", step: 24, row: 0 }]);
     ui.click('[aria-label="Next score page"]'); assert.ok(ui.cell("31:24"));
   } finally { await ui.done(); }
 });
@@ -696,7 +720,7 @@ test("compiled composer sets a hold by dragging along a row, clamps at the autho
     assert.equal(ui.cell("4:6").classList.contains("drag"), false, "a hold never crosses rows");
     under = ui.cell("11:5"); pointer("pointermove", window);
     pointer("pointerup", window);
-    assert.deepEqual(ui.ops, [{ op: "set_cell", step: 2, row: 5, value: { k: "n", p: PATCH_ID, len: 6 } }], "clamped at the authored end (step 7)");
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 2, row: 5, value: { k: "n", p: PATCH_ID, len: 6 } }], "clamped at the authored end (step 7)");
     ui.cell("2:5").click(); flushSync();
     assert.equal(ui.ops.length, 1, "the click the browser fires after a drag is swallowed");
     await new Promise((r) => setTimeout(r, 5));
@@ -809,7 +833,9 @@ test("a re-read of a score already on screen does not lock the grid; only a firs
   try { assert.equal(empty.target.querySelectorAll("[data-score-cell]").length, 0); } finally { await empty.done(); }
 });
 
-test("post to chat is offered only with a host callback and only for a ready score", async () => {
+// Contract change, owner decision 2026-10-20 ("nothing blocks playback"): a score with flags used to
+// disable post, download, share and play. It now plays and exports what it can.
+test("post to chat is offered only with a host callback, and flags never disable it, play or export", async () => {
   const m = model(); m.steps = 16;
   const without = surface(m);
   try { assert.equal(without.target.querySelector("[data-score-post]"), null); } finally { await without.done(); }
@@ -820,9 +846,9 @@ test("post to chat is offered only with a host callback and only for a ready sco
     assert.ok(post); assert.equal(post.disabled, false);
     post.click(); flushSync(); assert.equal(posted, 1);
   } finally { await ui.done(); }
-  const unready = model(); unready.steps = 16; unready.ready = false;
-  const blocked = surface(unready, { onpost: () => { posted++; } });
-  try { assert.equal(blocked.target.querySelector<HTMLButtonElement>("[data-score-post]")!.disabled, true); } finally { await blocked.done(); }
+  const flagged = model(); flagged.steps = 16; flagged.ready = false; flagged.readiness.headerConflicts = true;
+  const open = surface(flagged, { onpost: () => { posted++; } });
+  try { assert.equal(open.target.querySelector<HTMLButtonElement>("[data-score-post]")!.disabled, false); } finally { await open.done(); }
 });
 
 test("a note's volume is edited in the selected panel, remembered for the next placement and carried by resize", async () => {
@@ -832,19 +858,21 @@ test("a note's volume is edited in the selected panel, remembered for the next p
   try {
     ui.click('[data-score-cell="0:0"]');
     ui.change('[aria-label="Volume of this note"]', "60");
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 0, row: 0, value: { k: "n", p: PATCH_ID, len: 2, vol: 60 } });
+    // A legacy note's edit lands in its layer, and the legacy cell is cleared after it.
+    const legacy = { op: "clear_cell", step: 0, row: 0 };
+    assert.deepEqual(ui.ops.slice(-2), [{ op: "set_note", step: 0, row: 0, value: { k: "n", p: PATCH_ID, len: 2, vol: 60 } }, legacy]);
     assert.equal(heard.at(-1), 60, "the change is heard at the new level");
     // Placement uses the remembered level; a full level writes no field at all.
     ui.click('[data-score-cell="4:1"]');
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 4, row: 1, value: { k: "n", p: PATCH_ID, len: SCORE_DEFAULT_HOLD, vol: 60 } });
+    assert.deepEqual(ui.ops.at(-1), { op: "set_note", step: 4, row: 1, value: { k: "n", p: PATCH_ID, len: SCORE_DEFAULT_HOLD, vol: 60 } });
     assert.equal(heard.at(-1), 60, "a placed note auditions at the level it was written with");
     ui.input('[aria-label="Placement volume"]', "100");
     ui.click('[data-score-cell="8:1"]');
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 8, row: 1, value: { k: "n", p: PATCH_ID, len: SCORE_DEFAULT_HOLD } });
+    assert.deepEqual(ui.ops.at(-1), { op: "set_note", step: 8, row: 1, value: { k: "n", p: PATCH_ID, len: SCORE_DEFAULT_HOLD } });
     // Out-of-range input falls back to full level: the next placement writes no field.
     ui.input('[aria-label="Placement volume"]', "0");
     ui.click('[data-score-cell="12:1"]');
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 12, row: 1, value: { k: "n", p: PATCH_ID, len: SCORE_DEFAULT_HOLD } });
+    assert.deepEqual(ui.ops.at(-1), { op: "set_note", step: 12, row: 1, value: { k: "n", p: PATCH_ID, len: SCORE_DEFAULT_HOLD } });
   } finally { await ui.done(); }
   // A note that already carries a level: the steppers move it by ten, and a resize keeps it.
   const quiet = model(); quiet.steps = 16; quiet.cells["0:0"] = { k: "n", p: PATCH_ID, len: 2, vol: 60 };
@@ -852,17 +880,20 @@ test("a note's volume is edited in the selected panel, remembered for the next p
   try {
     panel.click('[data-score-cell="0:0"]');
     assert.equal((panel.target.querySelector('[aria-label="Volume of this note"]') as HTMLInputElement).value, "60");
+    const legacy = { op: "clear_cell", step: 0, row: 0 };
     panel.click('[aria-label="Louder"]');
-    assert.deepEqual(panel.ops.at(-1), { op: "set_cell", step: 0, row: 0, value: { k: "n", p: PATCH_ID, len: 2, vol: 70 } });
+    assert.deepEqual(panel.ops.slice(-2), [{ op: "set_note", step: 0, row: 0, value: { k: "n", p: PATCH_ID, len: 2, vol: 70 } }, legacy]);
     panel.click('[aria-label="Quieter"]');
-    assert.deepEqual(panel.ops.at(-1), { op: "set_cell", step: 0, row: 0, value: { k: "n", p: PATCH_ID, len: 2, vol: 50 } });
+    assert.deepEqual(panel.ops.slice(-2), [{ op: "set_note", step: 0, row: 0, value: { k: "n", p: PATCH_ID, len: 2, vol: 50 } }, legacy]);
     panel.click('[aria-label="Lengthen this note"]');
-    assert.deepEqual(panel.ops.at(-1), { op: "set_cell", step: 0, row: 0, value: { k: "n", p: PATCH_ID, len: 3, vol: 60 } }, "a longer hold keeps the note's level");
+    assert.deepEqual(panel.ops.slice(-2), [{ op: "set_note", step: 0, row: 0, value: { k: "n", p: PATCH_ID, len: 3, vol: 60 } }, legacy], "a longer hold keeps the note's level");
     assert.ok(panel.target.querySelector('[data-score-cell="0:0"]')?.getAttribute("aria-label")?.includes("60%"), "the cell names its level");
   } finally { await panel.done(); }
 });
 
-test("dragging a note's body moves it to another step and pitch as a clear and a set; a blocked drop or no movement writes nothing", async () => {
+// A move writes the note at its destination first and clears its old place after: a refusal part
+// way leaves the note in both places, never in neither (docs/design-score-layers.md section 8).
+test("dragging a note's body moves it to another step and pitch as a set and a clear; a blocked drop or no movement writes nothing", async () => {
   const m = model(); m.steps = 16; m.cells["2:5"] = { k: "n", p: PATCH_ID, len: 3, vol: 60 }; m.cells["9:8"] = { k: "n", p: PATCH_ID, len: 1 };
   const heard: number[] = [];
   const ui = surface(m, { onaudition: (_p, note) => heard.push(note) });
@@ -877,7 +908,7 @@ test("dragging a note's body moves it to another step and pitch as a clear and a
     for (const key of ["6:8", "7:8", "8:8"]) assert.ok(ui.cell(key).classList.contains("drag"), `${key} previews the landing`);
     assert.ok(ui.cell("2:5").classList.contains("lifting"), "the note's old place fades while it is carried");
     pointer("pointerup", window);
-    assert.deepEqual(ui.ops, [{ op: "clear_cell", step: 2, row: 5 }, { op: "set_cell", step: 6, row: 8, value: { k: "n", p: PATCH_ID, len: 3, vol: 60 } }]);
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 6, row: 8, value: { k: "n", p: PATCH_ID, len: 3, vol: 60 } }, { op: "clear_cell", step: 2, row: 5 }]);
     assert.deepEqual(heard, [68], "the moved note is heard at its new pitch");
     ui.ops.length = 0;
     // The model is the test's object, so the note is still at 2:5. A drop onto the note at 9:8 is refused.
@@ -897,11 +928,11 @@ test("alt plus an arrow nudges the selected note, and the selected panel's move 
   try {
     ui.click('[data-score-cell="4:4"]'); ui.cell("4:4").focus();
     ui.cell("4:4").dispatchEvent(new w.KeyboardEvent("keydown", { key: "ArrowUp", altKey: true, bubbles: true, cancelable: true })); flushSync();
-    assert.deepEqual(ui.ops, [{ op: "clear_cell", step: 4, row: 4 }, { op: "set_cell", step: 4, row: 5, value: { k: "n", p: PATCH_ID, len: 2 } }]);
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 4, row: 5, value: { k: "n", p: PATCH_ID, len: 2 } }, { op: "clear_cell", step: 4, row: 4 }]);
     ui.ops.length = 0;
     ui.click('[data-score-cell="4:4"]');
     ui.click('[aria-label="Move this note later"]');
-    assert.deepEqual(ui.ops, [{ op: "clear_cell", step: 4, row: 4 }, { op: "set_cell", step: 5, row: 4, value: { k: "n", p: PATCH_ID, len: 2 } }]);
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 5, row: 4, value: { k: "n", p: PATCH_ID, len: 2 } }, { op: "clear_cell", step: 4, row: 4 }]);
     ui.ops.length = 0;
     // An arrow without alt still moves the selection only.
     ui.cell("4:4").dispatchEvent(new w.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true })); flushSync();
@@ -916,16 +947,17 @@ test("undo and redo replay a gesture's previous values; the buttons and ctrl z /
   try {
     assert.equal(ui.target.querySelector<HTMLButtonElement>("[data-score-undo]")!.disabled, true);
     ui.click('[data-score-cell="4:1"]');
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 4, row: 1, value: { k: "n", p: PATCH_ID, len: SCORE_DEFAULT_HOLD } });
+    assert.deepEqual(ui.ops.at(-1), { op: "set_note", step: 4, row: 1, value: { k: "n", p: PATCH_ID, len: SCORE_DEFAULT_HOLD } });
     assert.equal(ui.target.querySelector<HTMLButtonElement>("[data-score-undo]")!.disabled, false);
     key("z", { ctrlKey: true });
-    assert.deepEqual(ui.ops.at(-1), { op: "clear_cell", step: 4, row: 1 }, "undoing a placement clears the cell it filled");
+    assert.deepEqual(ui.ops.at(-1), { op: "clear_note", step: 4, row: 1, layer: PATCH_ID }, "undoing a placement clears the note it wrote");
     key("z", { ctrlKey: true, shiftKey: true });
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 4, row: 1, value: { k: "n", p: PATCH_ID, len: SCORE_DEFAULT_HOLD } }, "redo places it again");
+    assert.deepEqual(ui.ops.at(-1), { op: "set_note", step: 4, row: 1, value: { k: "n", p: PATCH_ID, len: SCORE_DEFAULT_HOLD } }, "redo places it again");
     ui.ops.length = 0;
     ui.click('[aria-label="Erase"]'); ui.click('[data-score-cell="1:0"]');
     assert.deepEqual(ui.ops, [{ op: "clear_cell", step: 0, row: 0 }]);
     ui.click("[data-score-undo]");
+    // The erased note was a legacy cell, so undo restores it there exactly (scoreInverse).
     assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 0, row: 0, value: { k: "n", p: PATCH_ID, len: 2, vol: 40 } }, "undoing an erase restores the note with its length and level");
     ui.click("[data-score-redo]");
     assert.deepEqual(ui.ops.at(-1), { op: "clear_cell", step: 0, row: 0 });
@@ -946,7 +978,7 @@ test("sounds can be listened to without touching the document, and drums are hea
     ui.click('[data-score-mode="drum"]'); ui.click('[data-score-pad="3"]');
     assert.deepEqual(pads, [3], "choosing a drum plays it");
     ui.click('[data-score-cell="2:20"]');
-    assert.deepEqual(ui.ops, [{ op: "set_cell", step: 2, row: 20, value: { k: "d", pad: 3 } }]);
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 2, row: 20, value: { k: "d", pad: 3 } }]);
     assert.deepEqual(pads, [3, 3], "placing a hit plays it");
     ui.click('[aria-label="Listen"]'); ui.click('[data-score-cell="5:20"]');
     assert.deepEqual(pads, [3, 3, 3], "the listen tool on an empty drum cell plays the chosen drum");
@@ -978,12 +1010,12 @@ test("repeat bar copies the current bar one bar later and grows the score when i
     ui.click("[data-score-repeat-bar]");
     assert.deepEqual(ui.ops, [
       { op: "set_header", field: "steps", value: 32 },
-      { op: "set_cell", step: 16, row: 5, value: { k: "n", p: PATCH_ID, len: 4 } },
-      { op: "set_cell", step: 24, row: 0, value: { k: "d", pad: 2 } },
+      { op: "set_note", step: 16, row: 5, value: { k: "n", p: PATCH_ID, len: 4 } },
+      { op: "set_note", step: 24, row: 0, value: { k: "d", pad: 2 } },
     ], "the length grows first, then the cells in step order");
     ui.click("[data-score-undo]");
     assert.deepEqual(ui.ops.slice(3), [
-      { op: "clear_cell", step: 24, row: 0 }, { op: "clear_cell", step: 16, row: 5 }, { op: "set_header", field: "steps", value: 16 },
+      { op: "clear_note", step: 24, row: 0, layer: "d" }, { op: "clear_note", step: 16, row: 5, layer: PATCH_ID }, { op: "set_header", field: "steps", value: 16 },
     ], "undoing the repeat clears the copies and restores the length, in reverse");
   } finally { await ui.done(); }
 });
@@ -997,7 +1029,7 @@ test("an alt plus arrow nudge is taken on the capture phase and never reaches th
   try {
     ui.click('[data-score-cell="4:4"]'); ui.cell("4:4").focus();
     ui.cell("4:4").dispatchEvent(new w.KeyboardEvent("keydown", { key: "ArrowLeft", altKey: true, bubbles: true, cancelable: true })); flushSync();
-    assert.deepEqual(ui.ops, [{ op: "clear_cell", step: 4, row: 4 }, { op: "set_cell", step: 3, row: 4, value: { k: "n", p: PATCH_ID, len: 2 } }]);
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 3, row: 4, value: { k: "n", p: PATCH_ID, len: 2 } }, { op: "clear_cell", step: 4, row: 4 }]);
     assert.deepEqual(seen, [], "the app's own Alt+arrow listener did not see the nudge");
     // Focus outside the grid: the key is the app's again.
     ui.target.querySelector<HTMLButtonElement>('[data-score-tab="score"]')!.focus();
@@ -1019,6 +1051,7 @@ test("undo and redo meet the hand-edit guards against the document as it is now,
     assert.equal(ui.target.querySelector<HTMLButtonElement>("[data-score-undo]")!.disabled, false, "the gesture stays undoable for later");
     delete m.cells["1:0"];
     ui.click("[data-score-undo]");
+    // The erased note was a legacy cell, and undo restores legacy cells exactly where they were.
     assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 0, row: 0, value: { k: "n", p: PATCH_ID, len: 2 } });
     // Between the undo and its redo someone else writes the cell; the redo replaces it, and the
     // next undo restores THEIR note instead of clearing the cell.
@@ -1030,9 +1063,10 @@ test("undo and redo meet the hand-edit guards against the document as it is now,
   } finally { await ui.done(); }
 });
 
-test("a gesture the host refuses midway is rolled back, so a move never leaves its clear without its set", async () => {
+test("a gesture the host refuses midway is rolled back, so a move is never left half done", async () => {
   const m = model(); m.steps = 16; m.cells["2:5"] = { k: "n", p: PATCH_ID, len: 3, vol: 60 };
-  const ui = surface(m, { refuse: (op) => op.op === "set_cell" && op.step === 6 });
+  // The move writes the destination first; refusing its clear leaves an accepted write to put back.
+  const ui = surface(m, { refuse: (op) => op.op === "clear_cell" && op.step === 2 });
   try {
     const pointer = (type: string, target: EventTarget, init: PointerEventInit = {}) => { target.dispatchEvent(new w.PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, button: 0, ...init })); flushSync(); };
     const doc = document as unknown as { elementFromPoint: (x: number, y: number) => Element | null };
@@ -1041,7 +1075,7 @@ test("a gesture the host refuses midway is rolled back, so a move never leaves i
       let under: Element | null = null; doc.elementFromPoint = () => under;
       pointer("pointerdown", ui.cell("2:5")); under = ui.cell("6:5"); pointer("pointermove", window); pointer("pointerup", window);
     } finally { doc.elementFromPoint = original; }
-    assert.deepEqual(ui.ops, [{ op: "clear_cell", step: 2, row: 5 }, { op: "set_cell", step: 2, row: 5, value: { k: "n", p: PATCH_ID, len: 3, vol: 60 } }], "the accepted clear was put back");
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 6, row: 5, value: { k: "n", p: PATCH_ID, len: 3, vol: 60 } }, { op: "clear_note", step: 6, row: 5, layer: PATCH_ID }], "the accepted write was taken back");
     assert.match(ui.notices.at(-1) ?? "", /nothing was changed/);
     assert.equal(ui.target.querySelector<HTMLButtonElement>("[data-score-undo]")!.title.includes("move"), false, "a rolled-back gesture is not recorded");
   } finally { await ui.done(); }
@@ -1061,12 +1095,12 @@ test("the right part of a note's last cell is the resize handle and the rest of 
     press(80); under = ui.cell("6:5"); pointer("pointermove", window);
     assert.ok(ui.cell("6:5").classList.contains("drag") && !ui.cell("2:5").classList.contains("lifting"), "the handle resizes");
     pointer("pointerup", window);
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 2, row: 5, value: { k: "n", p: PATCH_ID, len: 5 } });
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 2, row: 5, value: { k: "n", p: PATCH_ID, len: 5 } }, { op: "clear_cell", step: 2, row: 5 }]);
     ui.ops.length = 0;
     press(20); under = ui.cell("6:7"); pointer("pointermove", window);
     assert.ok(ui.cell("2:5").classList.contains("lifting"), "the body moves");
     pointer("pointerup", window);
-    assert.deepEqual(ui.ops, [{ op: "clear_cell", step: 2, row: 5 }, { op: "set_cell", step: 4, row: 7, value: { k: "n", p: PATCH_ID, len: 3 } }], "grabbed two cells in, so the note lands two cells before the pointer");
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 4, row: 7, value: { k: "n", p: PATCH_ID, len: 3 } }, { op: "clear_cell", step: 2, row: 5 }], "grabbed two cells in, so the note lands two cells before the pointer");
   } finally { doc.elementFromPoint = original; await ui.done(); }
 });
 
@@ -1090,12 +1124,13 @@ test("shift+click and a shift+drag marquee build a phrase; it moves, nudges and 
     pointer("pointerup", window);
     assert.match(ui.target.querySelector("[data-score-phrase]")?.parentElement?.textContent ?? "", /3 notes/);
     assert.equal(ui.cell("12:9").classList.contains("grp"), false);
-    // Alt+arrow moves the whole phrase: clears first, then sets, in step order.
+    // Alt+arrow moves the whole phrase: every note written at its new place first (against the
+    // direction of travel, the highest note first when moving up), then the old places cleared.
     ui.cell("2:5").focus();
     ui.cell("2:5").dispatchEvent(new w.KeyboardEvent("keydown", { key: "ArrowUp", altKey: true, bubbles: true, cancelable: true })); flushSync();
     assert.deepEqual(ui.ops, [
+      { op: "set_note", step: 4, row: 8, value: { k: "n", p: PATCH_ID, len: 2 } }, { op: "set_note", step: 2, row: 6, value: { k: "n", p: PATCH_ID, len: 2 } }, { op: "set_note", step: 3, row: 1, value: { k: "d", pad: 3 } },
       { op: "clear_cell", step: 2, row: 5 }, { op: "clear_cell", step: 3, row: 0 }, { op: "clear_cell", step: 4, row: 7 },
-      { op: "set_cell", step: 2, row: 6, value: { k: "n", p: PATCH_ID, len: 2 } }, { op: "set_cell", step: 3, row: 1, value: { k: "d", pad: 3 } }, { op: "set_cell", step: 4, row: 8, value: { k: "n", p: PATCH_ID, len: 2 } },
     ]);
     ui.ops.length = 0;
     // The model is the test's object, so the phrase is picked at its new keys but those cells are empty: it dissolves.
@@ -1107,7 +1142,7 @@ test("shift+click and a shift+drag marquee build a phrase; it moves, nudges and 
     pointer("pointerup", window);
     assert.deepEqual(ui.ops, []); assert.match(ui.notices.at(-1) ?? "", /in the way/);
     pointer("pointerdown", ui.cell("2:5")); under = ui.cell("3:5"); pointer("pointermove", window); pointer("pointerup", window);
-    assert.deepEqual(ui.ops.map((op) => (op as { op: string }).op), ["clear_cell", "clear_cell", "clear_cell", "set_cell", "set_cell", "set_cell"], "one step later for all three");
+    assert.deepEqual(ui.ops.map((op) => (op as { op: string }).op), ["set_note", "set_note", "set_note", "clear_cell", "clear_cell", "clear_cell"], "one step later for all three");
     ui.ops.length = 0;
     // Delete clears the phrase.
     pointer("pointerdown", ui.cell("1:0"), { shiftKey: true }); under = ui.cell("6:9"); pointer("pointermove", window); pointer("pointerup", window);
@@ -1126,15 +1161,15 @@ test("ctrl+a picks every note, ctrl+d duplicates the phrase where it ends, escap
     assert.match(ui.target.querySelector("[data-score-phrase]")?.parentElement?.textContent ?? "", /2 notes/);
     key("d", { ctrlKey: true });
     assert.deepEqual(ui.ops, [
-      { op: "set_cell", step: 8, row: 5, value: { k: "n", p: PATCH_ID, len: 2 } },
-      { op: "set_cell", step: 11, row: 5, value: { k: "n", p: PATCH_ID, len: 3 } },
+      { op: "set_note", step: 8, row: 5, value: { k: "n", p: PATCH_ID, len: 2 } },
+      { op: "set_note", step: 11, row: 5, value: { k: "n", p: PATCH_ID, len: 3 } },
     ], "the copy starts at step 8, where the phrase (2..8) ends");
     ui.ops.length = 0;
     key("Escape");
     assert.equal(ui.target.querySelector("[data-score-phrase]"), null, "escape dissolves the phrase");
     ui.click('[data-score-cell="5:5"]');
     ui.click('[aria-label="Duplicate this note"]');
-    assert.deepEqual(ui.ops, [{ op: "set_cell", step: 8, row: 5, value: { k: "n", p: PATCH_ID, len: 3 } }], "one note duplicates right after itself");
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 8, row: 5, value: { k: "n", p: PATCH_ID, len: 3 } }], "one note duplicates right after itself");
   } finally { await ui.done(); }
 });
 
@@ -1188,7 +1223,7 @@ test("taking a note out of a two-note phrase leaves one ordinary selection, and 
     // Dragging a note outside the phrase moves that note alone and ends the phrase.
     let under: Element | null = null; doc.elementFromPoint = () => under;
     pointer("pointerdown", ui.cell("6:7")); under = ui.cell("7:7"); pointer("pointermove", window); pointer("pointerup", window);
-    assert.deepEqual(ui.ops, [{ op: "clear_cell", step: 6, row: 7 }, { op: "set_cell", step: 7, row: 7, value: { k: "n", p: PATCH_ID, len: 2 } }]);
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 7, row: 7, value: { k: "n", p: PATCH_ID, len: 2 } }, { op: "clear_cell", step: 6, row: 7 }]);
     assert.equal(ui.target.querySelector("[data-score-phrase]"), null);
     ui.ops.length = 0;
     ui.cell("7:7").focus(); ui.cell("7:7").dispatchEvent(new w.KeyboardEvent("keydown", { key: "ArrowRight", altKey: true, bubbles: true, cancelable: true })); flushSync();
@@ -1251,16 +1286,17 @@ test("the phrase panel transposes the phrase by the chosen interval as one gestu
     shiftClick("4:7");
     assert.ok(ui.target.querySelector("[data-score-transpose]"), "a phrase offers an interval");
     ui.click('[aria-label="Transpose the phrase up"]');
-    assert.deepEqual(ui.ops, [{ op: "clear_cell", step: 2, row: 5 }, { op: "clear_cell", step: 4, row: 7 },
-      { op: "set_cell", step: 2, row: 17, value: { k: "n", p: PATCH_ID, len: 2 } }, { op: "set_cell", step: 4, row: 19, value: { k: "n", p: PATCH_ID, len: 2 } }], "an octave by default");
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 4, row: 19, value: { k: "n", p: PATCH_ID, len: 2 } }, { op: "set_note", step: 2, row: 17, value: { k: "n", p: PATCH_ID, len: 2 } },
+      { op: "clear_cell", step: 2, row: 5 }, { op: "clear_cell", step: 4, row: 7 }], "an octave by default, the highest note written first");
     ui.ops.length = 0;
     ui.click('[aria-label="Transpose the phrase up"]');
     assert.deepEqual(ui.ops, [], "another octave would leave the grid: nothing moves, nothing is clamped");
     assert.match(ui.notices.at(-1) ?? "", /off the grid/);
     ui.change('[aria-label="Interval"]', "7");
     ui.click('[aria-label="Transpose the phrase down"]');
-    assert.deepEqual(ui.ops, [{ op: "clear_cell", step: 2, row: 17 }, { op: "clear_cell", step: 4, row: 19 },
-      { op: "set_cell", step: 2, row: 10, value: { k: "n", p: PATCH_ID, len: 2 } }, { op: "set_cell", step: 4, row: 12, value: { k: "n", p: PATCH_ID, len: 2 } }], "a fifth down, the phrase still picked at its new place");
+    // The phrase now lives in its layer, so moving it again replaces those layered notes.
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 2, row: 10, value: { k: "n", p: PATCH_ID, len: 2 } }, { op: "set_note", step: 4, row: 12, value: { k: "n", p: PATCH_ID, len: 2 } },
+      { op: "clear_note", step: 2, row: 17, layer: PATCH_ID }, { op: "clear_note", step: 4, row: 19, layer: PATCH_ID }], "a fifth down, the phrase still picked at its new place");
     assert.match(ui.target.querySelector("[data-score-phrase]")?.parentElement?.textContent ?? "", /2 notes/);
   } finally { await ui.done(); }
 });
@@ -1271,12 +1307,12 @@ test("alt+page up/down transposes the selected note by the interval; a note that
   const key = (cell: string, name: string) => { ui.cell(cell).focus(); ui.cell(cell).dispatchEvent(new w.KeyboardEvent("keydown", { key: name, altKey: true, bubbles: true, cancelable: true })); flushSync(); };
   try {
     ui.click('[data-score-cell="4:4"]'); key("4:4", "PageUp");
-    assert.deepEqual(ui.ops, [{ op: "clear_cell", step: 4, row: 4 }, { op: "set_cell", step: 4, row: 16, value: { k: "n", p: PATCH_ID, len: 2 } }]);
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 4, row: 16, value: { k: "n", p: PATCH_ID, len: 2 } }, { op: "clear_cell", step: 4, row: 4 }]);
     ui.ops.length = 0;
     ui.click('[data-score-cell="8:20"]'); key("8:20", "PageUp");
     assert.deepEqual(ui.ops, []); assert.match(ui.notices.at(-1) ?? "", /off the grid/);
     key("8:20", "PageDown");
-    assert.deepEqual(ui.ops, [{ op: "clear_cell", step: 8, row: 20 }, { op: "set_cell", step: 8, row: 8, value: { k: "n", p: PATCH_ID, len: 1 } }]);
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 8, row: 8, value: { k: "n", p: PATCH_ID, len: 1 } }, { op: "clear_cell", step: 8, row: 20 }]);
   } finally { await ui.done(); }
 });
 
@@ -1306,12 +1342,114 @@ test("the grid stays editable while the score plays: a placed note is written bu
     assert.ok(ui.target.querySelector("[data-score-next-pass]"), "edits wait for the next pass");
     assert.equal(ui.target.querySelector(".st-banner.warn"), null, "playback is not a read-only reason");
     ui.click('[data-score-cell="3:2"]');
-    assert.deepEqual(ui.ops, [{ op: "set_cell", step: 2, row: 2, value: { k: "n", p: PATCH_ID, len: 2 } }]);
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 2, row: 2, value: { k: "n", p: PATCH_ID, len: 2 } }]);
     assert.deepEqual(heard, [], "the loop's next pass plays it; no audition cuts the loop");
     ui.click('[aria-label="Move this note up"]');
-    assert.deepEqual(ui.ops.at(-1), { op: "set_cell", step: 2, row: 3, value: { k: "n", p: PATCH_ID, len: 2 } });
+    assert.deepEqual(ui.ops.slice(-2), [{ op: "set_note", step: 2, row: 3, value: { k: "n", p: PATCH_ID, len: 2 } }, { op: "clear_note", step: 2, row: 2, layer: PATCH_ID }]);
     assert.deepEqual(heard, [], "nor does a move");
     ui.click('[aria-label="Listen to this note"]');
     assert.deepEqual(heard, [63], "an explicit listen still sounds");
+  } finally { await ui.done(); }
+});
+
+// Owner decisions 2026-10-20: one note per sound per cell, and every sound (and the drum kit) can
+// be shown, ghosted or hidden. Ghost is outlines only and never interactive, so other sounds can be
+// written over it; only a shown sound takes new notes; the toggle is a symbol, never a word.
+const OTHER = "c".repeat(64);
+function layered(notes: Record<string, ScoreCell>): ScoreModel {
+  const m = model(); m.patches[OTHER] = { ...PATCH, o: [{ w: 2, t: 0, c: 0, l: 80 }] }; m.patchSlots[OTHER] = slot(m.patches[OTHER]);
+  m.notes = notes; // separate from the (legacy, empty) cells: these are layered notes
+  return m;
+}
+
+test("each sound and the drum kit cycle show, ghost and hide with a symbol only; a ghosted sound is written over", async () => {
+  const ui = surface(layered({ [`2:5/${OTHER}`]: { k: "n", p: OTHER, len: 2 } }));
+  try {
+    const toggle = () => ui.target.querySelector<HTMLButtonElement>(`[data-score-visibility="${OTHER}"]`)!;
+    assert.ok(ui.target.querySelector('[data-score-visibility="d"]'), "the drum kit has its own toggle");
+    assert.equal(toggle().textContent!.trim(), "", "a symbol, no words");
+    assert.match(toggle().getAttribute("aria-label")!, /: shown$/);
+    assert.ok(ui.cell("2:5").classList.contains("n"), "a shown sound's note is drawn and editable");
+    ui.click(`[data-score-visibility="${OTHER}"]`);
+    assert.match(toggle().getAttribute("aria-label")!, /: ghosted$/);
+    assert.ok(ui.cell("2:5").classList.contains("ghost") && ui.cell("2:5").classList.contains("gon"), "an outline at the onset");
+    assert.ok(ui.cell("3:5").classList.contains("gend"), "and the end of its hold");
+    assert.equal(ui.cell("2:5").classList.contains("n"), false, "not a note to the grid");
+    ui.click('[data-score-cell="2:5"]');
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 2, row: 5, value: { k: "n", p: PATCH_ID, len: SCORE_DEFAULT_HOLD } }], "the chosen sound is placed over the ghost, in its own layer");
+    ui.click(`[data-score-visibility="${OTHER}"]`);
+    assert.match(toggle().getAttribute("aria-label")!, /: hidden$/);
+    assert.equal(ui.cell("3:5").classList.contains("ghost") || ui.cell("3:5").classList.contains("held"), false, "a hidden sound is not drawn");
+    ui.click(`[data-score-visibility="${OTHER}"]`);
+    assert.match(toggle().getAttribute("aria-label")!, /: shown$/, "and back to shown");
+  } finally { await ui.done(); }
+});
+
+// Review L4 and L6: selection is kept by cell, so ghosting a sound must drop a selection on it (it
+// would re-bind to another sound's note in that cell); and two members placing the same note is no
+// conflict, so it carries no conflict mark.
+test("ghosting a sound drops the selection on it; identical concurrent values are not marked as a conflict", async () => {
+  const m = layered({ [`4:2/${OTHER}`]: { k: "n", p: OTHER, len: 1 }, [`8:3/${PATCH_ID}`]: { k: "n", p: PATCH_ID, len: 1 } });
+  const source = (n: number) => ({ opId: n.toString(16).padStart(64, "0"), author: "e".repeat(64), nonce: n.toString(16).padStart(32, "0") });
+  m.layerSlots = { [`8:3/${PATCH_ID}`]: { cleared: false, register: { selected: { value: { k: "n", p: PATCH_ID, len: 1 }, source: source(1) }, conflicts: [{ value: { k: "n", p: PATCH_ID, len: 1 }, source: source(2) }] } } };
+  // Two members set the same tempo at once: one value, not a conflict.
+  m.headers.bpm = { selected: { value: 120, source: source(3) }, conflicts: [{ value: 120, source: source(4) }] };
+  assert.deepEqual(scoreAttention(m).map((item) => item.id), [], "nothing to choose between");
+  const ui = surface(m);
+  try {
+    assert.equal(ui.cell("8:3").classList.contains("conf"), false, "the same note twice is one note");
+    assert.equal(ui.target.querySelector(".sc-field.conf"), null, "no header conflict either");
+    ui.click('[data-score-cell="4:2"]');
+    assert.ok(ui.target.querySelector('[aria-label="Sound of this note"]'), "the other sound's note is selected");
+    ui.click(`[data-score-visibility="${OTHER}"]`);
+    assert.equal(ui.target.querySelector('[aria-label="Sound of this note"]'), null, "ghosting its sound drops that selection");
+    assert.equal(ui.cell("4:2").classList.contains("sel"), false);
+  } finally { await ui.done(); }
+});
+
+// Third review L2: the playing voices are clipped to the end, so "fit to last note" read 15 for a
+// hold from 14 to 21 and was disabled; it must still offer to cover the hold.
+test("fit to last note still covers a hold that crosses the end", async () => {
+  const m = model(); m.steps = 16; m.cells["14:0"] = { k: "n", p: PATCH_ID, len: 8 };
+  const ui = surface(m);
+  try {
+    ui.click('[data-score-tab="score"]');
+    const fit = ui.button("fit to last note");
+    assert.equal(fit.disabled, false);
+    fit.click(); flushSync();
+    assert.deepEqual(ui.ops.at(-1), { op: "set_header", field: "steps", value: 22 });
+  } finally { await ui.done(); }
+});
+
+test("only a shown sound takes new notes: ghosting or hiding the chosen sound turns placement off", async () => {
+  const ui = surface(layered({}));
+  try {
+    for (const state of ["ghosted", "hidden"]) {
+      ui.click(`[data-score-visibility="${PATCH_ID}"]`);
+      assert.match(ui.target.querySelector(`[data-score-visibility="${PATCH_ID}"]`)!.getAttribute("aria-label")!, new RegExp(state));
+      assert.ok(ui.cell("4:4").classList.contains("off"), `${state}: no placement`);
+      ui.click('[data-score-cell="4:4"]');
+      assert.deepEqual(ui.ops, []);
+    }
+    ui.click('[data-score-mode="drum"]');
+    assert.equal(ui.cell("4:4").classList.contains("off"), false, "the drum kit is its own layer, still shown");
+    ui.click('[data-score-visibility="d"]');
+    assert.ok(ui.cell("4:4").classList.contains("off"), "a ghosted kit takes no hits");
+  } finally { await ui.done(); }
+});
+
+test("a cell holding two sounds shows the chosen one, marks the other, and selecting a note picks up its sound", async () => {
+  const ui = surface(layered({ [`4:2/${PATCH_ID}`]: { k: "n", p: PATCH_ID, len: 1 }, [`4:2/${OTHER}`]: { k: "n", p: OTHER, len: 1 }, [`8:2/${OTHER}`]: { k: "n", p: OTHER, len: 1 } }));
+  try {
+    assert.ok(ui.cell("4:2").classList.contains("stacked"), "a second sound is behind the shown one");
+    assert.match(ui.cell("4:2").getAttribute("title")!, /more sounds here/);
+    assert.match(ui.cell("4:2").getAttribute("aria-label")!, /SYNTH/, "the chosen sound's note is the one shown");
+    ui.click('[data-score-cell="8:2"]');
+    assert.ok(ui.target.querySelector(`[data-doc-patch="${OTHER}"]`)!.closest(".sc-prow")!.classList.contains("on"), "selecting the other sound's note chose it");
+    assert.match(ui.cell("4:2").getAttribute("aria-label")!, /Square sound/, "so the shared cell now shows that sound's note");
+    ui.click('[data-score-cell="12:6"]');
+    assert.deepEqual(ui.ops, [{ op: "set_note", step: 12, row: 6, value: { k: "n", p: OTHER, len: SCORE_DEFAULT_HOLD } }], "the next placement uses the sound just picked up");
+    ui.click('[aria-label="Erase"]'); ui.click('[data-score-cell="4:2"]');
+    assert.deepEqual(ui.ops.at(-1), { op: "clear_note", step: 4, row: 2, layer: OTHER }, "erase removes the chosen sound's note, never the other one in that cell");
   } finally { await ui.done(); }
 });

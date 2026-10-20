@@ -772,7 +772,8 @@
     // Editor Play is the whole composition unless the composer asked for a start step. Stop
     // leaves a frame selected for editing, which must not turn the next Play into an implicit
     // seek that skips the first sound marker.
-    void audioActions.start(kind, prepare, loop, from)
+    // `document`: this is the open document's own playback (a layered score may hold more notes).
+    void audioActions.start(kind, prepare, loop, from, true)
       .then((started: boolean) => { if (!started) onnotice("playback was cancelled or audio is unavailable; press Play to try again", "warn"); })
       .catch((e: unknown) => onnotice(reason(e), "warn"));
   }
@@ -953,6 +954,9 @@
   // discard of something that may now have committed.
   let discardArmed = $state("");
   const armKey = (s: SaveRecord) => `${s.id}:${s.status}:${s.mayHaveCommitted}`;
+  /** The armed confirmation. A Score write takes the rest of its gesture with it (the clear of the
+   *  note's old place, the phrase's other notes), so the button says how many edits go. */
+  const discardConfirm = (s: SaveRecord) => { const n = session.discardCount(s.id); return n > 1 ? `Discard ${n} edits?` : "Really discard?"; };
   function discardSave(s: SaveRecord) {
     if (discardArmed !== armKey(s)) { discardArmed = armKey(s); return; }
     discardArmed = "";
@@ -1239,7 +1243,7 @@
           {#if (head.kind === "frame" || head.kind === "apply" || head.kind === "applyIndex" || head.kind === "overlayApply") && !refusalFor(head) && overlayRetryOf(head) !== "none" && session.canReauthor(head.id)}
             <button type="button" class="st-btn" class:primary={!session.canRetry(head.id)} onclick={() => reauthorSave(head)}>Save as a new edit</button>
           {/if}
-          <button type="button" class="st-btn ghost" onclick={() => discardSave(head)}>{discardArmed === armKey(head) ? "Really discard?" : "Discard"}</button>
+          <button type="button" class="st-btn ghost" onclick={() => discardSave(head)}>{discardArmed === armKey(head) ? discardConfirm(head) : "Discard"}</button>
         </span>{/if}
       </div>
     {/if}
@@ -1258,7 +1262,7 @@
               {#if session.canRetry(s.id)}
                 <button type="button" class="st-btn primary" onclick={() => retrySave(s)}>{overlayRetryOf(s) === "afterExplicitAccess" ? "Reload and retry" : "Retry now"}</button>
               {/if}
-              <button type="button" class="st-btn ghost" onclick={() => discardSave(s)}>{discardArmed === armKey(s) ? "Really discard?" : "Discard"}</button>
+              <button type="button" class="st-btn ghost" onclick={() => discardSave(s)}>{discardArmed === armKey(s) ? discardConfirm(s) : "Discard"}</button>
             </span>{/if}
           </div>
         {/each}
@@ -1271,7 +1275,7 @@
         <span>{heldQueued.length} restored {heldQueued.length === 1 ? "edit" : "edits"} not saved yet · {heldQueued[0].label}</span>
         <span class="st-card-acts">
           <button type="button" class="st-btn primary" onclick={() => void session.saveDocument(objectId).catch(e => onnotice(reason(e), "warn"))}>Save</button>
-          <button type="button" class="st-btn ghost" onclick={() => discardSave(heldQueued[0])}>{discardArmed === armKey(heldQueued[0]) ? "Really discard?" : "Discard"}</button>
+          <button type="button" class="st-btn ghost" onclick={() => discardSave(heldQueued[0])}>{discardArmed === armKey(heldQueued[0]) ? discardConfirm(heldQueued[0]) : "Discard"}</button>
         </span>
       </div>
     {/if}
@@ -1403,7 +1407,7 @@
                   {#if inspected === v.snapshot}
                     {#if inspectedVersion}
                       {@const c = inspectedVersion.content}
-                      <p class="micro wrap">{#if c.kind === "flipnote"}title "{c.title?.selected.value ?? ""}" · {c.fps?.selected.value ?? 12} fps · {c.timeline.length} frames · {Object.keys(c.tombstones).length} deleted · {fmtKib(c.declaredFrameBytes)} declared{:else if c.kind === "score"}score "{c.title?.selected.value ?? ""}" · {c.bpm?.selected.value ?? 120} BPM · {Object.keys(c.cells).length} retained cell slots{:else}index · {Object.keys(c.objects).length} entries · {Object.keys(c.overflow).length} overflow · {Object.keys(c.deletedObjects).length} deleted{/if} · historical, not the current view</p>
+                      <p class="micro wrap">{#if c.kind === "flipnote"}title "{c.title?.selected.value ?? ""}" · {c.fps?.selected.value ?? 12} fps · {c.timeline.length} frames · {Object.keys(c.tombstones).length} deleted · {fmtKib(c.declaredFrameBytes)} declared{:else if c.kind === "score"}score "{c.title?.selected.value ?? ""}" · {c.bpm?.selected.value ?? 120} BPM · {Object.keys(c.cells).length + Object.keys(c.layers ?? {}).length} retained note slots{:else}index · {Object.keys(c.objects).length} entries · {Object.keys(c.overflow).length} overflow · {Object.keys(c.deletedObjects).length} deleted{/if} · historical, not the current view</p>
                     {:else}
                       <p class="micro wrap">reading…</p>
                     {/if}
@@ -1494,7 +1498,7 @@
       {#if mediaReceipt}<div class="st-banner info wrap">{mediaReceipt}</div>{/if}
       {#key objectId}
         <ScoreEditor model={score} readonlyReason={readOnlyWhy} loading={doc?.loading ?? false} error={doc?.error ?? ""} {patchLibrary} library={patchShelves} {who} {tint}
-          onop={(op) => guard(() => session.applyScoreOp(objectId, op))} onroom={() => session.draftRoom()} onaddpatch={addStudioPatch}
+          onop={(op, gesture) => guard(() => session.applyScoreOp(objectId, op, gesture))} onroom={() => session.draftRoom()} onaddpatch={addStudioPatch}
           selection={scoreSelectionMemory.recall(objectId)} onselection={(selection) => scoreSelectionMemory.remember(objectId, selection)}
           onplay={audioActions ? toggleStudioPlay : undefined} onstop={() => audioActions?.stop()} {playing} nextPass={playing && !!audioState.nextPass} positionMs={playing ? audioState.elapsedMs : null}
           {loop} onloop={(next) => { loop = next; }} onaudition={audioActions ? auditionSound : undefined} onauditionpad={audioActions ? auditionPad : undefined} onnew={openSoundfont}

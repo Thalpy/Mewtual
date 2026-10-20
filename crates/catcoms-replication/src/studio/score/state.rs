@@ -13,6 +13,8 @@ use crate::studio::{IndexRegister, IndexSource, IndexValue};
 use crate::MAX_CHECKPOINT_BYTES;
 
 pub type ScoreAddress = (u16, u8);
+/// A layered note's slot: `(step, row, layer)`, keyed `n/{step}:{row}/{layer}` in the document.
+pub type ScoreNoteAddress = (u16, u8, ScoreLayer);
 /// Scores use the Index provenance shape: full author, original nonce and derived operation id.
 /// There is no invented per-cell timestamp or new author/signature mechanism.
 pub type ScoreSource = IndexSource;
@@ -20,11 +22,17 @@ pub type ScoreValue<T> = IndexValue<T>;
 pub type ScoreRegister<T> = IndexRegister<T>;
 pub(super) const MAX_PRIMITIVES: u64 = (MAX_EPOCH_OPERATIONS * 7 + 8192) as u64;
 pub(super) const MAX_READ_BYTES: usize = MAX_EPOCH_BYTES + MAX_CHECKPOINT_BYTES;
-const MAX_KEY_BYTES: usize = 71;
+/// The longest key a score document may hold: `n/255:24/` plus a 64-hex sound id is 73 bytes.
+/// It was 71 (`_p1/op/` plus 64 hex) before layered notes. A 74-byte key is refused before any
+/// value under it is read. This also bounds string scalar values (`Budget::value`), whose only
+/// legitimate use is the fixed header strings, all far shorter.
+const MAX_KEY_BYTES: usize = 73;
 pub(super) const MAX_RECORD_BYTES: usize = 33 + MAX_DOMAIN_OP_BYTES;
 
-/// Raw Automerge winner and ALL live alternatives. Effective removal is deliberately distinct
-/// from that winner: an unobserved concurrent Clear/Remove still dominates a winning Set.
+/// A LEGACY slot (`c/` cells, `p/` recipes): REMOVAL WINS. Raw Automerge winner and ALL live
+/// alternatives. Effective removal is deliberately distinct from that winner: an unobserved
+/// concurrent Clear/Remove still dominates a winning Set, and a live legacy cell plays only its
+/// selected value. Never use these helpers for a layered note: see [`ScoreLayerSlot`].
 #[derive(Clone, PartialEq, Eq)]
 pub struct ScoreSlot<T> {
     pub register: ScoreRegister<Option<T>>,
@@ -57,6 +65,75 @@ impl<T> std::fmt::Debug for ScoreSlot<T> {
     }
 }
 
+/// A LAYERED note slot (`n/{step}:{row}/{layer}`): ADD WINS (docs/design-score-layers.md section 2).
+///
+/// A newtype over the register with deliberately NO `value()` or `removed()`, so the removal-wins
+/// helpers of [`ScoreSlot`] cannot be applied to it by copy-paste. A concurrent clear does not
+/// remove a concurrent set: a clear only removes the values its author observed (its Automerge
+/// predecessors), and whatever live values remain all play.
+///
+/// The register keeps every alternative, clears included (recovery evidence); a value's layer
+/// always equals the slot's (enforced by the reader, the snapshot codec and the change validator).
+#[derive(Clone, PartialEq, Eq)]
+pub struct ScoreLayerSlot {
+    register: ScoreRegister<Option<ScoreCell>>,
+}
+impl ScoreLayerSlot {
+    /// Wrap a register. Construction is not validation: the snapshot codec (and so `readiness`,
+    /// `checkpoint` and every recovery snapshot) re-checks provenance and the layer of each value.
+    pub fn new(register: ScoreRegister<Option<ScoreCell>>) -> Self {
+        Self { register }
+    }
+    /// Raw evidence, for display and recovery. Reading `selected.value` from this is NOT what the
+    /// slot plays or shows: use [`Self::live`] and [`Self::shown`].
+    pub fn register(&self) -> &ScoreRegister<Option<ScoreCell>> {
+        &self.register
+    }
+    /// Every alternative, selected first, clears included.
+    pub fn alternatives(&self) -> impl Iterator<Item = &ScoreValue<Option<ScoreCell>>> {
+        std::iter::once(&self.register.selected).chain(self.register.conflicts.iter())
+    }
+    /// The distinct `Some` values among all alternatives, in alternative order (selected first).
+    /// Every one of these plays. Linear-logarithmic, never quadratic: one member can stack
+    /// thousands of concurrent values on one key.
+    pub fn live(&self) -> Vec<&ScoreCell> {
+        let mut seen = BTreeSet::new();
+        self.alternatives()
+            .filter_map(|v| v.value.as_ref())
+            .filter(|cell| seen.insert(super::voices::identity(cell)))
+            .collect()
+    }
+    /// No live value: every alternative is a clear. Only a cleared slot is "deleted".
+    pub fn cleared(&self) -> bool {
+        self.alternatives().all(|v| v.value.is_none())
+    }
+    /// The alternative the composer shows and edits from, a whole-version restore authors and
+    /// compaction promotes to `selected`: the selected value if it is live, else the live
+    /// alternative with the lowest `source.op_id` (bytewise). `None` exactly when cleared.
+    /// The renderer's `layerShownAlternative` (studio-native.ts) is the same rule.
+    pub fn shown_alternative(&self) -> Option<&ScoreValue<Option<ScoreCell>>> {
+        if self.register.selected.value.is_some() {
+            return Some(&self.register.selected);
+        }
+        self.register
+            .conflicts
+            .iter()
+            .filter(|v| v.value.is_some())
+            .min_by_key(|v| v.source.op_id)
+    }
+    /// The value of [`Self::shown_alternative`].
+    pub fn shown(&self) -> Option<&ScoreCell> {
+        self.shown_alternative().and_then(|v| v.value.as_ref())
+    }
+}
+impl std::fmt::Debug for ScoreLayerSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScoreLayerSlot").finish_non_exhaustive()
+    }
+}
+
+/// Diagnostic flags of one note slot, a legacy cell or a layered note. Each is an OR over the
+/// slot's voices (docs/design-score-layers.md section 3); none of them refuses playback.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ScoreCellIssues {
     pub count: bool,
@@ -70,16 +147,31 @@ pub struct ScorePatchIssues {
     pub count: bool,
     pub conflict: bool,
 }
-/// Reasons a resolved export is unavailable. Evidence remains editable/recoverable, not dropped.
+/// What is worth reviewing about a score. DIAGNOSTICS ONLY: nothing refuses play, export, share
+/// or post on these any more (docs/design-score-layers.md section 3); voices that cannot play are
+/// skipped and counted instead. Evidence remains editable/recoverable, not dropped.
+///
+/// SPARSE: a slot appears only with at least one true flag. The renderer serialises readiness into
+/// its editor media key and computes the same maps itself (score-voices.ts), so a dense or
+/// differently-derived projection would make every readback look like a source change.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ScoreReadiness {
+    /// Legacy cells, keyed like `c/` (`"S:R"` in the bridge DTO).
     pub cells: BTreeMap<ScoreAddress, ScoreCellIssues>,
+    /// Layered notes, keyed like `n/` (`"S:R/L"` under `readiness.layers` in the bridge DTO).
+    pub layers: BTreeMap<ScoreNoteAddress, ScoreCellIssues>,
     pub patches: BTreeMap<ContentId, ScorePatchIssues>,
+    /// A header register holding more than one DISTINCT value. The Automerge winner is the value
+    /// used, deterministically on every peer; identical concurrent values are not a conflict.
     pub header_conflicts: bool,
 }
 impl ScoreReadiness {
+    /// Nothing to review. A diagnostic summary only; never a gate.
     pub fn ready(&self) -> bool {
-        self.cells.is_empty() && self.patches.is_empty() && !self.header_conflicts
+        self.cells.is_empty()
+            && self.layers.is_empty()
+            && self.patches.is_empty()
+            && !self.header_conflicts
     }
 }
 impl std::fmt::Debug for ScoreReadiness {
@@ -99,7 +191,12 @@ pub struct ScoreProjection {
     pub bpm: Option<ScoreRegister<u16>>,
     pub bpb: Option<ScoreRegister<u8>>,
     pub steps: Option<ScoreRegister<u16>>,
+    /// Legacy `c/` cells: removal wins, only the selected value plays.
     pub cells: BTreeMap<ScoreAddress, ScoreSlot<ScoreCell>>,
+    /// Layered `n/` notes: add wins, every distinct live value plays. Empty for every score
+    /// authored before layers, which keeps such scores' seeds and DTOs byte-identical.
+    pub layers: BTreeMap<ScoreNoteAddress, ScoreLayerSlot>,
+    /// Recipes: removal wins, like legacy cells.
     pub patches: BTreeMap<ContentId, ScoreSlot<StudioPatch>>,
 }
 impl std::fmt::Debug for ScoreProjection {
@@ -140,6 +237,7 @@ impl ScoreProjection {
             bpb: None,
             steps: None,
             cells: BTreeMap::new(),
+            layers: BTreeMap::new(),
             patches: BTreeMap::new(),
         }
     }
@@ -311,6 +409,22 @@ impl ScoreProjection {
                         })?,
                     },
                 );
+            } else if let Some(note) = key.strip_prefix("n/") {
+                // Same canonical-address rules as `c/`, plus a canonical layer spelling. Every
+                // value already proved `operation_key(op) == key`, which pins the address and
+                // derives a SetNote's layer from its own value; the guard below restates the
+                // layer binding so a future key-format change cannot silently drop it.
+                let (address, layer) = note.split_once('/').ok_or(ReplError::Malformed)?;
+                let (step, row) = parse_address(address)?;
+                let layer = ScoreLayer::parse(layer)?;
+                result.layers.insert(
+                    (step, row, layer),
+                    ScoreLayerSlot::new(map_register(register, |op| match op {
+                        ScoreOp::SetNote { value, .. } if value.layer() == layer => Ok(Some(value)),
+                        ScoreOp::ClearNote { layer: cleared, .. } if cleared == layer => Ok(None),
+                        _ => Err(ReplError::Malformed),
+                    })?),
+                );
             } else if let Some(patch) = key.strip_prefix("p/") {
                 let patch = fixed_hex(patch)?;
                 result.patches.insert(
@@ -365,70 +479,64 @@ impl ScoreProjection {
         Ok(result)
     }
 
-    /// Derive bounded readiness without deleting authored material. Caller-mutable projection
-    /// fields are measured/validated before allocating derived flags or walking overlap intervals.
-    pub fn readiness(&self) -> Result<ScoreReadiness, ReplError> {
-        self.measure_snapshot()?;
-        let mut result = ScoreReadiness {
-            cells: BTreeMap::new(),
-            patches: BTreeMap::new(),
-            header_conflicts: self.title.as_ref().is_some_and(|r| !r.conflicts.is_empty())
-                || self.bpm.as_ref().is_some_and(|r| !r.conflicts.is_empty())
-                || self.bpb.as_ref().is_some_and(|r| !r.conflicts.is_empty())
-                || self.steps.as_ref().is_some_and(|r| !r.conflicts.is_empty()),
-        };
-        let active_patches: BTreeSet<_> = self
-            .patches
+    /// The sounds a note may use: active (non-removed) recipes, the first 64 by id. A note whose
+    /// sound is outside this set is skipped and flagged `recipe`, never refused.
+    pub(super) fn admitted_sounds(&self) -> BTreeSet<ContentId> {
+        self.patches
             .iter()
             .filter(|(_, slot)| slot.value().is_some())
             .map(|(id, _)| *id)
-            .collect();
-        let admitted_patches: BTreeSet<_> = active_patches
-            .iter()
             .take(SCORE_MAX_PATCHES)
-            .copied()
-            .collect();
+            .collect()
+    }
+
+    /// What this score plays (docs/design-score-layers.md section 3), the Rust mirror of the
+    /// renderer's `scoreVoices`. Caller-mutable fields are measured/validated first.
+    pub fn voices(&self) -> Result<ScoreVoices, ReplError> {
+        self.measure_snapshot()?;
+        Ok(super::voices::compute(
+            &self.cells,
+            &self.layers,
+            self.effective_steps(),
+            &self.admitted_sounds(),
+        )
+        .public())
+    }
+
+    /// Derive bounded, sparse diagnostics without deleting authored material. Caller-mutable
+    /// projection fields are measured/validated before allocating derived flags or sorting voices.
+    /// The note flags come from the one voice definition shared with the renderer (see
+    /// `voices.rs`); this runs on every native view, so it is O(n log n) in retained evidence.
+    pub fn readiness(&self) -> Result<ScoreReadiness, ReplError> {
+        self.measure_snapshot()?;
+        // More than one DISTINCT value (identical concurrent values are not a conflict). Linear:
+        // "some alternative differs from the selected one" is the same predicate.
+        fn distinct<T: PartialEq>(r: &ScoreRegister<T>) -> bool {
+            r.conflicts.iter().any(|v| v.value != r.selected.value)
+        }
+        let admitted = self.admitted_sounds();
+        let report =
+            super::voices::compute(&self.cells, &self.layers, self.effective_steps(), &admitted);
+        let mut result = ScoreReadiness {
+            cells: report.cells,
+            layers: report.layers,
+            patches: BTreeMap::new(),
+            header_conflicts: self.title.as_ref().is_some_and(distinct)
+                || self.bpm.as_ref().is_some_and(distinct)
+                || self.bpb.as_ref().is_some_and(distinct)
+                || self.steps.as_ref().is_some_and(distinct),
+        };
         for (id, slot) in &self.patches {
             if slot.value().is_none() {
                 continue;
             }
             let issues = ScorePatchIssues {
-                count: !admitted_patches.contains(id),
-                conflict: !slot.register.conflicts.is_empty(),
+                count: !admitted.contains(id),
+                // Never in practice (an id is its descriptor's hash); kept for the DTO.
+                conflict: distinct(&slot.register),
             };
             if issues != ScorePatchIssues::default() {
                 result.patches.insert(*id, issues);
-            }
-        }
-        let mut active = 0;
-        let mut held: BTreeMap<u8, Vec<(u16, ScoreAddress)>> = BTreeMap::new();
-        for (address @ (step, row), slot) in &self.cells {
-            let Some(cell) = slot.value() else {
-                continue;
-            };
-            active += 1;
-            let mut issues = ScoreCellIssues {
-                count: active > SCORE_MAX_CELLS,
-                extent: *step >= self.effective_steps(),
-                conflict: !slot.register.conflicts.is_empty(),
-                ..ScoreCellIssues::default()
-            };
-            if let ScoreCell::Note { patch, len, .. } = cell {
-                let end = *step + len.unwrap_or(1); // static validation proved global extent.
-                issues.extent |= end > self.effective_steps();
-                issues.recipe = !admitted_patches.contains(patch);
-                let intervals = held.entry(*row).or_default();
-                intervals.retain(|(end, _)| *end > *step);
-                for (_, other) in intervals.iter() {
-                    result.cells.entry(*other).or_default().overlap = true;
-                    issues.overlap = true;
-                }
-                intervals.push((end, *address));
-            }
-            if issues != ScoreCellIssues::default() {
-                let entry = result.cells.entry(*address).or_default();
-                issues.overlap |= entry.overlap;
-                *entry = issues;
             }
         }
         Ok(result)
@@ -456,6 +564,9 @@ pub(super) fn operation_key(operation: &ScoreOp) -> String {
         ScoreOp::SetCell { step, row, .. } | ScoreOp::ClearCell { step, row } => {
             format!("c/{step}:{row}")
         }
+        // A SetNote's layer is its value's; the key never takes a layer from anywhere else.
+        ScoreOp::SetNote { step, row, value } => format!("n/{step}:{row}/{}", value.layer().key()),
+        ScoreOp::ClearNote { step, row, layer } => format!("n/{step}:{row}/{}", layer.key()),
         ScoreOp::SetPatch { patch, .. } | ScoreOp::RemovePatch { patch } => {
             format!("p/{}", hex(patch))
         }

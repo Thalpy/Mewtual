@@ -86,6 +86,17 @@ impl Writer {
         }
         Ok(())
     }
+    /// Fixed-width bytes with NO length prefix, for a field whose width the format itself fixes
+    /// (the Score layer trailer's sound id). Read back with [`fixed`].
+    pub(super) fn fixed<const N: usize>(&mut self, value: &[u8; N]) -> Result<(), ReplError> {
+        self.charge(N)?;
+        if let Some(e) = &mut self.encoder {
+            for byte in value {
+                e.put_u8(*byte);
+            }
+        }
+        Ok(())
+    }
     pub(super) fn optional<const N: usize>(
         &mut self,
         value: Option<[u8; N]>,
@@ -113,6 +124,14 @@ pub(super) fn array<const N: usize>(d: &mut Decoder<'_>) -> Result<[u8; N], Repl
         .map_err(malformed)?
         .try_into()
         .map_err(|_| ReplError::Malformed)
+}
+/// Inverse of [`Writer::fixed`]: exactly `N` unprefixed bytes.
+pub(super) fn fixed<const N: usize>(d: &mut Decoder<'_>) -> Result<[u8; N], ReplError> {
+    let mut out = [0; N];
+    for byte in &mut out {
+        *byte = d.get_u8().map_err(malformed)?;
+    }
+    Ok(out)
 }
 pub(super) fn optional<const N: usize>(d: &mut Decoder<'_>) -> Result<Option<[u8; N]>, ReplError> {
     match d.get_u8().map_err(malformed)? {
@@ -173,6 +192,10 @@ impl SnapshotValue for StudioExpiry {
 
 /// Selected values never change just to meet the conflict limit. Extra alternatives and fields
 /// remain in the complete recovery projection. A field with alternatives consumes one slot.
+///
+/// Score LAYER slots (`n/` notes) are deliberately outside this budget: their alternatives are
+/// voices that all play, so trimming them here would change what a score sounds like at its next
+/// checkpoint. They are bounded by the 4096-voice cap instead (score/snapshot.rs `compact`).
 pub(super) struct ConflictBudget(pub(super) usize);
 impl ConflictBudget {
     pub(super) fn retained(&mut self, alternatives: usize) -> usize {

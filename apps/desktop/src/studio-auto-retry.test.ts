@@ -181,6 +181,28 @@ test("a Score edit the history moved under is saved again into the current epoch
   assert.equal(h.session.saves.length, 0, "no card was left for the member");
 });
 
+// Design review H4: the composer now places every note as a layered `set_note`, so the re-save
+// must cover it or the owner's decision silently stops applying to placements. A layered clear
+// stays the member's, like `clear_cell`.
+test("a layered note the history moved under is re-saved on its own; a layered clear stays the member's", async () => {
+  const h = await harness();
+  h.session.applyScoreOp(score, { op: "set_note", step: 0, row: 0, value: { k: "d", pad: 1 } });
+  h.ipc.on("studio_read", () => ({ ...ordinaryView(scoreContent(), { epochId: id32(0xe2) }), group }));
+  await h.session.refreshDoc(score);
+  await h.tick(5000);
+  const sent = h.calls("studio_apply");
+  assert.equal(sent.length, 1); assert.equal(sent[0].args.epochId, id32(0xe2));
+  assert.equal(JSON.parse(String(sent[0].args.body)).op, "set_note");
+  assert.equal(h.session.saves.length, 0, "no card was left for the member");
+  const clear = await harness();
+  clear.session.applyScoreOp(score, { op: "clear_note", step: 0, row: 0, layer: "d" });
+  clear.ipc.on("studio_read", () => ({ ...ordinaryView(scoreContent(), { epochId: id32(0xe2) }), group }));
+  await clear.session.refreshDoc(score);
+  await clear.tick(5000);
+  assert.equal(clear.calls("studio_apply").length, 0, "a clear is never re-authored unseen");
+  assert.equal(clear.session.saves.length, 1); assert.equal(clear.session.needsDecision(clear.session.saves[0].id), true);
+});
+
 test("after native's retired-epoch refusal, the Score edit is re-read and re-saved on its own", async () => {
   const h = await harness(); let applies = 0, epoch = id32(0xe1);
   h.ipc.on("studio_read", () => ({ ...ordinaryView(scoreContent(), { epochId: epoch }), group }));
@@ -351,6 +373,126 @@ test("a local-draft save is never resent on its own: its retry identity is a tic
   assert.equal(failed.kind, "overlayApply"); assert.equal(failed.status, "uncertain");
   assert.equal(h.session.autoRetryAt(failed.id), null);
   await h.tick(10 * 60_000); assert.equal(h.calls("studio_unconfirmed_overlay_save").length, 1);
+});
+
+// Review M1 (layers): a composer move is [write the note at its new place, clear its old place].
+// Native refused the write for good (its sound was removed meanwhile) and the clear waited behind
+// it. Discarding the write released the clear, which then deleted the note it was moving.
+test("discarding a gesture's refused write takes that gesture's unsent clear with it, so the note stays", async () => {
+  const h = await harness();
+  const note = { k: "d" as const, pad: 1 };
+  h.ipc.on("studio_apply_batch", () => { throw "Studio: batched Apply item 1 of 2 was refused (cell out of range); the items before it are saved, so retry the same batch exactly or discard that item"; });
+  h.ipc.on("studio_apply", (args) => { if (JSON.parse(String(args.body)).op === "set_note") throw "Studio: cell out of range"; return { ...ordinaryView(scoreContent()), group }; });
+  h.session.applyScoreOp(score, { op: "set_note", step: 4, row: 0, value: note }, 7);
+  h.session.applyScoreOp(score, { op: "clear_cell", step: 2, row: 0 }, 7);
+  // An unrelated clear of another gesture stays queued behind it and is saved after.
+  h.session.applyScoreOp(score, { op: "clear_cell", step: 9, row: 0 }, 8);
+  await h.tick(5000); await settle(8); await h.tick(1000);
+  const ops = () => h.session.saves.map((s) => s.kind === "apply" ? s.op.op : s.kind);
+  assert.deepEqual(ops(), ["set_note", "clear_cell", "clear_cell"], "the clears wait behind the refused write");
+  h.session.discard(h.session.saves[0].id); await settle(8); await h.tick(1000);
+  const sent = h.calls("studio_apply").map((c) => JSON.parse(String(c.args.body)) as { op: string; step: number });
+  assert.equal(sent.some((op) => op.op === "clear_cell" && op.step === 2), false, "the moved note's old place was never cleared");
+  assert.ok(sent.some((op) => op.op === "clear_cell" && op.step === 9), "another gesture's clear is saved as usual");
+  assert.equal(h.session.saves.length, 0);
+});
+
+// Re-review H1 (a): with two clears behind the refused write, discarding them one by one pumped
+// between them, and the second clear started before it could be dropped.
+test("discarding a refused write drops every clear of its gesture at once: none is sent", async () => {
+  const h = await harness();
+  h.ipc.on("studio_apply_batch", () => { throw "Studio: batched Apply item 1 of 3 was refused (cell out of range); the items before it are saved, so retry the same batch exactly or discard that item"; });
+  h.ipc.on("studio_apply", (args) => { if (JSON.parse(String(args.body)).op === "set_note") throw "Studio: cell out of range"; return { ...ordinaryView(scoreContent()), group }; });
+  h.session.applyScoreOp(score, { op: "set_note", step: 4, row: 0, value: { k: "d", pad: 1 } }, 11);
+  h.session.applyScoreOp(score, { op: "clear_cell", step: 2, row: 0 }, 11);
+  h.session.applyScoreOp(score, { op: "clear_cell", step: 3, row: 0 }, 11);
+  await h.tick(5000); await settle(8); await h.tick(60_000); // automatic resends make the clears queued again
+  assert.deepEqual(h.session.saves.map((s) => s.kind === "apply" ? s.op.op : s.kind), ["set_note", "clear_cell", "clear_cell"]);
+  assert.equal(h.session.discardCount(h.session.saves[0].id), 3, "the confirmation can say three edits go");
+  assert.equal(h.session.discardCount(h.session.saves[1].id), 1, "a clear goes alone");
+  h.session.discard(h.session.saves[0].id); await settle(8); await h.tick(60_000);
+  const sent = h.calls("studio_apply").map((c) => JSON.parse(String(c.args.body)) as { op: string });
+  assert.equal(sent.some((op) => op.op === "clear_cell"), false, "no clear of the gesture was sent");
+  assert.equal(h.session.saves.length, 0);
+});
+
+// Re-review H1 (b): a slide right is [4 <- B, 3 <- A, clear 2]. With 4 <- B refused for good (the
+// score was shortened meanwhile) and discarded, 3 <- A would overwrite B, which then exists nowhere.
+test("discarding a refused write also drops the gesture's later writes, so no carried note is overwritten", async () => {
+  const h = await harness();
+  const a = { k: "n" as const, p: "ab".repeat(32) }, b = { k: "n" as const, p: "ab".repeat(32), vol: 50 };
+  h.ipc.on("studio_apply_batch", () => { throw "Studio: batched Apply item 1 of 3 was refused (note length outside score); the items before it are saved, so retry the same batch exactly or discard that item"; });
+  h.ipc.on("studio_apply", (args) => { const op = JSON.parse(String(args.body)); if (op.op === "set_note" && op.step === 4) throw "Studio: note length outside score"; return { ...ordinaryView(scoreContent()), group }; });
+  h.session.applyScoreOp(score, { op: "set_note", step: 4, row: 0, value: b }, 12);
+  h.session.applyScoreOp(score, { op: "set_note", step: 3, row: 0, value: a }, 12);
+  h.session.applyScoreOp(score, { op: "clear_note", step: 2, row: 0, layer: a.p }, 12);
+  await h.tick(5000); await settle(8); await h.tick(60_000);
+  h.session.discard(h.session.saves[0].id); await settle(8); await h.tick(60_000);
+  const sent = h.calls("studio_apply").map((c) => JSON.parse(String(c.args.body)) as { op: string; step: number });
+  assert.equal(sent.some((op) => op.op === "set_note" && op.step === 3), false, "B at 3 was never overwritten");
+  assert.equal(sent.some((op) => op.op === "clear_note"), false);
+  assert.equal(h.session.saves.length, 0);
+});
+
+// Re-review M2: gesture links are not part of the lock snapshot. Restored, a discarded write used
+// to let a bulk Save run its clear, deleting the note the gesture was moving.
+test("after a restore, discarding a note write holds the restored note edits behind it for the member", async () => {
+  const h = await harness();
+  h.session.applyScoreOp(score, { op: "set_note", step: 4, row: 0, value: { k: "d", pad: 1 } }, 21);
+  h.session.applyScoreOp(score, { op: "clear_cell", step: 2, row: 0 }, 21);
+  const draft = decodeStudioDraft(h.session.draftSnapshot()!);
+  h.session.reset(); h.session.restoreDraft(draft); h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); await settle(8);
+  h.session.open(score); await settle(8);
+  const [write, clear] = h.session.saves;
+  h.session.discard(write.id); await settle(8);
+  await h.session.save().catch(() => {}); await h.tick(60_000);
+  assert.equal(h.calls("studio_apply").length + h.calls("studio_apply_batch").length, 0, "a bulk Save sends nothing the member did not choose");
+  assert.equal(h.session.saves.length, 1);
+  assert.equal(h.session.saves[0].id, clear.id); assert.equal(h.session.saves[0].status, "blocked");
+  assert.match(h.session.saves[0].error, /earlier edit was discarded/);
+  h.session.retry(clear.id); await settle(8); await h.tick(1000);
+  assert.equal(h.calls("studio_apply").length, 1, "the member's own retry sends it");
+});
+
+// Third review M-B: "Save as a new edit" on a restored write replaced the record without its
+// restored mark, so discarding the replacement let a bulk Save run the restored clear.
+test("a restored write saved as a new edit and then discarded still holds the restored clear behind it", async () => {
+  const h = await harness();
+  h.session.applyScoreOp(score, { op: "set_note", step: 4, row: 0, value: { k: "d", pad: 1 } }, 31);
+  h.session.applyScoreOp(score, { op: "clear_cell", step: 2, row: 0 }, 31);
+  const draft = JSON.parse(h.session.draftSnapshot()!);
+  Object.assign(draft.records[0], { status: "blocked", attempts: 1, error: "Studio: cell out of range" }); // refused, proven not written
+  h.session.reset(); h.session.restoreDraft(decodeStudioDraft(JSON.stringify(draft))); h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); await settle(8);
+  h.session.open(score); await settle(8);
+  h.ipc.on("studio_apply", (args) => { if (JSON.parse(String(args.body)).op === "set_note") throw "Studio: cell out of range"; return { ...ordinaryView(scoreContent()), group }; });
+  h.session.reauthor(h.session.saves[0].id); await settle(8);
+  const replacement = h.session.saves[0];
+  assert.equal(h.calls("studio_apply").length, 1, "the new edit was sent and refused again");
+  h.session.discard(replacement.id); await settle(8);
+  await h.session.save().catch(() => {}); await h.tick(60_000);
+  assert.equal(h.calls("studio_apply").some((c) => JSON.parse(String(c.args.body)).op === "clear_cell"), false, "the restored clear never ran");
+  assert.equal(h.session.saves.length, 1); assert.equal(h.session.saves[0].status, "blocked");
+  assert.match(h.session.saves[0].error, /earlier edit was discarded/);
+});
+
+// Third review L1: a restored clear that had already failed kept its automatic resend, which fired
+// a second after the member discarded the write before it.
+test("discarding a restored write cancels the automatic resend of a failed restored clear behind it", async () => {
+  const h = await harness();
+  h.session.applyScoreOp(score, { op: "set_note", step: 4, row: 0, value: { k: "d", pad: 1 } }, 32);
+  h.session.applyScoreOp(score, { op: "clear_cell", step: 2, row: 0 }, 32);
+  const draft = decodeStudioDraft(h.session.draftSnapshot()!);
+  h.session.reset(); h.session.restoreDraft(draft); h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.flush(); await settle(8);
+  h.session.open(score); await settle(8);
+  h.ipc.on("studio_apply_batch", () => { throw "receipt lost"; });
+  await h.session.save().catch(() => {}); await settle(8);
+  assert.deepEqual(h.session.saves.map((s) => s.status), ["uncertain", "uncertain"]);
+  assert.ok(h.session.autoRetryAt(h.session.saves[1].id) !== null, "the clear had a resend due");
+  h.ipc.on("studio_apply", () => ({ ...ordinaryView(scoreContent()), group }));
+  h.session.discard(h.session.saves[0].id); await settle(8); await h.tick(10 * 60_000);
+  assert.equal(h.calls("studio_apply").length, 0, "nothing was resent on its own");
+  assert.equal(h.session.autoRetryAt(h.session.saves[0].id), null);
+  assert.match(h.session.saves[0].error, /earlier edit was discarded/);
 });
 
 test("a batch refused at one item: the others land on their own, the refused one stays and holds its lane", async () => {

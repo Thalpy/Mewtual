@@ -13499,20 +13499,22 @@
     return !locked && (view === "studio" || pixaViewer !== null || inlinePixaAudioOwner !== null) && activeServerId !== null && cur?.active
       ? { generation: studioAudioGeneration, server: activeServerId, channel: cur.active, membership: studioMembership } : null;
   }
-  async function startStudioAudio(kind: Parameters<StudioAudioActions["start"]>[0], prepare: Parameters<StudioAudioActions["start"]>[1], loop: boolean, offset = 0, owner: typeof inlinePixaAudioOwner = null): Promise<boolean> {
+  async function startStudioAudio(kind: Parameters<StudioAudioActions["start"]>[0], prepare: Parameters<StudioAudioActions["start"]>[1], loop: boolean, offset = 0, owner: typeof inlinePixaAudioOwner = null, document = false): Promise<boolean> {
       stopStudioAudio(); inlinePixaAudioOwner = owner;
       suppressCurrentTake();
       const engine = ensureJamEngine();
       if (studioAudioEngine !== engine) { studioAudio?.stop(); studioAudioEngine = engine; studioAudio = new StudioAudioSession(engine); }
       studioAudio!.setScope(studioAudioScope(), callDeafened);
-      const pending = studioAudio!.start(kind, prepare, loop, offset);
+      const pending = studioAudio!.start(kind, prepare, loop, offset, document);
       studioAudioState = studioAudio!.state;
       const started = await pending; studioAudioState = studioAudio!.state;
       if (!started && inlinePixaAudioOwner === owner) inlinePixaAudioOwner = null;
       return started;
   }
   const studioAudioActions: StudioAudioActions = {
-    start: (kind, prepare, loop, offset) => startStudioAudio(kind, prepare, loop, offset),
+    // Only the Studio surface's own Play says `document` (see StudioAudioActions.start); this
+    // file's viewers call startStudioAudio without it.
+    start: (kind, prepare, loop, offset, document) => startStudioAudio(kind, prepare, loop, offset, null, document === true),
     stop: stopStudioAudio,
     refresh: () => { studioAudio?.refresh(); if (studioAudio) studioAudioState = studioAudio.state; },
   };

@@ -31,13 +31,13 @@ import { workingFlipnote, workingScore, workingIndex, workingSlot } from "./stud
 import { encodeStudioDraft, validateDraftOperation, type StudioDraft } from "./studio-draft.ts";
 import { validateJamPatch } from "./jam-patch.ts";
 import type { JamPatch, JamTake } from "./jam-contract.ts";
-import { flipnotePixaFromNative, preflightFlipnoteMedia, scorePlaybackFromNative } from "./studio-resolved-export.ts";
+import { flipnotePixaFromNative, preflightFlipnoteMedia, scoreExportInput, scorePlaybackFromNative, withVoiceSkips } from "./studio-resolved-export.ts";
 import { exportScorePlayback, type ScorePlayback, type ScoreExportInput } from "./studio-export.ts";
 import { exportStudioGif, publishStudioPixa, type StudioGifSaved } from "./studio-media.ts";
 import { decodePixa, encodePixa, exportFlipnotePixa, PIXA_MAX_BYTES } from "./pixa.ts";
 import { historicalSoundOperation, soundRecoveryChoices } from "./studio-sound-recovery.ts";
 import { readStudioFault, repairStudioFault, type FaultScope, type FaultView } from "./studio-fault.ts";
-import { canonicalJson, randomElementId, type FlipnoteOp, type IndexOp, type ScoreOp, type ScoreCell } from "./studio-contract.ts";
+import { canonicalJson, parseNoteKey, randomElementId, type FlipnoteOp, type IndexOp, type ScoreOp, type ScoreCell } from "./studio-contract.ts";
 import {
   DEFAULT_FPS,
   SETTLEMENT_CHANGED_EVENT,
@@ -127,6 +127,7 @@ import {
   type StudioUnlisten,
   type UnconfirmedOverlaySave,
   type UnconfirmedOverlaySaveInput,
+  layerShownAlternative,
 } from "./studio-native.ts";
 
 export type StudioScope = { server: number; channel: Decimal };
@@ -287,7 +288,10 @@ const AUTO_RETRY_MS = [1000, 2000, 4000, 8000, 15_000, 30_000, 60_000];
 /// before it is left to the member: enough for an ordinary rotation, not a loop.
 const AUTO_REAUTHOR_MAX = 3;
 /// The Score operations that are additions, and so are re-saved on their own (scheduleAutoReauthor).
-const AUTO_REAUTHOR_OPS: ReadonlySet<string> = new Set(["set_cell", "set_patch"]);
+const AUTO_REAUTHOR_OPS: ReadonlySet<string> = new Set(["set_cell", "set_note", "set_patch"]);
+/// The card of a restored note edit held because an earlier restored edit in its lane was
+/// discarded (see `discard`): it may have belonged to that edit's gesture, so it waits for the member.
+const RESTORED_AFTER_DISCARD = "An earlier edit was discarded. Retry this one or discard it.";
 /// Refusals that no resend of the same request can change: the member decides (save as a new edit,
 /// where allowed, or discard). The native texts come from catcoms-app (store/epoch_studio.rs,
 /// studio.rs, studio_exchange.rs). An exact retry after "Shared history changed" would also skip
@@ -490,6 +494,12 @@ export class StudioSession {
   private cancelAutosave: (() => void) | null = null;
   private readonly eligible = new Set<number>();
   private readonly restoredHeld = new Set<number>();
+  /// The composer gesture each queued Score record came from (`applyScoreOp`). Session-private and
+  /// never persisted (the lock snapshot's format is unchanged). Pruned as links are added, so it
+  /// stays near the queue's size.
+  private readonly gestureOf = new Map<number, number>();
+  /// Restored Score note edits, whose gesture links did not survive the lock (see `discard`).
+  private readonly restoredUnlinked = new Set<number>();
   private editorEpoch = 0;
   private editorSnapshot: { key: string; frames: { id: string; cid: string; bytes: Uint8Array | undefined }[] } | null = null;
   get editorMediaGeneration(): number { return this.editorEpoch; }
@@ -597,7 +607,10 @@ export class StudioSession {
       flipnote: m ? [m.title, m.fps, m.titleConflicts, m.fpsConflicts, m.overCapCount, m.sound.patches, m.sound.score,
         [...m.sound.sfx].sort((a, b) => a.id.localeCompare(b.id)).map(s => [s.id, s.frame, s.patch, s.note, s.durationMs, s.conflicts]), m.sound.readiness,
         m.frames.map(f => [f.id, f.bytes, f.conflicts, f.insertions, f.overCap])] : null,
-      score: score ? [score.title, score.bpm, score.bpb, score.steps, score.cells, score.patches, score.readiness] : null }),
+      // `voices.play` is what a Score sounds like, layered notes included (`cells` holds only the
+      // legacy ones). The working projection and native's readback compute it identically, so an
+      // acknowledged save does not read as a source change.
+      score: score ? [score.title, score.bpm, score.bpb, score.steps, score.cells, score.voices.play, score.patches, score.readiness] : null }),
       frames: (m?.frames ?? []).map(f => ({ id: f.id, cid: f.cid, bytes: this.doc ? this.unsavedPix(this.doc.object, f.id) ?? this.blobs.get(f.cid) : undefined })) };
     const previous = this.editorSnapshot;
     const changed = !previous || previous.key !== snapshot.key || snapshot.frames.some((f, i) => {
@@ -656,7 +669,7 @@ export class StudioSession {
     this.closeHeld = false;
     this.preferring.length = 0; // every awaited Save of the old scope rejects on the generation change
     this.cancelAutosave?.(); this.cancelAutosave = null; this.eligible.clear();
-    this.restoredHeld.clear(); this.editorSnapshot = null;
+    this.restoredHeld.clear(); this.gestureOf.clear(); this.restoredUnlinked.clear(); this.editorSnapshot = null;
     this.draftGroup = null;
     this.docReadSerial.clear(); this.indexReadSerial = 0;
     this.mediaEpoch++;
@@ -1428,16 +1441,24 @@ export class StudioSession {
   removeScorePatch(object: Hex32, patch: Hex64): void {
     this.scoreOp(object, { op: "remove_patch", patch }, "remove score recipe");
   }
-  private scoreOp(object: Hex32, op: ScoreOp, label: string): void {
+  private scoreOp(object: Hex32, op: ScoreOp, label: string): SaveEntry {
     if (this.objectKind(object) !== "score") throw new StudioNativeError("score edit requires a pinned Score target");
-    this.applyOp(object, op, label);
+    return this.applyOp(object, op, label);
   }
 
-  /** A component emits typed Score operations; family and exact retry identity stay session-owned. */
-  applyScoreOp(object: Hex32, op: ScoreOp): void {
+  /** A component emits typed Score operations; family and exact retry identity stay session-owned.
+   *  `gesture` names the composer gesture the operation belongs to (`scoreGestureId`): the session
+   *  uses it only so a discarded write takes that gesture's unsent clears with it. */
+  applyScoreOp(object: Hex32, op: ScoreOp, gesture?: number): void {
     if (this.objectKind(object) !== "score") throw new StudioNativeError("score edit requires a pinned Score target");
-    if (op.op === "set_header" && op.field === "title") this.setTitle(object, op.value as string);
-    else this.scoreOp(object, op, "score edit");
+    if (op.op === "set_header" && op.field === "title") { this.setTitle(object, op.value as string); return; }
+    const entry = this.scoreOp(object, op, "score edit");
+    if (gesture === undefined) return;
+    if (this.gestureOf.size > this.records.length + 64) {
+      const live = new Set(this.records.map((r) => r.id));
+      for (const id of this.gestureOf.keys()) if (!live.has(id)) this.gestureOf.delete(id);
+    }
+    this.gestureOf.set(entry.id, gesture);
   }
 
   setSoundPatch(object: Hex32, patch: Hex64, descriptor: JamPatch): void {
@@ -1551,8 +1572,9 @@ export class StudioSession {
   prepareScorePlayback(object: Hex32, opts: { playback?: boolean } = { playback: true }): Promise<ScorePlayback> {
     return this.oneMedia(async () => {
       const source = this.mediaSource(object, "score", opts.playback ?? true);
-      const playback = this.hasDocumentDraft(object) && this.workingScore
-        ? await exportScorePlayback(this.scoreInput(object, this.workingScore), this.mediaContext(source.view))
+      const working = this.hasDocumentDraft(object) ? this.workingScore : null;
+      const playback = working
+        ? withVoiceSkips(await exportScorePlayback(this.scoreInput(object, working), this.mediaContext(source.view)), working)
         : await scorePlaybackFromNative(object, source.view as ScoreView, this.me);
       source.assertCurrent();
       return playback;
@@ -1609,10 +1631,10 @@ export class StudioSession {
     if (!view.group) throw new StudioNativeError("Reopen this document before playing or exporting.");
     return { group: view.group, exporter: this.me };
   }
+  /** What the score plays (its voices) and the sounds they may use; merging is additive and
+   * nothing here refuses a score (see scoreExportInput). */
   private scoreInput(object: string, model: ScoreModel): ScoreExportInput {
-    if (!model.ready || Object.values(model.cellSlots).some(s => !s.removed && s.register.conflicts.length) ||
-        Object.values(model.patchSlots).some(s => !s.removed && s.register.conflicts.length)) throw new StudioNativeError("Resolve music conflicts before playing or exporting.");
-    return { id: object, bpm: model.bpm, bpb: model.bpb, steps: model.steps, cells: model.cells, patches: model.patches };
+    return scoreExportInput(object, model);
   }
 
   /** The flipnote's package. Play passes `playback: true` (never refused by save status); a
@@ -1804,6 +1826,7 @@ export class StudioSession {
         mayHaveCommitted: interrupted || record.mayHaveCommitted };
       this.records.push(restored); this.saveSeq = Math.max(this.saveSeq, record.id);
       this.restoredHeld.add(record.id);
+      if (isScoreWrite(restored) || isScoreClear(restored)) this.restoredUnlinked.add(restored.id);
     }
     // No timer, eligible identity or worker is installed: only Save/retry can submit restored work.
   }
@@ -2019,6 +2042,11 @@ export class StudioSession {
     if (base) replacement.binding = { epochId: base.epochId, awaiting: base.awaitingTenureReceipt, phase: base.phase };
     this.records[at] = replacement;
     this.eligible.delete(s.id); this.restoredHeld.delete(s.id); this.forgetAutoRetry(s.id);
+    // The re-authored edit is still the same gesture's write (or clear), and a restored one is still
+    // restored without its links; see `discard` (third review M-B).
+    const gesture = this.gestureOf.get(s.id);
+    if (gesture !== undefined) { this.gestureOf.delete(s.id); this.gestureOf.set(replacement.id, gesture); }
+    if (this.restoredUnlinked.delete(s.id)) this.restoredUnlinked.add(replacement.id);
     this.eligible.add(replacement.id);
     this.settleRecord(s, "discarded");
     if (opts.pump === false) return; // the caller re-authors several, then notifies and pumps once
@@ -2031,16 +2059,64 @@ export class StudioSession {
   discard(id: number): void {
     const at = this.records.findIndex((r) => r.id === id && r.status !== "inflight");
     if (at < 0) return;
-    const [s] = this.records.splice(at, 1);
-    this.eligible.delete(s.id); this.restoredHeld.delete(s.id); this.cooling.delete(s.id); this.busyResends.delete(s.id);
-    this.forgetAutoRetry(s.id);
+    const s = this.records[at];
+    const gesture = this.gestureOf.get(s.id);
+    // A composer gesture writes before it clears and writes each note's new place before its old
+    // key is overwritten (score-editor.ts `scoreSurfaceOps`), so every PREFIX of a gesture keeps
+    // every note. Its later records only make sense after this one: the clear of a note's old place
+    // run without its write deletes the note, and a later write may overwrite the note this one was
+    // carrying. So discarding a Score write takes every later record of its gesture in the lane with
+    // it, writes and clears alike, never an earlier one (review M1, re-review H1). They are dropped
+    // even when marked uncertain: a refused batch marks every member so, but native applies a batch
+    // in order and stops at the refused item, so nothing after it was written; the point is that
+    // they are never sent now. One already in flight cannot be recalled.
+    const doomed = [s, ...this.gestureAfter(at)];
+    if (gesture === undefined && isScoreWrite(s) && this.restoredUnlinked.has(s.id)) {
+      // Restored after a lock, the links are gone (they are not part of the snapshot's format), and
+      // guessing gestures from record order could drop an unrelated placement. So the restored note
+      // edits after this one in its lane are held instead, each the member's to retry or discard:
+      // none of them runs on a bulk Save, and none is dropped unseen (re-review M2).
+      // A failed one (blocked or uncertain) keeps its status but loses its automatic resend or re-save,
+      // which would otherwise send it a second later without the member (third review L1).
+      for (const r of this.records.slice(at + 1)) {
+        if (laneOf(r) !== laneOf(s) || !this.restoredUnlinked.has(r.id) || r.status === "inflight") continue;
+        if (r.status === "queued") r.status = "blocked";
+        r.error = RESTORED_AFTER_DISCARD;
+        this.eligible.delete(r.id); this.cooling.delete(r.id);
+        this.cancelAutoRetry(r.id);
+        this.reauthoring.delete(r.id);
+        for (const job of this.reauthorJobs.values()) job.ids.delete(r.id);
+      }
+    }
+    // All of them leave before anything is pumped: a pump between two would start the next one.
+    for (const r of doomed) {
+      this.records.splice(this.records.indexOf(r), 1);
+      this.eligible.delete(r.id); this.restoredHeld.delete(r.id); this.cooling.delete(r.id); this.busyResends.delete(r.id);
+      this.forgetAutoRetry(r.id);
+      this.gestureOf.delete(r.id); this.restoredUnlinked.delete(r.id);
+      this.discardedTotal++;
+      this.settleRecord(r, "discarded");
+    }
     // A departure waiting for this lane to drain gives up when the member empties it by discarding:
     // its Index half (a rename's other half) then stays where it was, for the member to decide.
     if (!this.records.some(r => laneOf(r) === laneOf(s))) this.releaseAfterDrain.delete(laneOf(s));
-    this.discardedTotal++;
-    this.settleRecord(s, "discarded");
     this.notify();
     this.pump();
+  }
+
+  /// The later records of the composer gesture of the Score write at `at`, in its lane and not in
+  /// flight: what `discard` takes with that write. Empty for anything else.
+  private gestureAfter(at: number): SaveEntry[] {
+    const s = this.records[at], gesture = s ? this.gestureOf.get(s.id) : undefined;
+    if (!s || gesture === undefined || !isScoreWrite(s)) return [];
+    return this.records.slice(at + 1).filter((r) => this.gestureOf.get(r.id) === gesture && laneOf(r) === laneOf(s) && r.status !== "inflight");
+  }
+
+  /// How many edits `discard(id)` removes: this one and the later records of its composer gesture,
+  /// so a confirmation can say so (third review L5). Zero when it cannot be discarded now.
+  discardCount(id: number): number {
+    const at = this.records.findIndex((r) => r.id === id && r.status !== "inflight");
+    return at < 0 ? 0 : 1 + this.gestureAfter(at).length;
   }
 
   /// The newest unsaved pixels for a frame, so an editor reopens what the member drew rather
@@ -3040,6 +3116,22 @@ function choicesForContent(content: StudioContent, mode: RecoveryMode): { choice
       if (value && (mode === "copy" || value.value !== null)) out.push({ choice: { kind: "scoreCell", step, row, value: value.source.opId },
         label: `${value.value === null ? "clear" : "cell"} ${key}` });
     }
+    // Layered notes are add wins, so the removal-wins `selected` above must never be applied to
+    // them: a clear winning the register does not remove a live note. A live slot offers its shown
+    // value (the one rule native restores and compaction promotes); in copy mode a cleared slot
+    // offers its clear with the lowest op id, as a removed cell does.
+    const layerKeys = Object.keys(content.layers ?? {}).map((key) => ({ key, at: parseNoteKey(key) }))
+      .filter((entry): entry is { key: string; at: NonNullable<ReturnType<typeof parseNoteKey>> } => entry.at !== null && entry.at.layer !== null)
+      .sort((a, b) => a.at.step - b.at.step || a.at.row - b.at.row || (a.at.layer! < b.at.layer! ? -1 : a.at.layer! > b.at.layer! ? 1 : 0));
+    for (const { key, at } of layerKeys) {
+      const slot = content.layers![key], shown = layerShownAlternative(slot);
+      const value = shown ?? (mode === "copy"
+        ? [slot.register.selected, ...slot.register.conflicts].filter((a) => a.value === null).sort((a, b) => a.source.opId < b.source.opId ? -1 : 1)[0]
+        : undefined);
+      // The layer is in the label: two sounds in one cell are two choices that must read apart.
+      if (value) out.push({ choice: { kind: "scoreNote", step: at.step, row: at.row, layer: at.layer!, value: value.source.opId },
+        label: `${value.value === null ? "clear" : "note"} ${at.step}:${at.row} ${at.layer === "d" ? "drums" : `sound ${at.layer!.slice(0, 8)}`}` });
+    }
   } else if (content.kind === "index") {
     for (const [id, entry] of [...Object.entries(content.objects), ...Object.entries(content.overflow)]) {
       out.push({ choice: { kind: "object", id }, label: `entry "${entry.title.selected.value}"` });
@@ -3055,6 +3147,15 @@ function choicesForContent(content: StudioContent, mode: RecoveryMode): { choice
 
 function laneOf(s: SaveRecord): string {
   return s.kind === "applyIndex" ? "index" : s.object ?? "index";
+}
+
+/** A Score edit that writes a note (layered, or a legacy cell an undo restores). */
+function isScoreWrite(s: SaveRecord): boolean {
+  return (s.kind === "apply" || s.kind === "overlayApply") && (s.op.op === "set_note" || s.op.op === "set_cell");
+}
+/** A Score edit that clears a note. */
+function isScoreClear(s: SaveRecord): boolean {
+  return (s.kind === "apply" || s.kind === "overlayApply") && (s.op.op === "clear_note" || s.op.op === "clear_cell");
 }
 
 /** Two records were authored against the same view (or both without one, in the immediate seam). */

@@ -784,14 +784,42 @@ fn projection_content(projection: &StudioProjection) -> Result<Value, String> {
                 }
                 ScoreCell::Drum { pad } => json!({"k":"d","pad":pad}),
             };
-            json!({"kind":"score","title":p.title.as_ref().map(|v|ireg(v,|v|json!(v))),
+            let issues = |v: &ScoreCellIssues| json!({"count":v.count,"extent":v.extent,"recipe":v.recipe,"overlap":v.overlap,"conflict":v.conflict});
+            let mut content = json!({"kind":"score","title":p.title.as_ref().map(|v|ireg(v,|v|json!(v))),
                 "bpm":p.bpm.as_ref().map(|v|ireg(v,|v|json!(v))),"bpb":p.bpb.as_ref().map(|v|ireg(v,|v|json!(v))),
                 "steps":p.steps.as_ref().map(|v|ireg(v,|v|json!(v))),
                 "cells":p.cells.iter().map(|((step,row),slot)|(format!("{step}:{row}"),json!({"removed":slot.removed(),"register":ireg(&slot.register,|v|json!(v.as_ref().map(cell)))}))).collect::<std::collections::BTreeMap<_,_>>(),
                 "patches":p.patches.iter().map(|(id,slot)|(hex::encode(id),json!({"removed":slot.removed(),"register":ireg(&slot.register,|v|json!(v.as_ref().map(|v|v.value())))}))).collect::<std::collections::BTreeMap<_,_>>(),
                 "readiness":{"headerConflicts":ready.header_conflicts,
-                    "cells":ready.cells.iter().map(|((step,row),v)|(format!("{step}:{row}"),json!({"count":v.count,"extent":v.extent,"recipe":v.recipe,"overlap":v.overlap,"conflict":v.conflict}))).collect::<std::collections::BTreeMap<_,_>>(),
-                    "patches":ready.patches.iter().map(|(id,v)|(hex::encode(id),json!({"count":v.count,"conflict":v.conflict}))).collect::<std::collections::BTreeMap<_,_>>()}})
+                    "cells":ready.cells.iter().map(|((step,row),v)|(format!("{step}:{row}"),issues(v))).collect::<std::collections::BTreeMap<_,_>>(),
+                    "patches":ready.patches.iter().map(|(id,v)|(hex::encode(id),json!({"count":v.count,"conflict":v.conflict}))).collect::<std::collections::BTreeMap<_,_>>()}});
+            // Layered notes (docs/design-score-layers.md section 4) are ADD WINS: `cleared` is
+            // "no live value", never the removal-wins `removed`. Both `layers` and
+            // `readiness.layers` appear exactly when layer slots exist (the latter possibly `{}`),
+            // so a score without layers keeps the exact DTO older renderers parse. Keys are
+            // `"S:R/L"` with `L` = `d` or the 64-hex sound id; registers use the cells' shape and
+            // the renderer's shared evidence bound, which the projection's own bound covers.
+            if !p.layers.is_empty() {
+                content["layers"] = json!(p
+                    .layers
+                    .iter()
+                    .map(|((step, row, layer), slot)| {
+                        (
+                            format!("{step}:{row}/{}", layer.key()),
+                            json!({"cleared":slot.cleared(),"register":ireg(slot.register(),|v|json!(v.as_ref().map(cell)))}),
+                        )
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>());
+                content["readiness"]["layers"] = json!(ready
+                    .layers
+                    .iter()
+                    .map(|((step, row, layer), v)| (
+                        format!("{step}:{row}/{}", layer.key()),
+                        issues(v)
+                    ))
+                    .collect::<std::collections::BTreeMap<_, _>>());
+            }
+            content
         }
     })
 }

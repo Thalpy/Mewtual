@@ -1,8 +1,55 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Score layers and additive merging (2026-10-20)
+
+Owner decisions: one note per sound per cell; concurrent edits merge by adding and nothing blocks
+playback; every sound (and the drum kit) can be shown, ghosted or hidden in the composer. The full
+contract is `docs/design-score-layers.md`; this is the interface summary.
+
+- Wire: two new Score operations, `{"op":"set_note","row","step","value"}` and
+  `{"layer":"d"|<64 hex>,"op":"clear_note","row","step"}`, stored at `n/{step}:{row}/{layer}`
+  (`MAX_KEY_BYTES` 73). A note's layer is its sound id; every drum is in layer `d`. Older builds
+  refuse them as malformed and pause Studio sync for that server: everyone editing together must
+  update first. New builds author only these for notes; `clear_cell` still removes a legacy note.
+- Merge: legacy `c/` cells and sounds keep removal wins and a live legacy cell plays only its
+  selected value. Layer slots are add wins: every distinct live value plays, a concurrent clear
+  removes only what its author saw. A slot's shown value is the selected one when live, else the
+  live alternative with the lowest source op id (`layerShownValue`).
+- What plays (`score-voices.ts`, mirrored by Rust readiness and pinned by
+  `studio-score-readiness-v1.json`): candidates, clipped to the grid (`len` written only above 1),
+  identical voices collapsed across slots, canonical order, then skips (after the 4096th, a sound not
+  among the first 64, a start at or past the end). Readiness flags are diagnostics only: `conflict`
+  means distinct values, `overlap` only within one row and one sound, computed by an O(n) sweep.
+  Nothing refuses Play, download, share or post. `ScorePlayback.skipped` counts what does not sound.
+- Bridge DTO: a score with layer slots adds `layers: {"S:R/L": {cleared, register}}` and
+  `readiness.layers`; a score without them keeps the exact earlier shape.
+- Exporter input: `notes: {step,row,value}[]` (or the older `cells` record). Overlapping holds of
+  one pitch each take the lowest free lane (lane `k >= 1` nonce from `catcoms-score-voice:v1`);
+  a clean score exports byte-identically.
+- Studio playback of a document may hold 48 notes at once (`JAM_DOCUMENT_HELD_MAX`); jukebox decks
+  and received takes keep 16 per performer. Under the 64-voice ceiling that leaves 16 held voices
+  for all live performers together while a document plays locally.
+- A Flipnote's linked Score resolves the same additive way: its PIXA carries what the score plays
+  instead of refusing on the score's readiness (declared change; the Flipnote's own frames and
+  sound still refuse on conflicts).
+- Recovery: `RecoveryChoice` gains `{kind:"scoreNote",step,row,layer,value}`; native restores the
+  version's shown value with `set_note` (or `clear_note`).
+- Composer: the grid edits one shown note per cell (the chosen sound's first) and
+  `scoreSurfaceOps` turns each gesture into layered ops, writes before clears and each note's new
+  place before its old key is overwritten, so a refusal part way never deletes a note. `onop`
+  carries a gesture id (`scoreGestureId`); `applyScoreOp(object, op, gesture)` links the records
+  (session-private, never persisted), and discarding a refused write removes the gesture's later
+  records in that lane, writes and clears alike. After a restore the links are gone, so discarding
+  a restored note write instead holds the restored note edits behind it as `blocked` cards for the
+  member. Phrase moves emit their sets against the direction of travel. Editing a legacy note
+  moves it into its layer (`set_note`, then
+  `clear_cell`); undo restores a legacy cell where it was (`set_cell`). Visibility is per viewer,
+  never written, and hiding does not mute. Only a shown sound takes new notes; a ghosted sound is
+  outlines that other sounds can be written over.
+
 ## Score additions re-saved after an epoch move (2026-10-20)
 
-Owner decision. A queued Score addition (`set_cell`, `set_patch`) whose document history moved
+Owner decision. A queued Score addition (`set_cell`, `set_note`, `set_patch`) whose document history moved
 under it is saved again on its own: "Shared history changed" at admission, or native's
 "epoch studio: edit belongs to a retired epoch". It is saved into the current epoch as a fresh edit
 with a new nonce, in its lane position, with its label, and no card. This is an exception to the
@@ -17,8 +64,10 @@ with a new nonce, in its lane position, with its label, and no card. This is an 
   with "Save as a new edit".
 - While it is pending, `resaving(id)` is true: `saveTally()` counts the record as retrying,
   `needsDecision` is false, and the banner offers no buttons.
-- Clears, header changes and sound removals keep their card. Re-authored on a newer history, they
-  could remove or override a collaborator's addition unseen.
+- Clears (`clear_cell`, `clear_note`), header changes and sound removals keep their card.
+  Re-authored on a newer history, they could remove or override a collaborator's addition unseen.
+  A legacy note moved into its layer is a `set_note` (re-saved) and a `clear_cell` (kept): until
+  the member decides, the note plays from both places.
 - Flipnote and Index records keep their card.
 - A reset, lock or scope change drops pending jobs.
 
@@ -4332,11 +4381,13 @@ the creative design ranges, cell keys are canonical `step:row`, and values are e
 `{k:"n",p:<patch id>,len?:<sixteenth steps>,vol?:1..100}` or `{k:"d",pad:0..9}`. Note length is 1 through
 the remaining score steps; absent `len` preserves the original one-step draft. `vol` is the note's
 authored level in percent of its recipe; absent means full level and is kept absent (the exported
-take's note-on carries it as `v`). Same-row note
-overlap refuses rather than silently shortening authored holds. Patch keys must equal the existing
-jam recipe hashes. Up to 4096 cells and 64 recipes are accepted. Cells beyond the requested score length
-refuse; the connected native projection consumer refuses unresolved overflow/conflicts before
-exporting, without silently dropping frames or notes.
+take's note-on carries it as `v`). Superseded 2026-10-20 (see "Score layers and additive merging"
+at the top): input may instead be `notes: {step,row,value}[]`, overlapping holds play on their own
+lanes instead of refusing, and the connected consumer no longer refuses on readiness; it exports
+what `score-voices.ts` plays and counts the rest as skipped. Patch keys must equal the existing
+jam recipe hashes. Up to 4096 notes and 64 recipes are accepted. Notes beyond the requested score
+length refuse at this leaf (callers clip or skip them first). Flipnote frames still refuse on
+unresolved overflow/conflicts.
 
 Context carries `{group,exporter}`. `group` must come from the stable backend group identifier,
 not a local numeric server alias; the helper can enforce only scalar-text/UTF-8 size bounds.
@@ -4394,7 +4445,8 @@ Optional authored title/BPM/BPB/step registers preserve complete winner/alternat
 values default to empty/120/4/16 without invented provenance. Cell/recipe slots retain a raw
 register of optional values; any live removal makes effective presence false. Clear and remove
 on absent slots record intent. Later Sets supersede exact observed same-property predecessors,
-not unseen removals. Readiness flags conflicts, overlap, missing recipes, extent and cap overflow.
+not unseen removals. Readiness flags conflicts, overlap, missing recipes, extent and cap overflow
+(diagnostics only since 2026-10-20; layered notes are add wins, see the top section).
 Score snapshots use explicit payload prefix2, and score restart units require trailing family2
 even when pristine. Existing Index/art bytes are unchanged. See `GATE6-STATE-DESIGN.md`.
 The native diagnostic shape `kind:"score"` uses optional header registers and cell/patch maps

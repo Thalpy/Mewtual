@@ -62,7 +62,52 @@ fn score_diagnostics_distinguish_effective_removal_from_raw_winner() {
             },
         },
     );
+    // A clean neighbour: one drum, one value. Together with the removed slot above, this score has
+    // no layer slots, so its DTO must stay byte-identical to the pre-layer build's
+    // (docs/design-score-layers.md section 4). The string below was captured from HEAD 2f0b7837
+    // before any layer code existed; change it only for an intentional, documented DTO change.
+    let drum = ScoreCell::Drum { pad: 3 };
+    score.cells.insert(
+        (1, 2),
+        ScoreSlot {
+            register: ScoreRegister {
+                selected: ScoreValue {
+                    source: source(
+                        3,
+                        ScoreOp::SetCell {
+                            step: 1,
+                            row: 2,
+                            value: drum.clone(),
+                        },
+                    ),
+                    value: Some(drum),
+                },
+                conflicts: vec![],
+            },
+        },
+    );
     let view = projection_content(&StudioProjection::Score(Box::new(score))).unwrap();
+    assert_eq!(
+        serde_json::to_string(&view).unwrap(),
+        concat!(
+            r#"{"bpb":null,"bpm":null,"cells":{"0:0":{"register":{"conflicts":[{"source":{"#,
+            r#""author":"0303030303030303030303030303030303030303030303030303030303030303","#,
+            r#""nonce":"02020202020202020202020202020202","#,
+            r#""opId":"9169816df10005dfba5011385a0f3243b1af324b80577259997abb4bb619b435"},"#,
+            r#""value":null}],"selected":{"source":{"#,
+            r#""author":"0303030303030303030303030303030303030303030303030303030303030303","#,
+            r#""nonce":"01010101010101010101010101010101","#,
+            r#""opId":"394b7ccb7782208d4d1b05312959da351cfb44d143f9dda2d533f2b298ddbeef"},"#,
+            r#""value":{"k":"d","pad":0}}},"removed":true},"1:2":{"register":{"conflicts":[],"#,
+            r#""selected":{"source":{"#,
+            r#""author":"0303030303030303030303030303030303030303030303030303030303030303","#,
+            r#""nonce":"03030303030303030303030303030303","#,
+            r#""opId":"063dbcc4355624af0557bf8f1ea7f2f55ed325e7550feb03a6cbf03beccb7753"},"#,
+            r#""value":{"k":"d","pad":3}}},"removed":false}},"kind":"score","patches":{},"#,
+            r#""readiness":{"cells":{},"headerConflicts":false,"patches":{}},"steps":null,"#,
+            r#""title":null}"#
+        )
+    );
     assert_eq!(view["kind"], "score");
     assert_eq!(view["cells"]["0:0"]["removed"], true);
     assert_eq!(
@@ -857,6 +902,8 @@ fn native_object_family_and_score_recovery_choices_are_explicit_and_closed() {
     let value = hex::encode([3; 32]);
     for choice in [
         json!({"kind":"scoreCell","step":255,"row":24,"value":value}),
+        json!({"kind":"scoreNote","step":255,"row":24,"layer":"d","value":value}),
+        json!({"kind":"scoreNote","step":0,"row":0,"layer":value,"value":value}),
         json!({"kind":"scorePatch","patch":value,"value":value}),
         json!({"kind":"scoreHeader","field":"steps","value":value}),
     ] {
@@ -865,10 +912,26 @@ fn native_object_family_and_score_recovery_choices_are_explicit_and_closed() {
             .checked()
             .unwrap();
     }
+    // The renderer's `scoreNote` choice names the layer as the note key spells it.
+    assert!(matches!(
+        serde_json::from_value::<recovery_ipc::ChoiceInput>(
+            json!({"kind":"scoreNote","step":3,"row":2,"layer":value,"value":value})
+        )
+        .unwrap()
+        .checked()
+        .unwrap(),
+        app::studio::StudioRecoveryItem::ScoreNote { step: 3, row: 2, layer: ScoreLayer::Sound(id), .. } if id == [3; 32]
+    ));
     for bad in [
         json!({"kind":"scoreCell","step":256,"row":0,"value":value}),
         json!({"kind":"scoreCell","step":0,"row":25,"value":value}),
         json!({"kind":"scoreCell","step":0,"row":0,"value":value,"author":value}),
+        json!({"kind":"scoreNote","step":256,"row":0,"layer":"d","value":value}),
+        json!({"kind":"scoreNote","step":0,"row":25,"layer":"d","value":value}),
+        json!({"kind":"scoreNote","step":0,"row":0,"layer":"D","value":value}),
+        json!({"kind":"scoreNote","step":0,"row":0,"layer":"AB".repeat(32),"value":value}),
+        json!({"kind":"scoreNote","step":0,"row":0,"layer":"ab".repeat(31),"value":value}),
+        json!({"kind":"scoreNote","step":0,"row":0,"value":value}),
         json!({"kind":"scoreHeader","field":"fps","value":value}),
         json!({"kind":"scorePatch","patch":"AB".repeat(32),"value":value}),
     ] {

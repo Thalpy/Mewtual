@@ -13,6 +13,7 @@ import {
   JAM_FILTER_NYQUIST_RATIO,
   JAM_FILTER_Q_MAX,
   JAM_FILTER_Q_MIN,
+  JAM_DOCUMENT_HELD_MAX,
   JAM_HELD_PER_PEER,
   JAM_VOICES_GLOBAL,
   JAM_KIT,
@@ -67,6 +68,9 @@ type ArchivalPlaybackData = {
   sfxOwner: string;
   /** Receiver-owned gain for current and future lazy lanes; never a recipe/network field. */
   level: number;
+  /** The performer's held-note cap for this playback: JAM_DOCUMENT_HELD_MAX for the Studio's own
+   * document (prepareArchivalPlayback `document`), otherwise the per-performer default. */
+  heldCap?: number;
 };
 type PlaybackPatchData = Readonly<{
   patches: readonly JamPatch[];
@@ -591,6 +595,9 @@ export class JamEngine {
     take: unknown,
     animation: JamArchivalAnimation | undefined,
     isCurrent: () => boolean = () => true,
+    /** The Studio playing its own document (studio-playback.ts): a layered score may hold up to
+     * JAM_DOCUMENT_HELD_MAX notes. Jukebox decks and shared takes leave this unset. */
+    opts: { document?: boolean } = {},
   ): Promise<JamArchivalPlayback | null> {
     if (this.disposed || this.deafened || !isCurrent()) return null;
     let plan: JamArchivalPlan;
@@ -605,7 +612,8 @@ export class JamEngine {
     if (!sfxOwner) return null;
     this.closeArchival();
     const capability = Object.freeze({ [ARCHIVAL_PLAYBACK]: true as const });
-    this.archival = { capability, plan, patches, channels: new Map(), played: new Set(), generation, sfxChannels: 0, sfxOwner, level: 1 };
+    this.archival = { capability, plan, patches, channels: new Map(), played: new Set(), generation, sfxChannels: 0, sfxOwner, level: 1,
+      ...(opts.document ? { heldCap: JAM_DOCUMENT_HELD_MAX } : {}) };
     return capability;
   }
 
@@ -695,7 +703,7 @@ export class JamEngine {
     }
     const result = this.noteOnWithHold({ channel, sequence: event.sequence, note: event.note, wave: event.wave!, ageMs, remote: true,
       ...(event.level === undefined ? {} : { level: event.level }) },
-      event.patch === undefined ? undefined : { patches: archival.patches, index: event.patch }, event.holdMs! - ageMs);
+      event.patch === undefined ? undefined : { patches: archival.patches, index: event.patch }, event.holdMs! - ageMs, archival.heldCap);
     if (sfx && !result.ok) {
       this.removeChannel(channel); archival.channels.delete(event.lane); archival.sfxChannels--;
     }
@@ -724,6 +732,8 @@ export class JamEngine {
     input: JamNoteInput,
     playback: Readonly<{ patches: JamPlaybackPatchSet; index: number }> | undefined,
     holdMs: number,
+    /** Only from the engine's own archival record (playArchivalEvent), never from an input. */
+    heldCap?: number,
   ): JamPlayResult {
     if (
       this.disposed || !isMidiNote(input.note) || !isLegacyWave(input.wave) || !validSequence(input.sequence) ||
@@ -772,6 +782,7 @@ export class JamEngine {
       phase: "held",
       startedAtMs: this.nowMs(),
       holdMs,
+      ...(heldCap === undefined ? {} : { heldCap }),
       teardown: (reason) => runtime?.teardown(reason),
     });
     if (!allocation.ok) return { ok: false, reason: allocation.reason, sequence };

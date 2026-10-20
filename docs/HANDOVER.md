@@ -1,5 +1,128 @@
 # Mewtual; Handover
 
+## Collaborative Score editing, stages 2 to 4: layers, additive merge, show/ghost/hide (2026-10-20, branch `score-composer-2`)
+
+Contract: `docs/design-score-layers.md` (design-reviewed; findings H1 to H4 and M1 to M5 are folded
+in and marked there). Interface summary: INTERFACES.md top section. Threat notes: THREAT-MODEL.md
+"Score layers".
+
+Renderer (apps/desktop/src):
+- `score-voices.ts` (new) is the one definition of what plays: candidates, clipping (`len` only
+  above 1), collapse, canonical order, skips, sparse flags, an O(n) overlap sweep. The shared
+  fixture `crates/catcoms-replication/tests/fixtures/studio-score-readiness-v1.json` pins it
+  against Rust readiness.
+- `studio-contract.ts`: `set_note`/`clear_note`, `ScoreLayer`, `layerOf`, `noteKey`, `parseNoteKey`.
+- `studio-native.ts`: optional `layers`/`readiness.layers` parse; `ScoreModel.notes`,
+  `layerSlots`, `voices`; `scoreVoiceSlots`, `layerShownValue`/`layerShownAlternative`;
+  `RecoveryChoice` `scoreNote`.
+- `studio-working.ts`: pending `set_note`/`clear_note`, readiness from `score-voices.ts`, split by
+  collection and kept sparse (the media key serialises it).
+- `studio-export.ts`: `notes` input, lanes for overlapping holds, `skipped`.
+  `studio-resolved-export.ts`: `scoreExportInput` never refuses; `withVoiceSkips`.
+- `studio-session.ts`: media key includes `voices.play`; `scoreNote` recovery choices;
+  `AUTO_REAUTHOR_OPS` has `set_note`. `studio-draft.ts` accepts the new ops and choice.
+- Playback: `JAM_DOCUMENT_HELD_MAX` (48), `heldCap` on the allocator, `document` flag from
+  `Studio.svelte` through `App.svelte`, `studio-audio.ts` and `studio-playback.ts`.
+- Composer: `score-editor.ts` gains the layer surface (`scoreSurface`, `scoreGhostCells`,
+  `scoreSurfaceOps`, `scoreNoteCheck`, `scoreIssuesAt`, visibility helpers) and `note`
+  diagnostics; `scoreDiagnosticOperation` returns a list. `ScoreEditor.svelte` reads the document as
+  `docModel` and edits `model`, the surface; every write leaves through `sendAll`, which
+  translates surface gestures and records document ops for undo. New hooks:
+  `data-score-visibility` (per sound and `d`), `data-doc-kit`; ghost cells carry
+  `ghost`/`gon`/`gend`/`gpad`. Ready gating of play, post, download and share is gone.
+- Visual fixture: "Recovery sketch" holds a concurrent pair in one layer and a hit a clear lost to.
+
+Rust (crates/catcoms-replication, crates/catcoms-app, src-tauri):
+- `score.rs`: `ScoreOp::SetNote`/`ClearNote`, `ScoreLayer` (`key`/`parse`, one spelling),
+  `ScoreCell::layer`. `references.rs` knows both names.
+- `score/state.rs`: `ScoreProjection.layers`, the `ScoreLayerSlot` newtype (no `value()`/
+  `removed()`; `live`, `cleared`, `shown`, `shown_alternative`), `n/` keys, `MAX_KEY_BYTES` 73,
+  readiness from `score/voices.rs` (the Rust half of `score-voices.ts`), distinct-value header and
+  patch conflicts.
+- `score/snapshot.rs`: the optional layer trailer (tag `0x01`, absent without layers, golden
+  vector), voice-order compaction outside the conflict budget, layer op ids in `source_ids`.
+- `admission.rs`: legacy cells and live layer slots share the 4096 cap; `change.rs`: `SetNote`
+  faces `SetCell`'s checks, `ClearNote` always admissible.
+- `catcoms-app` `restore/score.rs`: `StudioRecoveryItem::ScoreNote`; restore authors the shown
+  value into an empty slot only, Copy can clear; the combined cap.
+- src-tauri: the `layers` DTO (byte-identity pinned for layer-free scores) and the `scoreNote`
+  `ChoiceInput`.
+- Tests: `score/voices/tests.rs` runs the shared fixture, a pairwise overlap oracle and a timing
+  test; `score/change/tests/layers.rs` covers both Automerge orders of add vs clear, the 73/74-byte
+  key, the trailer, compaction, the budget exemption, the voice-order cap and the combined cap.
+  `studio-score-ops-v1.json` gained five layered vectors (23 cases).
+
+Gotchas:
+- The composer's surface is derived from the `model` prop. A test that changes the score under a
+  mounted composer must hand over a new model (Harness `update`); the in-place `apply` harness works
+  because `sendAll` bumps `sent`, which re-derives the surface.
+- Test `ScoreModel`s must carry `notes` (the fixtures alias it to `cells`) and `voices`.
+- A gesture's ops are writes before clears; refusal tests now refuse the clear.
+
+Adversarial review (2026-10-20): no blocker or high; a re-review of the first M1/M2 fixes found
+one high and two mediums in them, fixed as below. Fixed:
+- M1 (with re-review H1 and M2): discarding a refused write released its gesture's clear,
+  deleting the note. `onop` carries `scoreGestureId()`; `applyScoreOp(object, op, gesture)` keeps
+  a session-private link; `discard` of a linked Score write removes every LATER record of its
+  gesture in the lane (writes and clears, not in flight) in one pass, then pumps once (pumping per
+  record started the next clear). Links are not in the lock snapshot: after a restore, discarding
+  a Score write marks the restored note edits after it in its lane `blocked` ("An earlier edit was
+  discarded..."), so a bulk Save never runs them and each is the member's to retry or discard.
+- M2 (with re-review M1): a slide could overwrite a note before writing its value elsewhere.
+  `scoreMoveSelection` emits sets against the direction of travel, and `orderWrites` makes a write
+  wait for the write carrying the value it replaces (identity ignores `len: 1` vs absent and
+  `vol: 100` vs absent). An exhaustive test checks every prefix of every move of small patterns of
+  repeated values, in time and pitch.
+- M3 (doc): one slot can fill the 4096 voice cap and push others' notes out; recorded in
+  THREAT-MODEL as an accepted residual risk.
+- L2, L8: overclaiming or stale wording in INTERFACES, THREAT-MODEL, GATE6-ACTIVATION-DESIGN,
+  design-creative-suite, GATE7-UI-HANDOFF, Studio's history line, recovery labels (now name the
+  layer).
+- L3: the grid shows a layered copy before a stale legacy copy of the same sound; editing,
+  moving or clearing the shown note takes the stale copy with it.
+- L4: ghosting or hiding a sound drops a selection or picks on it; reviewing a legacy item
+  (removed ones too) shows its sound; "Sound of this note" lists shown sounds only.
+- L5: the full-score message now fits moves too.
+- L6: identical concurrent values carry no conflict mark, for notes and headers, and are not
+  listed for attention (`scoreHeaderOthers`, distinct values in `scoreAttention`).
+- L7: while a set of a header is queued, the working projection gives that header one value, so
+  readiness, chips and the attention list agree with the readback.
+- L9: usage, trim and the overview count every voice (`docModel.voices.all`, exact for queued
+  edits); the grid's extent also reads the raw shown notes so tails past the end stay visible.
+
+Third review pass (no blocker or high). Fixed:
+- M-A: a phrase move could replace a note of the moving sound stacked behind another sound in the
+  destination cell, never picked. `scoreSurfaceOps` refuses a set onto an existing document key
+  that is not the cell's shown note and was not vacated earlier in the gesture ("Another note of
+  that sound is in the way there."); this also covers changing a note's sound onto a stacked one
+  (L3). A randomized two-sound property test checks no move changes an unpicked note.
+- M-B: re-authoring a restored write dropped its restored mark; `reauthor` now carries it.
+- L1: the restored hold also covers failed restored records: it cancels their automatic resend
+  and re-save jobs and sets the hold message.
+- L2: "fit to last note" reads the raw shown notes too, so it can cover a hold crossing the end.
+- L4: a cell's "another value by" marks drop while an edit of that note is queued.
+- L5: Discard's confirmation says how many edits go (`discardCount`).
+
+Follow-ups (not done):
+- L1: the exporter's lane skips (`ScorePlayback.skipped` beyond voice skips) are not shown
+  anywhere; the composer's export list shows voice skips only.
+- L5: at the 4096 cap a move or a legacy edit is refused, since it needs a free place between its
+  write and its clear.
+- L10: no Rust test pins the maximal combined seed (4096 voices backed twice, a full legacy
+  conflict budget, maximal titles) under 2 MiB; the reviewer estimates about 1.74 MB.
+- M3 mitigation: count only the first few distinct values of one slot toward the voice cap.
+- L4 remainder: the selection is kept by cell, so making a sound shown or choosing another sound
+  can re-bind it to that sound's note in the same cell (visible in the panel, not silent).
+- Residual: after discarding a refused move write, a later gesture that writes the same sound into
+  the vacated cell overwrites the note's only copy (no worse than before the fix).
+- Overlay-route (closing/unconfirmed) coverage of the discard cascade is by construction only
+  (the same `laneOf`/`isScoreWrite` path); no test drives that route.
+
+Contract changes in existing tests (all declared in the tests): placements author `set_note`;
+legacy edits are `set_note` then `clear_cell`; moves write before they clear, phrase moves write
+against the direction of travel (score-gestures and score-editor tests); flags never disable
+post/play/export ("to review", not "to fix"); the resolved-export refusal test now plays what it can.
+
 ## Collaborative Score editing, stage 1: additions re-saved after an epoch move (2026-10-20, branch `score-composer-2`)
 
 The owner's decisions are recorded in INTERFACES.md (top section):

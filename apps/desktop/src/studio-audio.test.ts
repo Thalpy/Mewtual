@@ -24,16 +24,25 @@ function releaseEnd(value: ScorePlayback): number {
 }
 function harness() {
   let now = 0, prepared = 0, resumes = 0, revoked = 0, fail = false;
-  const plans = new Map<JamArchivalPlayback, ReturnType<typeof planJamArchivalPlayback>>();
+  const plans = new Map<JamArchivalPlayback, ReturnType<typeof planJamArchivalPlayback>>(), documents: boolean[] = [];
   const context = { state: "running" as AudioContextState, resume: async () => { resumes++; context.state = "running"; } };
   const audio = new StudioAudioSession({ context,
-    prepareArchivalPlayback: async (value, animation) => { const cap = {} as JamArchivalPlayback; plans.set(cap, planJamArchivalPlayback(value, animation)); prepared++; return cap; },
+    prepareArchivalPlayback: async (value, animation, _current, opts) => { const cap = {} as JamArchivalPlayback; plans.set(cap, planJamArchivalPlayback(value, animation)); prepared++; documents.push(opts?.document === true); return cap; },
     archivalPlaybackPlan: (cap) => plans.get(cap) ?? null, playArchivalEvent: () => fail ? Promise.reject(new Error("renderer failed")) : { ok: true },
     revokeArchivalPlayback: (cap) => { revoked++; return plans.delete(cap); },
   }, () => now);
   audio.setScope({ generation: 1, server: 1, channel: "channel", membership: 1 }, false);
-  return { audio, context, now: (ms: number) => { now = ms; }, prepared: () => prepared, resumes: () => resumes, revoked: () => revoked, fail: () => { fail = true; } };
+  return { audio, context, documents, now: (ms: number) => { now = ms; }, prepared: () => prepared, resumes: () => resumes, revoked: () => revoked, fail: () => { fail = true; } };
 }
+
+test("the editor's own Play, and every loop restart of it, asks for the document voice cap; other playback never does", async () => {
+  const value = await score(16, { "0:0": { k: "n", p: vector.patchId } });
+  const h = harness();
+  assert.equal(await h.audio.start("score", async () => value, true, 0, true), true);
+  h.now(16 * 125); await h.audio.tick(); // the loop restarts at the grid end
+  assert.equal(await h.audio.start("score", async () => value, false), true); // a viewer's playback
+  assert.deepEqual(h.documents, [true, true, false]);
+});
 
 test("looping pictures keep moving through long SFX without restarting or shortening that sound", async () => {
   const p = decodePixa(Buffer.from(vector.pixaHex, "hex"));

@@ -24,13 +24,14 @@ export function validateDraftOperation(value: unknown, family: "index" | "flipno
     set_sfx: ["op", "sfx", "frame", "patch", "note", "duration_ms"], remove_sfx: ["op", "sfx"],
     set_export: ["op", "export", "cid", "bytes", "expiry"], remove_export: ["op", "export"],
     set_cell: ["op", "step", "row", "value"], clear_cell: ["op", "step", "row"],
+    set_note: ["op", "step", "row", "value"], clear_note: ["op", "step", "row", "layer"],
     set_title: ["op", "object", "title"], set_expiry: ["op", "object", "expiry"], tombstone_object: ["op", "object"],
     put_object: ["op", "object", "kind", "title", "created_by", "ts", "expiry"],
   };
   if (typeof op !== "string" || !Object.hasOwn(keys, op)) fail(); exact(v, keys[op]);
   if (keys[op].some(k => k !== "expiry" && !Object.hasOwn(v, k))) fail();
   const allowed = family === "index" ? ["set_title", "set_expiry", "tombstone_object", "put_object"] : family === "score"
-    ? ["set_header", "set_patch", "remove_patch", "set_cell", "clear_cell"]
+    ? ["set_header", "set_patch", "remove_patch", "set_cell", "clear_cell", "set_note", "clear_note"]
     : ["set_header", "set_patch", "remove_patch", "insert_frame", "replace_frame", "remove_frame", "set_sfx", "remove_sfx", "set_export", "remove_export"];
   if (!allowed.includes(op)) fail();
   for (const field of ["frame", "sfx", "export", "object"]) if (field in v && !hex(v[field], 32)) fail();
@@ -42,12 +43,14 @@ export function validateDraftOperation(value: unknown, family: "index" | "flipno
   if (op === "set_patch" && !validateJamPatch(v.descriptor).ok) fail();
   if (op === "set_sfx" && (!int(v.note, 0, 127) || !int(v.duration_ms, 1, 600_000))) fail();
   if (op === "put_object" && ((v.kind !== "score" && v.kind !== "flipnote") || !int(v.ts, 0))) fail();
-  if (op === "set_cell" || op === "clear_cell") {
+  if (op === "set_cell" || op === "clear_cell" || op === "set_note" || op === "clear_note") {
     if (!int(v.step, 0, 255) || !int(v.row, 0, 24)) fail();
-    if (op === "set_cell") {
+    if (op === "set_cell" || op === "set_note") {
       const cell = obj(v.value); exact(cell, cell.k === "n" ? ["k", "p", "len", "vol"] : ["k", "pad"]);
       if (cell.k === "n" ? !hex(cell.p, 64) || (cell.len !== undefined && !int(cell.len, 1, 256)) || (cell.vol !== undefined && !int(cell.vol, 1, 100)) : cell.k !== "d" || !int(cell.pad, 0, 9)) fail();
     }
+    // A layer is the drum kit or one sound's id (docs/design-score-layers.md).
+    if (op === "clear_note" && v.layer !== "d" && !hex(v.layer, 64)) fail();
   }
   if (op === "set_header") {
     if (v.field === "title") { if (!text(v.value, 65536)) fail(); }
@@ -130,15 +133,18 @@ export function decodeStudioDraft(json: string): StudioDraft {
       const e = obj(v.edit); exact(e, ["snapshot", "choice", "mode", "epochId", "expectedProjection", "nonce", "body"]);
       if (!hex(e.snapshot, 64) || !hex(e.epochId, 32) || !hex(e.expectedProjection, 64) || !hex(e.nonce, 32) || !text(e.body, 65536) || !["copy", "restore"].includes(String(e.mode))) fail();
       const choice = obj(e.choice);
-      const keys: Record<string, string[]> = { soundRecord: ["kind", "value"], scoreCell: ["kind", "step", "row", "value"], scorePatch: ["kind", "patch", "value"],
+      const keys: Record<string, string[]> = { soundRecord: ["kind", "value"], scoreCell: ["kind", "step", "row", "value"], scoreNote: ["kind", "step", "row", "layer", "value"],
+        scorePatch: ["kind", "patch", "value"],
         scoreHeader: ["kind", "field", "value"], frame: ["kind", "id", "value"], frameDeletion: ["kind", "id"], title: ["kind", "value"], fps: ["kind", "value"],
         object: ["kind", "id"], objectTitle: ["kind", "id", "value"], objectExpiry: ["kind", "id", "value"], objectDeletion: ["kind", "id"] };
       if (typeof choice.kind !== "string" || !Object.hasOwn(keys, choice.kind)) fail(); exact(choice, keys[choice.kind]);
       if (keys[choice.kind].some(k => !Object.hasOwn(choice, k)) || "value" in choice && !hex(choice.value, 64) || "id" in choice && !hex(choice.id, 32) || "patch" in choice && !hex(choice.patch, 64) ||
-          choice.kind === "scoreCell" && (!int(choice.step, 0, 255) || !int(choice.row, 0, 24)) || choice.kind === "scoreHeader" && !["title", "bpm", "bpb", "steps"].includes(String(choice.field))) fail();
+          (choice.kind === "scoreCell" || choice.kind === "scoreNote") && (!int(choice.step, 0, 255) || !int(choice.row, 0, 24)) ||
+          choice.kind === "scoreNote" && choice.layer !== "d" && !hex(choice.layer, 64) ||
+          choice.kind === "scoreHeader" && !["title", "bpm", "bpb", "steps"].includes(String(choice.field))) fail();
       const family = v.object === null ? "index" : v.objectKind ?? "flipnote";
       if (family !== "index" && family !== "flipnote" && family !== "score") fail();
-      const permitted = family === "index" ? ["object", "objectTitle", "objectExpiry", "objectDeletion"] : family === "score" ? ["scoreCell", "scorePatch", "scoreHeader"] : ["frame", "frameDeletion", "title", "fps", "soundRecord"];
+      const permitted = family === "index" ? ["object", "objectTitle", "objectExpiry", "objectDeletion"] : family === "score" ? ["scoreCell", "scoreNote", "scorePatch", "scoreHeader"] : ["frame", "frameDeletion", "title", "fps", "soundRecord"];
       if (!permitted.includes(choice.kind)) fail();
       const body = JSON.parse(e.body as string); validateDraftOperation(body, family);
       if (canonicalJson(body) !== e.body) fail();

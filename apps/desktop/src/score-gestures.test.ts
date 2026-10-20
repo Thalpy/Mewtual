@@ -7,8 +7,10 @@ import { scoreApplyLocal, scoreClearSelection, scoreDuplicateSelection, scoreInv
 
 const PATCH_ID = "a".repeat(64), OTHER_ID = "b".repeat(64);
 const PATCH: JamPatch = { v: 1, o: [{ w: 0, t: 0, c: 0, l: 80 }], e: { a: 10, d: 40, s: 70, r: 120 }, f: { m: 0, c: 18000, q: 0, e: 0 }, l: { r: 1, d: 0, t: 0 }, x: { c: 0, d: 0, r: 0 } };
+/** `notes` is `cells` itself (a legacy cell is a note under its own key), as score-editor.test.ts builds it. */
 function model(steps = 16): ScoreModel {
-  return { title: "t", bpm: 120, bpb: 4, steps, cells: {}, patches: { [PATCH_ID]: PATCH }, cellSlots: {}, patchSlots: {}, headers: { title: null, bpm: null, bpb: null, steps: null }, readiness: { cells: {}, patches: {}, headerConflicts: false }, ready: true };
+  const cells: ScoreModel["cells"] = {};
+  return { title: "t", bpm: 120, bpb: 4, steps, cells, notes: cells, layerSlots: {}, voices: { all: [], play: [], skipped: 0, issues: {} }, patches: { [PATCH_ID]: PATCH }, cellSlots: {}, patchSlots: {}, headers: { title: null, bpm: null, bpb: null, steps: null }, readiness: { cells: {}, patches: {}, headerConflicts: false }, ready: true };
 }
 
 test("the local projection applies every operation the way the working projection does, without touching its input", () => {
@@ -85,12 +87,15 @@ test("a marquee picks the onsets inside its rectangle, in step then row order, w
 test("a phrase moves as one gesture, keeps its shape, may slide over its own cells and refuses as a whole", () => {
   const m = model(16); m.cells["2:5"] = { k: "n", p: PATCH_ID, len: 2, vol: 50 }; m.cells["4:7"] = { k: "n", p: PATCH_ID, len: 2 }; m.cells["3:0"] = { k: "d", pad: 3 }; m.cells["9:9"] = { k: "n", p: PATCH_ID, len: 1 };
   const keys = ["2:5", "4:7", "3:0"];
+  // Declared change (re-review M1): sets run against the direction of travel, the note furthest
+  // ahead first, so each note's new place is written before the note behind it overwrites its old
+  // one. Moving later and up by (1, 2): 4:7 is furthest ahead, then 2:5, then 3:0.
   assert.deepEqual(scoreMoveSelection(m, keys, 1, 2), [
     { op: "clear_cell", step: 2, row: 5 }, { op: "clear_cell", step: 3, row: 0 }, { op: "clear_cell", step: 4, row: 7 },
+    { op: "set_cell", step: 5, row: 9, value: { k: "n", p: PATCH_ID, len: 2 } },
     { op: "set_cell", step: 3, row: 7, value: { k: "n", p: PATCH_ID, len: 2, vol: 50 } },
     { op: "set_cell", step: 4, row: 2, value: { k: "d", pad: 3 } },
-    { op: "set_cell", step: 5, row: 9, value: { k: "n", p: PATCH_ID, len: 2 } },
-  ], "clears first, then sets in step order; a note may land where a selected note was");
+  ], "clears first, then sets against the direction of travel; a note may land where a selected note was");
   assert.deepEqual(scoreMoveSelection(m, keys, 0, 0), []);
   assert.throws(() => scoreMoveSelection(m, keys, 5, 2), /in the way/, "the note at 9:9 blocks one of them, so none move");
   assert.throws(() => scoreMoveSelection(m, keys, 12, 0), /past the end/);

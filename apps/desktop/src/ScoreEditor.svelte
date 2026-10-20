@@ -35,7 +35,7 @@
   // own (the loop will play it), only an explicit listen is.
   import { onDestroy, tick, untrack, type Snippet } from "svelte";
   import { JAM_MET_BPM_MIN, JAM_MET_BPM_MAX, JAM_MET_BPB_MIN, JAM_MET_BPB_MAX, type JamPatch } from "./jam-contract.ts";
-  import { SCORE_MAX_CELLS, SCORE_MAX_STEPS, SCORE_MAX_PATCHES, SCORE_ROWS, SCORE_VOLUME_MAX, SCORE_VOLUME_MIN, canonicalJson, type ScoreCell, type ScoreOp } from "./studio-contract.ts";
+  import { SCORE_DRUM_LAYER, SCORE_MAX_CELLS, SCORE_MAX_STEPS, SCORE_MAX_PATCHES, SCORE_ROWS, SCORE_VOLUME_MAX, SCORE_VOLUME_MIN, canonicalJson, parseNoteKey, type ScoreCell, type ScoreOp } from "./studio-contract.ts";
   import type { ScoreModel } from "./studio-native.ts";
   import { groupShelves, instrumentName, libraryKey, rackLabel, samePatch, waveGlyph, type LibraryItem } from "./studio-sound-ui.ts";
   import { validScoreKey, type ScoreSelection } from "./score-selection.ts";
@@ -47,7 +47,8 @@
     scoreOnsetsIn, scoreOverlappingNotes, scorePadForRow,
     scorePatchOrder, scorePatchUsage, scorePitch, scorePlayheadStep, scoreRepeatBar, scoreReplay, scoreRowIsBlack, scoreScaleRows, scoreSlotDiagnostic, scoreSnapStart,
     scoreTapTempo, scoreTimeLabel, scoreExtent, scoreFreeRun,
-    type ScoreDiagnostic, type ScoreHold, type ScoreScaleKind,
+    SCORE_VISIBILITY_NEXT, scoreGestureId, scoreGhostCells, scoreHeaderOthers, scoreIssuesAt, scoreLayerOf, scoreSurface, scoreSurfaceOps, scoreVisibilityOf,
+    type ScoreDiagnostic, type ScoreGhostCell, type ScoreHold, type ScoreScaleKind, type ScoreSurface, type ScoreVisibility,
   } from "./score-editor.ts";
 
   type Props = {
@@ -63,8 +64,10 @@
     /** Author label ("you" for self) and dot colour for retained values. */
     who?: (identity: string) => string;
     tint?: (identity: string) => string;
-    /** Queues one typed operation; `false` means the host refused it (nothing was queued). */
-    onop: (op: ScoreOp) => boolean | void;
+    /** Queues one typed operation; `false` means the host refused it (nothing was queued).
+     *  `gesture` is shared by every operation of one gesture (`scoreGestureId`), so the host can
+     *  drop a gesture's unsent clears when its write is discarded. */
+    onop: (op: ScoreOp, gesture: number) => boolean | void;
     /** How many operations the host can still queue; a gesture longer than that is refused whole
      *  before anything is sent. Absent means unbounded. */
     onroom?: () => number;
@@ -100,8 +103,12 @@
     history?: Snippet;
     onnotice: (text: string, kind: "info" | "success" | "error") => void;
   };
+  // `docModel` is the document as the host projects it. Everything the grid touches reads `model`
+  // below instead: the same document with its cells replaced by the layer surface (one shown note
+  // per cell, see score-editor.ts), so the gesture code keeps its one-note-per-cell rules and every
+  // write is translated into layered operations at the one place writes leave (`sendAll`).
   let {
-    model, readonlyReason, loading, error, patchLibrary, library = [], who = (id: string) => id.slice(0, 8), tint = () => "var(--muted)",
+    model: docModel, readonlyReason, loading, error, patchLibrary, library = [], who = (id: string) => id.slice(0, 8), tint = () => "var(--muted)",
     onop, onroom, selection = null, onselection, onaddpatch, onplay, onstop, playing = false, nextPass = false, positionMs = null, loop = false, onloop, onaudition, onauditionpad, onnew, onexport, onshare, onpost,
     mediaBusy = false, history, onnotice,
   }: Props = $props();
@@ -193,7 +200,27 @@
   let alive = true;
   onDestroy(() => { alive = false; if (tapTimer) clearTimeout(tapTimer); });
 
+  // Each sound's visibility (and the drum kit's, under "d"), for this viewer and this mount only:
+  // never written to the document, and hiding a sound does not mute it.
+  let visibility = $state<Record<string, ScoreVisibility>>({});
+
   // --- derived views -----------------------------------------------------------------------------
+  // The rack order comes from the document, not the surface: the chosen sound decides the surface.
+  const order = $derived(docModel ? scorePatchOrder(docModel) : []);
+  // Once explicitly chosen, an unavailable recipe must not silently fall back to another sound.
+  // This also holds note entry while a newly queued recipe is not yet in the projection the
+  // host shows (the working projection under autosave, the native readback otherwise).
+  const selectedPatch = $derived(patch ? (order.includes(patch) ? patch : "") : order[0] ?? "");
+  /** The layer new notes go into, and the one a cell shows first. */
+  const chosenLayer = $derived(mode === "drum" ? SCORE_DRUM_LAYER : selectedPatch || null);
+  /** Placement needs the chosen layer shown: ghosted and hidden sounds take no new notes. */
+  const placeable = $derived(chosenLayer !== null && scoreVisibilityOf(visibility, chosenLayer) === "show");
+  // `sent` counts gestures queued. The host replaces the model for every queued edit, so the
+  // surface follows the prop; re-deriving after a send as well keeps it current for a host that
+  // folds edits into the same object (the unit-test harness does).
+  let sent = $state(0);
+  const view = $derived.by<ScoreSurface | null>(() => { void sent; return docModel ? scoreSurface(docModel, visibility, chosenLayer) : null; });
+  const model = $derived(view?.model ?? null);
   // A re-read of a score already on screen (the echo of an own Save, a remote edit) must not take
   // the grid away: the working projection keeps every queued edit, and a later readback corrects
   // anything the author got ahead of. Only the first read, with nothing to show, blocks input.
@@ -203,20 +230,35 @@
   const group = $derived(model ? [...picked].filter((key) => model!.cells[key]) : []);
   const groupSet = $derived(new Set(group));
   const phrase = $derived(group.length > 1);
-  const extent = $derived(model ? scoreExtent(model) : SCORE_PAGE_STEPS);
+  // Usage, the overview and trim count every voice, shown or not: a hidden sound still plays, and so
+  // does a concurrent longer value behind the shown one. The voices are exact for queued edits too
+  // (the working projection computes them). They are clipped to the end, so the grid's extent also
+  // reads the raw shown notes, whose tails past the end stay visible and hatched.
+  const allNotes = $derived.by(() => {
+    void sent;
+    if (!docModel) return null;
+    const cells: Record<string, ScoreCell> = {};
+    docModel.voices.all.forEach((voice, i) => { cells[`${voice.step}:${voice.row}#${i}`] = voice.value; });
+    return { steps: docModel.steps, cells };
+  });
+  const extent = $derived(allNotes && docModel ? Math.max(scoreExtent(allNotes), scoreExtent({ steps: docModel.steps, cells: docModel.notes })) : SCORE_PAGE_STEPS);
+  const noteCount = $derived(docModel ? Object.keys(docModel.notes).length : 0);
+  /** Each header's alternatives with a DIFFERENT value: what the "another value by" chips name.
+   *  Two members setting the same tempo agreed; readiness does not call that a conflict either. */
+  const differing = $derived({
+    title: scoreHeaderOthers(docModel?.headers.title), bpm: scoreHeaderOthers(docModel?.headers.bpm),
+    bpb: scoreHeaderOthers(docModel?.headers.bpb), steps: scoreHeaderOthers(docModel?.headers.steps),
+  });
+  const hitCount = $derived(docModel ? Object.values(docModel.notes).filter((cell) => cell.k === "d").length : 0);
   const pages = $derived(Math.max(1, Math.ceil(extent / size)));
   const currentPage = $derived(Math.min(Math.floor(Math.max(0, start) / size), pages - 1));
   const columns = $derived(Array.from({ length: Math.max(0, Math.min(size, extent - currentPage * size)) }, (_, i) => currentPage * size + i));
   const rows = Array.from({ length: SCORE_ROWS }, (_, i) => SCORE_ROWS - 1 - i);
   const holds = $derived<Map<string, ScoreHold>>(model ? scoreHolds(model, columns) : new Map());
-  const order = $derived(model ? scorePatchOrder(model) : []);
-  const usage = $derived<Map<string, number>>(model ? scorePatchUsage(model) : new Map());
-  // Once explicitly chosen, an unavailable recipe must not silently fall back to another sound.
-  // This also holds note entry while a newly queued recipe is not yet in the projection the
-  // host shows (the working projection under autosave, the native readback otherwise).
-  const selectedPatch = $derived(patch ? (order.includes(patch) ? patch : "") : order[0] ?? "");
+  const ghostCells = $derived<Map<string, ScoreGhostCell>>(view ? scoreGhostCells(view.ghosts, columns) : new Map());
+  const usage = $derived<Map<string, number>>(allNotes ? scorePatchUsage(allNotes) : new Map());
   const patchPending = $derived(!!patch && !order.includes(patch));
-  const attention = $derived(model ? scoreAttention(model) : []);
+  const attention = $derived(docModel ? scoreAttention(docModel) : []);
   const attentionPages = $derived(Math.max(1, Math.ceil(attention.length / SCORE_DIAGNOSTIC_PAGE)));
   const currentAttentionPage = $derived(Math.min(attentionPage, attentionPages - 1));
   const attentionSlice = $derived(attention.slice(currentAttentionPage * SCORE_DIAGNOSTIC_PAGE, (currentAttentionPage + 1) * SCORE_DIAGNOSTIC_PAGE));
@@ -235,10 +277,12 @@
     return result;
   });
   const selectedCell = $derived(model && selected ? model.cells[selected] ?? null : null);
-  const selectedDiag = $derived(model && selected ? scoreSlotDiagnostic(model, "cell", selected) : null);
+  /** The note key behind a surface cell: the shown note's own key, else the cell itself. */
+  const realKey = (key: string) => view?.keyOf.get(key) ?? key;
+  const selectedDiag = $derived(docModel && selected ? scoreSlotDiagnostic(docModel, realKey(selected).includes("/") ? "note" : "cell", realKey(selected)) : null);
   /** The selected note and every note overlapping its run, owner first; more than one means a choice to make. */
   const selectedNotes = $derived(model && selected ? (model.cells[selected] ? scoreOverlappingNotes(model, selected) : scoreNotesAt(model, Number(selected.split(":")[0]), Number(selected.split(":")[1]))) : []);
-  const occupied = $derived<Set<number>>(model ? scoreOccupiedSteps(model) : new Set());
+  const occupied = $derived<Set<number>>(allNotes ? scoreOccupiedSteps(allNotes) : new Set());
   const stepsPerBar = $derived(Math.max(1, model?.bpb ?? 4) * SCORE_STEPS_PER_BEAT);
   const playhead = $derived(model && playing && positionMs !== null ? scorePlayheadStep(positionMs, model.bpm, model.steps, loop) : -1);
   const shelves = $derived(groupShelves(library));
@@ -265,11 +309,13 @@
   const canRedo = $derived(redoStack.length > 0 && !blocked);
   /** The bar the selection (else the page) is in, for "repeat bar". */
   const currentBar = $derived(Math.floor((selected ? Number(selected.split(":")[0]) : columns[0] ?? 0) / stepsPerBar));
-  const lastSounding = $derived(model ? scoreLastSoundingStep(model) : -1);
+  // The voices are clipped to the end, so a hold crossing it is read from the raw shown notes too:
+  // "fit to last note" must still be able to lengthen the score to cover it (third review L2).
+  const lastSounding = $derived(allNotes && docModel ? Math.max(scoreLastSoundingStep(allNotes), scoreLastSoundingStep({ cells: docModel.notes })) : -1);
   /** The cells a click would fill right now: exactly what `fitPlacement` would write. */
   const target = $derived.by<Set<string>>(() => {
     const result = new Set<string>();
-    if (!model || drag || blocked || !hover || tool !== "place" || mode !== "note" || !selectedPatch) return result;
+    if (!model || drag || blocked || !hover || tool !== "place" || mode !== "note" || !selectedPatch || !placeable) return result;
     const [step, row] = hover.split(":").map(Number);
     const fit = fitPlacement(step, row);
     if (!fit) return result;
@@ -307,7 +353,7 @@
    * end or folded away. The hover preview and the write share this, so they cannot disagree.
    */
   function fitPlacement(step: number, row: number): { start: number; len: number } | null {
-    if (!model || step >= model.steps || folded.has(row) || scoreOnsetAt(model, step, row)) return null;
+    if (!model || !placeable || step >= model.steps || folded.has(row) || scoreOnsetAt(model, step, row)) return null;
     const snapped = scoreSnapStart(step, snap, model.steps);
     const start = snapped < step && scoreFreeRun(model, snapped, row, step - snapped + 1) === step - snapped + 1 ? snapped : step;
     const len = scoreFreeRun(model, start, row, hold);
@@ -325,8 +371,42 @@
   function itemLabel(item: ScoreDiagnostic): string {
     if (item.kind === "header") return item.key;
     if (item.kind === "patch") return nameOf(item.key);
-    const [step, row] = item.key.split(":").map(Number);
-    return `${scorePitch(row)} · ${stepLabel(step)}`;
+    const at = parseNoteKey(item.key);
+    if (!at) return item.key;
+    const layer = at.layer === null ? "" : at.layer === SCORE_DRUM_LAYER ? " · drums" : ` · ${nameOf(at.layer)}`;
+    return `${scorePitch(at.row)} · ${stepLabel(at.step)}${layer}`;
+  }
+  /** Readiness of the note shown at a surface cell (or of the legacy slot there, shown or not). */
+  const issuesOf = (key: string) => docModel ? scoreIssuesAt(docModel, realKey(key)) : undefined;
+  /** What the slot behind a surface cell retains: other values, who wrote the shown one, and a clear
+   * that beat a value (legacy only: a layered clear never beats a live note). */
+  function slotOf(key: string): { others: string[]; author: string | null; gone: boolean } {
+    const real = realKey(key);
+    if (!docModel) return { others: [], author: null, gone: false };
+    // `others` are the authors of DIFFERENT values only: two members placing the same note is one
+    // note, not a conflict (readiness agrees).
+    const differing = (shown: ScoreCell | null, alternatives: { value: ScoreCell | null; source: { author: string } }[]) => {
+      const bytes = shown === null ? null : canonicalJson(shown);
+      return alternatives.filter((a) => a.value !== null && canonicalJson(a.value) !== bytes).map((a) => a.source.author);
+    };
+    // While an edit of this note is queued the working projection shows its value, which is none of
+    // the register's: that edit replaces them all once it lands, so there is no other value to name
+    // yet (the working readiness agrees; third review L4).
+    if (real.includes("/")) {
+      const slot = docModel.layerSlots[real];
+      if (!slot) return { others: [], author: null, gone: false };
+      const live = [slot.register.selected, ...slot.register.conflicts].filter((a) => a.value !== null);
+      const shown = docModel.notes[real] ?? live[0]?.value ?? null;
+      const by = live.find((a) => a.value !== null && shown !== null && canonicalJson(a.value) === canonicalJson(shown));
+      if (!by) return { others: [], author: null, gone: false };
+      return { others: differing(shown, live), author: by.source.author, gone: false };
+    }
+    const slot = docModel.cellSlots[real];
+    if (!slot) return { others: [], author: null, gone: false };
+    const current = docModel.cells[real];
+    if (current && slot.register.selected.value !== null && canonicalJson(current) !== canonicalJson(slot.register.selected.value)) return { others: [], author: null, gone: false };
+    const beaten = slot.removed && (slot.register.selected.value !== null || slot.register.conflicts.some((c) => c.value !== null));
+    return { others: differing(slot.register.selected.value, slot.register.conflicts), author: slot.register.selected.source.author, gone: beaten };
   }
   function cellLabel(step: number, row: number): string {
     const key = `${step}:${row}`, cell = model?.cells[key], held = holds.get(key);
@@ -336,31 +416,37 @@
     return `${base}: empty`;
   }
   function cellTitle(step: number, row: number, label: string): string {
-    const key = `${step}:${row}`, issues = model?.readiness.cells[key], slot = model?.cellSlots[key], held = holds.get(key);
+    const key = `${step}:${row}`, issues = issuesOf(key), slot = slotOf(key), held = holds.get(key);
     const flags = issues ? (Object.entries(issues) as [keyof typeof SCORE_ISSUE_LABELS, boolean][]).filter(([, v]) => v).map(([k]) => SCORE_ISSUE_LABELS[k]) : [];
     const parts = [label];
     if (held?.others.length) parts.push(`also ${held.others.map((k) => `${nameOf(model!.cells[k].k === "n" ? (model!.cells[k] as { p: string }).p : "")} from ${stepLabel(Number(k.split(":")[0]))}`).join(", ")}`);
-    if (slot?.register.conflicts.length) parts.push(`another value by ${slot.register.conflicts.map((c) => who(c.source.author)).join(", ")}`);
-    if (slot && !model?.cells[key] && slot.removed && (slot.register.selected.value !== null || slot.register.conflicts.some((c) => c.value !== null))) parts.push("cleared");
-    if (slot?.register.selected && model?.cells[key]) parts.push(`by ${who(slot.register.selected.source.author)}`);
+    if (view?.stacked.has(key)) parts.push("more sounds here");
+    if (slot.others.length) parts.push(`another value by ${slot.others.map((author) => who(author)).join(", ")}`);
+    if (slot.gone && !model?.cells[key]) parts.push("cleared");
+    if (slot.author && model?.cells[key]) parts.push(`by ${who(slot.author)}`);
     return [...parts, ...flags].join(" · ");
   }
   function cellClass(step: number, row: number): string {
-    const key = `${step}:${row}`, cell = model?.cells[key], held = holds.get(key), issues = model?.readiness.cells[key], slot = model?.cellSlots[key];
+    const key = `${step}:${row}`, cell = model?.cells[key], held = holds.get(key), issues = issuesOf(key), slot = slotOf(key);
+    const ghost = !cell && !held ? ghostCells.get(key) : undefined;
     const classes: string[] = [];
     if ((step + 1) % stepsPerBar === 0) classes.push("bar"); else if ((step + 1) % SCORE_STEPS_PER_BEAT === 0) classes.push("beat");
     if (cell?.k === "n") { classes.push("n"); if ((cell.len ?? 1) === 1) classes.push("end"); }
     if (cell?.k === "d") classes.push("pad");
     if (held) { classes.push("held"); if (held.last) classes.push("end"); if (held.others.length) classes.push("stacked"); }
+    if (view?.stacked.has(key)) classes.push("stacked");
+    // A ghosted sound: an outline in its colour, nothing else. The cell under it is empty to every
+    // gesture, which is what lets another sound be written over it.
+    if (ghost) classes.push(ghost.p === null ? "ghost gpad" : "ghost", ...(ghost.onset ? ["gon"] : []), ...(ghost.last ? ["gend"] : []));
     if (issues?.count) classes.push("over");
     if (issues?.extent || step >= (model?.steps ?? 0)) classes.push("past");
     // Readiness is keyed by the onset; a hold whose recipe is gone is hollow along its whole run.
-    if (issues?.recipe || (held && model?.readiness.cells[held.onset]?.recipe)) classes.push("norecipe");
+    if (issues?.recipe || (held && issuesOf(held.onset)?.recipe)) classes.push("norecipe");
     if (issues?.overlap) classes.push("overlap");
-    if (issues?.conflict || (slot?.register.conflicts.length ?? 0) > 0) classes.push("conf");
+    if (issues?.conflict || slot.others.length > 0) classes.push("conf");
     // A clear that beat a value (its own setter or a concurrent one) leaves a mark the attention
     // list can explain; a plain clear with nothing beaten is just an empty cell.
-    if (slot && !cell && !held && slot.removed && (slot.register.selected.value !== null || slot.register.conflicts.some((c) => c.value !== null))) classes.push("gone");
+    if (slot.gone && !cell && !held && !ghost) classes.push("gone");
     if (folded.has(row)) classes.push("fold");
     if (mode === "drum" && scorePadForRow(row) !== null) classes.push("lane");
     if (selected === key || (selected !== null && held?.onset === selected)) classes.push("sel");
@@ -385,7 +471,7 @@
   }
   function cellStyle(step: number, row: number): string {
     const key = `${step}:${row}`, cell = model?.cells[key], held = holds.get(key);
-    const id = cell?.k === "n" ? cell.p : held?.p;
+    const id = cell?.k === "n" ? cell.p : held?.p ?? (!cell ? ghostCells.get(key)?.p ?? undefined : undefined);
     return id ? `--pc: ${swatch(id)}` : "";
   }
   function rulerLabel(step: number): string {
@@ -417,10 +503,14 @@
    * replays exactly the values each operation replaced. A gesture the host refuses midway is
    * recorded for the operations that were accepted, so even that much can be undone.
    */
-  function sendAll(make: (current: ScoreModel) => ScoreOp[], label: string): Gesture | null {
-    if (blocked || !model) return null;
+  function sendAll(make: (current: ScoreModel) => ScoreOp[], label: string, space: "surface" | "document" = "surface"): Gesture | null {
+    if (blocked || !model || !docModel || !view) return null;
+    // `surface` gestures are built against the grid's one-note-per-cell surface and translated to
+    // layered document operations here; `document` ones (undo, redo, a retained value) already are
+    // document operations. Either way what is queued, recorded and inverted is document operations,
+    // so an undo never depends on which sound happens to be chosen when it runs.
     let ops: ScoreOp[];
-    try { ops = make(model); } catch (cause) { onnotice(message(cause), "error"); return null; }
+    try { ops = space === "surface" ? scoreSurfaceOps(docModel, view, make(model)) : make(docModel); } catch (cause) { onnotice(message(cause), "error"); return null; }
     if (!ops.length) return null;
     // A gesture the host cannot queue whole is refused before anything is sent: a phrase moved
     // half way, or cleared without room for the restore, is worse than a refusal.
@@ -431,8 +521,9 @@
     }
     // `undos[i]` is what puts back whatever `forward[i]` replaced, taken before it was sent.
     const forward: ScoreOp[] = [], undos: (ScoreOp | null)[] = [];
-    let working = model;
-    const queue = (op: ScoreOp): boolean => { try { return onop(op) !== false; } catch (cause) { onnotice(message(cause), "error"); return false; } };
+    let working = docModel;
+    const gesture = scoreGestureId();
+    const queue = (op: ScoreOp): boolean => { try { return onop(op, gesture) !== false; } catch (cause) { onnotice(message(cause), "error"); return false; } };
     for (const op of ops) {
       const undo = scoreInverse(working, op);
       if (!queue(op)) break;
@@ -440,6 +531,7 @@
       working = scoreApplyLocal(working, op);
     }
     if (!forward.length) return null;
+    sent++;
     const newestFirst = (list: (ScoreOp | null)[]) => list.filter((op): op is ScoreOp => op !== null).reverse();
     if (forward.length < ops.length) {
       // The host refused an operation after accepting earlier ones (its queue is full, or it
@@ -471,7 +563,7 @@
   function undo() {
     const gesture = undoStack.at(-1);
     if (!gesture || blocked) return;
-    const sent = sendAll((current) => scoreReplay(current, gesture.inverse), gesture.label);
+    const sent = sendAll((current) => scoreReplay(current, gesture.inverse), gesture.label, "document");
     if (!sent) return;
     undoStack = undoStack.slice(0, -1);
     redoStack = [...redoStack.slice(-(HISTORY_MAX - 1)), { label: gesture.label, forward: sent.inverse, inverse: sent.forward }];
@@ -479,7 +571,7 @@
   function redo() {
     const gesture = redoStack.at(-1);
     if (!gesture || blocked) return;
-    const sent = sendAll((current) => scoreReplay(current, gesture.forward), gesture.label);
+    const sent = sendAll((current) => scoreReplay(current, gesture.forward), gesture.label, "document");
     if (!sent) return;
     redoStack = redoStack.slice(0, -1);
     undoStack = [...undoStack.slice(-(HISTORY_MAX - 1)), sent];
@@ -502,7 +594,7 @@
   }
   /** `remember` keeps `len` as the next default: a length the author chose, not one the end or a neighbour forced. */
   function place(step: number, row: number, len: number, recipe = selectedPatch, remember = true) {
-    if (!model) return;
+    if (!model || !placeable) return;
     const entry = mode === "drum" ? { mode: "drum" as const, pad: scorePadForRow(row) ?? pad } : { mode: "note" as const, patch: recipe, len, volume };
     if (!send(() => scoreCellOperation(model!, step, row, entry), entry.mode === "drum" ? "place a hit" : "place a note")) return;
     selected = `${step}:${row}`;
@@ -591,7 +683,7 @@
     record(gesture);
     // Notes the composer would never author (overlapping holds, past the end, a sound that is
     // gone) can be cleared but not put back as they were: say so now, not at the undo.
-    try { scoreReplay(gesture.forward.reduce((m, op) => scoreApplyLocal(m, op), model), gesture.inverse); }
+    try { scoreReplay(gesture.forward.reduce((m, op) => scoreApplyLocal(m, op), docModel!), gesture.inverse); }
     catch (cause) { onnotice(`cleared · undo cannot restore every note as it was (${message(cause)})`, "info"); }
     picked = new Set(); selected = null;
   }
@@ -657,19 +749,27 @@
       else if (selectedPatch && step < model.steps && !folded.has(row)) audition(selectedPatch, row, Math.max(1, Math.min(hold, model.steps - step)));
       return;
     }
-    if (onset) { selected = onset.key; return; }
+    if (onset) { select(onset.key, onset.cell); return; }
     if (folded.has(row)) return; // a folded row takes no new note
     if (mode === "drum") { place(step, row, 1); return; }
     if (!selectedPatch) return;
     const fit = fitPlacement(step, row);
     if (fit) place(fit.start, row, fit.len, selectedPatch, fit.len === hold);
   }
-  /** Placement is impossible here (past the end, no recipe, folded row); the cell stays focusable for navigation. */
+  /** Selecting a note makes its sound the chosen one (a hit, the drum kit), so the cell keeps
+   *  showing it and the next placement continues with what was just picked up. */
+  function select(key: string, cell: ScoreCell) {
+    selected = key;
+    if (cell.k === "d") mode = "drum";
+    else if (order.includes(cell.p)) { patch = cell.p; mode = "note"; }
+  }
+  /** Placement is impossible here (past the end, no recipe, a sound not shown, folded row); the
+   *  cell stays focusable for navigation. */
   function cellOff(step: number, row: number): boolean {
     if (!model) return true;
     const key = `${step}:${row}`;
     if (model.cells[key] || holds.has(key)) return false;
-    return step >= model.steps || (mode === "note" && !selectedPatch) || folded.has(row);
+    return step >= model.steps || (mode === "note" && !selectedPatch) || !placeable || folded.has(row);
   }
   function contextCell(event: MouseEvent, step: number, row: number) {
     event.preventDefault();
@@ -715,7 +815,7 @@
       drag = { kind: "move", pointerId: event.pointerId, onset, cell: carried, len: carried.k === "n" ? (carried.len ?? 1) : 1, offset: step - onsetStep, to: { step: onsetStep, row }, fits: true, reason: "", moved: false, keys, delta: { step: 0, row: 0 } };
       return;
     }
-    if (mode !== "note" || !selectedPatch) return;
+    if (mode !== "note" || !selectedPatch || !placeable) return;
     // The gesture starts as exactly the click the preview shows; moving the pointer lengthens it.
     const fit = fitPlacement(step, row);
     if (!fit) return;
@@ -878,7 +978,28 @@
     if (send(() => scoreCellOperation(model!, step, row, { mode: "note", patch: cell.p, len: cell.len ?? 1, volume: level }), "change a note's volume")) { volume = level; if (!playing) audition(cell.p, row, cell.len ?? 1, level); }
   }
   function useAlternative(item: ScoreDiagnostic, index: number) {
-    send(() => scoreDiagnosticOperation(model!, item, index), "choose a retained value");
+    const gesture = sendAll((current) => scoreDiagnosticOperation(current, item, index), "choose a retained value", "document");
+    if (gesture) record(gesture);
+  }
+  /** Clear a slot the attention list names by its own note key (legacy or layered), shown or not. */
+  function clearSlot(key: string) {
+    const at = parseNoteKey(key);
+    if (!at) return;
+    const gesture = sendAll((current) => scoreReplay(current, [at.layer === null ? { op: "clear_cell", step: at.step, row: at.row } : { op: "clear_note", step: at.step, row: at.row, layer: at.layer }]), "clear", "document");
+    if (gesture) record(gesture);
+  }
+  /** One sound's (or the kit's) visibility steps show, ghost, hide. A ghosted or hidden layer
+   *  leaves the selection and the phrase: nothing on it may be edited. */
+  function cycleVisibility(layer: string) {
+    const next = SCORE_VISIBILITY_NEXT[scoreVisibilityOf(visibility, layer)];
+    if (next !== "show" && model && docModel) {
+      // The selection and the phrase are kept by cell; left alone they would re-bind to whatever
+      // another sound shows in those cells, and a phrase move would carry notes never picked.
+      const onLayer = (key: string) => { const cell = model!.cells[key]; return !!cell && scoreLayerOf(docModel!, cell) === layer; };
+      if (selected && onLayer(selected)) selected = null;
+      if ([...picked].some(onLayer)) picked = new Set([...picked].filter((key) => !onLayer(key)));
+    }
+    visibility = { ...visibility, [layer]: next };
   }
   function removePatch(id: string) {
     const used = usage.get(id) ?? 0;
@@ -911,9 +1032,20 @@
   function focusItem(item: ScoreDiagnostic) {
     expanded = expanded === item.id ? "" : item.id;
     altPage = 0;
-    if (item.kind === "cell") {
-      selected = item.key;
-      goTo(Number(item.key.split(":")[0]));
+    if (item.kind === "cell" || item.kind === "note") {
+      const at = parseNoteKey(item.key);
+      if (!at) return;
+      // A note is reviewed in its own layer: choose it and show it, or the grid would show another
+      // sound's note (or nothing) in that cell. A legacy cell's layer is its value's.
+      // A removed legacy cell has no live value; its retained alternatives still name its sound.
+      const value = at.layer === null ? docModel?.cells[item.key] ?? (item.alternatives.find((a) => a.value !== null)?.value as ScoreCell | undefined) : null;
+      const layer = at.layer ?? (value ? scoreLayerOf(docModel!, value) : null);
+      if (layer !== null) {
+        if (layer === SCORE_DRUM_LAYER) mode = "drum"; else if (order.includes(layer)) pickPatch(layer);
+        if (scoreVisibilityOf(visibility, layer) !== "show") visibility = { ...visibility, [layer]: "show" };
+      }
+      selected = `${at.step}:${at.row}`;
+      goTo(at.step);
     } else if (item.kind === "patch" && model?.patches[item.key]) pickPatch(item.key);
   }
   /** Tab into the grid with nothing selected adopts the focused cell, so the next arrow has a start. A
@@ -1004,7 +1136,9 @@
       <div class="st-opt">
         <i class="sw" style="background: {swatch(selectedCell.p)}"></i>
         <select class="st-input grow" aria-label="Sound of this note" title="change this note's sound" value={selectedCell.p} disabled={blocked} onchange={(e) => reassignSelected(e.currentTarget.value)}>
-          {#each order as id (id)}<option value={id}>{nameOf(id)}</option>{/each}
+          <!-- Only a shown sound takes notes: moving a note into a ghosted or hidden one would make
+               it vanish from under the member's hand. -->
+          {#each order.filter((id) => id === selectedCell?.p || scoreVisibilityOf(visibility, id) === "show") as id (id)}<option value={id}>{nameOf(id)}</option>{/each}
         </select>
         {#if onaudition}<button type="button" class="st-tile" aria-label="Listen to this note" title="listen" onclick={() => auditionCell(selectedCell!, sRow)}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M4 2.5 13 8 4 13.5z"></path></svg></button>{/if}
       </div>
@@ -1062,8 +1196,9 @@
         {/if}
       {/each}
     {/if}
-    {#if model.cellSlots[selected]?.register.selected && selectedCell}
-      <p class="micro wrap">by <i class="who" style="background: {tint(model.cellSlots[selected].register.selected.source.author)}"></i>{who(model.cellSlots[selected].register.selected.source.author)}</p>
+    {@const author = selectedCell ? slotOf(selected).author : null}
+    {#if author}
+      <p class="micro wrap">by <i class="who" style="background: {tint(author)}"></i>{who(author)}</p>
     {/if}
     {#if selectedDiag && (selectedDiag.alternatives.length > 1 || selectedDiag.issues.length)}
       {#if selectedDiag.issues.length}<div class="st-opt">{#each selectedDiag.issues as issue (issue)}<span class="chip warn"><i></i><span class="micro">{SCORE_ISSUE_LABELS[issue as keyof typeof SCORE_ISSUE_LABELS] ?? issue}</span></span>{/each}</div>{/if}
@@ -1071,6 +1206,17 @@
       {#if selectedDiag.alternatives.length > 1 && tab !== "score"}{@render alternatives(selectedDiag)}{/if}
     {/if}
   {/if}
+{/snippet}
+
+<!-- A layer's show / ghost / hide toggle: a symbol only (the owner's rule), its state named for
+     screen readers. Clicking steps to the next state. -->
+{#snippet visToggle(layer: string, name: string)}
+  {@const state = scoreVisibilityOf(visibility, layer)}
+  <button type="button" class="vis" data-v={state} data-score-visibility={layer} aria-label="{name}: {state === 'show' ? 'shown' : state === 'ghost' ? 'ghosted' : 'hidden'}" onclick={() => cycleVisibility(layer)}>
+    {#if state === "show"}<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="5.5" width="11" height="5" rx="1.5" fill="currentColor"></rect></svg>
+    {:else if state === "ghost"}<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="5.5" width="11" height="5" rx="1.5" stroke-dasharray="2 1.5"></rect></svg>
+    {:else}<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="5.5" width="11" height="5" rx="1.5"></rect><path d="M3 13 13 3"></path></svg>{/if}
+  </button>
 {/snippet}
 
 {#snippet alternatives(item: ScoreDiagnostic)}
@@ -1101,24 +1247,22 @@
   <!-- header: the document's facts and the export actions -->
   <div class="sc-head">
     <input class="st-title" aria-label="Score title" value={model?.title ?? ""} placeholder="untitled" disabled={blocked} onchange={(e) => header("title", e)} />
-    {#if model?.headers.title?.conflicts.length}<span class="chip warn" title="another title was set at the same time by {model.headers.title.conflicts.map((c) => who(c.source.author)).join(', ')}"><i></i><span class="micro">title</span></span>{/if}
+    {#if differing.title.length}<span class="chip warn" title="another title was set at the same time by {differing.title.map((c) => who(c.source.author)).join(', ')}"><i></i><span class="micro">title</span></span>{/if}
     {#if model}
       <span class="chip"><span class="micro">{model.bpm} bpm</span></span>
       <span class="chip"><span class="micro">{model.bpb} / bar</span></span>
       <span class="chip"><span class="micro">{model.steps} steps · {bars} {bars === 1 ? "bar" : "bars"} · {scoreTimeLabel(totalMs)}</span></span>
-      {#if model.ready && !issueCount}
-        <span class="chip ok" title="plays and exports as written"><i></i><span class="micro">ready</span></span>
-      {:else if model.ready}
-        <button type="button" class="chip as-btn" title="plays and exports as written; retained values are waiting for a decision" onclick={() => { tab = "score"; }}><i></i><span class="micro">{issueCount} to review</span></button>
-      {:else}
-        <button type="button" class="chip warn as-btn" title="open the list of cells, sounds and headers that need a decision" onclick={() => { tab = "score"; }}><i></i><span class="micro">{issueCount} to fix</span></button>
+      <!-- Nothing here gates playing or exporting: concurrent edits merge by adding, and whatever
+           cannot play is skipped. The count only says there is something to look at. -->
+      {#if issueCount}
+        <button type="button" class="chip as-btn" title="open the list of notes, sounds and headers worth a look" onclick={() => { tab = "score"; }}><i></i><span class="micro">{issueCount} to review</span></button>
       {/if}
     {/if}
     <span class="grow"></span>
     <button type="button" class="st-tg" class:on={scaleOn} aria-pressed={scaleOn} data-score-scale-toggle title="scale view [s] · folds rows outside the scale; notes there stay" onclick={toggleScale}><i></i><span class="micro">{scaleOn ? `${SCORE_ROOTS[scaleRoot]} ${scaleKind}` : "scale view"}</span></button>
-    {#if onpost}<button type="button" class="st-btn primary" data-score-post disabled={mediaBusy || playing || !model?.ready} title={model?.ready ? "attach this score to a chat message" : "fix the flagged items first"} onclick={onpost}><svg viewBox="0 0 16 16" class="ico" aria-hidden="true"><path d="M2 8l12-6-4 12-2.5-4.5z"></path></svg>post to chat</button>{/if}
-    {#if onexport}<button type="button" class="st-btn" disabled={mediaBusy || playing || !model?.ready} title={model?.ready ? "save this score as a .jamtake file" : "fix the flagged items first"} onclick={onexport}>download .jamtake</button>{/if}
-    {#if onshare}<button type="button" class="st-btn" disabled={mediaBusy || playing || !model?.ready} title={model?.ready ? "put a .jamtake of this score in the server share" : "fix the flagged items first"} onclick={onshare}>share</button>{/if}
+    {#if onpost}<button type="button" class="st-btn primary" data-score-post disabled={mediaBusy || playing || !model} title="attach this score to a chat message" onclick={onpost}><svg viewBox="0 0 16 16" class="ico" aria-hidden="true"><path d="M2 8l12-6-4 12-2.5-4.5z"></path></svg>post to chat</button>{/if}
+    {#if onexport}<button type="button" class="st-btn" disabled={mediaBusy || playing || !model} title="save this score as a .jamtake file" onclick={onexport}>download .jamtake</button>{/if}
+    {#if onshare}<button type="button" class="st-btn" disabled={mediaBusy || playing || !model} title="put a .jamtake of this score in the server share" onclick={onshare}>share</button>{/if}
   </div>
 
   {#if error}<div class="st-banner danger" role="alert">{error}</div>{/if}
@@ -1260,10 +1404,21 @@
             {/if}
 
             <div class="st-sec nxt">sounds in this score <span class="n">· {order.length} / {SCORE_MAX_PATCHES}</span></div>
+            <!-- The drum kit is one layer, toggled like a sound. -->
+            <div class="sc-prow" class:on={mode === "drum"}>
+              {@render visToggle(SCORE_DRUM_LAYER, "drums")}
+              <button type="button" class="pick" data-doc-kit aria-pressed={mode === "drum"} title="drums · {hitCount} {hitCount === 1 ? 'hit' : 'hits'} · click to place hits" onclick={() => { mode = "drum"; }}>
+                <i class="sw kit"></i>
+                <span class="nm">drums</span>
+                <span class="grow"></span>
+                <span class="micro">{hitCount}</span>
+              </button>
+            </div>
             {#each order as id (id)}
               {@const issues = model.readiness.patches[id]}
               {@const used = usage.get(id) ?? 0}
-              <div class="sc-prow" class:on={selectedPatch === id}>
+              <div class="sc-prow" class:on={selectedPatch === id && mode === "note"}>
+                {@render visToggle(id, nameOf(id))}
                 <button type="button" class="pick" data-doc-patch={id} aria-pressed={selectedPatch === id} title="{nameOf(id)} · {used} {used === 1 ? 'note' : 'notes'} · click to place with it" onclick={() => pickPatch(id)}>
                   <i class="sw" style="background: {swatch(id)}"></i>
                   <svg viewBox="0 0 26 12" aria-hidden="true"><path d={waveGlyph(model.patches[id])}></path></svg>
@@ -1314,7 +1469,7 @@
             <!-- tempo -->
             <div class="st-sec">tempo <span class="n">· {JAM_MET_BPM_MIN} to {JAM_MET_BPM_MAX}</span></div>
             <div class="sc-big"><b>{model.bpm}</b><span class="micro">bpm</span>
-              {#if model.headers.bpm?.conflicts.length}<span class="chip warn" title="another value by {model.headers.bpm.conflicts.map((c) => who(c.source.author)).join(', ')}"><i></i><span class="micro">conflict</span></span>{/if}
+              {#if differing.bpm.length}<span class="chip warn" title="another value by {differing.bpm.map((c) => who(c.source.author)).join(', ')}"><i></i><span class="micro">conflict</span></span>{/if}
             </div>
             <div class="st-opt">
               <button type="button" class="st-tile txt" aria-label="Tempo down five" disabled={blocked || model.bpm - 5 < JAM_MET_BPM_MIN} onclick={() => setBpm(model!.bpm - 5)}>−5</button>
@@ -1333,7 +1488,7 @@
                 <button type="button" class="st-tile" class:on={model.bpb === n} aria-pressed={model.bpb === n} aria-label="{n} beats per bar" disabled={blocked} onclick={() => setBpb(n)}>{n}</button>
               {/each}
             </div>
-            {#if model.headers.bpb?.conflicts.length}<p class="micro wrap">another value by {model.headers.bpb.conflicts.map((c) => `${who(c.source.author)}: ${c.value}`).join(", ")}</p>{/if}
+            {#if differing.bpb.length}<p class="micro wrap">another value by {differing.bpb.map((c) => `${who(c.source.author)}: ${c.value}`).join(", ")}</p>{/if}
             <!-- length -->
             <div class="st-sec nxt">length</div>
             <div class="sc-deriv">
@@ -1349,20 +1504,15 @@
               <button type="button" class="st-btn ghost" title="round the length up to whole bars" disabled={blocked || model.steps % stepsPerBar === 0 || bars * stepsPerBar > SCORE_MAX_STEPS} onclick={() => setSteps(bars * stepsPerBar)}>fit to bars</button>
               <button type="button" class="st-btn ghost" data-score-repeat-bar title="copy bar {currentBar + 1} into the bar after it; the score grows if it has to, and taken cells are left alone" disabled={blocked || (currentBar + 2) * stepsPerBar > SCORE_MAX_STEPS} onclick={repeatBar}>repeat bar {currentBar + 1}</button>
             </div>
-            {#if model.headers.steps?.conflicts.length}<p class="micro wrap">another length by {model.headers.steps.conflicts.map((c) => `${who(c.source.author)}: ${c.value}`).join(", ")} · cells past the shorter end stay, hatched</p>{/if}
+            {#if differing.steps.length}<p class="micro wrap">another length by {differing.steps.map((c) => `${who(c.source.author)}: ${c.value}`).join(", ")} · cells past the shorter end stay, hatched</p>{/if}
             <div class="sc-bar"><i style="width: {(model.steps / SCORE_MAX_STEPS) * 100}%"></i></div>
-            <span class="micro">{model.steps} of {SCORE_MAX_STEPS} steps · {Object.keys(model.cells).length} of {SCORE_MAX_CELLS} cells</span>
+            <span class="micro">{model.steps} of {SCORE_MAX_STEPS} steps · {noteCount} of {SCORE_MAX_CELLS} notes</span>
 
-            <!-- attention -->
-            {#if model.ready && !attention.length}
-              <div class="st-sec nxt">ready</div>
-              <p class="micro wrap">plays and exports as written</p>
-            {:else}
-              <div class="st-sec nxt">{attention.length} {model.ready ? "to review" : "to fix"}</div>
-            {/if}
+            <!-- attention: things to look at, never a gate -->
+            {#if attention.length}<div class="st-sec nxt">{attention.length} to review</div>{/if}
             {#each attentionSlice as item (item.id)}
               <button type="button" class="sc-att" class:on={expanded === item.id} data-score-evidence={item.id} aria-expanded={expanded === item.id} onclick={() => focusItem(item)}>
-                <span class="kind">{item.kind === "cell" ? "◼" : item.kind === "patch" ? "♪" : "⌂"}</span>
+                <span class="kind">{item.kind === "cell" || item.kind === "note" ? "◼" : item.kind === "patch" ? "♪" : "⌂"}</span>
                 <span class="lb">{itemLabel(item)}</span>
                 <span class="grow"></span>
                 {#each item.issues as issue (issue)}<span class="chip warn"><span class="micro">{SCORE_ISSUE_LABELS[issue as keyof typeof SCORE_ISSUE_LABELS] ?? issue}</span></span>{/each}
@@ -1373,7 +1523,7 @@
                 <div class="sc-attbody">
                   {#if item.alternatives.length > 1 || item.removed}{@render alternatives(item)}{/if}
                   <div class="acts">
-                    {#if item.kind === "cell"}<button type="button" class="st-btn ghost" disabled={blocked} onclick={() => clearKey(item.key)}>clear</button>{/if}
+                    {#if item.kind === "cell" || item.kind === "note"}<button type="button" class="st-btn ghost" disabled={blocked} onclick={() => clearSlot(item.key)}>clear</button>{/if}
                     {#if item.kind === "patch" && model.patches[item.key]}<button type="button" class="st-btn ghost" disabled={blocked} onclick={() => send(() => ({ op: "remove_patch", patch: item.key }), "remove a sound")}>remove sound</button>{/if}
                   </div>
                 </div>
@@ -1389,19 +1539,17 @@
 
             <!-- export -->
             <div class="st-sec nxt">export <span class="n">· jam-take:v1</span></div>
+            <!-- What the export will hold. Skipped notes are counted, never a reason to refuse. -->
             <ul class="sc-check" data-score-export>
-              <li><i class={order.length <= SCORE_MAX_PATCHES && !Object.values(model.readiness.patches).some((p) => p.count) ? "ok" : "warn"}></i><span>{order.length} {order.length === 1 ? "sound" : "sounds"} of {SCORE_MAX_PATCHES}</span></li>
-              <li><i class={!Object.values(model.readiness.cells).some((c) => c.count) ? "ok" : "warn"}></i><span>{Object.keys(model.cells).length} cells of {SCORE_MAX_CELLS}</span></li>
-              <li><i class={!Object.values(model.readiness.cells).some((c) => c.extent || c.recipe || c.overlap) ? "ok" : "warn"}></i><span>every note inside the length, with a sound, no overlaps</span></li>
-              <li><i class={!model.readiness.headerConflicts && !Object.values(model.readiness.cells).some((c) => c.conflict) && !Object.values(model.readiness.patches).some((p) => p.conflict) ? "ok" : "warn"}></i><span>no retained concurrent values</span></li>
-              <li><i class="ok"></i><span>step = {scoreDurationMs(1, model.bpm)} ms at {model.bpm} bpm · {Object.values(model.cells).filter((c) => c.k === "n").length} notes · {Object.values(model.cells).filter((c) => c.k === "d").length} hits</span></li>
+              <li><i class={order.length <= SCORE_MAX_PATCHES && !Object.values(docModel!.readiness.patches).some((p) => p.count) ? "ok" : "warn"}></i><span>{order.length} {order.length === 1 ? "sound" : "sounds"} of {SCORE_MAX_PATCHES}</span></li>
+              <li><i class={docModel!.voices.skipped ? "warn" : "ok"}></i><span>{docModel!.voices.play.length} {docModel!.voices.play.length === 1 ? "note plays" : "notes play"}{docModel!.voices.skipped ? ` · ${docModel!.voices.skipped} skipped` : ""}</span></li>
+              <li><i class="ok"></i><span>step = {scoreDurationMs(1, model.bpm)} ms at {model.bpm} bpm</span></li>
             </ul>
             <div class="acts">
-              {#if onpost}<button type="button" class="st-btn primary" disabled={mediaBusy || playing || !model.ready} onclick={onpost}>post to chat</button>{/if}
-              {#if onexport}<button type="button" class="st-btn" disabled={mediaBusy || playing || !model.ready} onclick={onexport}>download .jamtake</button>{/if}
-              {#if onshare}<button type="button" class="st-btn" disabled={mediaBusy || playing || !model.ready} onclick={onshare}>share</button>{/if}
+              {#if onpost}<button type="button" class="st-btn primary" disabled={mediaBusy || playing} onclick={onpost}>post to chat</button>{/if}
+              {#if onexport}<button type="button" class="st-btn" disabled={mediaBusy || playing} onclick={onexport}>download .jamtake</button>{/if}
+              {#if onshare}<button type="button" class="st-btn" disabled={mediaBusy || playing} onclick={onshare}>share</button>{/if}
             </div>
-            {#if !model.ready}<p class="micro wrap">export waits for the items above</p>{/if}
           {:else}
             {@render history?.()}
           {/if}
@@ -1416,9 +1564,9 @@
       {#if playing}
         <button type="button" class="sc-tool play on" title="stop [space]" aria-label="stop" onclick={onstop} disabled={!onstop}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M3.5 3.5h9v9h-9z"></path></svg></button>
       {:else}
-        <button type="button" class="sc-tool play" title={model.ready ? "play [space]" : "fix the flagged items to play"} aria-label="play" onclick={() => onplay?.()} disabled={loading || !model.ready || !onplay}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M4 2.5 13 8 4 13.5z"></path></svg></button>
+        <button type="button" class="sc-tool play" title="play [space]" aria-label="play" onclick={() => onplay?.()} disabled={loading || !onplay}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M4 2.5 13 8 4 13.5z"></path></svg></button>
         {#if selected && cursor > 0}
-          <button type="button" class="sc-tool sm" aria-label="Play from the selected step" title="play from {stepLabel(cursor)}" disabled={loading || !model.ready || !onplay} onclick={() => onplay?.(scoreDurationMs(cursor, model!.bpm))}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M2.5 3h1.5v10H2.5zM6 2.5 14 8 6 13.5z"></path></svg></button>
+          <button type="button" class="sc-tool sm" aria-label="Play from the selected step" title="play from {stepLabel(cursor)}" disabled={loading || !onplay} onclick={() => onplay?.(scoreDurationMs(cursor, model!.bpm))}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M2.5 3h1.5v10H2.5zM6 2.5 14 8 6 13.5z"></path></svg></button>
         {/if}
       {/if}
       <button type="button" class="sc-tool sm" aria-label="Next page" disabled={currentPage + 1 >= pages} onclick={() => show(currentPage + 1)}><svg viewBox="0 0 16 16" class="solid" aria-hidden="true"><path d="M3.5 3 10 8l-6.5 5zM11.5 3H13v10h-1.5z"></path></svg></button>
@@ -1428,13 +1576,13 @@
       <span class="mono strong">{cursor + 1} <span class="dim">/ {model.steps}</span></span>
       <span class="micro">{scoreTimeLabel(cursorMs)} <span class="dim">of {scoreTimeLabel(totalMs)}</span> · bar {scoreBarBeat(cursor, model.bpb).bar} · beat {scoreBarBeat(cursor, model.bpb).beat}</span>
       <span class="grow"></span>
-      <label class="sc-field" title="tempo · {JAM_MET_BPM_MIN} to {JAM_MET_BPM_MAX}{model.headers.bpm?.conflicts.length ? ' · another value by ' + model.headers.bpm.conflicts.map((c) => who(c.source.author)).join(', ') : ''}" class:conf={model.headers.bpm?.conflicts.length}>
+      <label class="sc-field" title="tempo · {JAM_MET_BPM_MIN} to {JAM_MET_BPM_MAX}{differing.bpm.length ? ' · another value by ' + differing.bpm.map((c) => who(c.source.author)).join(', ') : ''}" class:conf={differing.bpm.length}>
         <input type="number" aria-label="Score BPM" min={JAM_MET_BPM_MIN} max={JAM_MET_BPM_MAX} step="1" value={model.bpm} disabled={blocked} onchange={(e) => header("bpm", e)} /><span class="micro">bpm</span>
       </label>
-      <label class="sc-field" title="beats per bar · {JAM_MET_BPB_MIN} to {JAM_MET_BPB_MAX}{model.headers.bpb?.conflicts.length ? ' · another value by ' + model.headers.bpb.conflicts.map((c) => who(c.source.author)).join(', ') : ''}" class:conf={model.headers.bpb?.conflicts.length}>
+      <label class="sc-field" title="beats per bar · {JAM_MET_BPB_MIN} to {JAM_MET_BPB_MAX}{differing.bpb.length ? ' · another value by ' + differing.bpb.map((c) => who(c.source.author)).join(', ') : ''}" class:conf={differing.bpb.length}>
         <input type="number" aria-label="Score beats per bar" min={JAM_MET_BPB_MIN} max={JAM_MET_BPB_MAX} step="1" value={model.bpb} disabled={blocked} onchange={(e) => header("bpb", e)} /><span class="micro">/ bar</span>
       </label>
-      <label class="sc-field" title="length in sixteenth steps · 1 to {SCORE_MAX_STEPS}{model.headers.steps?.conflicts.length ? ' · another value by ' + model.headers.steps.conflicts.map((c) => who(c.source.author)).join(', ') : ''}" class:conf={model.headers.steps?.conflicts.length}>
+      <label class="sc-field" title="length in sixteenth steps · 1 to {SCORE_MAX_STEPS}{differing.steps.length ? ' · another value by ' + differing.steps.map((c) => who(c.source.author)).join(', ') : ''}" class:conf={differing.steps.length}>
         <input type="number" aria-label="Score steps" min="1" max={SCORE_MAX_STEPS} step="1" value={model.steps} disabled={blocked} onchange={(e) => header("steps", e)} /><span class="micro">steps</span>
       </label>
       <button type="button" class="st-btn ghost" title="add one bar of {stepsPerBar} steps" disabled={blocked || model.steps + stepsPerBar > SCORE_MAX_STEPS} onclick={() => setSteps(model!.steps + stepsPerBar)}>+ bar</button>
@@ -1574,6 +1722,17 @@
   .sc-cell.overlap { box-shadow: inset 0 0 0 1px var(--danger); }
   .sc-cell.conf { background-image: linear-gradient(225deg, var(--warn) 0 5px, transparent 5.5px); }
   .sc-cell.gone::after { content: "×"; position: absolute; inset: 0; font-family: var(--mono); font-size: 0.6rem; line-height: calc(var(--row, 22px) - 1px); text-align: center; color: var(--muted); }
+  /* A ghosted sound: the outline of its run in its own colour, solid (dashes mean "no sound") and
+     with no fill, continuous across a hold: top and bottom on every cell, the left edge at the onset,
+     the right edge at the last step. The cell under it is empty to every gesture. */
+  .sc-cell.ghost::before { content: ""; position: absolute; top: 2px; bottom: 2px; left: -1px; right: 0; border-top: 1px solid var(--pc, var(--sc-pad)); border-bottom: 1px solid var(--pc, var(--sc-pad)); opacity: 0.8; pointer-events: none; }
+  .sc-cell.ghost.gon::before { left: 2px; border-left: 1px solid var(--pc, var(--sc-pad)); border-radius: 2px 0 0 2px; }
+  .sc-cell.ghost.gend::before { right: 2px; border-right: 1px solid var(--pc, var(--sc-pad)); border-radius: 0 2px 2px 0; }
+  .sc-cell.ghost.gon.gend::before { border-radius: 2px; }
+  /* A ghosted hit: the diamond's outline, drawn as a rotated square so it needs no clip-path fill. */
+  .sc-cell.ghost.gpad::before { left: 50%; top: 50%; right: auto; bottom: auto; width: 8px; height: 8px; margin: -4px 0 0 -4px; border: 1px solid var(--sc-pad); border-radius: 1px; transform: rotate(45deg); }
+  .sc-cell.fold.ghost::before { top: 1px; bottom: 1px; }
+  .sc-cell.fold.ghost.gpad::before { width: 4px; height: 4px; margin: -2px 0 0 -2px; }
   /* Folded by the scale view: a sliver that still shows what it holds. */
   .sc-cell.fold { background: var(--bg-0); border-bottom-color: var(--bg-0); }
   .sc-cell.fold::before { top: 1px; bottom: 1px; }
@@ -1626,6 +1785,14 @@
   .sc-prow .x:hover { color: var(--danger); border-color: var(--danger-brd); }
   .sc-prow .x.listen svg { width: 10px; height: 10px; }
   .sc-prow .x.listen:hover { color: var(--accent-hi); border-color: var(--border); }
+  /* A layer's visibility: the glyph is the state (a filled bar, its dashed outline, struck through). */
+  .sc-prow .vis { width: 22px; height: 22px; flex: none; padding: 0; border: 1px solid transparent; border-radius: var(--r); background: transparent; color: var(--text-2); display: inline-flex; align-items: center; justify-content: center; }
+  .sc-prow .vis svg { width: 14px; height: 14px; stroke-width: 1.3; }
+  .sc-prow .vis:hover { border-color: var(--border); color: var(--text); }
+  .sc-prow .vis[data-v="ghost"] { color: var(--muted); }
+  .sc-prow .vis[data-v="hide"] { color: var(--faint); }
+  .sc-prow .vis[data-v="hide"]:hover { color: var(--muted); }
+  .sw.kit { background: var(--sc-pad); clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%); border-radius: 0; }
   .sc-prow .x.armed { width: auto; padding: 0 7px; font-size: 0.58rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--danger); border-color: var(--danger-brd); background: var(--danger-dim); }
   .sc-prow .x:disabled { opacity: 0.45; }
   .sc-shelf { font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); padding: 6px 0 2px; display: flex; align-items: center; gap: 6px; white-space: nowrap; }

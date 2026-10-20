@@ -130,6 +130,49 @@ test("snapshot rejects malformed retry identity and preserves full u128 scope, U
   h.session.reset();
 });
 
+// Design review M4: a retained draft is rejected whole on any unknown shape, so a lock snapshot
+// holding one layered edit or one layered recovery would lose every edit beside it.
+test("retained drafts carry layered note edits and layered recovery choices, and refuse malformed layers", () => {
+  const p = "ab".repeat(32);
+  validateDraftOperation({ op: "set_note", step: 255, row: 24, value: { k: "n", p, len: 1, vol: 100 } }, "score");
+  validateDraftOperation({ op: "clear_note", step: 0, row: 0, layer: "d" }, "score");
+  validateDraftOperation({ op: "clear_note", step: 3, row: 2, layer: p }, "score");
+  for (const bad of [{ op: "clear_note", step: 0, row: 0, layer: "D" }, { op: "clear_note", step: 0, row: 0, layer: p.slice(2) },
+    { op: "clear_note", step: 256, row: 0, layer: "d" }, { op: "set_note", step: 0, row: 0, value: { k: "n", p, len: 0 } }]) {
+    assert.throws(() => validateDraftOperation(bad, "score"), JSON.stringify(bad));
+  }
+  assert.throws(() => validateDraftOperation({ op: "set_note", step: 0, row: 0, value: { k: "d", pad: 0 } }, "flipnote"), "a Flipnote never holds a note");
+  const body = canonicalJson({ op: "set_note", row: 2, step: 4, value: { k: "n", p } });
+  const recovery = (layer: string) => JSON.stringify({ version: 1, scope: { server: SERVER, channel: CHANNEL }, group, records: [{
+    kind: "recoveryApply", id: 1, label: "note", status: "queued", attempts: 0, error: "", mayHaveCommitted: false, epochChanged: false, object, objectKind: "score",
+    edit: { snapshot: id64(1), choice: { kind: "scoreNote", step: 4, row: 2, layer, value: id64(2) }, mode: "restore", epochId: id32(3), expectedProjection: id64(4), nonce: id32(5), body },
+    applied: null }] });
+  const decoded = decodeStudioDraft(recovery(p));
+  assert.equal(decoded.records[0].kind, "recoveryApply");
+  assert.equal(encodeStudioDraft(decoded), recovery(p));
+  for (const layer of ["D", "", p.toUpperCase(), `${p}0`]) assert.throws(() => decodeStudioDraft(recovery(layer)), layer);
+});
+
+// Review L7: the working projection copied the base's header conflict even while a queued header
+// edit resolved it, so the readback of that very edit (one value) looked like a source change.
+test("a queued header edit resolves that header's conflict in the working projection, and only that header's", () => {
+  const source = (n: number) => ({ opId: id64(n), author: ME, nonce: id32(n) });
+  const conflicted = (field: "bpm" | "title") => scoreModel(parseScoreView({ ...ordinaryView({ kind: "score", title: field === "title" ? { selected: { value: "a", source: source(1) }, conflicts: [{ value: "b", source: source(2) }] } : null,
+    bpm: field === "bpm" ? { selected: { value: 120, source: source(3) }, conflicts: [{ value: 126, source: source(4) }] } : null, bpb: null, steps: null,
+    cells: {}, patches: {}, readiness: { cells: {}, patches: {}, headerConflicts: true } }), group }).content);
+  const queued = (field: string, value: unknown) => ({ kind: "apply", id: 1, label: "", status: "queued", attempts: 0, error: "", mayHaveCommitted: false, epochChanged: false, object,
+    request: { object, objectKind: "score", epochId: id32(1), nonce: id32(1), body: "" }, op: { op: "set_header", field, value } }) as unknown as SaveRecord;
+  const base = conflicted("bpm");
+  assert.equal(base.readiness.headerConflicts, true);
+  assert.equal(workingScore(base, [queued("bpm", 130)]).readiness.headerConflicts, false, "the queued tempo is the one value once it lands");
+  const working = workingScore(base, [queued("bpm", 130)]);
+  assert.deepEqual([working.headers.bpm?.selected.value, working.headers.bpm?.conflicts.length], [130, 0], "so no \"another value by\" chip waits for the readback");
+  assert.equal(working.headers.bpm?.selected.source.opId, base.headers.bpm?.selected.source.opId, "a display value, never a fabricated operation");
+  assert.equal(workingScore(base, [queued("bpb", 3)]).readiness.headerConflicts, true, "another header's edit leaves the tempo conflict");
+  assert.equal(workingScore(conflicted("title"), [queued("title", "c")]).readiness.headerConflicts, false);
+  assert.equal(workingScore(base, []).readiness.headerConflicts, true, "with nothing queued it is native's flag");
+});
+
 test("sound and music use their effective draft, preserving raw evidence and permanent removals", async () => {
   const h = await harness(), vector = JSON.parse(readFileSync(new URL("../../../crates/catcoms-replication/tests/fixtures/studio-export-v1.json", import.meta.url), "utf8"));
   h.session.setSoundPatch(object, vector.patchId, vector.patch);

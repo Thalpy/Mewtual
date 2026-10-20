@@ -73,6 +73,26 @@
     {
       "name": "steps_max",
       "body": "{\"field\":\"steps\",\"op\":\"set_header\",\"value\":256}"
+    },
+    {
+      "name": "layer_note",
+      "body": "{\"op\":\"set_note\",\"row\":0,\"step\":0,\"value\":{\"k\":\"n\",\"p\":\"6ef42672dfee8b336c82d5466a84dceaa6dd18f405e5a4710ea24c9db47eaf6c\"}}"
+    },
+    {
+      "name": "layer_note_last",
+      "body": "{\"op\":\"set_note\",\"row\":24,\"step\":255,\"value\":{\"k\":\"n\",\"len\":1,\"p\":\"6ef42672dfee8b336c82d5466a84dceaa6dd18f405e5a4710ea24c9db47eaf6c\",\"vol\":100}}"
+    },
+    {
+      "name": "layer_drum",
+      "body": "{\"op\":\"set_note\",\"row\":24,\"step\":255,\"value\":{\"k\":\"d\",\"pad\":9}}"
+    },
+    {
+      "name": "layer_clear_drums",
+      "body": "{\"layer\":\"d\",\"op\":\"clear_note\",\"row\":0,\"step\":0}"
+    },
+    {
+      "name": "layer_clear_sound",
+      "body": "{\"layer\":\"6ef42672dfee8b336c82d5466a84dceaa6dd18f405e5a4710ea24c9db47eaf6c\",\"op\":\"clear_note\",\"row\":24,\"step\":255}"
     }
   ]
 }

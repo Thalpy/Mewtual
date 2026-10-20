@@ -7,7 +7,9 @@ import type { ScorePlayback } from "./studio-export.ts";
 /** `nextPass`: a looping Score has edits waiting for its next pass (being prepared, or ready). */
 export type StudioAudioState = Readonly<{ state: StudioPlaybackState; elapsedMs: number; nextPass?: boolean }>;
 export type StudioAudioActions = {
-  start: (kind: "score" | "flipnote", prepare: () => Promise<ScorePlayback | Uint8Array>, loop: boolean, offsetMs?: number) => Promise<boolean>;
+  /** `document`: the Studio's own editor Play of the open document (a layered score may hold more
+   * notes at once). Received content (chat's PIXA viewer, inline playback) leaves it false. */
+  start: (kind: "score" | "flipnote", prepare: () => Promise<ScorePlayback | Uint8Array>, loop: boolean, offsetMs?: number, document?: boolean) => Promise<boolean>;
   stop: () => void;
   /** The looping Score's source changed: prepare its next pass from the document as it is now. */
   refresh?: () => void;
@@ -19,6 +21,8 @@ export const STUDIO_REFRESH_RETRIES = 3;
 
 type Active = {
   kind: "score" | "flipnote"; value: JamTake | Uint8Array; gridMs: number; loop: boolean; generation: number;
+  /** Carried to every loop restart (see StudioAudioActions.start). */
+  document: boolean;
   /** The Score's preparation, kept for `refresh`; null for a flipnote. */
   prepare: (() => Promise<ScorePlayback | Uint8Array>) | null;
   /** The pass prepared from the source as it is now, swapped in at the next loop restart. */
@@ -52,7 +56,7 @@ export class StudioAudioSession {
     this.scopeKey = key; this.deafened = deafened; this.controller.setScope(scope, deafened);
   }
   stop(): void { this.generation++; this.preparing = false; this.active = null; this.elapsed = 0; this.controller.stop(); }
-  async start(kind: "score" | "flipnote", prepare: () => Promise<ScorePlayback | Uint8Array>, loop: boolean, offsetMs = 0): Promise<boolean> {
+  async start(kind: "score" | "flipnote", prepare: () => Promise<ScorePlayback | Uint8Array>, loop: boolean, offsetMs = 0, document = false): Promise<boolean> {
     this.stop();
     if (!this.scopeKey || this.deafened) return false;
     const generation = this.generation;
@@ -74,9 +78,10 @@ export class StudioAudioSession {
         gridMs = score.gridMs;
         value = planJamArchivalPlayback(score.take).take;
       } else value = encodePixa(decodePixa(input as Uint8Array));
+      this.controller.document = document;
       const started = kind === "score" ? await this.controller.startTake(value as JamTake, offsetMs, gridMs) : await this.controller.startPixa(value as Uint8Array, offsetMs);
       if (!current()) return false;
-      if (started) this.active = { kind, value, gridMs, loop: loop && (kind !== "score" || (value as JamTake).events.length > 0), generation,
+      if (started) this.active = { kind, value, gridMs, loop: loop && (kind !== "score" || (value as JamTake).events.length > 0), generation, document,
         prepare: kind === "score" ? prepare : null, next: null, dirty: false, refreshing: false, failures: 0 };
       return started;
     } finally { if (current()) this.preparing = false; }
@@ -133,6 +138,7 @@ export class StudioAudioSession {
         // a preparation still under way lands the pass after.
         const next = active.next;
         if (next) { active.value = next.value; active.gridMs = next.gridMs; active.next = null; }
+        this.controller.document = active.document;
         const started = active.kind === "score" ? await this.controller.startTake(active.value as JamTake, 0, active.gridMs) : await this.controller.startPixa(active.value as Uint8Array);
         if (this.active !== active || active.generation !== this.generation) return;
         if (!started) this.active = null;
