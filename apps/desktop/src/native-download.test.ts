@@ -4,6 +4,7 @@ import {
   completedDownload,
   downloadSavedNotice,
   guideSavedNotice,
+  isSaveAsCancelled,
   saveGroupFile,
   resumeGroupFile,
   saveSpaceGuide,
@@ -55,6 +56,41 @@ test("explicit resume sends only saved identity and revision with a fresh native
   assert.deepEqual(mock.calls, [{ command: "save_group_file", args: {
     server: 2, cid: "c", name: "resumed.bin", resume: "d", expectedIntent: "7",
   } }]);
+});
+test("Save as sends only a flag, never a path, and its cancel is recognized exactly", async () => {
+  const saved = { path: "/Chosen/report.bin", displayed: true };
+  const mock = mockInvoker(saved);
+  assert.deepEqual(await saveGroupFile(mock.invoke, 2, "c", "report.bin", { saveAs: true }), saved);
+  assert.deepEqual(mock.calls[0].args, { server: 2, cid: "c", name: "report.bin", saveAs: true });
+  await resumeGroupFile(mock.invoke, 2, "c", "r.bin", "d", "7", "op", true, true);
+  assert.deepEqual(mock.calls[1].args, {
+    server: 2, cid: "c", name: "r.bin", resume: "d", expectedIntent: "7", freshCopy: true, saveAs: true, operation: "op",
+  });
+  for (const args of mock.calls.map((call) => call.args ?? {})) {
+    for (const key of Object.keys(args)) assert.doesNotMatch(key, /path|folder|dir|destination/i);
+  }
+  await saveGroupFile(mock.invoke, 2, "c", "plain.bin");
+  assert.equal("saveAs" in (mock.calls[2].args ?? {}), false, "the one-click default sends no flag");
+  assert.equal(isSaveAsCancelled("Save as was cancelled."), true);
+  assert.equal(isSaveAsCancelled(new Error("Save as was cancelled.")), true);
+  assert.equal(isSaveAsCancelled("Save as was cancelled. Also something else"), false);
+  assert.equal(isSaveAsCancelled("A Save as window is already open."), false);
+});
+test("a save that may not be in Downloads names no folder", () => {
+  assert.deepEqual(
+    downloadSavedNotice("report.bin", { path: "/Chosen/report.bin", displayed: true }, false),
+    { text: "Saved report.bin.", kind: "ok", ms: 4_000 },
+  );
+  assert.deepEqual(
+    downloadSavedNotice("report.bin", { path: "/Chosen/report.bin", displayed: false }, false),
+    { text: "Saved to /Chosen/report.bin.", kind: "info", ms: 8_000 },
+  );
+  const warned = downloadSavedNotice("r.bin", { path: "/Chosen/r.bin", displayed: true, warning: "Note." }, false);
+  assert.equal(warned.kind, "info");
+  assert.doesNotMatch(warned.text, /Downloads/);
+  for (const notice of [warned, downloadSavedNotice("r.bin", { path: "/x/r.bin", displayed: true }, false)]) {
+    assert.doesNotMatch(notice.text, /[·—–]/);
+  }
 });
 test("successful reveal does not hide a committed save's encrypted-cleanup warning", () => {
   const warning = "The encrypted download copy could not be removed; remove it from Transfers.";

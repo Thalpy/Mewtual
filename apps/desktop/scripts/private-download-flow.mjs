@@ -9,7 +9,7 @@ export const privateDownloadFlowExpression = String.raw`(async () => {
     }
   };
   const base = window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
-  const first = { id: 'd'.repeat(64), cid: 'a'.repeat(64), intent: '3', grant: '1', status: 'incomplete', verifiedChunks: 1, savedChunks: 0, totalChunks: 3 };
+  const first = { id: 'd'.repeat(64), cid: 'a'.repeat(64), intent: '3', grant: '1', status: 'incomplete', verifiedChunks: 1, savedChunks: 0, totalChunks: 3, chosenPlace: false };
   const exhausted = { ...first, id: 'e'.repeat(64), cid: 'b'.repeat(64), status: 'exhausted', grant: '9007199254740993' };
   const ready = { ...first, id: 'f'.repeat(64), cid: 'c'.repeat(64), status: 'ready', verifiedChunks: 3 };
   // A journaled save whose partial file was replaced: it must offer Save new copy, never Resume.

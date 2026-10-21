@@ -94,9 +94,9 @@
     type StoredTone, type ToneOverride,
   } from "./notification-sounds";
   import {
-    completedDownload, downloadSavedNotice, guideSavedNotice, saveGroupFile, resumeGroupFile, saveSpaceGuide,
+    completedDownload, downloadSavedNotice, guideSavedNotice, isSaveAsCancelled, saveGroupFile, resumeGroupFile, saveSpaceGuide,
   } from "./native-download";
-  import { acceptSaveProgress, checkedPrivateDownloads, privateDownloadActions, privateDownloadChatSave, privateDownloadDetail, privateDownloadOffers, type PrivateDownload, type PrivateDownloadActionKind } from "./private-downloads";
+  import { acceptSaveProgress, checkedPrivateDownloads, privateDownloadActions, privateDownloadChatSave, privateDownloadDetail, privateDownloadOffers, privateDownloadSaveAsIsNewCopy, type PrivateDownload, type PrivateDownloadActionKind } from "./private-downloads";
   import {
     newVaultSecretError, vaultSecretChangeNotice, type VaultSecretChangeResult,
   } from "./vault-secret-change";
@@ -9653,6 +9653,7 @@
       { head: true, kind: "file", title: f.name },
       { label: "Open details", icon: "info", onSelect: () => openFileInfo(f) },
       { label: "Download", icon: "down", onSelect: () => downloadFile(f) },
+      { label: "Save as", icon: "down", onSelect: () => downloadFile(f, true) },
       { label: "Post to chat", icon: "reply", onSelect: () => appendToDraft(`![${f.name}](cid:${f.cid})`) },
       { divider: true },
       { label: "Copy address (CID)", icon: "fp", onSelect: () => copyText(f.cid) },
@@ -10047,7 +10048,10 @@
         items.push({ label: "View image", icon: "img", onSelect: () => openLightbox(el) });
       }
       items.push({ label: "Properties", icon: "info", onSelect: () => openFileRef(cid) });
-      if (embedded) items.push({ label: "Download", icon: "down", onSelect: () => downloadFile(embedded) });
+      if (embedded) {
+        items.push({ label: "Download", icon: "down", onSelect: () => downloadFile(embedded) });
+        items.push({ label: "Save as", icon: "down", onSelect: () => downloadFile(embedded, true) });
+      }
       items.push({ label: "Copy address (CID)", icon: "fp", onSelect: () => copyText(cid) });
       // An image can cover its whole message row, so keep the message actions reachable here:
       // right-clicking the picture offers the same Reply/Edit/Delete as right-clicking the text.
@@ -12027,13 +12031,22 @@
     folder = breadcrumbs.slice(0, i + 1).join("/");
   }
 
-  async function downloadFile(f: UiFile) {
+  // `saveAs`: native opens the OS "Save as" dialog itself (no path is ever sent from here). A
+  // default value, never an optional parameter: `x?: T` in a .svelte script breaks the app at load.
+  async function downloadFile(f: UiFile, saveAs = false) {
     if (activeServerId === null) return;
     const server = activeServerId;
     const key = dlKey(server, f.cid);
     if (saveInProgress(f.cid)) return;
     const existing = privateDownloads.find(row => row.cid === f.cid);
     if (existing) {
+      // Save as on a known file goes through its row; where the row does not offer it (running,
+      // removing, exhausted, partly saved), Transfers shows the explicit choices.
+      if (saveAs) {
+        if (privateDownloadOffers(existing, "saveAs")) await resumePrivateDownload(existing, false, true);
+        else switchView("downloads");
+        return;
+      }
       // Running, halted, saved, removing or exhausted rows need an explicit choice in Transfers.
       if (privateDownloadChatSave(existing) === "transfers") { switchView("downloads"); return; }
       await resumePrivateDownload(existing);
@@ -12065,16 +12078,21 @@
       ts: started,
     };
     try {
-      const saved = await saveGroupFile(invoke, server, f.cid, f.name, { operation });
+      const saved = await saveGroupFile(invoke, server, f.cid, f.name, { operation, saveAs });
       if (!unlockedViewCurrent(gen, server)) return;
       if (downloads[key]?.operation === operation) {
         Object.assign(downloads[key], completedDownload(downloads[key], saved, Date.now()));
       }
-      const notice = downloadSavedNotice(f.name, saved);
+      const notice = downloadSavedNotice(f.name, saved, !saveAs);
       toast(notice.text, notice.kind, notice.ms);
       refreshFiles();
     } catch (e) {
       if (!unlockedViewCurrent(gen, server)) return;
+      // Closing the dialog started nothing: drop the pending row quietly, no error.
+      if (saveAs && isSaveAsCancelled(e)) {
+        if (downloads[key]?.operation === operation) delete downloads[key];
+        return;
+      }
       error = String(e);
       if (downloads[key]?.operation === operation) {
         downloads[key].status = "failed";
@@ -12088,9 +12106,13 @@
     }
   }
 
-  async function resumePrivateDownload(row: PrivateDownload, fresh = false) {
+  // `saveAs` asks native to open the OS dialog for this save; on a halted or saved row it also
+  // means a new copy (the old journal is forgotten, exactly as for Save new copy).
+  async function resumePrivateDownload(row: PrivateDownload, fresh = false, saveAs = false) {
     const server = activeServerId, gen = viewGeneration;
-    if (server === null || locked || privateDownloadBusy || privateDownloadSaves[row.id] || saveInProgress(row.cid) || !privateDownloadOffers(row, fresh ? "fresh" : "resume")) return;
+    const offer = saveAs ? "saveAs" : fresh ? "fresh" : "resume";
+    if (server === null || locked || privateDownloadBusy || privateDownloadSaves[row.id] || saveInProgress(row.cid) || !privateDownloadOffers(row, offer)) return;
+    const newCopy = fresh || (saveAs && privateDownloadSaveAsIsNewCopy(row));
     const mutation = Symbol("private download");
     error = "";
     privateDownloadBusy = mutation;
@@ -12114,12 +12136,20 @@
       // Acquisition may wait for a member. Keep Pause/Remove available during that wait;
       // this separate token blocks only a duplicate Save of this same native owner.
       if (privateDownloadBusy === mutation) privateDownloadBusy = null;
-      const saved = await resumeGroupFile(invoke, server, row.cid, name, row.id, row.intent, operation, fresh);
+      const saved = await resumeGroupFile(invoke, server, row.cid, name, row.id, row.intent, operation, newCopy, saveAs);
       if (!unlockedViewCurrent(gen, server)) return;
       if (downloads[key]?.operation === operation) Object.assign(downloads[key], completedDownload(downloads[key], saved, Date.now()));
-      const notice = downloadSavedNotice(name, saved);
+      // A resumed row may be saving anywhere (a remembered choice or an earlier partial), so the
+      // notice names Downloads only for a plain first save of a row that never chose a place.
+      const toDownloads = !saveAs && !row.chosenPlace && row.status === "ready" && row.savedChunks === 0;
+      const notice = downloadSavedNotice(name, saved, toDownloads);
       toast(notice.text, notice.kind, notice.ms);
     } catch (e) {
+      // Closing the dialog started nothing: drop the pending row quietly, no error.
+      if (saveAs && isSaveAsCancelled(e)) {
+        if (downloads[key]?.operation === operation) delete downloads[key];
+        return;
+      }
       if (unlockedViewCurrent(gen, server)) {
         error = String(e);
         if (downloads[key]?.operation === operation) Object.assign(downloads[key], { status: "failed", error: String(e), updatedAt: Date.now() });
@@ -12155,6 +12185,7 @@
   function runPrivateDownloadAction(row: PrivateDownload, kind: PrivateDownloadActionKind) {
     if (kind === "resume") return resumePrivateDownload(row);
     if (kind === "fresh") return resumePrivateDownload(row, true);
+    if (kind === "saveAs") return resumePrivateDownload(row, false, true);
     if (kind === "pause") return changePrivateDownload(row, false);
     return changePrivateDownload(row, true, kind === "keep");
   }
@@ -31307,6 +31338,7 @@
           <button class="ghost small" onclick={() => lightbox && openFileRef(lightbox.cid)}>Properties</button>
           {#if lightboxFile}
             <button class="ghost small" onclick={() => lightboxFile && downloadFile(lightboxFile)}>Download</button>
+            <button class="ghost small" onclick={() => lightboxFile && downloadFile(lightboxFile, true)}>Save as</button>
           {/if}
           <span class="lightbox-div" aria-hidden="true"></span>
           <button class="ghost small" aria-label="Close" title="Close (Esc)" onclick={closeLightbox}>✕</button>
@@ -31527,6 +31559,7 @@
                 <button class="primary" disabled={!mayFetchPixa(fileInfo.size)} onclick={() => fileInfo && openPixaViewer(fileInfo)}>Open flipnote</button>
               {/if}
               <button class="primary" onclick={() => fileInfo && downloadFile(fileInfo)}>↓ Download</button>
+              <button class="ghost" onclick={() => fileInfo && downloadFile(fileInfo, true)}>Save as</button>
               {#if canSetExpiry}
                 <button class="ghost" disabled={fileInfoExpiryBusy} onclick={toggleKeepForever}>
                   {fileInfoExpiryBusy ? "Saving…" : keptForever ? "Restore 30-day expiry" : "♾ Keep forever"}

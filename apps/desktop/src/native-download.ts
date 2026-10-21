@@ -49,7 +49,11 @@ export async function saveGroupFile(
   server: number,
   cid: string,
   name: string,
-  options?: { resume?: string; expectedIntent?: string; operation?: string; freshCopy?: boolean },
+  options?: {
+    resume?: string; expectedIntent?: string; operation?: string; freshCopy?: boolean;
+    /** Native opens the OS "Save as" dialog itself; no path or folder is ever sent from here. */
+    saveAs?: boolean;
+  },
 ): Promise<SavedFileResult> {
   return checkedResult(await invoke<unknown>("save_group_file", {
     server, cid, name,
@@ -57,6 +61,7 @@ export async function saveGroupFile(
     // Only meaningful with a resume ID: native removes the partly saved file it can prove it
     // created, forgets that journal under the same intent CAS, then saves a separate file.
     ...(options?.resume && options.freshCopy ? { freshCopy: true } : {}),
+    ...(options?.saveAs ? { saveAs: true } : {}),
     ...(options?.operation ? { operation: options.operation } : {}),
   }));
 }
@@ -66,9 +71,16 @@ export async function saveGroupFile(
  * allowance is never sent. */
 export async function resumeGroupFile(
   invoke: NativeInvoker, server: number, cid: string, name: string,
-  resume: string, expectedIntent: string, operation?: string, freshCopy = false,
+  resume: string, expectedIntent: string, operation?: string, freshCopy = false, saveAs = false,
 ): Promise<SavedFileResult> {
-  return saveGroupFile(invoke, server, cid, name, { resume, expectedIntent, operation, freshCopy });
+  return saveGroupFile(invoke, server, cid, name, { resume, expectedIntent, operation, freshCopy, saveAs });
+}
+
+/** Native's exact reply when the user closes the "Save as" dialog without choosing. Nothing was
+ * started or recorded, so the caller drops its pending row quietly instead of showing an error. */
+export const SAVE_AS_CANCELLED = "Save as was cancelled.";
+export function isSaveAsCancelled(error: unknown): boolean {
+  return (error instanceof Error ? error.message : String(error)) === SAVE_AS_CANCELLED;
 }
 
 export async function saveSpaceGuide(
@@ -94,8 +106,16 @@ export function completedDownload(
   };
 }
 
-export function downloadSavedNotice(name: string, saved: SavedFileResult) {
+/** `toDownloads` is true only when the save provably went to the Downloads folder (a first
+ * one-click save). A "Save as" choice, a remembered choice or a resumed partial may be anywhere,
+ * so those notices name no folder. */
+export function downloadSavedNotice(name: string, saved: SavedFileResult, toDownloads = true) {
   const warning = saved.warning ? ` ${saved.warning}` : "";
+  if (!toDownloads && !saved.contentValidation) {
+    return saved.displayed
+      ? { text: `Saved ${name}.${warning}`, kind: saved.warning ? "info" as const : "ok" as const, ms: saved.warning ? 8_000 : 4_000 }
+      : { text: `Saved to ${saved.path}.${warning}`, kind: "info" as const, ms: 8_000 };
+  }
   if (saved.contentValidation === "mismatch") {
     return {
       text: `Saved ${name}, but its bytes do not match the declared media type. Treat the unlocked copy as untrusted.${warning}`,

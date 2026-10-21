@@ -2,8 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
-import { saveGroupFile, resumeGroupFile, completedDownload, downloadSavedNotice } from "./native-download.ts";
-import { acceptSaveProgress, privateDownloadChatSave, privateDownloadOffers } from "./private-downloads.ts";
+import { saveGroupFile, resumeGroupFile, completedDownload, downloadSavedNotice, isSaveAsCancelled } from "./native-download.ts";
+import { acceptSaveProgress, privateDownloadChatSave, privateDownloadOffers, privateDownloadSaveAsIsNewCopy } from "./private-downloads.ts";
 
 // Execute the real App handlers and real progress listener across held native replies. This
 // catches races that pure status-label tests cannot see without compiling another fake app.
@@ -25,12 +25,12 @@ visit(tree); assert.ok(progress);
 const production = ts.transpileModule(handlers.map(n => n.getFullText(tree)).join("\n") +
   `\nfunction applyProgress(e) ${progress.body.getText(tree)}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 const file = { cid: "c".repeat(64), name: "cat.bin", author: "cat", held: 0, total: 2, size: 100 };
-const saved = { id: "d".repeat(64), cid: file.cid, intent: "3", grant: "1", status: "incomplete", verifiedChunks: 1, savedChunks: 0, totalChunks: 2 };
+const saved = { id: "d".repeat(64), cid: file.cid, intent: "3", grant: "1", status: "incomplete", verifiedChunks: 1, savedChunks: 0, totalChunks: 2, chosenPlace: false };
 const result = { path: "/Downloads/cat.bin", displayed: true };
 function deferred() { let resolve!: (value: unknown) => void, reject!: (error: unknown) => void; const promise = new Promise((yes,no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 function fixture() {
   return new Function("saveGroupFile", "resumeGroupFile", "completedDownload", "downloadSavedNotice", "acceptSaveProgress",
-    "privateDownloadChatSave", "privateDownloadOffers", "file", `
+    "privateDownloadChatSave", "privateDownloadOffers", "isSaveAsCancelled", "privateDownloadSaveAsIsNewCopy", "file", `
     let activeServerId = 1, viewGeneration = 2, locked = false, error = "", privateDownloadBusy = null;
     let privateDownloads = [], privateDownloadSaves = {}, downloads = {}, activeSaves = {}, uuid = 0, refreshes = 0;
     const calls = [], notices = [], views = [], replies = new Map(), filesByCid = new Map([[file.cid, file]]);
@@ -53,7 +53,7 @@ function fixture() {
         bytes_done: 100, bytes_total: 100, network_bytes_done: 0, provider: null } }); },
       state: () => ({ error, refreshes, downloads, activeSaves, busy: privateDownloadBusy, saves: privateDownloadSaves }) };
   `)(saveGroupFile, resumeGroupFile, completedDownload, downloadSavedNotice, acceptSaveProgress,
-    privateDownloadChatSave, privateDownloadOffers, file);
+    privateDownloadChatSave, privateDownloadOffers, isSaveAsCancelled, privateDownloadSaveAsIsNewCopy, file);
 }
 test("resumed save settles its exact row and late/preview progress cannot revive it", async () => {
   const app = fixture(), held = deferred(); app.replies.set("save_group_file", held.promise);
@@ -116,6 +116,50 @@ test("Save new copy sends freshCopy with the exact revision and Keep partly save
   assert.deepEqual(app.calls[1], ["cancel_private_download", { server: 1, download: saved.id, keepPartial: true }]);
   await app.act({ ...saved, status: "saved" }, "remove");
   assert.deepEqual(app.calls[2], ["cancel_private_download", { server: 1, download: saved.id }]);
+});
+test("Save as sends only a flag, implies a new copy on halted or saved rows, and never a path", async () => {
+  const app = fixture();
+  await app.act({ ...saved, status: "saved" }, "saveAs");
+  assert.deepEqual(
+    { ...app.calls[0][1], operation: undefined },
+    { server: 1, cid: file.cid, name: file.name, resume: saved.id, expectedIntent: "3", freshCopy: true, saveAs: true, operation: undefined },
+  );
+  await app.act({ ...saved, status: "incomplete" }, "saveAs");
+  assert.equal(app.calls[1][1].saveAs, true);
+  assert.equal(app.calls[1][1].freshCopy, undefined, "no journal to forget on an unfinished row");
+  await app.act({ ...saved, status: "save-interrupted" }, "saveAs"); // not offered there
+  assert.equal(app.calls.length, 2);
+  for (const [, args] of app.calls) {
+    for (const key of Object.keys(args)) assert.doesNotMatch(key, /path|folder|dir|destination/i);
+  }
+});
+test("closing the Save as dialog is quiet: no error, no notice, no leftover row", async () => {
+  for (const viaRow of [false, true]) {
+    const app = fixture();
+    app.replies.set("save_group_file", Promise.reject("Save as was cancelled."));
+    if (viaRow) await app.act({ ...saved, status: "ready" }, "saveAs");
+    else await app.start(file, true);
+    assert.equal(app.calls[0][1].saveAs, true);
+    assert.equal(app.state().error, "", `viaRow=${viaRow}`);
+    assert.equal(app.notices.length, 0);
+    assert.equal(Object.keys(app.state().downloads).length, 0, "the pending row is dropped");
+    assert.equal(Object.keys(app.state().activeSaves).length, 0);
+  }
+  // Any other failure is still an error.
+  const app = fixture();
+  app.replies.set("save_group_file", Promise.reject("That folder cannot be used. Choose another folder."));
+  await app.start(file, true);
+  assert.match(app.state().error, /folder cannot be used/);
+});
+test("Save as from the file list goes through a known row, or to Transfers where it is not offered", async () => {
+  const app = fixture(); app.rows([{ ...saved, status: "saving" }]);
+  await app.start(file, true);
+  assert.equal(app.calls.length, 0);
+  assert.deepEqual(app.views, ["downloads"]);
+  const ready = fixture(); ready.rows([{ ...saved, status: "ready" }]);
+  await ready.start(file, true);
+  assert.equal(ready.calls[0][1].resume, saved.id);
+  assert.equal(ready.calls[0][1].saveAs, true);
 });
 test("Remove shows native's notice when a file of the save stays on disk, and nothing otherwise", async () => {
   const left = "A file at the partly saved file's name could not be confirmed as Mewtual's, so it was left in place.";

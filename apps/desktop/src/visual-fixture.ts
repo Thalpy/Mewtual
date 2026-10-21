@@ -323,6 +323,17 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
         ],
       });
     case "get_private_downloads": return [];
+    case "save_group_file": {
+      // Mirrors the native contract: the renderer sends a name and an optional `saveAs` flag,
+      // never a path or folder. A fixture "Save as" behaves as if the user closed the dialog, so
+      // screenshots never imply a real destination was chosen.
+      if (["path", "folder", "dir", "destination"].some((key) => key in args)) {
+        throw new Error("save_group_file never accepts a path from the renderer");
+      }
+      if (args.saveAs === true) throw new Error("Save as was cancelled.");
+      const name = typeof args.name === "string" ? args.name : "download";
+      return { path: `C:\\Users\\fixture\\Downloads\\${name}`, displayed: true };
+    }
     case "get_storage_health":
       return { listed_files: 2, unique_files: 2, referenced_chunks: 2, verified_chunks: 2,
         missing_chunks: 0, unreadable_chunks: 0, invalid_manifests: 0, verified_bytes: 2048,
