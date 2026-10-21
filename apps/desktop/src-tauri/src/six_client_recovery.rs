@@ -319,7 +319,10 @@ impl Scenario {
     }
 
     async fn wait_for_routes(&self, count: usize) {
-        let required = [(1, 0), (2, 0), (3, 0), (4, 3), (5, 3)];
+        // dial() only queues an attempt. The missed-membership scenario later leaves only
+        // clients 1 and 3 online, so it also needs 3's authenticated, persisted route to 1.
+        // Establish that custody during original admission, never by injecting a restore hint.
+        let required = [(1, 0), (2, 0), (3, 0), (3, 1), (4, 3), (5, 3)];
         tokio::select! {
             _ = async {
                 loop {
@@ -547,7 +550,15 @@ impl Scenario {
             let extra_operations: Vec<_> = history.operations.keys().filter(|id| !expected.operations.contains_key(*id)).map(hex::encode).collect();
             format!("messages={} ops={} missing_messages={missing_messages:?} unexpected_messages={unexpected_messages:?} changed_messages={changed_messages:?} missing_operations={missing_operations:?} extra_operations={extra_operations:?}", history.messages.len(), history.operations.len())
         });
-        let saved = net.map_or_else(
+        let saved = self.sealed_route_diagnostic(net);
+        format!("client={} {history} cadence_submitted_passes={} network={saved} recovery={recovery:?} routes={routes:?}",
+            index + 1, running.passes.load(Ordering::Acquire))
+    }
+
+    /// Project only fixture identities and listener equality; ServerNet itself contains secrets.
+    /// Callers bound the store query separately from actor observations so one cannot hide the other.
+    fn sealed_route_diagnostic(&self, net: Option<ServerNet>) -> String {
+        net.map_or_else(
             || "sealed network store probe exceeded 500ms".to_owned(),
             |net| {
                 let targets: Vec<_> = net
@@ -572,9 +583,7 @@ impl Scenario {
                     net.reconnect_policy
                 )
             },
-        );
-        format!("client={} {history} cadence_submitted_passes={} network={saved} recovery={recovery:?} routes={routes:?}",
-            index + 1, running.passes.load(Ordering::Acquire))
+        )
     }
 
     async fn converge_in(&self, channel: u128, indices: &[usize], expected: &History, phase: &str) {
