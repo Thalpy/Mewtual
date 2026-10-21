@@ -54,6 +54,8 @@ struct Fake {
     held: StdMutex<Option<std::fs::File>>,
     /// Lock lands right after the every-chunk checkpoint, before the commit guard.
     lock_at_publication: AtomicBool,
+    /// The session is retired after a step was dispatched but before its worker starts.
+    retired_before_worker_start: AtomicBool,
     /// Another program takes the chosen final name right after each publication checkpoint.
     take_final_name: AtomicUsize,
     folder: PathBuf,
@@ -70,6 +72,7 @@ impl Fake {
             hold_staging: AtomicBool::new(false),
             held: StdMutex::new(None),
             lock_at_publication: AtomicBool::new(false),
+            retired_before_worker_start: AtomicBool::new(false),
             take_final_name: AtomicUsize::new(0),
             folder: folder.to_owned(),
             backoffs: AtomicUsize::new(0),
@@ -164,6 +167,15 @@ impl ExportPorts for Arc<Fake> {
     }
     fn live(&self) -> bool {
         self.live.load(AtomicOrdering::SeqCst)
+    }
+    fn liveness(&self) -> Liveness {
+        let fake = self.clone();
+        Arc::new(move || {
+            fake.live.load(AtomicOrdering::SeqCst)
+                && !fake
+                    .retired_before_worker_start
+                    .load(AtomicOrdering::SeqCst)
+        })
     }
     async fn commit(&self) -> Result<Box<dyn Send + '_>, String> {
         if !self.live() {
@@ -323,6 +335,30 @@ async fn a_staging_name_that_cannot_be_removed_keeps_the_saved_record() {
     assert!(fake.published());
     assert!(folder.join("notes.txt.mewtual-part").exists());
     drop(fake.held.lock().unwrap().take());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_step_queued_before_retirement_writes_nothing_when_its_worker_starts() {
+    // The dispatch-time check passes; Lock retires the session while the blocking step waits
+    // for a worker. When it starts it must refuse, write nothing and checkpoint nothing.
+    let (_root, folder) = downloads();
+    let fake = Fake::new(&folder);
+    fake.retired_before_worker_start
+        .store(true, AtomicOrdering::SeqCst);
+    let destination = Destination::Downloads(folder.clone());
+    assert!(
+        export_sequence(&fake, good_plan(), &destination, "notes.txt")
+            .await
+            .is_err()
+    );
+    assert_eq!(fake.events(), [Event::Begin]);
+    assert_eq!(
+        std::fs::metadata(folder.join("notes.txt.mewtual-part"))
+            .unwrap()
+            .len(),
+        0,
+        "no plaintext was written"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

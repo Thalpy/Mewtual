@@ -922,6 +922,8 @@ pub(super) trait ExportPorts: Send + Sync {
     async fn chunk(&self, index: usize) -> Result<Vec<u8>, String>;
     /// The original invocation and the export lease are still current.
     fn live(&self) -> bool;
+    /// The same check as an owned value a blocking worker can carry and evaluate when it starts.
+    fn liveness(&self) -> Liveness;
     /// Take the session commit guard (Pause, Remove and Lock take it too) and confirm the
     /// invocation, lease and registry entry under it. Held until the returned value drops.
     async fn commit(&self) -> Result<Box<dyn Send + '_>, String>;
@@ -929,6 +931,9 @@ pub(super) trait ExportPorts: Send + Sync {
     /// Sanctioned-clock backoff between bounded local retries.
     async fn backoff(&self, delay: Duration);
 }
+
+/// An owned liveness check for blocking workers (see [`ExportPorts::liveness`]).
+pub(super) type Liveness = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// Production export effects for one save invocation and its acquired copy.
 pub(super) struct ActorExport<'a> {
@@ -956,6 +961,10 @@ impl ExportPorts for ActorExport<'_> {
     }
     fn live(&self) -> bool {
         !self.ctx.origin.is_cancelled() && self.ready.is_current()
+    }
+    fn liveness(&self) -> Liveness {
+        let (origin, ready) = (self.ctx.origin.clone(), self.ready.clone());
+        Arc::new(move || !origin.is_cancelled() && ready.is_current())
     }
     async fn commit(&self) -> Result<Box<dyn Send + '_>, String> {
         let commit = require_ui_session_generation(self.ctx.state, self.ctx.generation).await?;
@@ -1156,12 +1165,22 @@ pub(super) async fn export_sequence(
     let mut session_retries = 0;
     while let Some(index) = file.next_index() {
         let chunk = Arc::new(ports.chunk(index).await?);
+        // Liveness is checked before each dispatch AND again when the blocking worker actually
+        // starts: a step queued behind a busy blocking pool may begin after Lock, Pause or a
+        // replacement retired this session, and then it writes nothing. A step that has already
+        // started runs to completion (its write is fsynced and only the next checkpoint, which
+        // is lease-fenced, could ever describe it).
+        let liveness = ports.liveness();
         let (returned, outcome) = accept_with_retries(
             file,
             |mut file: ExportFile| {
                 let chunk = chunk.clone();
+                let liveness = liveness.clone();
                 async move {
                     blocking(move || {
+                        if !liveness() {
+                            return (file, Err(ExportError::Inactive));
+                        }
                         let outcome = file.accept(index, &chunk);
                         (file, outcome)
                     })
