@@ -1,5 +1,64 @@
 # Mewtual; Handover
 
+## Validated protected confirmation checkpoint (21 October)
+
+Published code through `9dc1b8d3` (`73c444a5` browser implementation) has identical Rust/native
+source to frozen `ecc8232f`. The sequential full validation in communication-proof-finish-worktree
+has completed: root **3,146 passed**, zero failures, 24 existing ignored across 57 summaries;
+native **443 library plus five ACL tests passed**, zero failures (874.42s for the library);
+native check passed (1m32s), debug build passed (6m26s), and actual startup passed with the
+original 20-second deadline. The native suite includes the previously failing onward channel
+discovery and authenticated automatic notification receipt, plus chat-bubble and durable
+Keep/private Download bridge-restart scenarios. Logs: voice-followup-root-full.log,
+voice-followup-native-full.log, voice-followup-native-check.log, voice-followup-native-build.log
+and voice-followup-startup.log in that frozen checkout's target directory.
+
+The selected browser code passes **2,268 full frontend tests**, zero failures (67.43s), 105 focused
+real-crypto/fault-seam tests, Svelte with zero errors/warnings, production build (36.24s) and all
+ten rendered Edge flows. Root strict Clippy, formatting, ambient checks and dependency policy pass;
+root/native formatting was rechecked. Read-only adversarial re-review has no remaining findings
+for the protected confirmation increments. This is a validated partial checkpoint, not live V2.
+Separate native/packaged-experiment dependency audit failures remain recorded; root cargo-deny
+passing does not clear them. Only one physical desktop is available.
+
+The newer Root result-safety code remains UNCOMMITTED in communication-root-results-worktree
+and is not included in this published checkpoint. Its focused compilation is now running;
+prior complete suites do not validate it. Production native registration/IPC/result settlement,
+SDP/key phase transfer, normal V2/RTC and legacy isolation, member media relay, combined rollout
+and physical audio/network acceptance remain unfinished.
+
+## Active Root result preparation (21 October, uncompiled)
+
+Frozen browser `9dc1b8d3` (code `73c444a5`) passes 105 focused crypto tests, 2,268 full frontend tests,
+Svelte, build and ten rendered flows. Its Rust/native source is identical to `ecc8232f`, whose
+COMPLETE root suite passes 3,146 tests, zero failures and 24 existing ignored tests across 57 summaries. The complete frozen native/check/build/startup chain is recorded above. The ONE Cargo
+process now compiles the new focused Root regressions in communication-root-results-worktree.
+Do not launch duplicate Cargo jobs.
+
+Active uncommitted/uncompiled work: communication-root-results-worktree, based on `9dc1b8d3`.
+It adds private prepared signatures and actual Root seal/open result consumers. Fallible cleanup,
+RNG/signing/hash/copies run before Engine/Group/Policy. An affine preparation loan retains the
+actual engine permit/input through concurrent settlement or unwind. Settlement fences first
+effects immediately; drained status/credit release wait for the loan. Consumed Incoming remainder,
+replaced actions/attempts/signatures and older promotion cleanup stay outside final guards.
+Low start preconstructs its replacement watch owner. Only Published packets have source authority;
+local refusal retains one exact inert signature, and changed bodies cannot trigger another sign.
+
+New deterministic regressions cover all three protected flights, exact history, final refusal,
+actual session revoke blocked on Policy with a live native child, last Clock owner closure,
+preparation/settlement/unwind, actual Root call/action identity and epoch/equal-join replacement.
+Their focused compilation is now running; they have not passed yet. Formatting and ambient checks pass. Static adversarial re-review is clear on both
+implementation and direct tests, with no remaining blocker/high/medium. No prior complete suite validates
+this new increment. Keep unpublished/retired owners in outer Options borrowed by final closures.
+Original actor/session checks follow the LAST callback. Child leases alone are insufficient.
+Short trusted watch notification is permitted; Engine/control/resource acquisition, arbitrary
+callbacks and owner destruction stay outside final native publication. Limits are unchanged.
+
+Production registration/IPC, complete derivation integration, authorized confirmation-to-SDP
+key/phase transfer, compatible helpers, normal V2/RTC and legacy mode isolation, member media
+relay, combined rollout and physical audio/network testing remain unfinished. Only one desktop
+is available. The native-provider experiment remains isolated and unselected.
+
 ## Selected WebCrypto continuation (21 October)
 
 Local `ecc8232f` is frozen in `communication-proof-finish-worktree` for one sequential full

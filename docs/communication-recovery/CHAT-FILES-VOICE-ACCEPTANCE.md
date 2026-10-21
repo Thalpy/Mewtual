@@ -1,5 +1,50 @@
 # Chat, files and voice implementation evidence
 
+## Validated protected confirmation checkpoint (21 October)
+
+Published code through `9dc1b8d3` (`73c444a5` browser implementation) has identical Rust/native
+source to frozen `ecc8232f`. The sequential full validation in communication-proof-finish-worktree
+has completed: root **3,146 passed**, zero failures, 24 existing ignored across 57 summaries;
+native **443 library plus five ACL tests passed**, zero failures (874.42s for the library);
+native check passed (1m32s), debug build passed (6m26s), and actual startup passed with the
+original 20-second deadline. The native suite includes the previously failing onward channel
+discovery and authenticated automatic notification receipt, plus chat-bubble and durable
+Keep/private Download bridge-restart scenarios. Logs: voice-followup-root-full.log,
+voice-followup-native-full.log, voice-followup-native-check.log, voice-followup-native-build.log
+and voice-followup-startup.log in that frozen checkout's target directory.
+
+The selected browser code passes **2,268 full frontend tests**, zero failures (67.43s), 105 focused
+real-crypto/fault-seam tests, Svelte with zero errors/warnings, production build (36.24s) and all
+ten rendered Edge flows. Root strict Clippy, formatting, ambient checks and dependency policy pass;
+root/native formatting was rechecked. Read-only adversarial re-review has no remaining findings
+for the protected confirmation increments. This is a validated partial checkpoint, not live V2.
+Separate native/packaged-experiment dependency audit failures remain recorded; root cargo-deny
+passing does not clear them. Only one physical desktop is available.
+
+The newer Root result-safety code remains UNCOMMITTED in communication-root-results-worktree
+and is not included in this published checkpoint. Its focused compilation is now running;
+prior complete suites do not validate it. Production native registration/IPC/result settlement,
+SDP/key phase transfer, normal V2/RTC and legacy isolation, member media relay, combined rollout
+and physical audio/network acceptance remain unfinished.
+
+## Native result continuation (21 October, not yet compiled)
+
+Active `communication-root-results-worktree`, based on browser checkpoint `9dc1b8d3`, adds
+private prepared signatures, actual Root seal/open admission, deferred token/slot/promotion cleanup
+and an affine preparation hold through settlement. New tests cover all three protected flights,
+exact accepted/rejected retries, refused publication without resigning or token effects, actual
+session revoke blocked on Policy, last Clock owner closure, actual native owner substitutions,
+epoch/equal-join replacement and preparation unwind. These tests have NOT run. Formatting and
+ambient checks pass. Read-only review prompted fixes for allocation under admission, cleanup
+under Engine and premature credit return; final static re-review is clear on those boundaries.
+
+Earlier frozen `ecc8232f` passes the COMPLETE root suite: **3,146 passed**, zero failures,
+24 existing ignored across 57 summaries (`voice-followup-root-full.log` in proof checkout).
+Its sequential separate native suite/check/build is still running; startup follows. Those results
+do not validate this new Root increment. Browser `9dc1b8d3` has identical Rust/native source to
+ecc and passes 2,268 full frontend tests. The complete frozen gates are now recorded above; the active Root work is still unpublished. Production IPC/RTC/V2, SDP transfer, member media relay, combined rollout and physical
+acceptance remain open. Only one physical desktop is available.
+
 ## Protected WebCrypto confirmation (21 October, native integration pending)
 
 The selected browser broker now consumes immutable protected row projections for seal/open,
