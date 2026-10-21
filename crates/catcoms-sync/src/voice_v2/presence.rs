@@ -14,11 +14,12 @@ use std::sync::Arc;
 
 mod confirmation;
 pub use confirmation::{
-    ConfirmationOutput, CryptoFlight, FlightSubmission, OpenedFlight, PairSetup, ReceiveProgress,
+    ConfirmationOutput, CryptoFlight, FlightSubmission, OpenedFlight, PairReceipt, PairSelector,
+    PairSetup, ReceiveProgress,
 };
 pub(crate) use confirmation::{
-    ProtectedDerivation, ProtectedDerivationResult, ProtectedOpenedResult, ProtectedResponse,
-    ProtectedSealedResult, ProtectedStart,
+    ProtectedDerivation, ProtectedDerivationResult, ProtectedOpenedResult, ProtectedPair,
+    ProtectedResponse, ProtectedSealedResult, ProtectedStart,
 };
 
 const RECORD_BYTES: usize = 1536;
@@ -68,24 +69,42 @@ impl FreshPeer {
         member: &dyn Fn(DeviceId) -> bool,
         clock: &dyn Clock,
     ) -> Result<(), VoiceError> {
+        // A membership view from another group/room/watcher cannot revoke this evidence.
+        // Reject immutable mismatches before invoking that foreign view or any Clock callback.
         let record = &self.0;
         if record.watcher != context.local || record.announcement.scope() != context.scope {
             return Err(VoiceError::Unauthorized);
         }
+        // Clock implementations are callbacks. Finish both samples before observing any
+        // revocable owner so a callback cannot close a watch after its last ownership check.
+        let wall = clock.now_ms();
+        let mono = clock.monotonic_ms();
         if !member(record.announcement.issuer()) || !member(record.watcher) {
             // Membership loss is irreversible for issued evidence. A retained clone must not
             // become usable again merely because the same device is later re-added.
             record.live.revoke();
             return Err(VoiceError::Unauthorized);
         }
-        if !record.owner.is_live()
-            || !record.live.is_live()
-            || clock.monotonic_ms() >= record.deadline
-        {
+        self.authorize_at(context, wall, mono)
+    }
+
+    /// Native pair publication uses the final Actor clock samples under its short fence.
+    /// This observes only immutable evidence and atomic gates; it never calls Clock or locks.
+    pub(super) fn authorize_at(
+        &self,
+        context: &Context,
+        wall: u64,
+        mono: u64,
+    ) -> Result<(), VoiceError> {
+        let record = &self.0;
+        if record.watcher != context.local || record.announcement.scope() != context.scope {
             return Err(VoiceError::Unauthorized);
         }
-        record.announcement.check_freshness(clock.now_ms())?;
-        record.proof.check_freshness(clock.now_ms())?;
+        if !record.owner.is_live() || !record.live.is_live() || mono >= record.deadline {
+            return Err(VoiceError::Unauthorized);
+        }
+        record.announcement.check_freshness(wall)?;
+        record.proof.check_freshness(wall)?;
         if matches!(record.announcement.body(), Body::Announcement { epoch, .. } if *epoch > context.epoch)
         {
             return Err(VoiceError::Freshness);
@@ -107,6 +126,11 @@ pub struct Watcher {
 }
 
 impl Watcher {
+    /// Selection is private to the native Root. A caller cannot supply evidence from another
+    /// watcher. The selected record is still revalidated after the final native Clock callback.
+    pub(crate) fn peer_for_pair(&self, peer: DeviceId) -> Option<FreshPeer> {
+        self.present.get(&peer).cloned()
+    }
     /// Time/owner collection needs no current actor permission and remains safe while locked.
     /// Membership transitions independently retire every issued presence capability at source.
     pub fn collect_expired(&mut self, clock: &dyn Clock) -> bool {

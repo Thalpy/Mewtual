@@ -663,8 +663,23 @@ impl ActorOwner {
     }
     pub(crate) fn source_context(&self, scope: super::Scope) -> Result<super::Context, VoiceError> {
         self.current()?;
-        let state = self.group.state.lock().unwrap_or_else(|e| e.into_inner());
-        let policy = self.gate.policy.lock().unwrap_or_else(|e| e.into_inner());
+        // Directory/grant validation also enters this path. EffectiveClock invokes the original
+        // injected clock: sampling beneath Group/Policy can deadlock session revocation and
+        // let a callback outlive a previous currency check. Sample before nonblocking acquisition,
+        // then repeat the original atomic owner check after both guards. SourceLedger must keep
+        // already-prepared jobs when this returns local Capacity for a later packet.
+        let wall = self.clock.now_ms();
+        let state = match self.group.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        let policy = match self.gate.policy.try_lock() {
+            Ok(policy) => policy,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        self.current()?;
         if state.revision != self.revision
             || scope.group != self.group.hash
             || scope.policy != policy.pin
@@ -676,7 +691,7 @@ impl ActorOwner {
         Ok(super::Context {
             scope,
             local: self.gate.local,
-            now: self.clock.now_ms(),
+            now: wall,
             epoch: state.epoch.ok_or(VoiceError::Unauthorized)?,
             indirect: policy.indirect,
         })

@@ -1,5 +1,32 @@
 # Chat, files and voice implementation evidence
 
+## Native pair continuation (21 October, focused Root checks passed; full gates pending)
+
+Next source is communication-pair-origin-worktree based on 7e19b948. New Root/Actor pair factory,
+immutable native implicit-watch selector, original pair retry/epoch/window and atomic publication
+are implemented. Authored regressions cover both native tables/serial, actual revocation at every
+Clock sample, final expiry and post-pin Group/Policy contention, full-pool and traffic conservation,
+explicit-watch substitution, actual newly-proved rejoin and epoch-before-first-derive. Existing
+positive low Root fixtures now use the production factory; the bridged public-presence test also
+requires both endpoint roles to produce the same handshake and native Derive action.
+
+Static review exposed inherited source_context Clock-under-Group/Policy reentry through grant
+validation. Sampling is moved before nonblocking native locks with original owner rechecks.
+Its new retryable Capacity is handled in SourceLedger without dropping earlier spent jobs;
+an actual two-packet Policy-contention test passes. Other inspected callers propagate or retain
+the refusal before mutation. All 426 focused Root voice tests pass, zero failures (22.49s),
+including both-role bridge proof-to-Derive,8-confirming/16-total/16-pin bounds and exact retry.
+The initial compile failed two fixture type checks (u64 callback return/non-Copy Context move);
+corrected rerun passes without weakening runtime gates. Logs: target/voice-pair-root-focused-{1,2}.log.
+Read-only adversarial re-review has no blocker/high/medium. All10 actor and the external API
+test pass, zero failures; complete frontend2,268 (73.48s), Svelte0errors/0warnings, production
+build51.22s and all10 rendered Edge flows pass. Strict whole-root Clippy1m55s (warnings denied),
+formatting, ambient and root dependency policy pass. Logs: target/voice-pair-{actor-focused-2,
+public-api,frontend-full,svelte,frontend-build,flows,format,clippy,ambient,deny}.log. Complete
+current Rust/native/check/build/startup gates remain pending. Old derived-origin full was interrupted for
+the context correction and has no pass claim. Published head remains
+c1532331 and no live V2/RTC/media, combined or physical acceptance is claimed.
+
 ## Native actor and terminal lifecycle (21 October, full gates pending)
 
 The body-free trusted actor bridge and terminal-retirement correction pass **10 actor tests**,

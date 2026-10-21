@@ -84,6 +84,25 @@ pub struct OriginLimits {
 }
 redacted_debug!(OriginLimits);
 impl OriginLimits {
+    #[cfg(test)]
+    pub(super) fn live_pair_pins_for_test(
+        &self,
+        member: DeviceId,
+        join: Nonce,
+        key_ref: [u8; 32],
+    ) -> usize {
+        self.records
+            .get(&member)
+            .and_then(|record| {
+                record
+                    .bindings
+                    .iter()
+                    .find(|binding| binding.join == join && binding.key_ref == key_ref)
+            })
+            .map_or(0, |binding| {
+                binding.pins.iter().filter(|pin| pin.is_live()).count()
+            })
+    }
     /// Prepay the existing member records before reserving an SDP workflow. This spends no
     /// requester/original allowance and resets no bucket. A fresh row's normal 60s retention
     /// exceeds the maximum 30s idle readiness plus 20s admitted work window.

@@ -3,6 +3,26 @@
 //! invented here. The actual signed source submission still performs its own quota admission.
 use super::*;
 
+/// A provisional origin key pin grants neither a pair nor traffic quota. Failed unpublished
+/// preparation revokes it without reacquiring Group; ordinary bounded collection prunes the
+/// dead clone later. Publication transfers its one live pin to the actual Pair.
+pub(crate) struct PairPinReservation {
+    pin: CallLease,
+    published: bool,
+}
+impl PairPinReservation {
+    pub(crate) fn publish(&mut self) {
+        self.published = true;
+    }
+}
+impl Drop for PairPinReservation {
+    fn drop(&mut self) {
+        if !self.published {
+            self.pin.revoke();
+        }
+    }
+}
+
 /// Affine permission to publish already-prepaid local state while the original Group/Policy
 /// view remains held. It grants no signing, engine, transport or remote packet admission.
 pub(crate) struct LocalOrigin<'a> {
@@ -28,6 +48,87 @@ impl LocalOrigin<'_> {
 }
 
 impl ActorOwner {
+    #[cfg(test)]
+    pub(crate) fn pair_pin_observer_for_test(
+        &self,
+        peer: DeviceId,
+        join: super::super::Nonce,
+        key_ref: [u8; 32],
+    ) -> Arc<dyn Fn() -> usize + Send + Sync> {
+        let group = self.group.clone();
+        Arc::new(move || {
+            group
+                .state
+                .try_lock()
+                .expect("inspection outside native Group")
+                .limits
+                .live_pair_pins_for_test(peer, join, key_ref)
+        })
+    }
+
+    /// Tests hold the actual original mutex in an independent thread after a Clock barrier.
+    /// No replacement policy/group or caller-constructed authority is involved.
+    #[cfg(test)]
+    pub(crate) fn native_view_holder_for_test(
+        &self,
+        policy: bool,
+        held: std::sync::mpsc::SyncSender<()>,
+        released: std::sync::mpsc::Receiver<()>,
+    ) -> Box<dyn FnOnce() + Send> {
+        let group = self.group.clone();
+        let gate = self.gate.clone();
+        Box::new(move || {
+            let wait = || {
+                held.send(()).unwrap();
+                let _ = released.recv();
+            };
+            if policy {
+                let _guard = gate.policy.lock().unwrap_or_else(|e| e.into_inner());
+                wait();
+            } else {
+                let _guard = group.state.lock().unwrap_or_else(|e| e.into_inner());
+                wait();
+            }
+        })
+    }
+    /// Reserve only the original origin/key binding's existing bounded pin position. Samples
+    /// precede both try-locks, and a refusal spends no requester/setup/room allowance. A second
+    /// final native transaction must still admit the pair; this is protective capacity only.
+    pub(crate) fn prepare_pair_pin(
+        &self,
+        binding: &super::super::packets::PairBinding,
+        context: &super::super::Context,
+        pin: &CallLease,
+    ) -> Result<PairPinReservation, VoiceError> {
+        let reservation = PairPinReservation {
+            pin: pin.clone(),
+            published: false,
+        };
+        self.current()?;
+        let _wall = self.clock.now_ms();
+        let mono = self.clock.monotonic_ms();
+        let mut state = match self.group.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        let policy = match self.gate.policy.try_lock() {
+            Ok(policy) => policy,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        self.check_route_view(&state, &policy, binding.peer, context)?;
+        if binding.peer == context.local
+            || !state.members.contains_key(&context.local)
+            || !pin.is_live()
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        state
+            .limits
+            .protect_pair(binding.peer, binding.join, binding.key_ref, pin, mono)?;
+        Ok(reservation)
+    }
     /// A local caller supplies actual native pair/room owners, never an envelope-shaped stand-in
     /// for network ingress. Sample injected time outside every guard and refuse contention so
     /// no blocking acquisition can silently age those samples before final publication.

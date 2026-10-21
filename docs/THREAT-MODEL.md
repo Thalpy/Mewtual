@@ -1,5 +1,23 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Native pair authority (21 October, full gates pending)
+
+A peer/device ID alone cannot bind an uncertain pair request: it now also names remote join,
+key reference and epoch. Root selects new evidence only from its actual implicit Watcher, and
+final native admission observes the original call/session/room/member/epoch and immutable window.
+Exact history cannot substitute a newly proved join, renew a failed pair or allocate keys/RTC.
+Pair protection is selected at creation; later epoch changes cannot migrate old authority into
+a fresh chain. A future automatic join/phase replacement must preserve actual consent and mode.
+
+Provisional pins grant protection/capacity only, never traffic/source quota. Unpublished failure
+revokes them after guards release. Ledger claim, Pair and serial publish in one native turn.
+No callback-bearing membership or Clock function belongs under that final fence. Grant context
+sampling now precedes Group/Policy, and source batch Capacity preserves earlier actual lower
+jobs. All 426 focused Root voice tests pass, including original-clock revocation sweeps and
+native contention/limit cases. No live V2/RTC/media or complete-gate claim follows. Physical
+acceptance still lacks a second desktop. Foreign immutable contexts reject before membership
+callbacks, preserving the original group's valid presence rather than revoking it.
+
 ## Native actor shutdown and voice controls (21 October, full gates pending)
 
 Opaque native actor controls preserve allocation identity and never turn serialized IDs into

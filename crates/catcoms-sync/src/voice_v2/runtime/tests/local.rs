@@ -160,3 +160,37 @@ fn effect_last_clock_callback_cannot_issue_an_owner_after_atomic_actor_close() {
         Some(VoiceError::Unauthorized)
     );
 }
+
+#[test]
+fn source_context_samples_outside_native_guards_and_refuses_contention() {
+    let clock = Arc::new(OriginClockProbe {
+        inner: ManualClock::new(1000),
+        owners: Mutex::new(None),
+        outside: AtomicBool::new(true),
+        samples: AtomicU64::new(0),
+    });
+    let runtime = Runtime::new(clock.clone());
+    let actor = active(&runtime, 1);
+    *clock.owners.lock().unwrap() =
+        Some((Arc::downgrade(&actor.group), Arc::downgrade(&actor.gate)));
+    let observed = actor.source_context(context().scope).unwrap();
+    assert_eq!((observed.now, observed.epoch), (1000, 1));
+    assert!(clock.outside.load(Ordering::Acquire));
+    {
+        let _group = actor.group.state.lock().unwrap();
+        assert_eq!(
+            actor.source_context(context().scope).err(),
+            Some(VoiceError::Capacity)
+        );
+    }
+    {
+        let _policy = actor.gate.policy.lock().unwrap();
+        assert_eq!(
+            actor.source_context(context().scope).err(),
+            Some(VoiceError::Capacity)
+        );
+    }
+    clock.outside.store(true, Ordering::Release);
+    assert!(actor.source_context(context().scope).is_ok());
+    assert!(clock.outside.load(Ordering::Acquire));
+}

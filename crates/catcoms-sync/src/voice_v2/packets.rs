@@ -82,6 +82,11 @@ pub struct PairBinding {
     pub key_ref: [u8; 32],
     pub handshake: [u8; 32],
 }
+
+/// Unpublished fixed pair state, constructed outside native Group/Policy. The sole LocalJoin
+/// keeps the packet table unchanged until its final synchronous publication. This value owns
+/// the exact revocation handle, not another equivalent join or reconstructed allocator.
+pub(super) struct PreparedConfirmationClaim(Pair);
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Status {
     Confirming,
@@ -571,6 +576,10 @@ redacted_debug!(
 );
 
 impl PacketLedger {
+    #[cfg(test)]
+    pub(super) fn pair_count_for_test(&self) -> usize {
+        self.pairs.len()
+    }
     /// Protection is selected only before this exact pair has allocated or admitted any packet.
     /// Counters survive cache pruning, so an expired ordinary action cannot look pristine later.
     pub(super) fn confirmation_is_unused(
@@ -871,6 +880,43 @@ impl PacketLedger {
         }
         pair.confirmation_claimed = true;
         Ok(())
+    }
+
+    /// Native production pairs have never occupied this transcript. Unlike compatibility
+    /// registration, this cannot adopt an already-created unclaimed/retired ledger row.
+    pub(super) fn prepare_confirmation_claim(
+        &self,
+        binding: PairBinding,
+        live: CallLease,
+        authority: &Authority<'_>,
+    ) -> Result<PreparedConfirmationClaim, VoiceError> {
+        self.current(authority)?;
+        if binding.peer == self.local
+            || !(authority.member)(binding.peer)
+            || !live.is_live()
+            || self.pairs.contains_key(&binding.handshake)
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        if self.pairs.len() >= PAIRS {
+            return Err(VoiceError::Capacity);
+        }
+        Ok(PreparedConfirmationClaim(Pair {
+            binding,
+            status: Status::Confirming,
+            live,
+            confirmation_claimed: true,
+            next: 0,
+            replay: Replay::default(),
+        }))
+    }
+
+    /// Infallible native tail after all call/room/epoch/evidence checks. Both bounded tables
+    /// publish in the same actor turn; no async/native callback can run between their inserts.
+    pub(super) fn publish_confirmation_claim(&mut self, prepared: PreparedConfirmationClaim) {
+        debug_assert!(self.pairs.len() < PAIRS);
+        debug_assert!(!self.pairs.contains_key(&prepared.0.binding.handshake));
+        self.pairs.insert(prepared.0.binding.handshake, prepared.0);
     }
     /// Private-protocol transition after the role-specific three-flight confirmation succeeds.
     #[cfg(test)]

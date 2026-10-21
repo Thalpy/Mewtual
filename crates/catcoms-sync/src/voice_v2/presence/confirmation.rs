@@ -19,11 +19,14 @@ const MAX_CONFIRMING: usize = 8;
 const PAIR_BYTES: usize = 6144;
 const CONFIRM_DOMAIN: &str = "mewtual/voice/key-confirm/v2";
 mod derivation;
+mod pair;
 mod protected;
 mod response;
 mod result;
 mod start;
 pub(crate) use derivation::{ProtectedDerivation, ProtectedDerivationResult};
+pub(crate) use pair::ProtectedPair;
+pub use pair::{PairReceipt, PairSelector};
 pub(crate) use response::ProtectedResponse;
 pub(crate) use result::{ProtectedOpenedResult, ProtectedSealedResult};
 pub(crate) use start::ProtectedStart;
@@ -327,6 +330,14 @@ impl ConfirmationRetirement {
     }
 }
 impl LocalJoin {
+    #[cfg(test)]
+    pub(crate) fn confirmation_counts_for_test(&self) -> (usize, usize, u64) {
+        (
+            self.confirmations.pairs.len(),
+            self.ledger.pair_count_for_test(),
+            self.confirmations.serial,
+        )
+    }
     fn chain_binding(
         &self,
         handshake: Nonce,

@@ -554,7 +554,13 @@ impl SourceLedger {
             {
                 continue;
             }
-            let context = actor.source_context(packet.object.scope())?;
+            let context = match actor.source_context(packet.object.scope()) {
+                Ok(context) => context,
+                // A later snapshot may encounter native contention after an earlier job spent
+                // its attempt. Keep that job and leave this packet untouched for quiet retry.
+                Err(VoiceError::Capacity) => continue,
+                Err(error) => return Err(error),
+            };
             let cursor_key = (key.0, packet.object.scope().room);
             let cursor = state.cursors.get(&cursor_key);
             let mut direct: Vec<_> = by_device

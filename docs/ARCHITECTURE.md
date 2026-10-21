@@ -1,5 +1,28 @@
 # Mewtual; Architecture
 
+## Native production pair selection (21 October, full gates pending)
+
+Root selects new pair evidence from the exact participant's implicit Watcher; the request binds
+peer device, remote join/key reference and current epoch. A fixed receipt is metadata only.
+Retained exact selector lookup precedes new discovery, preserving the independently pinned pair
+through presence expiry/renewal/newer-join proof. Final current native call/session/room/member/
+epoch/deadline checks remain required. Failed/retired records cannot recreate their allocator.
+Cached recovery emits no new revision, preventing a driver's ensure loop from waking itself.
+
+Transcript, original window, paid Pair/packet state and provisional origin pin are prepared before
+final Group/Policy publication. An unpublished reservation revokes its actual pin outside final guards; successful
+native publication moves both table owners and serial together. This uses existing 16-pair and
+eight-confirming limits and no traffic allowance. Protected creation epoch is permanent; a future
+driver needs explicit automatic join/phase replacement after epoch invalidation rather than
+silently adopting old pair authority. No wire/persistence format, IPC or dispatch enablement.
+
+The actual grant-validation path's source_context now samples Clock before nonblocking Group/
+Policy, then rechecks the original native owner. A later busy snapshot must leave earlier source
+jobs intact and the blocked packet unspent. Original Clock revocation and contention regressions
+pass within426 focused Root voice tests, zero failures (22.49s). All10 actor tests, external API
+test and2,268 frontend tests pass. Complete backend gates remain pending. The older frozen full
+run was interrupted for this correction.
+
 ## Native actor controls and terminal voice retirement (21 October, full gates pending)
 
 ServerActor now carries fixed-size, native-only voice controls through its existing bounded

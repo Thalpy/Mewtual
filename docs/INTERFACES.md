@@ -1,5 +1,21 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native protected pair factory (21 October, full gates pending)
+
+Root::prepare_voice_pair(&Arc<CallGrant>, PairSelector) and its typed ServerActor wrapper accept
+the expected peer device, remote join/key reference and epoch. They resolve original watch proof
+natively; callers cannot supply a FreshPeer or choose an unrelated explicit watcher. PairReceipt
+contains fixed handshake/peer/role metadata only. Exact retry retains original pair/deadline,
+including when discovery expired or a different join was proved. It cannot create browser keys.
+Only first publication emits a revision. A mismatched creation epoch refuses; automatic native
+join/phase replacement remains a separate driver obligation. Existing compatibility APIs and
+wire/storage formats are unchanged; no serialized commands, live dispatch or RTC are enabled.
+
+ActorOwner::source_context now reports retryable Capacity for native lock contention before
+returning a snapshot. Source batches preserve already-prepared jobs on that local refusal.
+All 426 focused Root voice tests,10 actor tests and the external API test pass, zero failures.
+Complete backend gates remain pending; no live V2 integration or enablement is claimed.
+
 ## Body-free ServerActor voice API (21 October, full gates pending)
 
 ServerActor exposes start_voice_endpoint, start_voice_watch, voice_watch_peers,

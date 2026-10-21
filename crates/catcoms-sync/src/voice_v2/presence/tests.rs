@@ -3,6 +3,7 @@ use catcoms_crypto::DeviceKeypair;
 use catcoms_rt::ManualClock;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
+mod pair;
 
 /// Exercise boundaries that a stationary ManualClock conceals without using ambient time.
 #[derive(Debug)]
@@ -603,12 +604,76 @@ fn another_groups_membership_view_cannot_revoke_this_groups_evidence() {
         .unwrap();
     let proof = participant.answer(&challenge, &clock, &mut rng).unwrap();
     let fresh = observer.prove(&proof, &clock).unwrap();
-    observer.context.scope.group[0] ^= 1;
-    assert!(fresh
-        .authorize(&observer.context, &|_| false, &clock)
-        .is_err());
-    observer.context.scope.group[0] ^= 1;
-    fresh.authorize(&observer.context, &member, &clock).unwrap();
+    for kind in ["group", "room", "local", "policy"] {
+        let mut wrong = Context { ..observer.context };
+        match kind {
+            "group" => wrong.scope.group[0] ^= 1,
+            "room" => wrong.scope.room += 1,
+            "local" => wrong.local = context(3).1.local,
+            _ => wrong.scope.policy = Some([77; 32]),
+        }
+        let queried = std::cell::Cell::new(false);
+        assert_eq!(
+            fresh.authorize(
+                &wrong,
+                &|_| {
+                    queried.set(true);
+                    false
+                },
+                &clock
+            ),
+            Err(VoiceError::Unauthorized)
+        );
+        assert!(
+            !queried.get(),
+            "a foreign context must not query or revoke this group's evidence"
+        );
+        fresh.authorize(&observer.context, &member, &clock).unwrap();
+    }
+}
+
+#[test]
+fn fresh_peer_checks_watch_after_the_original_clock_callback() {
+    #[derive(Debug)]
+    struct ClosingClock {
+        inner: ManualClock,
+        watch: WatchLease,
+    }
+    impl Clock for ClosingClock {
+        fn now_ms(&self) -> u64 {
+            self.inner.now_ms()
+        }
+        fn monotonic_ms(&self) -> u64 {
+            self.watch.revoke();
+            self.inner.monotonic_ms()
+        }
+        fn sleep(
+            &self,
+            duration: std::time::Duration,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            self.inner.sleep(duration)
+        }
+    }
+    let clock = ManualClock::new(1000);
+    let mut rng = rng();
+    let pool = Arc::new(Resources::default());
+    let mut observer = Observer::new(1, pool.clone(), &mut rng);
+    let mut limits = limits(&observer, pool.clone());
+    let mut participant = Participant::new(2, pool);
+    let announcement = participant.announce(&clock, &mut rng);
+    let challenge = observer
+        .challenge(&announcement, &mut limits, &clock, &mut rng)
+        .unwrap();
+    let proof = participant.answer(&challenge, &clock, &mut rng).unwrap();
+    let fresh = observer.prove(&proof, &clock).unwrap();
+    let closing = ClosingClock {
+        inner: clock,
+        watch: observer.lease.clone(),
+    };
+    assert_eq!(
+        fresh.authorize(&observer.context, &member, &closing),
+        Err(VoiceError::Unauthorized)
+    );
 }
 
 #[test]

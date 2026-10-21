@@ -10,6 +10,7 @@ const WATCHES: usize = 8;
 mod confirmation;
 mod derivation;
 mod ingress;
+mod pair;
 pub(crate) use ingress::EndpointReceipt;
 
 /// Affine native reply custody for one observer. The Root holds no strong reference to this

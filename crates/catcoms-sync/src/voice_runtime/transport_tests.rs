@@ -970,6 +970,17 @@ async fn voice_transport_native_public_presence_proves_both_joins_through_unjoin
         f.clock.advance_ms(500);
     }
     assert!(reached, "both actual native challenge/proof flows must finish");
+    let epoch = f._source.voice_v2_context(1).unwrap().epoch;
+    let source_pair = f._source.prepare_voice_pair(&a, voice_v2::presence::PairSelector {
+        peer: f.recipient.device_id(), join: ck.join, key_ref: ck.key_ref, epoch,
+    }).unwrap();
+    let recipient_pair = f.recipient.prepare_voice_pair(&c, voice_v2::presence::PairSelector {
+        peer: f._source.device_id(), join: ak.join, key_ref: ak.key_ref, epoch,
+    }).unwrap();
+    assert_eq!(source_pair.handshake, recipient_pair.handshake);
+    assert_ne!(source_pair.local_is_low, recipient_pair.local_is_low);
+    assert!(f._source.prepare_voice_derivation(&a, source_pair.handshake).is_ok());
+    assert!(f.recipient.prepare_voice_derivation(&c, recipient_pair.handshake).is_ok());
     assert!(f.helper.voice_runtime.as_ref().unwrap().endpoints.implicit_watch_for_test().is_none(), "forwarding confers no call participation");
     // Mem models connected links. This proves native public protocol/route ownership, not an
     // A-C-blocked physical topology, WebCrypto confirmation, SDP forwarding or audible media.

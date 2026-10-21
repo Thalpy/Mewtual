@@ -3,7 +3,7 @@
 //! This module exposes no Tauri command, browser projection, plaintext or live V2 dispatch.
 use super::*;
 use catcoms_sync::voice_v2::crypto_actions::{CryptoAction, CryptoResultReceipt};
-use catcoms_sync::voice_v2::presence::FreshPeer;
+use catcoms_sync::voice_v2::presence::{FreshPeer, PairReceipt, PairSelector};
 use catcoms_sync::voice_v2::{CallGrant, CallLease, Nonce, VoiceError};
 use catcoms_sync::VoiceWatchGrant;
 
@@ -60,6 +60,11 @@ enum Command {
     },
     Changes {
         reply: Reply<tokio::sync::watch::Receiver<u64>>,
+    },
+    Pair {
+        grant: Arc<CallGrant>,
+        selector: PairSelector,
+        reply: Reply<PairReceipt>,
     },
     Derive {
         grant: Arc<CallGrant>,
@@ -125,6 +130,16 @@ impl Command {
                 }
                 let _ = reply.send(server.sync.voice_endpoint_changes());
             }
+            Self::Pair {
+                grant,
+                selector,
+                reply,
+            } => {
+                if reply.is_closed() {
+                    return;
+                }
+                let _ = reply.send(server.sync.prepare_voice_pair(&grant, selector));
+            }
             Self::Derive {
                 grant,
                 handshake,
@@ -185,6 +200,20 @@ impl Command {
 }
 
 impl ServerActor {
+    /// Select the actual implicit watch's proven peer using immutable remote join/key identity.
+    /// Lost replies retry this same selector; a peer rejoin cannot silently change the request.
+    pub async fn prepare_voice_pair(
+        &self,
+        grant: Arc<CallGrant>,
+        selector: PairSelector,
+    ) -> Result<PairReceipt, VoiceEndpointError> {
+        self.voice_endpoint_request(|reply| Command::Pair {
+            grant,
+            selector,
+            reply,
+        })
+        .await
+    }
     async fn voice_endpoint_request<T: Send + 'static>(
         &self,
         build: impl FnOnce(Reply<T>) -> Command + Send,

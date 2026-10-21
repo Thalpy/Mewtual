@@ -432,6 +432,70 @@ fn source_later_effect_contention_preserves_prepared_jobs_and_the_unstarted_pack
 }
 
 #[test]
+fn source_later_context_contention_keeps_earlier_job_and_unspent_packet() {
+    let f = Fixture::new(true);
+    let a = f.targeted(91, 32);
+    let b = f.targeted(92, 32);
+    f.admit(a.clone()).unwrap();
+    f.admit(b.clone()).unwrap();
+    let mut keys = [(a.issuer(), a.id()), (b.issuer(), b.id())];
+    keys.sort();
+    let mut jobs = std::thread::scope(|threads| {
+        let (start, started) = std::sync::mpsc::sync_channel(0);
+        let (held, ready) = std::sync::mpsc::sync_channel(0);
+        let (release, released) = std::sync::mpsc::channel();
+        let actor = &f.actor;
+        let holder = threads.spawn(move || {
+            if started.recv().is_ok() {
+                actor.with_held_policy_for_test(|| {
+                    held.send(()).unwrap();
+                    released.recv().unwrap();
+                });
+            }
+        });
+        let mut start = Some(start);
+        let result =
+            f.source
+                .take_ready_using(&f.actor, &routes(&[3]), 4, |origin, target, expires| {
+                    let effect = f.actor.effect(origin, target, expires)?;
+                    start
+                        .take()
+                        .expect("only the first effect is reachable")
+                        .send(())
+                        .unwrap();
+                    ready.recv().unwrap();
+                    Ok(effect)
+                });
+        // Release/join before assertions; even an earlier unexpected refusal closes the start
+        // channel rather than leaving a waiting fixture thread behind.
+        drop(start);
+        let _ = release.send(());
+        holder.join().unwrap();
+        result.unwrap()
+    });
+    assert_eq!(
+        jobs.len(),
+        1,
+        "a local later context refusal cannot discard a spent job"
+    );
+    let first = jobs.pop().unwrap();
+    assert_eq!(first.key, keys[0]);
+    assert!(first.authority().authorized());
+    {
+        let state = f.source.state.lock().unwrap();
+        assert_eq!(state.packets[&keys[0]].state.lock().unwrap().attempts, 1);
+        let untouched = state.packets[&keys[1]].state.lock().unwrap();
+        assert_eq!((untouched.attempts, untouched.selected), (0, 0));
+        assert!(untouched.direct.is_empty() && untouched.helpers.is_empty());
+    }
+    let second = f.jobs(&[3]).pop().unwrap();
+    assert_eq!(second.key, keys[1]);
+    assert!(second.authority().authorized());
+    assert_eq!(f.source.counts(), (2, 2, 2));
+    drop((first, second));
+}
+
+#[test]
 fn source_three_total_submissions_mix_direct_and_two_helpers_without_refill() {
     let f = Fixture::new(true);
     let packet = f.targeted(21, 48);

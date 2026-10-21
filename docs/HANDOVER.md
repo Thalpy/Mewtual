@@ -1,5 +1,51 @@
 # Mewtual; Handover
 
+## Active production pair continuation (21 October, focused Root checks passed)
+
+Current next checkout: communication-pair-origin-worktree, based on local actor commit 7e19b948.
+The older derived-origin full run was deliberately interrupted after review found a reachable
+context Clock-under-lock defect. It has NO full-pass claim; native gates were not reached.
+Current pair source corrects that defect and passes 426 focused Root voice tests, zero failures
+(22.49s, target/voice-pair-root-focused-2.log). All10 focused actor tests and the external API
+test pass, zero failures (actor0.63s, compile4m39; API compile37.23s).
+Do not compile another Cargo target concurrently or attribute old results to this changed source.
+Published PR48 remains c1532331. The reviewed actor slice passes 10 actor, one external API and
+411 Root focused tests plus lint/format/ambient/deny; current complete backend gates are pending.
+
+This continuation implements native Root/ServerActor prepare_voice_pair with immutable
+peer/join/key_ref/epoch selection. New proof comes only from the actual participant's implicit
+watch. Exact cached recovery precedes discovery expiry/replacement and cannot self-wake revisions,
+extend the original window or allocate another pair. Prepared origin pin/credit/ledger owners
+precede final Group/Policy admission of both tables and serial. Protection is pinned to creation
+epoch before derivation. First output is fixed metadata, not transcript/key/RTC authority.
+
+Design review found an inherited source_context clock-under-lock deadlock through actual grant
+validation. Its clock samples now precede nonblocking locks and original atomic rechecks.
+SourceLedger preserves earlier spent jobs when a later context is temporarily busy. The new
+Root sweep covers every actual native Clock callback for call/room/session closure; other
+tests cover final deadline, post-pin real Group/Policy contention/rollback, both table
+counts/serial, origin burst conservation, cached closure, full-pool retry, live explicit-watch
+substitution, real same-device newly-proved rejoin, epoch-before-derive and both roles through
+the member bridge. Existing positive low Root fixtures now create pairs through production API.
+All 426 focused Root cases pass, including the 8-confirming/16-total/16-origin-pin limits and
+both-role bridged proof-to-Derive path. The first compile found two test fixture mistakes (a
+u64 callback return and a moved non-Copy Context); corrected rerun passes without changing
+runtime checks. Static read-only re-review has no remaining blocker/high/medium. Ordinary
+FreshPeer scope/membership ordering was restored and expanded across group/room/local/policy;
+foreign contexts cannot revoke original evidence. Dedicated sync-error injection and blocking-
+regression external watchdog remain test follow-ups. Complete frontend passes2,268 (73.48s),
+Svelte zero errors/warnings, production build51.22s and all10 rendered Edge flows pass. Strict
+whole-root Clippy passes with warnings denied (1m55s), formatting, ambient and root dependency
+policy pass. Logs: target/voice-pair-{actor-focused-2,public-api,frontend-full,svelte,frontend-build,
+flows,format,clippy,ambient,deny}.log. Complete current Rust/native/check/build/startup gates remain
+required. The root/native suites run sequentially with one compile job; no duplicate heavy run.
+
+Still disabled/open: production IPC registry/copy accounting, exact result/ACK/settlement retry
+custody, automatic join/phase replacement when a protected pair's epoch expires, authorized SDP
+key transfer, normal V2/RTC and legacy isolation, media relay, combined rollout and physical
+acceptance. Only one desktop is available. Preserve the unselected provider experiment, main
+Gate7 UI/combo changes and all actual worktrees under target. Do not cargo-clean that directory.
+
 ## Active native actor and terminal lifecycle work (21 October, full gates pending)
 
 Published checkpoint remains `c1532331` on PR48. Local `fe9c1048` and `a5fc6e2a`

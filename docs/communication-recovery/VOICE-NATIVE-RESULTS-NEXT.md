@@ -1,5 +1,20 @@
 # Next voice milestone: native result recovery
 
+## Production pair continuation (21 October, focused Root checks passed)
+
+communication-pair-origin-worktree now implements the native pair factory and passes 426 focused
+Root voice tests,10 actor tests, external API and2,268 frontend tests, zero failures. Full gates
+remain pending. The older
+actor full run was interrupted for the reviewed context correction. This supersedes the missing-
+factory description below, without a live integration/enablement claim. The production proof
+selector is bound to actual implicit watch plus immutable peer/join/key/epoch. Both tables and
+serial share final native publication; lost replies reuse original pair metadata without fresh
+discovery or wake loops. Creation epoch cannot migrate into later chain authority.
+
+Next still requires registered action/IPC copy accounting, exact history/ACK/settlement custody,
+automatic join/phase replacement after epoch invalidation, authorized SDP/key transfer, live
+dispatch/RTC and legacy isolation. Media relay and combined/physical acceptance remain open.
+
 ## Native actor bridge (21 October, full gates pending)
 
 The body-free trusted ServerActor bridge now reaches Root endpoint/watch/derivation/confirmation

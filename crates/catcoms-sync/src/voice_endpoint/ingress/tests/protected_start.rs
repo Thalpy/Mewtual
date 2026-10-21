@@ -5,6 +5,7 @@ use voice_v2::crypto_actions::{CryptoAction, CryptoInput};
 use voice_v2::presence::{LocalJoin, WatchAuthority};
 use voice_v2::JoinKey;
 mod derivation;
+mod pair;
 
 fn key(seed: u8) -> JoinKey {
     JoinKey::new([seed; 32], hex::decode("046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5").unwrap().try_into().unwrap()).unwrap()
@@ -31,9 +32,43 @@ async fn low_fixture() -> LowFixture {
 }
 
 async fn low_fixture_room(room: u128) -> LowFixture {
+    let (mut local, remote, runtime, clock, grant) = low_discovery_fixture(room).await;
+    let context = local.voice_v2_context(room).unwrap();
+    let pair = local
+        .prepare_voice_pair(
+            &grant,
+            voice_v2::presence::PairSelector {
+                peer: remote.device_id(),
+                join: key(82).join,
+                key_ref: key(82).key_ref,
+                epoch: context.epoch,
+            },
+        )
+        .unwrap();
+    assert!(pair.local_is_low);
+    (local, remote, runtime, clock, grant, pair.handshake)
+}
+
+// Shared real signed discovery without privately constructing a Pair. Positive protected Root
+// tests now traverse the production pair API, while admission regressions can stop beforehand.
+type DiscoveredFixture = (Node, Node, Arc<Runtime>, Arc<ManualClock>, Arc<CallGrant>);
+async fn low_discovery_fixture(room: u128) -> DiscoveredFixture {
+    low_discovery_for_watch(room, false).await.0
+}
+async fn low_discovery_for_watch(
+    room: u128,
+    explicit: bool,
+) -> (DiscoveredFixture, Option<Arc<crate::VoiceWatchGrant>>) {
+    low_discovery_with_clock(room, explicit, |clock| clock).await
+}
+async fn low_discovery_with_clock(
+    room: u128,
+    explicit: bool,
+    make_clock: impl FnOnce(Arc<ManualClock>) -> Arc<dyn Clock>,
+) -> (DiscoveredFixture, Option<Arc<crate::VoiceWatchGrant>>) {
     let (mut local, mut remote, _remote_runtime, clock) = super::fixture().await;
     assert!(local.device_id() < remote.device_id());
-    let runtime = Runtime::new(clock.clone());
+    let runtime = Runtime::new(make_clock(clock.clone()));
     if room == 1 {
         attach(&mut local, &runtime);
     } else {
@@ -66,6 +101,8 @@ async fn low_fixture_room(room: u128) -> LowFixture {
     local
         .start_voice_endpoint(grant.clone(), local_key.join, local_key.public_key)
         .unwrap();
+    let explicit_watch =
+        explicit.then(|| local.start_voice_watch(room, CallLease::default()).unwrap());
     let context = local.voice_v2_context(room).unwrap();
     let remote_context = Context {
         local: remote.device_id(),
@@ -104,7 +141,11 @@ async fn low_fixture_room(room: u128) -> LowFixture {
     let observer = voice
         .endpoints
         .observers
-        .get_mut(&participant.watch.id)
+        .get_mut(
+            &explicit_watch
+                .as_ref()
+                .map_or(participant.watch.id, |watch| watch.id),
+        )
         .unwrap();
     let watch_authority = WatchAuthority {
         context: &context,
@@ -135,22 +176,11 @@ async fn low_fixture_room(room: u128) -> LowFixture {
             &mut remote.rng,
         )
         .unwrap();
-    let fresh = observer
+    observer
         .watcher
         .prove(&proof, &watch_authority, clock.as_ref())
         .unwrap();
-    let pair = voice
-        .current
-        .as_ref()
-        .unwrap()
-        .with_limits(|limits| {
-            participant
-                .join
-                .begin_pair(&fresh, &local_authority, limits, clock.as_ref())
-        })
-        .unwrap();
-    assert!(pair.local_is_low);
-    (local, remote, runtime, clock, grant, pair.handshake)
+    ((local, remote, runtime, clock, grant), explicit_watch)
 }
 
 fn message(action: &CryptoAction) -> voice_v2::Nonce {

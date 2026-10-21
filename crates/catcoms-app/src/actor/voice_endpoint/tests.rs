@@ -71,6 +71,23 @@ async fn native_voice_actor_installs_exact_endpoint_and_coalesces_revision_obser
         .unwrap();
     assert!(changes.has_changed().unwrap());
     changes.borrow_and_update();
+    assert_eq!(
+        actor
+            .prepare_voice_pair(
+                grant.clone(),
+                PairSelector {
+                    peer: catcoms_crypto::DeviceId::from_bytes([9; 32]),
+                    join: [9; 32],
+                    key_ref: [9; 32],
+                    epoch: 0,
+                }
+            )
+            .await
+            .err(),
+        Some(VoiceEndpointError::Protocol(VoiceError::Unauthorized)),
+        "actor commands cannot manufacture a proven pair from request metadata"
+    );
+    assert!(!changes.has_changed().unwrap());
     actor
         .start_voice_endpoint(grant.clone(), [81; 32], point())
         .await
