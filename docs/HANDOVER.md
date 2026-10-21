@@ -502,6 +502,30 @@ dependency audit still fails on the pinned Tauri maintenance/quick-xml/plist adv
 root `cargo deny` does not clear that separate failure. No dependency exemption was added.
 The [acceptance ledger](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md) records the evidence.
 
+## External download resume (2026-10-21, focused checks; full suites pending)
+
+Branch `communication-external-download` (worktree `target/communication-external-download-worktree`,
+baseline `dbb8d36b`, not pushed or merged) implements resumable saves of private Downloads to the
+user's Downloads folder; this supersedes the "appending to a partly written external file is not
+implemented" note above for destinations that can be journaled. Design, crash table and both
+review rounds: [EXTERNAL-DOWNLOAD-RESUME](communication-recovery/EXTERNAL-DOWNLOAD-RESUME.md).
+
+- Storage: `kept/export.rs` (sealed `mewtual/download-transfer/v2` journal, typed transitions,
+  `ExportFile`), `kept/external.rs` (handle identity with birth time via `winapi-util`, no-follow
+  opens, link probe), exhaustive encoding predicates in `record.rs`, disk-full record writes that
+  no longer poison (`persistence.rs`), single-pass mount that leaves journaled removals for Remove.
+- Actor: journal transitions and preflight edges fenced by the export lease and the original
+  invocation (`actor.rs`); tests in `actor/file_transfers/tests/export.rs`.
+- Native: `private_downloads.rs` drives `export_journaled` in `spawn_blocking`, the Resume
+  preflight, Save new copy (`freshCopy`) and two-step Remove (`keepPartial`); small `lib.rs` hunk in
+  `save_group_file`. Fresh saves on destinations without identity or links keep the old writer.
+- Frontend: typed statuses and actions in `private-downloads.ts`; Transfers list in `App.svelte`.
+
+Focused checks and three review rounds are recorded in the acceptance ledger. Not yet run:
+complete root/native/frontend suites, `npm run build`, `test:startup`, `test:flows` (including the
+updated opt-in `FLOW_SCENARIO=private-download`), native physical checks. The Unix identity branch
+is compile-unverified on this host. No screenshot exists yet for the new Transfers rows.
+
 ## Chat history adversarial checkpoint (2026-10-20)
 
 The latest user request is to explain/test additive chat history across MLS epochs, disconnected

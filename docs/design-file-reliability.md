@@ -237,6 +237,19 @@ external file and encrypted progress. There is no exactly-once external publicat
 UI tells users to check Downloads before saving again, which may create another copy. Same-user
 staging mutation and abrupt native/physical-network acceptance remain outside current evidence.
 
+## Resumable external saves (21 October, implementation in progress)
+
+For destinations that can carry a journal, the export above is now resumable rather than always
+fresh. The partly written `<name>.mewtual-part` is tracked in the sealed Download record by its
+handle identity (volume, file index or inode, birth time) and a checkpoint of fsynced whole chunks.
+Resume reopens it without following links, re-verifies its prefix against plaintext regenerated
+from the private copy, continues writing, and publishes with a verified no-replace hard link. A
+missing, moved, replaced or relinked file, a removed or different folder and revoked permission
+become typed halts ("Folder or file unavailable", "Partly saved file changed") that keep encrypted
+progress and offer Save new copy. Remove deletes only the proven partial and never the saved file.
+Filesystems without stable identities, birth times or hard links keep the non-resumable writer.
+See [EXTERNAL-DOWNLOAD-RESUME](communication-recovery/EXTERNAL-DOWNLOAD-RESUME.md).
+
 ## Remaining limits
 
 - Remote possession acknowledgements, automatic replication and holder-aware eviction are not

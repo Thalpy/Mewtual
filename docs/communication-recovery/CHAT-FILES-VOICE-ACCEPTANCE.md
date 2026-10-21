@@ -1,5 +1,30 @@
 # Chat, files and voice implementation evidence
 
+## External download resume (21 October, focused checks; full suites pending)
+
+Branch `communication-external-download` from `dbb8d36b` closes the open "external destination
+resume" item for destinations that can carry a journal; it is not merged and not accepted.
+Design and dispositions: [EXTERNAL-DOWNLOAD-RESUME](EXTERNAL-DOWNLOAD-RESUME.md). A read-only design
+review (four high, four medium) and re-review (four medium) were resolved before persistence code;
+a post-implementation review of the diff (two high, two medium, four low, no blocker) was resolved
+in `591ba423`.
+
+Focused evidence on that branch: retained-store unit tests 87 pass (54 existing, 7 platform, 26
+export); the whole storage crate 152 plus 9 integration (one existing ignored); the complete
+per-crate app library suite passed 1,216 (22 existing ignored) before the review fixes and the
+file-transfer group 53 including six actor export cases; `catcoms-sync` library 894; native
+`download` filter 22 (including the four existing six-client private download scenarios and two
+new retry/liveness cases); frontend files private-downloads 6, lifecycle 6, native-download 7,
+kept-lifecycle 10, transfer-visual 8, visual-fixture 9, command security 9; Svelte check clean;
+strict Clippy for storage/sync/app; root and native formatting; ambient gate; `cargo deny`
+advisories/bans/licenses/sources ok. Each new guard was broken deliberately and its test went red.
+One app test failed once right after a rebuild and has not reproduced since. Native Clippy still
+reports three existing lint categories (`save_group_file` already exceeded the argument limit).
+
+Still open: complete root/native/frontend suites, `test:startup`, `test:flows`, the Unix identity
+branch (compile-unverified on Windows), physical power-loss behavior and a rendered Transfers
+screenshot. The non-resumable writer remains for filesystems without identity or hard links.
+
 ## Validated handoff prerequisites (21 October)
 
 Validated runtime source is `fef81f48`. Current code passes434 focused Root voice tests, including eight new

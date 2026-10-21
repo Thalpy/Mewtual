@@ -1,7 +1,22 @@
 # External download resume
 
 Design checkpoint, 21 October 2026. Status: **revision 3 after read-only design review and
-re-review (no blocker or high remains); implementation in progress.** Dispositions are at the end.
+re-review (no blocker or high remains); implemented on this branch with focused checks; complete
+suites and native gates pending.** Dispositions are at the end.
+
+## Implementation map
+
+| Concern | Code | Tests |
+| --- | --- | --- |
+| Platform identity, no-follow opens, codecs, fault seam | `crates/catcoms-storage/src/kept/external.rs` | `kept/external_tests.rs` |
+| Journal format, transition rules, `ExportFile`, store transitions | `crates/catcoms-storage/src/kept/export.rs` | `kept/export_tests.rs` |
+| DownloadV2 domain, exhaustive encoding predicates | `crates/catcoms-storage/src/kept/record.rs`, `variants.rs` | `export_tests.rs` (successor rules, max size, unknown domain) |
+| Disk-full record writes, presence field | `crates/catcoms-storage/src/kept/persistence.rs` | `export_tests.rs` (disk full) |
+| Two-step Remove, finish rules, status projection, mount pass | `kept/downloads.rs`, `kept.rs` | `export_tests.rs` (removal, finish) |
+| Sync forwarding | `crates/catcoms-sync/src/downloads.rs` | through actor tests |
+| Actor transitions and fences | `crates/catcoms-app/src/actor.rs` | `actor/file_transfers/tests/export.rs` |
+| Native orchestration, preflight, Remove, projection | `apps/desktop/src-tauri/src/private_downloads.rs`, `save_group_file` in `lib.rs` | `private_downloads.rs` tests |
+| Renderer states and actions | `apps/desktop/src/private-downloads.ts`, `native-download.ts`, `App.svelte` | `private-downloads.test.ts`, `private-download-lifecycle.test.ts` |
 
 Baseline: `dbb8d36b919372737178fd56c1e301dde8fd423c` (pushed tip of `chat-update-implementation`,
 "Record complete validation of the protected handoff checkpoint"). Branch
@@ -187,9 +202,10 @@ Rules:
    linking the new file to an absent probe name, checking the probe has the same identity and
    removing only the probe name. FAT and exFAT report a usable-looking index and creation time but
    cannot link, so without this probe a journal there could never publish. Attempt a folder flush,
-   then the actor persists Writing(0). If identity or linking is Unsupported, or the Writing(0)
-   publication fails, the file just created is removed after its identity is rechecked, and a fresh
-   save falls back to the non-resumable writer.
+   then the actor persists Writing(0). If identity or linking is Unsupported, the file just created
+   is removed and a fresh save falls back to the non-resumable writer. If the Writing(0) publication
+   fails, the file is removed after its identity is rechecked and the save reports that error (no
+   fallback: the old writer also needs record writes to finish).
 2. **Reopen and preflight.** Every journaled operation uses the **sealed folder path** and requires
    that folder to open with identity `folder_id`; nothing is created there. The staging leaf must
    open without following a link with identity `file_id` and link count 1. Native runs this check as
@@ -204,6 +220,12 @@ Rules:
      are kept; the first short or mismatching chunk is truncated and rewritten from there.
    - Every chunk, verified or written, feeds the plaintext CID hasher; chunk lengths must match the
      manifest. No unkeyed plaintext digest is persisted.
+   - The session only ever shrinks the file. If it finds the file shorter than its own verified
+     offset (another writer truncated it while the handle was open), it stops with Conflict, writes
+     no checkpoint, and the next Resume re-verifies from chunk zero. It never zero-extends, because
+     the stream CID check covers the plaintext fed, not the file contents.
+   - A verify-only session never lowers the saved checkpoint; only a session that has started
+     writing after a rewind may lower it.
 4. **Writes and checkpoints.** Each written chunk is followed by `sync_all`. The journal
    checkpoint (`written_chunks/bytes`) is persisted only at fsynced boundaries, every 8 chunks, when
    a session stops for a reason other than disk full, and before publication. It is never ahead of
@@ -245,10 +267,14 @@ encrypted progress. Disk full and transient write failures are not halts; see Bu
 | 10 | After the move to `deleting-v2` | Existing cleanup-only directory | Existing bounded `finish_deleting`. |
 | 11 | During Save new copy, after removing our partial, before the journal clears | Writing; staging missing | Preflight reports Unavailable; Save new copy again. |
 
-External cleanup that cannot prove ownership (folder or partial missing, identity changed,
-platform mismatch) finishes without deleting anything it finds. A proven partial whose deletion
-fails keeps the record in Deleting with its journal, conservatively charged; Remove retries it and
-"Keep partly saved file" releases the record while leaving the file for the user. Cleanup failure
+External cleanup reports a typed outcome. `Removed` (deleted, or already gone from a folder that
+could be checked) and `NotOurs` (folder identity or name now holds something else) let a removal
+finish without touching anything that is not provably ours. `FolderUnreachable` (missing folder or
+volume, other platform) and `Unchecked` (the partial exists but could not be opened, for example
+held without sharing), and a proven partial whose deletion fails, keep the record in Deleting with
+its journal, conservatively charged; Remove retries and "Keep partly saved file" releases the
+record while leaving the file for the user. Save new copy also proceeds on `FolderUnreachable`
+(an unreachable folder is why the user wants a new copy) but not on `Unchecked`. Cleanup failure
 never refunds quota or creates a second reservation.
 
 ## Budgets
@@ -292,6 +318,18 @@ never refunds quota or creates a second reservation.
   runs). One outcome, reflected truthfully in the native response.
 - Save new copy retires the transfer's read epoch in the same transition that clears the journal,
   so any in-flight export of the old journal stops at its next actor call.
+- Native checks the original invocation and lease before **every** write attempt, including each
+  retry after a backoff, so a session retired by Lock, Pause, Remove or replacement writes no more
+  plaintext (at most one already-started blocking write completes, crash row 3).
+- One live writer per partial, within one mounted store: Begin and Resume are refused while an
+  earlier session's `ExportFile` is still alive (its weak presence token is not cleared by Pause,
+  halts or Save new copy, only by its own drop). The token is in memory per mounted transfer, so a
+  blocking write that was already in flight when the vault was remounted or the account switched
+  (realistically only on a stalled volume) can still race a new session; the Conflict check
+  narrows but does not close that window. A halted journal is never shown as actively saving.
+- After a successful link, a failure to *check* the final name is transient (the retry recognizes
+  our own final name); only a different identity or a foreign object there is Changed. Recording a
+  proven publication also retires an earlier halt and clears Pause with an intent change.
 - `finish_download_export` is allowed only with export None (the non-resumable path) or Published.
   A record with a Writing journal cannot be released through the fallback path. An already
   released record makes finish a no-op, so a Remove that won does not cause a false cleanup warning.
@@ -412,3 +450,32 @@ Each new guard is confirmed by breaking its invariant and watching the test fail
 | M-4 guard scope | Folder flush and staging unlink moved after the guard is released; honest limit corrected. |
 | Low: Save another copy can orphan a row-7 staging name | Native removes a proven staging name before forgetting the journal; a failure leaves a second name for the saved file, documented. |
 | `QuotaExceeded` alongside `StorageFull` | Not adopted: only `StorageFull` is classified, keeping the non-poisoning exception narrow. |
+
+## Post-implementation review dispositions
+
+Read-only review of `dbb8d36b..1bca1620` (no blocker). All items below are fixed on this branch
+unless marked as a follow-up.
+
+| Finding | Disposition |
+| --- | --- |
+| HIGH: `unused_mut` in a cfg-gated branch breaks the Linux `-D warnings` build | `remove_proven` helper with no `mut`; the Windows read-only retry is inside `#[cfg(windows)]`. Still compile-unverified locally. |
+| HIGH: an old session could write after Lock/Pause/replacement; a later write could zero-extend a hole | Per-attempt liveness check (`accept_with_retries`); only-shrink with `Conflict` in `accept` and `prepare_publication`; one live writer per partial. Regressions: native retry/liveness tests, storage truncation and second-writer tests. |
+| MEDIUM: `remove_partial` treated "cannot check" as done | Typed `PartialRemoval`; Remove keeps Removing on `FolderUnreachable`/`Unchecked`; Save new copy refuses `Unchecked`. Windows regression with a non-sharing handle. |
+| MEDIUM: a failed post-link check became a permanent Changed halt | Post-link check errors are transient; recovery retires a halt. Regression with a seam on that check. |
+| LOW: Writing(0) failure text vs code | Design text corrected (error, no fallback). |
+| LOW: opt-in private-download browser flow stale | Rows carry `savedChunks`, new note text, Resume absent while receiving, plus a changed-destination action check. Not run here (`test:flows` reserved). |
+| LOW: recovered publication while paused | `mark_published` clears Pause with an intent change. |
+| LOW: stale comment; Debug of path-carrying results | Comment updated; `ExportProbe`, `ExportReopen` and `Publication` Debug redacted. |
+| Residual: no native end-to-end test of `export_journaled` | Follow-up. The retry/liveness policy is unit-tested; the sequence is covered at the actor layer. |
+| Residual: intermittent `actor_freeze_and_thaw_release_stale_export_transitions` | One unreproduced failure right after a rebuild; later passed in about 25 targeted reruns and in the complete per-crate app run (1,216 passed). Follow-up to root-cause if it recurs. |
+| Residual: Save new copy stale click | Intent pre-check before deleting anything; the abandon repeats the exact CAS. |
+| Residual: ReFS 64-bit file index, Unix CI birth time and non-root assumptions | Documented limits. |
+
+Re-review of `591ba423`: no blocker, high or medium remains. Low follow-ups, not fixed here:
+
+| Follow-up | Note |
+| --- | --- |
+| Single writer across remount | Presence is per mounted transfer; key the exclusion process-wide by Download ID in native if a stalled-volume race across remount matters. Qualified above and in THREAT-MODEL. |
+| Clear on a saved row with an unplugged folder | Stays Removing and offers "Keep partly saved file", although what remains is a second name for the complete file; wording could be specialized. |
+| Older session still alive | Resume spends one re-verification before the presence refusal; Save new copy can forget the journal and then fail at Begin. Bounded by clicks and that session's lifetime. |
+| Remove on a hung share | `privateDownloadBusy` stays set until the blocking removal returns (OS I/O timeout); pre-existing pattern. |

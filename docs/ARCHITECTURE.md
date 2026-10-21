@@ -281,6 +281,21 @@ remain distinct from eight process-wide acquisition jobs/attempts. Renderer meta
 saved manifests, keys, external destination authority or resource grants. Resume is explicit;
 there is no startup plaintext publication or persisted external path. See design-file-reliability.
 
+## Journaled external Download export (21 October, implementation in progress)
+
+Encrypted acquisition stays the only network phase; plaintext reaches Downloads only after the
+whole private copy is verified. The export journal lives in the same sealed Download record
+(`mewtual/download-transfer/v2`). Responsibilities are split so no Downloads I/O runs on the
+server actor: the storage crate's owned `ExportFile` performs external effects inside native
+`spawn_blocking` workers; the actor performs only sealed journal transitions fenced by the export
+lease (or an exact journal CAS) and the original native invocation; native
+(`private_downloads::export_journaled`) drives one chunk at a time through `ReadDownloadChunk`,
+emits progress, bounds local retries and holds the session commit guard only for publication.
+Mount never touches external paths: Deleting records that still name a partial wait for an
+explicit Remove. A fresh save on a destination without stable identity or hard links keeps the
+existing non-resumable writer. See
+[EXTERNAL-DOWNLOAD-RESUME](communication-recovery/EXTERNAL-DOWNLOAD-RESUME.md).
+
 ## Native MLS source catalog and explicit requester (19 October)
 
 `ServerGroup::member_count` now retains a fixed native observation of its committed epoch:

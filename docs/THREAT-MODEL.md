@@ -346,6 +346,46 @@ not same-user tampering with the source staging path. A crash after publication 
 can leave an external file plus private progress; the UI discloses possible duplicate re-export.
 This is not an exactly-once external receipt or a physical audio/network acceptance claim.
 
+## Journaled external export boundary (21 October, implementation in progress)
+
+For saves that can be journaled, this supersedes the statements above that no external path or
+offset is persisted and that resume always uses a fresh destination; the non-resumable fallback
+writer keeps those properties.
+
+- **New persisted metadata.** The destination folder path, the staging and final leaf names and
+  the partial's file identity (volume, file index or inode, birth time) live only inside the
+  sealed Download record under the purpose-separated metadata key, and in native memory. They are
+  redacted from Debug output and never reach renderer projections, logs, diagnostics or error
+  strings (pinned by tests).
+- **Ownership proof.** A saved path is never authority. Mewtual truncates, appends to, publishes
+  or deletes an external file only through a handle whose identity matches the journal; leaf opens
+  never follow a link or reparse point. A byte mismatch inside the durable checkpoint halts as
+  Changed and modifies nothing. The final name is never deleted, and publication is a no-replace
+  hard link verified afterwards.
+- **New exposure.** A paused or interrupted export now keeps partial plaintext in the destination
+  folder as `<name>.mewtual-part` across lock and restart until it is resumed, completed, replaced
+  by Save new copy or removed. Previously a failed export deleted it.
+- **Fences.** Journal transitions require the original export lease or an exact journal CAS, and
+  the original native invocation, so writes finishing after Lock, freeze/thaw, remount, Pause,
+  Remove or Save new copy persist nothing. Native rechecks the invocation and lease before every
+  plaintext write attempt, including retries. Within one mounted store only one live session may
+  write a partial (a write already stalled in flight across a remount or account switch can still
+  race a new session), and a session that finds the file shorter than its verified offset stops
+  instead of zero-extending.
+  Publication and Pause/Remove/Lock serialize on the session commit guard.
+- **Residual risks.** A same-user process can still race the gap between an identity check and the
+  path-based link or unlink. Filesystems without stable identities, birth times or hard links (some
+  SMB/FUSE, FAT, exFAT) keep the non-resumable writer. A volume whose device number changes across
+  reboot reports Changed. Destination folder flushes are best effort, so power loss can lose a
+  just-published name on filesystems that ignore them. A destination that hangs during the guarded
+  link can delay Lock, as the existing writer could. Remove keeps a partial it cannot check (folder
+  unavailable, file held without sharing) tracked as Removing rather than forgetting it; "Keep
+  partly saved file" and Save new copy on an unreachable folder can leave a remnant there, by the
+  user's choice. Unix identity code is compile-unverified on the Windows development host.
+- **Retained store.** A record write refused by a full volume before its rename now removes the
+  torn successor (and an empty new transfer directory) instead of poisoning the store; failures at
+  or after the rename, and process crashes, keep the existing fail-closed behavior.
+
 ## Public MLS source-catalog boundary (19 October)
 
 Connected-peer snapshots and evictable descriptor tables are not complete MLS source rosters.
