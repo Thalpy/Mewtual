@@ -1,6 +1,67 @@
 # Mewtual; Handover
 
-## Current action-row ownership continuation (21 October)
+## Native weak-context and lost-reply checkpoint (22 October)
+
+Frozen runtime source4db3f8249ef7960e11cc40febd2b81f6c3a6018e in
+target/communication-browser-action-worktree follows published PR48 checkpoint8773ac6b.
+The native/browser handoff remains this agent's assignment. This checkpoint does not enable
+an action opcode, live V2, SDP/ICE/RTC or member media relay.
+
+The paid application IO state now holds nine Weak references to the actual native owners.
+Per-call upgrade is all-or-nothing; ordinary commands and the native factory borrow the SAME
+UI session gate, real store, atomics and original commit mutex. Broad native state drops outside
+guards before detached work, which retains only actual actor/selected/grant/commit/work/payment.
+Factory selection accepts the original native Arc; pure early/final Coordinator checks cannot
+materialize a local snapshot when rejecting a foreign equal-label owner.
+
+Weak references retain original inline Arc allocations after value destruction. The fixed IO
+payment increased from24KiB to32KiB, within the same2MiB process limit. The current Windows
+layout is32,256 bytes, including11,352 bytes for weak-retained allocations and context wrappers;
+tail padding is measured using the pinned Arc layout. Context drops before its payment.
+Other platform layouts continue to refuse if the measured peak cannot fit.
+
+Ledger::lookup_original now recovers the same paid native row after a lost Begin reply supplied
+no RowId. It checks original grant allocation/executor/lease/full purpose, runs no Clock/charge/
+grant upgrade/factory action, and remains usable after End and actual grant destruction.
+None means no retained matching row, never drainage. This historical lookup is separate from
+currently authorized retry: idle handed-off Pending work still resumes on its original row/serial.
+No caller or transport uses historical metadata as permission to re-arm a factory.
+
+Focused current gates: all123 native handoff tests pass (2.06s); the preceding172 voice-filter
+tests pass before the three additional lookup tests. Nine actual native command-security tests
+and the full2,348 frontend tests pass (62.24s). Actual-diff adversarial design/review/re-review
+has no remaining findings. The earlier24KiB layout refusal and test-only Context name collision
+remain in failed logs; corrected focused runs and measured-layout check pass.
+The restricted browser-flow attempt lost CDP before flow assertions; the unchanged gate was
+rerun with normal Windows process access. Failed attempts are retained, never counted as passes.
+
+Complete fresh native passes600 tests including five ACL tests, zero failures
+(512.28s gate). Check27.17s, strict all-target/all-feature
+Clippy40.94s, format0.84s and the fresh Root construction
+scanner0.77s pass. Fresh complete Root passes3233 tests, zero failures,
+24 existing ignored across59 result summaries (1920.34s). Root Rust/Cargo/
+dependency-policy inputs remain byte-identical to validated f1c58519; prior Root static/ambient/
+dependency checks retain their own provenance. Native and Root full suites ran serially.
+
+Fresh frontend Svelte check57.41s has zero errors/warnings; production
+build45.14s and all ten rendered flows55.89s pass.
+Development executable build131.47s, actual startup3.62s,
+packaged custom-protocol debug build119.19s and actual packaged Windows
+document/reload/CSP/CORS/public-metadata/normal-close probe2.67s pass.
+Probe binary SHA256:32e07da86119b0cc764d719fb9ec0c3e172a5443d062096b9eafc969470be8ab. It requests no unlock/credentials and verifies
+only public metadata, exact-port policy and normal native collection. It does not establish
+selected crypto/action delivery or audible/physical networking. Only one desktop is available.
+Logs: target/voice-native-context-*; exact commands/times: voice-native-context-gates.jsonl.
+
+Still required: authenticated factory/action input/result/receipt ACK/settlement/phase closure
+and final delivery over the same Session; final actual-channel closure under the original UI
+commit; production proven-pair registration; full96KiB Workflow retirement and copy funding;
+sharing the original browser execution position; safe collection of the separate32-row action
+history. The existing16KiB Phase loan is not the whole Workflow. Live V2/RTC/isolation, relay,
+combined acceptance and independent physical audio/network acceptance remain open with their
+assigned owners. Separate native/experiment dependency-audit findings remain open.
+
+## Previous action-row ownership checkpoint (21 October)
 
 Source b0b303ebcc140f6414e89ae4b06ee8a46ece5175 follows the published edb00dda app-owned
 Status checkpoint in target/communication-browser-action-worktree. The native/browser handoff
