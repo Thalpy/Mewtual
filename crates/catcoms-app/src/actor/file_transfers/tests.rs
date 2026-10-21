@@ -2186,6 +2186,7 @@ async fn private_download_uses_real_acquisition_and_protected_store_without_publ
         &mut requester,
         cid.as_bytes().to_vec(),
         None,
+        None,
         RequestCancellation::new(watch, None),
         reply,
     );
@@ -2193,6 +2194,7 @@ async fn private_download_uses_real_acquisition_and_protected_store_without_publ
         .await
         .unwrap();
     assert!(ready.is_current());
+    assert!(ready.planned().is_none(), "no choice means Downloads");
     assert_eq!(ready.cid(), cid);
     assert!(requester.sync.kept_files().files.is_empty());
     assert!(requester.sync.kept_files().transfers.is_empty());
@@ -2237,6 +2239,7 @@ async fn interrupted_private_download_preserves_original_plan_and_spend_on_expli
         &mut requester,
         cid.as_bytes().to_vec(),
         None,
+        None,
         RequestCancellation::new(watch, None),
         reply,
     );
@@ -2262,6 +2265,7 @@ async fn interrupted_private_download_preserves_original_plan_and_spend_on_expli
         &mut requester,
         cid.as_bytes().to_vec(),
         Some(before.id),
+        None,
         RequestCancellation::new(watch, None),
         reply,
     );
@@ -2280,6 +2284,71 @@ async fn interrupted_private_download_preserves_original_plan_and_spend_on_expli
             .requests
             < before.state.remaining.requests
     );
+    source.shutdown().await;
+    bounded(source_task).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_save_as_choice_survives_an_interrupted_acquisition_and_remount() {
+    // Picker review H2: the choice is remembered in the sealed record in the same step that
+    // starts the run, so a cancelled network phase and a remount still save to the chosen place;
+    // a plain Resume afterwards (no new choice) gets it back from the record.
+    let Pair {
+        mut requester,
+        holder,
+        cid,
+        gate,
+        mut entered,
+        ..
+    } = pair().await;
+    let dir = tempfile::tempdir().unwrap();
+    attach_kept(&mut requester, dir.path());
+    let chosen = tempfile::tempdir().unwrap();
+    let choice = Arc::new(
+        catcoms_storage::kept::ChosenDestination::validate(&chosen.path().join("report.bin"))
+            .unwrap(),
+    );
+    let (source, _events, source_task) = spawn(holder);
+    let mut transfers = isolated_transfers();
+    let (cancel, watch) = watch::channel(false);
+    let (reply, result) = oneshot::channel();
+    transfers.download(
+        &mut requester,
+        cid.as_bytes().to_vec(),
+        None,
+        Some(choice.clone()),
+        RequestCancellation::new(watch, None),
+        reply,
+    );
+    let step = bounded(transfers.next()).await.unwrap();
+    transfers.complete(&mut requester, step);
+    let _lower = bounded(entered.recv()).await.unwrap();
+    assert!(requester.sync.downloads().unwrap()[0].planned);
+    cancel.send_replace(true);
+    let step = bounded(transfers.next()).await.unwrap();
+    transfers.complete(&mut requester, step);
+    assert!(bounded(result).await.unwrap().is_err());
+    // Remount: the choice is still in the sealed record.
+    requester.set_blob_store(Box::new(catcoms_storage::MemoryBlobStore::new()));
+    attach_kept(&mut requester, dir.path());
+    let saved = requester.sync.downloads().unwrap().remove(0);
+    assert!(saved.planned, "the remembered choice survives the remount");
+    gate.add_permits(8);
+    let (_cancel, watch) = watch::channel(false);
+    let (reply, result) = oneshot::channel();
+    transfers.download(
+        &mut requester,
+        cid.as_bytes().to_vec(),
+        Some(saved.id),
+        None,
+        RequestCancellation::new(watch, None),
+        reply,
+    );
+    let ready = drive_download(&mut requester, &mut transfers, result)
+        .await
+        .unwrap();
+    let planned = ready.planned().expect("a choice is remembered").unwrap();
+    assert_eq!(*planned, *choice);
     source.shutdown().await;
     bounded(source_task).await.unwrap();
 }

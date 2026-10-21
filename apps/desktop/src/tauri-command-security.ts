@@ -342,7 +342,9 @@ export const TAURI_COMMAND_GROUPS = {
       // and launches it. Only the exact full publication envelope is returned for clipboard fallback
       // when the URL needs a bounded excerpt.
       // Writes a shared file to Downloads by streaming it from the actor: the name is sanitized
-      // native-side and the reserved path is the only thing that reaches the webview.
+      // native-side and the reserved path is the only thing that reaches the webview. Its
+      // `saveAs` flag makes native open the OS "Save as" dialog itself; no path, folder or name
+      // ever comes from the renderer (its signature is pinned by a test).
       "save_group_file",
     ],
   },

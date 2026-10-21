@@ -3,9 +3,9 @@
 //! live group/file-key authority at every acquisition/export effect, including local cache hits.
 use super::*;
 use catcoms_storage::kept::{
-    DownloadExportLease, DownloadId, DownloadObservation, DownloadRun, DownloadStatus,
-    DownloadStore, ExportFence, ExportHalt, ExportJournal, ExportPresence, ExportState,
-    KeepNetworkWork, KeepPlan, KeepRetry, KeepRetryReceipt, KeepWork,
+    ChoiceRefusal, ChosenDestination, DownloadExportLease, DownloadId, DownloadObservation,
+    DownloadRun, DownloadStatus, DownloadStore, ExportFence, ExportHalt, ExportJournal,
+    ExportPresence, ExportState, KeepNetworkWork, KeepPlan, KeepRetry, KeepRetryReceipt, KeepWork,
 };
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
@@ -184,6 +184,27 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         Ok(self
             .download_store_mut()?
             .publish_download_export(lease, expected)?)
+    }
+    /// Remember a "Save as" choice for the exact current acquisition run. Live group/file-key
+    /// authority is rechecked like every other private-download effect.
+    pub fn plan_download_destination(
+        &mut self,
+        run: DownloadRun,
+        choice: &ChosenDestination,
+    ) -> Result<(), SyncError> {
+        self.download_authorized()?;
+        Ok(self
+            .download_store_mut()?
+            .plan_download_destination(run, choice)?)
+    }
+    /// Native-only: where a fresh export of this Download goes (`None` is Downloads). Names an
+    /// external path; never projected to the renderer.
+    #[allow(clippy::type_complexity)]
+    pub fn download_planned_destination(
+        &self,
+        id: DownloadId,
+    ) -> Result<Option<Result<ChosenDestination, ChoiceRefusal>>, SyncError> {
+        Ok(self.download_store()?.download_planned_destination(id)?)
     }
     /// Native-only preflight observation; names an external path, never projected to the renderer.
     pub fn download_observation(

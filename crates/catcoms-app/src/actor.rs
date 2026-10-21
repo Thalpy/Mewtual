@@ -67,6 +67,13 @@ pub struct DownloadReady {
     root: Arc<dyn catcoms_rt::RequestAuthority>,
     actor: tokio::sync::watch::Receiver<bool>,
     export_custody: Option<catcoms_rt::SharedRequestKeepalive>,
+    /// Where a fresh export goes, read from the sealed record when the copy was verified: `None`
+    /// is the Downloads folder; `Some(Err)` is a remembered choice this platform cannot decode.
+    /// Begin still checks the journal against the record's plan, so a choice replaced after this
+    /// read cannot be used.
+    planned: Option<
+        Result<Arc<catcoms_storage::kept::ChosenDestination>, catcoms_storage::kept::ChoiceRefusal>,
+    >,
 }
 /// One lease-fenced export journal transition, named after the storage edge it performs. The
 /// journals are native-memory values that carry an external path; they never cross IPC.
@@ -202,6 +209,15 @@ impl DownloadReady {
     /// chunk only at its declared length and publishes only if the stream hashes to its CID.
     pub fn export_plan(&self) -> Result<catcoms_storage::kept::ExportPlan, String> {
         catcoms_storage::kept::ExportPlan::from_manifest(&self.manifest).map_err(|e| e.to_string())
+    }
+    /// The remembered "Save as" destination for a fresh export; see the field.
+    #[allow(clippy::type_complexity)]
+    pub fn planned(
+        &self,
+    ) -> Option<
+        Result<Arc<catcoms_storage::kept::ChosenDestination>, catcoms_storage::kept::ChoiceRefusal>,
+    > {
+        self.planned.clone()
     }
     /// Observe the ORIGINAL Root and mounted storage generations before plaintext effects.
     /// Native invocation/session/entry and destination authorization remain caller obligations.
@@ -941,6 +957,8 @@ pub enum AppCommand {
     AcquireDownload {
         cid: Vec<u8>,
         resume: Option<catcoms_storage::kept::DownloadId>,
+        /// A "Save as" choice to remember in the sealed record before any network work.
+        planned: Option<Arc<catcoms_storage::kept::ChosenDestination>>,
         cancel: RequestCancellation,
         reply: oneshot::Sender<Result<DownloadReady, String>>,
     },
@@ -3240,11 +3258,24 @@ impl ServerActor {
         resume: Option<catcoms_storage::kept::DownloadId>,
         cancel: RequestCancellation,
     ) -> Result<DownloadReady, String> {
+        self.acquire_download_to(cid, resume, None, cancel).await
+    }
+    /// [`Self::acquire_download`] that also remembers a "Save as" choice in the sealed record,
+    /// in the same actor step that starts or resumes the run and before any network work, so an
+    /// interrupted acquisition still saves to the chosen place. A later Save as replaces it.
+    pub async fn acquire_download_to(
+        &self,
+        cid: Vec<u8>,
+        resume: Option<catcoms_storage::kept::DownloadId>,
+        planned: Option<Arc<catcoms_storage::kept::ChosenDestination>>,
+        cancel: RequestCancellation,
+    ) -> Result<DownloadReady, String> {
         let (reply, receiver) = oneshot::channel();
         self.cmd_tx
             .send(AppCommand::AcquireDownload {
                 cid,
                 resume,
+                planned,
                 cancel: cancel.clone(),
                 reply,
             })
@@ -5518,8 +5549,8 @@ where
                     Some(AppCommand::KeepFile { cid, cancel, reply }) => {
                         file_transfers.keep(&mut server, cid, cancel, reply);
                     }
-                    Some(AppCommand::AcquireDownload { cid, resume, cancel, reply }) => {
-                        file_transfers.download(&mut server, cid, resume, cancel, reply);
+                    Some(AppCommand::AcquireDownload { cid, resume, planned, cancel, reply }) => {
+                        file_transfers.download(&mut server, cid, resume, planned, cancel, reply);
                         let _ = event_tx.send(AppEvent::FilesUpdated).await;
                     }
                     Some(AppCommand::ReadDownloadChunk { ready, index, cancel, reply }) => {

@@ -14812,19 +14812,6 @@ async fn save_group_file(
     save_as: Option<bool>,
 ) -> Result<SavedFileResult, String> {
     let generation = keep_session::invocation_generation(&state).await?;
-    // "Save as": native opens the dialog itself (the renderer never supplies a path), before any
-    // export slot, record, acquisition or allowance is touched, so cancelling changes nothing.
-    let chosen = if save_as.unwrap_or(false) {
-        let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
-        let chooser = private_downloads::NativeChooser::new(app.clone());
-        match private_downloads::choose_destination(&chooser, downloads, &name).await? {
-            Some(choice) => Some(Arc::new(choice)),
-            None => return Err(private_downloads::SAVE_AS_CANCELLED.into()),
-        }
-    } else {
-        None
-    };
-    let export_slot = private_downloads::export_slot()?;
     if operation.as_ref().is_some_and(|id| {
         id.is_empty()
             || id.len() > 128
@@ -14837,11 +14824,37 @@ async fn save_group_file(
         .clone()
         .try_into()
         .map_err(|_| "bad cid length".to_string())?;
+    let resume = resume.as_deref().map(private_downloads::id).transpose()?;
     let (actor, instance) = actor_instance_of(&state, server).await?;
     let origin = keep_session::for_actor(&state, server, &actor, generation)
         .await
         .ok_or_else(|| "The file read is no longer active.".to_string())?;
-    let resume = resume.as_deref().map(private_downloads::id).transpose()?;
+    // "Save as" (picker review M4): native opens the dialog itself (the renderer never supplies a
+    // path), after this invocation's generation and origin are captured and before any export
+    // slot, record, acquisition or allowance is touched, so cancelling changes nothing and an
+    // open dialog holds no slot. At most one dialog is open at a time. The dialog can outlive
+    // Lock, unlock or a server replacement, so all of that is rechecked once it closes.
+    let chosen = if save_as.unwrap_or(false) {
+        let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
+        let chooser = private_downloads::NativeChooser::new(app.clone());
+        let choice = private_downloads::choose_destination(&chooser, downloads, &name).await?;
+        let current = actor_instance_of(&state, server)
+            .await
+            .is_ok_and(|(_, now)| now == instance);
+        if origin.is_cancelled()
+            || !current
+            || keep_session::invocation_generation(&state).await? != generation
+        {
+            return Err("The download is no longer active.".into());
+        }
+        match choice {
+            Some(choice) => Some(Arc::new(choice)),
+            None => return Err(private_downloads::SAVE_AS_CANCELLED.into()),
+        }
+    } else {
+        None
+    };
+    let export_slot = private_downloads::export_slot()?;
     // A file of an abandoned earlier save that stays on disk; reported with the new result.
     let mut left_behind = None;
     if let Some(id) = resume {
@@ -14878,9 +14891,10 @@ async fn save_group_file(
         return Err("The download is no longer active.".into());
     }
     // No external .part exists during acquisition. Only encrypted, owner-scoped chunks survive
-    // interruption/restart; resuming always captures this fresh invocation and destination.
+    // interruption/restart; resuming always captures this fresh invocation. A new "Save as"
+    // choice is remembered in the sealed record before any network work (picker review H2).
     let ready = actor
-        .acquire_download(raw, resume, origin.clone())
+        .acquire_download_to(raw, resume, chosen.clone(), origin.clone())
         .await?
         .with_export_custody(export_slot);
     if origin.is_cancelled() || !ready.is_current() {
@@ -14894,9 +14908,16 @@ async fn save_group_file(
             "file is larger than the {MAX_FILE_BYTES}-byte limit"
         ));
     }
-    let destination = match chosen {
-        Some(choice) => private_downloads::Destination::Chosen(choice),
-        None => private_downloads::Destination::Downloads(
+    // The record, not this invocation, names where a fresh save goes: its remembered choice
+    // (this one, an earlier one that survived a restart, or a newer Save as that replaced it), or
+    // Downloads. Begin refuses any journal that does not match the record's choice.
+    let destination = match (ready.planned(), chosen.is_some()) {
+        (Some(Ok(choice)), _) => private_downloads::Destination::Chosen(choice),
+        (Some(Err(refusal)), _) => return Err(refusal.to_string()),
+        // This invocation chose a place but the record no longer remembers one: another save
+        // already started a journal there. Never redirect this Save as to Downloads.
+        (None, true) => return Err(private_downloads::PLACE_CHANGED.into()),
+        (None, false) => private_downloads::Destination::Downloads(
             app.path().download_dir().map_err(|e| e.to_string())?,
         ),
     };

@@ -29,6 +29,8 @@ pub(super) struct UiDownload {
     /// Whole chunks covered by the durable external-save checkpoint (0 without a journal).
     saved_chunks: usize,
     total_chunks: usize,
+    /// A "Save as" choice is remembered for this row's next save. Never the path or name.
+    chosen_place: bool,
 }
 
 /// Closed renderer status, highest precedence first. Typed storage state decides it; nothing is
@@ -78,6 +80,7 @@ fn project(download: DownloadStatus) -> UiDownload {
         ExportView::Published => total_chunks,
         ExportView::None => 0,
     };
+    let chosen_place = download.planned;
     let state = download.state;
     UiDownload {
         id: hex::encode(download.id.as_bytes()),
@@ -88,6 +91,7 @@ fn project(download: DownloadStatus) -> UiDownload {
         verified_chunks: state.verified_chunks,
         saved_chunks,
         total_chunks,
+        chosen_place,
     }
 }
 pub(super) fn id(text: &str) -> Result<DownloadId, String> {
@@ -451,7 +455,7 @@ pub(super) fn export_slot() -> Result<Arc<tokio::sync::OwnedSemaphorePermit>, St
         .clone()
         .try_acquire_owned()
         .map(Arc::new)
-        .map_err(|_| "Downloads are busy. Try again shortly.".into())
+        .map_err(|_| "Too many files are being saved. Try again shortly.".into())
 }
 
 /// Run one external filesystem step off the async workers and the server actor.
@@ -481,6 +485,9 @@ const JOURNAL_EXISTS: &str =
 /// Returned when the user closes the "Save as" dialog without choosing. Nothing was started or
 /// recorded; the renderer treats exactly this text as a quiet cancel, not a failure.
 pub(super) const SAVE_AS_CANCELLED: &str = "Save as was cancelled.";
+/// A Save as invocation found its choice already consumed by another save of the same file.
+pub(super) const PLACE_CHANGED: &str =
+    "This file is already being saved somewhere else. Open Transfers to see it.";
 /// Appended when a save uses the non-resumable writer (no stable identity or hard links there).
 pub(super) const NOT_RESUMABLE_NOTE: &str =
     "This location cannot keep a partly saved file, so an interrupted save there starts over.";
@@ -540,11 +547,35 @@ impl DestinationChooser for NativeChooser {
                 });
             })
             .map_err(|_| "The Save as window could not be opened.".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "The Save as window closed unexpectedly.".to_string())
+        // A dropped sender (the main-thread closure never ran, or the dialog task ended without
+        // a result) means no path was chosen: the same as Cancel, nothing started.
+        Ok(receiver.await.unwrap_or(None))
     }
 }
+
+/// Process-wide: at most one "Save as" dialog at a time (picker review M4). A second request
+/// while one is open is refused instead of stacking unowned dialogs.
+static DIALOG_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+struct DialogTurn;
+impl DialogTurn {
+    fn take() -> Option<Self> {
+        DIALOG_OPEN
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+            .then_some(Self)
+    }
+}
+impl Drop for DialogTurn {
+    fn drop(&mut self) {
+        DIALOG_OPEN.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+pub(super) const DIALOG_BUSY: &str = "A Save as window is already open.";
 
 /// Ask the user where to save, starting in Downloads with the sanitized file name. `Ok(None)`
 /// means cancelled. Whatever the dialog returns is validated before use: absolute path, usable
@@ -556,6 +587,7 @@ pub(super) async fn choose_destination(
     downloads: PathBuf,
     name: &str,
 ) -> Result<Option<ChosenDestination>, String> {
+    let _turn = DialogTurn::take().ok_or(DIALOG_BUSY)?;
     let Some(picked) = chooser.choose(downloads, safe_download_name(name)).await? else {
         return Ok(None);
     };
@@ -1600,3 +1632,7 @@ mod cleanup_tests;
 #[cfg(test)]
 #[path = "private_downloads/export_tests.rs"]
 mod export_tests;
+
+#[cfg(test)]
+#[path = "private_downloads/chooser_tests.rs"]
+mod chooser_tests;

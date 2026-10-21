@@ -278,13 +278,15 @@ struct KeepState {
     tried: Vec<[u8; 32]>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum SavedRequest {
     Keep {
         resume_existing: bool,
     },
     Download {
         resume: Option<catcoms_storage::kept::DownloadId>,
+        /// A "Save as" choice remembered in the record right after its run starts.
+        planned: Option<Arc<catcoms_storage::kept::ChosenDestination>>,
     },
 }
 
@@ -485,12 +487,18 @@ impl ReadJob {
                     let _ = reply.send(result.and_then(|lease| {
                         let lease =
                             lease.ok_or_else(|| "Download ownership changed.".to_string())?;
+                        let planned = server
+                            .sync
+                            .download_planned_destination(lease.id())
+                            .map_err(|e| e.to_string())?
+                            .map(|planned| planned.map(Arc::new));
                         Ok(DownloadReady {
                             lease,
                             manifest: keep.manifest.clone(),
                             root: self.root,
                             actor: self.actor,
                             export_custody: None,
+                            planned,
                         })
                     }));
                 }
@@ -849,6 +857,7 @@ impl FileTransfers {
         server: &mut Server<T, R>,
         raw: Vec<u8>,
         resume: Option<catcoms_storage::kept::DownloadId>,
+        planned: Option<Arc<catcoms_storage::kept::ChosenDestination>>,
         cancel: RequestCancellation,
         reply: oneshot::Sender<Result<DownloadReady, String>>,
     ) {
@@ -857,7 +866,7 @@ impl FileTransfers {
             raw,
             Some(cancel),
             ReadReply::Download(reply),
-            SavedRequest::Download { resume },
+            SavedRequest::Download { resume, planned },
         );
     }
 
@@ -908,7 +917,7 @@ impl FileTransfers {
                     .map_err(|_| "bad content address".to_string())?,
             );
             let download = matches!(request, SavedRequest::Download { .. });
-            let saved_download = if let SavedRequest::Download { resume } = request {
+            let saved_download = if let SavedRequest::Download { resume, .. } = request {
                 let found = server
                     .sync
                     .downloads()
@@ -1045,6 +1054,23 @@ impl FileTransfers {
                         .map_err(|e| e.to_string())?,
                 )
             };
+            // Remember a "Save as" choice in the same synchronous step, before any network
+            // work: an interrupted acquisition, Pause, Lock or restart then still saves there.
+            // If that write is refused, release the run we just started so nothing is left
+            // holding the single active-run slot.
+            if let (
+                SavedRun::Download(run),
+                SavedRequest::Download {
+                    planned: Some(choice),
+                    ..
+                },
+            ) = (&token, &request)
+            {
+                if let Err(error) = server.sync.plan_download_destination(*run, choice) {
+                    let _ = token.pause(server);
+                    return Err(error.to_string());
+                }
+            }
             Ok::<_, String>((cid, listing, token, manifest, plan_version))
         })();
         match result {
