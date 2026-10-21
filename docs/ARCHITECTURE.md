@@ -1,5 +1,24 @@
 # Mewtual; Architecture
 
+## Selected native/browser key bootstrap (21 October)
+
+One retained WebCrypto broker selects one nonextractable key for an actual accepted native
+owner/executor. Native keeps a bounded paid generation with the original grant identity, join,
+permit and frozen public point. Exact replies can be recovered; closed/refused metadata cannot
+regenerate or adopt an earlier key. A typed foreign-executor refusal requires no computation or
+settlement by that executor. Settlement-first permanently closes a selected generation.
+
+Public-key publication uses the actual ServerActor endpoint API. Its native-owned task retains
+the UI commit guard across the actor reply even if the IPC caller disappears. Exact settlement
+waits for real publication drainage. Browser work shares the existing bounded queue; one retained
+wake identity covers End/remount during failed replies without creating an immediate retry loop.
+Private keys, confirmation plaintext, SDP and ICE do not use these three fixed-metadata commands.
+This is not the byte-bearing action IPC channel or a stock-framework allocation bound.
+
+Current native/frontend/check/build/startup/flow gates pass; the handover records exact counts
+and unchanged-root provenance. Earlier pending sections below are historical. Normal V2/RTC,
+protocol-mode isolation, member media relay and combined/physical acceptance remain open.
+
 ## Native production pair selection (21 October, full gates pending)
 
 Root selects new pair evidence from the exact participant's implicit Watcher; the request binds

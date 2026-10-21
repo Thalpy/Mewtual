@@ -1,6 +1,6 @@
 # Mewtual; Interfaces & Hooks Schema
 
-## Selected join-key bootstrap (21 October, validation in progress)
+## Selected join-key bootstrap (21 October, complete gates passed)
 
 Main-window commands `admit_voice_join_key(owner, executor)` and
 `publish_voice_join_key(owner, executor, permit, publicKey)` carry fixed public metadata only.
@@ -20,7 +20,9 @@ only after any actual native publisher drains; it grants no engine, signing or R
 The retained WebCrypto broker's `selectJoinKey` coalesces computation and uncertain replies,
 preserves the same key through temporary publication Capacity, and never uses generic fresh-
 token generate admission. Compatibility key APIs remain available for existing fixtures.
-New validation is pending; ordinary V2 dispatch and the application call driver remain disabled.
+Complete native/frontend gates, check/build/startup and rendered flows pass; the handover records
+exact source provenance and the unchanged-root evidence. Ordinary V2 dispatch and the application
+call driver remain disabled.
 
 ## Accepted native voice activation retries (21 October, complete gates passed)
 

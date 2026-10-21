@@ -1,10 +1,10 @@
 # Chat, files and voice implementation evidence
 
-## Selected key bootstrap continuation (21 October, complete gates pending)
+## Validated selected key bootstrap (21 October)
 
-Published source remains `f5ae59a3`. Local `2c09aadd` integrates one native/browser selected key
-through actual ServerActor endpoint publication; a subsequent executor-refusal correction is
-under focused validation. Current frontend/security focus passes 28 cases (19 selected-key,
+Published source remains `f5ae59a3`. Local frozen `451ecbaa` integrates one native/browser selected
+key through actual ServerActor endpoint publication and typed executor-refusal recovery.
+Current frontend/security focus passes 28 cases (19 selected-key,
 nine command-security), including retained orphan settlement on remount and two distinct
 brokers while the original engine is held. Definitive native refusal grants the second broker
 no work or settlement authority, including if End occurs while its reply is pending.
@@ -16,9 +16,12 @@ The original native focus takes0.35s after6m48s compile; the corrected nine case
 after2m16s compile.
 Earlier 49 native voice/2,285 full frontend passes precede the refusal correction. The subsequent
 native full run was deliberately stopped to include that correction; it is not accepted evidence.
-Current complete native/frontend/check/build/startup/flow gates remain required. Existing full
-root/static evidence covers byte-identical root source, with fresh native-source construction
-verification required in this checkout.
+The corrected source now passes complete native:465 library plus five ACL tests, zero failures
+(586.76s library;589.92s gate), native check27.8s, all49 native voice tests, full frontend2,287
+(70.61s tests), Svelte zero errors/warnings, production build51.08s and all10 rendered Edge
+flows64.61s. Existing complete root3,218/static evidence covers byte-identical root source;
+the native-source construction gate passes freshly here in1.09s. Native executable build163s,
+formatting0.69s and actual startup2.55s pass. Static re-review has no remaining blocker/high/medium.
 
 This bounds paid generation records, broker flights and admitted publication work. It does not
 bound arbitrary stock-IPC invoke waiters/framework copies and does not complete action/result

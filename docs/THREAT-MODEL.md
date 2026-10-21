@@ -1,6 +1,6 @@
 # Threat model; client integrity & enforcement boundaries
 
-## Selected browser key-generation ownership (21 October, validation in progress)
+## Selected browser key-generation ownership (21 October, complete gates passed)
 
 A new browser broker cannot adopt a still-admitted generation by repeating its native owner ID.
 Native selects one executor per actual accepted owner/grant, preserves its original join/permit
@@ -16,7 +16,7 @@ key export/adoption, listener, CSP source or byte-bearing result command. The ex
 lifecycle bookkeeping within the trusted main window, not remote protocol authentication.
 Application record charges do not claim physical SDK/GC or stock IPC allocation bounds. Normal
 V2 ingress, RTC mode isolation, result/ACK/settlement IPC and SDP phase transfer remain separate
-enablement requirements. Existing complete-suite evidence applies only to the published source.
+enablement requirements. Current complete-gate evidence and its provenance are in the handover.
 
 ## Native pair authority (21 October, full gates pending)
 

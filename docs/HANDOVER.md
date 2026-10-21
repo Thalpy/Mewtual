@@ -1,8 +1,8 @@
 # Mewtual; Handover
 
-## Selected V2 join-key integration in progress (21 October)
+## Validated selected V2 join-key checkpoint (21 October)
 
-Published checkpoint remains `f5ae59a3`; the uncommitted continuation is in this same isolated
+Published checkpoint remains `f5ae59a3`; local frozen source is `451ecbaa` in this isolated
 checkout. It adds exact native join-key admission, public-key endpoint publication through the
 actual ServerActor, and selected-key computation on the retained WebCrypto broker. One paid
 generation is selected per actual native owner/executor. Lost replies recover the same permit,
@@ -27,17 +27,23 @@ It also identified a foreign executor's definitive refusal being treated as unce
 correction now returns typed refused metadata with empty permit/join, without touching the
 original operation. Two brokers prove refusal both before and during End, with zero second
 computation/settlement. The corrected native focused run passes all nine tests (0.33s after
-2m16s compile). Earlier 49 native
-voice and 2,285 frontend passes precede this last correction; the subsequent full native run
-was deliberately interrupted before acceptance and has no full-pass claim. All complete gates
-remain required for the corrected source. The complete evidence below applies to the
-published source through `23bbeac8`, not this uncommitted continuation.
+2m16s compile). Complete native now passes 465 library plus five ACL tests, zero failures
+(586.76s library; 589.92s complete gate), and native check passes in27.8s. All49 native voice
+tests pass in19.71s. Current full frontend passes2,287 (70.61s tests/72.21s gate), Svelte zero
+errors/warnings, production build51.08s and all10 rendered Edge flows64.61s. Root source remains
+byte-identical to the completed3,218-case319db214 run; its native-source-reading construction
+gate passes freshly here in1.09s. Static Root checks retain their identical-source provenance.
+Final executable build (163s), native formatting (0.69s) and actual startup (2.55s) pass too.
+No validation process remains active. Earlier interrupted full attempts carry no pass claim.
+Read-only re-review finds no remaining blocker/high/medium in the corrected boundary.
 
 Normal V2 dispatch is still disabled. Native action registration and byte-bearing IPC custody,
 exact result/ACK/settlement delivery, SDP key/phase transfer, automatic epoch replacement,
-SDP/ICE/RTC and legacy-session isolation, media relay, combined acceptance and separate-device
-physical testing remain open. The selected-key adapter is ready for driver integration only
-after its new acceptance gates; no complete-call claim is made here.
+SDP/ICE/RTC and legacy-session isolation, media relay, external destination resume, combined acceptance and separate-device
+physical testing remain open. The selected-key adapter's gates are complete; no complete-call
+claim is made here. Logs: `target/voice-join-key-{native-focused-2,native-all-voice,native-full,
+native-check,native-build,native-format,startup,root-construction,frontend-focused-4,
+frontend-final,svelte-final,frontend-build,flows}.log` and the native/web results files.
 
 ## Validated native activation checkpoint (21 October)
 

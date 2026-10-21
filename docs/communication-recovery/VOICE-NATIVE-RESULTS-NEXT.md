@@ -1,13 +1,14 @@
 # Next voice milestone: native result recovery
 
-## Selected join-key bootstrap continuation (21 October, validation pending)
+## Validated selected join-key bootstrap (21 October)
 
 The new selected-key path reaches actual native endpoint installation, with original owner/
 executor/permit/join identity and one browser-held nonextractable key. Exact uncertain retries
 share original computation/public point. Definitive foreign-executor refusal is typed history,
 not work that the new broker must settle. End/remount wakes bounded original cleanup, including
 when a settlement rejection arrives after retirement. Current execution/review status is in
-the handover and acceptance ledger; no live V2 call follows from this bootstrap alone.
+the handover and acceptance ledger. Complete native465+5ACL, frontend2,287, static/build/startup
+and rendered flows pass. No live V2 call follows from this bootstrap alone.
 
 Next complete the original action registration and real native/browser result/ACK/settlement
 transport. The proposed bounded loopback pilot below still needs precharged physical-flight
