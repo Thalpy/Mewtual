@@ -6,7 +6,10 @@ Main-window commands `admit_voice_join_key(owner, executor)` and
 `publish_voice_join_key(owner, executor, permit, publicKey)` carry fixed public metadata only.
 The executor is a canonical 32-byte hex identity retained by one browser broker; publicKey is
 exactly 65 SEC1 bytes encoded as canonical hex. Admission returns the original native permit/
-join and either admitted or closed history. A closed response cannot reconstruct private keys
+join and either admitted or closed history. A different executor gets typed refused metadata
+with its requested owner/executor and empty permit/join; it owes no settlement and cannot touch
+the original generation. Browser selection returns unavailable so its driver can replace the
+join, rather than retaining an uncertain engine lane. A closed response cannot reconstruct private keys
 or authorize recomputation. Publication fixes its original point before actual actor handoff;
 successful exact retries return the same native key reference, including after settlement.
 

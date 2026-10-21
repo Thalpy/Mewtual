@@ -58,9 +58,11 @@ async fn selected_join_key_actual_endpoint_recovers_publication_without_replacin
             .await
             .is_err()
     );
-    assert!(admit_inner(&f.state, &owner, &hex::encode([8; 32]))
+    let refused = admit_inner(&f.state, &owner, &hex::encode([8; 32]))
         .await
-        .is_err());
+        .unwrap();
+    assert_eq!(refused.kind, "refused");
+    assert!(refused.permit.is_empty() && refused.join.is_empty());
     f.close().await;
 }
 

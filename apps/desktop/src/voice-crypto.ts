@@ -115,7 +115,7 @@ export type VoiceDerivationHandle = Readonly<{
 /** Opaque: only the creating broker's WeakMap contains the non-extractable private key. */
 export type VoiceJoinKeyHandle = Readonly<{ publicKey(): Uint8Array<ArrayBuffer> }>;
 export type VoiceSelectedKeyAdmission = Readonly<{
-  owner: string; executor: string; permit: string; join: string; kind: "admitted" | "closed";
+  owner: string; executor: string; permit: string; join: string; kind: "admitted" | "closed" | "refused";
 }>;
 export type VoiceSelectedKeyPublication = Readonly<{
   owner: string; executor: string; permit: string; join: string; keyRef: string;
@@ -128,7 +128,7 @@ export interface VoiceSelectedKeyNative {
   settle(owner: string, executor: string): Promise<void>;
 }
 export type VoiceSelectedKeyOutcome = Readonly<{ kind: "accepted"; key: VoiceJoinKeyHandle }> |
-  Readonly<{ kind: "uncertain" | "retired" | "failed" | "busy" }>;
+  Readonly<{ kind: "uncertain" | "retired" | "failed" | "busy" | "unavailable" }>;
 export type VoiceSelectedKeyHandle = Readonly<{ attempt(): Promise<VoiceSelectedKeyOutcome> }>;
 export type VoiceCryptoChain = Readonly<{ close(): void; isCurrent(): boolean }>;
 export type VoiceDerivationSetup = Readonly<{ localPublicKey: Uint8Array; peerPublicKey: Uint8Array; transcript: Uint8Array }>;
@@ -434,10 +434,22 @@ export class VoiceCryptoBroker {
         const observed = record.wake;
         let reply: unknown;
         try { reply = await record.native.admit(record.owner.token, record.executor); } catch { /* Recover the same native selection. */ }
+        if (exactKeys(reply, ["owner", "executor", "permit", "join", "kind"]) && reply.owner === record.owner.token && reply.executor === record.executor &&
+            reply.kind === "refused" && reply.permit === "" && reply.join === "") {
+          // Native proves this executor was never admitted. It owes no settlement and must
+          // never settle/adopt the older executor's still-running generation. The call driver
+          // may replace its native join; this broker cannot reconstruct the missing private key.
+          historical = true; outcome = Object.freeze({ kind: "unavailable" }); return;
+        }
+        // A terminal no-computation response remains useful after End: ignoring it would make
+        // this executor try to settle work native proved belongs to somebody else.
+        if (exactKeys(reply, ["owner", "executor", "permit", "join", "kind"]) && reply.owner === record.owner.token && reply.executor === record.executor &&
+            reply.kind === "closed" && boundText(reply.permit) && typeof reply.join === "string" && /^[0-9a-f]{64}$/.test(reply.join)) {
+          historical = true; outcome = Object.freeze({ kind: "unavailable" }); return;
+        }
         if (!live()) return;
         if (exactKeys(reply, ["owner", "executor", "permit", "join", "kind"]) && reply.owner === record.owner.token && reply.executor === record.executor &&
             boundText(reply.permit) && typeof reply.join === "string" && /^[0-9a-f]{64}$/.test(reply.join) && (reply.kind === "admitted" || reply.kind === "closed")) {
-          if (reply.kind === "closed") { historical = true; return; }
           record.permit = reply.permit; record.join = reply.join;
         } else await this.waitSelectedKeyRetry(record, observed);
       }

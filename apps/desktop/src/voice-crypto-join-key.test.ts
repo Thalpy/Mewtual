@@ -18,6 +18,7 @@ function fixture(t: TestContext) {
   let loseAdmit = false, losePublish = false, loseSettle = false, capacity = false, closed = false, failEngine = false;
   let holdEngine: ReturnType<typeof gate> | null = null, holdPublish: ReturnType<typeof gate> | null = null, holdSettle: ReturnType<typeof gate> | null = null;
   let point: Uint8Array | null = null;
+  let selectedExecutor: string | null = null;
   const engine = new Proxy(real, { get(target, name) {
     const value = Reflect.get(target, name);
     if (typeof value !== "function") return value;
@@ -36,6 +37,8 @@ function fixture(t: TestContext) {
   const native: VoiceSelectedKeyNative = {
     async admit(owner, executor) {
       admissions++;
+      if (selectedExecutor === null) selectedExecutor = executor;
+      else if (selectedExecutor !== executor) return { owner, executor, permit: "", join: "", kind: "refused" };
       if (loseAdmit) { loseAdmit = false; throw new Error("accepted reply lost"); }
       return { owner, executor, permit: "native-permit", join: hash(2), kind: closed ? "closed" : "admitted" };
     },
@@ -102,7 +105,7 @@ for (const phase of ["admit", "publish", "settle", "capacity"] as const) test(`s
 
 test("closed native selection is history only and cannot regenerate a missing private key", async t => {
   const f = fixture(t); f.close();
-  assert.equal((await f.select().attempt()).kind, "failed");
+  assert.equal((await f.select().attempt()).kind, "unavailable");
   await until(() => f.broker.counts().active === 0);
   assert.equal(f.counts().generates, 0); assert.equal(f.counts().publications, 0); assert.equal(f.counts().settlements, 0);
 });
@@ -181,6 +184,36 @@ test("same-token owner substitution and adapter replacement cannot adopt a retai
   assert.throws(() => f.broker.selectJoinKey(replacement, f.native), /selection changed/);
   assert.throws(() => f.broker.selectJoinKey(f.owner, { ...f.native }), /selection changed/);
   assert.equal(f.counts().generates, 0); replacement.retire();
+});
+
+for (const retireDuringReply of [false, true]) test(`a second broker ${retireDuringReply ? "Ended during refusal" : "gets definitive no-admission"} without computing or settling the first generation`, async t => {
+  const f = fixture(t), hold = f.holdEngine(), first = f.select().attempt();
+  await until(() => f.counts().generates === 1);
+  let secondGenerates = 0;
+  const engine = new Proxy(real, { get(target, name) {
+    const value = Reflect.get(target, name);
+    if (typeof value !== "function") return value;
+    return (...args: unknown[]) => { if (name === "generateKey") secondGenerates++; return value.apply(target, args); };
+  } });
+  const owner = createVoiceCryptoOwner(f.owner.token, f.owner.group, () => true);
+  const broker = new VoiceCryptoBroker(f.ordinary, engine);
+  const heldReply = gate(); let replied = false;
+  t.after(() => { heldReply.release(); owner.retire(); });
+  const native = { ...f.native, async admit(...args: Parameters<VoiceSelectedKeyNative["admit"]>) {
+    const reply = await f.native.admit(...args); replied = true;
+    if (retireDuringReply) await heldReply.promise;
+    return reply;
+  } };
+  const selected = broker.selectJoinKey(owner, native), pending = selected.attempt();
+  if (retireDuringReply) { await until(() => replied); owner.retire(); heldReply.release(); }
+  assert.equal((await pending).kind, retireDuringReply ? "retired" : "unavailable");
+  await until(() => broker.counts().active === 0);
+  assert.equal(secondGenerates, 0); assert.equal(f.counts().settlements, 0);
+  assert.equal(f.broker.counts().active, 1, "the original generation still owns its actual flight");
+  assert.equal((await selected.attempt()).kind, retireDuringReply ? "retired" : "unavailable");
+  hold.release(); assert.equal((await first).kind, "accepted");
+  await until(() => f.broker.counts().active === 0);
+  assert.equal(f.counts().generates, 1); assert.equal(f.counts().settlements, 1);
 });
 
 test("selected pending job survives module remount on the original window broker", async t => {

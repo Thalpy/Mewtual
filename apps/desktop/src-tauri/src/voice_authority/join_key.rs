@@ -126,10 +126,19 @@ impl Coordinator {
             self.join_generations.insert(owner_id.into(), generation);
         }
         let generation = &self.join_generations[owner_id];
-        if generation.executor != executor
-            || !generation.grant.ptr_eq(&Arc::downgrade(&owner._grant))
-        {
+        if !generation.grant.ptr_eq(&Arc::downgrade(&owner._grant)) {
             return Err("voice key belongs to another browser generation".into());
+        }
+        if generation.executor != executor {
+            // A definite no-admission result is distinct from an uncertain transport reply.
+            // It discloses none of the original executor/permit/join and cannot settle them.
+            return Ok(JoinKeyAdmission {
+                owner: owner_id.into(),
+                executor: hex::encode(executor),
+                permit: String::new(),
+                join: String::new(),
+                kind: "refused",
+            });
         }
         Ok(JoinKeyAdmission {
             owner: owner_id.into(),

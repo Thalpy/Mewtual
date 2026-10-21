@@ -17,13 +17,20 @@ refuses a retained older pool. Three fixed public-metadata commands are main-win
 private key, confirmation plaintext, SDP or ICE crosses them. Application-owned record charges
 do not establish a stock-framework/SDK allocation bound. No listener or CSP change is introduced.
 
-Focused browser/security checks pass 26 tests (17 selected-key cases plus nine command security
+Focused browser/security checks pass 28 tests (19 selected-key cases plus nine command security
 checks), including End during a failed settlement reply and bounded orphan cleanup on remount.
 The wake identity is sampled before each RPC, so retirement cannot be lost before a retry wait,
 and persistent failure cannot spin. Svelte reports zero errors/warnings. All nine new native
 regressions pass (four actual bridge/actor cases, five Coordinator cases; 0.35s after6m48s compile).
-Read-only implementation re-review has no remaining blocker/high/medium. Full native/frontend/
-build/startup/flow checks remain required. The complete evidence below applies to the
+Read-only implementation review resolved the lost-wake race and LOW permission-ledger wording.
+It also identified a foreign executor's definitive refusal being treated as uncertain. That
+correction now returns typed refused metadata with empty permit/join, without touching the
+original operation. Two brokers prove refusal both before and during End, with zero second
+computation/settlement. The corrected native focused run passes all nine tests (0.33s after
+2m16s compile). Earlier 49 native
+voice and 2,285 frontend passes precede this last correction; the subsequent full native run
+was deliberately interrupted before acceptance and has no full-pass claim. All complete gates
+remain required for the corrected source. The complete evidence below applies to the
 published source through `23bbeac8`, not this uncommitted continuation.
 
 Normal V2 dispatch is still disabled. Native action registration and byte-bearing IPC custody,

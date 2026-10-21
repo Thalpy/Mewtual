@@ -27,7 +27,9 @@ fn selected_join_key_lost_admission_recovers_one_paid_operation_under_pressure()
         );
         assert_eq!(c.serial, baseline.0);
     }
-    assert!(c.admit_join_key(&owner, [8; 32]).is_err());
+    let refused = c.admit_join_key(&owner, [8; 32]).unwrap();
+    assert_eq!(refused.kind, "refused");
+    assert!(refused.permit.is_empty() && refused.join.is_empty());
     drop(pressure);
     assert_eq!(c.resources.counts(), baseline.1);
     assert!(c.settle_join_key(&owner, [9; 32]).unwrap().is_none());
@@ -44,7 +46,7 @@ fn selected_join_key_settlement_before_admission_irreversibly_closes_one_selecti
     for _ in 0..4 {
         assert_eq!(c.admit_join_key(&owner, [9; 32]).unwrap().kind, "closed");
         c.settle_join_key(&owner, [9; 32]).unwrap();
-        assert!(c.admit_join_key(&owner, [8; 32]).is_err());
+        assert_eq!(c.admit_join_key(&owner, [8; 32]).unwrap().kind, "refused");
         assert!(c.settle_join_key(&owner, [8; 32]).is_err());
     }
     assert_eq!((c.serial, c.resources.counts()), baseline);

@@ -1,5 +1,29 @@
 # Chat, files and voice implementation evidence
 
+## Selected key bootstrap continuation (21 October, complete gates pending)
+
+Published source remains `f5ae59a3`. Local `2c09aadd` integrates one native/browser selected key
+through actual ServerActor endpoint publication; a subsequent executor-refusal correction is
+under focused validation. Current frontend/security focus passes 28 cases (19 selected-key,
+nine command-security), including retained orphan settlement on remount and two distinct
+brokers while the original engine is held. Definitive native refusal grants the second broker
+no work or settlement authority, including if End occurs while its reply is pending.
+
+Nine initial native regressions pass: four actual actor/bridge cases and five synthetic-grant
+Coordinator cases. They cover frozen-point Root Capacity retry, actual publication after outer
+waiter cancellation, lock ordering, generation fencing, settlement-first and stale completion.
+The original native focus takes0.35s after6m48s compile; the corrected nine cases pass in0.33s
+after2m16s compile.
+Earlier 49 native voice/2,285 full frontend passes precede the refusal correction. The subsequent
+native full run was deliberately stopped to include that correction; it is not accepted evidence.
+Current complete native/frontend/check/build/startup/flow gates remain required. Existing full
+root/static evidence covers byte-identical root source, with fresh native-source construction
+verification required in this checkout.
+
+This bounds paid generation records, broker flights and admitted publication work. It does not
+bound arbitrary stock-IPC invoke waiters/framework copies and does not complete action/result
+IPC, SDP phase transfer, live V2/RTC, media relay or combined/physical acceptance.
+
 ## Validated accepted-activation retry correction (21 October)
 
 In communication-activation-recovery-worktree on319db214, accepted native controller/call
