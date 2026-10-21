@@ -25,10 +25,17 @@ const META: &str = "manifest";
 const PENDING: &str = "pending";
 const LEASE: &str = "lease.lock";
 mod downloads;
+mod export;
+mod external;
 mod persistence;
 mod record;
 use downloads::Owner;
 pub use downloads::{DownloadExportLease, DownloadId, DownloadRun, DownloadStatus, DownloadStore};
+pub use export::{
+    flush_destination, remove_partial, ExportError, ExportFile, ExportHalt, ExportJournal,
+    ExportPlan, ExportPresence, ExportProbe, ExportProgress, ExportReopen, ExportState, ExportView,
+    Publication, EXPORT_CHECKPOINT_CHUNKS,
+};
 use persistence::{Transfer, DELETING, FORMAT, FORMAT_CHARGE, TRANSFERS};
 pub use record::{
     KeepAllowance, KeepPhase, KeepRetry, KeepRetryReceipt, KeepScope, KEEP_EXECUTION_SLICE_MS,
@@ -665,6 +672,14 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
             {
                 return Err(StorageError::Malformed);
             }
+            if matches!(transfer.record.export, export::Export::Published(_)) {
+                // Re-verifying a saved file would spend allowance for nothing: the user chooses
+                // "Save another copy" (which forgets the journal) or "Clear" instead.
+                return Err(StorageError::Io(
+                    "This file was already saved. Clear it or save another copy from Transfers."
+                        .into(),
+                ));
+            }
             if transfer.record.exhausted {
                 return Err(StorageError::KeepExhausted);
             }
@@ -676,6 +691,7 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
                     // Starting another private verification run invalidates previously issued
                     // export observations, even when the saved winner itself is unchanged.
                     transfer.read_epoch.retire();
+                    transfer.export_presence = None;
                 }
                 transfer.checked = false;
             }
@@ -739,6 +755,9 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
             })();
             let transfer = match created {
                 Ok(transfer) => transfer,
+                // A full volume refused the first record, and both the torn record and the empty
+                // directory were removed: nothing new exists on disk, so admission simply fails.
+                Err(error) if persistence::is_clean_disk_full(&error) => return Err(error),
                 Err(error) => {
                     // An orphan/ambiguous first publication remains charged conservatively.
                     // Never retry another admission against the previous in-memory inventory.
@@ -796,6 +815,7 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
             transfer.publish(next, &self.metadata_key, &mut self.rng)?;
         }
         transfer.checked = false;
+        transfer.export_presence = None;
         // Invalidate runtime ownership before moving/removing any ciphertext. Late workers keep
         // their actual transport charges, but cannot mutate a replacement same-CID transfer.
         self.active = None;
@@ -857,6 +877,10 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
             .position(|t| t.record.owner() == identity)
             .ok_or(StorageError::Malformed)?;
         let transfer = &self.transfers[index];
+        if matches!(transfer.record.export, export::Export::Published(_)) {
+            // A saved file has nothing to pause or resume; Clear or Save another copy apply.
+            return Err(StorageError::Malformed);
+        }
         let phase_allows_intent = match transfer.record.phase {
             KeepPhase::Resumable => true,
             // Private export can be paused too. Public completed Keeps retain their existing
@@ -882,12 +906,18 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
             }
             if !self.transfers[index].record.public_retained() {
                 self.transfers[index].read_epoch.retire();
+                self.transfers[index].export_presence = None;
             }
         }
         let mut next = self.transfers[index].record.successor()?;
         next.user_paused = paused;
         if !paused {
             next.blocked = false;
+            // Explicit Resume re-checks the destination from scratch; a halt is cleared only by
+            // this intent change, and the next reopen persists it again if it still applies.
+            if let export::Export::Writing(journal) = &mut next.export {
+                journal.halt = None;
+            }
         }
         next.intent = expected_intent
             .checked_add(1)
@@ -1041,11 +1071,23 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
             self.transfers = loaded;
             // A durable deletion intent may have stopped before its cleanup-only move. Scope
             // and full inventory are now validated; finish it without manufacturing a run grant.
-            while let Some(index) = self
+            // One pass over a fixed list: a Download that still names an external partial is
+            // left in Deleting for an explicit Remove, because only native may touch the
+            // Downloads folder and a stalled or missing folder must never stall or loop mount.
+            let pending: Vec<Owner> = self
                 .transfers
                 .iter()
-                .position(|t| t.record.phase == KeepPhase::Deleting)
-            {
+                .filter(|t| {
+                    t.record.phase == KeepPhase::Deleting && t.record.export.journal().is_none()
+                })
+                .map(|t| t.record.owner())
+                .collect();
+            for owner in pending {
+                let index = self
+                    .transfers
+                    .iter()
+                    .position(|t| t.record.owner() == owner)
+                    .ok_or(StorageError::Malformed)?;
                 self.release_transfer(index)?;
             }
             Ok(())

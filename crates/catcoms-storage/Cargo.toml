@@ -15,6 +15,14 @@ hex = "0.4"
 zeroize = "1"
 tokio = { workspace = true, features = ["sync"] }
 
+[target.'cfg(windows)'.dependencies]
+# Journaled Download export proves a partly written file in Downloads is still the object Mewtual
+# created by the identity of an open handle (volume serial, file index, link count). std keeps
+# those Windows fields unstable and the workspace denies `unsafe_code`, so use this small, safe
+# wrapper of GetFileInformationByHandle. Unlicense OR MIT; already in the native lockfile; it
+# reuses the windows-sys 0.61 already resolved in this workspace.
+winapi-util = "0.1.11"
+
 [dev-dependencies]
 rand_chacha = "0.3"
 rand_core = "0.6"

@@ -61,6 +61,8 @@ pub struct DownloadStatus {
     pub id: DownloadId,
     pub state: KeptTransfer,
     pub checked: bool,
+    /// Typed external export state. Carries no path, name or identity.
+    pub export: super::ExportView,
 }
 
 /// Observing lease for one verified completed private download in this mounted store. It cannot
@@ -89,7 +91,7 @@ impl DownloadExportLease {
 }
 
 impl<R: CryptoRngCore> KeptBlobStore<R> {
-    fn download_index(&self, id: DownloadId) -> Result<usize, StorageError> {
+    pub(super) fn download_index(&self, id: DownloadId) -> Result<usize, StorageError> {
         self.ready()?;
         if self.scope.is_none() {
             return Err(StorageError::Malformed);
@@ -130,6 +132,7 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
                     id,
                     state: self.transfer_state(t),
                     checked: t.checked && !t.poisoned,
+                    export: self.export_view(t),
                 }),
                 Owner::Keep(_) => None,
             })
@@ -369,17 +372,62 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
         }
         Ok(bytes)
     }
-    pub fn cancel_download(&mut self, id: DownloadId) -> Result<(), StorageError> {
+    /// Remove/Clear. Without an export journal this releases the record at once, as before.
+    /// With one, it durably publishes Deleting (keeping the journal so cleanup can still prove
+    /// which external file is ours), revokes every export observer, and returns the journal:
+    /// native then removes the proven partial and calls [`Self::finish_download_cleanup`].
+    /// Repeating it on a record already in that state returns the journal again.
+    pub fn cancel_download(&mut self, id: DownloadId) -> Result<Option<ExportState>, StorageError> {
         let index = self.download_index(id)?;
-        self.release_transfer(index)
+        if self.transfers[index].record.export.journal().is_none() {
+            self.release_transfer(index)?;
+            return Ok(None);
+        }
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.identity != Owner::Download(id))
+        {
+            return Err(StorageError::Io("pause the active kept copy first".into()));
+        }
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.identity == Owner::Download(id))
+        {
+            self.active = None;
+        }
+        let transfer = &mut self.transfers[index];
+        transfer.read_epoch.retire();
+        transfer.checked = false;
+        transfer.export_presence = None;
+        if transfer.record.phase != KeepPhase::Deleting {
+            let mut next = transfer.record.successor()?;
+            next.phase = KeepPhase::Deleting;
+            transfer.publish(next, &self.metadata_key, &mut self.rng)?;
+        }
+        Ok(transfer.record.export.state())
     }
     /// Cleanup after committed external publication may remove only the exact exported
     /// generation. A second Save/reverification of the same record invalidates this cleanup.
+    /// A record with a Writing journal cannot be released here: that would let a non-resumable
+    /// fallback export complete a journaled save and orphan its tracked partial. A record that is
+    /// already gone (for example a Remove that won the race) makes this a no-op.
     pub fn finish_download_export(
         &mut self,
         lease: &DownloadExportLease,
     ) -> Result<(), StorageError> {
-        let index = self.download_index(lease.id)?;
+        self.ready()?;
+        if self.scope.is_none() {
+            return Err(StorageError::Malformed);
+        }
+        let Some(index) = self
+            .transfers
+            .iter()
+            .position(|t| t.record.owner() == Owner::Download(lease.id))
+        else {
+            return Ok(());
+        };
         let transfer = &self.transfers[index];
         if !lease.is_current()
             || !lease.mount.issued_by(&self.read_epoch)
@@ -388,6 +436,7 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
                 .record
                 .committed_plan()
                 .is_none_or(|p| p.version != lease.version)
+            || matches!(transfer.record.export, super::export::Export::Writing(_))
             || self.active.is_some()
         {
             return Err(StorageError::Malformed);
@@ -469,7 +518,9 @@ pub trait DownloadStore {
         cid: &Cid,
         max: usize,
     ) -> Result<Vec<u8>, StorageError>;
-    fn cancel_download(&mut self, id: DownloadId) -> Result<(), StorageError>;
+    /// `Some` means Deleting is durable and native must remove the proven partial, then call
+    /// [`DownloadStore::finish_download_cleanup`]; `None` means the record is already released.
+    fn cancel_download(&mut self, id: DownloadId) -> Result<Option<ExportState>, StorageError>;
     fn set_download_paused(
         &mut self,
         id: DownloadId,
@@ -483,6 +534,50 @@ pub trait DownloadStore {
     ) -> Result<KeepRetryReceipt, StorageError>;
     /// Cheap original-run fence; false after replacement, cancellation or remount.
     fn download_run_current(&self, run: DownloadRun, cid: &Cid, version: &[u8; 32]) -> bool;
+
+    // Journaled external export. These write only the sealed record; every external filesystem
+    // effect happens in native through `ExportFile`, never on the caller's actor thread.
+    fn download_export_state(&self, id: DownloadId) -> Result<Option<ExportState>, StorageError>;
+    fn begin_download_export(
+        &mut self,
+        lease: &DownloadExportLease,
+        journal: &ExportJournal,
+        presence: ExportPresence,
+    ) -> Result<(), StorageError>;
+    fn resume_download_export(
+        &mut self,
+        lease: &DownloadExportLease,
+        journal: &ExportJournal,
+        presence: ExportPresence,
+    ) -> Result<(), StorageError>;
+    fn checkpoint_download_export(
+        &mut self,
+        lease: &DownloadExportLease,
+        expected: &ExportJournal,
+        next: &ExportJournal,
+    ) -> Result<(), StorageError>;
+    fn publish_download_export(
+        &mut self,
+        lease: &DownloadExportLease,
+        expected: &ExportJournal,
+    ) -> Result<(), StorageError>;
+    fn recover_download_export(
+        &mut self,
+        id: DownloadId,
+        expected: &ExportJournal,
+    ) -> Result<(), StorageError>;
+    fn halt_download_export(
+        &mut self,
+        id: DownloadId,
+        expected: &ExportJournal,
+        halt: ExportHalt,
+    ) -> Result<(), StorageError>;
+    fn abandon_download_export(
+        &mut self,
+        id: DownloadId,
+        expected_intent: u64,
+    ) -> Result<u64, StorageError>;
+    fn finish_download_cleanup(&mut self, id: DownloadId) -> Result<(), StorageError>;
 }
 
 impl<R: CryptoRngCore> DownloadStore for KeptBlobStore<R> {
@@ -560,7 +655,7 @@ impl<R: CryptoRngCore> DownloadStore for KeptBlobStore<R> {
     ) -> Result<Vec<u8>, StorageError> {
         KeptBlobStore::read_download_export(self, lease, cid, max)
     }
-    fn cancel_download(&mut self, id: DownloadId) -> Result<(), StorageError> {
+    fn cancel_download(&mut self, id: DownloadId) -> Result<Option<ExportState>, StorageError> {
         KeptBlobStore::cancel_download(self, id)
     }
     fn set_download_paused(
@@ -580,5 +675,64 @@ impl<R: CryptoRngCore> DownloadStore for KeptBlobStore<R> {
     }
     fn download_run_current(&self, run: DownloadRun, cid: &Cid, version: &[u8; 32]) -> bool {
         KeptBlobStore::download_run_current(self, run, cid, version)
+    }
+    fn download_export_state(&self, id: DownloadId) -> Result<Option<ExportState>, StorageError> {
+        KeptBlobStore::download_export_state(self, id)
+    }
+    fn begin_download_export(
+        &mut self,
+        lease: &DownloadExportLease,
+        journal: &ExportJournal,
+        presence: ExportPresence,
+    ) -> Result<(), StorageError> {
+        KeptBlobStore::begin_download_export(self, lease, journal, presence)
+    }
+    fn resume_download_export(
+        &mut self,
+        lease: &DownloadExportLease,
+        journal: &ExportJournal,
+        presence: ExportPresence,
+    ) -> Result<(), StorageError> {
+        KeptBlobStore::resume_download_export(self, lease, journal, presence)
+    }
+    fn checkpoint_download_export(
+        &mut self,
+        lease: &DownloadExportLease,
+        expected: &ExportJournal,
+        next: &ExportJournal,
+    ) -> Result<(), StorageError> {
+        KeptBlobStore::checkpoint_download_export(self, lease, expected, next)
+    }
+    fn publish_download_export(
+        &mut self,
+        lease: &DownloadExportLease,
+        expected: &ExportJournal,
+    ) -> Result<(), StorageError> {
+        KeptBlobStore::publish_download_export(self, lease, expected)
+    }
+    fn recover_download_export(
+        &mut self,
+        id: DownloadId,
+        expected: &ExportJournal,
+    ) -> Result<(), StorageError> {
+        KeptBlobStore::recover_download_export(self, id, expected)
+    }
+    fn halt_download_export(
+        &mut self,
+        id: DownloadId,
+        expected: &ExportJournal,
+        halt: ExportHalt,
+    ) -> Result<(), StorageError> {
+        KeptBlobStore::halt_download_export(self, id, expected, halt)
+    }
+    fn abandon_download_export(
+        &mut self,
+        id: DownloadId,
+        expected_intent: u64,
+    ) -> Result<u64, StorageError> {
+        KeptBlobStore::abandon_download_export(self, id, expected_intent)
+    }
+    fn finish_download_cleanup(&mut self, id: DownloadId) -> Result<(), StorageError> {
+        KeptBlobStore::finish_download_cleanup(self, id)
     }
 }
