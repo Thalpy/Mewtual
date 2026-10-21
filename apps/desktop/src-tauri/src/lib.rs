@@ -14570,9 +14570,53 @@ async fn stream_download_to_disk(
     target: &[u8; 32],
     source: &mut impl SaveSource,
 ) -> Result<PathBuf, String> {
+    stream_download_staged(
+        || create_staged_download(downloads, name),
+        total,
+        size,
+        target,
+        source,
+    )
+    .await
+}
+
+/// The same writer at a place the user picked in "Save as", for a location that cannot carry a
+/// journal. Storage's [`catcoms_storage::kept::ChosenDestination::create_unjournaled`] applies
+/// the chosen-location rules: never create the folder, use the exact chosen name, refuse an
+/// existing name or `.part` instead of numbering, and refuse a folder that cannot hard link.
+async fn stream_download_to_chosen(
+    choice: &catcoms_storage::kept::ChosenDestination,
+    total: usize,
+    size: u64,
+    target: &[u8; 32],
+    source: &mut impl SaveSource,
+) -> Result<PathBuf, String> {
+    stream_download_staged(
+        || {
+            choice
+                .create_unjournaled()
+                .map_err(|error| error.to_string())
+        },
+        total,
+        size,
+        target,
+        source,
+    )
+    .await
+}
+
+/// Shared body of the non-resumable writer. `stage` reserves the `.part` and names the final path;
+/// it runs only after the first liveness check, so a retired command creates no plaintext file.
+async fn stream_download_staged(
+    stage: impl FnOnce() -> Result<(std::fs::File, PathBuf, PathBuf), String>,
+    total: usize,
+    size: u64,
+    target: &[u8; 32],
+    source: &mut impl SaveSource,
+) -> Result<PathBuf, String> {
     // Refuse a command retired during its earlier plan awaits before creating plaintext staging.
     source.still_unlocked().await?;
-    let (mut file, staging, path) = create_staged_download(downloads, name)?;
+    let (mut file, staging, path) = stage()?;
     let failed = |error: String| -> String {
         let _ = std::fs::remove_file(&staging);
         error
@@ -14765,8 +14809,21 @@ async fn save_group_file(
     expected_intent: Option<String>,
     operation: Option<String>,
     fresh_copy: Option<bool>,
+    save_as: Option<bool>,
 ) -> Result<SavedFileResult, String> {
     let generation = keep_session::invocation_generation(&state).await?;
+    // "Save as": native opens the dialog itself (the renderer never supplies a path), before any
+    // export slot, record, acquisition or allowance is touched, so cancelling changes nothing.
+    let chosen = if save_as.unwrap_or(false) {
+        let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
+        let chooser = private_downloads::NativeChooser::new(app.clone());
+        match private_downloads::choose_destination(&chooser, downloads, &name).await? {
+            Some(choice) => Some(Arc::new(choice)),
+            None => return Err(private_downloads::SAVE_AS_CANCELLED.into()),
+        }
+    } else {
+        None
+    };
     let export_slot = private_downloads::export_slot()?;
     if operation.as_ref().is_some_and(|id| {
         id.is_empty()
@@ -14805,6 +14862,7 @@ async fn save_group_file(
             id,
             intent,
             fresh_copy.unwrap_or(false),
+            chosen.is_some(),
         )
         .await?
         {
@@ -14833,7 +14891,12 @@ async fn save_group_file(
             "file is larger than the {MAX_FILE_BYTES}-byte limit"
         ));
     }
-    let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
+    let destination = match chosen {
+        Some(choice) => private_downloads::Destination::Chosen(choice),
+        None => private_downloads::Destination::Downloads(
+            app.path().download_dir().map_err(|e| e.to_string())?,
+        ),
+    };
     // Journaled, resumable export first; the non-resumable writer only when this destination
     // cannot carry a journal for a fresh save (no stable identity, links unsupported).
     let context = private_downloads::ExportContext {
@@ -14847,9 +14910,10 @@ async fn save_group_file(
         cid: &cid,
         operation: operation.as_deref(),
     };
-    let path = match private_downloads::export_journaled(&context, &ready, downloads.clone(), &name)
-        .await?
-    {
+    let journaled =
+        private_downloads::export_journaled(&context, &ready, &destination, &name).await?;
+    let resumable = journaled.is_some();
+    let path = match journaled {
         Some(path) => path,
         None => {
             let mut source = ActorSaveSource {
@@ -14865,10 +14929,18 @@ async fn save_group_file(
                 origin: origin.clone(),
                 operation: operation.clone(),
             };
-            stream_download_to_disk(&downloads, &name, total, size, &target, &mut source).await?
+            let written = match &destination {
+                private_downloads::Destination::Downloads(folder) => {
+                    stream_download_to_disk(folder, &name, total, size, &target, &mut source).await
+                }
+                private_downloads::Destination::Chosen(choice) => {
+                    stream_download_to_chosen(choice, total, size, &target, &mut source).await
+                }
+            };
+            written.map_err(|error| format!("{error} {}", private_downloads::NOT_RESUMABLE_NOTE))?
         }
     };
-    let saved = finish_saved_read_if(
+    let mut saved = finish_saved_read_if(
         &state,
         generation,
         &origin,
@@ -14879,6 +14951,14 @@ async fn save_group_file(
         || ready.is_current(),
     )
     .await?;
+    if !resumable {
+        // Say honestly that this location could not have resumed an interrupted save.
+        let note = private_downloads::NOT_RESUMABLE_NOTE;
+        saved.warning = Some(match saved.warning.take() {
+            Some(warning) => format!("{warning} {note}"),
+            None => note.to_string(),
+        });
+    }
     // Publication is already committed. Cleanup failure must never turn that success into a
     // retryable save error or remove the external file; retained ciphertext remains charged.
     finish_download_response(

@@ -63,6 +63,8 @@ pub struct DownloadStatus {
     pub checked: bool,
     /// Typed external export state. Carries no path, name or identity.
     pub export: super::ExportView,
+    /// A "Save as" choice is remembered for the next save (no path or name is exposed).
+    pub planned: bool,
 }
 
 /// Observing lease for one verified completed private download in this mounted store. It cannot
@@ -108,7 +110,7 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
             .map(|active| active.token)
             .ok_or(StorageError::Malformed)
     }
-    fn download_run(&self, run: DownloadRun) -> Result<KeepRun, StorageError> {
+    pub(super) fn download_run(&self, run: DownloadRun) -> Result<KeepRun, StorageError> {
         let index = self.download_index(run.id)?;
         if self.transfers[index].poisoned || self.active.as_ref().is_none_or(|a| !*a.owner.borrow())
         {
@@ -133,6 +135,7 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
                     state: self.transfer_state(t),
                     checked: t.checked && !t.poisoned,
                     export: self.export_view(t),
+                    planned: t.record.planned.is_some(),
                 }),
                 Owner::Keep(_) => None,
             })
@@ -538,6 +541,19 @@ pub trait DownloadStore {
     // Journaled external export. These write only the sealed record; every external filesystem
     // effect happens in native through `ExportFile`, never on the caller's actor thread.
     fn download_export_state(&self, id: DownloadId) -> Result<Option<ExportState>, StorageError>;
+    /// Remember a "Save as" choice for the exact current run; see
+    /// [`KeptBlobStore::plan_download_destination`].
+    fn plan_download_destination(
+        &mut self,
+        run: DownloadRun,
+        choice: &super::ChosenDestination,
+    ) -> Result<(), StorageError>;
+    /// Where a fresh export goes; see [`KeptBlobStore::download_planned_destination`].
+    #[allow(clippy::type_complexity)]
+    fn download_planned_destination(
+        &self,
+        id: DownloadId,
+    ) -> Result<Option<Result<super::ChosenDestination, super::ChoiceRefusal>>, StorageError>;
     fn begin_download_export(
         &mut self,
         lease: &DownloadExportLease,
@@ -678,6 +694,19 @@ impl<R: CryptoRngCore> DownloadStore for KeptBlobStore<R> {
     }
     fn download_export_state(&self, id: DownloadId) -> Result<Option<ExportState>, StorageError> {
         KeptBlobStore::download_export_state(self, id)
+    }
+    fn plan_download_destination(
+        &mut self,
+        run: DownloadRun,
+        choice: &super::ChosenDestination,
+    ) -> Result<(), StorageError> {
+        KeptBlobStore::plan_download_destination(self, run, choice)
+    }
+    fn download_planned_destination(
+        &self,
+        id: DownloadId,
+    ) -> Result<Option<Result<super::ChosenDestination, super::ChoiceRefusal>>, StorageError> {
+        KeptBlobStore::download_planned_destination(self, id)
     }
     fn begin_download_export(
         &mut self,

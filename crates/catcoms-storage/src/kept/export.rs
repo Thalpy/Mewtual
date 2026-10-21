@@ -1,14 +1,18 @@
 //! Journaled export of a completed private Download to a user-visible file.
 //!
 //! Encrypted acquisition stays the only network phase. Once the whole private copy is verified,
-//! native writes plaintext to `<name>.mewtual-part` in the Downloads folder and publishes the final
+//! native writes plaintext to `<name>.mewtual-part` in the destination folder (Downloads by
+//! default, or a folder the user picked in the native "Save as" dialog) and publishes the final
 //! name without replacement. This module makes that export restart-safe:
 //!
 //! - [`ExportJournal`] is sealed inside the Download record (`mewtual/download-transfer/v2`). It
 //!   records the destination folder, both leaf names, the partial file's handle identity and a
 //!   checkpoint of fsynced whole chunks. A saved path is never authority on its own.
+//! - [`PlannedDestination`] is the "Save as" choice, sealed in the same record from the start of
+//!   acquisition until Begin replaces it with the journal, so an interrupted network phase still
+//!   saves to the chosen place.
 //! - [`ExportFile`] is an owned value that native moves into `spawn_blocking`. It performs every
-//!   external filesystem effect and holds no store borrow, so a stalled Downloads volume can pin
+//!   external filesystem effect and holds no store borrow, so a stalled destination volume can pin
 //!   only that save's worker, never the server actor or app Lock.
 //! - The `KeptBlobStore` methods at the end are the only journal transitions. They run on the
 //!   actor, write only the sealed record in the vault, and are fenced by the export lease
@@ -71,6 +75,15 @@ impl ExportJournal {
     }
     pub fn halt(&self) -> Option<ExportHalt> {
         self.halt
+    }
+    /// The name this save started with: the staging leaf without `.mewtual-part`. A
+    /// publication-time collision is numbered from it (the chosen "Save as" name or the Downloads
+    /// name), never from today's listed file name, and it stays the same across every resume and
+    /// restart even after an earlier attempt persisted a numbered final name.
+    pub(super) fn base_name(&self) -> &str {
+        self.staging
+            .strip_suffix(external::STAGING_SUFFIX)
+            .unwrap_or(&self.final_leaf)
     }
     /// The four fields that name the destination object. They never change for one journal.
     pub(super) fn same_destination(&self, other: &Self) -> bool {
@@ -199,7 +212,16 @@ impl Export {
 impl record::Record {
     /// Single-record export rules. Only a DownloadV2 record may carry a journal, only once its
     /// encrypted copy is Completed (or being deleted), and Published means every chunk was saved.
+    /// A planned "Save as" destination is also V2-only and exists only while there is no journal.
     pub(super) fn validate_export(&self) -> Result<(), StorageError> {
+        if let Some(planned) = &self.planned {
+            if self.encoding != record::RecordEncoding::DownloadV2
+                || self.export != Export::None
+                || !planned.valid()
+            {
+                return Err(StorageError::Malformed);
+            }
+        }
         let Some(journal) = self.export.journal() else {
             return Ok(());
         };
@@ -218,20 +240,47 @@ impl record::Record {
         Ok(())
     }
 
-    /// The single permitted encoding change for Downloads: V1 to V2 on the edge that starts an
-    /// export. Every other successor keeps its encoding, so records without a journal stay
-    /// readable by the released reader.
+    /// The only permitted encoding change for Downloads: V1 to V2 on the edge that starts an
+    /// export, or on the edge that remembers a "Save as" choice. Every other successor keeps its
+    /// encoding, so records with neither stay readable by the released reader.
     pub(super) fn upgrades_for_export(&self, next: &Self) -> bool {
         self.encoding == record::RecordEncoding::DownloadV1
             && next.encoding == record::RecordEncoding::DownloadV2
             && self.export == Export::None
-            && matches!(next.export, Export::Writing(_))
+            && self.planned.is_none()
+            && (matches!(next.export, Export::Writing(_))
+                || (next.export == Export::None && next.planned.is_some()))
+    }
+
+    /// Planned-destination transitions. It is set or replaced only while there is no journal and
+    /// outside Deleting, and it is retired only by Begin, which must consume exactly the plan it
+    /// was made from. Deleting and network Retry grants never move it.
+    fn validate_planned_successor(&self, next: &Self) -> Result<(), StorageError> {
+        let deleting = self.phase == KeepPhase::Deleting || next.phase == KeepPhase::Deleting;
+        let allowed = match (&self.planned, &next.planned) {
+            (old, new) if old == new => true,
+            _ if deleting => false,
+            // Set or replace: the record must have no journal on either side.
+            (_, Some(_)) => self.export == Export::None && next.export == Export::None,
+            // Retire: only Begin, with the journal made from this plan.
+            (Some(planned), None) => {
+                self.export == Export::None
+                    && matches!(&next.export, Export::Writing(journal) if planned.matches(journal))
+            }
+            (None, None) => true,
+        };
+        if allowed {
+            Ok(())
+        } else {
+            Err(StorageError::Malformed)
+        }
     }
 
     /// Journal transitions. Deleting never gains, edits or retires a journal: removal keeps it
     /// until the directory is released, so cleanup can still prove which file is ours. Clearing
     /// a halt or forgetting a journal requires an explicit intent change in the same publication.
     pub(super) fn validate_export_successor(&self, next: &Self) -> Result<(), StorageError> {
+        self.validate_planned_successor(next)?;
         let intent_changed = next.intent != self.intent;
         let completed = self.phase == KeepPhase::Completed && next.phase == KeepPhase::Completed;
         let allowed = if self.phase == KeepPhase::Deleting || next.phase == KeepPhase::Deleting {
@@ -325,13 +374,326 @@ pub enum ExportError {
     },
     /// This destination cannot carry a journal; a fresh save keeps the non-resumable writer.
     Unsupported,
+    /// The folder cannot make the no-replace hard link that every publication needs (FAT, exFAT,
+    /// most USB sticks). Neither writer could finish there, so nothing is written: the fresh
+    /// partial this call created is removed and the user chooses another place.
+    NoLinks,
     /// The lease, invocation or saved journal changed. Stop without effects.
     Inactive,
     /// The partial became shorter than this session's verified offset while it was open (another
     /// writer or tool truncated it). Never zero-extend over that gap and never checkpoint it: stop,
     /// keep the journal Writing, and let the next Resume re-verify from chunk zero.
     Conflict,
+    /// A "Save as" destination was refused before anything was written there.
+    Refused(ChoiceRefusal),
     Storage(StorageError),
+}
+
+/// Why a destination chosen in the native "Save as" dialog cannot be used. Every refusal happens
+/// before any file is created or changed at that location.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChoiceRefusal {
+    /// The dialog returned something other than an absolute path with a usable file name.
+    InvalidName,
+    /// The parent folder is missing, not a directory, or cannot be opened.
+    FolderUnavailable,
+    /// A file (or anything else) already has that name. It is never replaced, even when the
+    /// operating system's dialog already asked whether to replace it.
+    Exists,
+    /// `<name>.mewtual-part` already exists there (for example an earlier interrupted save).
+    PartialExists,
+    /// The folder is no longer the directory chosen in the dialog (renamed, removed, or swapped
+    /// for a link or junction) by the time saving starts.
+    FolderChanged,
+    /// The operating system refused to let Mewtual create a file there (a protected folder, or
+    /// controlled folder access).
+    NotWritable,
+}
+impl std::fmt::Display for ChoiceRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidName => "That file name cannot be used. Choose another name.",
+            Self::FolderUnavailable => "That folder cannot be used. Choose another folder.",
+            Self::Exists => {
+                "A file with that name already exists there and was left unchanged. Choose another name."
+            }
+            Self::PartialExists => {
+                "A partly saved file with that name already exists there. Choose another name."
+            }
+            Self::FolderChanged => "The chosen folder changed before saving started. Choose it again.",
+            Self::NotWritable => "Mewtual cannot write to that folder. Choose another folder.",
+        })
+    }
+}
+
+/// A destination the user picked in the native "Save as" dialog, checked before anything is
+/// acquired or written. It authorizes one save (and that save's later resumes): the actor
+/// remembers it in the sealed Download record as a [`PlannedDestination`] until the journal
+/// takes over at Begin. It never comes from the renderer. Debug output is redacted because it
+/// holds the user's folder and file name.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ChosenDestination {
+    folder: PathBuf,
+    name: String,
+    /// Identity of the chosen folder at selection time, re-checked at creation. `None` when the
+    /// filesystem cannot provide one; such a destination can only use the non-resumable writer,
+    /// and nothing can tell a swapped folder at the same path from the chosen one.
+    folder_id: Option<FileIdentity>,
+}
+impl std::fmt::Debug for ChosenDestination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChosenDestination")
+            .field("identified", &self.folder_id.is_some())
+            .finish_non_exhaustive()
+    }
+}
+/// Suffix of the non-resumable writer's partial (native's `DOWNLOAD_STAGING_SUFFIX`).
+const UNJOURNALED_SUFFIX: &str = ".part";
+impl ChosenDestination {
+    /// Check what the dialog returned: an absolute path whose file name passes the journal's leaf
+    /// rules (with room for `.mewtual-part`, no Windows device name), whose parent is an existing
+    /// directory (identity captured when the filesystem has one, following a folder-level link the
+    /// user navigated into) whose path the sealed record can hold, and where neither the name nor
+    /// its partial name exists yet. Nothing is created here.
+    pub fn validate(path: &Path) -> Result<Self, ChoiceRefusal> {
+        if !path.is_absolute() {
+            return Err(ChoiceRefusal::InvalidName);
+        }
+        if external::CURRENT_PLATFORM == 0 {
+            // No platform tag means the choice could not be remembered or decoded later.
+            return Err(ChoiceRefusal::FolderUnavailable);
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| {
+                external::valid_leaf(name) && external::valid_leaf(&external::staging_for(name))
+            })
+            .ok_or(ChoiceRefusal::InvalidName)?
+            .to_owned();
+        let folder = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .ok_or(ChoiceRefusal::InvalidName)?
+            .to_owned();
+        let encoded = external::encode_os(folder.as_os_str());
+        if encoded.is_empty() || encoded.len() > external::MAX_FOLDER_BYTES {
+            // Longer than the sealed record's folder bound: refuse rather than accept a choice
+            // that an interrupted save could not find again.
+            return Err(ChoiceRefusal::FolderUnavailable);
+        }
+        let folder_id = match external::folder_identity(&folder) {
+            Ok(id) => Some(id),
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                // An existing directory without a usable identity (some network shares and FUSE
+                // mounts): still a valid place for the non-resumable writer.
+                if !folder.is_dir() {
+                    return Err(ChoiceRefusal::FolderUnavailable);
+                }
+                None
+            }
+            Err(_) => return Err(ChoiceRefusal::FolderUnavailable),
+        };
+        match external::occupied(&folder.join(&name)) {
+            Ok(false) => {}
+            Ok(true) => return Err(ChoiceRefusal::Exists),
+            Err(_) => return Err(ChoiceRefusal::FolderUnavailable),
+        }
+        match external::occupied(&folder.join(external::staging_for(&name))) {
+            Ok(false) => {}
+            Ok(true) => return Err(ChoiceRefusal::PartialExists),
+            Err(_) => return Err(ChoiceRefusal::FolderUnavailable),
+        }
+        Ok(Self {
+            folder,
+            name,
+            folder_id,
+        })
+    }
+    /// The chosen file name as the user typed it (already a valid leaf).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    /// The sealed form the actor stores until Begin. Always representable: `validate` refused
+    /// paths beyond the folder bound and platforms without a tag.
+    pub(super) fn planned(&self) -> PlannedDestination {
+        PlannedDestination {
+            platform: external::CURRENT_PLATFORM,
+            folder: external::encode_os(self.folder.as_os_str()),
+            folder_id: self.folder_id,
+            name: self.name.clone(),
+        }
+    }
+
+    /// Reserve the non-resumable writer's partial at this chosen place, for a location that
+    /// cannot carry a journal (no stable identity). The chosen-location rules still hold: the
+    /// folder is never created and must still be a directory (and still the identified one, when
+    /// an identity was captured); the exact chosen name is used and refused if it exists, never
+    /// numbered; an existing `<name>.part` is refused, never adopted. A folder that cannot hard
+    /// link is refused before any plaintext exists, because publication needs that link. Returns
+    /// the open partial, its path and the final path.
+    pub fn create_unjournaled(&self) -> Result<(File, PathBuf, PathBuf), ExportError> {
+        let refused = |refusal| ExportError::Refused(refusal);
+        match self.folder_id {
+            Some(captured) => match external::folder_identity(&self.folder) {
+                Ok(id) if id == captured => {}
+                Ok(_) => return Err(refused(ChoiceRefusal::FolderChanged)),
+                Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                    return Err(refused(ChoiceRefusal::FolderChanged))
+                }
+                Err(error) => return Err(chosen_error(error)),
+            },
+            None => match fs::metadata(&self.folder) {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => return Err(refused(ChoiceRefusal::FolderUnavailable)),
+                Err(error) => return Err(chosen_error(error)),
+            },
+        }
+        let final_path = self.folder.join(&self.name);
+        if external::occupied(&final_path).map_err(chosen_error)? {
+            return Err(refused(ChoiceRefusal::Exists));
+        }
+        let staging_leaf = format!("{}{UNJOURNALED_SUFFIX}", self.name);
+        if !external::valid_leaf(&staging_leaf) {
+            return Err(refused(ChoiceRefusal::InvalidName));
+        }
+        let staging = self.folder.join(&staging_leaf);
+        let file = match external::create_leaf(&staging) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(refused(ChoiceRefusal::PartialExists))
+            }
+            Err(error) => return Err(chosen_error(error)),
+        };
+        let failure = match links_supported(&self.folder, &staging_leaf, None) {
+            LinkProbe::Works => return Ok((file, staging, final_path)),
+            LinkProbe::Refused => ExportError::NoLinks,
+            // A probe name may still point at this file; never fill it with plaintext. The
+            // abandoned file is empty, so a leftover probe name discloses nothing.
+            LinkProbe::Inconclusive => ExportError::Local {
+                retryable: false,
+                reason: "a temporary name in that folder could not be removed".into(),
+            },
+        };
+        // Created exclusively by this call a moment ago; nothing else can own it.
+        drop(file);
+        let _ = fs::remove_file(&staging);
+        Err(failure)
+    }
+}
+
+/// Classify a creation failure at a chosen place, where no journal exists yet to halt: every
+/// outcome is a refusal to choose again, a full volume, or a transient local failure.
+fn chosen_error(error: io::Error) -> ExportError {
+    match error.kind() {
+        io::ErrorKind::StorageFull => ExportError::Full,
+        io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => {
+            ExportError::Refused(ChoiceRefusal::NotWritable)
+        }
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => {
+            ExportError::Refused(ChoiceRefusal::FolderUnavailable)
+        }
+        _ => ExportError::Local {
+            retryable: false,
+            reason: error.to_string(),
+        },
+    }
+}
+
+/// A "Save as" choice remembered in the sealed Download record (`mewtual/download-transfer/v2`)
+/// from the moment the actor starts or resumes its acquisition run until Begin turns it into the
+/// export journal. It exists only while the record has no journal, so an interrupted network
+/// phase, Pause, Lock or restart still saves to the chosen place. Debug output is redacted.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct PlannedDestination {
+    /// Platform that encoded `folder`; a vault moved to another OS cannot reinterpret it.
+    platform: u8,
+    folder: Vec<u8>,
+    folder_id: Option<FileIdentity>,
+    name: String,
+}
+impl std::fmt::Debug for PlannedDestination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlannedDestination")
+            .field("identified", &self.folder_id.is_some())
+            .finish_non_exhaustive()
+    }
+}
+impl PlannedDestination {
+    pub(super) fn encode(&self, e: &mut Encoder) {
+        e.put_u8(self.platform);
+        e.put_bytes(&self.folder).expect("bounded folder");
+        match &self.folder_id {
+            None => {
+                e.put_u8(0);
+            }
+            Some(id) => {
+                e.put_u8(1);
+                e.put_bytes(&id.encode()).expect("fixed identity");
+            }
+        }
+        e.put_bytes(self.name.as_bytes()).expect("bounded leaf");
+    }
+    pub(super) fn decode(d: &mut Decoder<'_>) -> Result<Self, StorageError> {
+        let bad = |_| StorageError::Malformed;
+        let platform = d.get_u8().map_err(bad)?;
+        let folder = d.get_bytes().map_err(bad)?.to_vec();
+        let folder_id = match d.get_u8().map_err(bad)? {
+            0 => None,
+            1 => Some(
+                FileIdentity::decode(d.get_bytes().map_err(bad)?).ok_or(StorageError::Malformed)?,
+            ),
+            _ => return Err(StorageError::Malformed),
+        };
+        let name = std::str::from_utf8(d.get_bytes().map_err(bad)?)
+            .map_err(|_| StorageError::Malformed)?
+            .to_owned();
+        let planned = Self {
+            platform,
+            folder,
+            folder_id,
+            name,
+        };
+        if !planned.valid() {
+            return Err(StorageError::Malformed);
+        }
+        Ok(planned)
+    }
+    /// Structural bounds only, as for the journal; whether the platform matches is answered
+    /// when native asks for the destination.
+    pub(super) fn valid(&self) -> bool {
+        matches!(
+            self.platform,
+            external::PLATFORM_WINDOWS | external::PLATFORM_UNIX
+        ) && !self.folder.is_empty()
+            && self.folder.len() <= external::MAX_FOLDER_BYTES
+            && self
+                .folder_id
+                .is_none_or(|id| id.platform() == self.platform)
+            && external::valid_leaf(&self.name)
+            && external::valid_leaf(&external::staging_for(&self.name))
+    }
+    /// Begin may consume this plan only with the journal `create_chosen` made from it: same
+    /// sealed folder bytes, the captured folder identity, the chosen name and its partial name.
+    pub(super) fn matches(&self, journal: &ExportJournal) -> bool {
+        self.platform == journal.folder_id.platform()
+            && self.folder == journal.folder
+            && self.folder_id == Some(journal.folder_id)
+            && self.name == journal.final_leaf
+            && journal.staging == external::staging_for(&self.name)
+    }
+    /// The remembered choice for this platform, or `FolderUnavailable` when it was written on
+    /// another operating system. Every creation re-checks the folder and name before writing.
+    pub(super) fn destination(&self) -> Result<ChosenDestination, ChoiceRefusal> {
+        let folder = external::decode_os(self.platform, &self.folder)
+            .map(PathBuf::from)
+            .ok_or(ChoiceRefusal::FolderUnavailable)?;
+        Ok(ChosenDestination {
+            folder,
+            name: self.name.clone(),
+            folder_id: self.folder_id,
+        })
+    }
 }
 impl std::fmt::Display for ExportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -342,17 +704,22 @@ impl std::fmt::Display for ExportError {
             Self::Halted(ExportHalt::Changed) => f.write_str(
                 "The partly saved file was changed or replaced. Save a new copy to continue.",
             ),
-            Self::Full => {
-                f.write_str("Not enough space in Downloads. Free some space, then resume saving.")
-            }
-            Self::Local { reason, .. } => write!(f, "Saving to Downloads failed: {reason}"),
+            // These name no folder: the destination may be Downloads or a "Save as" choice.
+            Self::Full => f.write_str(
+                "Not enough space in the destination folder. Free some space, then resume saving.",
+            ),
+            Self::Local { reason, .. } => write!(f, "Saving the file failed: {reason}"),
             Self::Unsupported => {
                 f.write_str("This folder cannot keep track of a partly saved file.")
             }
+            Self::NoLinks => f.write_str(
+                "This drive cannot finish a save safely (for example a FAT or exFAT drive). Use Save as to choose another place.",
+            ),
             Self::Inactive => f.write_str("The download is no longer active."),
             Self::Conflict => f.write_str(
                 "The partly saved file changed while saving. Resume saving to check it again.",
             ),
+            Self::Refused(refusal) => write!(f, "{refusal}"),
             Self::Storage(error) => write!(f, "{error}"),
         }
     }
@@ -624,35 +991,53 @@ fn remove_proven(staging: &Path, read_only: bool) -> io::Result<()> {
     removed
 }
 
+/// Outcome of the hard-link probe on a freshly created partial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkProbe {
+    /// A probe name was linked to our file, proven to be it (when an identity exists) and removed.
+    Works,
+    /// The link call itself failed. Every publication is that same no-replace link, so no writer
+    /// can finish in this folder (FAT, exFAT; Linux vfat reports this as a permission error).
+    Refused,
+    /// Linking worked but the probe could not be confirmed or removed (for example an indexer
+    /// holding the new name). Linking is possible, but a journal should not depend on it.
+    Inconclusive,
+}
+
 /// Publication needs a no-replace hard link. FAT and exFAT give a usable-looking file index and
 /// creation time but cannot link, so a journal there could never complete and would strand the
 /// plaintext partial at "Saving interrupted". Prove linking works on this folder, with the fresh
-/// staging file, before the journal names it: link it to an absent probe name, confirm the probe
-/// is the same object, then remove only the probe name. Any failure means "do not journal".
-fn links_supported(folder: &Path, staging: &str, observed: &external::Observed) -> bool {
+/// staging file, before anything is written: link it to an absent probe name, confirm the probe is
+/// the same object when `identity` is known, then remove only the probe name.
+fn links_supported(folder: &Path, staging: &str, identity: Option<FileIdentity>) -> LinkProbe {
     let source = folder.join(staging);
     for attempt in 0..4 {
         let probe = format!("{staging}-probe{attempt}");
         if !external::valid_leaf(&probe) {
-            return false;
+            return LinkProbe::Inconclusive;
         }
         let target = folder.join(&probe);
         match external::link(&source, &target) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(_) => return false,
+            Err(_) => return LinkProbe::Refused,
         }
-        let ours = matches!(
-            external::open_leaf(&target, false),
-            Ok(Leaf::Opened(_, linked)) if linked.identity == observed.identity
-        );
-        if ours {
-            // Only our just-made second name for our own file is removed here.
-            return fs::remove_file(&target).is_ok();
+        let ours = match identity {
+            Some(identity) => matches!(
+                external::open_leaf(&target, false),
+                Ok(Leaf::Opened(_, linked)) if linked.identity == identity
+            ),
+            // No identity source: the link call created this absent name exclusively from our
+            // own just-created partial, so the name is ours to remove.
+            None => true,
+        };
+        // Only our just-made second name for our own file is removed here.
+        if ours && fs::remove_file(&target).is_ok() {
+            return LinkProbe::Works;
         }
-        return false;
+        return LinkProbe::Inconclusive;
     }
-    false
+    LinkProbe::Inconclusive
 }
 
 /// Attempt to make a just-changed directory entry durable. Best effort by design: some network
@@ -725,53 +1110,115 @@ impl ExportFile {
             if external::occupied(&folder.join(&final_leaf)).map_err(local)? {
                 continue;
             }
-            let path = folder.join(&staging);
-            let file = match external::create_leaf(&path) {
+            let file = match external::create_leaf(&folder.join(&staging)) {
                 Ok(file) => file,
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(local(error)),
             };
-            let observed = match external::observe(&file) {
-                Ok(observed)
-                    if observed.regular
-                        && observed.links == 1
-                        && links_supported(folder, &staging, &observed) =>
-                {
-                    observed
-                }
-                _ => {
-                    // Created by this call a moment ago; remove it so an unsupported
-                    // destination leaves nothing behind for the fallback writer to trip over.
-                    drop(file);
-                    let _ = fs::remove_file(&path);
-                    return Err(ExportError::Unsupported);
-                }
-            };
-            // Best effort: make the new directory entry durable before the journal names it.
-            let _ = persistence::directory_barrier(folder);
-            let journal = ExportJournal {
-                folder: encoded,
-                folder_id,
-                staging,
-                final_leaf,
-                file_id: observed.identity,
-                written_chunks: 0,
-                written_bytes: 0,
-                halt: None,
-            };
-            return Ok(Self::session(
-                file,
-                folder.to_owned(),
-                journal,
-                name,
-                plan,
-                0,
-            ));
+            let leaves = (staging, final_leaf);
+            return Self::adopt_created(file, folder, encoded, folder_id, leaves, plan);
         }
         Err(ExportError::Local {
             retryable: false,
             reason: "too many downloads with this name already exist".into(),
         })
+    }
+
+    /// Start a fresh export at a destination the user picked in the native dialog. Unlike a
+    /// Downloads save, nothing is created or renamed implicitly: the folder must still be the
+    /// exact directory chosen (a parent swapped for a link, junction or another folder is
+    /// refused, as is one that no longer reports any identity), the chosen name must still be
+    /// absent, and the partial is created exclusively beside it. `Unsupported` (a folder that
+    /// never had an identity, or a partial without one) leaves nothing behind and lets native use
+    /// [`ChosenDestination::create_unjournaled`] at the same place; `NoLinks` refuses a folder
+    /// where no writer could publish.
+    pub fn create_chosen(
+        choice: &ChosenDestination,
+        plan: ExportPlan,
+    ) -> Result<Self, ExportError> {
+        let folder = choice.folder.as_path();
+        let name = choice.name.as_str();
+        if external::CURRENT_PLATFORM == 0 {
+            return Err(ExportError::Unsupported);
+        }
+        let Some(captured) = choice.folder_id else {
+            return Err(ExportError::Unsupported);
+        };
+        let encoded = external::encode_os(folder.as_os_str());
+        if encoded.is_empty() || encoded.len() > external::MAX_FOLDER_BYTES {
+            return Err(ExportError::Refused(ChoiceRefusal::FolderUnavailable));
+        }
+        match external::folder_identity(folder) {
+            Ok(id) if id == captured => {}
+            // A folder that had an identity and now reports none is not provably the same one.
+            Ok(_) => return Err(ExportError::Refused(ChoiceRefusal::FolderChanged)),
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                return Err(ExportError::Refused(ChoiceRefusal::FolderChanged))
+            }
+            Err(error) => return Err(chosen_error(error)),
+        }
+        // Still before any plaintext exists, so a name taken since the dialog is refused and the
+        // user chooses again; only a collision after this point is numbered at publication.
+        if external::occupied(&folder.join(name)).map_err(chosen_error)? {
+            return Err(ExportError::Refused(ChoiceRefusal::Exists));
+        }
+        let staging = external::staging_for(name);
+        let file = match external::create_leaf(&folder.join(&staging)) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(ExportError::Refused(ChoiceRefusal::PartialExists))
+            }
+            Err(error) => return Err(chosen_error(error)),
+        };
+        let leaves = (staging, name.to_owned());
+        Self::adopt_created(file, folder, encoded, captured, leaves, plan)
+    }
+
+    /// Shared tail of both creations: prove identity and hard-link support on the file this call
+    /// just created exclusively, then build the Writing(0) journal for the caller to persist.
+    fn adopt_created(
+        file: File,
+        folder: &Path,
+        encoded: Vec<u8>,
+        folder_id: FileIdentity,
+        (staging, final_leaf): (String, String),
+        plan: ExportPlan,
+    ) -> Result<Self, ExportError> {
+        let path = folder.join(&staging);
+        let failure = match external::observe(&file) {
+            Ok(observed) if observed.regular && observed.links == 1 => {
+                match links_supported(folder, &staging, Some(observed.identity)) {
+                    LinkProbe::Works => Ok(observed),
+                    // No writer could publish here: refuse before any plaintext exists.
+                    LinkProbe::Refused => Err(ExportError::NoLinks),
+                    LinkProbe::Inconclusive => Err(ExportError::Unsupported),
+                }
+            }
+            _ => Err(ExportError::Unsupported),
+        };
+        let observed = match failure {
+            Ok(observed) => observed,
+            Err(error) => {
+                // Created by this call a moment ago; remove it so a refused or unsupported
+                // destination leaves nothing behind for the fallback writer to trip over.
+                drop(file);
+                let _ = fs::remove_file(&path);
+                return Err(error);
+            }
+        };
+        // Best effort: make the new directory entry durable before the journal names it.
+        let _ = persistence::directory_barrier(folder);
+        let journal = ExportJournal {
+            folder: encoded,
+            folder_id,
+            staging,
+            final_leaf,
+            file_id: observed.identity,
+            written_chunks: 0,
+            written_bytes: 0,
+            halt: None,
+        };
+        Ok(Self::session(file, folder.to_owned(), journal, plan, 0))
     }
 
     /// Preflight before an explicit Resume spends any allowance re-verifying the private copy.
@@ -787,16 +1234,10 @@ impl ExportFile {
         }
     }
 
-    /// Reopen a saved partial for writing. `name` is this invocation's sanitized name, used only
-    /// to choose a new final name if the saved one became occupied.
-    pub fn reopen(
-        journal: &ExportJournal,
-        name: &str,
-        plan: ExportPlan,
-    ) -> Result<ExportReopen, ExportError> {
-        if !external::valid_leaf(name) {
-            return Err(ExportError::Storage(StorageError::Malformed));
-        }
+    /// Reopen a saved partial for writing. A final name that became occupied is replaced at
+    /// publication by a numbered name derived from the journal's own staging name, so nothing
+    /// from this invocation (such as today's listed file name) can redirect it.
+    pub fn reopen(journal: &ExportJournal, plan: ExportPlan) -> Result<ExportReopen, ExportError> {
         let (file, folder) = match locate(journal, true)? {
             Located::Ready(file, folder) => (file, folder),
             Located::Published(path) => return Ok(ExportReopen::Published(path)),
@@ -812,7 +1253,6 @@ impl ExportFile {
             file,
             folder,
             journal.clone(),
-            name,
             plan,
             present,
         ))))
@@ -822,7 +1262,6 @@ impl ExportFile {
         file: File,
         folder: PathBuf,
         journal: ExportJournal,
-        name: &str,
         plan: ExportPlan,
         present: u64,
     ) -> Self {
@@ -832,8 +1271,8 @@ impl ExportFile {
             durable: journal.written_bytes,
             verify_limit: present.min(plan.total),
             diverged: false,
+            base_name: journal.base_name().to_owned(),
             journal,
-            base_name: name.to_owned(),
             plan,
             next: 0,
             offset: 0,
@@ -1158,12 +1597,74 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
         {
             return Err(StorageError::Malformed);
         }
+        // A remembered "Save as" choice binds this Begin: only the journal made from it may start,
+        // and starting consumes it. A Downloads journal (or one from a replaced choice) is refused
+        // so a concurrent click can never redirect a save the user aimed elsewhere.
+        if transfer
+            .record
+            .planned
+            .as_ref()
+            .is_some_and(|planned| !planned.matches(journal))
+        {
+            return Err(StorageError::Io(
+                "Where this file is saved changed. Try saving again.".into(),
+            ));
+        }
         let mut next = transfer.record.successor()?;
         next.encoding = record::RecordEncoding::DownloadV2;
         next.export = Export::Writing(journal.clone());
+        next.planned = None;
         transfer.publish(next, &self.metadata_key, &mut self.rng)?;
         self.register_presence(index, lease, presence);
         Ok(())
+    }
+
+    /// Remember a "Save as" choice for this Download, in the same synchronous actor step that
+    /// started or resumed its acquisition run and before any network work, so an interrupted
+    /// acquisition, Pause, Lock or restart still saves to the chosen place. Fenced by that exact
+    /// current run; refused while a journal exists (a chosen place never redirects an existing
+    /// partial) and while Deleting. Replacing an earlier choice is allowed. Upgrades V1 to V2.
+    pub fn plan_download_destination(
+        &mut self,
+        run: DownloadRun,
+        choice: &ChosenDestination,
+    ) -> Result<(), StorageError> {
+        self.download_run(run)?;
+        let index = self.download_index(run.id)?;
+        let planned = choice.planned();
+        let transfer = &mut self.transfers[index];
+        if transfer.record.export != Export::None {
+            return Err(StorageError::Io(
+                "This file already has a partly saved copy. Choose Save new copy or Remove in Transfers first."
+                    .into(),
+            ));
+        }
+        if transfer.record.phase == KeepPhase::Deleting || !planned.valid() {
+            return Err(StorageError::Malformed);
+        }
+        if transfer.record.planned.as_ref() == Some(&planned) {
+            return Ok(());
+        }
+        let mut next = transfer.record.successor()?;
+        next.encoding = record::RecordEncoding::DownloadV2;
+        next.planned = Some(planned);
+        transfer.publish(next, &self.metadata_key, &mut self.rng)
+    }
+
+    /// Native-only: where a fresh export of this Download goes. `None` is the one-click
+    /// Downloads folder; `Some(Err(_))` is a remembered choice this platform cannot decode (the
+    /// vault moved to another operating system), which native refuses rather than redirecting to
+    /// Downloads. The returned choice is re-checked by every creation before anything is written.
+    pub fn download_planned_destination(
+        &self,
+        id: DownloadId,
+    ) -> Result<Option<Result<ChosenDestination, ChoiceRefusal>>, StorageError> {
+        let index = self.download_index(id)?;
+        Ok(self.transfers[index]
+            .record
+            .planned
+            .as_ref()
+            .map(PlannedDestination::destination))
     }
 
     /// Register a native task that reopened the exact saved, unhalted journal. No record write.

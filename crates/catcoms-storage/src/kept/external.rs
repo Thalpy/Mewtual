@@ -171,6 +171,7 @@ fn identity_of(
 
 /// Identity of the object behind `file`, from the handle itself.
 pub(super) fn observe(file: &File) -> io::Result<Observed> {
+    inject(Effect::Identity)?;
     #[cfg(windows)]
     {
         let info = winapi_util::file::information(file)?;
@@ -385,6 +386,24 @@ pub(super) fn valid_leaf(leaf: &str) -> bool {
         })
         && matches!(components.next(), Some(Component::Normal(name)) if name == OsStr::new(leaf))
         && components.next().is_none()
+        && !windows_device_name(leaf)
+}
+
+/// Windows reserves these names (with any extension) for devices: opening `NUL.txt` or `COM1.log`
+/// can address the device instead of a file. Native's name sanitizer already prefixes such peer
+/// names, but a "Save as" name comes from the user's dialog and must be refused here instead.
+/// Applied on every platform so a journal written on one cannot name a device on another.
+fn windows_device_name(leaf: &str) -> bool {
+    let stem = leaf
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_ascii_uppercase();
+    let numbered = (stem.starts_with("COM") || stem.starts_with("LPT"))
+        && stem.len() == 4
+        && matches!(stem.as_bytes()[3], b'1'..=b'9');
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered
 }
 
 /// Collision candidate `number` for a sanitized name, matching the native writer's convention:
@@ -422,6 +441,9 @@ pub(super) enum Effect {
     Remove,
     /// The identity check of the final name right after a successful link.
     Check,
+    /// Any handle identity query (`observe`), to model a filesystem without stable identities
+    /// (some network shares and FUSE mounts) on a test host that has them.
+    Identity,
     /// The sealed record write in `persistence.rs` (not an external path); shares the seam so a
     /// test can model a full vault volume.
     RecordWrite,

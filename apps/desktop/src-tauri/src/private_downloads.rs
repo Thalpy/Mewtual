@@ -11,9 +11,9 @@
 use super::*;
 use catcoms_app::{DownloadExportEdge, DownloadExportTransition, DownloadReady};
 use catcoms_storage::kept::{
-    flush_destination, remove_partial, DownloadId, DownloadStatus, ExportError, ExportFile,
-    ExportHalt, ExportJournal, ExportProbe, ExportProgress, ExportReopen, ExportState, ExportView,
-    KeepPhase, PartialRemoval, Publication, EXPORT_CHECKPOINT_CHUNKS,
+    flush_destination, remove_partial, ChosenDestination, DownloadId, DownloadStatus, ExportError,
+    ExportFile, ExportHalt, ExportJournal, ExportProbe, ExportProgress, ExportReopen, ExportState,
+    ExportView, KeepPhase, PartialRemoval, Publication, EXPORT_CHECKPOINT_CHUNKS,
 };
 
 #[derive(Serialize)]
@@ -274,6 +274,94 @@ pub(super) fn local_retry_delay(chunk_attempts: u32, session_retries: u32) -> Op
 
 const ALREADY_SAVED: &str =
     "This file was already saved. Clear it or save another copy from Transfers.";
+const JOURNAL_EXISTS: &str =
+    "This file already has a partly saved copy. Choose Save new copy or Remove in Transfers first.";
+/// Returned when the user closes the "Save as" dialog without choosing. Nothing was started or
+/// recorded; the renderer treats exactly this text as a quiet cancel, not a failure.
+pub(super) const SAVE_AS_CANCELLED: &str = "Save as was cancelled.";
+/// Appended when a save uses the non-resumable writer (no stable identity or hard links there).
+pub(super) const NOT_RESUMABLE_NOTE: &str =
+    "This location cannot keep a partly saved file, so an interrupted save there starts over.";
+
+/// Where one save writes. A chosen destination comes only from the native dialog through
+/// [`choose_destination`]; nothing from the renderer can construct one.
+pub(super) enum Destination {
+    /// The one-click default: the OS Downloads folder, resolved for this invocation.
+    Downloads(PathBuf),
+    /// A folder and name the user picked in the native "Save as" dialog, for this save only.
+    Chosen(Arc<ChosenDestination>),
+}
+
+/// The native "Save as" dialog behind a seam, so tests never open a real window. Returns the
+/// path the user picked, or `None` when they cancelled.
+#[async_trait::async_trait]
+pub(super) trait DestinationChooser: Send + Sync {
+    async fn choose(
+        &self,
+        directory: PathBuf,
+        suggested_name: String,
+    ) -> Result<Option<PathBuf>, String>;
+}
+
+/// Production chooser: `rfd`'s OS dialog, configured like tauri-plugin-dialog 2.7. It is built on
+/// the main thread (GTK and AppKit require that) through Tauri core's `run_on_main_thread`, then
+/// awaited on a dedicated thread; the async command only awaits a oneshot, so neither the async
+/// runtime nor the main thread blocks while the dialog is open.
+pub(super) struct NativeChooser(AppHandle);
+impl NativeChooser {
+    pub(super) fn new(app: AppHandle) -> Self {
+        Self(app)
+    }
+}
+#[async_trait::async_trait]
+impl DestinationChooser for NativeChooser {
+    async fn choose(
+        &self,
+        directory: PathBuf,
+        suggested_name: String,
+    ) -> Result<Option<PathBuf>, String> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let window = self.0.get_webview_window("main");
+        self.0
+            .run_on_main_thread(move || {
+                let mut dialog = rfd::AsyncFileDialog::new()
+                    .set_title("Save as")
+                    .set_directory(&directory)
+                    .set_file_name(&suggested_name);
+                if let Some(window) = &window {
+                    dialog = dialog.set_parent(window);
+                }
+                let pending = dialog.save_file();
+                std::thread::spawn(move || {
+                    let picked = tauri::async_runtime::block_on(pending);
+                    let _ = sender.send(picked.map(|handle| handle.path().to_path_buf()));
+                });
+            })
+            .map_err(|_| "The Save as window could not be opened.".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "The Save as window closed unexpectedly.".to_string())
+    }
+}
+
+/// Ask the user where to save, starting in Downloads with the sanitized file name. `Ok(None)`
+/// means cancelled. Whatever the dialog returns is validated before use: absolute path, usable
+/// name, an existing parent directory whose identity is captured, and no existing file or
+/// partial at that name (an existing file is refused and left untouched even if the dialog
+/// already asked to replace it).
+pub(super) async fn choose_destination(
+    chooser: &dyn DestinationChooser,
+    downloads: PathBuf,
+    name: &str,
+) -> Result<Option<ChosenDestination>, String> {
+    let Some(picked) = chooser.choose(downloads, safe_download_name(name)).await? else {
+        return Ok(None);
+    };
+    blocking(move || ChosenDestination::validate(&picked))
+        .await?
+        .map(Some)
+        .map_err(|refusal| refusal.to_string())
+}
 
 /// One chunk through `step` with the bounded local retry policy. `live` (original invocation and
 /// export lease) is checked before EVERY attempt, including after each backoff, so a session
@@ -422,7 +510,13 @@ pub(super) async fn prepare_resume(
     id: DownloadId,
     expected_intent: u64,
     fresh_copy: bool,
+    chosen: bool,
 ) -> Result<Option<SavedFileResult>, String> {
+    // A chosen destination always starts a new file. Continuing an existing partial at its own
+    // place is plain Resume; redirecting it requires the explicit Save new copy semantics.
+    if chosen && !fresh_copy && actor.download_export_state(id).await?.is_some() {
+        return Err(JOURNAL_EXISTS.into());
+    }
     let intent = if fresh_copy {
         abandon_partial(
             state,
@@ -575,7 +669,7 @@ impl ExportContext<'_> {
 pub(super) async fn export_journaled(
     ctx: &ExportContext<'_>,
     ready: &DownloadReady,
-    downloads: PathBuf,
+    destination: &Destination,
     name: &str,
 ) -> Result<Option<PathBuf>, String> {
     let plan = ready.export_plan()?;
@@ -583,8 +677,18 @@ pub(super) async fn export_journaled(
     let base = safe_download_name(name);
     let mut file = match ctx.actor.download_export_state(id).await? {
         None => {
-            let (folder, name, plan) = (downloads, base.clone(), plan.clone());
-            let file = match blocking(move || ExportFile::create(&folder, &name, plan)).await? {
+            let plan = plan.clone();
+            let created = match destination {
+                Destination::Downloads(folder) => {
+                    let (folder, name) = (folder.clone(), base.clone());
+                    blocking(move || ExportFile::create(&folder, &name, plan)).await?
+                }
+                Destination::Chosen(choice) => {
+                    let choice = choice.clone();
+                    blocking(move || ExportFile::create_chosen(&choice, plan)).await?
+                }
+            };
+            let file = match created {
                 Ok(file) => file,
                 Err(ExportError::Unsupported) => return Ok(None),
                 Err(error) => return Err(error.to_string()),
@@ -604,9 +708,14 @@ pub(super) async fn export_journaled(
             }
             file
         }
+        Some(ExportState::Writing(_)) if matches!(destination, Destination::Chosen(_)) => {
+            // A chosen destination is only ever a new file; it never redirects an existing
+            // partial. prepare_resume forgets the old journal first when Save as means a new copy.
+            return Err(JOURNAL_EXISTS.into());
+        }
         Some(ExportState::Writing(journal)) => {
-            let (saved, name, plan) = (journal.clone(), base.clone(), plan.clone());
-            match blocking(move || ExportFile::reopen(&saved, &name, plan))
+            let (saved, plan) = (journal.clone(), plan.clone());
+            match blocking(move || ExportFile::reopen(&saved, plan))
                 .await?
                 .map_err(|error| error.to_string())?
             {
@@ -801,6 +910,7 @@ mod tests {
             state,
             checked,
             export,
+            planned: false,
         }
     }
     fn writing(halt: Option<ExportHalt>, active: bool) -> ExportView {

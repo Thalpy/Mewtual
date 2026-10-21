@@ -13,9 +13,11 @@ const RECORD_V4: &[u8] = b"mewtual/kept-transfer/v4";
 // Download is a distinct sealed purpose, never an upgrade of an existing Keep record. It reuses
 // the bounded V4 body but its original transfer identity also names the private Download owner.
 const RECORD_DOWNLOAD_V1: &[u8] = b"mewtual/download-transfer/v1";
-// The V1 body plus a closed export journal (`export.rs`). Only the None-to-Writing export edge
-// upgrades a V1 record, so records without a journal stay readable by the released reader; an
-// older reader refuses this domain without deleting it.
+// The V1 body plus a closed export journal and an optional planned "Save as" destination
+// (`export.rs`). Only the edge that starts an export or remembers a choice upgrades a V1 record,
+// so a record that never had either stays readable by the released reader; an older reader
+// refuses this domain without deleting it. v2 was amended (planned destination) before it was
+// ever pushed or released, so no v3 exists.
 const RECORD_DOWNLOAD_V2: &[u8] = b"mewtual/download-transfer/v2";
 #[path = "variants.rs"]
 mod variants;
@@ -172,6 +174,9 @@ pub(super) struct Record {
     pub variants: Option<Variants>,
     /// External export journal; only DownloadV2 may carry anything but None.
     pub export: super::export::Export,
+    /// "Save as" choice remembered until Begin turns it into the journal; DownloadV2 only, and
+    /// only while `export` is None.
+    pub planned: Option<super::export::PlannedDestination>,
 }
 impl Record {
     pub(super) fn owner(&self) -> Owner {
@@ -213,6 +218,7 @@ impl Record {
             last_retry: None,
             variants: None,
             export: super::export::Export::None,
+            planned: None,
         })
     }
     pub(super) fn successor(&self) -> Result<Self, StorageError> {
@@ -251,6 +257,7 @@ impl Record {
                 RecordEncoding::DownloadV2 => false,
             }
             && self.export == super::export::Export::None
+            && self.planned.is_none()
             && !self.blocked
             && self.phase == KeepPhase::Resumable
             && self.grant == 1
@@ -356,8 +363,10 @@ impl Record {
             || next.exhausted
             || next.verified != self.verified
             || next.variants != self.variants
-            // A network Retry grant never moves the external export or its encoding.
+            // A network Retry grant never moves the external export, the remembered "Save as"
+            // choice or the encoding.
             || next.export != self.export
+            || next.planned != self.planned
             || next.encoding != self.encoding
             || next
                 .last_retry
@@ -460,6 +469,16 @@ impl Record {
         }
         if self.encoding == RecordEncoding::DownloadV2 {
             self.export.encode(&mut e);
+            // Amendment to the unreleased v2 body: a presence byte and the planned destination.
+            match &self.planned {
+                None => {
+                    e.put_u8(0);
+                }
+                Some(planned) => {
+                    e.put_u8(1);
+                    planned.encode(&mut e);
+                }
+            }
         }
         e.finish()
     }
@@ -586,10 +605,16 @@ impl Record {
         } else {
             None
         };
-        let export = if encoding == RecordEncoding::DownloadV2 {
-            super::export::Export::decode(&mut d)?
+        let (export, planned) = if encoding == RecordEncoding::DownloadV2 {
+            let export = super::export::Export::decode(&mut d)?;
+            let planned = match d.get_u8().map_err(|_| bad())? {
+                0 => None,
+                1 => Some(super::export::PlannedDestination::decode(&mut d)?),
+                _ => return Err(bad()),
+            };
+            (export, planned)
         } else {
-            super::export::Export::None
+            (super::export::Export::None, None)
         };
         d.finish().map_err(|_| bad())?;
         let record = Self {
@@ -611,6 +636,7 @@ impl Record {
             last_retry,
             variants,
             export,
+            planned,
         };
         record.validate()?;
         Ok(record)

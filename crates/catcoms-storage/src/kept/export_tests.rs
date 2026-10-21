@@ -8,6 +8,9 @@ use catcoms_crypto::DeviceId;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+#[path = "export_chosen_tests.rs"]
+mod chosen;
+
 const CHUNKS: [&[u8]; 2] = [b"alpha chunk one!", b"bravo chunk two"];
 
 fn scope() -> KeepScope {
@@ -243,9 +246,7 @@ fn torn_or_extra_tail_after_the_checkpoint_is_verified_then_rewritten() {
     };
     assert_eq!(journal.written_chunks(), 0);
     let lease = reverified(&mut store, id);
-    let ExportReopen::Ready(mut file) =
-        ExportFile::reopen(&journal, "notes.txt", export_plan()).unwrap()
-    else {
+    let ExportReopen::Ready(mut file) = ExportFile::reopen(&journal, export_plan()).unwrap() else {
         panic!("our partial reopens");
     };
     store
@@ -285,8 +286,7 @@ fn checkpoint_claiming_more_than_the_file_rewinds_but_a_changed_byte_inside_it_h
         drop(store);
         let mut store = open(&fx.vault);
         let lease = reverified(&mut store, id);
-        let ExportReopen::Ready(mut file) =
-            ExportFile::reopen(&checkpoint, "notes.txt", export_plan()).unwrap()
+        let ExportReopen::Ready(mut file) = ExportFile::reopen(&checkpoint, export_plan()).unwrap()
         else {
             panic!("identity still matches");
         };
@@ -335,8 +335,7 @@ fn verification_never_lowers_a_checkpoint_but_a_rewind_does() {
                 .unwrap();
             handle.set_len(3).unwrap();
         }
-        let ExportReopen::Ready(mut file) =
-            ExportFile::reopen(&full, "notes.txt", export_plan()).unwrap()
+        let ExportReopen::Ready(mut file) = ExportFile::reopen(&full, export_plan()).unwrap()
         else {
             panic!();
         };
@@ -378,8 +377,7 @@ fn identity_collision_over_foreign_content_halts_and_removal_leaves_the_bytes() 
     journal.file_id = observed.identity;
     journal.written_chunks = 1;
     journal.written_bytes = CHUNKS[0].len() as u64;
-    let ExportReopen::Ready(mut forged) =
-        ExportFile::reopen(&journal, "notes.txt", export_plan()).unwrap()
+    let ExportReopen::Ready(mut forged) = ExportFile::reopen(&journal, export_plan()).unwrap()
     else {
         panic!("forged identity matches");
     };
@@ -469,7 +467,7 @@ fn destination_changes_while_paused_become_typed_halts_without_touching_other_fi
         );
         assert!(
             matches!(
-                ExportFile::reopen(&journal, "notes.txt", export_plan()).unwrap(),
+                ExportFile::reopen(&journal, export_plan()).unwrap(),
                 ExportReopen::Halt(halt) if halt == expected
             ),
             "{change:?}"
@@ -552,9 +550,7 @@ fn a_live_older_session_blocks_a_second_writer_until_it_is_dropped() {
     ));
     store.set_download_paused(id, intent + 1, false).unwrap();
     let lease = reverified(&mut store, id);
-    let ExportReopen::Ready(newer) =
-        ExportFile::reopen(&journal, "notes.txt", export_plan()).unwrap()
-    else {
+    let ExportReopen::Ready(newer) = ExportFile::reopen(&journal, export_plan()).unwrap() else {
         panic!();
     };
     assert!(
@@ -669,19 +665,33 @@ fn disk_full_while_writing_persists_nothing_and_a_later_attempt_completes() {
 }
 
 #[test]
-fn unsupported_links_choose_the_fallback_at_creation_and_halt_at_publication() {
+fn a_folder_without_links_is_refused_at_creation_and_halts_at_publication() {
+    // FAT and exFAT report identities but cannot link, and every publication (journaled or the
+    // non-resumable writer) is a no-replace link: refuse before any plaintext exists. Linux vfat
+    // reports the failure as a permission error, so the kind does not matter.
+    for kind in [io::ErrorKind::Unsupported, io::ErrorKind::PermissionDenied] {
+        let fx = fixture();
+        assert!(matches!(
+            injected(Effect::Link, kind, || {
+                ExportFile::create(&fx.downloads, "notes.txt", export_plan())
+            }),
+            Err(ExportError::NoLinks)
+        ));
+        assert_eq!(
+            fs::read_dir(&fx.downloads).unwrap().count(),
+            0,
+            "a refused destination keeps nothing behind"
+        );
+    }
+    // A folder without stable identities still selects the non-resumable writer.
     let fx = fixture();
     assert!(matches!(
-        injected(Effect::Link, io::ErrorKind::Unsupported, || {
+        injected(Effect::Identity, io::ErrorKind::Unsupported, || {
             ExportFile::create(&fx.downloads, "notes.txt", export_plan())
         }),
         Err(ExportError::Unsupported)
     ));
-    assert_eq!(
-        fs::read_dir(&fx.downloads).unwrap().count(),
-        0,
-        "an unsupported destination keeps nothing for the fallback writer to trip over"
-    );
+    assert_eq!(fs::read_dir(&fx.downloads).unwrap().count(), 0);
     let mut store = open(&fx.vault);
     let (_id, lease) = completed(&mut store);
     let mut file = started(&mut store, &lease, &fx.downloads);
@@ -722,9 +732,7 @@ fn occupied_final_name_is_renamed_durably_before_linking_and_never_replaced() {
     drop(store);
     let mut store = open(&fx.vault);
     let lease = reverified(&mut store, id);
-    let ExportReopen::Ready(mut file) =
-        ExportFile::reopen(&journal, "notes.txt", export_plan()).unwrap()
-    else {
+    let ExportReopen::Ready(mut file) = ExportFile::reopen(&journal, export_plan()).unwrap() else {
         panic!();
     };
     store
@@ -1193,7 +1201,11 @@ fn export_errors_never_carry_paths_or_names() {
         ExportError::Halted(ExportHalt::Changed),
         ExportError::Full,
         ExportError::Unsupported,
+        ExportError::NoLinks,
         ExportError::Inactive,
+        ExportError::Refused(ChoiceRefusal::Exists),
+        ExportError::Refused(ChoiceRefusal::NotWritable),
+        chosen_error(io::Error::from(io::ErrorKind::PermissionDenied)),
         local(fs::File::open(fx.downloads.join("notes.txt.mewtual-part")).unwrap_err()),
         local(io::Error::from(io::ErrorKind::TimedOut)),
     ];

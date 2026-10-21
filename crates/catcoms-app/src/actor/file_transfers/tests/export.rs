@@ -237,7 +237,7 @@ async fn pause_mid_export_stops_effects_and_resume_continues_the_same_partial_fi
         panic!("journal survives Pause");
     };
     let ExportReopen::Ready(mut file) =
-        ExportFile::reopen(&saved_journal, "cat.bin", second.export_plan().unwrap()).unwrap()
+        ExportFile::reopen(&saved_journal, second.export_plan().unwrap()).unwrap()
     else {
         panic!("our partial reopens");
     };
