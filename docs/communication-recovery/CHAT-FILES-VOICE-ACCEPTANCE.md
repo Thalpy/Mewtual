@@ -1,5 +1,38 @@
 # Chat, files and voice implementation evidence
 
+## Protected WebCrypto confirmation (21 October, native integration pending)
+
+The selected browser broker now consumes immutable protected row projections for seal/open,
+using the original accepted derivation keys. Twelve row claims and all byte limits are unchanged.
+The serial prepaid execution position remains reserved between flights; maximum retained input
+plus maximum serial engine peak must fit before copying. Real owned TypedArrays prevent aliasing
+subclass/Buffer slices. Historical tagged and tagless admission outcomes cannot settle a prior
+browser's engine. Lost result replies retry original computed output without another AEAD.
+
+New real P-256/HKDF/AES-GCM tests cover all three flights and all three candidates, maximum
+4,096-byte AAD/512-byte confirmation plaintext, lost accepted/rejected replies, delayed settlement,
+full ordinary byte/queue pressure, engine cancellation, nonce reuse, corrupted ciphertext,
+identity/role/binding/allowance substitutions, aliased caller mutation and metadata-only history.
+The native adapter is an explicit fault seam, not actual native IPC or RTC. All 14 new tests pass
+(`voice-protected-boundaries-1.log`); existing 91 pass. The earlier new run passed ten/failed one
+because changed-length fixture input triggered the correct engine-byte rejection before the
+intended equal-size identity check. No runtime check was loosened. Corrected combined verification
+passes104/104 (`voice-protected-all-2.log`) before the final maximum-candidate boundary test.
+
+Final full frontend: **2,268 passed**, zero failures (67.43s,
+`voice-protected-frontend-full-2.log`). Svelte: zero errors/warnings (`voice-protected-svelte-2.log`).
+Production build: pass,36.24s (`voice-protected-build-1.log`). All ten rendered Edge flows pass
+(`voice-protected-flows-1.log`). Read-only re-review resolves both medium findings and reports no
+remaining blocker/high/medium. The initial existing-test command did not run because the new log
+directory was absent; it is not counted as evidence. The corrected command passed91 existing cases.
+
+Rust/native sources are unchanged from frozen `ecc8232f`; its one sequential complete validation
+chain is still running in `communication-proof-finish-worktree`. Native startup follows its
+full root/native/check/build gates. No parallel Cargo suite is running here. Production Root result
+admission, native IPC, phase/key transfer, normal V2/RTC, media relay, combined rollout and physical
+audio/network acceptance remain open. Only one physical desktop is available. The separate native
+provider experiment is unselected/uncompiled and is not included in this implementation.
+
 ## Protected Proof/Finish work in progress (21 October)
 
 The `communication-proof-finish-worktree` (base local `600186e5`) contains protected follow-up

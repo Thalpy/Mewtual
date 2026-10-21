@@ -1,5 +1,19 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Protected browser confirmation seam (21 October, not production IPC)
+
+`registerProtectedConfirmation(owner, chain, native, input)` accepts the exact native action,
+chain binding, immutable row, role/kind, decimal sequence, AAD/body and engine-byte allowance.
+An identical projection recovers its handle; changed inputs or a spent row refuse before native
+admission. The adapter must resolve the original native action and authorize first effects again.
+Handles expose terminal metadata, never plaintext or fresh RTC authority.
+
+`VoiceProtectedConfirmationNative` supplies exact admit/commit/settle. Tagged and tagless terminal
+admission replies are history only; they cannot settle an earlier browser's engine. Completed
+output remains owned through uncertain result replies. A future bounded driver must retry rows
+after derivation readiness and retry older uncertain handles as well as new follow-ups. Broker
+version6 refuses older retained pools. No production command or native IPC consumer is added.
+
 ## Protected confirmation response (21 October, awaiting validation)
 
 `Root::respond_voice_confirmation(grant, handshake, trigger)` takes an actual retained

@@ -1,5 +1,34 @@
 # Mewtual; Handover
 
+## Selected WebCrypto continuation (21 October)
+
+Local `ecc8232f` is frozen in `communication-proof-finish-worktree` for one sequential full
+root/native/check/build chain; startup follows. It passes 365 focused voice and 2,254 frontend
+tests. The full root suite is still running. Do not start duplicate Cargo jobs, edit that frozen
+Rust source or attribute earlier full suites to it. PR48 remains published at `d7d0586f`.
+
+Active implementation is `communication-browser-handoff-worktree`, based on `ecc8232f`.
+The selected WebCrypto broker now supports protected seal/open with unchanged prepaid rows/bytes,
+a serial execution lane, owned inputs and exact completed-output retries. All 105 focused crypto
+cases pass across their files, including all three candidate lanes at maximum headers/bodies.
+The complete frontend passes **2,268/2,268** (67.43s); Svelte reports zero errors/warnings,
+production build passes (36.24s), and all ten rendered Edge flows pass. Static re-review has no
+remaining blocker/high/medium. Full backend/native/startup gates remain pending. The first new run passed ten/failed
+one: a changed-length fixture met the correct exact engine-byte refusal before the intended
+identity check. The corrected fixture changes equal-length data. The first existing-test command
+did not run because its log directory was absent; the corrected rerun passes 91 existing cases.
+
+Read-only review caught aliasing TypedArray.slice copies and a tagless historical refusal that
+could settle an earlier browser's work. Both are corrected with regressions. The future driver
+must retry rows after derivation readiness and uncertain earlier results before they strand the
+serial lane. Production Root/IPC/RTC, phase transfer, media relay and combined/physical acceptance
+remain open. Only one physical desktop is available.
+
+The separate `communication-native-engine-worktree` preserves an unselected, uncompiled native
+provider/ownership experiment. It is NOT in this continuation. Review recommends retaining
+WebCrypto: switching providers adds key/build/audit/interop work without removing SDP/ICE IPC.
+No provider, dependency or ADR change is adopted. Do not accidentally include that experiment.
+
 ## Active continuation (21 October)
 
 Reviewed low Hello is committed locally at `600186e5`, with 352 focused voice tests, 2,254 full

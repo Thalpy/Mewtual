@@ -1,5 +1,16 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Protected browser computation (21 October, integration pending)
+
+Protected native row projections cannot use ordinary keys or raw encryption/opening APIs.
+Role/row/allowance checks precede owned copying, including TypedArray subclasses with aliasing
+slice methods. Counters burn before encryption; failed crypto and repulls cannot reset them.
+One prepaid serial execution position and fixed rows bound work independently of ordinary load.
+Completed output remains charged across uncertain replies. Historical tagged/tagless admission
+reports cannot compute, commit or settle another browser's engine. Chain close revokes keys but
+retains actual running work through final promise/settlement drainage. Browser bookkeeping is not
+protocol authority; native first-effect/IPC, phase transfer, live RTC/media remain unimplemented.
+
 ## Delayed protected follow-up classification (21 October, awaiting validation)
 
 Protected Proof/Finish intake deliberately retains original pair/chain inbox authority across

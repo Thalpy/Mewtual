@@ -1,5 +1,17 @@
 # Mewtual; Architecture
 
+## Protected browser confirmation (21 October, integration pending)
+
+The selected WebCrypto broker consumes protected native row projections after accepted derivation.
+Rows1..9 map the three Hello/Proof/Finish candidates and local role; row0 remains derivation.
+Twelve fixed claims and existing byte allowances are unchanged. A bounded private queue shares
+one prepaid execution position through actual crypto/result/settlement drainage, retaining it
+between flights. Retained input projections plus the maximum serial engine peak must fit before
+copying. Owned TypedArrays cannot alias caller subclasses. Exact lost result replies retry the
+same computed bytes without another AEAD/counter allocation. Historical admission replies are
+metadata and cannot settle earlier work. Tests use real WebCrypto with a fault adapter; production
+native IPC/Root/RTC and authorized confirmation-to-SDP key transfer remain open.
+
 ## Protected three-flight continuation (21 October, awaiting validation)
 
 The continuation checkout generalizes protected intake to Hello/Proof/Finish and adds a native

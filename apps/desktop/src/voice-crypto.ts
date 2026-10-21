@@ -116,6 +116,19 @@ export type VoiceDerivationHandle = Readonly<{
 export type VoiceJoinKeyHandle = Readonly<{ publicKey(): Uint8Array<ArrayBuffer> }>;
 export type VoiceCryptoChain = Readonly<{ close(): void; isCurrent(): boolean }>;
 export type VoiceDerivationSetup = Readonly<{ localPublicKey: Uint8Array; peerPublicKey: Uint8Array; transcript: Uint8Array }>;
+
+/** Projection of one actual native protected row. body is native plaintext for seal, signed
+ * ciphertext for open. These data never create native authority; the adapter resolves the
+ * original registered action again before signing/consuming its token. */
+export type VoiceProtectedConfirmationInput = VoiceConfirmationIdentity & Readonly<{
+  binding: VoiceCryptoChainBinding; row: number; operation: "seal" | "open";
+  kind: ConfirmationKind; sequence: string; aad: Uint8Array; body: Uint8Array; engineBytes: number;
+}>;
+export interface VoiceProtectedConfirmationNative {
+  admitAction(identity: VoiceConfirmationIdentity, bytes: number): Promise<AdmissionReply | CommitReply>;
+  commitProtectedConfirmation(identity: VoiceConfirmationIdentity, output: Uint8Array, resultTag: string): Promise<CommitReply>;
+  settleAction(identity: VoiceConfirmationIdentity): Promise<void>;
+}
 type ActionOutcome = VoiceConfirmationOutcome | VoiceDerivationOutcome;
 type ActionHandle = Readonly<{
   attempt(): Promise<ActionOutcome>; inspect(): VoiceConfirmationStatus; retire(): void;
@@ -131,6 +144,8 @@ type BrowserChain = {
   running: boolean; execution: boolean; variable: boolean; fixedBytes: number;
   record: ActionRecord | null; unsubscribe: () => void; handle: VoiceCryptoChain;
   timer: ReturnType<typeof setTimeout> | null;
+  records: Map<number, ActionRecord>; queue: ActionRecord[];
+  retainedBytes: number; enginePeak: number;
 };
 const CHAIN_ROWS = 12;
 const CHAIN_HISTORY = 24 * 1024;
@@ -167,10 +182,11 @@ function signal<T>(): Signal<T> {
   return { promise, resolve };
 }
 type ActionRecord = {
-  operation: "confirmation" | "derive";
+  operation: "confirmation" | "derive" | "protected";
   owner: VoiceCryptoOwner; pair: VoiceCryptoPair | null;
   identity: VoiceConfirmationIdentity; input: VoiceConfirmationInput | null; bytes: number;
   derivation: VoiceDerivationInput | null; chain: BrowserChain | null;
+  protectedInput: VoiceProtectedConfirmationInput | null;
   status: VoiceConfirmationStatus; outcome: ActionOutcome | null;
   attempt: Signal<ActionOutcome> | null; retry: Signal<void> | null;
   job: Job | null; running: boolean; retired: boolean; drained: boolean; released: boolean;
@@ -189,6 +205,11 @@ function sameConfirmation(a: VoiceConfirmationInput, b: VoiceConfirmationInput):
   return a.action === b.action && a.version === b.version && a.inputTag === b.inputTag &&
     a.handshake === b.handshake && a.deliveryToken === b.deliveryToken && a.kind === b.kind &&
     a.sequence === b.sequence && sameBytes(a.aad, b.aad) && sameBytes(a.ciphertext, b.ciphertext);
+}
+function sameProtectedConfirmation(a: VoiceProtectedConfirmationInput, b: VoiceProtectedConfirmationInput): boolean {
+  return a.owner === b.owner && a.action === b.action && a.version === b.version && a.inputTag === b.inputTag &&
+    sameBinding(a.binding, b.binding) && a.row === b.row && a.operation === b.operation && a.kind === b.kind &&
+    a.sequence === b.sequence && a.engineBytes === b.engineBytes && sameBytes(a.aad, b.aad) && sameBytes(a.body, b.body);
 }
 function exactKeys(value: unknown, names: string[]): value is Record<string, unknown> {
   return !!value && typeof value === "object" && Reflect.ownKeys(value).length === names.length &&
@@ -242,7 +263,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 5;
+  readonly version = 6;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -254,6 +275,7 @@ export class VoiceCryptoBroker {
   private readonly actions = new Map<string, ActionRecord>();
   private confirmationNative: VoiceConfirmationNative | null = null;
   private derivationNative: VoiceDerivationNative | null = null;
+  private protectedNative: VoiceProtectedConfirmationNative | null = null;
   private readonly joinKeys = new WeakMap<VoiceJoinKeyHandle, JoinKeyRecord>();
   private readonly keys = new Set<JoinKeyRecord>();
   private readonly chains = new WeakMap<VoiceCryptoChain, BrowserChain>();
@@ -312,8 +334,8 @@ export class VoiceCryptoBroker {
     key.join = join; key.key = keyRef;
   }
 
-  /** Inactive derive-only reservation, matching the native prerequisite. Twelve row claims
-   * are protected, but only row0 has a consumer. No confirmation/SDP readiness is implied.
+  /** Protected derivation and confirmation reservation. Twelve immutable row claims and one
+   * serial execution position remain prepaid through close; SDP requires a later phase owner.
    * expires is computed from the ORIGINAL browser request start, never native monotonic time. */
   prepareChain(owner: VoiceCryptoOwner, handle: VoiceJoinKeyHandle, binding: VoiceCryptoChainBinding, expires: number, setup: VoiceDerivationSetup): VoiceCryptoChain {
     current(owner); this.collectChains();
@@ -340,9 +362,10 @@ export class VoiceCryptoBroker {
     this.charge(owner, fixed + CHAIN_VARIABLE);
     const chain: BrowserChain = {
       owner, key, binding: Object.freeze({ ...binding }), expires, closed: false,
-      setup: Object.freeze({ localPublicKey: setup.localPublicKey.slice(), peerPublicKey: setup.peerPublicKey.slice(), transcript: setup.transcript.slice() }),
+      setup: Object.freeze({ localPublicKey: new Uint8Array(setup.localPublicKey), peerPublicKey: new Uint8Array(setup.peerPublicKey), transcript: new Uint8Array(setup.transcript) }),
       rowIssued: false, reservedRows: CHAIN_ROWS, running: false, execution: true,
       variable: true, fixedBytes: fixed, record: null, unsubscribe: () => {}, handle: null!, timer: null,
+      records: new Map(), queue: [], retainedBytes: 130 + setup.transcript.length, enginePeak: 0,
     };
     chain.handle = Object.freeze({ close: () => this.closeChain(chain), isCurrent: () => this.chainCurrent(chain) });
     this.reservedRows += CHAIN_ROWS; this.protectedPositions++;
@@ -380,11 +403,11 @@ export class VoiceCryptoBroker {
     this.reservedRows -= rows; chain.reservedRows = 0;
     chain.fixedBytes -= rows * (CHAIN_HISTORY / CHAIN_ROWS); this.refund(chain.owner, rows * (CHAIN_HISTORY / CHAIN_ROWS));
     chain.record?.pair?.retire();
-    if (chain.record) this.retireAction(chain.record);
+    for (const record of [...chain.records.values()]) this.retireAction(record);
     if (!chain.running) this.drainChain(chain);
   }
   private drainChain(chain: BrowserChain): void {
-    if (chain.execution) { chain.execution = false; this.protectedPositions--; }
+    if (chain.closed && chain.execution && !chain.running) { chain.execution = false; this.protectedPositions--; }
     if (chain.closed && chain.variable && !chain.running) {
       if (chain.setup) {
         chain.setup.localPublicKey.fill(0); chain.setup.peerPublicKey.fill(0); chain.setup.transcript.fill(0); chain.setup = null;
@@ -392,6 +415,10 @@ export class VoiceCryptoBroker {
       if (chain.record?.derivation) {
         chain.record.derivation.localPublicKey.fill(0); chain.record.derivation.peerPublicKey.fill(0); chain.record.derivation.transcript.fill(0);
         chain.record.derivation = null;
+      }
+      for (const record of chain.records.values()) {
+        record.protectedInput?.aad.fill(0); record.protectedInput?.body.fill(0);
+        record.protectedInput = null;
       }
       chain.variable = false; this.refund(chain.owner, CHAIN_VARIABLE);
       if (this.progress.get(chain.owner.group) === chain) this.progress.delete(chain.owner.group);
@@ -427,11 +454,14 @@ export class VoiceCryptoBroker {
       return previous.handle as VoiceDerivationHandle;
     }
     if (chain.rowIssued) throw new Error("voice derivation row already issued");
+    const retained = chain.retainedBytes + 130 + input.transcript.length;
+    const peak = Math.max(chain.enginePeak, input.engineBytes);
+    if (retained + peak > CHAIN_VARIABLE) throw new Error("voice chain capacity reached");
     const identity = Object.freeze({ owner: owner.token, action: input.action, version: input.version, inputTag: input.inputTag });
     const owned = Object.freeze({ ...identity, binding: chain.binding, engineBytes: input.engineBytes,
-      localPublicKey: input.localPublicKey.slice(), peerPublicKey: input.peerPublicKey.slice(), transcript: input.transcript.slice() });
+      localPublicKey: new Uint8Array(input.localPublicKey), peerPublicKey: new Uint8Array(input.peerPublicKey), transcript: new Uint8Array(input.transcript) });
     const record: ActionRecord = {
-      operation: "derive", owner, pair: null, identity, input: null, derivation: owned, chain, bytes: 0,
+      operation: "derive", owner, pair: null, identity, input: null, derivation: owned, protectedInput: null, chain, bytes: 0,
       status: "queued", outcome: null, attempt: null, retry: null, job: null, running: false,
       retired: false, drained: false, released: false, unsubscribe: () => {}, handle: null!,
     };
@@ -442,8 +472,63 @@ export class VoiceCryptoBroker {
     });
     record.handle = action;
     chain.rowIssued = true; chain.reservedRows--; this.reservedRows--;
-    chain.record = record; this.actions.set(id, record); this.derivationNative ??= native;
+    chain.record = record; chain.records.set(0, record); chain.retainedBytes = retained; chain.enginePeak = peak;
+    this.actions.set(id, record); this.derivationNative ??= native;
     return action;
+  }
+
+  /** Consume one native-projected protected row. Repulls coalesce the original immutable
+   * input; a different action can never reuse a spent row, including after engine failure.
+   * All buffers/peak are covered BEFORE copying by the existing chain's variable reservation. */
+  registerProtectedConfirmation(owner: VoiceCryptoOwner, plan: VoiceCryptoChain, native: VoiceProtectedConfirmationNative,
+    input: VoiceProtectedConfirmationInput): VoiceConfirmationHandle {
+    current(owner);
+    const chain = this.chains.get(plan);
+    if (!chain || chain.owner !== owner || !this.chainCurrent(chain) ||
+        !exactKeys(input, ["owner", "action", "version", "inputTag", "binding", "row", "operation", "kind", "sequence", "aad", "body", "engineBytes"]) ||
+        input.owner !== owner.token || !validBinding(input.binding) || !sameBinding(chain.binding, input.binding) ||
+        typeof input.inputTag !== "string" || !/^[0-9a-f]{64}$/.test(input.inputTag) ||
+        !Number.isInteger(input.row) || input.row < 1 || input.row > 9 ||
+        !(input.aad instanceof Uint8Array) || !(input.body instanceof Uint8Array) || input.aad.length > MAX_CONTEXT) {
+      throw new Error("invalid native protected confirmation input");
+    }
+    u64(input.action, "action"); u64(input.version, "action version"); u64(input.sequence, "sequence");
+    const step = (input.row - 1) % 3;
+    const kind = (["hello", "proof", "finish"] as const)[step];
+    const seal = chain.binding.localIsLow ? step !== 1 : step === 1;
+    const ciphertextBytes = seal ? input.body.length + 16 : input.body.length;
+    if (input.kind !== kind || input.operation !== (seal ? "seal" : "open") ||
+        ciphertextBytes < 16 || ciphertextBytes > 528 ||
+        input.engineBytes !== 4 * (input.aad.length + ciphertextBytes) + 3 * 512 + 2048) {
+      throw new Error("invalid native protected confirmation input");
+    }
+    const id = owner.token + "/" + input.action, previous = this.actions.get(id);
+    if (previous) {
+      if (previous.owner !== owner || previous.chain !== chain || previous.operation !== "protected" ||
+          !previous.protectedInput || !sameProtectedConfirmation(previous.protectedInput, input)) {
+        throw new Error("native protected confirmation identity changed");
+      }
+      return previous.handle as VoiceConfirmationHandle;
+    }
+    const pair = chain.record?.outcome?.kind === "accepted" ? chain.record.pair : null;
+    if (!pair || !pair.isProtected() || chain.records.has(input.row)) throw new Error("voice protected row unavailable");
+    const retained = chain.retainedBytes + input.aad.length + input.body.length;
+    const peak = Math.max(chain.enginePeak, input.engineBytes);
+    if (retained + peak > CHAIN_VARIABLE) throw new Error("voice chain capacity reached");
+    const identity = Object.freeze({ owner: owner.token, action: input.action, version: input.version, inputTag: input.inputTag });
+    // Uint8Array subclasses may override slice; Buffer.slice is a shared view. Construct real
+    // owned arrays so caller mutation cannot change input after its native identity is fixed.
+    const owned = Object.freeze({ ...input, binding: chain.binding, aad: new Uint8Array(input.aad), body: new Uint8Array(input.body) });
+    const record: ActionRecord = {
+      operation: "protected", owner, pair, identity, input: null, derivation: null, protectedInput: owned, chain, bytes: 0,
+      status: "queued", outcome: null, attempt: null, retry: null, job: null, running: false,
+      retired: false, drained: false, released: false, unsubscribe: () => {}, handle: null!,
+    };
+    record.handle = Object.freeze({ attempt: () => this.attemptAction(record) as Promise<VoiceConfirmationOutcome>,
+      inspect: () => record.status, retire: () => this.retireAction(record) });
+    chain.records.set(input.row, record); chain.retainedBytes = retained; chain.enginePeak = peak;
+    chain.reservedRows--; this.reservedRows--; this.actions.set(id, record); this.protectedNative ??= native;
+    return record.handle as VoiceConfirmationHandle;
   }
 
   /** Pair wrappers come from the retained broker's module. A fresh HMR derive may finish on
@@ -563,7 +648,7 @@ export class VoiceCryptoBroker {
       aad: new Uint8Array(input.aad), ciphertext: new Uint8Array(input.ciphertext),
     });
     const record: ActionRecord = {
-      operation: "confirmation", derivation: null, chain: null,
+      operation: "confirmation", derivation: null, protectedInput: null, chain: null,
       owner, pair, identity, input: owned, bytes, status: "queued", outcome: null,
       attempt: null, retry: null, job: null, running: false, retired: false,
       drained: false, released: false, unsubscribe: () => {}, handle: null!,
@@ -619,15 +704,23 @@ export class VoiceCryptoBroker {
     };
     record.job = job;
     if (record.chain) {
-      // This position was paid before the plan was published. It is independent of the
-      // ordinary queue, including a full queue of 32. Actual promise drainage returns it.
-      const chain = record.chain;
-      chain.running = true; this.active++; this.protectedActive++;
-      void job.start().finally(() => {
-        this.active--; this.protectedActive--; chain.running = false; this.drainChain(chain);
-      });
+      // The bounded row queue shares one prepaid position. Follow-up input may arrive before
+      // the previous result RPC settles; it cannot start a second engine in the same lane.
+      record.chain.queue.push(record); this.pumpProtected(record.chain);
     } else { this.queue.push(job); this.pump(); }
     return attempt;
+  }
+
+  private pumpProtected(chain: BrowserChain): void {
+    if (chain.running || !this.chainCurrent(chain)) return;
+    const record = chain.queue.shift();
+    if (!record) return;
+    if (record.retired || !record.job) { this.pumpProtected(chain); return; }
+    chain.running = true; this.active++; this.protectedActive++;
+    void record.job.start().finally(() => {
+      this.active--; this.protectedActive--; chain.running = false;
+      this.drainChain(chain); this.pumpProtected(chain);
+    });
   }
 
   private finishAction(record: ActionRecord, outcome: ActionOutcome): void {
@@ -644,18 +737,20 @@ export class VoiceCryptoBroker {
   }
 
   private async driveAction(record: ActionRecord): Promise<void> {
-    const native = record.operation === "derive" ? this.derivationNative! : this.confirmationNative!;
+    const native = record.operation === "derive" ? this.derivationNative! :
+      record.operation === "protected" ? this.protectedNative! : this.confirmationNative!;
     let attemptedAdmission = false, admitted = false, historicalOnly = false;
     let plaintext: Uint8Array<ArrayBuffer> | null = null, resultTag: string | null = null;
     const live = () => !record.retired && record.owner.isCurrent() && (!record.chain || this.chainCurrent(record.chain));
     try {
       while (live() && !admitted) {
         record.status = "admitting"; attemptedAdmission = true;
-        let answer: AdmissionReply | DerivationCommitReply;
-        try { answer = await native.admitAction(record.identity, record.derivation?.engineBytes ?? record.bytes); }
+        let answer: AdmissionReply | DerivationCommitReply | CommitReply;
+        try { answer = await native.admitAction(record.identity, record.derivation?.engineBytes ?? record.protectedInput?.engineBytes ?? record.bytes); }
         catch { await this.uncertainAction(record); continue; }
         if (!live()) break;
-        if (record.operation === "derive" && this.finishDerivationReply(record, answer)) {
+        if ((record.operation === "derive" && this.finishDerivationReply(record, answer)) ||
+            (record.operation === "protected" && this.finishConfirmationReply(record, answer))) {
           // A past receipt is no authority to settle an engine owned by an earlier browser
           // incarnation. This broker did not compute it and cannot attest its retirement.
           historicalOnly = true; return;
@@ -666,6 +761,9 @@ export class VoiceCryptoBroker {
         } else if (exactKeys(answer, ["kind", "owner", "action", "version", "inputTag", "receipt", "code"]) &&
                    answer.kind === "rejected" && boundIdentity(answer, record.identity) &&
                    boundText(answer.receipt) && rejection(answer.code)) {
+          // A protected terminal admission report describes past native state. This window
+          // did not compute it and cannot attest settlement of an earlier browser's engine.
+          if (record.operation === "protected") historicalOnly = true;
           this.finishAction(record, Object.freeze({ kind: "rejected", receipt: answer.receipt, code: answer.code }));
           return;
         } else { await this.uncertainAction(record); }
@@ -680,9 +778,11 @@ export class VoiceCryptoBroker {
             input.peerPublicKey, input.transcript, input.binding.localIsLow, () => live(), true);
           // Native derivation commits an empty closed marker, never a key export.
           plaintext = new Uint8Array();
+        } else if (record.operation === "protected") {
+          plaintext = await record.pair!.computeProtectedConfirmation(CONFIRM_COMPUTE, record.protectedInput!);
         } else plaintext = await record.pair!.computeConfirmation(CONFIRM_COMPUTE, record.input!);
         if (!live()) return;
-        if (plaintext.length > 512) throw new Error("invalid confirmation engine result");
+        if (plaintext.length > (record.protectedInput?.operation === "seal" ? 528 : 512)) throw new Error("invalid confirmation engine result");
         const digest = new Uint8Array(await this.subtle.digest("SHA-256", plaintext));
         if (digest.length !== 32) throw new Error("invalid confirmation digest");
         resultTag = Array.from(digest, value => value.toString(16).padStart(2, "0")).join("");
@@ -696,6 +796,7 @@ export class VoiceCryptoBroker {
         let answer: CommitReply | DerivationCommitReply | null = null;
         try {
           if (record.operation === "derive") answer = await this.derivationNative!.commitDerivation(record.identity, resultTag);
+          else if (record.operation === "protected") answer = await this.protectedNative!.commitProtectedConfirmation(record.identity, copy, resultTag);
           else {
             const input = record.input!;
             const packet = Object.freeze({ ...input, aad: input.aad.slice(), ciphertext: input.ciphertext.slice() });
@@ -709,19 +810,7 @@ export class VoiceCryptoBroker {
           if (this.finishDerivationReply(record, answer)) return;
           await this.uncertainAction(record); continue;
         }
-        if (exactKeys(answer, ["kind", "owner", "action", "version", "inputTag", "resultTag", "receipt", "confirmation"]) &&
-            answer.kind === "accepted" && boundIdentity(answer, record.identity) &&
-            answer.resultTag === resultTag && boundText(answer.receipt) &&
-            "confirmation" in answer && (answer.confirmation === "continue" || answer.confirmation === "confirmed")) {
-          this.finishAction(record, Object.freeze({ kind: "accepted", receipt: Object.freeze({ ...answer }) as VoiceConfirmationReceipt }));
-          return;
-        }
-        if (exactKeys(answer, ["kind", "owner", "action", "version", "inputTag", "resultTag", "receipt", "code"]) &&
-            answer.kind === "rejected" && boundIdentity(answer, record.identity) &&
-            answer.resultTag === resultTag && boundText(answer.receipt) && rejection(answer.code)) {
-          this.finishAction(record, Object.freeze({ kind: "rejected", receipt: answer.receipt, code: answer.code }));
-          return;
-        }
+        if (this.finishConfirmationReply(record, answer, resultTag)) return;
         await this.uncertainAction(record);
       }
     } finally {
@@ -733,6 +822,24 @@ export class VoiceCryptoBroker {
       }
       if (record.retired || !record.owner.isCurrent()) this.retireAction(record);
     }
+  }
+
+  private finishConfirmationReply(record: ActionRecord, answer: unknown, resultTag?: string): boolean {
+    const tag = (value: unknown) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value) &&
+      (resultTag === undefined || value === resultTag);
+    if (exactKeys(answer, ["kind", "owner", "action", "version", "inputTag", "resultTag", "receipt", "confirmation"]) &&
+        answer.kind === "accepted" && boundIdentity(answer, record.identity) && tag(answer.resultTag) &&
+        boundText(answer.receipt) && (answer.confirmation === "continue" || answer.confirmation === "confirmed")) {
+      this.finishAction(record, Object.freeze({ kind: "accepted", receipt: Object.freeze({ ...answer }) as VoiceConfirmationReceipt }));
+      return true;
+    }
+    if (exactKeys(answer, ["kind", "owner", "action", "version", "inputTag", "resultTag", "receipt", "code"]) &&
+        answer.kind === "rejected" && boundIdentity(answer, record.identity) && tag(answer.resultTag) &&
+        boundText(answer.receipt) && rejection(answer.code)) {
+      this.finishAction(record, Object.freeze({ kind: "rejected", receipt: answer.receipt, code: answer.code }));
+      return true;
+    }
+    return false;
   }
 
   private finishDerivationReply(record: ActionRecord, answer: unknown): boolean {
@@ -759,6 +866,10 @@ export class VoiceCryptoBroker {
     if (!record.running) {
       const queued = record.job ? this.queue.indexOf(record.job) : -1;
       if (queued >= 0) this.queue.splice(queued, 1);
+      if (record.chain) {
+        const protectedQueued = record.chain.queue.indexOf(record);
+        if (protectedQueued >= 0) record.chain.queue.splice(protectedQueued, 1);
+      }
       record.drained = true;
     }
     // Action-only retirement keeps the terminal identity/slot while its owner is current.
@@ -771,6 +882,7 @@ export class VoiceCryptoBroker {
     record.released = true; record.unsubscribe();
     record.input?.aad.fill(0); record.input?.ciphertext.fill(0);
     record.input = null; record.pair = null;
+    record.protectedInput?.aad.fill(0); record.protectedInput?.body.fill(0); record.protectedInput = null;
     if (record.derivation) {
       record.derivation.localPublicKey.fill(0); record.derivation.peerPublicKey.fill(0); record.derivation.transcript.fill(0);
       record.derivation = null;
@@ -817,7 +929,8 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 5 || typeof previous.run !== "function" ||
+    if (previous.version !== 6 || typeof previous.run !== "function" ||
+        typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");
     }
@@ -886,6 +999,22 @@ export class VoiceCryptoPair {
       additionalData: input.aad as Uint8Array<ArrayBuffer>, tagLength: 128,
     }, this.#rx!, input.ciphertext as Uint8Array<ArrayBuffer>));
     try { this.assertOrdinary(); return opened; } catch (error) { opened.fill(0); throw error; }
+  }
+
+  /** Only a registered protected chain job can reach this private-mark seam. Ordinary APIs
+   * continue to reject these keys. Native owns the immutable row/counter/AAD/body; this window
+   * additionally burns encryption counters before entering WebCrypto, even if it rejects. */
+  async computeProtectedConfirmation(mark: symbol, input: VoiceProtectedConfirmationInput): Promise<Uint8Array<ArrayBuffer>> {
+    if (mark !== CONFIRM_COMPUTE || !this.#protected) throw new Error("protected native computation required");
+    this.assertCurrent();
+    const sequence = u64(input.sequence, "sequence");
+    const algorithm = { name: "AES-GCM", iv: voicePacketIv(sequence), additionalData: input.aad as Uint8Array<ArrayBuffer>, tagLength: 128 };
+    let result: Uint8Array<ArrayBuffer>;
+    if (input.operation === "seal") {
+      this.#broker.burnSequence(this.#owner, this.#domain, sequence);
+      result = new Uint8Array(await this.#broker.subtle.encrypt(algorithm, this.#tx!, input.body as Uint8Array<ArrayBuffer>));
+    } else result = new Uint8Array(await this.#broker.subtle.decrypt(algorithm, this.#rx!, input.body as Uint8Array<ArrayBuffer>));
+    try { this.assertCurrent(); return result; } catch (error) { result.fill(0); throw error; }
   }
 
   encrypt(aad: Uint8Array, sequence: bigint, plaintext: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
