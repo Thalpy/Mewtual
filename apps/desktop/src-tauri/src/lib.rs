@@ -14916,8 +14916,13 @@ async fn save_group_file(
     let journaled =
         private_downloads::export_journaled(&context, &ready, &destination, &name).await?;
     let resumable = journaled.is_some();
+    // Review L3: when the staging name could not be settled, the Published record stays so the
+    // leftover second plaintext name remains visible in Transfers until Clear removes it.
+    let keep_record = journaled
+        .as_ref()
+        .is_some_and(|exported| !exported.staging_cleared);
     let path = match journaled {
-        Some(path) => path,
+        Some(exported) => exported.path,
         None => {
             let mut source = ActorSaveSource {
                 actor: actor.clone(),
@@ -14960,6 +14965,14 @@ async fn save_group_file(
     }
     if let Some(note) = left_behind {
         private_downloads::append_warning(&mut saved, note);
+    }
+    if keep_record {
+        private_downloads::append_warning(&mut saved, private_downloads::STAGING_LEFT);
+        let _commit = keep_session::read_commit(&state, generation, &origin).await?;
+        if !ready.invocation_current() {
+            return Err("The download is no longer active.".into());
+        }
+        return Ok(saved);
     }
     // Publication is already committed. Cleanup failure must never turn that success into a
     // retryable save error or remove the external file; retained ciphertext remains charged.

@@ -12,7 +12,7 @@ use super::*;
 use catcoms_app::{DownloadExportEdge, DownloadExportTransition, DownloadPreflight, DownloadReady};
 use catcoms_storage::kept::{
     flush_destination, partial_presence, remove_partial, ChosenDestination, DownloadId,
-    DownloadStatus, ExportError, ExportFile, ExportHalt, ExportJournal, ExportProbe,
+    DownloadStatus, ExportError, ExportFile, ExportHalt, ExportJournal, ExportPlan, ExportProbe,
     ExportProgress, ExportReopen, ExportState, ExportView, KeepPhase, PartialPresence,
     PartialRemoval, Publication, EXPORT_CHECKPOINT_CHUNKS,
 };
@@ -718,6 +718,9 @@ where
     finish_download_response(state, generation, origin, saved, allowed, cleanup).await
 }
 
+/// Shown with a successful save whose temporary staging name could not be removed (review L3).
+pub(super) const STAGING_LEFT: &str = "A temporary second name for the saved file could not be removed yet. Clear this file in Transfers to remove it.";
+
 /// Shown when Save new copy goes ahead although the old partial could not be reached.
 const OLD_PARTIAL_UNREACHABLE: &str =
     "The folder with the old partly saved file is unavailable, so that file was left in place.";
@@ -907,98 +910,150 @@ pub(super) struct ExportContext<'a> {
     pub(super) cid: &'a str,
     pub(super) operation: Option<&'a str>,
 }
-impl ExportContext<'_> {
-    fn progress(&self, ready: &DownloadReady, progress: ExportProgress) {
-        if !ready.is_current() {
+/// What one save's journaled export needs from outside the sequence, behind a seam so the real
+/// sequence runs in tests across its awaits with real files. Production is [`ActorExport`].
+#[async_trait::async_trait]
+pub(super) trait ExportPorts: Send + Sync {
+    /// The record's saved export state now.
+    async fn export_state(&self) -> Result<Option<ExportState>, String>;
+    /// One lease-fenced journal transition on the actor.
+    async fn transition(&self, transition: DownloadExportTransition) -> Result<(), String>;
+    /// Plaintext of chunk `index`, regenerated from the retained encrypted copy.
+    async fn chunk(&self, index: usize) -> Result<Vec<u8>, String>;
+    /// The original invocation and the export lease are still current.
+    fn live(&self) -> bool;
+    /// Take the session commit guard (Pause, Remove and Lock take it too) and confirm the
+    /// invocation, lease and registry entry under it. Held until the returned value drops.
+    async fn commit(&self) -> Result<Box<dyn Send + '_>, String>;
+    fn progress(&self, progress: ExportProgress);
+    /// Sanctioned-clock backoff between bounded local retries.
+    async fn backoff(&self, delay: Duration);
+}
+
+/// Production export effects for one save invocation and its acquired copy.
+pub(super) struct ActorExport<'a> {
+    pub(super) ctx: &'a ExportContext<'a>,
+    pub(super) ready: &'a DownloadReady,
+}
+#[async_trait::async_trait]
+impl ExportPorts for ActorExport<'_> {
+    async fn export_state(&self) -> Result<Option<ExportState>, String> {
+        self.ctx.actor.download_export_state(self.ready.id()).await
+    }
+    async fn transition(&self, transition: DownloadExportTransition) -> Result<(), String> {
+        self.ctx
+            .actor
+            .download_export_transition(self.ready.clone(), transition, self.ctx.origin.clone())
+            .await
+    }
+    async fn chunk(&self, index: usize) -> Result<Vec<u8>, String> {
+        Ok(self
+            .ctx
+            .actor
+            .read_download_chunk(self.ready.clone(), index, self.ctx.origin.clone())
+            .await?
+            .into_bytes())
+    }
+    fn live(&self) -> bool {
+        !self.ctx.origin.is_cancelled() && self.ready.is_current()
+    }
+    async fn commit(&self) -> Result<Box<dyn Send + '_>, String> {
+        let commit = require_ui_session_generation(self.ctx.state, self.ctx.generation).await?;
+        let current_entry = self
+            .ctx
+            .state
+            .servers
+            .lock()
+            .await
+            .get(&self.ctx.server)
+            .is_some_and(|entry| entry.instance == self.ctx.instance);
+        if !self.live() || !current_entry {
+            return Err("The download is no longer active.".into());
+        }
+        Ok(Box::new(commit))
+    }
+    fn progress(&self, progress: ExportProgress) {
+        if !self.ready.is_current() {
             return;
         }
-        keep_session::publish_progress(self.origin, || {
-            let _ = self.app.emit(
+        let ctx = self.ctx;
+        keep_session::publish_progress(ctx.origin, || {
+            let _ = ctx.app.emit(
                 "download-progress",
                 DownloadProgressEvt {
-                    server: self.server,
-                    cid: self.cid.to_owned(),
-                    cancellation: self.operation.map(str::to_owned),
+                    server: ctx.server,
+                    cid: ctx.cid.to_owned(),
+                    cancellation: ctx.operation.map(str::to_owned),
                     done: progress.done,
                     total: progress.total,
                     bytes_done: progress.bytes,
-                    bytes_total: ready.total_size(),
+                    bytes_total: self.ready.total_size(),
                     network_bytes_done: 0,
                     provider: None,
                 },
             );
         });
     }
-    async fn transition(
-        &self,
-        ready: &DownloadReady,
-        transition: DownloadExportTransition,
-    ) -> Result<(), String> {
-        self.actor
-            .download_export_transition(ready.clone(), transition, self.origin.clone())
-            .await
+    async fn backoff(&self, delay: Duration) {
+        SystemClock.sleep(delay).await;
     }
-    async fn checkpoint(
-        &self,
-        ready: &DownloadReady,
-        mut file: ExportFile,
-    ) -> Result<ExportFile, String> {
-        let (mut file, journal) = blocking(move || {
-            let journal = file.checkpoint();
-            (file, journal)
+}
+
+/// Persist this session's durable progress through the checkpoint CAS.
+async fn checkpoint(ports: &impl ExportPorts, mut file: ExportFile) -> Result<ExportFile, String> {
+    let (mut file, journal) = blocking(move || {
+        let journal = file.checkpoint();
+        (file, journal)
+    })
+    .await?;
+    let journal = journal.map_err(|error| error.to_string())?;
+    ports
+        .transition(DownloadExportTransition::Checkpoint {
+            expected: file.journal().clone(),
+            next: journal.clone(),
         })
         .await?;
-        let journal = journal.map_err(|error| error.to_string())?;
-        self.transition(
-            ready,
-            DownloadExportTransition::Checkpoint {
-                expected: file.journal().clone(),
-                next: journal.clone(),
-            },
-        )
-        .await?;
-        file.checkpointed(journal);
-        Ok(file)
+    file.checkpointed(journal);
+    Ok(file)
+}
+
+/// Record a halt found during the session, fenced by its export lease. Best effort: a refusal
+/// means something newer already changed the record.
+async fn record_halt(ports: &impl ExportPorts, journal: ExportJournal, halt: ExportHalt) -> String {
+    if journal.halt() != Some(halt) {
+        let _ = ports
+            .transition(DownloadExportTransition::Halt {
+                expected: journal,
+                halt,
+            })
+            .await;
     }
-    /// Record a halt found during the session, fenced by this session's export lease. Best
-    /// effort: a refusal means something newer already changed the record.
-    async fn record_halt(
-        &self,
-        ready: &DownloadReady,
-        journal: ExportJournal,
-        halt: ExportHalt,
-    ) -> String {
-        if journal.halt() != Some(halt) {
-            let _ = self
-                .transition(
-                    ready,
-                    DownloadExportTransition::Halt {
-                        expected: journal,
-                        halt,
-                    },
-                )
-                .await;
+    ExportError::Halted(halt).to_string()
+}
+
+/// End a session on an error. A halt is persisted. Only a transient local failure (after its
+/// bounded retries) checkpoints what is durable. Review L4: a verification failure (a CID or
+/// layout mismatch, `Storage`), a conflict, disk full or an inactive session never advance the
+/// checkpoint, so a mismatched stream can never reach the every-chunk journal that recovery
+/// would accept.
+async fn stop(ports: &impl ExportPorts, file: ExportFile, error: ExportError) -> String {
+    match error {
+        ExportError::Halted(halt) => record_halt(ports, file.journal().clone(), halt).await,
+        ExportError::Local { .. } => {
+            let message = error.to_string();
+            let _ = checkpoint(ports, file).await;
+            message
         }
-        ExportError::Halted(halt).to_string()
+        other => other.to_string(),
     }
-    /// End a session on an error. A halt is persisted. Only a transient local failure (after its
-    /// bounded retries) checkpoints what is durable. Review L4: a verification failure (a CID or
-    /// layout mismatch, `Storage`), a conflict, disk full or an inactive session never advance the
-    /// checkpoint, so a mismatched stream can never reach the every-chunk journal that recovery
-    /// would accept.
-    async fn stop(&self, ready: &DownloadReady, file: ExportFile, error: ExportError) -> String {
-        match error {
-            ExportError::Halted(halt) => {
-                self.record_halt(ready, file.journal().clone(), halt).await
-            }
-            ExportError::Local { .. } => {
-                let message = error.to_string();
-                let _ = self.checkpoint(ready, file).await;
-                message
-            }
-            other => other.to_string(),
-        }
-    }
+}
+
+/// A completed journaled save.
+pub(super) struct Exported {
+    pub(super) path: PathBuf,
+    /// No staging name of ours can remain. Review L3: when false, the caller keeps the Published
+    /// record so the leftover second plaintext name stays visible until Clear removes it.
+    pub(super) staging_cleared: bool,
 }
 
 /// Journaled export of a verified private copy. `Ok(None)` means a fresh save cannot be journaled
@@ -1009,11 +1064,20 @@ pub(super) async fn export_journaled(
     ready: &DownloadReady,
     destination: &Destination,
     name: &str,
-) -> Result<Option<PathBuf>, String> {
+) -> Result<Option<Exported>, String> {
     let plan = ready.export_plan()?;
-    let id = ready.id();
+    export_sequence(&ActorExport { ctx, ready }, plan, destination, name).await
+}
+
+/// The export sequence itself, over [`ExportPorts`].
+pub(super) async fn export_sequence(
+    ports: &impl ExportPorts,
+    plan: ExportPlan,
+    destination: &Destination,
+    name: &str,
+) -> Result<Option<Exported>, String> {
     let base = safe_download_name(name);
-    let mut file = match ctx.actor.download_export_state(id).await? {
+    let mut file = match ports.export_state().await? {
         None => {
             let plan = plan.clone();
             let created = match destination {
@@ -1031,18 +1095,15 @@ pub(super) async fn export_journaled(
                 Err(ExportError::Unsupported) => return Ok(None),
                 Err(error) => return Err(error.to_string()),
             };
-            let begun = ctx
-                .transition(
-                    ready,
-                    DownloadExportTransition::Begin {
-                        journal: file.journal().clone(),
-                        presence: file.presence(),
-                    },
-                )
+            let begun = ports
+                .transition(DownloadExportTransition::Begin {
+                    journal: file.journal().clone(),
+                    presence: file.presence(),
+                })
                 .await;
             if let Err(error) = begun {
                 let _ = blocking(move || file.discard()).await;
-                return Err(error);
+                return Err(user_message(error));
             }
             file
         }
@@ -1058,46 +1119,43 @@ pub(super) async fn export_journaled(
                 .map_err(|error| error.to_string())?
             {
                 ExportReopen::Ready(file) => {
-                    ctx.transition(
-                        ready,
-                        DownloadExportTransition::Resume {
+                    ports
+                        .transition(DownloadExportTransition::Resume {
                             journal,
                             presence: file.presence(),
-                        },
-                    )
-                    .await?;
+                        })
+                        .await
+                        .map_err(user_message)?;
                     *file
                 }
                 // The reopen verified the content read-only against this manifest (review U-M2).
                 ExportReopen::Published(path) => {
-                    ctx.transition(
-                        ready,
-                        DownloadExportTransition::RecoverPublished {
+                    ports
+                        .transition(DownloadExportTransition::RecoverPublished {
                             expected: journal.clone(),
-                        },
-                    )
-                    .await
-                    .map_err(user_message)?;
-                    // The caller releases the record next; drop our second (staging) name first.
-                    let _ = blocking(move || remove_partial(&journal)).await;
-                    return Ok(Some(path));
+                        })
+                        .await
+                        .map_err(user_message)?;
+                    // The caller releases the record next; drop our second (staging) name first,
+                    // and keep the record if that cannot be settled (review L3).
+                    let staging_cleared = blocking(move || {
+                        matches!(remove_partial(&journal), Ok(outcome) if outcome.settled())
+                    })
+                    .await?;
+                    return Ok(Some(Exported {
+                        path,
+                        staging_cleared,
+                    }));
                 }
-                ExportReopen::Halt(halt) => {
-                    return Err(ctx.record_halt(ready, journal, halt).await)
-                }
+                ExportReopen::Halt(halt) => return Err(record_halt(ports, journal, halt).await),
             }
         }
         Some(ExportState::Published(_)) => return Err(ALREADY_SAVED.into()),
     };
-    ctx.progress(ready, file.progress());
+    ports.progress(file.progress());
     let mut session_retries = 0;
     while let Some(index) = file.next_index() {
-        let chunk = Arc::new(
-            ctx.actor
-                .read_download_chunk(ready.clone(), index, ctx.origin.clone())
-                .await?
-                .into_bytes(),
-        );
+        let chunk = Arc::new(ports.chunk(index).await?);
         let (returned, outcome) = accept_with_retries(
             file,
             |mut file: ExportFile| {
@@ -1110,21 +1168,23 @@ pub(super) async fn export_journaled(
                     .await
                 }
             },
-            || !ctx.origin.is_cancelled() && ready.is_current(),
-            |delay| async move { SystemClock.sleep(delay).await },
+            || ports.live(),
+            |delay| ports.backoff(delay),
             &mut session_retries,
         )
         .await?;
         file = returned;
         let progress = match outcome {
             Ok(progress) => progress,
-            Err(error) => return Err(ctx.stop(ready, file, error).await),
+            Err(error) => return Err(stop(ports, file, error).await),
         };
-        ctx.progress(ready, progress);
+        ports.progress(progress);
         if progress.done % EXPORT_CHECKPOINT_CHUNKS == 0 && file.next_index().is_some() {
-            file = ctx.checkpoint(ready, file).await?;
+            file = checkpoint(ports, file).await?;
         }
     }
+    // Review U-L1: publication retries are charged to the same per-session budget as chunk
+    // retries and wait on the sanctioned clock, never a separate unpaced allowance.
     let mut publication_attempts = 0;
     let path = loop {
         let (returned, prepared) = blocking(move || {
@@ -1136,34 +1196,23 @@ pub(super) async fn export_journaled(
         let (journal, already) = match prepared {
             Ok(Publication::Ready(journal)) => (journal, None),
             Ok(Publication::AlreadyPublished(journal, path)) => (journal, Some(path)),
-            Err(error) => return Err(ctx.stop(ready, file, error).await),
+            Err(error) => return Err(stop(ports, file, error).await),
         };
         // The every-chunk checkpoint, including any new final name, is durable before linking.
         if &journal != file.journal() {
-            ctx.transition(
-                ready,
-                DownloadExportTransition::Checkpoint {
+            ports
+                .transition(DownloadExportTransition::Checkpoint {
                     expected: file.journal().clone(),
                     next: journal.clone(),
-                },
-            )
-            .await?;
+                })
+                .await
+                .map_err(user_message)?;
             file.checkpointed(journal);
         }
         let linked = {
             // Guard: the staging recheck, the link, the final-name check and Published. Pause,
             // Remove and Lock take the same guard, so exactly one of them or publication wins.
-            let _commit = require_ui_session_generation(ctx.state, ctx.generation).await?;
-            let current_entry = ctx
-                .state
-                .servers
-                .lock()
-                .await
-                .get(&ctx.server)
-                .is_some_and(|entry| entry.instance == ctx.instance);
-            if ctx.origin.is_cancelled() || !ready.is_current() || !current_entry {
-                return Err("The download is no longer active.".into());
-            }
+            let _commit = ports.commit().await?;
             let linked = match already {
                 Some(path) => Ok(path),
                 None => {
@@ -1177,32 +1226,51 @@ pub(super) async fn export_journaled(
                 }
             };
             if linked.is_ok() {
-                ctx.transition(
-                    ready,
-                    DownloadExportTransition::Publish {
+                ports
+                    .transition(DownloadExportTransition::Publish {
                         expected: file.published_journal(),
-                    },
-                )
-                .await?;
+                    })
+                    .await
+                    .map_err(user_message)?;
             }
             linked
         };
         match linked {
             Ok(path) => break path,
             Err(ExportError::Local {
-                retryable: true, ..
-            }) if publication_attempts < 2 => publication_attempts += 1,
-            Err(error) => return Err(ctx.stop(ready, file, error).await),
+                retryable: true,
+                reason,
+            }) => match local_retry_delay(publication_attempts, session_retries) {
+                Some(delay) => {
+                    publication_attempts += 1;
+                    session_retries += 1;
+                    if !ports.live() {
+                        return Err("The download is no longer active.".into());
+                    }
+                    ports.backoff(delay).await;
+                }
+                None => {
+                    let error = ExportError::Local {
+                        retryable: false,
+                        reason,
+                    };
+                    return Err(stop(ports, file, error).await);
+                }
+            },
+            Err(error) => return Err(stop(ports, file, error).await),
         }
     };
     // After the guard: best-effort folder flush and removal of our staging name.
     let journal = file.published_journal();
-    let _ = blocking(move || {
+    let staging_cleared = blocking(move || {
         flush_destination(&journal);
-        file.finish();
+        file.finish()
     })
-    .await;
-    Ok(Some(path))
+    .await?;
+    Ok(Some(Exported {
+        path,
+        staging_cleared,
+    }))
 }
 
 #[cfg(test)]
@@ -1509,3 +1577,7 @@ mod tests {
 #[cfg(test)]
 #[path = "private_downloads/cleanup_tests.rs"]
 mod cleanup_tests;
+
+#[cfg(test)]
+#[path = "private_downloads/export_tests.rs"]
+mod export_tests;

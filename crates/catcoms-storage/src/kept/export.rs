@@ -76,6 +76,15 @@ impl ExportJournal {
     pub fn halt(&self) -> Option<ExportHalt> {
         self.halt
     }
+    /// The current final leaf name (a numbered name once a collision moved it). Native-only, like
+    /// the journal itself; never sent to the renderer.
+    pub fn final_name(&self) -> &str {
+        &self.final_leaf
+    }
+    /// The staging leaf name (`<name>.mewtual-part`). Native-only, like [`Self::final_name`].
+    pub fn staging_name(&self) -> &str {
+        &self.staging
+    }
     /// The name this save started with: the staging leaf without `.mewtual-part`. A
     /// publication-time collision is numbered from it (the chosen "Save as" name or the Downloads
     /// name), never from today's listed file name, and it stays the same across every resume and
@@ -1784,11 +1793,11 @@ impl ExportFile {
             Ok(_) => return Err(ExportError::Halted(ExportHalt::Changed)),
             Err(error) => return Err(local(error)),
         };
-        // From this point the link may exist even if the call below reports an error, so the
-        // session never trims or writes again (see `prepare_publication` and `accept`).
-        self.linked = true;
+        // Once the link exists, or may exist, the session never trims or writes again (see
+        // `prepare_publication` and `accept`). Only a definite refusal leaves it private.
         match external::link(&staging, &target) {
-            Ok(()) => {}
+            Ok(()) => self.linked = true,
+            // The name was taken: no link was made, so the retry may choose a numbered name.
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 return Err(ExportError::Local {
                     retryable: true,
@@ -1800,7 +1809,12 @@ impl ExportFile {
             Err(error) if error.kind() == io::ErrorKind::Unsupported => {
                 return Err(ExportError::Halted(ExportHalt::Unavailable));
             }
-            Err(error) => return Err(local(error)),
+            // Anything else is uncertain (a network filesystem can fail after creating the
+            // entry), so treat the file as possibly visible from now on.
+            Err(error) => {
+                self.linked = true;
+                return Err(local(error));
+            }
         }
         let checked = external::inject(external::Effect::Check)
             .and_then(|()| external::open_leaf(&target, false));
@@ -1834,16 +1848,18 @@ impl ExportFile {
     }
 
     /// After Published: close the handle, then remove the staging name if it is still ours.
-    /// Failure is harmless (it is a second name for the saved file) and is not reported.
-    pub fn finish(self) {
+    /// Returns whether that question is settled (no staging name of ours can remain). Review L3:
+    /// when it is not (the name could not be checked or deleted), native keeps the Published row
+    /// so the leftover second plaintext name stays tracked until Clear removes it.
+    pub fn finish(self) -> bool {
         let journal = self.journal.clone();
         drop(self);
-        let _ = remove_partial(&journal);
+        matches!(remove_partial(&journal), Ok(outcome) if outcome.settled())
     }
 
     /// Remove a just-created partial whose first journal publication failed.
     pub fn discard(self) {
-        self.finish();
+        let _ = self.finish();
     }
 }
 
