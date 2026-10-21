@@ -128,6 +128,11 @@ pub(crate) struct ResolvedRow {
     row: Arc<Row>,
 }
 impl ResolvedRow {
+    /// Fixed metadata for an authenticated reply after a lost factory response. The ID is
+    /// never authority: later operations must still resolve this same native provenance.
+    pub(crate) fn id(&self) -> RowId {
+        self.row.id
+    }
     pub(crate) fn status(&self) -> Result<Status, VoiceError> {
         self.ledger.status(self.row.id)
     }
@@ -153,6 +158,33 @@ impl ResolvedRow {
 }
 
 impl Ledger {
+    /// Recover a lost factory reply even when its caller never received a RowId. Search only
+    /// the finite paid index using the ORIGINAL selected grant/lease/executor/full purpose.
+    /// This historical lookup requires no live grant/current selection, takes no data loan,
+    /// and never calls `begin`, re-arms an idle Pending worker or runs a Clock callback.
+    ///
+    /// `None` means no retained matching row at this observation; it is not drainage evidence.
+    /// A separately authorized retry must still use `begin` on the SAME original purpose:
+    /// returning a Pending row here must not suppress its existing idle-worker retry path.
+    pub(crate) fn lookup_original(
+        self: &Arc<Self>,
+        selected: &SelectedHandoffOwner,
+        purpose: Purpose,
+    ) -> Option<ResolvedRow> {
+        let row = self
+            .index
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .rows
+            .iter()
+            .flatten()
+            .find(|row| row.key.matches(selected, purpose))
+            .cloned()?;
+        Some(ResolvedRow {
+            ledger: self.clone(),
+            row,
+        })
+    }
     /// Resolve against the ORIGINAL native-selected owner, not the current replacement and
     /// not strings from the request. Preserve access to exact historical cleanup after End;
     /// no grant upgrade, Clock callback, resource charge or data loan occurs in this lookup.

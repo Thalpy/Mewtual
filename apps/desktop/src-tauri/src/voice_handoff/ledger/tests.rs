@@ -683,6 +683,129 @@ fn every_original_key_component_is_required_even_when_other_identity_components_
 }
 
 #[test]
+fn lost_factory_reply_lookup_is_history_only_and_authorized_retry_keeps_the_same_row() {
+    let (mut coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let purpose = Purpose::Derive(selector);
+    assert!(ledger.lookup_original(&selected, purpose).is_none());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let id = registration.id(); // unavailable to the modeled lost-reply caller
+    registration.mark_handoff().unwrap();
+    drop(registration); // actual failed native factory has retired; its purpose is uncertain
+    let original = ledger.row(id).unwrap();
+    let before = selected.resources().counts();
+    {
+        let state = original.state.lock().unwrap();
+        let Body::Pending(pending) = &state.body else {
+            panic!("uncertain Pending");
+        };
+        assert!(!pending.worker && pending.handed_off);
+        // Holding State pins the pure lookup boundary: it must not inspect/re-arm a worker,
+        // reconcile the Action, or wait for any callback-bearing authority observation.
+        let recovered = ledger.lookup_original(&selected, purpose).unwrap();
+        assert!(recovered.id() == id && Arc::ptr_eq(&recovered.row, &original));
+    }
+    assert_eq!(selected.resources().counts(), before);
+    assert!(ledger
+        .lookup_original(&selected, purpose)
+        .unwrap()
+        .status()
+        .unwrap()
+        .action
+        .is_none());
+    // A caller separately admitted by the factory's current UI/selection/Root fences can
+    // still resume this same uncertain purpose; history lookup never spends that worker.
+    let retry = ticket(&ledger, selected.clone(), selector);
+    assert!(retry.id() == id);
+    assert!(matches!(
+        ledger.begin(selected.clone(), purpose).unwrap(),
+        Begin::Existing(existing) if existing == id
+    ));
+    assert!(ledger.lookup_original(&selected, purpose).unwrap().id() == id);
+    drop(retry);
+    coordinator.end(selected.id());
+    drop(coordinator);
+    assert!(selected.grant_identity().upgrade().is_none());
+    assert!(ledger.lookup_original(&selected, purpose).unwrap().id() == id);
+    assert!(matches!(
+        ledger.begin(selected.clone(), purpose),
+        Err(VoiceError::Unauthorized)
+    ));
+}
+
+#[test]
+fn original_purpose_lookup_under_full_pressure_rejects_foreign_identity_and_every_selector_field() {
+    let (_coordinator, selected, selector) = selection();
+    let (_foreign_coordinator, foreign, _) = selection();
+    assert_eq!(selected.id(), foreign.id());
+    assert_eq!(selected.executor(), foreign.executor());
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let id = registration.id();
+    registration.mark_handoff().unwrap();
+    drop(registration);
+    let pool = selected.resources();
+    let _pressure = pool
+        .charge(
+            selected.binding().scope.group,
+            256 * 1024 - pool.counts().0,
+            ResourceKind::Retained,
+        )
+        .unwrap();
+    let before = pool.counts();
+    let mut peer = selector;
+    peer.peer = DeviceKeypair::from_seed(&[5; 32]).device_id();
+    let mut join = selector;
+    join.join[0] ^= 1;
+    let mut key = selector;
+    key.key_ref[0] ^= 1;
+    let mut epoch = selector;
+    epoch.epoch += 1;
+    for _ in 0..4 {
+        assert!(ledger
+            .lookup_original(&foreign, Purpose::Derive(selector))
+            .is_none());
+        for wrong in [peer, join, key, epoch] {
+            assert!(ledger
+                .lookup_original(&selected, Purpose::Derive(wrong))
+                .is_none());
+        }
+        let recovered = ledger
+            .lookup_original(&selected, Purpose::Derive(selector))
+            .unwrap();
+        assert!(recovered.id() == id);
+        assert!(!recovered.status().unwrap().drained);
+    }
+    assert_eq!(
+        pool.counts(),
+        before,
+        "historical lookup takes no fresh credit/work"
+    );
+}
+
+#[test]
+fn missing_original_purpose_is_not_drained_and_a_removed_unstarted_row_cannot_alias_a_new_serial() {
+    let (_coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let purpose = Purpose::Derive(selector);
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let old = registration.id();
+    let retained = ledger.lookup_original(&selected, purpose).unwrap();
+    drop(registration); // proven no actor handoff: existing removal behavior is unchanged
+    assert!(ledger.lookup_original(&selected, purpose).is_none());
+    assert!(matches!(retained.status(), Err(VoiceError::Unauthorized)));
+    let replacement = ticket(&ledger, selected.clone(), selector);
+    let current = ledger.lookup_original(&selected, purpose).unwrap();
+    assert!(current.id() == replacement.id());
+    assert!(current.id().slot == old.slot && current.id().serial > old.serial);
+    assert!(matches!(
+        ledger.resolve(&selected, purpose, old),
+        Err(VoiceError::Unauthorized)
+    ));
+    assert!(!current.status().unwrap().drained);
+}
+
+#[test]
 fn resolved_row_preserves_exact_terminal_cleanup_after_end_and_actual_grant_drop() {
     use std::future::Future;
     use std::task::{Context, Poll};
@@ -713,8 +836,12 @@ fn resolved_row_preserves_exact_terminal_cleanup_after_end_and_actual_grant_drop
         "no live affine grant is needed for exact cleanup"
     );
     let recovered = ledger
-        .resolve(&selected, Purpose::Derive(selector), id)
+        .lookup_original(&selected, Purpose::Derive(selector))
         .unwrap();
+    assert!(
+        recovered.id() == id,
+        "lost Begin reply requires no caller-known RowId"
+    );
     assert!(matches!(recovered.work(), Err(VoiceError::Unauthorized)));
     assert!(
         matches!(row.work(), Err(VoiceError::Unauthorized)),
@@ -745,6 +872,12 @@ fn resolved_row_preserves_exact_terminal_cleanup_after_end_and_actual_grant_drop
     row.acknowledge(&receipt).unwrap();
     assert!(row.acknowledge(&wrong).is_err());
     assert!(row.work().is_err());
+    let compacted = ledger
+        .lookup_original(&selected, Purpose::Derive(selector))
+        .unwrap();
+    assert!(compacted.id() == id);
+    assert!(compacted.reconcile().unwrap() == row.reconcile().unwrap());
+    compacted.acknowledge(&receipt).unwrap();
 }
 
 #[test]

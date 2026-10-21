@@ -55,6 +55,11 @@ metadata/cleanup use, without upgrading the grant for historical recovery. All r
 operational helpers are module-private. Data admission tests the original lease under State;
 this lookup is not current UI/channel/Root effect authority. Actual physical callers still
 need to bound simultaneous handles and complete funding/drainage before serving action bytes.
+An independent bounded original-purpose lookup also recovers this native handle when a lost
+factory reply left the requester without a RowId. It checks the same native provenance and
+works after End/grant destruction, without charges, Clock callbacks or factory mutation.
+Missing history is not drainage evidence. Current-authority retry remains a separate path:
+pure historical lookup must not prevent an idle Pending worker from resuming on its original row.
 
 This service still handles authenticated Status only. Factory/action input, result, exact
 receipt ACK, settlement, phase closure and final delivery remain open. Starting the local

@@ -63,6 +63,11 @@ This proves row provenance only. The future transport must still check actual ch
 current selection and UI generation at final effect admission, with Root's membership/epoch/
 deadline checks. Repeated resolution is possible; physical callers must bound concurrent
 handles in their existing payments rather than interpreting non-Clone as an admission gate.
+An independent original-purpose lookup uses the same bounded index/provenance when a lost
+factory reply supplied no RowId. It cannot allocate a row, re-arm a Pending worker, upgrade
+a grant or treat missing history as drained. Explicit current-authority retry stays separate
+and resumes only the same retained purpose/serial. End still permits historical lookup while
+rejecting fresh work. Neither metadata lookup is exposed as a channel action by this increment.
 
 Only Status is served. No factory/action input/result/ACK/settlement/final-delivery chain, live
 V2/SDP/ICE/RTC, legacy-mode isolation or member media relay is enabled by this increment. Packaged
