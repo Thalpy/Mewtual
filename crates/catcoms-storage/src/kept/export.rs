@@ -250,8 +250,15 @@ impl record::Record {
                         && old.same_destination(new)
                         && (old.halt.is_none() || new.halt.is_some() || intent_changed)
                 }
+                // Publication is proven by the final name's identity, so it may also retire a
+                // halt; everything else about the journal is carried over unchanged.
                 (Export::Writing(old), Export::Published(new)) => {
-                    completed && old == new && old.halt.is_none()
+                    completed
+                        && old.same_destination(new)
+                        && old.final_leaf == new.final_leaf
+                        && old.written_chunks == new.written_chunks
+                        && old.written_bytes == new.written_bytes
+                        && new.halt.is_none()
                 }
                 (Export::Writing(_) | Export::Published(_), Export::None) => {
                     completed && intent_changed
@@ -320,6 +327,10 @@ pub enum ExportError {
     Unsupported,
     /// The lease, invocation or saved journal changed. Stop without effects.
     Inactive,
+    /// The partial became shorter than this session's verified offset while it was open (another
+    /// writer or tool truncated it). Never zero-extend over that gap and never checkpoint it: stop,
+    /// keep the journal Writing, and let the next Resume re-verify from chunk zero.
+    Conflict,
     Storage(StorageError),
 }
 impl std::fmt::Display for ExportError {
@@ -339,6 +350,9 @@ impl std::fmt::Display for ExportError {
                 f.write_str("This folder cannot keep track of a partly saved file.")
             }
             Self::Inactive => f.write_str("The download is no longer active."),
+            Self::Conflict => f.write_str(
+                "The partly saved file changed while saving. Resume saving to check it again.",
+            ),
             Self::Storage(error) => write!(f, "{error}"),
         }
     }
@@ -417,7 +431,6 @@ impl ExportPlan {
 pub struct ExportPresence(Weak<()>);
 
 /// Result of a preflight that retains no handle and modifies nothing.
-#[derive(Debug)]
 pub enum ExportProbe {
     Ready,
     /// The final name already holds our file (crash after the link, before Published).
@@ -428,7 +441,6 @@ pub enum ExportProbe {
 }
 
 /// Result of reopening a saved journal for writing.
-#[derive(Debug)]
 pub enum ExportReopen {
     Ready(Box<ExportFile>),
     Published(PathBuf),
@@ -436,13 +448,59 @@ pub enum ExportReopen {
 }
 
 /// Result of preparing publication.
-#[derive(Debug)]
 pub enum Publication {
     /// Persist this checkpoint (every chunk, and possibly a new final name) BEFORE linking.
     Ready(ExportJournal),
     /// The final name already holds our file (an earlier link whose Published transition was
     /// lost). Persist the every-chunk journal, then record Published; never link again.
     AlreadyPublished(ExportJournal, PathBuf),
+}
+
+// These carry external paths. Debug output names only the variant so an accidental log line
+// cannot disclose the user's folder or file name.
+impl std::fmt::Debug for ExportProbe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ready => f.write_str("ExportProbe::Ready"),
+            Self::Published(_) => f.write_str("ExportProbe::Published(..)"),
+            Self::Halt(halt) => write!(f, "ExportProbe::Halt({halt:?})"),
+            Self::Local(_) => f.write_str("ExportProbe::Local(..)"),
+        }
+    }
+}
+impl std::fmt::Debug for ExportReopen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ready(file) => write!(f, "ExportReopen::Ready({file:?})"),
+            Self::Published(_) => f.write_str("ExportReopen::Published(..)"),
+            Self::Halt(halt) => write!(f, "ExportReopen::Halt({halt:?})"),
+        }
+    }
+}
+impl std::fmt::Debug for Publication {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ready(journal) => write!(f, "Publication::Ready({journal:?})"),
+            Self::AlreadyPublished(journal, _) => {
+                write!(f, "Publication::AlreadyPublished({journal:?}, ..)")
+            }
+        }
+    }
+}
+
+/// What a removal attempt established. Only `Removed` and `NotOurs` let a removal finish: anything
+/// that could still be our plaintext partial is never silently forgotten.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartialRemoval {
+    /// Our partial was deleted, or was already gone from a folder we could check.
+    Removed,
+    /// The folder or the name now holds something that cannot be ours; nothing was touched.
+    NotOurs,
+    /// The saved folder cannot be reached (missing folder or volume, other platform, permission).
+    FolderUnreachable,
+    /// The folder is ours but the partial could not be opened to prove ownership (for example
+    /// another program holds it without sharing). It may be ours, so it is not forgotten.
+    Unchecked,
 }
 
 enum Located {
@@ -507,14 +565,17 @@ fn locate(journal: &ExportJournal, write: bool) -> Result<Located, ExportError> 
 
 /// Remove the saved partial only if its folder and file identity prove it is ours. The final name
 /// is never touched; when staging and final are the same object only the staging name goes.
-/// Anything that cannot be proven ours (missing folder, other platform, foreign file) is left in
-/// place and counts as done, so removal is bounded and never blocks on an unreachable folder.
-pub fn remove_partial(journal: &ExportJournal) -> Result<(), ExportError> {
+/// The typed outcome lets each caller decide whether it may forget the journal: a partial that
+/// cannot be checked right now is reported, never silently treated as "not ours". `Err` means the
+/// partial was proven ours but its deletion failed.
+pub fn remove_partial(journal: &ExportJournal) -> Result<PartialRemoval, ExportError> {
     let Some(folder) = journal.folder_path() else {
-        return Ok(());
+        return Ok(PartialRemoval::FolderUnreachable);
     };
-    if !matches!(external::folder_identity(&folder), Ok(id) if id == journal.folder_id) {
-        return Ok(());
+    match external::folder_identity(&folder) {
+        Ok(id) if id == journal.folder_id => {}
+        Ok(_) => return Ok(PartialRemoval::NotOurs),
+        Err(_) => return Ok(PartialRemoval::FolderUnreachable),
     }
     let staging = folder.join(&journal.staging);
     match external::open_leaf(&staging, false) {
@@ -524,35 +585,43 @@ pub fn remove_partial(journal: &ExportJournal) -> Result<(), ExportError> {
                 .metadata()
                 .is_ok_and(|metadata| metadata.permissions().readonly());
             drop(file);
-            let mut removed = external::remove(&staging);
-            #[cfg(windows)]
-            if read_only
-                && matches!(&removed, Err(error) if error.kind() == io::ErrorKind::PermissionDenied)
-            {
-                // Windows refuses to delete a read-only file. This one is proven ours, so clear
-                // only that attribute and try once more. (Unix unlink ignores the file mode.)
-                if let Ok(metadata) = fs::metadata(&staging) {
-                    let mut permissions = metadata.permissions();
-                    #[allow(clippy::permissions_set_readonly_false)]
-                    permissions.set_readonly(false);
-                    if fs::set_permissions(&staging, permissions).is_ok() {
-                        removed = external::remove(&staging);
-                    }
+            match remove_proven(&staging, read_only) {
+                Ok(()) => Ok(PartialRemoval::Removed),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    Ok(PartialRemoval::Removed)
                 }
-            }
-            #[cfg(not(windows))]
-            let _ = read_only;
-            match removed {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
                 Err(error) => Err(ExportError::Local {
                     retryable: true,
                     reason: error.to_string(),
                 }),
             }
         }
-        _ => Ok(()),
+        Ok(Leaf::Missing) => Ok(PartialRemoval::Removed),
+        Ok(Leaf::Opened(..)) | Ok(Leaf::Foreign) => Ok(PartialRemoval::NotOurs),
+        Err(_) => Ok(PartialRemoval::Unchecked),
     }
+}
+
+/// Delete a staging name already proven ours. Windows refuses to delete a read-only file, so for
+/// a proven partial clear only that attribute and try once more; Unix unlink ignores the mode.
+fn remove_proven(staging: &Path, read_only: bool) -> io::Result<()> {
+    let removed = external::remove(staging);
+    #[cfg(windows)]
+    if read_only
+        && matches!(&removed, Err(error) if error.kind() == io::ErrorKind::PermissionDenied)
+    {
+        if let Ok(metadata) = fs::metadata(staging) {
+            let mut permissions = metadata.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            if fs::set_permissions(staging, permissions).is_ok() {
+                return external::remove(staging);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = read_only;
+    removed
 }
 
 /// Publication needs a no-replace hard link. FAT and exFAT give a usable-looking file index and
@@ -827,8 +896,16 @@ impl ExportFile {
         // From here on this session writes. A file shorter than its checkpoint (torn or lost
         // tail) rewinds to this whole-chunk boundary, which every earlier chunk just verified.
         self.diverged = true;
+        // Only ever shrink. Every byte before `offset` was verified or written by this session,
+        // so the file can be shorter only if something truncated it while this handle was open
+        // (for example a second session after Lock and Resume). Zero-extending would publish a
+        // hole that still passes the stream CID check, so stop instead.
+        let length = self.file.metadata().map_err(local)?.len();
+        if length < self.offset {
+            return Err(ExportError::Conflict);
+        }
         let written = (|| {
-            if self.file.metadata()?.len() != self.offset {
+            if length > self.offset {
                 self.file.set_len(self.offset)?;
             }
             self.file.seek(SeekFrom::Start(self.offset))?;
@@ -875,8 +952,14 @@ impl ExportFile {
         {
             return Err(ExportError::Storage(StorageError::Malformed));
         }
+        // The plaintext CID covers what this session fed, not the file. A file now shorter than
+        // the declared size was truncated by someone else: never publish it (see `accept`).
+        let length = self.file.metadata().map_err(local)?.len();
+        if length < self.offset {
+            return Err(ExportError::Conflict);
+        }
         let trimmed = (|| {
-            if self.file.metadata()?.len() != self.offset {
+            if length > self.offset {
                 self.file.set_len(self.offset)?;
             }
             self.file.sync_all()
@@ -939,11 +1022,21 @@ impl ExportFile {
             }
             Err(error) => return Err(local(error)),
         }
-        match external::open_leaf(&target, false) {
+        let checked = external::inject(external::Effect::Check)
+            .and_then(|()| external::open_leaf(&target, false));
+        match checked {
             Ok(Leaf::Opened(_, observed)) if observed.identity == self.journal.file_id => {}
             // Someone swapped the staging name between our check and the link. The new name is
             // not ours to delete; report the change instead of publishing.
-            _ => return Err(ExportError::Halted(ExportHalt::Changed)),
+            Ok(_) => return Err(ExportError::Halted(ExportHalt::Changed)),
+            // Could not check yet (an indexer or antivirus holding the new name). The link is
+            // made; a retry re-runs `prepare_publication`, which recognizes our own final name.
+            Err(error) => {
+                return Err(ExportError::Local {
+                    retryable: true,
+                    reason: error.to_string(),
+                })
+            }
         }
         Ok(target)
     }
@@ -1007,16 +1100,36 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
             Export::Writing(journal) => ExportView::Writing {
                 saved_chunks: journal.written_chunks(),
                 halt: journal.halt,
-                active: transfer
-                    .export_presence
-                    .as_ref()
-                    .is_some_and(|(guard, token)| {
-                        token.strong_count() != 0
-                            && guard.current()
-                            && guard.issued_by(&transfer.read_epoch)
-                    }),
+                // A halted journal is never actively saving, even while its stopping session
+                // still holds the presence token (kept so no second writer opens the partial).
+                active: journal.halt.is_none()
+                    && transfer
+                        .export_presence
+                        .as_ref()
+                        .is_some_and(|(guard, token)| {
+                            token.strong_count() != 0
+                                && guard.current()
+                                && guard.issued_by(&transfer.read_epoch)
+                        }),
             },
         }
+    }
+
+    /// One live writer per partial. An older `ExportFile` (for example one sleeping in a retry
+    /// after Lock, or still finishing a blocking write after Pause) keeps its token alive until it
+    /// is dropped; a new session must not open a second handle onto the same file meanwhile. The
+    /// token is deliberately not cleared by Pause, halts or Save new copy, only by its own drop.
+    fn presence_free(&self, index: usize, presence: &ExportPresence) -> Result<(), StorageError> {
+        let busy = self.transfers[index]
+            .export_presence
+            .as_ref()
+            .is_some_and(|(_, token)| token.strong_count() != 0 && !token.ptr_eq(&presence.0));
+        if busy {
+            return Err(StorageError::Io(
+                "This file is already being saved. Try again shortly.".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn register_presence(
@@ -1036,6 +1149,7 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
         presence: ExportPresence,
     ) -> Result<(), StorageError> {
         let index = self.export_index(lease)?;
+        self.presence_free(index, &presence)?;
         let transfer = &mut self.transfers[index];
         if transfer.record.export != Export::None
             || journal.written_chunks != 0
@@ -1065,6 +1179,7 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
         {
             return Err(StorageError::Malformed);
         }
+        self.presence_free(index, &presence)?;
         self.register_presence(index, lease, presence);
         Ok(())
     }
@@ -1126,13 +1241,25 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
         if transfer.poisoned
             || transfer.record.phase != KeepPhase::Completed
             || transfer.record.export != Export::Writing(expected.clone())
-            || expected.halt.is_some()
             || expected.written_chunks() != transfer.record.plan.chunks.len()
         {
             return Err(StorageError::Malformed);
         }
         let mut next = transfer.record.successor()?;
-        next.export = Export::Published(expected.clone());
+        // Native proved the final name holds our file, so an earlier halt (for example a check
+        // that failed transiently right after the link) no longer describes this destination.
+        let mut journal = expected.clone();
+        journal.halt = None;
+        next.export = Export::Published(journal);
+        if next.user_paused {
+            // A saved file has nothing left to pause; clearing Pause is an intent change.
+            next.user_paused = false;
+            next.intent = transfer
+                .record
+                .intent
+                .checked_add(1)
+                .ok_or(StorageError::Malformed)?;
+        }
         transfer.publish(next, &self.metadata_key, &mut self.rng)?;
         transfer.export_presence = None;
         Ok(())
@@ -1162,7 +1289,6 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
         journal.halt = Some(halt);
         let mut next = transfer.record.successor()?;
         next.export = Export::Writing(journal);
-        transfer.export_presence = None;
         transfer.publish(next, &self.metadata_key, &mut self.rng)
     }
 
@@ -1189,7 +1315,6 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
             .ok_or(StorageError::Malformed)?;
         transfer.read_epoch.retire();
         transfer.checked = false;
-        transfer.export_presence = None;
         let mut next = transfer.record.successor()?;
         next.export = Export::None;
         next.intent = intent;

@@ -475,11 +475,18 @@ fn destination_changes_while_paused_become_typed_halts_without_touching_other_fi
             "{change:?}"
         );
         store.halt_download_export(id, &journal, expected).unwrap();
-        // Removal of a halted record never deletes anything it cannot prove is ours.
+        // Removal of a halted record never deletes anything it cannot prove is ours, and says
+        // which: only Removed/NotOurs let native finish, FolderUnreachable keeps Removing.
         let ExportState::Writing(halted) = store.cancel_download(id).unwrap().unwrap() else {
             panic!("journal is kept for cleanup");
         };
-        remove_partial(&halted).unwrap();
+        let outcome = remove_partial(&halted).unwrap();
+        let expected_outcome = match change {
+            Change::Deleted | Change::Moved | Change::PermissionRevoked => PartialRemoval::Removed,
+            Change::Replaced | Change::Linked | Change::FolderReplaced => PartialRemoval::NotOurs,
+            Change::FolderGone => PartialRemoval::FolderUnreachable,
+        };
+        assert_eq!(outcome, expected_outcome, "{change:?}");
         store.finish_download_cleanup(id).unwrap();
         if let Some((path, bytes)) = keep {
             assert_eq!(fs::read(path).unwrap(), bytes, "{change:?}");
@@ -492,6 +499,151 @@ fn destination_changes_while_paused_become_typed_halts_without_touching_other_fi
         }
         let _ = lease;
     }
+}
+
+#[test]
+fn concurrent_truncation_is_a_conflict_never_a_zero_filled_hole() {
+    for at_publication in [false, true] {
+        let fx = fixture();
+        let mut store = open(&fx.vault);
+        let (_id, lease) = completed(&mut store);
+        let mut file = started(&mut store, &lease, &fx.downloads);
+        file.accept(0, CHUNKS[0]).unwrap();
+        if at_publication {
+            file.accept(1, CHUNKS[1]).unwrap();
+        }
+        // Another writer (for example a second session after Lock and Resume) shrinks the
+        // partial while this session's handle is still open.
+        let other = fs::OpenOptions::new()
+            .write(true)
+            .open(staging(&fx.downloads))
+            .unwrap();
+        other.set_len(5).unwrap();
+        drop(other);
+        let outcome = if at_publication {
+            file.prepare_publication().map(|_| ())
+        } else {
+            file.accept(1, CHUNKS[1]).map(|_| ())
+        };
+        assert!(
+            matches!(outcome, Err(ExportError::Conflict)),
+            "at_publication={at_publication}"
+        );
+        assert_eq!(
+            fs::metadata(staging(&fx.downloads)).unwrap().len(),
+            5,
+            "the file is never zero-extended over the truncated range"
+        );
+    }
+}
+
+#[test]
+fn a_live_older_session_blocks_a_second_writer_until_it_is_dropped() {
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (id, lease) = completed(&mut store);
+    let older = started(&mut store, &lease, &fx.downloads);
+    let journal = older.journal().clone();
+    let intent = store.downloads().unwrap()[0].state.intent;
+    store.set_download_paused(id, intent, true).unwrap();
+    assert!(matches!(
+        view(&store),
+        ExportView::Writing { active: false, .. }
+    ));
+    store.set_download_paused(id, intent + 1, false).unwrap();
+    let lease = reverified(&mut store, id);
+    let ExportReopen::Ready(newer) =
+        ExportFile::reopen(&journal, "notes.txt", export_plan()).unwrap()
+    else {
+        panic!();
+    };
+    assert!(
+        store
+            .resume_download_export(&lease, &journal, newer.presence())
+            .is_err(),
+        "the paused session still owns a live handle onto the partial"
+    );
+    drop(older);
+    store
+        .resume_download_export(&lease, &journal, newer.presence())
+        .unwrap();
+    assert!(matches!(
+        view(&store),
+        ExportView::Writing { active: true, .. }
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn removal_reports_a_partial_it_cannot_open_instead_of_forgetting_it() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (id, lease) = completed(&mut store);
+    let mut file = started(&mut store, &lease, &fx.downloads);
+    file.accept(0, CHUNKS[0]).unwrap();
+    drop(file);
+    // Another program holds the partial without sharing.
+    let holder = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(staging(&fx.downloads))
+        .unwrap();
+    let ExportState::Writing(journal) = store.cancel_download(id).unwrap().unwrap() else {
+        panic!();
+    };
+    assert_eq!(remove_partial(&journal).unwrap(), PartialRemoval::Unchecked);
+    drop(holder);
+    assert!(
+        staging(&fx.downloads).exists(),
+        "nothing was deleted or forgotten"
+    );
+    assert_eq!(remove_partial(&journal).unwrap(), PartialRemoval::Removed);
+    store.finish_download_cleanup(id).unwrap();
+}
+
+#[test]
+fn a_failed_check_after_the_link_retries_into_saved_and_recovery_clears_halt_and_pause() {
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (id, lease) = completed(&mut store);
+    let mut file = started(&mut store, &lease, &fx.downloads);
+    write_all(&mut file);
+    let Publication::Ready(journal) = file.prepare_publication().unwrap() else {
+        panic!();
+    };
+    store
+        .checkpoint_download_export(&lease, file.journal(), &journal)
+        .unwrap();
+    file.checkpointed(journal.clone());
+    assert!(matches!(
+        injected(Effect::Check, io::ErrorKind::Other, || file.link()),
+        Err(ExportError::Local {
+            retryable: true,
+            ..
+        })
+    ));
+    // The retry recognizes our own final name instead of linking again.
+    let Publication::AlreadyPublished(again, path) = file.prepare_publication().unwrap() else {
+        panic!("our link is recognized");
+    };
+    assert_eq!(again, journal);
+    drop(file);
+    // Even an older build's halt plus a Pause cannot strand the saved file.
+    store
+        .halt_download_export(id, &journal, ExportHalt::Changed)
+        .unwrap();
+    let ExportState::Writing(halted) = state(&store, id) else {
+        panic!();
+    };
+    let intent = store.downloads().unwrap()[0].state.intent;
+    store.set_download_paused(id, intent, true).unwrap();
+    store.recover_download_export(id, &halted).unwrap();
+    let saved = store.downloads().unwrap().remove(0);
+    assert_eq!(saved.export, ExportView::Published);
+    assert!(!saved.state.user_paused);
+    assert_eq!(fs::read(path).unwrap(), CHUNKS.concat());
+    assert!(!fx.downloads.join("notes (1).txt").exists());
 }
 
 #[test]

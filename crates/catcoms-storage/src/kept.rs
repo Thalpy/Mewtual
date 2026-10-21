@@ -34,7 +34,7 @@ pub use downloads::{DownloadExportLease, DownloadId, DownloadRun, DownloadStatus
 pub use export::{
     flush_destination, remove_partial, ExportError, ExportFile, ExportHalt, ExportJournal,
     ExportPlan, ExportPresence, ExportProbe, ExportProgress, ExportReopen, ExportState, ExportView,
-    Publication, EXPORT_CHECKPOINT_CHUNKS,
+    PartialRemoval, Publication, EXPORT_CHECKPOINT_CHUNKS,
 };
 use persistence::{Transfer, DELETING, FORMAT, FORMAT_CHARGE, TRANSFERS};
 pub use record::{
@@ -690,8 +690,9 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
                 if !transfer.record.public_retained() {
                     // Starting another private verification run invalidates previously issued
                     // export observations, even when the saved winner itself is unchanged.
+                    // The export presence token is kept: a still-live older session must block
+                    // a new one from opening a second handle onto the same partial.
                     transfer.read_epoch.retire();
-                    transfer.export_presence = None;
                 }
                 transfer.checked = false;
             }
@@ -905,8 +906,10 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
                 self.active = None;
             }
             if !self.transfers[index].record.public_retained() {
+                // Retiring the epoch ends "Saving" in the projection and fences the old session's
+                // journal writes. Its presence token stays until that session drops its file, so
+                // a Resume cannot open a second writer onto the same partial in the meantime.
                 self.transfers[index].read_epoch.retire();
-                self.transfers[index].export_presence = None;
             }
         }
         let mut next = self.transfers[index].record.successor()?;
@@ -1247,7 +1250,9 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
         let invalidated_winner = bad_current && record.selected_is_winner();
         let plan = next.plan.clone();
         // Synchronously revoke all old queued lower effects BEFORE attempting publication. A
-        // failed publication poisons the journal and never restores their authority or budget.
+        // failed publication poisons the journal (or, for a clean disk-full refusal before the
+        // rename, leaves the previous record in force) and never restores their authority or
+        // budget: the active run stays revoked either way.
         self.active = None;
         if invalidated_winner {
             self.transfers[index].checked = false;

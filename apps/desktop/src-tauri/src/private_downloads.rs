@@ -13,7 +13,7 @@ use catcoms_app::{DownloadExportEdge, DownloadExportTransition, DownloadReady};
 use catcoms_storage::kept::{
     flush_destination, remove_partial, DownloadId, DownloadStatus, ExportError, ExportFile,
     ExportHalt, ExportJournal, ExportProbe, ExportProgress, ExportReopen, ExportState, ExportView,
-    KeepPhase, Publication, EXPORT_CHECKPOINT_CHUNKS,
+    KeepPhase, PartialRemoval, Publication, EXPORT_CHECKPOINT_CHUNKS,
 };
 
 #[derive(Serialize)]
@@ -217,9 +217,13 @@ pub(super) async fn remove_download(
     if let Some(saved) = pending {
         if !keep_partial {
             let journal = saved.journal().clone();
-            blocking(move || remove_partial(&journal))
-                .await?
-                .map_err(|_| REMOVE_RETRY.to_string())?;
+            // Only a proven removal, or proof that nothing there is ours, may forget the journal.
+            // A partial that cannot be checked right now stays tracked in Removing.
+            match blocking(move || remove_partial(&journal)).await? {
+                Ok(PartialRemoval::Removed | PartialRemoval::NotOurs) => {}
+                Ok(PartialRemoval::FolderUnreachable) => return Err(REMOVE_UNREACHABLE.into()),
+                Ok(PartialRemoval::Unchecked) | Err(_) => return Err(REMOVE_RETRY.into()),
+            }
         }
         commit_kept_command(
             state,
@@ -233,6 +237,7 @@ pub(super) async fn remove_download(
     Ok(())
 }
 const REMOVE_RETRY: &str = "The partly saved file could not be removed. Close any app using it, then choose Remove again, or choose Keep partly saved file.";
+const REMOVE_UNREACHABLE: &str = "The folder with the partly saved file is unavailable. Reconnect it and choose Remove again, or choose Keep partly saved file.";
 
 /// Capacity follows the entire export, including its queued actor plaintext reply. Acquiring
 /// this before plan/manifest work and staging prevents unbounded save invocations from waiting
@@ -269,6 +274,53 @@ pub(super) fn local_retry_delay(chunk_attempts: u32, session_retries: u32) -> Op
 
 const ALREADY_SAVED: &str =
     "This file was already saved. Clear it or save another copy from Transfers.";
+
+/// One chunk through `step` with the bounded local retry policy. `live` (original invocation and
+/// export lease) is checked before EVERY attempt, including after each backoff, so a session
+/// retired by Lock, Pause, Remove or a replacement never writes plaintext again. `step` moves the
+/// subject into a blocking worker and back; `Err` means that worker died.
+pub(super) async fn accept_with_retries<T, Step, StepFut, Sleep, SleepFut>(
+    mut subject: T,
+    mut step: Step,
+    live: impl Fn() -> bool,
+    sleep: Sleep,
+    session_retries: &mut u32,
+) -> Result<(T, Result<ExportProgress, ExportError>), String>
+where
+    Step: FnMut(T) -> StepFut,
+    StepFut: Future<Output = Result<(T, Result<ExportProgress, ExportError>), String>>,
+    Sleep: Fn(Duration) -> SleepFut,
+    SleepFut: Future<Output = ()>,
+{
+    let mut attempts = 0;
+    loop {
+        if !live() {
+            return Ok((subject, Err(ExportError::Inactive)));
+        }
+        let (returned, outcome) = step(subject).await?;
+        subject = returned;
+        match outcome {
+            Err(ExportError::Local {
+                retryable: true,
+                reason,
+            }) => match local_retry_delay(attempts, *session_retries) {
+                Some(delay) => {
+                    attempts += 1;
+                    *session_retries += 1;
+                    sleep(delay).await;
+                }
+                None => {
+                    let error = ExportError::Local {
+                        retryable: false,
+                        reason,
+                    };
+                    return Ok((subject, Err(error)));
+                }
+            },
+            other => return Ok((subject, other)),
+        }
+    }
+}
 
 /// Result of checking a saved journal before an explicit Resume spends allowance re-verifying
 /// the encrypted copy.
@@ -323,13 +375,28 @@ pub(super) async fn abandon_partial(
     let Some(saved) = actor.download_export_state(id).await? else {
         return Ok(expected_intent);
     };
+    // Refuse a stale click before deleting anything; the abandon below repeats the exact CAS.
+    let current = actor.downloads().await?;
+    if !current
+        .iter()
+        .any(|row| row.id == id && row.state.intent == expected_intent)
+    {
+        return Err("This download changed. Open Transfers and try again.".into());
+    }
     let journal = saved.journal().clone();
-    blocking(move || remove_partial(&journal))
-        .await?
-        .map_err(|_| {
-            "The partly saved file could not be removed. Close any app using it and try again."
-                .to_string()
-        })?;
+    // A folder that cannot be reached is usually why the user wants a new copy; the old partial
+    // then stays wherever it is. A reachable partial that cannot be checked is not forgotten.
+    match blocking(move || remove_partial(&journal)).await? {
+        Ok(
+            PartialRemoval::Removed | PartialRemoval::NotOurs | PartialRemoval::FolderUnreachable,
+        ) => {}
+        Ok(PartialRemoval::Unchecked) | Err(_) => {
+            return Err(
+                "The partly saved file could not be removed. Close any app using it and try again."
+                    .into(),
+            )
+        }
+    }
     commit_kept_command(
         state,
         server,
@@ -491,7 +558,9 @@ impl ExportContext<'_> {
                 )
                 .await
             }
-            ExportError::Full | ExportError::Inactive => error.to_string(),
+            // Conflict: the partial shrank under this session, so its offset no longer describes
+            // durable bytes. Write no checkpoint; the next Resume re-verifies from chunk zero.
+            ExportError::Full | ExportError::Inactive | ExportError::Conflict => error.to_string(),
             other => {
                 let _ = self.checkpoint(ready, file).await;
                 other.to_string()
@@ -575,41 +644,33 @@ pub(super) async fn export_journaled(
     ctx.progress(ready, file.progress());
     let mut session_retries = 0;
     while let Some(index) = file.next_index() {
-        let mut chunk = ctx
-            .actor
-            .read_download_chunk(ready.clone(), index, ctx.origin.clone())
-            .await?
-            .into_bytes();
-        let mut attempts = 0;
-        let progress = loop {
-            let (returned, kept, outcome) = blocking(move || {
-                let outcome = file.accept(index, &chunk);
-                (file, chunk, outcome)
-            })
-            .await?;
-            file = returned;
-            chunk = kept;
-            match outcome {
-                Ok(progress) => break progress,
-                Err(ExportError::Local {
-                    retryable: true,
-                    reason,
-                }) => match local_retry_delay(attempts, session_retries) {
-                    Some(delay) => {
-                        attempts += 1;
-                        session_retries += 1;
-                        SystemClock.sleep(delay).await;
-                    }
-                    None => {
-                        let error = ExportError::Local {
-                            retryable: false,
-                            reason,
-                        };
-                        return Err(ctx.stop(ready, file, error).await);
-                    }
-                },
-                Err(error) => return Err(ctx.stop(ready, file, error).await),
-            }
+        let chunk = Arc::new(
+            ctx.actor
+                .read_download_chunk(ready.clone(), index, ctx.origin.clone())
+                .await?
+                .into_bytes(),
+        );
+        let (returned, outcome) = accept_with_retries(
+            file,
+            |mut file: ExportFile| {
+                let chunk = chunk.clone();
+                async move {
+                    blocking(move || {
+                        let outcome = file.accept(index, &chunk);
+                        (file, outcome)
+                    })
+                    .await
+                }
+            },
+            || !ctx.origin.is_cancelled() && ready.is_current(),
+            |delay| async move { SystemClock.sleep(delay).await },
+            &mut session_retries,
+        )
+        .await?;
+        file = returned;
+        let progress = match outcome {
+            Ok(progress) => progress,
+            Err(error) => return Err(ctx.stop(ready, file, error).await),
         };
         ctx.progress(ready, progress);
         if progress.done % EXPORT_CHECKPOINT_CHUNKS == 0 && file.next_index().is_some() {
@@ -882,5 +943,98 @@ mod tests {
             }
         }
         assert_eq!(session, LOCAL_RETRIES_PER_SESSION);
+    }
+
+    fn transient() -> ExportError {
+        ExportError::Local {
+            retryable: true,
+            reason: "locked".into(),
+        }
+    }
+    fn done() -> ExportProgress {
+        ExportProgress {
+            done: 1,
+            total: 1,
+            bytes: 1,
+        }
+    }
+    /// Scripted step: the subject counts attempts; each attempt pops the next outcome.
+    async fn scripted(
+        outcomes: Vec<Result<ExportProgress, ExportError>>,
+        live: impl Fn(u32) -> bool,
+        session: &mut u32,
+    ) -> (u32, Result<ExportProgress, ExportError>) {
+        let outcomes = std::sync::Mutex::new(outcomes.into_iter());
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        accept_with_retries(
+            0u32,
+            |count: u32| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let next = outcomes.lock().unwrap().next().expect("scripted outcome");
+                async move { Ok((count + 1, next)) }
+            },
+            || live(calls.load(Ordering::SeqCst)),
+            |_| async {},
+            session,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn transient_failures_retry_within_the_bound_then_stop_non_retryable() {
+        let mut session = 0;
+        let (attempts, outcome) = scripted(
+            vec![Err(transient()), Err(transient()), Ok(done())],
+            |_| true,
+            &mut session,
+        )
+        .await;
+        assert_eq!((attempts, session), (3, 2));
+        assert_eq!(outcome.unwrap(), done());
+        let mut session = 0;
+        let (attempts, outcome) = scripted(
+            (0..10).map(|_| Err(transient())).collect(),
+            |_| true,
+            &mut session,
+        )
+        .await;
+        assert_eq!(attempts, LOCAL_RETRIES_PER_CHUNK + 1);
+        assert!(matches!(
+            outcome,
+            Err(ExportError::Local {
+                retryable: false,
+                ..
+            })
+        ));
+        // Disk full and halts are never retried.
+        let mut session = 0;
+        let (attempts, outcome) = scripted(
+            vec![Err(ExportError::Full), Ok(done())],
+            |_| true,
+            &mut session,
+        )
+        .await;
+        assert_eq!(attempts, 1);
+        assert!(matches!(outcome, Err(ExportError::Full)));
+    }
+
+    #[tokio::test]
+    async fn no_write_attempt_happens_after_the_invocation_or_lease_retires() {
+        // Lock (or Pause/Remove/replacement) lands while the first attempt backs off: the retry
+        // must not run, so no plaintext is written by a retired session.
+        let mut session = 0;
+        let (attempts, outcome) = scripted(
+            vec![Err(transient()), Ok(done())],
+            |calls| calls == 0,
+            &mut session,
+        )
+        .await;
+        assert_eq!(attempts, 1, "only the attempt made while live");
+        assert!(matches!(outcome, Err(ExportError::Inactive)));
+        let mut session = 0;
+        let (attempts, outcome) = scripted(vec![Ok(done())], |_| false, &mut session).await;
+        assert_eq!(attempts, 0, "a retired session never starts a write");
+        assert!(matches!(outcome, Err(ExportError::Inactive)));
     }
 }

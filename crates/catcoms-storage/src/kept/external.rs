@@ -420,6 +420,8 @@ pub(super) enum Effect {
     Link,
     Write,
     Remove,
+    /// The identity check of the final name right after a successful link.
+    Check,
     /// The sealed record write in `persistence.rs` (not an external path); shares the seam so a
     /// test can model a full vault volume.
     RecordWrite,

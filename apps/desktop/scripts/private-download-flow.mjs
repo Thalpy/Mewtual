@@ -9,11 +9,13 @@ export const privateDownloadFlowExpression = String.raw`(async () => {
     }
   };
   const base = window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
-  const first = { id: 'd'.repeat(64), cid: 'a'.repeat(64), intent: '3', grant: '1', status: 'incomplete', verifiedChunks: 1, totalChunks: 3 };
+  const first = { id: 'd'.repeat(64), cid: 'a'.repeat(64), intent: '3', grant: '1', status: 'incomplete', verifiedChunks: 1, savedChunks: 0, totalChunks: 3 };
   const exhausted = { ...first, id: 'e'.repeat(64), cid: 'b'.repeat(64), status: 'exhausted', grant: '9007199254740993' };
   const ready = { ...first, id: 'f'.repeat(64), cid: 'c'.repeat(64), status: 'ready', verifiedChunks: 3 };
-  const names = new Map([[first.id,'Interrupted drawing.bin'],[exhausted.id,'Large download.bin'],[ready.id,'Ready example.bin']]);
-  let inventory = [first, exhausted, ready], saving = null;
+  // A journaled save whose partial file was replaced: it must offer Save new copy, never Resume.
+  const changed = { ...first, id: '1'.repeat(64), cid: '2'.repeat(64), status: 'destination-changed', verifiedChunks: 3, savedChunks: 1 };
+  const names = new Map([[first.id,'Interrupted drawing.bin'],[exhausted.id,'Large download.bin'],[ready.id,'Ready example.bin'],[changed.id,'Changed example.bin']]);
+  let inventory = [first, exhausted, ready, changed], saving = null;
   const calls = [];
   const notify = () => base('plugin:event|emit', { event: 'files-updated', payload: { server: 1 } });
   window.__TAURI_INTERNALS__.invoke = async (command, args = {}) => {
@@ -52,10 +54,16 @@ export const privateDownloadFlowExpression = String.raw`(async () => {
   const action = (name,label) => [...(row(name)?.querySelectorAll('button') ?? [])].find(b => b.textContent.trim() === label);
   const click = async (name,label) => { await wait(() => action(name,label) && !action(name,label).disabled,label); action(name,label).click(); };
   await wait(() => row('Interrupted drawing.bin'),'saved progress after opening Transfers');
-  const out = { disclosure: document.querySelector('.downloads-tab').textContent.includes('check Downloads before saving again') };
+  const out = { disclosure: document.querySelector('.downloads-tab').textContent.includes('Save new copy starts a separate file') };
+  await wait(() => row('Changed example.bin'),'changed destination row');
+  if (!action('Changed example.bin','Save new copy') || action('Changed example.bin','Resume saving') || action('Changed example.bin','Try again')) {
+    throw new Error('a changed destination must offer Save new copy and never resume into the replaced file');
+  }
   await click('Interrupted drawing.bin','Resume download');
   await wait(() => saving && first.status === 'receiving' && action('Interrupted drawing.bin','Pause'),'active metadata before save reply');
-  out.duplicateDisabled = action('Interrupted drawing.bin','Resume download').disabled;
+  // While receiving, Resume is not offered at all (absent), so a duplicate save cannot start.
+  const duplicate = action('Interrupted drawing.bin','Resume download');
+  out.duplicateDisabled = !duplicate || duplicate.disabled;
   out.pauseAvailable = !action('Interrupted drawing.bin','Pause').disabled;
   await click('Interrupted drawing.bin','Pause');
   await wait(() => !saving && row('Interrupted drawing.bin').textContent.includes('Paused'),'paused encrypted progress');
