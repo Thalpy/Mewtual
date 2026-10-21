@@ -14764,6 +14764,7 @@ async fn save_group_file(
     resume: Option<String>,
     expected_intent: Option<String>,
     operation: Option<String>,
+    fresh_copy: Option<bool>,
 ) -> Result<SavedFileResult, String> {
     let generation = keep_session::invocation_generation(&state).await?;
     let export_slot = private_downloads::export_slot()?;
@@ -14792,15 +14793,24 @@ async fn save_group_file(
                 .as_deref()
                 .ok_or("Download revision is required.")?,
         )?;
-        commit_kept_command(
+        // Save new copy, destination preflight (before re-verification spends allowance) and
+        // the intent CAS. A save the preflight finds already published finishes here.
+        if let Some(saved) = private_downloads::prepare_resume(
             &state,
             server,
             instance,
             generation,
-            actor.set_download_paused(id, intent, false),
+            &actor,
+            &origin,
+            id,
+            intent,
+            fresh_copy.unwrap_or(false),
         )
-        .await?;
-    } else if expected_intent.is_some() {
+        .await?
+        {
+            return Ok(saved);
+        }
+    } else if expected_intent.is_some() || fresh_copy.is_some() {
         return Err("Download ID is required.".into());
     }
     if origin.is_cancelled() {
@@ -14824,30 +14834,49 @@ async fn save_group_file(
         ));
     }
     let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
-    let mut source = ActorSaveSource {
-        actor,
+    // Journaled, resumable export first; the non-resumable writer only when this destination
+    // cannot carry a journal for a fresh save (no stable identity, links unsupported).
+    let context = private_downloads::ExportContext {
         state: &state,
         app: &app,
+        actor: &actor,
         server,
-        cid,
-        ready,
-        total,
-        size,
+        instance,
         generation,
-        origin,
-        operation,
+        origin: &origin,
+        cid: &cid,
+        operation: operation.as_deref(),
     };
-    let path =
-        stream_download_to_disk(&downloads, &name, total, size, &target, &mut source).await?;
+    let path = match private_downloads::export_journaled(&context, &ready, downloads.clone(), &name)
+        .await?
+    {
+        Some(path) => path,
+        None => {
+            let mut source = ActorSaveSource {
+                actor: actor.clone(),
+                state: &state,
+                app: &app,
+                server,
+                cid: cid.clone(),
+                ready: ready.clone(),
+                total,
+                size,
+                generation,
+                origin: origin.clone(),
+                operation: operation.clone(),
+            };
+            stream_download_to_disk(&downloads, &name, total, size, &target, &mut source).await?
+        }
+    };
     let saved = finish_saved_read_if(
         &state,
         generation,
-        &source.origin,
+        &origin,
         &path,
         &declared_mime,
         exported_media_validation,
         reveal_path,
-        || source.ready.is_current(),
+        || ready.is_current(),
     )
     .await?;
     // Publication is already committed. Cleanup failure must never turn that success into a
@@ -14855,10 +14884,10 @@ async fn save_group_file(
     finish_download_response(
         &state,
         generation,
-        &source.origin,
+        &origin,
         saved,
-        || source.ready.invocation_current(),
-        source.actor.finish_download_export(source.ready.clone()),
+        || ready.invocation_current(),
+        actor.finish_download_export(ready.clone()),
     )
     .await
 }
