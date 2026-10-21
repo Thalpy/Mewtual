@@ -1,5 +1,19 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Native confirmation result admission (21 October, validation pending)
+
+Private prepared signatures grant no source authority. Final Capacity retains the exact artifact
+in its original row, without another signature for changed ciphertext. First Root seal/open
+results recognize actual call/action allocations and recheck original actor/session/room/epoch/
+pending gates after the last injected callback. Session revocation wins before child revocation
+can acquire Policy; a still-live child alone cannot publish. History grants no fresh authority.
+
+An affine preparation loan retains actual engine/input custody while signing, RNG and copies
+run, including competing settlement or unwind. Settlement fences first effects immediately;
+actual drained status and credit release wait for that loan. Token/slot/phase/credit destruction
+and promotion cleanup occur outside result/native guards. No limits are raised. All 389 focused voice tests and unchanged layout guards pass. Complete gates remain pending;
+these changes establish no IPC, RTC, media relay or physical acceptance.
+
 ## Protected browser computation (21 October, integration pending)
 
 Protected native row projections cannot use ordinary keys or raw encryption/opening APIs.

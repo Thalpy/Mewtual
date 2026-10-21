@@ -82,6 +82,22 @@ pub struct CryptoAuthority {
 }
 redacted_debug!(CryptoAuthority);
 impl CryptoAuthority {
+    /// Sample this authority's OWN monotonic origin before a short native fence. Later native
+    /// callbacks may revoke any gate, so repeat authorized_at only after their final callback.
+    pub(super) fn observation_time(&self) -> (u64, u64) {
+        (self.clock.monotonic_ms(), self.clock.now_ms())
+    }
+    pub(super) fn authorized_at(&self, mono: u64, wall: u64) -> bool {
+        self.local.is_live()
+            && self.pair.is_live()
+            && self.pending.iter().flatten().all(CallLease::is_live)
+            && self
+                .hello
+                .as_ref()
+                .is_none_or(SequenceAuthority::authorized)
+            && mono < self.deadline
+            && wall <= self.expires
+    }
     /// Historical results retain the original native clock, independently of pending token
     /// authorization. A retry must not select a new clock or renew any original deadline.
     pub(super) fn history_time(&self) -> (u64, u64) {
@@ -144,17 +160,8 @@ impl RequestAuthority for CryptoAuthority {
     fn authorized(&self) -> bool {
         // Clock is an injected callback and may synchronously close an owner. Observe all
         // original irreversible gates AFTER the final callback, not only on the next poll.
-        let mono = self.clock.monotonic_ms();
-        let wall = self.clock.now_ms();
-        self.local.is_live()
-            && self.pair.is_live()
-            && self.pending.iter().flatten().all(CallLease::is_live)
-            && self
-                .hello
-                .as_ref()
-                .is_none_or(SequenceAuthority::authorized)
-            && mono < self.deadline
-            && wall <= self.expires
+        let (mono, wall) = self.observation_time();
+        self.authorized_at(mono, wall)
     }
     async fn revoked(&self) {
         if !self.authorized() {
@@ -205,6 +212,40 @@ mod tests {
             duration: std::time::Duration,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
             self.inner.sleep(duration)
+        }
+    }
+
+    #[test]
+    fn final_pure_pending_observation_never_resamples_clock_and_sees_later_revocation() {
+        for index in 0..5 {
+            let gates: [CallLease; 5] = std::array::from_fn(|_| CallLease::default());
+            let clock = Arc::new(LastClockRevocation {
+                inner: ManualClock::new(1000),
+                target: gates[index].clone(),
+                armed: std::sync::atomic::AtomicBool::new(false),
+            });
+            let mut authority = CryptoAuthority::new(
+                gates[0].clone(),
+                gates[1].clone(),
+                clock.clone(),
+                16_000,
+                u64::MAX,
+            )
+            .unwrap();
+            for gate in gates.iter().skip(2) {
+                authority = authority.with_pending(gate.clone()).unwrap();
+            }
+            let (mono, wall) = authority.observation_time();
+            clock.armed.store(true, Ordering::Release);
+            assert!(authority.authorized_at(mono, wall));
+            assert!(
+                clock.armed.load(Ordering::Acquire),
+                "pure fence must not invoke Clock"
+            );
+            assert!(gates[index].is_live());
+            gates[index].revoke();
+            assert!(!authority.authorized_at(mono, wall));
+            assert!(clock.armed.load(Ordering::Acquire));
         }
     }
 

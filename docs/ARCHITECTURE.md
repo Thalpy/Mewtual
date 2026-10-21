@@ -1,5 +1,22 @@
 # Mewtual; Architecture
 
+## Prepared native confirmation results (21 October, validation pending)
+
+The next native increment splits sealing into Unsigned, private Prepared and source-visible
+Published stages in the original outgoing row. Local refusal retains one exact inert signature;
+changed ciphertext refuses before another signing call. All signing, hashing, copies, RNG,
+pruning and replacement-owner construction precede Engine and short nonblocking Group/Policy
+admission. An affine preparation loan retains the original admitted engine charge through actual
+work, including settlement/unwind. Settlement fences first effects immediately; drained status
+and permit/input release wait for the loan. No capacity or reusable permit is added.
+
+Root seal/open consumers recognize actual call/action allocations and current native room,
+participant and epoch. Final original actor/session checks follow the last Clock callback.
+Consumed token/slot/body custody, replaced signatures/actions/attempts and older promotion cleanup
+remain outside all final guards. Compatibility result APIs share the prepared packet seam.
+All 389 focused voice tests and unchanged layout guards pass; complete gates remain pending; production IPC, normal V2/RTC, authorized SDP phase transfer,
+member media relay and combined/physical acceptance remain open.
+
 ## Protected browser confirmation (21 October, integration pending)
 
 The selected WebCrypto broker consumes protected native row projections after accepted derivation.

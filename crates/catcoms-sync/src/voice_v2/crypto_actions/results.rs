@@ -119,7 +119,7 @@ impl CryptoAction {
     pub fn terminal_status(&self) -> CryptoResultStatus {
         let engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
         CryptoResultStatus {
-            settled: engine.settled,
+            settled: engine.settled && !engine.preparing,
             receipt: engine
                 .terminal
                 .as_ref()

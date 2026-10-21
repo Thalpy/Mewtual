@@ -1,5 +1,17 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Root confirmation results (21 October, validation pending)
+
+`Root::submit_voice_confirmation_result(grant, action, ciphertext, tag)` and
+`Root::commit_voice_confirmation_result(grant, action, plaintext, tag)` require actual native
+CallGrant and retained CryptoAction allocations. Equal serialized IDs cannot adopt another owner.
+Exact terminal recovery returns metadata; first effects cross the original actor/session/room/
+epoch boundary after fallible preparation. No command, wire format or persistence format changes.
+
+A private affine loan conserves the admitted engine charge through native preparation.
+`settle_engine` fences first effects immediately, while `is_settled` and terminal status remain
+false until the loan drains. Exact ACK and settlement remain independent. All 389 focused voice tests and unchanged layout guards pass; complete gates remain pending; production registration/IPC, derivation and SDP integration remain separate work.
+
 ## Protected browser confirmation seam (21 October, not production IPC)
 
 `registerProtectedConfirmation(owner, chain, native, input)` accepts the exact native action,

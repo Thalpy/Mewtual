@@ -76,12 +76,41 @@ pub(super) enum Key {
 #[derive(Default)]
 struct Engine {
     settled: bool,
+    // A private synchronous preparation can run outside Engine without lending away its actual
+    // charge. Settlement fences first effects immediately, but returns credit only after this
+    // affine loan drains. There is at most one preparation for this native action allocation.
+    preparing: bool,
     // Lending authority is pending state, not permanent history. Taking it under this same
     // fence prevents a delayed admission from rebuilding capacity after actual settlement.
     lender: Option<ByteBudget>,
     permit: Option<Credit>,
     terminal: Option<results::RecordedResult>,
     acknowledged: bool,
+}
+
+#[must_use = "retain the preparation loan until all actual work and copies have drained"]
+pub(super) struct ResultPreparation<'a> {
+    action: &'a CryptoAction,
+}
+impl Drop for ResultPreparation<'_> {
+    fn drop(&mut self) {
+        let retired = {
+            let mut engine = self.action.engine.lock().unwrap_or_else(|e| e.into_inner());
+            debug_assert!(engine.preparing);
+            engine.preparing = false;
+            (
+                if engine.settled {
+                    engine.permit.take()
+                } else {
+                    None
+                },
+                self.action.take_settled_payload(&engine),
+            )
+        };
+        // This loan must stay in the outer result scope. Never destroy input/phase/credit
+        // owners beneath Engine or the short native Group/Policy publication fence.
+        drop(retired);
+    }
 }
 
 /// Opaque registered action. Clones preserve the exact engine fence and its actual charge.
@@ -159,14 +188,49 @@ impl CryptoAction {
             Err(VoiceError::Unauthorized)
         }
     }
+    pub(super) fn pending_observation(&self) -> (u64, u64) {
+        self.authority.observation_time()
+    }
+    /// Pending original-owner check only; caller MUST already hold this action's result fence.
+    /// This never reenters Engine or samples a Clock while final native admission is held.
+    pub(super) fn check_pending_at(&self, mono: u64, wall: u64) -> Result<(), VoiceError> {
+        if self.authority.authorized_at(mono, wall)
+            && self.call.is_live()
+            && self.chain.as_ref().is_none_or(CallLease::is_live)
+        {
+            Ok(())
+        } else {
+            Err(VoiceError::Unauthorized)
+        }
+    }
+    /// Allow bounded private preparation only after this exact engine was admitted. The final
+    /// result fence must repeat settlement/permit and original-owner checks: settlement may win
+    /// while signatures/RNG/copies are prepared, in which case no first effect is published.
+    pub(super) fn begin_result_preparation(&self) -> Result<ResultPreparation<'_>, VoiceError> {
+        let (mono, wall) = self.pending_observation();
+        let mut engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
+        if engine.settled || engine.permit.is_none() || engine.terminal.is_some() {
+            return Err(VoiceError::Unauthorized);
+        }
+        self.check_pending_at(mono, wall)?;
+        if engine.preparing {
+            return Err(VoiceError::Capacity);
+        }
+        engine.preparing = true;
+        Ok(ResultPreparation { action: self })
+    }
     pub fn engine_bytes(&self) -> usize {
         self.engine_bytes
     }
     pub fn is_settled(&self) -> bool {
-        self.engine
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .settled
+        let engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
+        engine.settled && !engine.preparing
+    }
+    #[cfg(test)]
+    pub(crate) fn result_fence_available_for_test(&self) -> bool {
+        // A deterministic injected Clock/RNG can observe whether preparation accidentally
+        // executes beneath Engine, without exposing any permit or mutable engine state.
+        self.engine.try_lock().is_ok()
     }
     pub fn is_pending(&self) -> bool {
         let engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
@@ -210,7 +274,11 @@ impl CryptoAction {
             let mut engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
             engine.settled = true;
             (
-                engine.permit.take(),
+                if engine.preparing {
+                    None
+                } else {
+                    engine.permit.take()
+                },
                 engine.lender.take(),
                 self.take_settled_payload(&engine),
             )
@@ -222,7 +290,8 @@ impl CryptoAction {
         // No terminal result after actual last-RPC settlement can ever become a first result:
         // the permanent engine fence already refuses it. Such failed/unstarted work has no
         // receipt to ACK. Installed terminal results still require their exact ACK.
-        if engine.settled && (engine.terminal.is_none() || engine.acknowledged) {
+        if engine.settled && !engine.preparing && (engine.terminal.is_none() || engine.acknowledged)
+        {
             self.input.lock().unwrap_or_else(|e| e.into_inner()).take()
         } else {
             None
@@ -843,6 +912,77 @@ mod tests {
                 })
             })
             .unwrap()
+    }
+
+    #[test]
+    fn actual_result_preparation_retains_engine_and_input_through_concurrent_settlement() {
+        for unwind in [false, true] {
+            let pool = Arc::new(Resources::default());
+            let call = CallLease::default();
+            let mut queue = ActionQueue::default();
+            let action = publish(&mut queue, &pool, &call, 1);
+            assert!(
+                action.begin_result_preparation().is_err(),
+                "unadmitted engines cannot prepare"
+            );
+            action.admit_engine(action.engine_bytes()).unwrap();
+            let before = pool.counts();
+            assert_eq!(before.1, 1);
+            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let preparation = action.begin_result_preparation().unwrap();
+                assert_eq!(
+                    action.begin_result_preparation().err(),
+                    Some(VoiceError::Capacity)
+                );
+                // A real competing settlement request permanently fences a first result, but
+                // cannot report actual drainage or refund this loan's running copies/work.
+                std::thread::scope(|scope| {
+                    scope.spawn(|| action.settle_engine()).join().unwrap();
+                });
+                assert_eq!(pool.counts(), before);
+                assert!(!action.is_settled());
+                assert!(!action.terminal_status().settled);
+                assert!(action.input().is_ok());
+                assert!(action.admit_engine(action.engine_bytes()).is_err());
+                assert!(action
+                    .with_result(&[], action.output_tag(&[]).unwrap(), || panic!(
+                        "settlement won"
+                    ))
+                    .is_err());
+                if unwind {
+                    panic!("preparation aborted");
+                }
+                drop(preparation);
+            }));
+            assert_eq!(run.is_err(), unwind);
+            assert_eq!(pool.counts().1, 0);
+            assert!(action.is_settled() && action.terminal_status().settled);
+            assert!(action.input().is_err());
+            assert!(action.begin_result_preparation().is_err());
+        }
+    }
+
+    #[test]
+    fn completed_preparation_does_not_settle_or_refund_a_running_browser_engine() {
+        let pool = Arc::new(Resources::default());
+        let call = CallLease::default();
+        let mut queue = ActionQueue::default();
+        let action = publish(&mut queue, &pool, &call, 1);
+        action.admit_engine(action.engine_bytes()).unwrap();
+        let before = pool.counts();
+        drop(action.begin_result_preparation().unwrap());
+        assert_eq!(pool.counts(), before);
+        assert!(!action.is_settled());
+        let next = action.begin_result_preparation().unwrap();
+        let receipt = finish(&action, CryptoOutcome::Derived);
+        action.acknowledge_result(&receipt).unwrap();
+        action.settle_engine();
+        assert_eq!(pool.counts().1, 1);
+        assert!(action.input().is_ok());
+        drop(next);
+        assert_eq!(pool.counts().1, 0);
+        assert!(action.input().is_err());
+        assert!(receipt.same_transition(&action.terminal_status().receipt.unwrap()));
     }
 
     #[test]

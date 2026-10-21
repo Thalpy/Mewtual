@@ -309,6 +309,50 @@ fn frame(f: &mut Fixture, object: SignedObject) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn protected_root_result_requires_actual_call_and_action_allocations() {
+    let mut f = fixture().await;
+    let object = f.object.clone();
+    admit(&mut f, object).unwrap();
+    let action = actions(&mut f).pop().unwrap();
+    action.admit_engine(action.engine_bytes()).unwrap();
+    let tag = action.output_tag(&f.plaintext).unwrap();
+    let foreign = Arc::new(CallGrant::from_lease(CallLease::default(), f.grant.scope()));
+    assert_eq!(
+        f.receiver
+            .commit_voice_confirmation_result(&foreign, &action, &f.plaintext, tag)
+            .err(),
+        Some(VoiceError::Unauthorized)
+    );
+    assert!(action.terminal_status().receipt.is_none());
+    let mut other = fixture().await;
+    let object = other.object.clone();
+    admit(&mut other, object).unwrap();
+    let other_action = actions(&mut other).pop().unwrap();
+    assert_eq!(
+        f.receiver
+            .commit_voice_confirmation_result(&f.grant, &other_action, &f.plaintext, tag)
+            .err(),
+        Some(VoiceError::Unauthorized)
+    );
+    assert!(action.terminal_status().receipt.is_none());
+    let receipt = f
+        .receiver
+        .commit_voice_confirmation_result(&f.grant, &action, &f.plaintext, tag)
+        .unwrap();
+    assert_eq!(
+        receipt.outcome,
+        voice_v2::crypto_actions::CryptoOutcome::Opened
+    );
+    action.settle_engine();
+    action.acknowledge_result(&receipt).unwrap();
+    let recovered = f
+        .receiver
+        .commit_voice_confirmation_result(&f.grant, &action, &f.plaintext, tag)
+        .unwrap();
+    assert!(receipt.same_transition(&recovered));
+}
+
+#[tokio::test]
 async fn protected_root_hello_returns_signed_admission_and_exact_lost_ack_without_new_work() {
     let mut f = fixture().await;
     let object = f.object.clone();
@@ -344,24 +388,13 @@ async fn protected_root_hello_returns_signed_admission_and_exact_lost_ack_withou
 
     // Successful decryption consumes its token. Admission history must survive independently.
     first[0].admit_engine(first[0].engine_bytes()).unwrap();
-    let context = f.receiver.voice_v2_context(f.grant.scope().room).unwrap();
     let result = f
         .receiver
-        .voice_runtime
-        .as_mut()
-        .unwrap()
-        .endpoints
-        .participant
-        .as_mut()
-        .unwrap()
-        .join
-        .commit_confirmation_result(
+        .commit_voice_confirmation_result(
+            &f.grant,
             &first[0],
             &f.plaintext,
             first[0].output_tag(&f.plaintext).unwrap(),
-            &authority(&context, &f.grant.lease()),
-            f.clock.as_ref(),
-            &mut f.receiver.rng,
         )
         .unwrap();
     first[0].settle_engine();

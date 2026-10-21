@@ -2592,6 +2592,87 @@ fn successful_newer_promotion_retires_old_pair_and_captured_old_finish() {
     }
 }
 
+#[test]
+fn promotion_revokes_old_incoming_immediately_but_defers_its_actual_table_cleanup() {
+    let mut f = fixture();
+    let (_, _, _, proof) = through_proof(&mut f);
+    let old = f.id;
+    let Body::Encrypted {
+        mut header,
+        ciphertext,
+    } = proof.body().clone()
+    else {
+        panic!("proof")
+    };
+    header.sequence += 1;
+    let delayed = SignedObject::issue(
+        proof.scope(),
+        &f.high.signer,
+        [44; 32],
+        proof.issued(),
+        proof.expires(),
+        Body::Encrypted { header, ciphertext },
+    )
+    .unwrap();
+    let ReceiveProgress::Decrypt(retained) = f.low.receive(delayed, &f.clock).unwrap() else {
+        panic!("retained old input")
+    };
+    let mut replacement = replacement_high(&mut f);
+    let newer = admit_pair(&mut f.low, &mut replacement, &f.clock, &mut f.rng);
+    let _old_high = std::mem::replace(&mut f.high, replacement);
+    f.id = newer;
+    through_proof(&mut f);
+    let finish = f.low.flight(newer, &f.clock, &mut f.rng);
+    let mut retirement = ConfirmationRetirement::default();
+    f.low
+        .join
+        .submit_confirmation_inner(
+            FlightSubmission {
+                handshake: newer,
+                action: finish.action,
+                reservation: finish.reservation.id,
+                ciphertext: &vec![22; finish.plaintext.len() + 16],
+            },
+            &f.low.signer,
+            &ca(&f.low.context, &f.low.lease),
+            &f.clock,
+            &mut retirement,
+        )
+        .unwrap();
+    assert!(retirement.handshakes.contains(&Some(old)));
+    assert_eq!(
+        f.low
+            .join
+            .ledger
+            .validate_inbound_commit(
+                retained.token,
+                retained.aad(),
+                retained.header.sequence,
+                retained.ciphertext(),
+                &ca(&f.low.context, &f.low.lease),
+                &f.clock
+            )
+            .err(),
+        Some(VoiceError::Unauthorized)
+    );
+    retirement.finish(&mut f.low.join);
+    assert_eq!(
+        f.low
+            .join
+            .ledger
+            .validate_inbound_commit(
+                retained.token,
+                retained.aad(),
+                retained.header.sequence,
+                retained.ciphertext(),
+                &ca(&f.low.context, &f.low.lease),
+                &f.clock
+            )
+            .err(),
+        Some(VoiceError::Reservation)
+    );
+}
+
 #[tokio::test]
 async fn deferred_finish_worker_cannot_submit_after_a_new_native_attempt() {
     let mut f = fixture();

@@ -4,6 +4,8 @@ use catcoms_rt::ManualClock;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 mod outgoing;
+mod retirement;
+mod sealed;
 
 const HANDSHAKE: [u8; 32] = [9; 32];
 
@@ -55,7 +57,7 @@ fn final_time_sample_end_refuses_first_seal_without_signing() {
         Err(VoiceError::Unauthorized)
     );
     assert_eq!(clock.reads.load(std::sync::atomic::Ordering::SeqCst), 2);
-    assert!(f.a.ledger.outgoing[&draft.id].cached.is_none());
+    assert!(f.a.ledger.outgoing[&draft.id].sealed.published().is_none());
 }
 
 #[test]

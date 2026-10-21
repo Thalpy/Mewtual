@@ -13,6 +13,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 mod outgoing;
+mod sealed;
+pub(in crate::voice_v2) use sealed::PreparedSealedPublication;
 
 const PAIRS: usize = 16;
 const RESERVATIONS: usize = 32;
@@ -128,7 +130,7 @@ struct Outgoing {
     construction: u64,
     retire: u64,
     source_deadline: u64,
-    cached: Option<SignedObject>,
+    sealed: sealed::SealedState,
     live: CallLease,
     crypto: RevocationOwner,
     // Protected output remains tied to its original chain after encryption has settled.
@@ -387,6 +389,16 @@ pub struct CommittedPacket {
     _credit: Arc<Credit>,
 }
 
+/// The remainder of a consumed incoming row still owns revocation/watch, phase and table-slot
+/// custody. A native final transaction must retire this OUTSIDE Engine/Group/Policy, even though
+/// its CommittedPacket separately retains the actual signed body/byte credit.
+pub(super) struct ConsumedIncoming {
+    _token: RevocationOwner,
+    _confirmation: Option<PendingConfirmation>,
+    _exchange: Option<Arc<Exchange>>,
+    _slot: slots::Slot,
+}
+
 /// Private synchronous transaction plan. It must not cross an await: its sole ledger owner
 /// prepares closed-result work, repeats final checks, then consumes it without a fallible tail.
 pub(super) struct ValidatedInbound {
@@ -397,6 +409,35 @@ pub(super) struct ValidatedInbound {
     pub retire: u64,
     pair: CallLease,
     token_owner: CallLease,
+    local: CallLease,
+    epoch: u64,
+    issued: u64,
+    confirmation: Option<PendingConfirmation>,
+    exchange: Option<Arc<Exchange>>,
+}
+impl ValidatedInbound {
+    /// Final pure observation for an exclusive synchronous result transaction. Header/tuple
+    /// equality and all member/Clock callbacks have already run. These original owners may be
+    /// revoked by a later native-origin time sample; never reconstruct them from current IDs.
+    pub(super) fn check_at(&self, epoch: u64, wall: u64, mono: u64) -> Result<(), VoiceError> {
+        if epoch != self.epoch
+            || !self.local.is_live()
+            || !self.pair.is_live()
+            || !self.token_owner.is_live()
+            || self
+                .confirmation
+                .as_ref()
+                .is_some_and(|pending| !pending.authorized())
+            || self
+                .exchange
+                .as_ref()
+                .is_some_and(|exchange| !exchange.is_live())
+            || mono >= self.retire
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        freshness(self.issued, self.expires, wall)
+    }
 }
 
 /// Packet-specific source authority, created only for the ledger's exact cached signed bytes.
@@ -869,10 +910,18 @@ impl PacketLedger {
             .retain(|_, incoming| incoming.object.issuer != peer);
     }
     pub(super) fn retire_handshake(&mut self, handshake: &[u8; 32]) {
+        self.retire_handshake_authority(handshake);
+        self.clear_handshake_incoming(handshake);
+    }
+    /// Immediate revocation only. Native result publication defers actual table cleanup until
+    /// Engine/Group/Policy guards return; dropping a row here would retire its real owners.
+    pub(super) fn retire_handshake_authority(&mut self, handshake: &[u8; 32]) {
         if let Some(pair) = self.pairs.get_mut(handshake) {
             pair.status = Status::Retired;
             pair.live.revoke();
         }
+    }
+    pub(super) fn clear_handshake_incoming(&mut self, handshake: &[u8; 32]) {
         self.incoming.retain(|_, incoming| !matches!(incoming.object.body(), Body::Encrypted { header, .. } if &header.handshake == handshake));
     }
     /// Opaque receipts are still revalidated against current native pair ownership before a
@@ -946,71 +995,14 @@ impl PacketLedger {
         authority: &Authority<'_>,
         clock: &dyn Clock,
     ) -> Result<SignedObject, VoiceError> {
-        self.prune(clock);
-        self.current(authority)?;
-        let outgoing = self.outgoing.get(&id).ok_or(VoiceError::Reservation)?;
-        if !outgoing.live.is_live() {
-            return Err(VoiceError::Unauthorized);
-        }
-        if outgoing
-            .exchange
-            .as_ref()
-            .is_some_and(|exchange| !exchange.is_live())
-        {
-            return Err(VoiceError::Unauthorized);
-        }
-        freshness(
-            outgoing.draft.issued,
-            outgoing.draft.expires,
+        let prepared: PreparedSealedPublication<'_> =
+            self.prepare_sealed_publication(id, ciphertext, signer, authority, clock)?;
+        prepared.check_at(
+            authority.context.epoch,
             clock.now_ms(),
+            clock.monotonic_ms(),
         )?;
-        self.pair(&outgoing.draft.header.handshake, authority)?;
-        if signer.voice_public_key()? != outgoing.draft.public_key {
-            return Err(VoiceError::Unauthorized);
-        }
-        if let Some(cached) = &outgoing.cached {
-            let Body::Encrypted {
-                ciphertext: original,
-                ..
-            } = &cached.body
-            else {
-                unreachable!()
-            };
-            return if ciphertext == original {
-                Ok(cached.clone())
-            } else {
-                Err(VoiceError::RetryMismatch)
-            };
-        }
-        if clock.monotonic_ms() >= outgoing.construction {
-            return Err(VoiceError::Reservation);
-        }
-        if ciphertext.len() != outgoing.ciphertext_bytes {
-            return Err(VoiceError::Bounds);
-        }
-        // Native time/signer seams above may observe End or membership replacement. Recheck
-        // irreversible owners after their last sample and immediately before first signing.
-        self.pair(&outgoing.draft.header.handshake, authority)?;
-        if !outgoing.live.is_live()
-            || outgoing
-                .chain
-                .as_ref()
-                .is_some_and(|chain| !chain.is_live())
-            || !outgoing.crypto.0.is_live()
-            || outgoing
-                .exchange
-                .as_ref()
-                .is_some_and(|exchange| !exchange.is_live())
-        {
-            return Err(VoiceError::Unauthorized);
-        }
-        let signed = outgoing.draft.seal(signer, ciphertext)?;
-        let outgoing = self.outgoing.get_mut(&id).expect("checked reservation");
-        outgoing.cached = Some(signed.clone());
-        // Signing consumes pending encryption eligibility. Source still owns outgoing.live;
-        // an exact cached submit retry remains valid without authorizing another engine seal.
-        outgoing.crypto.0.revoke();
-        Ok(signed)
+        Ok(prepared.publish())
     }
     pub(super) fn outgoing_crypto_authority(
         &self,
@@ -1032,7 +1024,7 @@ impl PacketLedger {
                 | EncryptedKind::ConfirmFinish
         );
         if confirmation != is_confirmation
-            || outgoing.cached.is_some()
+            || outgoing.sealed.published().is_some()
             || !outgoing.live.is_live()
             || reserved.aad != outgoing.draft.aad()
             || reserved.sequence != outgoing.draft.header.sequence
@@ -1125,7 +1117,7 @@ impl PacketLedger {
             .get(&object.id())
             .ok_or(VoiceError::Reservation)?;
         if !outgoing.live.is_live()
-            || outgoing.cached.as_ref() != Some(object)
+            || outgoing.sealed.published() != Some(object)
             || outgoing
                 .chain
                 .as_ref()
@@ -1464,6 +1456,11 @@ impl PacketLedger {
             retire: incoming.retire,
             pair,
             token_owner: incoming.token.0.clone(),
+            local: self.lease.clone(),
+            epoch: authority.context.epoch,
+            issued: incoming.object.issued(),
+            confirmation: incoming.confirmation.clone(),
+            exchange: incoming.exchange.clone(),
         })
     }
     /// Recheck immediately before consumption, after all closed-result validation, RNG draws
@@ -1479,7 +1476,8 @@ impl PacketLedger {
             .incoming
             .get(&prepared.token)
             .ok_or(VoiceError::Reservation)?;
-        incoming.object.check_freshness(clock.now_ms())?;
+        let wall = clock.now_ms();
+        incoming.object.check_freshness(wall)?;
         let monotonic = clock.monotonic_ms();
         // Clock/native seams can observe End while sampling time. Repeat current local and
         // pair ownership AFTER those samples; no further clock or callback may separate this
@@ -1501,23 +1499,41 @@ impl PacketLedger {
         {
             return Err(VoiceError::Unauthorized);
         }
-        Ok(())
+        prepared.check_at(authority.context.epoch, wall, monotonic)
     }
     pub(super) fn consume_validated_inbound(
         &mut self,
         prepared: ValidatedInbound,
     ) -> CommittedPacket {
+        let (packet, remainder) = self.consume_validated_inbound_deferred(prepared);
+        // Compatibility callers are outside a native publication fence. Protected confirmation
+        // instead keeps this remainder in its outer retirement owner until all guards return.
+        drop(remainder);
+        packet
+    }
+
+    pub(super) fn consume_validated_inbound_deferred(
+        &mut self,
+        prepared: ValidatedInbound,
+    ) -> (CommittedPacket, ConsumedIncoming) {
         let incoming = self
             .incoming
             .remove(&prepared.token)
             .expect("validated synchronous incoming transaction");
-        CommittedPacket {
+        let packet = CommittedPacket {
             object: incoming.object,
             local_lease: self.lease.clone(),
             pair_lease: prepared.pair,
             retire: incoming.retire,
             _credit: incoming._credit,
-        }
+        };
+        let remainder = ConsumedIncoming {
+            _token: incoming.token,
+            _confirmation: incoming.confirmation,
+            _exchange: incoming.exchange,
+            _slot: incoming._slot,
+        };
+        (packet, remainder)
     }
 }
 

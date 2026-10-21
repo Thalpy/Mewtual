@@ -27,37 +27,40 @@ prior complete suites do not validate it. Production native registration/IPC/res
 SDP/key phase transfer, normal V2/RTC and legacy isolation, member media relay, combined rollout
 and physical audio/network acceptance remain unfinished.
 
-## Active Root result preparation (21 October, uncompiled)
+## Prepared Root results (21 October, focused verification passed)
 
-Frozen browser `9dc1b8d3` (code `73c444a5`) passes 105 focused crypto tests, 2,268 full frontend tests,
-Svelte, build and ten rendered flows. Its Rust/native source is identical to `ecc8232f`, whose
-COMPLETE root suite passes 3,146 tests, zero failures and 24 existing ignored tests across 57 summaries. The complete frozen native/check/build/startup chain is recorded above. The ONE Cargo
-process now compiles the new focused Root regressions in communication-root-results-worktree.
-Do not launch duplicate Cargo jobs.
+The current native result increment is in communication-root-results-worktree, based on published
+c1532331. It adds actual Root seal/open result admission, private signatures retained through
+local refusal, deferred consumed token/slot and older promotion cleanup, preconstructed attempt
+owners and an affine preparation hold. Compatibility seal/open/derivation also prepare cleanup
+before Engine. Settlement immediately fences first effects while actual custody stays charged
+until preparation drains, including unwind. Only Published signatures have source authority.
 
-Active uncommitted/uncompiled work: communication-root-results-worktree, based on `9dc1b8d3`.
-It adds private prepared signatures and actual Root seal/open result consumers. Fallible cleanup,
-RNG/signing/hash/copies run before Engine/Group/Policy. An affine preparation loan retains the
-actual engine permit/input through concurrent settlement or unwind. Settlement fences first
-effects immediately; drained status/credit release wait for the loan. Consumed Incoming remainder,
-replaced actions/attempts/signatures and older promotion cleanup stay outside final guards.
-Low start preconstructs its replacement watch owner. Only Published packets have source authority;
-local refusal retains one exact inert signature, and changed bodies cannot trigger another sign.
+All **389 focused voice tests pass**, zero failures (15.69s, voice-root-results-focused-2.log).
+This includes unchanged row/metadata/Pair size guards, all three protected flights, exact
+accepted/rejected history, Capacity without resigning or token effects, actual session revoke
+blocked on Policy with a live native child, last Clock owner closure, settlement during signing
+and RNG, competing settlement/unwind, actual Root call/action identity and epoch/equal-join
+replacement. The first actual run passed 388/failed 1: the synthetic End fixture's lease is
+independent of actor children, so runtime revoke alone did not mark its receipt retired. The
+fixture now also closes its original call; the retirement assertion remains. Actual Root tests
+use Directory's registered CallGrant. No runtime check or limit was weakened.
 
-New deterministic regressions cover all three protected flights, exact history, final refusal,
-actual session revoke blocked on Policy with a live native child, last Clock owner closure,
-preparation/settlement/unwind, actual Root call/action identity and epoch/equal-join replacement.
-Their focused compilation is now running; they have not passed yet. Formatting and ambient checks pass. Static adversarial re-review is clear on both
-implementation and direct tests, with no remaining blocker/high/medium. No prior complete suite validates
-this new increment. Keep unpublished/retired owners in outer Options borrowed by final closures.
-Original actor/session checks follow the LAST callback. Child leases alone are insufficient.
-Short trusted watch notification is permitted; Engine/control/resource acquisition, arbitrary
-callbacks and owner destruction stay outside final native publication. Limits are unchanged.
+Static adversarial re-review has no remaining blocker/high/medium, including derivation cleanup
+and the RNG-settlement addition. Formatting and ambient pass. Strict whole-root Clippy passes with warnings denied (2m25s), root dependency policy passes,
+and the complete frontend passes 2,268 tests with zero failures (216.25s, two workers).
+Complete root/native gates are now queued against this frozen source. The earlier
+complete 3,146-root/443-native/2,268-frontend evidence above belongs to c1532331, not this increment.
+Keep unpublished and retired owners outer, destroy them after all final guards, and recheck the
+original actor/session after the LAST injected callback. Child leases alone are insufficient.
+Short trusted watch notification is allowed; no extra Engine/control/resource acquisition or
+arbitrary callbacks belong in final native admission. Existing limits are unchanged.
 
-Production registration/IPC, complete derivation integration, authorized confirmation-to-SDP
-key/phase transfer, compatible helpers, normal V2/RTC and legacy mode isolation, member media
-relay, combined rollout and physical audio/network testing remain unfinished. Only one desktop
-is available. The native-provider experiment remains isolated and unselected.
+Still open: production registration/IPC and exact historical result/ACK/settlement recovery,
+complete Root derivation integration, authorized confirmation-to-SDP key/phase transfer,
+compatible helpers, normal V2/RTC and legacy isolation, member media relay, combined rollout and
+physical audio/network acceptance. Only one desktop is available. The native-provider experiment
+stays isolated and unselected.
 
 ## Selected WebCrypto continuation (21 October)
 

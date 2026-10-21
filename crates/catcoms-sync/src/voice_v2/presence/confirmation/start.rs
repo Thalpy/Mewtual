@@ -171,6 +171,9 @@ impl LocalJoin {
         let mut published = None;
         let mut retired_action = None;
         let mut retired_attempt = None;
+        // Default creates the watch allocation. A successful final publication may only move
+        // this prepared owner; a refusal destroys it after Group/Policy/History have returned.
+        let mut next_attempt = Some(RevocationOwner::default());
         actor.with_local_origin(peer, authority.context, |wall, mono, origin| {
             final_owner(wall, mono)?;
             publication
@@ -195,7 +198,10 @@ impl LocalJoin {
                 if let Some(old) = &pair.action {
                     old.live.0.revoke();
                 }
-                retired_attempt = Some(std::mem::take(&mut pair.attempt));
+                retired_attempt = Some(std::mem::replace(
+                    &mut pair.attempt,
+                    next_attempt.take().expect("prepared replacement attempt"),
+                ));
                 pair.action_serial = change.action.serial;
                 retired_action = pair.action.replace(change.action);
                 pair.protected_hello_tags[usize::from(pair.starts)] = Some(low_tag);

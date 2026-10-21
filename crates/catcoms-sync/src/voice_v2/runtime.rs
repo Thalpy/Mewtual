@@ -527,6 +527,12 @@ pub struct View {
 }
 redacted_debug!(View);
 impl ActorOwner {
+    #[cfg(test)]
+    pub(crate) fn revocation_observer_for_test(&self) -> CallLease {
+        // Tests wait for the actual atomic close while revoke_session is blocked on Policy.
+        // This clones its original observation gate; it does not fabricate child authority.
+        self.gate.live.clone()
+    }
     pub(crate) fn uses_resources(&self, resources: &Arc<Resources>) -> bool {
         Arc::ptr_eq(&self.resources, resources)
     }

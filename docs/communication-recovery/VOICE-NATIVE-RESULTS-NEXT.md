@@ -1,10 +1,50 @@
 # Next voice milestone: native result recovery
 
+## Prepared Root seal/open continuation (21 October, uncompiled)
+
+The active next checkout now adds Root seal/open result consumers, actual call/action identity,
+private signature staging, final original actor/session admission, deferred token/slot/promotion
+cleanup and an affine preparation hold through settlement. This implements the planned native
+transaction shape below, and all 389 focused voice tests pass, including unchanged layout guards. Static re-review has no remaining
+blocker/high/medium. Formatting and ambient checks pass. Complete validation still belongs to
+the frozen earlier checkpoint; do not claim current result readiness before complete gates.
+
+Next after this slice: Root derivation integration; registered historical-result/ACK/settlement
+and exact retry delivery; native/browser IPC copy ownership; authorized confirmation-to-SDP phase
+and key transfer; current SDP/ICE/RTC and live dispatch isolation. Reconcile native terminal rows
+quietly after lost replies without another computation or allocator. Explicitly cover lost
+settlement requests, not just lost commit replies: a browser terminal outcome must not strand
+a native engine allowance or let later protected rows spin on its capacity. The adapter/broker
+settlement owner must retain original identity and actual RPC custody until confirmed drainage.
+
+### Settlement adapter contract before enablement
+
+The selected broker already awaits `settleAction` inside its finalizer, retaining the serial
+protected lane while that promise is pending. Its terminal handle must keep returning the
+immutable outcome, not rerun AEAD/commit or drive a second settlement owner. The future stateful
+native IPC adapter must coalesce one settlement per original admitted controller/permit/action,
+allow at most one RPC in flight and retain actual reply custody. Lost request/reply is retryable:
+keep the promise pending and retry only on bounded concrete availability/driver events or an
+explicit retry, with the same identity. No polling loop or replacement grant is justified.
+
+Only exact native proof of actual drainage may resolve that promise. `settle_engine` latching a
+refusal is insufficient while ResultPreparation still owns running work; await native drained
+status/completion. An unknown identity is not evidence of settlement without the original
+non-reusable tombstone proving drainage. Irrecoverable identity/protocol rejection must first
+retire/quarantine the original owner, retaining uncertain native custody. End, lock and remount
+must not cancel that settlement owner or bind it to a current replacement call.
+
+Required actual IPC tests: request lost before native; ACK lost after native; native preparation
+still running; End/remount during retry; permanent wrong identity; and a queued next protected
+row. Prove one AEAD/commit, original exact identity and no early lane advance, input retirement
+or credit return. Current broker fault seams and Coordinator test recognition booleans do not
+prove this production contract.
+
 ## Selected browser consumer and next Root boundary (21 October)
 
 Protected WebCrypto seal/open now consumes the original prepaid chain rows and serial execution
 position after accepted derivation. Real-crypto/fault-seam checks pass105 cases; full frontend
-passes2,268, Svelte reports no errors/warnings, production build and ten rendered flows pass.
+passes 2,268, Svelte reports no errors/warnings, production build and ten rendered flows pass.
 This is not production native IPC or RTC. The unselected native-provider experiment stays isolated.
 
 Next implement a prepared Root result transaction, not a thin wrapper around LocalJoin commits.

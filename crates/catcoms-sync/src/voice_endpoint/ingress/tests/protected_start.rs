@@ -135,6 +135,35 @@ async fn root_protected_low_start_recovers_exact_history_and_refuses_a_foreign_c
         .start_voice_confirmation(&grant, handshake, None)
         .unwrap();
     let first_id = message(&first);
+    let input = first.input().unwrap();
+    let CryptoInput::EncryptConfirmation(flight) = input.as_input() else {
+        panic!("seal")
+    };
+    let ciphertext = vec![22; flight.plaintext.len() + 16];
+    let tag = first.output_tag(&ciphertext).unwrap();
+    // The Root result path must reject an unadmitted engine before signing, then publish its
+    // original packet and terminal metadata through the actual directory/session fence.
+    assert_eq!(
+        root.submit_voice_confirmation_result(&grant, &first, &ciphertext, tag)
+            .err(),
+        Some(VoiceError::Unauthorized)
+    );
+    first.admit_engine(first.engine_bytes()).unwrap();
+    let sealed = root
+        .submit_voice_confirmation_result(&grant, &first, &ciphertext, tag)
+        .unwrap();
+    assert!(matches!(
+        sealed.outcome,
+        voice_v2::crypto_actions::CryptoOutcome::Sealed { .. }
+    ));
+    first.settle_engine();
+    first.acknowledge_result(&sealed).unwrap();
+    assert!(first.input().is_err());
+    assert!(sealed.same_transition(
+        &root
+            .submit_voice_confirmation_result(&grant, &first, &ciphertext, tag)
+            .unwrap()
+    ));
     let next = root
         .start_voice_confirmation(&grant, handshake, Some(first_id))
         .unwrap();
@@ -165,6 +194,12 @@ async fn root_protected_low_equal_join_replacement_never_adopts_old_action_or_pr
         .start_voice_confirmation(&grant, handshake, None)
         .unwrap();
     let predecessor = message(&old);
+    let input = old.input().unwrap();
+    let CryptoInput::EncryptConfirmation(flight) = input.as_input() else {
+        panic!("seal")
+    };
+    let ciphertext = vec![22; flight.plaintext.len() + 16];
+    let tag = old.output_tag(&ciphertext).unwrap();
     old.admit_engine(old.engine_bytes()).unwrap();
     grant.lease().revoke();
     root.reconcile_voice_actor();
@@ -182,6 +217,14 @@ async fn root_protected_low_equal_join_replacement_never_adopts_old_action_or_pr
         Some(VoiceError::Unauthorized)
     );
     assert!(!old.is_pending());
+    for owner in [&grant, &replacement] {
+        assert_eq!(
+            root.submit_voice_confirmation_result(owner, &old, &ciphertext, tag)
+                .err(),
+            Some(VoiceError::Unauthorized)
+        );
+    }
+    assert!(old.terminal_status().receipt.is_none());
     assert!(old.admit_engine(old.engine_bytes()).is_err());
     old.settle_engine();
 }
@@ -192,6 +235,13 @@ async fn root_protected_low_mls_epoch_addition_retires_old_start_without_removin
     let old = root
         .start_voice_confirmation(&grant, handshake, None)
         .unwrap();
+    let input = old.input().unwrap();
+    let CryptoInput::EncryptConfirmation(flight) = input.as_input() else {
+        panic!("seal")
+    };
+    let ciphertext = vec![22; flight.plaintext.len() + 16];
+    let tag = old.output_tag(&ciphertext).unwrap();
+    old.admit_engine(old.engine_bytes()).unwrap();
     let before = root.voice_v2_context(1).unwrap().epoch;
     let third = catcoms_mls::MlsDevice::generate().unwrap();
     let package = third.key_package().unwrap();
@@ -205,5 +255,12 @@ async fn root_protected_low_mls_epoch_addition_retires_old_start_without_removin
         Some(VoiceError::Unauthorized)
     );
     assert!(!old.is_pending());
+    assert_eq!(
+        root.submit_voice_confirmation_result(&grant, &old, &ciphertext, tag)
+            .err(),
+        Some(VoiceError::Unauthorized)
+    );
+    assert!(old.terminal_status().receipt.is_none());
+    old.settle_engine();
     assert_eq!(clock.now_ms(), 1000, "the test changes epoch, not expiry");
 }

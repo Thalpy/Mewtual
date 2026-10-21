@@ -20,8 +20,10 @@ const PAIR_BYTES: usize = 6144;
 const CONFIRM_DOMAIN: &str = "mewtual/voice/key-confirm/v2";
 mod protected;
 mod response;
+mod result;
 mod start;
 pub(crate) use response::ProtectedResponse;
+pub(crate) use result::{ProtectedOpenedResult, ProtectedSealedResult};
 pub(crate) use start::ProtectedStart;
 
 #[derive(Default)]
@@ -211,9 +213,17 @@ struct PreparedActionChange {
     action: Action,
     retire: Option<MessageId>,
 }
+struct PreparedOpenedConfirmation {
+    prepared: ValidatedInbound,
+    change: PreparedConfirmation,
+}
+
 enum PreparedConfirmation {
     Hello {
         action: Option<PreparedActionChange>,
+        // Creating a CallLease/watch owner allocates. Prepare it before native admission;
+        // publication replaces the actual attempt without mem::take/default inside guards.
+        attempt: Option<RevocationOwner>,
         low: Nonce,
         high: Option<Nonce>,
         nonce_tag: Option<Nonce>,
@@ -290,15 +300,26 @@ fn apply_action(pair: &mut Pair, prepared: PreparedActionChange, ledger: &Packet
 #[derive(Default)]
 struct ConfirmationRetirement {
     action: Option<Action>,
+    signature: Option<SignedObject>,
     attempt: Option<RevocationOwner>,
     crypto: Option<Arc<CryptoAction>>,
+    packet: Option<(
+        super::super::packets::CommittedPacket,
+        super::super::packets::ConsumedIncoming,
+    )>,
+    // Fixed pair bound: revocation in publication records cleanup work without allocating or
+    // dropping older Incoming/token/slot owners while Engine/Group/Policy remain held.
+    handshakes: [Option<Nonce>; MAX_PAIRS],
 }
 impl ConfirmationRetirement {
-    fn finish(self) {
-        // Called only after the current decrypt Engine/result fence has returned. A different
+    fn finish(self, join: &mut LocalJoin) {
+        // Called only after the current Engine/result fence has returned. A different
         // action's engine/payload locks and credit destruction must never nest inside that fence.
         if let Some(crypto) = &self.crypto {
             crypto.retire_if_unstarted();
+        }
+        for id in self.handshakes.iter().flatten() {
+            join.ledger.clear_handshake_incoming(id);
         }
         drop(self);
     }
@@ -656,50 +677,18 @@ impl LocalJoin {
         authority: &Authority<'_>,
         clock: &dyn Clock,
     ) -> Result<CryptoResultReceipt, VoiceError> {
-        if !action.belongs_to(self.scope, &self.lease)
-            || action.operation() != CryptoOperation::EncryptConfirmation
-        {
-            return Err(VoiceError::Unauthorized);
-        }
-        if let Some(receipt) = action.recover_result(ciphertext, claimed_tag)? {
-            return Ok(receipt);
-        }
-        let input = match action.input() {
-            Ok(input) => input,
-            // A concurrent terminal publication/ACK can compact after the history miss.
-            // Recheck exact history rather than reconstructing input or repeating effects.
-            Err(_) => {
-                return action
-                    .recover_result(ciphertext, claimed_tag)?
-                    .ok_or(VoiceError::Unauthorized)
-            }
-        };
-        let CryptoInput::EncryptConfirmation(flight) = input.as_input() else {
-            return Err(VoiceError::Unauthorized);
-        };
-        action.with_result(ciphertext, claimed_tag, || {
-            // Exact terminal history above survives epoch changes; a first protected seal
-            // must still belong to its original chain before it can sign or mutate a packet.
-            action.check_chain_epoch(authority.context.epoch)?;
-            let signed = self.submit_confirmation_inner(
-                FlightSubmission {
-                    handshake: flight.handshake,
-                    action: flight.action,
-                    reservation: flight.reservation.id,
-                    ciphertext,
-                },
+        self.seal_confirmation_result(
+            result::SealedResult {
+                action,
+                ciphertext,
+                claimed_tag,
                 signer,
-                authority,
-                clock,
-            )?;
-            Ok(TerminalResult {
-                binding: self.result_binding(flight.handshake, u64::MAX, signed.expires()),
-                outcome: CryptoOutcome::Sealed {
-                    message: signed.id(),
-                    hash: signed.hash(),
-                },
-            })
-        })
+            },
+            authority,
+            clock,
+            None,
+            |_, _| Ok(()),
+        )
     }
 
     /// First closed-plaintext transition cannot race a terminal settlement fence. No plaintext
@@ -760,26 +749,43 @@ impl LocalJoin {
         let CryptoInput::DecryptConfirmation(packet) = input.as_input() else {
             return Err(VoiceError::Unauthorized);
         };
+        let _preparation = action.begin_result_preparation()?;
+        action.check_chain_epoch(authority.context.epoch)?;
+        // Preparation can prune expired siblings or retire a removed member. Their actual
+        // packet/slot destructors must run before Engine, not beneath its result guard.
+        let mut prepared = Some(self.prepare_confirmation_terminal(
+            OpenedFlight {
+                token: packet.token,
+                aad: packet.aad(),
+                sequence: packet.header.sequence,
+                ciphertext: packet.ciphertext(),
+                plaintext,
+            },
+            authority,
+            clock,
+            rng,
+        )?);
         let mut retirement = ConfirmationRetirement::default();
         let result = action.with_result(plaintext, claimed_tag, || {
             // Pending token authority alone does not bind a protected chain's MLS epoch.
             // Check before any nonce/token/Hello transition; historical recovery stays first.
             action.check_chain_epoch(authority.context.epoch)?;
-            self.commit_confirmation_terminal(
-                OpenedFlight {
-                    token: packet.token,
-                    aad: packet.aad(),
-                    sequence: packet.header.sequence,
-                    ciphertext: packet.ciphertext(),
-                    plaintext,
-                },
-                authority,
-                clock,
-                rng,
+            let wall = clock.now_ms();
+            let mono = clock.monotonic_ms();
+            let (own_mono, own_wall) = action.pending_observation();
+            action.check_pending_at(own_mono, own_wall)?;
+            prepared
+                .as_ref()
+                .expect("prepared plaintext transition")
+                .prepared
+                .check_at(authority.context.epoch, wall, mono)?;
+            Ok(self.apply_confirmation_terminal(
+                prepared.take().expect("one plaintext publication"),
                 &mut retirement,
-            )
+            ))
         });
-        retirement.finish();
+        retirement.finish(self);
+        drop(prepared);
         result
     }
 
@@ -822,18 +828,27 @@ impl LocalJoin {
         let CryptoInput::Derive(setup) = input.as_input() else {
             return Err(VoiceError::Unauthorized);
         };
-        action.with_result(&[], claimed_tag, || {
+        let _preparation = action.begin_result_preparation()?;
+        action.check_chain_epoch(authority.context.epoch)?;
+        // Compatibility derivation also performs member/expiry housekeeping before Engine.
+        // Root derivation still needs its own current actor/session/room publication consumer.
+        self.pair_current(setup.handshake, authority, clock)?;
+        let mut binding = self.result_binding(setup.handshake, u64::MAX, u64::MAX);
+        binding.attempt = None;
+        let mut terminal = Some(TerminalResult {
+            binding,
+            outcome: CryptoOutcome::Derived,
+        });
+        let result = action.with_result(&[], claimed_tag, || {
             // History above remains recoverable after an epoch change. First effects still
             // require the epoch captured by this plan, even without another prepare/pull.
             action.check_chain_epoch(authority.context.epoch)?;
-            self.pair_current(setup.handshake, authority, clock)?;
-            let mut binding = self.result_binding(setup.handshake, u64::MAX, u64::MAX);
-            binding.attempt = None;
-            Ok(TerminalResult {
-                binding,
-                outcome: CryptoOutcome::Derived,
-            })
-        })
+            let (mono, wall) = action.pending_observation();
+            action.check_pending_at(mono, wall)?;
+            Ok(terminal.take().expect("one derivation publication"))
+        });
+        drop(terminal);
+        result
     }
 
     /// Derivation belongs to the unchanged native pair, independently of confirmation nonce
@@ -1015,8 +1030,8 @@ impl LocalJoin {
         if !(authority.member)(pair.binding.peer) {
             pair.pin.revoke();
             pair.retired = true;
-            // This check also runs inside an action's first-result Engine fence. Revoke only
-            // the pin here; quiet collection closes unused chain capacity outside that fence.
+            // Result callers must run this fallible housekeeping before Engine. Retiring the
+            // ledger can drop Incoming/slot/credit owners; final publication uses pure gates.
             self.ledger.retire_handshake(&handshake);
         }
         if pair.retired || !pair.pin.is_live() {
@@ -1205,7 +1220,11 @@ impl LocalJoin {
         clock: &dyn Clock,
     ) -> Result<SignedObject, VoiceError> {
         self.require_ordinary_confirmation(submission.handshake)?;
-        self.submit_confirmation_inner(submission, signer, authority, clock)
+        let mut retirement = ConfirmationRetirement::default();
+        let result =
+            self.submit_confirmation_inner(submission, signer, authority, clock, &mut retirement);
+        retirement.finish(self);
+        result
     }
 
     /// Native result processing has already validated the exact action and original epoch.
@@ -1216,6 +1235,7 @@ impl LocalJoin {
         signer: &dyn VoiceSigner,
         authority: &Authority<'_>,
         clock: &dyn Clock,
+        retirement: &mut ConfirmationRetirement,
     ) -> Result<SignedObject, VoiceError> {
         let FlightSubmission {
             handshake,
@@ -1251,7 +1271,7 @@ impl LocalJoin {
             .expect("checked action")
             .signed = Some(signed.clone());
         if kind == EncryptedKind::ConfirmFinish {
-            self.apply_promotion(handshake);
+            self.apply_promotion(handshake, retirement);
         }
         Ok(signed)
     }
@@ -1338,7 +1358,7 @@ impl LocalJoin {
         let mut retirement = ConfirmationRetirement::default();
         let result =
             self.commit_confirmation_terminal(opened, authority, clock, rng, &mut retirement);
-        retirement.finish();
+        retirement.finish(self);
         match result?.outcome {
             CryptoOutcome::Opened => Ok(()),
             CryptoOutcome::Rejected(error) => Err(error),
@@ -1360,6 +1380,24 @@ impl LocalJoin {
         rng: &mut dyn CryptoRngCore,
         retirement: &mut ConfirmationRetirement,
     ) -> Result<TerminalResult, VoiceError> {
+        let prepared = self.prepare_confirmation_terminal(opened, authority, clock, rng)?;
+        let wall = clock.now_ms();
+        let mono = clock.monotonic_ms();
+        prepared
+            .prepared
+            .check_at(authority.context.epoch, wall, mono)?;
+        Ok(self.apply_confirmation_terminal(prepared, retirement))
+    }
+
+    /// Fallible preparation owns all replacement state before the final native transaction.
+    /// This changes neither incoming consumption nor nonce/attempt/promotion state.
+    fn prepare_confirmation_terminal(
+        &mut self,
+        opened: OpenedFlight<'_>,
+        authority: &Authority<'_>,
+        clock: &dyn Clock,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<PreparedOpenedConfirmation, VoiceError> {
         let OpenedFlight {
             token,
             aad,
@@ -1391,6 +1429,18 @@ impl LocalJoin {
             self.promotion_current(handshake)?;
             self.ledger.validate_establish(&handshake, authority)?;
         }
+        Ok(PreparedOpenedConfirmation { prepared, change })
+    }
+
+    /// Apply after original action/token checks. A future Root consumer must additionally hold
+    /// its final actor/session/room admission. Actual retired owners stay in outer retirement.
+    fn apply_confirmation_terminal(
+        &mut self,
+        ready: PreparedOpenedConfirmation,
+        retirement: &mut ConfirmationRetirement,
+    ) -> TerminalResult {
+        let PreparedOpenedConfirmation { prepared, change } = ready;
+        let handshake = prepared.header.handshake;
         let deadline = prepared.retire;
         let expires = prepared.expires;
         let hash = prepared.hash;
@@ -1412,7 +1462,7 @@ impl LocalJoin {
                     })
                 });
         }
-        let _receipt = self.ledger.consume_validated_inbound(prepared);
+        retirement.packet = Some(self.ledger.consume_validated_inbound_deferred(prepared));
         // No fallible work follows this point. The action's result fence encloses consumption,
         // state application and receipt installation; neither settlement nor a second commit
         // can observe the intermediate state.
@@ -1420,6 +1470,7 @@ impl LocalJoin {
             PreparedConfirmation::Rejected(error) => CryptoOutcome::Rejected(error),
             PreparedConfirmation::Hello {
                 action,
+                attempt,
                 low,
                 high,
                 nonce_tag,
@@ -1431,7 +1482,10 @@ impl LocalJoin {
                     .expect("checked pair");
                 if let Some(action) = action {
                     pair.attempt.0.revoke();
-                    retirement.attempt = Some(std::mem::take(&mut pair.attempt));
+                    retirement.attempt = Some(std::mem::replace(
+                        &mut pair.attempt,
+                        attempt.expect("prepared replacement attempt"),
+                    ));
                     retirement.action = replace_action(pair, action, &self.ledger);
                     pair.low_nonce = Some(low);
                     pair.high_nonce = high;
@@ -1457,7 +1511,7 @@ impl LocalJoin {
                 CryptoOutcome::Opened
             }
             PreparedConfirmation::Finish => {
-                self.apply_promotion(handshake);
+                self.apply_promotion(handshake, retirement);
                 self.confirmations
                     .pairs
                     .get_mut(&handshake)
@@ -1476,7 +1530,7 @@ impl LocalJoin {
             // attempt which happened to be current when delayed plaintext finally arrived.
             binding.attempt = None;
         }
-        Ok(TerminalResult { binding, outcome })
+        TerminalResult { binding, outcome }
     }
     fn prepare_confirmation_change(
         &self,
@@ -1518,6 +1572,7 @@ impl LocalJoin {
                     )?;
                     return Ok(PreparedConfirmation::Hello {
                         action: Some(action),
+                        attempt: Some(RevocationOwner::default()),
                         low,
                         high: Some(nonce),
                         nonce_tag,
@@ -1525,6 +1580,7 @@ impl LocalJoin {
                 }
                 Ok(PreparedConfirmation::Hello {
                     action: None,
+                    attempt: None,
                     low,
                     high: pair.high_nonce,
                     nonce_tag: None,
@@ -1577,26 +1633,13 @@ impl LocalJoin {
         }
         Ok(())
     }
-    fn apply_promotion(&mut self, handshake: Nonce) {
-        self.ledger.establish_validated(&handshake);
-        let peer = self.confirmations.pairs[&handshake].binding.peer;
-        let generation = self.confirmations.pairs[&handshake].generation;
-        for (id, pair) in &mut self.confirmations.pairs {
-            if *id != handshake
-                && pair.binding.peer == peer
-                && pair.generation < generation
-                && !pair.retired
-            {
-                pair.pin.revoke();
-                pair.retired = true;
-                self.ledger.retire_handshake(id);
-            }
-        }
-        self.confirmations
-            .pairs
-            .get_mut(&handshake)
-            .expect("checked pair")
-            .established = true;
+    fn apply_promotion(&mut self, handshake: Nonce, retirement: &mut ConfirmationRetirement) {
+        apply_promotion(
+            &mut self.confirmations,
+            &mut self.ledger,
+            handshake,
+            retirement,
+        );
     }
     pub fn pair_established(
         &mut self,
@@ -1606,6 +1649,60 @@ impl LocalJoin {
     ) -> Result<bool, VoiceError> {
         self.pair_current(handshake, authority, clock)?;
         Ok(self.confirmations.pairs[&handshake].established)
+    }
+}
+
+/// Split field borrows let the exclusive signed-packet loan publish its pair transition without
+/// reconstructing LocalJoin or reacquiring any control/resource lock beneath native admission.
+fn apply_promotion(
+    confirmations: &mut Confirmations,
+    ledger: &mut PacketLedger,
+    handshake: Nonce,
+    retirement: &mut ConfirmationRetirement,
+) {
+    ledger.establish_validated(&handshake);
+    let peer = confirmations.pairs[&handshake].binding.peer;
+    let generation = confirmations.pairs[&handshake].generation;
+    let mut retired = 0;
+    for (id, pair) in &mut confirmations.pairs {
+        if *id != handshake
+            && pair.binding.peer == peer
+            && pair.generation < generation
+            && !pair.retired
+        {
+            pair.pin.revoke();
+            pair.retired = true;
+            ledger.retire_handshake_authority(id);
+            retirement.handshakes[retired] = Some(*id);
+            retired += 1;
+        }
+    }
+    confirmations
+        .pairs
+        .get_mut(&handshake)
+        .expect("checked pair")
+        .established = true;
+}
+
+fn apply_confirmation_seal(
+    confirmations: &mut Confirmations,
+    ledger: &mut PacketLedger,
+    handshake: Nonce,
+    kind: EncryptedKind,
+    signed: SignedObject,
+    retirement: &mut ConfirmationRetirement,
+) {
+    retirement.signature = confirmations
+        .pairs
+        .get_mut(&handshake)
+        .expect("checked pair")
+        .action
+        .as_mut()
+        .expect("checked action")
+        .signed
+        .replace(signed);
+    if kind == EncryptedKind::ConfirmFinish {
+        apply_promotion(confirmations, ledger, handshake, retirement);
     }
 }
 

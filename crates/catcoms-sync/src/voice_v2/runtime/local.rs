@@ -54,8 +54,10 @@ impl ActorOwner {
         if peer == context.local || !state.members.contains_key(&context.local) {
             return Err(VoiceError::Unauthorized);
         }
-        // The callback may only try-lock its short History fence. Unpublished owners stay
-        // outside its environment: their destructors must run after Group/Policy are released.
+        // The callback may only try-lock its short History fence or publish an already-prepared
+        // result while the caller holds Engine. Never acquire Engine from this callback: that
+        // would invert Engine -> Group -> Policy. Unpublished owners stay outside its
+        // environment so their destructors run after Group/Policy have been released.
         publish(
             wall,
             mono,

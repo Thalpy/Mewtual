@@ -231,6 +231,7 @@ fn protected_low_predecessors_never_branch_or_become_fresh_after_all_three_candi
 fn protected_low_final_refusal_publishes_no_candidate_packet_or_pair_nonce() {
     let (mut f, _runtime, actor, _chain) = low_fixture();
     let before = f.pool.counts();
+    let original_attempt = f.low.join.confirmations.pairs[&f.id].attempt.0.clone();
     assert_eq!(
         start_checked(&mut f, &actor, None, |_, _| Err(VoiceError::Capacity)).err(),
         Some(VoiceError::Capacity)
@@ -239,10 +240,17 @@ fn protected_low_final_refusal_publishes_no_candidate_packet_or_pair_nonce() {
     assert_eq!(pair.starts, 0);
     assert_eq!(pair.action_serial, 0);
     assert!(pair.action.is_none() && pair.low_nonce.is_none());
+    assert!(pair.attempt.0.is_same(&original_attempt));
+    assert!(original_attempt.is_live());
     assert_eq!(f.pool.counts(), before);
     let action = start(&mut f, &actor, None).unwrap();
     assert_eq!(tuple(&action).2, 1);
     assert_eq!(f.low.join.confirmations.pairs[&f.id].starts, 1);
+    assert!(!original_attempt.is_live());
+    assert!(!f.low.join.confirmations.pairs[&f.id]
+        .attempt
+        .0
+        .is_same(&original_attempt));
 }
 
 #[test]

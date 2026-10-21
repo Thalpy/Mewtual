@@ -5,6 +5,7 @@ use crate::voice_v2::chain::ConfirmationAdmission;
 use crate::voice_v2::helper::RoomAuthority;
 use crate::voice_v2::runtime::{ActorOwner, Runtime, View};
 use rand_core::RngCore;
+mod result;
 
 struct ProtectedFixture {
     f: Fixture,

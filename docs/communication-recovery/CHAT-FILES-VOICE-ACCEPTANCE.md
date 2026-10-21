@@ -27,23 +27,32 @@ prior complete suites do not validate it. Production native registration/IPC/res
 SDP/key phase transfer, normal V2/RTC and legacy isolation, member media relay, combined rollout
 and physical audio/network acceptance remain unfinished.
 
-## Native result continuation (21 October, not yet compiled)
+## Native result continuation (21 October, focused verification passed)
 
-Active `communication-root-results-worktree`, based on browser checkpoint `9dc1b8d3`, adds
-private prepared signatures, actual Root seal/open admission, deferred token/slot/promotion cleanup
-and an affine preparation hold through settlement. New tests cover all three protected flights,
-exact accepted/rejected retries, refused publication without resigning or token effects, actual
-session revoke blocked on Policy, last Clock owner closure, actual native owner substitutions,
-epoch/equal-join replacement and preparation unwind. These tests have NOT run. Formatting and
-ambient checks pass. Read-only review prompted fixes for allocation under admission, cleanup
-under Engine and premature credit return; final static re-review is clear on those boundaries.
+Current result implementation in communication-root-results-worktree adds private prepared
+signatures, actual Root seal/open result admission, deferred consumed token/slot/promotion cleanup,
+preconstructed replacement attempts and an affine engine preparation hold. Compatibility
+seal/open/derivation also move housekeeping before Engine. Competing settlement fences first
+effects immediately but cannot return actual preparation capacity or report drainage early.
+No wire/persistence format, row limit or byte allowance changes.
 
-Earlier frozen `ecc8232f` passes the COMPLETE root suite: **3,146 passed**, zero failures,
-24 existing ignored across 57 summaries (`voice-followup-root-full.log` in proof checkout).
-Its sequential separate native suite/check/build is still running; startup follows. Those results
-do not validate this new Root increment. Browser `9dc1b8d3` has identical Rust/native source to
-ecc and passes 2,268 full frontend tests. The complete frozen gates are now recorded above; the active Root work is still unpublished. Production IPC/RTC/V2, SDP transfer, member media relay, combined rollout and physical
-acceptance remain open. Only one physical desktop is available.
+The first fresh run passed 388/failed 1 (15.58s, voice-root-results-focused-1.log): its synthetic End
+call lease was independent of actor children, so runtime revoke did not itself retire that lease.
+The fixture now also ends its original call and retains the retired assertion; actual Root
+regressions use native Directory/CallGrant custody. Corrected full focused execution passes
+**389/389**, zero failures (15.69s, voice-root-results-focused-2.log). All fixed-layout guards pass.
+The new cases exercise all three protected flights, exact accepted/rejected retries, final
+Capacity without resigning/token effects, actual session revoke blocked on Policy with a live
+native child, final Clock revocation, signing/RNG settlement, unwind, native owner substitution,
+MLS epoch and equal-join replacement. No runtime gate or assertion was loosened.
+
+Static adversarial re-review found no remaining blocker/high/medium after fixing allocation
+inside admission, cleanup under Engine and premature credit return during preparation. Formatting
+and ambient pass. Strict whole-root Clippy passes (2m25s), root dependency policy passes, and the complete frontend
+passes 2,268 tests with zero failures (216.25s, two workers). Complete root/native validation
+is now queued against this frozen source. Earlier complete results above apply only to published c1532331.
+Production native IPC/RTC/V2, complete Root derivation, authorized SDP phase transfer, member media
+relay, combined rollout and physical acceptance remain open. Only one physical desktop exists.
 
 ## Protected WebCrypto confirmation (21 October, native integration pending)
 

@@ -255,7 +255,7 @@ impl PacketLedger {
                 source_deadline: mono
                     .saturating_add(MAX_PACKET_LIFETIME_MS)
                     .min(confirmation_deadline),
-                cached: None,
+                sealed: sealed::SealedState::Unsigned,
                 live: CallLease::default(),
                 crypto: RevocationOwner::default(),
                 chain: chain.clone(),
