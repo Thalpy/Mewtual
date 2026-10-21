@@ -1,6 +1,6 @@
 # Next voice milestone: native result recovery
 
-## Implemented handoff prerequisites (21 October, full suites pending)
+## Validated handoff prerequisites (21 October)
 
 An actual native action can now lend one chain-wide HandoffLoan from its existing96KiB
 confirmation envelope and expose metadata from the original paid fixed PlanBinding. Eight new
@@ -14,7 +14,10 @@ channel authentication/registration or complete flight custody. Full-suite statu
 The disabled pilot now implements the original native ledger and fixed drained history, with
 row/phase prepayment, original selected-key/action/pair binding and metadata-only reconcile/
 ACK/settlement after phase closure. Its process-owned pending/live/drained rows share 32 slots;
-there is no eviction. All 60 included harness tests pass; the native full gate remains pending.
+there is no eviction. All 60 included harness cases pass in both the smaller harness and the
+complete native gate (496 library plus five ACL tests, zero failures). Root3,226, frontend2,297,
+native check/build/startup, static/build and rendered flows pass; exact provenance and failed
+attempts are in the handover and acceptance ledger.
 Ledger re-review has no remaining blocker/high/medium. Snapshots retain Weak grants; tombstones
 retain no strong Action/Phase/Grant. Reviewed cleanup dead ends and observer wake races now
 have deterministic regressions, including cancellation and late exact ACK.

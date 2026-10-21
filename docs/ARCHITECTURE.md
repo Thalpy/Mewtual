@@ -1,6 +1,6 @@
 # Mewtual; Architecture
 
-## Protected handoff capacity (21 October, full validation pending)
+## Validated protected handoff capacity (21 October)
 
 An actual protected CryptoAction lends one chain-wide HandoffLoan from its existing96KiB
 Workflow. Retained copy capacity adds no Crypto slot; Clock sampling precedes Engine, followed
@@ -11,7 +11,8 @@ The adapter must retain the original action and separately prove real copy/worke
 The candidate browser reader follows actual BYOB transfers, caps a body at2064 bytes plus one
 EOF byte and awaits cancellation/release. It is not a complete flight/copy budget or a live
 transport. Focused/static review and a generated-data packaged Windows probe pass; complete
-current-source Root suite passes 3,226; native gates remain pending. Full frontend (2,297), static/build and rendered
+current-source Root suite passes 3,226; native passes 496 library plus five ACL tests, check,
+executable build and actual startup. Full frontend (2,297), static/build and rendered
 flows pass. No application listener/CSP/dispatch is enabled.
 
 The disabled pilot's process-owned native ledger reserves row and phase metadata before

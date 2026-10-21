@@ -1,9 +1,9 @@
 # Mewtual; Handover
 
-## Protected handoff prerequisites (21 October, full suites pending)
+## Validated protected handoff checkpoint (21 October)
 
-Published communication head is7de74d11. Current work in
-target/communication-activation-recovery-worktree adds one serial HandoffLoan from an actual
+Validated runtime source is `fef81f48`, isolated in
+target/communication-activation-recovery-worktree. It adds one serial HandoffLoan from an actual
 CryptoAction's existing96KiB Workflow. No budget or Crypto lane was added. Original Workflow
 custody survives settlement/End/expiry until the loan's actual last owner drops, and failed
 claims spend no lane. Fixed action history shares the original paid PlanBinding without
@@ -13,7 +13,9 @@ now explicitly retains that charge while its action survives and asserts zero on
 All434 focused Root voice tests pass, including eight new handoff regressions. Formatting,
 strict whole-root Clippy, ambient and all four root deny categories pass. The complete root
 suite passes 3,226 with zero failures, 24 existing ignored and 58 summaries (4,815.7s), on the
-frozen current Root source. Complete native gates remain pending. Full frontend passes 2,297 tests;
+frozen current Root source. Complete native passes 496 library plus five ACL tests, zero failures
+(597.81s library; 600.73s gate). All 80 native voice tests pass (18.02s tests; 199.59s including
+compilation), native check47.79s, build191.16s and formatting pass. Full frontend passes 2,297 tests;
 Svelte has zero errors/warnings, production build and all ten rendered flows pass. Shared-cache fingerprints
 initially named another checkout: only affected sync/app/CLI marker files were invalidated,
 then current-source compilation and focused tests passed. Stale/failed attempts are not passes.
@@ -47,7 +49,10 @@ cannot wake itself into a retry loop. Cancellation and late exact ACK have focus
 All nine command-policy extraction tests pass freshly on the final native source.
 The first actual native compile caught two test-only references to an undeclared futures
 helper that the standalone harness supplied. They now use std::task::Wake without a dependency
-change. That failed attempt is not accepted evidence; native validation is running again.
+change. That failed attempt is not accepted evidence. The corrected full native gates pass.
+The sandboxed startup attempt produced no output and timed out after20s. The identical rebuilt
+binary/unchanged startup gate passes with normal Windows access in2.00s. Neither timeout nor
+failed compile is recorded as a pass. All nine Root and ten native source hashes remain frozen.
 
 No application listener/CSP, byte-bearing command or V2 dispatch is enabled. Next: actual actor
 registration and framed derivation/result/ACK/settlement transport, independently prepaid

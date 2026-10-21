@@ -1,13 +1,15 @@
 # Chat, files and voice implementation evidence
 
-## Handoff prerequisites (21 October, full suites pending)
+## Validated handoff prerequisites (21 October)
 
-Published head is7de74d11. Current code passes434 focused Root voice tests, including eight new
+Validated runtime source is `fef81f48`. Current code passes434 focused Root voice tests, including eight new
 handoff cases for original binding/Clock/expiry, settlement order, sibling rows, pressure and
 actual last-loan custody after End. Original2KiB/1536-byte allowances are unchanged. Root format,
 strict whole-root Clippy, ambient and all four deny categories pass. Complete current root
-passes 3,226, zero failures, 24 existing ignored, 58 summaries (4,815.7s). Complete native gates
-remain pending. Full frontend passes 2,297, Svelte zero errors/
+passes 3,226, zero failures, 24 existing ignored, 58 summaries (4,815.7s). Complete native passes
+496 library plus five ACL tests, zero failures (597.81s library;600.73s gate). All80 native voice
+cases pass (18.02s tests;199.59s compile/gate), native check47.79s, executable build191.16s,
+formatting and actual startup2.00s pass. Full frontend passes 2,297, Svelte zero errors/
 warnings, production build and all ten rendered flows pass. Stale-cache and failed attempts are not
 accepted current-source evidence; affected crate markers were invalidated before these results.
 
@@ -21,9 +23,17 @@ it establishes no live V2 call or physical audio result. Read-only re-review has
 The disabled native pilot now includes selected-owner binding, original-action registration,
 one shared phase loan and immutable compacted terminal history. All 60 actual-source harness
 cases pass, including 29 phase/parser/ledger cases and two new selected-owner cases. This is
-not the complete native gate or actual Actor/MLS/browser acceptance. Ledger re-review has no
+not actual Actor/MLS/browser acceptance. Those same cases now also pass in the complete native
+workspace gate. Ledger re-review has no
 remaining blocker/high/medium after cleanup and observer readiness fixes. The 32-row pending/live/drained bound is an explicit
 pilot limit; uncertain history is never evicted.
+
+The first actual native compile exposed two test-only futures helpers supplied by the smaller
+harness but absent from native dependencies. They use std::task::Wake now, with no dependency
+change. A sandboxed startup attempt produced no output and timed out; the unchanged gate and
+same rebuilt binary pass with normal Windows access. Neither failed attempt is a pass. All19
+Root/native frozen source hashes match after validation, and command-security extraction
+passes freshly on current native source. Earlier pending sections below are historical.
 
 The loan conserves capacity; actual actor integration, physical-copy/terminal-proof delivery,
 SDP phase transfer/live V2/RTC/isolation, media relay, external destination resume and combined/

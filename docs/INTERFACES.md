@@ -1,6 +1,6 @@
 # Mewtual; Interfaces & Hooks Schema
 
-## Protected native handoff loan (21 October, full validation pending)
+## Validated protected native handoff loan (21 October)
 
 CryptoAction::protected_binding returns immutable native-selected metadata, including after
 input compaction. Its original fixed PlanBinding remains charged; projection equality supplies
