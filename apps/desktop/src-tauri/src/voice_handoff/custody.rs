@@ -155,6 +155,10 @@ impl CopyCustody {
     }
 }
 impl Phase {
+    /// Capacity binding for the separately prepaid physical channel, never Root effect authority.
+    pub(super) fn uses_pool(&self, resources: &Arc<Resources>, group: [u8; 32]) -> bool {
+        Arc::ptr_eq(&self.resources, resources) && self.scope.group == group
+    }
     pub(crate) fn copy(self: &Arc<Self>, bytes: usize) -> Result<CopyCustody, VoiceError> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.stage != Stage::Open {

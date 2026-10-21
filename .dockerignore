@@ -61,6 +61,8 @@
 !apps/desktop/src-tauri/build.rs
 !apps/desktop/src-tauri/capabilities/default.json
 !apps/desktop/src-tauri/src/**/*.rs
+# Public fixed codec vectors consumed by both the Rust and WebCrypto test suites.
+!apps/desktop/src-tauri/src/voice_handoff/channel/vectors.json
 !apps/desktop/src-tauri/tauri.conf.json
 !apps/desktop/src-tauri/tauri.official.conf.json
 !apps/desktop/src-tauri/icons/**/*.icns
