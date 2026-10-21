@@ -315,6 +315,50 @@ fn checkpoint_claiming_more_than_the_file_rewinds_but_a_changed_byte_inside_it_h
 }
 
 #[test]
+fn verification_never_lowers_a_checkpoint_but_a_rewind_does() {
+    for truncated in [false, true] {
+        let fx = fixture();
+        let mut store = open(&fx.vault);
+        let (id, lease) = completed(&mut store);
+        let mut file = started(&mut store, &lease, &fx.downloads);
+        write_all(&mut file);
+        let full = file.checkpoint().unwrap();
+        store
+            .checkpoint_download_export(&lease, file.journal(), &full)
+            .unwrap();
+        drop(file);
+        if truncated {
+            // Lost tail shorter than the first chunk: the session must rewrite from zero.
+            let handle = fs::OpenOptions::new()
+                .write(true)
+                .open(staging(&fx.downloads))
+                .unwrap();
+            handle.set_len(3).unwrap();
+        }
+        let ExportReopen::Ready(mut file) =
+            ExportFile::reopen(&full, "notes.txt", export_plan()).unwrap()
+        else {
+            panic!();
+        };
+        file.accept(0, CHUNKS[0]).unwrap();
+        let mid = file.checkpoint().unwrap();
+        if truncated {
+            assert_eq!(
+                mid.written_chunks(),
+                1,
+                "after a rewind the lower checkpoint is the truth"
+            );
+        } else {
+            assert_eq!(
+                mid, full,
+                "verifying chunk 0 must not lower the durable checkpoint of chunks 0 and 1"
+            );
+        }
+        let _ = (id, lease);
+    }
+}
+
+#[test]
 fn identity_collision_over_foreign_content_halts_and_removal_leaves_the_bytes() {
     // Birth time makes an accidental (dev, ino) reuse infeasible; this forges the collision to
     // pin the remaining guards: no write and no deletion of a file that is not provably ours.

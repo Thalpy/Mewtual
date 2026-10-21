@@ -845,11 +845,19 @@ impl ExportFile {
 
     /// Flush and return the journal describing every chunk processed so far. The caller persists
     /// it through the checkpoint CAS; it never claims bytes that were not just made durable.
+    ///
+    /// While a resumed session is still only verifying, the saved checkpoint is kept rather than
+    /// lowered: an earlier session already fsynced that range, and lowering it would turn checked
+    /// bytes into an "unacknowledged tail" that a later resume truncates instead of halting on.
+    /// Once the session writes (after a short file rewound it), the lower value is the truth.
     pub fn checkpoint(&mut self) -> Result<ExportJournal, ExportError> {
         self.file.sync_all().map_err(local)?;
         let mut journal = self.journal.clone();
-        journal.written_chunks = u32::try_from(self.next).map_err(|_| StorageError::Malformed)?;
-        journal.written_bytes = self.offset;
+        if self.diverged || self.offset >= self.journal.written_bytes {
+            journal.written_chunks =
+                u32::try_from(self.next).map_err(|_| StorageError::Malformed)?;
+            journal.written_bytes = self.offset;
+        }
         Ok(journal)
     }
 
