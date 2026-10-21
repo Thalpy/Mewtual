@@ -1,5 +1,16 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Internal channel bootstrap candidate (21 October)
+
+Native-only voice_handoff::bootstrap::ensure resolves the actual selected owner/executor and
+matching actor device before constructing one retained ECDH setup. It returns Pending, one
+shared immutable Ready output, or Closed with native_setup_drained. That last field describes
+native construction only, never browser/provider cleanup. No renderer command accepts it.
+The transcript uses closed version/suite1, exact big-endian fields and bounded UTF8/raw-group
+lengths; voice-ipc-bootstrap.ts validates public metadata against the original selection but
+creates no key, Session or counter. ECDH/framing keys remain private to their native owner.
+Actual renderer serialization, IO, browser crypto/ACK and action transfer are not implemented.
+
 ## Process-only retained capacity (21 October)
 
 `Resources::charge_process_retained(bytes)` returns a noncloneable `ProcessRetainedCredit`

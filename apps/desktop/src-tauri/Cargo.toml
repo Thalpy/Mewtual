@@ -23,6 +23,10 @@ aes-gcm = "=0.10.3"
 hkdf = "=0.12.4"
 hmac = "=0.12.1"
 sha2 = "=0.10.9"
+# Newly reachable secret local-channel ECDH, not just an already-transitive public-key parser.
+# The bootstrap source review records arithmetic/zeroization limits. This edge requests only
+# ECDH; other dependants may unify further p256 features in the resolved native graph.
+p256 = { version = "=0.13.2", default-features = false, features = ["ecdh"] }
 async-trait = "0.1"
 bytes = "1"
 tauri = { version = "2", features = [] }

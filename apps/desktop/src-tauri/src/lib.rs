@@ -476,6 +476,10 @@ struct AppState {
     /// The disabled pilot has no command consumer yet; do not clear uncertain rows on End.
     #[allow(dead_code)]
     voice_handoff: Arc<voice_handoff::ledger::Ledger>,
+    /// Immutable local-channel setup/counters outlive an invoke waiter. Disabled pilot only;
+    /// End/lock cannot clear uncertain setup or install a new session for the original owner.
+    #[allow(dead_code)]
+    voice_channels: Arc<voice_handoff::bootstrap::Registry>,
     next_id: Mutex<u64>,
     /// Serialize first mount and already-mounted authentication. A duplicate frontend unlock must
     /// never race two reloads, while an explicitly UI-locked session must authenticate against

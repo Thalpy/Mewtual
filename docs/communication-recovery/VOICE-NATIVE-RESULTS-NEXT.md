@@ -1,5 +1,64 @@
 # Next voice milestone: native result recovery
 
+## Native bootstrap candidate (21 October, complete native gates running)
+
+Active checkout is target/communication-bootstrap-channel-worktree, based on published
+`c5c52fd8`; Root resource primitive is separately committed `a695470d`. The current candidate
+adds internal selected-owner ECDH setup, with no renderer command, application listener,
+CSP change or browser Session. Pending is retained before RNG; final generation, actual
+selected Arc and lease checks cover Ready installation under Coordinator. Error/unwind closes
+that original purpose. Exact setup replies share one immutable descriptor and its original
+credit even after registry removal. Close-first is independent of join-key settlement.
+
+The lazy64-slot index prepays4KiB process capacity; each row/output prepays8KiB real group
+capacity, separate from the existing12KiB control/2KiB Session payments. Native arithmetic
+prepays an ordinary8KiB Crypto owner. The concrete future, named setup owners and pinned
+primeorder16-point table have layout regression guards. All13 new native bootstrap tests pass
+within61 passing handoff tests, including actual ServerActor selected-key fixtures. Complete
+native gates are running serially. No complete allocation/RSS bound is claimed.
+There is no uncertain-row eviction; this finite pilot requires lifecycle collection before
+live activation. `Closed.native_setup_drained` currently describes native computation only, never actual
+browser/provider drainage. Before browser crypto is connected, retain/transfer a corresponding
+ordinary engine owner through real setup, outgoing sealing/MAC and authenticated setup ACK.
+
+The canonical transcript includes version/suite, monotonic native session ID/slot, original
+generation/server/incarnation/raw group/scope/policy/room, actual local device/join, selected
+owner/executor and both65-byte points in fixed roles. The pure browser parser creates no key
+or counter allocator. Seven new real-WebCrypto/metadata regressions and the eight existing
+frame regressions pass, including fixed-width leading-zero ECDH and UTF8 BOM identity refusal.
+Shared fixtures use deterministic public test keys only. Fresh complete Root passes3,233
+tests with zero failures; format, strict Clippy, ambient and Root deny pass. Complete frontend
+passes2,312, Svelte zero errors/warnings, production build and all ten rendered flows pass.
+Read-only actual-diff re-review has no remaining findings. Hosted c5c52fd8 still fails Linux
+exact-history recovery and a Windows file-range actor bound; current native diagnostics do
+not fix the Linux failure. No live V2/media/combined acceptance follows.
+
+### Newly reachable native ECDH source review
+
+The direct pinned `p256=0.13.2` ECDH edge adds only that dependency to the native package's
+lock entry; no resolved version changed. `default-features=false` limits this edge's request,
+not features unified by other dependants. This is a new secret-arithmetic consumer, not
+assurance inferred from a pre-existing lockfile entry.
+
+Reviewed exact registry sources: p2560.13.2 ecdh.rs and arithmetic/scalar.rs;
+elliptic-curve0.13.8 ecdh.rs/public_key.rs/scalar/nonzero.rs; primeorder0.13.6 projective.rs.
+Native prepays before parsing the full uncompressed SEC1 point and doing scalar work. The
+borrowed Sized RNG adapter delegates only to injected catcoms-rt randomness. Scalar generation
+uses rejection sampling; fixtures pin that contract. Both ephemeral public-key construction
+and ECDH use the pinned arithmetic, whose multiplication table is considered in the guard.
+`EphemeralSecret` and `SharedSecret` drop zeroize their own stored scalar/field bytes; extracted
+seed/framing keys have their own zeroizing owners. Arithmetic temporaries, browser providers,
+thread stacks, SDK/GC heaps and compiler copies are not covered by that erasure statement.
+
+The p256 README explicitly reports no independent arithmetic audit or thorough generated-
+assembly constant-time assessment. This source review is not such an audit. ECDH alone is
+unauthenticated: the immutable native point/transcript must come from trusted main-window
+IPC and the actual selected browser private key. Local keys confer no remote member or Root
+effect authority. Compromise of the retained browser join private key can recover recorded
+local exchanges; this construction does not claim forward secrecy against that compromise.
+Existing separate native/experiment dependency-audit findings remain open; Root deny passing
+does not clear them, and this change adds no advisory exemption.
+
 ## Current continuation (21 October)
 
 Published checkpoint is `71d11284`; reviewed file-fixture correction is `7609b66b`. Active work is in
@@ -37,7 +96,7 @@ lost reply never refunds either. Its sole prepaid position survives fetch/read c
 crypto settlement and explicit returned-buffer disposal. The current pure codec owns no keys.
 Whole-chain/SDP/RTC activation and relay/combined/physical work below remain open.
 
-### Next bootstrap design: selected-key ECDH (reviewed, not implemented)
+### Original bootstrap design: selected-key ECDH (candidate above)
 
 Use the actual selected browser join key and a fresh native local-channel P-256 ephemeral key.
 Return only the immutable native public point/session metadata through the trusted main-WebView
@@ -74,7 +133,8 @@ off-curve points; transcript/point/session substitution; distinct native session
 repeated RNG fixtures; wrong actual selected handle; accepted reply loss; concurrent startup;
 End/lock during computation; and settlement before delayed first admission. Start with a
 harmless authenticated Control exchange before adding Root effects. This design is not an
-implemented bootstrap, application listener or live V2 call.
+validated operational bootstrap, application listener or live V2 call. The candidate above
+implements the internal native setup and awaits compilation/integration.
 
 ## Validated handoff prerequisites (21 October)
 

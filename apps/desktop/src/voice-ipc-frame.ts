@@ -1,7 +1,7 @@
 /** Canonical metadata for the disabled native voice handoff candidate. These helpers own no
  * keys/counters and authenticate nothing. A future paid transport must pin the original bytes,
  * verify the directional MAC and debit its original session before reading any body. Seed
- * import deliberately remains test-only until native bootstrap ownership is implemented. */
+ * import deliberately remains fixture-only; there is still no browser Session constructor. */
 export type VoiceIpcDirection = 0 | 1;
 export type VoiceIpcOperation = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
 export type VoiceIpcBodyKind = 0 | 1;

@@ -1,23 +1,30 @@
 //! Disabled encrypted framing and one prepaid physical position. This is not a listener,
-//! bootstrap/stock-IPC copy proof, browser-close proof, native action adapter or live driver.
+//! stock-IPC copy proof, browser-close proof, native action adapter or live driver. Its child
+//! bootstrap module is an internal ECDH candidate, without a renderer/IO consumer yet.
 //! A MAC identifies this local channel only; every Root effect still needs its actual owner.
 use super::custody::{Buffer, Phase};
 use super::http;
+#[cfg(test)]
 use catcoms_rt::CryptoRngCore;
-use catcoms_sync::voice_v2::resources::{Credit, ResourceKind, Resources};
+#[cfg(test)]
+use catcoms_sync::voice_v2::resources::ResourceKind;
+use catcoms_sync::voice_v2::resources::{Credit, Resources};
 use std::sync::{Arc, Mutex};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroize;
+#[cfg(test)]
+use zeroize::Zeroizing;
 
+pub(super) mod bootstrap;
 mod crypto;
 pub(super) use crypto::{BodyKind, Operation};
 use crypto::{Direction, Header, Keys};
 
-const CONTROL_BYTES: usize = 12 * 1024;
-const BOOTSTRAP_BYTES: usize = 2048;
+pub(super) const CONTROL_BYTES: usize = 12 * 1024;
+pub(super) const BOOTSTRAP_BYTES: usize = 2048;
 const CONTROL_CIPHER: usize = 256 + 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Refused {
+pub(crate) enum Refused {
     Bounds,
     Header,
     Authentication,
@@ -32,9 +39,9 @@ struct Counters {
     request_floor: u64,
     response_sequence: u64,
 }
-/// Keys/counters never reset or adopt an imported seed. Construct with the sanctioned fresh
-/// RNG seam; a future immutable-slot bootstrap registry must keep the original Session through
-/// uncertain replies/remount. No renderer-provided seed or descriptor can reinstall its keys.
+/// Keys/counters never reset or adopt an imported seed. The native candidate's immutable-slot
+/// ECDH registry keeps this original Session through uncertain replies. The fresh-seed fixture
+/// constructor is test-only; no renderer seed/descriptor can reinstall keys or counters.
 pub(super) struct Session {
     resources: Arc<Resources>,
     group: [u8; 32],
@@ -45,6 +52,7 @@ pub(super) struct Session {
     _bootstrap: Credit,
 }
 impl Session {
+    #[cfg(test)]
     pub(super) fn new(
         resources: Arc<Resources>,
         group: [u8; 32],

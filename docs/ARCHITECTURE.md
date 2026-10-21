@@ -1,5 +1,20 @@
 # Mewtual; Architecture
 
+## Internal immutable local-channel bootstrap (21 October)
+
+The disabled ECDH candidate retains Pending before native RNG, validates the actual selected
+browser P-256 point, and installs one Session under original UI-generation/selected-Arc checks.
+An injective versioned transcript binds both points, device/join, original group/room/policy,
+owner/executor and native session/slot. Exact retries share the original immutable paid public
+output; no seed is exported and counters cannot be recreated. The64-slot paid index has no
+uncertain-history eviction and still needs lifecycle collection before activation.
+
+This candidate has no renderer command, application listener/CSP change, browser Session or live
+dispatch. Its native-only computation credit does not pay for future browser crypto or prove
+provider drainage. Actual IO/copy custody, setup ACK, action delivery, SDP/RTC, legacy isolation
+and media relay remain separate work. Current full-gate provenance is in HANDOVER.md; historical
+pending/pass descriptions below do not supersede it.
+
 ## Fixed native process infrastructure (21 October)
 
 `Resources::charge_process_retained` prepays fixed listener/router/task overhead against the

@@ -1,5 +1,22 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Internal ECDH bootstrap boundary (21 October)
+
+The candidate checks the actual selected-owner Arc, original UI generation and live lease at
+final Session installation. Pending precedes injected RNG; error/unwind permanently closes
+that purpose, so lost replies cannot reset counters or request another ephemeral key. Public
+outputs share their original paid allocation. Native curve validation precedes secret scalar
+work and transcript bindings separate roles/groups/devices/joins/executors/sessions. UTF8
+decoding preserves a leading BOM rather than aliasing two owner identities.
+
+ECDH is not remote authentication. Immutable native metadata must eventually arrive through
+trusted main-window IPC and the actual selected browser private key. Later compromise of that
+retained join key can recover recorded local exchanges; no forward-secrecy claim is made.
+Pinned p256 has no independent arithmetic/assembly audit; stored-value Drop zeroization does
+not cover arithmetic temporaries, SDK/provider heaps or compiler copies. Detailed source audit
+is in communication-recovery/VOICE-NATIVE-RESULTS-NEXT.md. There is no listener or live path;
+browser crypto funding, actual physical setup ACK/drainage and legacy isolation remain required.
+
 ## Fixed native infrastructure capacity (21 October)
 
 The distinct process-retained credit shares the existing2MiB total with all groups. It is
