@@ -550,11 +550,13 @@ pub(super) fn inject(effect: Effect) -> io::Result<()> {
     Ok(())
 }
 #[cfg(test)]
+pub(in crate::kept) type LinkHook = Option<Box<dyn FnMut(&Path)>>;
+#[cfg(test)]
 thread_local! {
     /// Test-only interleaving point just before the path-based hard link: a test models another
     /// program acting on the source path at exactly that moment.
-    pub(in crate::kept) static BEFORE_LINK: std::cell::RefCell<Option<Box<dyn FnMut(&Path)>>> =
-        std::cell::RefCell::new(None);
+    pub(in crate::kept) static BEFORE_LINK: std::cell::RefCell<LinkHook> =
+        const { std::cell::RefCell::new(None) };
 }
 /// No-replace publication primitive: refuses an existing destination on every platform.
 pub(super) fn link(from: &Path, to: &Path) -> io::Result<()> {
