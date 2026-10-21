@@ -1,30 +1,38 @@
 # Chat, files and voice implementation evidence
 
-## Native/browser status continuation (21 October, implementation still partial)
+## App-owned status/bootstrap continuation (21 October, still partial)
 
-The active bootstrap-channel checkout now contains internal native TCP Status IO plus a
-retained selected-key browser Session with exact physical counters and bounded BYOB admission.
-Setup/control capacity remains paid through actual SDK/read/cancel drainage, including End,
-lost replies and native no-work history. The current54 focused browser regressions and full
-frontend2,341 pass; Svelte/build/all ten rendered flows pass. Complete Root passes3,233, zero
-failures,24 existing ignored/59 summaries (2,234.97s), plus format/strict Clippy/ambient/deny.
-All82 native handoff regressions, native check, strict Clippy and format pass. Complete native
-passes553 library plus five ACL tests, zero failures (630.91s gate), on status source de082d87.
-The separate browser-action checkout's collection continuation is still native-uncompiled.
-Actual-diff static review/re-review has no remaining findings.
+Source bac90cfa in target/communication-browser-action-worktree adds the native application host,
+exact pre-window numeric-loopback CSP, entered-runtime setup, Exit-before-SDK-cleanup collection,
+three main-only public metadata commands and a retained production browser adapter. It also
+implements reusable channel closure with actual independent header/reply/public-owner custody,
+monotonic serials and grant-independent housekeeping. All setup variants retain their original
+paid serialization position; JSON capacity is hard-capped, not inferred from final length.
 
-Native's actual socket tests and browser tests with an independent WebCrypto native fixture do
-not establish the full packaged native IPC/browser connection. No app listener/CSP/bootstrap
-commands, action payload/result/ACK/settlement/final collection, reusable lifecycle collection
-or live V2 dispatch are enabled. Closed native Sessions retain control capacity, so the pilot
-cannot yet be activated for repeated calls. SDP/RTC/mode isolation, relay and combined/physical
-acceptance remain open; one physical desktop cannot establish independent-network acceptance.
+All 108 focused native handoff tests pass; 35 browser adapter/Session and nine command-security
+checks pass. Full frontend2,348, Svelte zero errors/warnings, build and all ten rendered flows
+pass. Complete native passes579 library plus five ACL tests, zero failures. Native strict
+all-target/all-feature Clippy/check/format, development build/startup and packaged build pass.
+The actual packaged Windows committed document/reload, enforced exact-port CSP, CORS, public
+metadata cleanup and normal-close/task-collection probe6 passes. Earlier failed harness attempts
+remain recorded; no runtime change or relaxed readiness was required. Root's complete3,233 and
+static gates passed on unchanged Root inputs; they were not repeated for this native-only delta.
+The fresh Root construction gate also passes against current native source. Actual-diff review/re-review has no remaining blocker/high/medium finding. Exact final
+gate records and failed-attempt provenance are in HANDOVER and target/voice-app-channel-*.
 
-Published f227b4f7 CI run39649824415/Linux job119394907283 fails the reversed-reopen chat union
-again:531 native passes/1 failure, client5 has14/15 while bridge4/client6 have15/15 operations.
-The missing operation is isolated client6's original signed message. Diagnostics now expose
-actual recovery state; they are not a fix. The chat recovery owner must resolve this before
-sign-off. The historical evidence below is scoped to its original sources and gates.
+Only authenticated Status is enabled. Public metadata IPC is not action/result delivery; stock
+framework/WebView public-metadata copies after handoff are outside the stated application-copy
+bound. Factory input, result, exact receipt ACK, settlement, authenticated browser phase closure,
+final delivery and separate action-history collection remain open. Live V2/SDP/ICE/RTC, legacy
+isolation, member media relay and combined/physical acceptance remain unfinished. Only one
+physical desktop is available. The passing packaged Windows startup/close probe exercises public
+metadata/CSP/CORS/normal shutdown only, not selected crypto or audible calls; it requests no vault
+unlock and supplies no credentials. Linux/macOS WebView compatibility remains unverified.
+
+Historical hosted f227b4f7 run39649824415/Linux job119394907283 failed reversed-reopen exact signed
+chat union (531 passes/1 failure, client5 had14/15; bridge4/client6 had15/15). Diagnostics did not
+fix that cause; latest-head hosted acceptance is unverified. The local new-channel discovery
+scenario passing does not establish a hosted recovery fix. Preserve the exact union and bounds.
 
 ## Historical bootstrap checkpoint (21 October, preceding complete gates)
 

@@ -1,59 +1,74 @@
 # Mewtual; Handover
 
-## Active native/browser handoff (21 October, integration open)
+## Active native/browser handoff (21 October, status bootstrap connected)
 
-Validated status source is `de082d87`, following PR48 checkpoint `f227b4f7`, isolated in
-target/communication-bootstrap-channel-worktree. Internal real-TCP Status transport is committed
-as `2fd0fad0`. The continuation adds the retained v8 browser Session, immutable selected-key
-construction, permanent physical counters, fixed BYOB response admission prefix and absolute
-IO cancellation. Native setup credit transfers into registry custody through real browser
-setup/outgoing SDK work; a separate original control lane and browser control envelope remain
-inside existing caps. Exact cleanup handles End, lock, lost setup replies and authoritative
-native no-work. Proven unstarted browser channels allocate no native purpose.
+Source `bac90cfad185a6273c309cf2686d45cc28528fb1` is isolated in
+`target/communication-browser-action-worktree`, following published PR48 `9218d179`.
+The app now owns the Status listener, exact pre-window numeric-loopback CSP and three main-only
+fixed public metadata commands. Startup explicitly enters Tauri's IO runtime; the Exit callback
+collects the actual service before SDK cleanup/restart. Unavailable handoff does not block the
+rest of app startup. Normal V2 call dispatch and action bytes remain disabled.
 
-All54 focused browser bootstrap/frame/body/Session checks pass, including End at each of14
-SDK steps, bad-body RX/replay, failed-seal TX, generic-key/executor substitution, native closed
-history, stale-port deadline and actual cancellation drainage. Full frontend passes2,341,
-Svelte zero errors/warnings, build and all ten rendered flows pass. Complete Root passes3,233,
-zero failures,24 existing ignored,59 summaries (2,234.97s); format4.30s, strict Clippy13.45s,
-ambient1.01s and all four Root deny categories1.78s pass. All82 focused native handoff tests
-pass (31.19s including rebuild), strict native Clippy56.70s and native check29.27s pass. Complete
-native passes553 library plus five ACL tests, zero failures (630.91s gate); native format0.84s
-passes. Logs are target/voice-browser-channel-* and target/voice-status-*. Startup/build were
-not rerun for this unstarted internal service: application setup/runtime placement is unchanged.
-The preceding executable/startup evidence below belongs to its stated source, not this delta.
+Browser v9 final cleanup waits for actual SDK/read/cancel work, exact setup settlement and buffer
+disposal before final native collection. Native closes routing first, tracks paid independent
+header/reply/public owners, and reuses a slot only after their actual drainage and permanent
+original-lease retirement. Serials remain monotonic across reuse. Six admission hooks collect
+eligible late drops outside Coordinator. A pressure test proves controller admission after
+reclamation; it does not claim a new room-call grant under full pressure.
 
-Two initial native focus attempts failed only new test accounting assertions that conflated
-independent Root CallGrant retirement with setup retirement. Baselines now follow each actual
-End/lock transition, retaining exact8KiB/one-slot and no-work/no-allocation cleanup assertions.
-The failed logs remain evidence; no production allowance or rejection check was weakened.
+Ready, Pending and Closed setup replies share one original paid Row projection position. The
+actual JSON allocation is hard-capped at 2,304 bytes, with fixed 2,048-byte hex scratch inside
+the unchanged 8 KiB Row budget. Delayed Closed replies remain paid through End and collection;
+non-Ready replies cannot bypass the serialization gate. Stock framework/WebView public-metadata
+copies after body handoff are explicitly outside this application-copy bound. Private/action
+bytes must not use that exception. windowVoiceIpcNative retains the exact adapter across module
+and component remounts; selected-key adapters/owners must also retain their original identities.
 
-Actual-diff adversarial review/re-review has no remaining findings after resolving unstarted/
-pre-admission cleanup, hostile HTTP header copying, missing browser IO deadline and closed-result
-truthfulness. This is static boundary review plus the stated focused tests, not physical
-native/browser/RTC acceptance. The native service remains status-only and is not started by
-the app. Application listener/CSP/bootstrap commands, actual factory/action input/result/receipt
-ACK/settlement/final-delivery integration and lifecycle collection remain open. Native closed
-Sessions still retain control capacity until registry teardown; this finite pilot must not
-be activated as a reusable call service. Live V2/SDP/ICE/RTC and legacy isolation belong to the
-next integration owner; media relay and combined/physical acceptance remain open. Only one
-physical desktop is available. Preserve unrelated main-worktree UI/combo edits.
+Current focused gates: 108 native handoff tests pass (2.05s), 35 browser adapter/Session checks
+and all nine command-security checks pass. Complete frontend passes 2,348, Svelte zero errors/
+warnings, production build37.61s and all ten rendered Edge flows pass. Strict native all-target/
+all-feature Clippy75.17s and native check48.33s pass. Complete native passes579 library plus
+five ACL tests, zero failures (530.02s library;644.28s gate). Native format1.03s, development
+executable build181.14s and real startup3.30s pass. Packaged custom-protocol debug build120.53s
+and the actual Windows document/reload/CSP/CORS/metadata/normal-close probe pass. Logs:
+target/voice-app-channel-*. Actual-diff review/re-review has
+no remaining blocker/high/medium finding after correcting security-ledger drift, serializer
+capacity accounting and non-Ready reply custody. One failed focus3 compile caught the missing
+close-first Row initializer; corrected focus4 passes, and the failed log remains retained.
 
-The next collection continuation is isolated in target/communication-browser-action-worktree,
-based on de082d87. It adds original-owner closure, paid weak Session/public-output witnesses and
-slot reclamation only after actual owners and the permanently retired lease drain. Its browser
-v9 final-collection/reply-loss set passes30 tests. New native collection cases (held independent
-owners, pressure, replacement/lock and68 sequential generations) are compiling; this draft is
-not yet acceptance evidence or application activation. Continue development there, keep this
-validated status checkout fixed, and serialize Cargo ownership.
+Root Rust, Cargo inputs and dependency policy are byte-identical to validated f1c58519; an exact
+Git diff verifies that. Its complete Root3,233 pass/zero failures/24 existing ignored/59 summaries
+(2,234.97s), format, strict Clippy, ambient and four deny categories are the existing evidence,
+not a newly repeated Root suite. The fresh Root construction gate also scans current native
+source and passes (one test,0.47s after4.11s compile). Prior status source de082d87/PR9218
+native553+5ACL/fullfrontend2,341 and preceding executable evidence belong to their own source;
+the current native gates above supersede them. Separate native/experiment audit findings remain open.
 
-Hosted `f227b4f7` is also not green: CI run39649824415/Linux job119394907283 again fails
-six_client_native_reversed_reopen_gossip_loss_and_command_load (531 native passes/1 failure).
-Bridge4 and client6 hold15/15 original operations; client5 holds14/15, missing the isolated
-client6 operation. Current bounded diagnostics report actual routes/recovery state but are
-not a production fix. Windows/Ubuntu Root jobs were still running at the inspection. Keep
-this separate chat recovery issue with its assigned owner; do not soften the exact union or
-raise timeouts. Root deny passing does not clear separate native/experiment audit findings.
+The packaged app probe uses a fresh owned WebView profile and never requests vault unlock or
+supplies credentials. It checks only public metadata command access/refusal, actual exact-port
+CSP/CORS and normal app close with native task collection. Probe6 passes on binary SHA256
+4a0d9e65e3356793701eafa538de89c755e1aa6788188c588c975f26e5305eef. Probes1-4 failed because
+CDP did not expose synthetic CSP response headers, then the harness reloaded a pending blank
+document. The corrected probe first requires the committed app origin/title/root/complete/IPC,
+then verifies a distinct committed loader after reload and reads an actual enforced connect-src
+violation. No native
+runtime change or relaxed acceptance was needed. Exit code0, closed stdio and the actual
+VOICE.HANDOFF.STOPPED marker establish normal collection; fallback kill cannot pass. This does
+not prove selected-key crypto exchange, action delivery, audible RTC or independent networking.
+Only one physical desktop is available; Linux/macOS WebView compatibility is unverified.
+
+Next: original native factory/action input, result/receipt ACK/settlement, authenticated browser
+phase closure and final delivery collection over this same Session. Normal proven-pair Actor
+registration, complete Workflow/copy funding and separate 32-row action-history collection
+remain required. Live V2/SDP/ICE/RTC and legacy isolation belong to the next integration owner;
+relay and combined/physical acceptance remain open. Preserve unrelated main Gate7 UI/combo edits
+and all worktrees; keep one Cargo owner, and do not recursively delete target.
+
+Hosted prior f227b4f7 CI run39649824415/Linux job119394907283 failed reversed-reopen exact chat
+union (531 passes/1 failure): client5 had14/15 original operations while bridge4/client6 had15/15.
+Those diagnostics are not a fix. This is historical hosted evidence, not a current-head result;
+latest PR48 hosted acceptance remains unverified. Keep chat recovery with its assigned owner and
+preserve exact union/time bounds. No green hosted-head claim is made here.
 
 ## Historical bootstrap checkpoint (21 October, preceding source)
 

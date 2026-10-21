@@ -1,35 +1,45 @@
 # Mewtual; Interfaces & Hooks Schema
 
-## Browser/native status candidate (21 October, not application-enabled)
+## App-owned public bootstrap and status channel (21 October)
 
-`VoiceCryptoBroker.nativeChannel(owner, key, native)` requires the retained broker's actual
-accepted selected key/owner/executor, captures the first stateless adapter and returns the
-same private Session handle on exact remount. `status()` coalesces its current physical flight;
-later attempts spend fresh TX on the original allocator. `close()` waits for actual SDK/IO
-drainage and exact native setup cleanup. The broker refuses a retained version7 pool rather
-than installing a second pool alongside unresolved work. This handle grants no Root/RTC effect.
+`setup_voice_channel({owner, executor})` requires the unlocked session and actual selected
+native owner/executor/generation. A failed/unstarted/finished service refuses before RNG or
+registry admission. It returns exactly Ready{owner,executor,kind,port,transcript},
+Pending{owner,executor,kind}, or Closed{owner,executor,kind,nativeSetupDrained}. IDs are the
+canonical voice- plus sixteen lowercase hex digits and 64 lowercase executor hex digits.
+The transcript is fixed public metadata; native ECDH/framing keys are never exported.
 
-The proposed trusted metadata adapter supplies `setup(owner, executor)` with exact public
-Ready{port,transcript}, Pending or Closed{nativeSetupDrained} fields. `settleSetup` is exact
-close-first cleanup and must resolve on native-authoritative no-work history after lock/End.
-No command exposes this adapter yet. Native's original setup credit remains paid until valid
-Status or trusted cleanup; the latter is called only after real browser promises drain.
+`settle_voice_channel_setup({owner,executor})` and `collect_voice_channel({owner,executor})`
+are main-window-only, exact original-identity cleanup and remain usable after lock/End.
+Their void success requires native Closed and actually drained setup. Unknown retired no-work
+is decided under UI commit; active same-owner/wrong-executor requests cannot invent it. Neither
+command accepts a drain flag, caller-selected Session/port or replacement generation.
 
-HTTP requests still contain the fixed144-character admission header and exact cipher body.
-HTTP200 responses now contain a fixed144-byte lowercase-hex admission prefix followed by the
-authenticated cipher body (Status19bytes, hence HTTP Content-Length163). HTTP204 preflight has
-neither body nor Content-Length. `readVoiceIpcResponse` owns the exact prefix BYOB buffer,
-authenticates before body admission, then checks exact body length and EOF. It does not read
-HTTP header values into application strings. `readVoiceIpcBody` likewise uses authenticated
-bytes and EOF; its earlier Content-Length-string equality rule is superseded. Unsupported
-BYOB, encoding, bad MAC/AEAD, truncation, excess and replay close the physical attempt without
-refund. An absolute injected browser IO deadline aborts but never detaches live SDK/cancel work.
+`windowVoiceIpcNative(invoke)` retains the actual stateless adapter object across remounts.
+Use it with the retained `VoiceCryptoBroker.nativeChannel(owner,key,native)` and the original
+accepted selected-key handle. An incompatible retained invoke/adapter or v7/v8 broker refuses
+rather than installing another pool. `status()` coalesces its current physical attempt; later
+attempts spend fresh TX on the same allocator. `close()` waits for actual SDK/read/cancel work,
+then exact setup settlement, buffer disposal and final channel collection.
 
-Status request plaintext is version1 + original16-byte Session +32-byte transcript hash. Its
-only reply is version1 + Ready1/Closed2 + native-setup-drained0/1. A header MAC alone or a valid
-AEAD body with the wrong Session/hash cannot settle setup. The native snapshot says nothing
-about browser, action, pair, remote endpoint or RTC readiness. Closed metadata is returned as
-closed, not an ambiguous result. Action payload/ACK/settlement and final collection remain open.
+Every successful public setup variant owns the same original Row projection guard through
+consuming IpcResponse conversion. JSON is written into one hard-capped 2,304-byte allocation;
+hex uses fixed 2,048-byte scratch. Delayed Closed/Pending replies remain paid after End/collection
+and cannot overlap Ready projections. Stock framework/WebView copies after handoff are excluded
+from this application-copy bound. Private/action bytes must use the authenticated channel.
+
+The app binds before window creation and adds only its exact http://127.0.0.1:port connect-src.
+The service accepts only the validated fixed native origin and literal Host, POST/OPTIONS
+`/voice/v2`, canonical framing and the original five-second connection deadline. HTTP 200 body
+starts with 144 lowercase admission bytes, then ciphertext; Status has 19 cipher bytes and
+Content-Length 163. Preflight 204 has neither body nor Content-Length. BYOB prefix authentication
+and RX debit precede body allocation. Browser IO expiry aborts, then awaits actual cancellation.
+
+Status plaintext is version1 + original 16-byte Session + 32-byte transcript hash. Its only
+reply is version1 + Ready1/Closed2 + native-setup-drained0/1. This grants no action, remote room,
+pair or RTC authority. Native routing is fenced before final closure; independent header/reply/
+public owners retain their capacity until actual drop, and a dead original lease precedes slot
+reuse. Factory/action delivery, receipt ACK, settlement and final phase collection remain open.
 
 ## Internal channel bootstrap candidate (21 October)
 

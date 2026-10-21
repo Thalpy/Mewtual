@@ -1,35 +1,47 @@
 # Threat model; client integrity & enforcement boundaries
 
-## Browser/native status transport boundary (21 October, disabled integration stage)
+## App-owned bootstrap/status boundary (21 October)
 
-Native original setup funding now survives native arithmetic and transfers into registry
-ownership before Ready. Only complete authenticated Status version/Session/transcript validation
-or exact trusted setup cleanup can retire it. Native End, timeout, bad body, waiter loss and
-unknown IDs do not prove browser drainage. A separate original control Crypto slot and native
-and browser control envelopes remain within existing caps, so full ordinary capacity cannot
-require a fresh slot for terminal control. Pre-admission pure resource rollback is permitted
-under Coordinator/Index; no active engine, affine grant, RNG or row/serial effect exists there.
-Actual transferred setup/output owners retire outside those guards.
+The listener is now reachable during application lifetime. Its fixed process payment and
+registry bind precede socket creation; its exact numeric port enters existing CSP before Tauri
+creates windows. Mode selection uses Tauri's custom-protocol decision, not Rust debug mode.
+Remote assets/windows, changed dev origins and unsupported HTTPS configuration refuse this
+channel rather than widen CORS. Startup failure leaves other app functions available. Explicit
+IO runtime entry avoids setup panics; Exit drains the actual status worker before SDK cleanup
+and restart. An interrupted observer or concurrent finish cannot fabricate completed drainage.
 
-The browser's private Session uses only its retained exact selected key/executor. Refcounts
-keep that key's metadata/point/private-key custody through actual SDK drainage after End.
-TX burns before WebCrypto; authenticated request-bound RX burns before BYOB body allocation.
-Physical errors never reset counters or recreate construction. One original reserved browser
-execution position avoids ordinary/protected queue deadlock without raising the two-slot cap.
+The three fixed-metadata commands are granted only to main, with remote/restricted surfaces
+excluded by the real ACL. Setup also requires unlocked session, selected native owner, original
+generation and actor binding. Exact cleanup remains possible while locked; it cannot install
+keys, revive an old generation or authorize a Root effect. Cleanup accepts no arbitrary drain
+assertion. Its trusted retained broker awaits real setup/SDK/IO promises before calling it.
 
-Port takeover is treated as hostile input. Fetch uses only an exact trusted literal-loopback
-port, rejects redirects and omits credentials/referrers. Fixed BYOB admission prefix intake
-avoids allocating attacker-sized HTTP header strings. One injected absolute IO deadline aborts
-fetch/read while retaining custody through actual cancellation and SDK settlement. It cannot
-force a hung SDK to drain or prove opaque SDK/GC erasure/RSS bounds. HTTP fields are not crypto
-authority; exact prefix MAC, body AEAD, Session/request binding and replay floors remain required.
+All successful setup variants borrow one original Row projection guard. Pending/Closed metadata
+remain paid even if End and collection race their delayed serialization. Ready checks the exact
+original credit. A hard-capped JSON writer prevents serializer capacity growth; combined graph,
+hex scratch and allocation fit the unchanged 8 KiB Row allowance. Arbitrary stock Tauri/WebView
+public-metadata copies after handoff, SDK/GC heaps, allocator RSS and physical erasure are not
+bounded by this payment. This narrow exception cannot carry secrets or action data.
 
-Proven unstarted channels need no native cleanup. An ambiguous setup attempt requires exact
-native settlement; a missing historical row is declared no-work only under UI commit when no
-current same-owner generation could still admit. A generic error is never treated as drainage.
-The service remains status-only and unstarted by the application. No listener/CSP/command,
-action/receipt/final-delivery chain or reusable lifecycle collection is enabled; live V2/RTC,
-legacy isolation, media relay and combined/physical acceptance remain open.
+The browser's retained v9 Session uses only its original selected key and executor. Constructor,
+adapter identity and TX/RX floors survive remount; generic keys/seeds cannot construct another
+channel. Native setup credit and the original control lane remain through actual SDK/read/cancel
+work, within existing caps. Header MAC alone, timeout, End and caller loss never prove drainage.
+Port takeover is hostile: fixed BYOB response prefix, MAC/AEAD/request binding and permanent replay
+floors apply before body admission; redirects, credentials and arbitrary endpoints are refused.
+
+Final closure fences new routing before detaching owners. Row collection requires a permanently
+dead lease, no pending setup, unique registry Row ownership and zero strong Session/public owners.
+Paid weak witnesses include headers and completed replies that hold no Row. Serial IDs never
+reset; stale cleanup cannot affect a replacement. Late drops are reclaimed before new admission,
+outside Coordinator. Uncertain history is never evicted for capacity.
+
+Only Status is served. No factory/action input/result/ACK/settlement/final-delivery chain, live
+V2/SDP/ICE/RTC, legacy-mode isolation or member media relay is enabled by this increment. Packaged
+Windows committed document/reload, enforced CSP/CORS, public metadata and native shutdown checks
+pass as recorded in HANDOVER; the probe requests no unlock and does not establish selected crypto
+or action delivery. Linux/macOS WebViews and independent physical audio/network acceptance remain
+unverified.
 
 ## Internal ECDH bootstrap boundary (21 October)
 

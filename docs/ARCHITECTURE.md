@@ -1,37 +1,40 @@
 # Mewtual; Architecture
 
-## Retained browser channel and native status transport (21 October, integration in progress)
+## App-owned status bootstrap and session collection (21 October)
 
-The internal service now exercises the immutable native Session over real loopback TCP. Its
-single connection has one original five-second deadline, fixed router scratch and a prepaid
-24KiB process infrastructure envelope. No application startup or command starts this service.
-The retained v8 browser broker constructs a private Session only from its exact accepted
-selected-key record/executor. Generic bound keys and supplied seeds cannot construct it.
-One constructor promise, original TX/RX floors and a prepaid control execution position survive
-remounts. Ordinary and protected admission share the existing two-position browser ceiling;
-control does not join an ordinary queue that protected work could be waiting on.
+Source bac90cfa connects the retained browser channel to application-owned native bootstrap.
+The host binds its paid loopback socket before Tauri creates windows and adds only that exact
+numeric port to the existing CSP and devCSP. Origin selection follows Tauri custom-protocol
+mode and validated main-window configuration, including packaged debug builds. Setup explicitly
+enters Tauri's IO runtime; the Exit callback collects the actual task/socket before SDK cleanup
+or restart. Bind/start failure disables this channel while the rest of the app can start.
 
-Native setup's original8KiB Crypto credit remains in the registry through real browser
-ECDH/HKDF/outgoing seal/MAC drainage. Complete authenticated Status retires that credit; exact
-trusted setup cleanup also works without channel keys, after End/lock and after lost replies.
-The original control Crypto lane, native12KiB and separate browser8KiB control bytes remain
-paid within the existing group/process limits. No timeout or caller loss releases actual work.
-Unknown retired cleanup returns native-authoritative closed/no-work metadata only while UI
-commit excludes admission and no current same-owner generation can still admit. Proven
-unstarted browser channels perform no native settlement. These are distinct safe cases.
+Three main-only commands expose fixed public setup and exact cleanup metadata. They carry no
+private key, seed, plaintext, SDP, ICE or action constructor. Ready, Pending and Closed replies
+share the original Row's serial projection guard and payment through body handoff. A capped
+2,304-byte JSON writer and 2,048-byte hex scratch fit the original 8 KiB Row envelope; arbitrary
+retained framework/WebView public-metadata copies after handoff are outside this copy bound.
+No private/action data may use this exception. The retained production metadata adapter has
+one immutable identity across component and module remounts.
 
-Responses place their fixed144-character admission prefix inside the BYOB stream. The browser
-authenticates it and spends RX before allocating/reading the body; it never copies untrusted
-HTTP header values. Its own original five-second IO deadline aborts a stale-port fetch/read,
-then awaits actual cancellation and SDK drainage. Fixed owner charges cover application
-metadata/copies, not opaque SDK/GC heaps, OS buffers, allocator RSS or physical erasure.
+The v9 browser broker retains its selected key, original TX/RX counters and constructor promise.
+An original native 8 KiB Crypto credit stays paid through real browser setup/outgoing SDK work.
+Separate original control capacity remains within the existing group/process/eight-Crypto and
+two-browser-position limits. IO expiry aborts actual reads but never proves SDK/cancel drainage.
 
-This is a status-only integration stage. Application listener/CSP/bootstrap commands,
-authenticated action input/result/receipt ACK/settlement/final delivery and lifecycle collection
-remain open. Native closed rows retain their original control slots, so the finite disabled
-pilot must not be activated as a reusable live-call service. Live V2/SDP/ICE/RTC, protocol-mode
-isolation, relay and combined/physical acceptance remain separate work. Historical candidate
-descriptions below do not supersede this scope or the current gate evidence in HANDOVER.md.
+Final collection closes routing first, then detaches native Session/public/setup owners only
+after browser SDK/IO and buffers drain. Paid weak witnesses track independent headers, completed
+replies and public outputs. A slot is reusable only when its original lease is permanently dead,
+no setup is pending and every actual owner has drained. Serial IDs never reset. Housekeeping
+runs outside Coordinator before new controller/owner/key admission, including late last-owner
+drops after the collection reply. No uncertain history is evicted to make capacity.
+
+This service still handles authenticated Status only. Factory/action input, result, exact
+receipt ACK, settlement, phase closure and final delivery remain open. Starting the local
+listener does not enable V2 signalling, SDP/ICE/RTC or legacy-mode isolation. The action ledger's
+separate finite history also needs collection. Relay and combined/physical acceptance remain
+open. Earlier checkpoint sections below retain their historical scope; HANDOVER has current
+gate provenance and platform limits.
 
 ## Internal immutable local-channel bootstrap (21 October)
 

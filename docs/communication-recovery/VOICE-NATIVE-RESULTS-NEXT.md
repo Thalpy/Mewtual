@@ -1,42 +1,43 @@
 # Next voice milestone: native result recovery
 
-## Current status-only native/browser continuation (21 October)
+## Current app-owned status continuation (21 October)
 
-Active source is target/communication-bootstrap-channel-worktree, based on published f227b4f7.
-The internal native TCP service and private retained v8 browser Session now share the immutable
-ECDH/framing contract. Actual native TCP tests and independent real-WebCrypto/browser-composition
-tests cover their respective boundaries; application IPC/startup/CSP integration is still absent.
-The service is not started by the app, and this is not a live byte-bearing action channel.
+Source bac90cfa is isolated in target/communication-browser-action-worktree, following published
+PR48 checkpoint 9218d179. Application host, exact pre-window CSP, fixed main-only bootstrap/cleanup
+commands and a retained production metadata adapter now connect the previously internal service.
+Only authenticated Status is enabled. Native action/receipt/result transport remains open.
 
-The browser constructor consumes only its retained exact selected key/executor, never imported
-seeds or generic equal-owner handles. Original TX/RX and constructor promise survive remounts.
-Native's original8KiB setup Crypto credit stays through browser ECDH/HKDF/outgoing seal/MAC;
-complete authenticated Status or trusted post-SDK setup cleanup retires it. An original control
-Crypto lane, native12KiB control and separate browser8KiB control coexist within existing limits.
-The browser reserves control execution before native admission from the existing two positions.
-Future protected-action integration must explicitly share/lend this position rather than stack
-another protected slot or enqueue channel control behind the chain it must settle.
+All 108 focused native handoff tests and 35 browser adapter/Session tests pass. Full frontend
+passes 2,348; Svelte has zero errors/warnings, build and all ten rendered flows pass. Native
+strict all-target/all-feature Clippy/check/format, complete native579+5ACL, development build/
+startup, packaged build and actual Windows document/reload/CSP/CORS/metadata/normal-close probe
+pass. The probe requests no vault unlock and does not establish selected crypto exchange or
+action transport. Actual-diff review/re-review has no remaining blocker/high/medium
+finding after command-ledger, serializer-capacity and non-Ready projection-custody corrections.
+A missing close-first initializer failed compilation once; its log is retained and corrected
+focus4 passes. Root's prior 3,233/full-static validation is on unchanged Root Rust/dependencies,
+not a fresh native-source run. HANDOVER records exact final gate provenance.
 
-HTTP200 response body begins with144 canonical admission bytes, followed by authenticated
-ciphertext. The BYOB reader never copies untrusted HTTP header values, authenticates before
-body allocation and burns RX before intake. Browser absolute five-second IO expiry aborts but
-keeps funding through actual fetch/read cancellation and SDK settlement. Lost setup replies,
-End/lock, native no-row/no-work and known closed metadata have distinct cleanup paths. Static
-adversarial re-review has no remaining findings. Focused browser set54/full frontend2,341 and
-complete Root3,233 pass; all82 focused native handoff tests and native check/strict Clippy/format
-pass. Complete native passes553 library plus five ACL tests, zero failures (630.91s gate).
-Current status source is de082d87; next collection work is isolated in
-target/communication-browser-action-worktree and is not yet native-validated. Exact evidence is in
-HANDOVER.md and retained target/voice-browser-channel-* / voice-status-* logs.
+Closed channel collection now tracks real independent owners and preserves monotonic serials;
+68 successive actual selected generations reuse capacity without reviving old Sessions. Browser
+v9 cleanup awaits all SDK/IO, then exact setup settlement, buffer disposal and final collection.
+Every public reply variant retains one original paid serialization position through framework
+handoff. Framework/WebView public-metadata copies beyond that boundary remain excluded; private
+or action bytes must never use stock IPC. Only one physical desktop is available.
 
-Next: reusable lifecycle collection (closed native Sessions currently retain control slots),
-trusted main-window setup/cleanup commands and exact pre-window CSP/listener integration, then
-actual factory/action input, result, exact receipt ACK, settlement, browser closure and final
-delivery collection. No stock-framework plaintext/result channel or arbitrary drain flag may
-substitute for those boundaries. Normal proven-pair Actor registration, whole-chain admission,
-SDP phase/key transfer, live RTC/mode isolation, relay and physical acceptance remain open.
-The historical candidate sections below retain their original evidence, not current absence
-or readiness claims.
+Next implement original factory/action input, result, exact receipt ACK, settlement, authenticated
+browser phase closure and final delivery collection over this same immutable Session. Resolve
+native context without an AppHandle cycle; admission still needs actual selected owner/actor,
+original UI commit/generation, native clock/deadline and current room/epoch/pair authority.
+Pending RowId is metadata, not action readiness. Normal proven-pair actor registration remains
+required; fixture-created pairs cannot establish that production path.
+
+Compose the original Workflow funding with actual native/browser serialization, SDK and retained
+copies before enabling action transport. The existing 16 KiB derivation HandoffLoan is not proof
+of a complete chain. Channel control already owns one of the existing two browser positions;
+protected work must share/lend it explicitly, never queue cleanup behind the chain being settled.
+The separate 32-row action ledger needs safe historical collection too. SDP phase/key transfer,
+live RTC/mode isolation, relay and combined/physical acceptance remain open.
 
 ## Historical native bootstrap candidate (21 October, preceding complete gates)
 
