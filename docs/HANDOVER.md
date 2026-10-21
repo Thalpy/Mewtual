@@ -1,10 +1,17 @@
 # Mewtual; Handover
 
-## Current native activation retry work (21 October, Rust validation pending)
+## Validated native activation checkpoint (21 October)
 
-Active next checkout is `target/communication-activation-recovery-worktree`, based on `319db214`.
-The frozen pair checkpoint's root suite is still running separately in session14577. Do not
-start another Cargo build or edit its sources. No new Rust test result is claimed here.
+Source through `23bbeac8` is validated in `target/communication-activation-recovery-worktree`.
+The complete root run passes 3,218 tests with zero failures and 24 existing ignored (58 summaries,
+5,304.73s) on frozen319db214; root manifests/lockfile/crates/bins/scripts are byte-identical here.
+The native-source construction gate also passes from this checkout (41.17s including compile).
+Session14577's older native build was deliberately interrupted during compilation, before tests,
+to validate this cumulative source instead. The cumulative native sequence has now passed:
+456 library tests plus five ACL tests, zero failures (579.06s library; 645.71s complete gate),
+native check (66.43s), executable build (338.48s), formatting (0.82s) and actual application
+startup (3.67s). No validation process remains active. Earlier pending/interrupted notes below
+are historical; this section supplies the cumulative evidence for the reviewed source.
 
 Accepted activation now recovers the original current controller/call before consumed-candidate
 lookup. Its original controller allocation, actor grant/child, UI generation and server entry
@@ -13,21 +20,28 @@ accepted retries do not retire an active call, create a nonce/grant or advance r
 End, lock/unlock, actor stop and replacement cannot recover a historical activation. Refused
 fresh admission leaves its borrowed affine grant with the bridge until native guards leave.
 
-Thirteen new Rust regressions are authored, not yet compiled: five synthetic Coordinator identity/
-custody cases and eight native cases, including actual actor/bridge barriers and generation
-registration before delayed voice revocation. Static read-only review/re-review
+All 40 focused native voice tests pass, including thirteen new regressions: five synthetic
+Coordinator identity/custody cases and eight native cases, including actual actor/bridge barriers
+and generation registration before delayed voice revocation. Tests take19.47s after10m01s compile;
+the script verifies that all thirteen new cases actually executed. Static read-only review/re-review
 has no remaining blocker/high/medium after correcting consume-on-refusal cleanup. Dedicated
 actual room/policy closure remains a coverage follow-up; actor-stop evidence does not establish
-that case. Full frontend passes2,268 (68.38s), native command-security9 pass (22.16s). No
+that case. Full frontend passes2,268 (75.15s), native command-security9 pass (22.16s), Svelte has
+zero errors/warnings, production build48.69s and all ten rendered Edge flows pass. No
 generic crypto/broker contract, command registration, listener, CSP, wire or persistence changed.
 
-After Rust focused/full validation, publish the cumulative reviewed checkpoint and exact evidence
-to PR48. Published head is still `c1532331`. Exact key-generation admission, action registration/
+Publish this cumulative reviewed checkpoint and exact evidence to PR48. Exact key-generation
+admission, action registration/
 IPC copies, result/ACK/settlement drainage, authorized SDP phase transfer, normal V2/RTC and legacy
 isolation, media relay and combined/physical acceptance remain open. Only one desktop exists.
 The bounded encrypted loopback channel is the preferred transport candidate for a later disabled
 pilot; browser/bootstrap copy retirement and other platforms are still unproved. Do not enable
 a listener/CSP or stack the existing96KiB confirmation and224KiB SDP reserves on that basis.
+
+Evidence logs: this checkout's `target/voice-activation-{root-construction,native-focused,
+native-full,native-check,native-build,native-format,startup,frontend-final,svelte,frontend-build,
+flows}.log`; complete root and strict static checks are in
+`target/communication-pair-origin-worktree/target/voice-pair-*.log`.
 
 ## Active production pair continuation (21 October, focused Root checks passed)
 

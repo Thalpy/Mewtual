@@ -7,8 +7,11 @@ worktree on319db214. It preserves the actual original controller/call allocation
 UI generation and server incarnation after lost replies, and rechecks current identity after
 asynchronous queries/commit waits. Concurrent early misses recover before another nonce. End,
 lock/replacement and revoked actor grants cannot recover historical authority. Temporary fresh
-grants remain with the bridge through all refusal paths and drop after native guards. Thirteen
-Rust regressions are authored but not yet compiled; static re-review and frontend checks pass.
+grants remain with the bridge through all refusal paths and drop after native guards. All40
+focused native voice tests pass, including thirteen new regressions; static re-review and full
+frontend checks pass. Root full passes 3,218 on byte-identical root code. The cumulative native
+suite passes 456 library plus five ACL tests; check, build, formatting and actual startup pass.
+The handover records exact provenance and logs. Earlier pending notes below are historical.
 Exact join-key generation admission and native action/settlement delivery are still separate.
 
 The next transport candidate is the application-owned bounded encrypted loopback channel tested

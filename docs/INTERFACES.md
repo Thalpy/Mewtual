@@ -1,6 +1,6 @@
 # Mewtual; Interfaces & Hooks Schema
 
-## Accepted native voice activation retries (21 October, validation pending)
+## Accepted native voice activation retries (21 October, complete gates passed)
 
 `activate_voice_owner(candidate)` can recover that exact currently installed controller or call
 after a lost accepted reply. It returns the original owner/group/join metadata; it creates no
@@ -11,6 +11,9 @@ preserves its current call. Concurrent duplicates share the first accepted insta
 cannot replay activation side effects. Pending candidates keep their existing TTL/CAS refusal.
 Native admission borrows its temporary grant and consumes it only on success; all refusal and
 duplicate-recovery cleanup occurs after Coordinator/UI guards. Normal V2/RTC remains disabled.
+The cumulative source passes the complete root, native and frontend suites plus native build/
+startup, static and rendered-flow checks; see the current handover for counts and provenance.
+Pending validation descriptions in older sections below are historical.
 
 ## Native protected pair factory (21 October, full gates pending)
 

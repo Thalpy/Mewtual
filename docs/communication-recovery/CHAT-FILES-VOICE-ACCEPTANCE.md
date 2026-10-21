@@ -1,6 +1,6 @@
 # Chat, files and voice implementation evidence
 
-## Current accepted-activation retry correction (21 October, Rust checks pending)
+## Validated accepted-activation retry correction (21 October)
 
 In communication-activation-recovery-worktree on319db214, accepted native controller/call
 activation now recovers exact current metadata before consumed-candidate lookup. The final
@@ -9,17 +9,26 @@ Concurrent duplicate misses recover before RNG. Refused fresh activation leaves 
 cleanup outside Coordinator/UI guards; it cannot revoke an existing owner. No new allowance,
 registry, serialized command, listener/CSP, wire/persistence format or live V2 is introduced.
 
-Thirteen new Rust tests are authored but NOT compiled/run: five Coordinator tests distinguish
+All 40 focused native voice tests pass (19.47s;10m01s compile), including thirteen new cases.
+Five Coordinator tests distinguish
 synthetic grant provenance; seven native tests use actual actor queries and held UI commit
 barriers for accepted reply loss, concurrent early misses, End, entry replacement, pending-End,
 actual actor-stop and lock/unlock. One additional native test isolates actual lock registration
 while original child recognition is still live, proving generation refusal before its delayed
 voice revocation hook. Dedicated actual room/policy closure remains a test follow-up.
 Read-only static review/re-review has no remaining blocker/high/medium after the borrowed-grant
-correction. Standalone native rustfmt, full frontend2,268 (68.38s) and native command-security9
-(22.16s) pass. The later pure final-generation repeat remains queued for Rust validation. Complete Rust/native
-checks are pending behind the frozen319db214 root suite, session14577; no duplicate Cargo run.
-Current PR48 head remainsc1532331. No physical or live RTC acceptance is claimed.
+correction. Standalone native rustfmt, full frontend2,268 (75.15s), native command-security9
+(22.16s), Svelte0errors/0warnings, build48.69s and all ten rendered Edge flows pass. The complete
+root suite passes3,218, zero failures,24existingignored,58summaries (5,304.73s), on319db214 with
+byte-identical root manifests/lockfile/crates/bins/scripts. Fresh native-source construction gate
+passes here. The cumulative native suite passes 456 library tests plus five ACL tests, zero
+failures (579.06s library; 645.71s complete gate). Native check (66.43s), executable build
+(338.48s), native formatting (0.82s) and actual application startup (3.67s) also pass.
+Session14577's older native compile was deliberately interrupted before testing; it contributes
+no native pass claim. No validation process remains active. Pending notes in earlier sections
+below are historical and superseded by this cumulative evidence. Logs are this checkout's
+`target/voice-activation-*.log` and the pair checkout's `target/voice-pair-*.log`.
+No physical or live RTC acceptance is claimed.
 
 ## Native pair continuation (21 October, focused Root checks passed; full gates pending)
 
