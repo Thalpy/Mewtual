@@ -113,6 +113,67 @@ fn leaf_open_refuses_directories_and_links_without_following_them() {
     }
 }
 
+/// Give `path` a WOF (non-surrogate) reparse point with `compact /exe`, as Windows does for
+/// compressed system files. Returns false where the volume cannot (FAT, ReFS, old Windows).
+#[cfg(windows)]
+pub(in crate::kept) fn compact_wof(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    let compacted = std::process::Command::new("compact.exe")
+        .args(["/c", "/exe:xpress4k"])
+        .arg(path)
+        .output()
+        .is_ok_and(|output| output.status.success());
+    compacted
+        && fs::symlink_metadata(path).is_ok_and(|metadata| {
+            u64::from(metadata.file_attributes()) & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        })
+}
+
+#[test]
+fn only_name_surrogate_reparse_points_make_a_file_foreign() {
+    const DIRECTORY: u64 = 0x10;
+    const REPARSE: u64 = 0x400;
+    const ARCHIVE: u64 = 0x20;
+    // A plain file, and one tagged by a cloud placeholder, WOF compression or dedup.
+    assert!(regular_from(ARCHIVE, false));
+    assert!(regular_from(ARCHIVE | REPARSE, false));
+    // Symbolic links, junctions and mount points redirect elsewhere.
+    assert!(!regular_from(ARCHIVE | REPARSE, true));
+    assert!(!regular_from(DIRECTORY, false));
+    assert!(!regular_from(DIRECTORY | REPARSE, true));
+    // The name-surrogate flag alone, without a reparse point, is meaningless.
+    assert!(regular_from(ARCHIVE, true));
+}
+
+#[cfg(windows)]
+#[test]
+fn a_wof_compressed_partial_is_still_ours_to_resume_and_remove() {
+    // Review M2: OneDrive Files On-Demand, `compact /exe` and dedup add non-surrogate reparse
+    // points to ordinary files. Our partial must not look "changed" and Remove must delete it.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notes.txt.mewtual-part");
+    let mut file = create_leaf(&path).unwrap();
+    file.write_all(&vec![b'a'; 256 * 1024]).unwrap();
+    let identity = observe(&file).unwrap().identity;
+    drop(file);
+    if !compact_wof(&path) {
+        eprintln!("skipping: compact /exe did not add a reparse point on this volume");
+        return;
+    }
+    let Leaf::Opened(mut reopened, observed) = open_leaf(&path, true).unwrap() else {
+        panic!("a WOF-compressed partial is still a plain file");
+    };
+    assert_eq!(observed.identity, identity);
+    assert!(observed.regular);
+    let mut head = [0u8; 4];
+    std::io::Read::read_exact(&mut reopened, &mut head).unwrap();
+    assert_eq!(
+        &head, b"aaaa",
+        "data is read through the filter, not the raw stream"
+    );
+    drop(reopened);
+}
+
 #[test]
 fn folder_identity_follows_a_linked_folder_and_refuses_files_and_missing_folders() {
     let dir = tempfile::tempdir().unwrap();

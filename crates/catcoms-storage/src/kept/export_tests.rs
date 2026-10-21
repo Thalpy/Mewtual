@@ -392,9 +392,11 @@ fn verification_never_lowers_a_checkpoint_but_a_rewind_does() {
 }
 
 #[test]
-fn identity_collision_over_foreign_content_halts_and_removal_leaves_the_bytes() {
+fn identity_collision_over_foreign_content_halts_without_writing() {
     // Birth time makes an accidental (dev, ino) reuse infeasible; this forges the collision to
-    // pin the remaining guards: no write and no deletion of a file that is not provably ours.
+    // pin the content guard: a mismatch inside the checkpoint halts and writes nothing. Identity
+    // is the only ownership proof for deletion, so a real collision WOULD let Remove delete this
+    // file; that residual is documented in THREAT-MODEL rather than claimed away here.
     let fx = fixture();
     let mut store = open(&fx.vault);
     let (id, lease) = completed(&mut store);
@@ -508,17 +510,28 @@ fn destination_changes_while_paused_become_typed_halts_without_touching_other_fi
         );
         store.halt_download_export(id, &journal, expected).unwrap();
         // Removal of a halted record never deletes anything it cannot prove is ours, and says
-        // which: only Removed/NotOurs let native finish, FolderUnreachable keeps Removing.
+        // which: FolderUnreachable keeps Removing; the others finish, with a notice whenever a
+        // file stays on disk.
         let ExportState::Writing(halted) = store.cancel_download(id).unwrap().unwrap() else {
             panic!("journal is kept for cleanup");
         };
         let outcome = remove_partial(&halted).unwrap();
         let expected_outcome = match change {
             Change::Deleted | Change::Moved | Change::PermissionRevoked => PartialRemoval::Removed,
-            Change::Replaced | Change::Linked | Change::FolderReplaced => PartialRemoval::NotOurs,
+            Change::Replaced | Change::Linked => PartialRemoval::LeftInPlace,
+            Change::FolderReplaced => PartialRemoval::FolderChanged,
             Change::FolderGone => PartialRemoval::FolderUnreachable,
         };
         assert_eq!(outcome, expected_outcome, "{change:?}");
+        // A file left on disk is never reported as removed.
+        assert_eq!(
+            outcome.notice(false).is_some(),
+            matches!(
+                change,
+                Change::Replaced | Change::Linked | Change::FolderReplaced
+            ),
+            "{change:?}"
+        );
         store.finish_download_cleanup(id).unwrap();
         if let Some((path, bytes)) = keep {
             assert_eq!(fs::read(path).unwrap(), bytes, "{change:?}");
@@ -639,6 +652,89 @@ fn removal_reports_a_partial_it_cannot_open_instead_of_forgetting_it() {
     );
     assert_eq!(remove_partial(&journal).unwrap(), PartialRemoval::Removed);
     store.finish_download_cleanup(id).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn a_compressed_or_cloud_tagged_partial_probes_ready_and_is_removed() {
+    // Review M2: a non-surrogate reparse point (WOF here; OneDrive placeholders and dedup use the
+    // same mechanism) must neither halt as Changed nor let Remove leave the plaintext behind.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (id, lease) = completed(&mut store);
+    let file = started(&mut store, &lease, &fx.downloads);
+    let journal = file.journal().clone();
+    drop(file);
+    // Grow it in place (same identity) so there is something to compress.
+    let mut handle = fs::OpenOptions::new()
+        .append(true)
+        .open(staging(&fx.downloads))
+        .unwrap();
+    std::io::Write::write_all(&mut handle, &vec![b'a'; 256 * 1024]).unwrap();
+    drop(handle);
+    if !external::tests::compact_wof(&staging(&fx.downloads)) {
+        eprintln!("skipping: compact /exe did not add a reparse point on this volume");
+        return;
+    }
+    assert!(
+        matches!(ExportFile::probe(&journal), ExportProbe::Ready),
+        "our own partial is not reported as changed"
+    );
+    let ExportState::Writing(saved) = store.cancel_download(id).unwrap().unwrap() else {
+        panic!();
+    };
+    assert_eq!(remove_partial(&saved).unwrap(), PartialRemoval::Removed);
+    assert!(!staging(&fx.downloads).exists(), "the plaintext is gone");
+    store.finish_download_cleanup(id).unwrap();
+}
+
+#[test]
+fn removal_reports_every_name_it_leaves_behind() {
+    // Review L2. (a) Remove racing publication: the link exists but Published was never
+    // recorded. Only the staging name goes; the saved file stays and the user is told.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (id, lease) = completed(&mut store);
+    let mut file = started(&mut store, &lease, &fx.downloads);
+    write_all(&mut file);
+    let Publication::Ready(journal) = file.prepare_publication().unwrap() else {
+        panic!();
+    };
+    store
+        .checkpoint_download_export(&lease, file.journal(), &journal)
+        .unwrap();
+    file.checkpointed(journal);
+    let path = file.link().unwrap();
+    drop(file);
+    let ExportState::Writing(saved) = store.cancel_download(id).unwrap().unwrap() else {
+        panic!();
+    };
+    let outcome = remove_partial(&saved).unwrap();
+    assert_eq!(outcome, PartialRemoval::KeptSaved);
+    assert!(outcome.notice(false).is_some() && outcome.notice(true).is_none());
+    assert!(!staging(&fx.downloads).exists());
+    assert_eq!(fs::read(&path).unwrap(), CHUNKS.concat());
+    store.finish_download_cleanup(id).unwrap();
+    // (b) Someone else hard-linked our partial elsewhere: our name goes, theirs stays, and the
+    // user is told a second name still holds the plaintext.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (id, lease) = completed(&mut store);
+    let mut file = started(&mut store, &lease, &fx.downloads);
+    file.accept(0, CHUNKS[0]).unwrap();
+    drop(file);
+    let other = fx.downloads.join("copied elsewhere.bin");
+    fs::hard_link(staging(&fx.downloads), &other).unwrap();
+    let ExportState::Writing(saved) = store.cancel_download(id).unwrap().unwrap() else {
+        panic!();
+    };
+    let outcome = remove_partial(&saved).unwrap();
+    assert_eq!(outcome, PartialRemoval::OtherNameRemains);
+    assert!(outcome.notice(true).is_some());
+    assert!(!staging(&fx.downloads).exists());
+    assert_eq!(fs::read(&other).unwrap(), CHUNKS[0]);
+    store.finish_download_cleanup(id).unwrap();
+    let _ = lease;
 }
 
 #[test]

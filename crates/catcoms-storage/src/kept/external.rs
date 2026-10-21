@@ -131,9 +131,25 @@ impl FileIdentity {
 pub(super) struct Observed {
     pub identity: FileIdentity,
     pub links: u64,
-    /// A plain file: not a directory and (on Windows) not a reparse point such as a link.
+    /// A plain file: not a directory and (on Windows) not a name-surrogate reparse point (a
+    /// symbolic link, junction or mount point that would redirect to another object).
     pub regular: bool,
     pub directory: bool,
+    /// Windows only: the object carries a reparse point that is NOT a name surrogate (a cloud
+    /// files placeholder, WOF compression, deduplication). It is still the same plain file, but
+    /// its data must be read through a normal handle so the filter can present it.
+    pub reparse: bool,
+}
+
+/// Windows classification of an opened object. Only name surrogates make it foreign: OneDrive
+/// Files On-Demand, `compact /exe` and data deduplication tag ordinary files with reparse points,
+/// and treating those as foreign would report our own partial as "changed" and let Remove leave
+/// its plaintext behind.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(super) fn regular_from(attributes: u64, name_surrogate: bool) -> bool {
+    const DIRECTORY: u64 = 0x10;
+    const REPARSE_POINT: u64 = 0x400;
+    attributes & DIRECTORY == 0 && !(attributes & REPARSE_POINT != 0 && name_surrogate)
 }
 
 /// The usable identity of an object, or `Unsupported` when the filesystem cannot provide one that
@@ -176,8 +192,15 @@ pub(super) fn observe(file: &File) -> io::Result<Observed> {
     {
         let info = winapi_util::file::information(file)?;
         let attributes = info.file_attributes();
-        // std reads the creation time through the same handle (GetFileInformationByHandle).
-        let born = file.metadata().and_then(|metadata| metadata.created());
+        // std reads the creation time and, for a reparse point, its tag through this same handle
+        // (GetFileInformationByHandle, then FileAttributeTagInfo); `is_symlink` is std's
+        // name-surrogate test. Metadata that cannot be read counts as a surrogate (foreign).
+        let metadata = file.metadata();
+        let surrogate = metadata
+            .as_ref()
+            .map_or(true, |metadata| metadata.file_type().is_symlink());
+        let born = metadata.and_then(|metadata| metadata.created());
+        let reparse = attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
         Ok(Observed {
             identity: identity_of(
                 PLATFORM_WINDOWS,
@@ -186,8 +209,9 @@ pub(super) fn observe(file: &File) -> io::Result<Observed> {
                 born,
             )?,
             links: info.number_of_links(),
-            regular: attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) == 0,
+            regular: regular_from(attributes, surrogate),
             directory: attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+            reparse: reparse && !surrogate,
         })
     }
     #[cfg(unix)]
@@ -204,6 +228,7 @@ pub(super) fn observe(file: &File) -> io::Result<Observed> {
             links: metadata.nlink(),
             regular: metadata.file_type().is_file(),
             directory: metadata.file_type().is_dir(),
+            reparse: false,
         })
     }
     #[cfg(not(any(windows, unix)))]
@@ -242,7 +267,6 @@ pub(super) fn folder_identity(folder: &Path) -> io::Result<FileIdentity> {
 }
 
 /// Result of opening a leaf inside the destination folder without following a link.
-#[derive(Debug)]
 pub(super) enum Leaf {
     Opened(File, Observed),
     /// Nothing exists at this name.
@@ -250,6 +274,16 @@ pub(super) enum Leaf {
     /// Something exists, but it is a link, a directory or another non-regular object. It can
     /// never be ours, so it is never written, truncated or deleted.
     Foreign,
+}
+// `File`'s own Debug output includes its path; name only the variant.
+impl std::fmt::Debug for Leaf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Opened(..) => "Leaf::Opened(..)",
+            Self::Missing => "Leaf::Missing",
+            Self::Foreign => "Leaf::Foreign",
+        })
+    }
 }
 
 /// Open `path` as a regular file without following a link at the final component. `write`
@@ -281,6 +315,22 @@ pub(super) fn open_leaf(path: &Path, write: bool) -> io::Result<Leaf> {
     let observed = observe(&file)?;
     if !observed.regular {
         return Ok(Leaf::Foreign);
+    }
+    #[cfg(windows)]
+    if observed.reparse {
+        // A plain file behind a non-surrogate reparse point (cloud placeholder, WOF, dedup). The
+        // flagged handle bypasses the filter that presents its data, so do I/O through a normal
+        // handle, and require that handle to name the same object.
+        let plain = match OpenOptions::new().read(true).write(write).open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Leaf::Missing),
+            Err(error) => return Err(error),
+        };
+        let again = observe(&plain)?;
+        if !again.regular || again.identity != observed.identity {
+            return Ok(Leaf::Foreign);
+        }
+        return Ok(Leaf::Opened(plain, again));
     }
     #[cfg(unix)]
     {

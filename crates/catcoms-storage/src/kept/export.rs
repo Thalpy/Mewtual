@@ -859,19 +859,57 @@ impl std::fmt::Debug for Publication {
     }
 }
 
-/// What a removal attempt established. Only `Removed` and `NotOurs` let a removal finish: anything
-/// that could still be our plaintext partial is never silently forgotten.
+/// What a removal attempt established. `FolderUnreachable` and `Unchecked` keep the journal (the
+/// partial may still be ours and reachable later). Every other outcome lets the removal finish,
+/// but only `Removed` means nothing of this save stays on disk: the others leave a file in place
+/// and carry a [`PartialRemoval::notice`] so the user is never told everything was removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PartialRemoval {
-    /// Our partial was deleted, or was already gone from a folder we could check.
+    /// Our partial was deleted, or was already gone from a folder we could check, and no other
+    /// name for it remains.
     Removed,
-    /// The folder or the name now holds something that cannot be ours; nothing was touched.
-    NotOurs,
+    /// Our staging name is gone and the same file stays under its final name: it had already been
+    /// saved (crash after the link, or Remove racing publication). Expected when clearing a saved
+    /// row; a Remove of an unfinished save tells the user the saved copy was kept.
+    KeptSaved,
+    /// Our staging name is gone, but another name for the same file that Mewtual did not make
+    /// still holds its plaintext. That name is not ours to delete.
+    OtherNameRemains,
+    /// Something is at our staging name that cannot be proven ours (a different file, a link or
+    /// other object). Nothing was touched.
+    LeftInPlace,
+    /// The saved folder path now names a different directory; whatever was ours is wherever the
+    /// old folder went. Nothing was touched.
+    FolderChanged,
     /// The saved folder cannot be reached (missing folder or volume, other platform, permission).
     FolderUnreachable,
     /// The folder is ours but the partial could not be opened to prove ownership (for example
     /// another program holds it without sharing). It may be ours, so it is not forgotten.
     Unchecked,
+}
+impl PartialRemoval {
+    /// Whether the caller may forget the journal.
+    pub fn settled(&self) -> bool {
+        !matches!(self, Self::FolderUnreachable | Self::Unchecked)
+    }
+    /// What to tell the user when a file of this save stays on disk. `saved` is true when the
+    /// record was already Published (clearing a saved row keeps the saved file by design).
+    pub fn notice(&self, saved: bool) -> Option<&'static str> {
+        match self {
+            Self::Removed | Self::FolderUnreachable | Self::Unchecked => None,
+            Self::KeptSaved if saved => None,
+            Self::KeptSaved => Some("This file had already been saved, so the saved copy was kept."),
+            Self::OtherNameRemains => Some(
+                "The partly saved file also had another name that Mewtual did not create. That name was left in place.",
+            ),
+            Self::LeftInPlace => Some(
+                "A file at the partly saved file's name could not be confirmed as Mewtual's, so it was left in place.",
+            ),
+            Self::FolderChanged => {
+                Some("The folder changed, so any partly saved file in it was left in place.")
+            }
+        }
+    }
 }
 
 enum Located {
@@ -945,9 +983,16 @@ pub fn remove_partial(journal: &ExportJournal) -> Result<PartialRemoval, ExportE
     };
     match external::folder_identity(&folder) {
         Ok(id) if id == journal.folder_id => {}
-        Ok(_) => return Ok(PartialRemoval::NotOurs),
+        Ok(_) => return Ok(PartialRemoval::FolderChanged),
         Err(_) => return Ok(PartialRemoval::FolderUnreachable),
     }
+    // Our final name holding our file means the save already completed under that name.
+    let final_is_ours = || {
+        matches!(
+            external::open_leaf(&folder.join(&journal.final_leaf), false),
+            Ok(Leaf::Opened(_, observed)) if observed.identity == journal.file_id
+        )
+    };
     let staging = folder.join(&journal.staging);
     match external::open_leaf(&staging, false) {
         Ok(Leaf::Opened(file, observed)) if observed.identity == journal.file_id => {
@@ -957,18 +1002,30 @@ pub fn remove_partial(journal: &ExportJournal) -> Result<PartialRemoval, ExportE
                 .is_ok_and(|metadata| metadata.permissions().readonly());
             drop(file);
             match remove_proven(&staging, read_only) {
-                Ok(()) => Ok(PartialRemoval::Removed),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    Ok(PartialRemoval::Removed)
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(ExportError::Local {
+                        retryable: true,
+                        reason: error.to_string(),
+                    })
                 }
-                Err(error) => Err(ExportError::Local {
-                    retryable: true,
-                    reason: error.to_string(),
-                }),
             }
+            // Account for every other name the object had: our own final name (already saved)
+            // and anything beyond it, which someone else made and which still holds plaintext.
+            let saved = final_is_ours();
+            let others = observed.links.saturating_sub(1 + u64::from(saved));
+            Ok(if others > 0 {
+                PartialRemoval::OtherNameRemains
+            } else if saved {
+                PartialRemoval::KeptSaved
+            } else {
+                PartialRemoval::Removed
+            })
         }
+        Ok(Leaf::Missing) if final_is_ours() => Ok(PartialRemoval::KeptSaved),
         Ok(Leaf::Missing) => Ok(PartialRemoval::Removed),
-        Ok(Leaf::Opened(..)) | Ok(Leaf::Foreign) => Ok(PartialRemoval::NotOurs),
+        Ok(Leaf::Opened(..)) | Ok(Leaf::Foreign) => Ok(PartialRemoval::LeftInPlace),
         Err(_) => Ok(PartialRemoval::Unchecked),
     }
 }

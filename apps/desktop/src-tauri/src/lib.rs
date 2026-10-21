@@ -14842,6 +14842,8 @@ async fn save_group_file(
         .await
         .ok_or_else(|| "The file read is no longer active.".to_string())?;
     let resume = resume.as_deref().map(private_downloads::id).transpose()?;
+    // A file of an abandoned earlier save that stays on disk; reported with the new result.
+    let mut left_behind = None;
     if let Some(id) = resume {
         // Explicit Resume changes intent by CAS; it neither supplies a new plan nor replenishes
         // an exhausted allowance. A newer pause/replacement must defeat this delayed click.
@@ -14852,7 +14854,7 @@ async fn save_group_file(
         )?;
         // Save new copy, destination preflight (before re-verification spends allowance) and
         // the intent CAS. A save the preflight finds already published finishes here.
-        if let Some(saved) = private_downloads::prepare_resume(
+        let prepared = private_downloads::prepare_resume(
             &state,
             server,
             instance,
@@ -14864,10 +14866,11 @@ async fn save_group_file(
             fresh_copy.unwrap_or(false),
             chosen.is_some(),
         )
-        .await?
-        {
+        .await?;
+        if let Some(saved) = prepared.saved {
             return Ok(saved);
         }
+        left_behind = prepared.notice;
     } else if expected_intent.is_some() || fresh_copy.is_some() {
         return Err("Download ID is required.".into());
     }
@@ -14953,11 +14956,10 @@ async fn save_group_file(
     .await?;
     if !resumable {
         // Say honestly that this location could not have resumed an interrupted save.
-        let note = private_downloads::NOT_RESUMABLE_NOTE;
-        saved.warning = Some(match saved.warning.take() {
-            Some(warning) => format!("{warning} {note}"),
-            None => note.to_string(),
-        });
+        private_downloads::append_warning(&mut saved, private_downloads::NOT_RESUMABLE_NOTE);
+    }
+    if let Some(note) = left_behind {
+        private_downloads::append_warning(&mut saved, note);
     }
     // Publication is already committed. Cleanup failure must never turn that success into a
     // retryable save error or remove the external file; retained ciphertext remains charged.

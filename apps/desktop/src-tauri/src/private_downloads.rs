@@ -173,17 +173,21 @@ pub(super) async fn retry_private_download(
 /// publishes Deleting, native removes only the partial file proven to be ours (never the final
 /// name), then the actor releases the record. `keepPartial` releases without deleting the file,
 /// the escape when removal keeps failing.
+///
+/// Returns a notice when the removal finished but a file of this save stays on disk (a saved
+/// copy, another name for the partial, or a file at its name that cannot be proven ours). The
+/// renderer shows it; a removal is never reported as complete while plaintext remains unmentioned.
 #[tauri::command]
 pub(super) async fn cancel_private_download(
     state: State<'_, AppState>,
     server: u64,
     download: String,
     keep_partial: Option<bool>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let generation = keep_session::invocation_generation(&state).await?;
     let id = id(&download)?;
     let (actor, instance) = actor_instance_of(&state, server).await?;
-    remove_download(
+    let notice = remove_download(
         &state,
         server,
         instance,
@@ -192,11 +196,13 @@ pub(super) async fn cancel_private_download(
         id,
         keep_partial.unwrap_or(false),
     )
-    .await
+    .await?;
+    Ok(notice.map(str::to_owned))
 }
 
 /// Shared Remove/Clear sequence. A removal whose proven partial cannot be deleted stays in the
-/// visible Removing state, conservatively charged; it never faults the store.
+/// visible Removing state, conservatively charged; it never faults the store. `Ok(Some(_))` is a
+/// finished removal that left a file on disk, with the text to tell the user.
 pub(super) async fn remove_download(
     state: &AppState,
     server: u64,
@@ -205,7 +211,7 @@ pub(super) async fn remove_download(
     actor: &ServerActor,
     id: DownloadId,
     keep_partial: bool,
-) -> Result<(), String> {
+) -> Result<Option<&'static str>, String> {
     let pending = commit_kept_command(
         state,
         server,
@@ -214,27 +220,30 @@ pub(super) async fn remove_download(
         actor.cancel_download(id),
     )
     .await?;
-    if let Some(saved) = pending {
-        if !keep_partial {
-            let journal = saved.journal().clone();
-            // Only a proven removal, or proof that nothing there is ours, may forget the journal.
-            // A partial that cannot be checked right now stays tracked in Removing.
-            match blocking(move || remove_partial(&journal)).await? {
-                Ok(PartialRemoval::Removed | PartialRemoval::NotOurs) => {}
-                Ok(PartialRemoval::FolderUnreachable) => return Err(REMOVE_UNREACHABLE.into()),
-                Ok(PartialRemoval::Unchecked) | Err(_) => return Err(REMOVE_RETRY.into()),
-            }
+    let Some(saved) = pending else {
+        return Ok(None);
+    };
+    let mut notice = None;
+    if !keep_partial {
+        let published = matches!(saved, ExportState::Published(_));
+        let journal = saved.journal().clone();
+        // Only an outcome that settles the question may forget the journal. A partial that cannot
+        // be checked right now stays tracked in Removing.
+        match blocking(move || remove_partial(&journal)).await? {
+            Ok(outcome) if outcome.settled() => notice = outcome.notice(published),
+            Ok(PartialRemoval::FolderUnreachable) => return Err(REMOVE_UNREACHABLE.into()),
+            Ok(_) | Err(_) => return Err(REMOVE_RETRY.into()),
         }
-        commit_kept_command(
-            state,
-            server,
-            instance,
-            generation,
-            actor.finish_download_cleanup(id),
-        )
-        .await?;
     }
-    Ok(())
+    commit_kept_command(
+        state,
+        server,
+        instance,
+        generation,
+        actor.finish_download_cleanup(id),
+    )
+    .await?;
+    Ok(notice)
 }
 const REMOVE_RETRY: &str = "The partly saved file could not be removed. Close any app using it, then choose Remove again, or choose Keep partly saved file.";
 const REMOVE_UNREACHABLE: &str = "The folder with the partly saved file is unavailable. Reconnect it and choose Remove again, or choose Keep partly saved file.";
@@ -449,8 +458,13 @@ pub(super) async fn resume_preflight(
     }
 }
 
+/// Shown when Save new copy goes ahead although the old partial could not be reached.
+const OLD_PARTIAL_UNREACHABLE: &str =
+    "The folder with the old partly saved file is unavailable, so that file was left in place.";
+
 /// "Save new copy" / "Save another copy": remove our proven partial (never the final name), then
-/// forget the journal under the explicit intent CAS. Returns the intent to use next.
+/// forget the journal under the explicit intent CAS. Returns the intent to use next and, when a
+/// file of the old save stays on disk, the notice to attach to the new save's result.
 pub(super) async fn abandon_partial(
     state: &AppState,
     server: u64,
@@ -459,10 +473,11 @@ pub(super) async fn abandon_partial(
     actor: &ServerActor,
     id: DownloadId,
     expected_intent: u64,
-) -> Result<u64, String> {
+) -> Result<(u64, Option<&'static str>), String> {
     let Some(saved) = actor.download_export_state(id).await? else {
-        return Ok(expected_intent);
+        return Ok((expected_intent, None));
     };
+    let published = matches!(saved, ExportState::Published(_));
     // Refuse a stale click before deleting anything; the abandon below repeats the exact CAS.
     let current = actor.downloads().await?;
     if !current
@@ -473,26 +488,42 @@ pub(super) async fn abandon_partial(
     }
     let journal = saved.journal().clone();
     // A folder that cannot be reached is usually why the user wants a new copy; the old partial
-    // then stays wherever it is. A reachable partial that cannot be checked is not forgotten.
-    match blocking(move || remove_partial(&journal)).await? {
-        Ok(
-            PartialRemoval::Removed | PartialRemoval::NotOurs | PartialRemoval::FolderUnreachable,
-        ) => {}
-        Ok(PartialRemoval::Unchecked) | Err(_) => {
-            return Err(
+    // then stays wherever it is, and the user is told. A reachable partial that cannot be checked
+    // is not forgotten.
+    let notice =
+        match blocking(move || remove_partial(&journal)).await? {
+            Ok(PartialRemoval::FolderUnreachable) => Some(OLD_PARTIAL_UNREACHABLE),
+            Ok(outcome) if outcome.settled() => outcome.notice(published),
+            Ok(_) | Err(_) => return Err(
                 "The partly saved file could not be removed. Close any app using it and try again."
                     .into(),
-            )
-        }
-    }
-    commit_kept_command(
+            ),
+        };
+    let intent = commit_kept_command(
         state,
         server,
         instance,
         generation,
         actor.abandon_download_export(id, expected_intent),
     )
-    .await
+    .await?;
+    Ok((intent, notice))
+}
+
+/// Add one sentence to a save result's warning, keeping any warning already there.
+pub(super) fn append_warning(saved: &mut SavedFileResult, note: &str) {
+    saved.warning = Some(match saved.warning.take() {
+        Some(warning) => format!("{warning} {note}"),
+        None => note.to_string(),
+    });
+}
+
+/// What an explicit Resume settled before acquisition.
+pub(super) struct Prepared {
+    /// The preflight found the file already saved (crash after the link): the save is finished.
+    pub(super) saved: Option<SavedFileResult>,
+    /// A file of an abandoned earlier save stays on disk; append this to the result.
+    pub(super) notice: Option<&'static str>,
 }
 
 /// Everything an explicit Resume does before acquisition: optional "Save new copy", the
@@ -511,14 +542,15 @@ pub(super) async fn prepare_resume(
     expected_intent: u64,
     fresh_copy: bool,
     chosen: bool,
-) -> Result<Option<SavedFileResult>, String> {
+) -> Result<Prepared, String> {
     // A chosen destination always starts a new file. Continuing an existing partial at its own
     // place is plain Resume; redirecting it requires the explicit Save new copy semantics.
     if chosen && !fresh_copy && actor.download_export_state(id).await?.is_some() {
         return Err(JOURNAL_EXISTS.into());
     }
+    let mut notice = None;
     let intent = if fresh_copy {
-        abandon_partial(
+        let (intent, left) = abandon_partial(
             state,
             server,
             instance,
@@ -527,7 +559,9 @@ pub(super) async fn prepare_resume(
             id,
             expected_intent,
         )
-        .await?
+        .await?;
+        notice = left;
+        intent
     } else {
         if let Preflight::Saved(path) = resume_preflight(actor, id, origin).await? {
             let saved = finish_saved_read_if(
@@ -542,7 +576,10 @@ pub(super) async fn prepare_resume(
             )
             .await?;
             let _ = remove_download(state, server, instance, generation, actor, id, false).await;
-            return Ok(Some(saved));
+            return Ok(Prepared {
+                saved: Some(saved),
+                notice: None,
+            });
         }
         expected_intent
     };
@@ -554,7 +591,10 @@ pub(super) async fn prepare_resume(
         actor.set_download_paused(id, intent, false),
     )
     .await?;
-    Ok(None)
+    Ok(Prepared {
+        saved: None,
+        notice,
+    })
 }
 
 async fn record_halt(

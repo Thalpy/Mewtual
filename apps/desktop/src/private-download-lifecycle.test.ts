@@ -117,6 +117,21 @@ test("Save new copy sends freshCopy with the exact revision and Keep partly save
   await app.act({ ...saved, status: "saved" }, "remove");
   assert.deepEqual(app.calls[2], ["cancel_private_download", { server: 1, download: saved.id }]);
 });
+test("Remove shows native's notice when a file of the save stays on disk, and nothing otherwise", async () => {
+  const left = "A file at the partly saved file's name could not be confirmed as Mewtual's, so it was left in place.";
+  const app = fixture();
+  app.replies.set("cancel_private_download", left);
+  await app.act({ ...saved, status: "destination-changed" }, "remove");
+  assert.deepEqual(app.notices, [[left, "info", 9000]]);
+  app.replies.set("cancel_private_download", null);
+  await app.act({ ...saved, status: "saved" }, "remove");
+  assert.equal(app.notices.length, 1, "a clean removal shows nothing extra");
+  // A notice that arrives after Lock is not shown to the next session.
+  const held = deferred(); app.replies.set("cancel_private_download", held.promise);
+  const removing = app.act({ ...saved, status: "saved" }, "remove");
+  app.lock(); app.unlock(); held.resolve(left); await removing;
+  assert.equal(app.notices.length, 1);
+});
 test("saving a halted, saved or running file from the list opens Transfers instead of acting", async () => {
   for (const status of ["destination-changed", "destination-unavailable", "saved", "removing", "exhausted", "saving", "receiving"]) {
     const app = fixture(); app.rows([{ ...saved, status }]);

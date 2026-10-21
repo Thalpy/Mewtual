@@ -12140,9 +12140,12 @@
     fileInventoryGate.invalidate();
     try {
       // Remove deletes encrypted progress and only a partly saved file native proves it created;
-      // keepPartial releases the record and leaves that file in place.
-      if (remove) await invoke("cancel_private_download", { server, download: row.id, ...(keepPartial ? { keepPartial: true } : {}) });
-      else await invoke("set_private_download_paused", { server, download: row.id, expectedIntent: row.intent, paused: true });
+      // keepPartial releases the record and leaves that file in place. Native returns a notice
+      // when a file of this save stays on disk, so a removal never silently leaves plaintext.
+      if (remove) {
+        const notice = await invoke<string | null>("cancel_private_download", { server, download: row.id, ...(keepPartial ? { keepPartial: true } : {}) });
+        if (typeof notice === "string" && notice && unlockedViewCurrent(gen, server)) toast(notice, "info", 9000);
+      } else await invoke("set_private_download_paused", { server, download: row.id, expectedIntent: row.intent, paused: true });
     } catch (e) { if (unlockedViewCurrent(gen, server)) error = String(e); }
     finally {
       if (privateDownloadBusy === mutation) privateDownloadBusy = null;
