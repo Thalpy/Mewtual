@@ -558,6 +558,12 @@ fn crash_between_link_and_published_recovers_to_saved_without_a_second_copy() {
         .unwrap();
     file.checkpointed(journal.clone());
     file.link().unwrap();
+    // A retried publication in the same session sees its own earlier link and never links again.
+    let Publication::AlreadyPublished(again, linked) = file.prepare_publication().unwrap() else {
+        panic!("our final name is recognized");
+    };
+    assert_eq!(again, journal);
+    assert_eq!(linked, fx.downloads.join("notes.txt"));
     drop(file); // crash before Published
     drop(store);
     let mut store = open(&fx.vault);

@@ -67,6 +67,39 @@ pub struct DownloadReady {
     actor: tokio::sync::watch::Receiver<bool>,
     export_custody: Option<catcoms_rt::SharedRequestKeepalive>,
 }
+/// One lease-fenced export journal transition, named after the storage edge it performs. The
+/// journals are native-memory values that carry an external path; they never cross IPC.
+#[derive(Debug)]
+pub enum DownloadExportTransition {
+    /// None -> Writing(0) for a fresh partial native just created and proved linkable.
+    Begin {
+        journal: catcoms_storage::kept::ExportJournal,
+        presence: catcoms_storage::kept::ExportPresence,
+    },
+    /// Register a task that reopened the exact saved, unhalted journal (no record write).
+    Resume {
+        journal: catcoms_storage::kept::ExportJournal,
+        presence: catcoms_storage::kept::ExportPresence,
+    },
+    /// Progress checkpoint, or a new final name persisted before a link attempt.
+    Checkpoint {
+        expected: catcoms_storage::kept::ExportJournal,
+        next: catcoms_storage::kept::ExportJournal,
+    },
+    /// Writing -> Published after native proved the final name holds the partial's identity.
+    Publish {
+        expected: catcoms_storage::kept::ExportJournal,
+    },
+}
+
+/// Lease-free journal edges a preflight may record before any re-verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadExportEdge {
+    Halt(catcoms_storage::kept::ExportHalt),
+    /// Crash between link and Published: the final name already holds our file.
+    RecoverPublished,
+}
+
 /// One private plaintext reply retains the native whole-export slot even if its waiter was
 /// canceled while the actor was reading disk. The receiver must retain its DownloadReady owner
 /// while using `into_bytes`; the live native SaveSource does so through write/publication.
@@ -111,6 +144,11 @@ impl DownloadReady {
     pub fn mime(&self) -> &str {
         &self.manifest.mime
     }
+    /// Plaintext layout bound from this exact verified manifest. A journaled export accepts each
+    /// chunk only at its declared length and publishes only if the stream hashes to its CID.
+    pub fn export_plan(&self) -> Result<catcoms_storage::kept::ExportPlan, String> {
+        catcoms_storage::kept::ExportPlan::from_manifest(&self.manifest).map_err(|e| e.to_string())
+    }
     /// Observe the ORIGINAL Root and mounted storage generations before plaintext effects.
     /// Native invocation/session/entry and destination authorization remain caller obligations.
     pub fn is_current(&self) -> bool {
@@ -121,6 +159,36 @@ impl DownloadReady {
     pub fn invocation_current(&self) -> bool {
         *self.actor.borrow() && self.actor.has_changed().is_ok() && self.root.authorized()
     }
+}
+
+/// Apply one journal transition on the actor. The original native invocation, the original
+/// actor/Root generation and the storage lease must all still be current: Lock retires the first
+/// without retiring the lease, so a late blocking write cannot persist progress after Lock.
+fn apply_download_export_transition<T: MeshTransport, R: CryptoRngCore>(
+    server: &mut Server<T, R>,
+    ready: &DownloadReady,
+    transition: DownloadExportTransition,
+    cancel: &RequestCancellation,
+) -> Result<(), String> {
+    if cancel.is_cancelled() || !ready.is_current() {
+        return Err("The download is no longer active.".to_string());
+    }
+    let lease = &ready.lease;
+    match transition {
+        DownloadExportTransition::Begin { journal, presence } => {
+            server.sync.begin_download_export(lease, &journal, presence)
+        }
+        DownloadExportTransition::Resume { journal, presence } => server
+            .sync
+            .resume_download_export(lease, &journal, presence),
+        DownloadExportTransition::Checkpoint { expected, next } => server
+            .sync
+            .checkpoint_download_export(lease, &expected, &next),
+        DownloadExportTransition::Publish { expected } => {
+            server.sync.publish_download_export(lease, &expected)
+        }
+    }
+    .map_err(|e| e.to_string())
 }
 
 /// Await one detached chunk request while retaining a native cancellation edge.
@@ -816,6 +884,37 @@ pub enum AppCommand {
         reply: oneshot::Sender<Result<catcoms_storage::kept::KeepRetryReceipt, String>>,
     },
     CancelDownload {
+        id: catcoms_storage::kept::DownloadId,
+        reply: oneshot::Sender<Result<Option<catcoms_storage::kept::ExportState>, String>>,
+    },
+    /// Native-only saved export journal. It names an external path; never renderer data.
+    DownloadExportState {
+        id: catcoms_storage::kept::DownloadId,
+        reply: oneshot::Sender<Result<Option<catcoms_storage::kept::ExportState>, String>>,
+    },
+    /// Lease-fenced journal transition for the exact original export invocation. Writes only the
+    /// sealed record; every external filesystem effect already happened in native.
+    DownloadExportTransition {
+        ready: DownloadReady,
+        // Boxed: a checkpoint carries two journals and would bloat every queued command.
+        transition: Box<DownloadExportTransition>,
+        cancel: RequestCancellation,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Lease-free preflight edge (halt or recovered publication) by exact journal CAS.
+    DownloadExportEdge {
+        id: catcoms_storage::kept::DownloadId,
+        expected: catcoms_storage::kept::ExportJournal,
+        edge: DownloadExportEdge,
+        cancel: RequestCancellation,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    AbandonDownloadExport {
+        id: catcoms_storage::kept::DownloadId,
+        expected_intent: u64,
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
+    FinishDownloadCleanup {
         id: catcoms_storage::kept::DownloadId,
         reply: oneshot::Sender<Result<(), String>>,
     },
@@ -3130,13 +3229,97 @@ impl ServerActor {
             .map_err(|_| "server stopped".to_string())?;
         receiver.await.map_err(|_| "server stopped".to_string())?
     }
+    /// Remove/Clear. `Some(journal)` means Deleting is durable and the caller must remove the
+    /// proven external partial (never the final name) before [`Self::finish_download_cleanup`].
     pub async fn cancel_download(
+        &self,
+        id: catcoms_storage::kept::DownloadId,
+    ) -> Result<Option<catcoms_storage::kept::ExportState>, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::CancelDownload { id, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
+    }
+    /// Release a Deleting record after native external cleanup ran or was declined.
+    pub async fn finish_download_cleanup(
         &self,
         id: catcoms_storage::kept::DownloadId,
     ) -> Result<(), String> {
         let (reply, receiver) = oneshot::channel();
         self.cmd_tx
-            .send(AppCommand::CancelDownload { id, reply })
+            .send(AppCommand::FinishDownloadCleanup { id, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
+    }
+    /// Native-only saved export journal for preflight, reopen and cleanup.
+    pub async fn download_export_state(
+        &self,
+        id: catcoms_storage::kept::DownloadId,
+    ) -> Result<Option<catcoms_storage::kept::ExportState>, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::DownloadExportState { id, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
+    }
+    /// Lease-fenced journal transition. The actor refuses it once `cancel` (the original native
+    /// invocation) is cancelled, so a blocking write that finishes after Lock persists nothing.
+    pub async fn download_export_transition(
+        &self,
+        ready: DownloadReady,
+        transition: DownloadExportTransition,
+        cancel: RequestCancellation,
+    ) -> Result<(), String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::DownloadExportTransition {
+                ready,
+                transition: Box::new(transition),
+                cancel,
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
+    }
+    /// Lease-free preflight edge by exact journal CAS, refused once `cancel` is cancelled.
+    pub async fn download_export_edge(
+        &self,
+        id: catcoms_storage::kept::DownloadId,
+        expected: catcoms_storage::kept::ExportJournal,
+        edge: DownloadExportEdge,
+        cancel: RequestCancellation,
+    ) -> Result<(), String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::DownloadExportEdge {
+                id,
+                expected,
+                edge,
+                cancel,
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
+    }
+    /// "Save new copy" / "Save another copy" under an explicit intent CAS. Returns the new intent.
+    pub async fn abandon_download_export(
+        &self,
+        id: catcoms_storage::kept::DownloadId,
+        expected_intent: u64,
+    ) -> Result<u64, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::AbandonDownloadExport {
+                id,
+                expected_intent,
+                reply,
+            })
             .await
             .map_err(|_| "server stopped".to_string())?;
         receiver.await.map_err(|_| "server stopped".to_string())?
@@ -5230,6 +5413,27 @@ where
                     Some(AppCommand::SetDownloadPaused { id, expected_intent, paused, reply }) => { let _ = reply.send(server.sync.set_download_paused(id, expected_intent, paused).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
                     Some(AppCommand::RetryDownload { id, request, reply }) => { let _ = reply.send(server.sync.retry_download(id, request).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
                     Some(AppCommand::CancelDownload { id, reply }) => { let _ = reply.send(server.sync.cancel_download(id).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
+                    Some(AppCommand::FinishDownloadCleanup { id, reply }) => { let _ = reply.send(server.sync.finish_download_cleanup(id).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
+                    Some(AppCommand::DownloadExportState { id, reply }) => { let _ = reply.send(server.sync.download_export_state(id).map_err(|e| e.to_string())); }
+                    Some(AppCommand::DownloadExportTransition { ready, transition, cancel, reply }) => {
+                        let _ = reply.send(apply_download_export_transition(&mut server, &ready, *transition, &cancel));
+                        let _ = event_tx.send(AppEvent::FilesUpdated).await;
+                    }
+                    Some(AppCommand::DownloadExportEdge { id, expected, edge, cancel, reply }) => {
+                        // Lock does not retire storage leases; the original invocation does stop here.
+                        let result = if cancel.is_cancelled() {
+                            Err("The download is no longer active.".to_string())
+                        } else {
+                            match edge {
+                                DownloadExportEdge::Halt(halt) => server.sync.halt_download_export(id, &expected, halt),
+                                DownloadExportEdge::RecoverPublished => server.sync.recover_download_export(id, &expected),
+                            }
+                            .map_err(|e| e.to_string())
+                        };
+                        let _ = reply.send(result);
+                        let _ = event_tx.send(AppEvent::FilesUpdated).await;
+                    }
+                    Some(AppCommand::AbandonDownloadExport { id, expected_intent, reply }) => { let _ = reply.send(server.sync.abandon_download_export(id, expected_intent).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
                     Some(AppCommand::RequestKeptFile { cid, reply }) => {
                         let session = keep_sessions.borrow().clone();
                         let result = file_transfers.request_keep(&mut server, cid, session);

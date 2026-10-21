@@ -440,8 +440,9 @@ pub enum ExportReopen {
 pub enum Publication {
     /// Persist this checkpoint (every chunk, and possibly a new final name) BEFORE linking.
     Ready(ExportJournal),
-    /// The final name already holds our file.
-    AlreadyPublished(PathBuf),
+    /// The final name already holds our file (an earlier link whose Published transition was
+    /// lost). Persist the every-chunk journal, then record Published; never link again.
+    AlreadyPublished(ExportJournal, PathBuf),
 }
 
 enum Located {
@@ -877,7 +878,7 @@ impl ExportFile {
         let current = self.folder.join(&journal.final_leaf);
         match external::open_leaf(&current, false) {
             Ok(Leaf::Opened(_, observed)) if observed.identity == journal.file_id => {
-                return Ok(Publication::AlreadyPublished(current));
+                return Ok(Publication::AlreadyPublished(journal, current));
             }
             Ok(Leaf::Missing) => {}
             Ok(_) => {

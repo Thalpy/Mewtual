@@ -3,8 +3,9 @@
 //! live group/file-key authority at every acquisition/export effect, including local cache hits.
 use super::*;
 use catcoms_storage::kept::{
-    DownloadExportLease, DownloadId, DownloadRun, DownloadStatus, DownloadStore, KeepNetworkWork,
-    KeepPlan, KeepRetry, KeepRetryReceipt, KeepWork,
+    DownloadExportLease, DownloadId, DownloadRun, DownloadStatus, DownloadStore, ExportHalt,
+    ExportJournal, ExportPresence, ExportState, KeepNetworkWork, KeepPlan, KeepRetry,
+    KeepRetryReceipt, KeepWork,
 };
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
@@ -125,8 +126,95 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .read_download_export(lease, cid, max)?)
     }
     /// Native-only cancel download; does not grant a renderer or external path capability.
-    pub fn cancel_download(&mut self, id: DownloadId) -> Result<(), SyncError> {
+    /// `Some` means Deleting is durable and native still has to remove the proven external
+    /// partial before [`Self::finish_download_cleanup`] releases the record.
+    pub fn cancel_download(&mut self, id: DownloadId) -> Result<Option<ExportState>, SyncError> {
         Ok(self.download_store_mut()?.cancel_download(id)?)
+    }
+    /// Release a Deleting record whose external cleanup already ran or was declined.
+    pub fn finish_download_cleanup(&mut self, id: DownloadId) -> Result<(), SyncError> {
+        Ok(self.download_store_mut()?.finish_download_cleanup(id)?)
+    }
+    /// Native-only saved export journal for preflight, reopen and cleanup. It names an external
+    /// path and must never be projected to the renderer.
+    pub fn download_export_state(&self, id: DownloadId) -> Result<Option<ExportState>, SyncError> {
+        Ok(self.download_store()?.download_export_state(id)?)
+    }
+    /// Journal transitions. Live group/file-key authority is rechecked here like every other
+    /// private-download effect; the caller separately checks the original native invocation.
+    pub fn begin_download_export(
+        &mut self,
+        lease: &DownloadExportLease,
+        journal: &ExportJournal,
+        presence: ExportPresence,
+    ) -> Result<(), SyncError> {
+        self.download_authorized()?;
+        Ok(self
+            .download_store_mut()?
+            .begin_download_export(lease, journal, presence)?)
+    }
+    pub fn resume_download_export(
+        &mut self,
+        lease: &DownloadExportLease,
+        journal: &ExportJournal,
+        presence: ExportPresence,
+    ) -> Result<(), SyncError> {
+        self.download_authorized()?;
+        Ok(self
+            .download_store_mut()?
+            .resume_download_export(lease, journal, presence)?)
+    }
+    pub fn checkpoint_download_export(
+        &mut self,
+        lease: &DownloadExportLease,
+        expected: &ExportJournal,
+        next: &ExportJournal,
+    ) -> Result<(), SyncError> {
+        self.download_authorized()?;
+        Ok(self
+            .download_store_mut()?
+            .checkpoint_download_export(lease, expected, next)?)
+    }
+    pub fn publish_download_export(
+        &mut self,
+        lease: &DownloadExportLease,
+        expected: &ExportJournal,
+    ) -> Result<(), SyncError> {
+        self.download_authorized()?;
+        Ok(self
+            .download_store_mut()?
+            .publish_download_export(lease, expected)?)
+    }
+    pub fn recover_download_export(
+        &mut self,
+        id: DownloadId,
+        expected: &ExportJournal,
+    ) -> Result<(), SyncError> {
+        self.download_authorized()?;
+        Ok(self
+            .download_store_mut()?
+            .recover_download_export(id, expected)?)
+    }
+    /// A halt only stops work, so it needs no file-key authority; it still requires the exact
+    /// saved journal.
+    pub fn halt_download_export(
+        &mut self,
+        id: DownloadId,
+        expected: &ExportJournal,
+        halt: ExportHalt,
+    ) -> Result<(), SyncError> {
+        Ok(self
+            .download_store_mut()?
+            .halt_download_export(id, expected, halt)?)
+    }
+    pub fn abandon_download_export(
+        &mut self,
+        id: DownloadId,
+        expected_intent: u64,
+    ) -> Result<u64, SyncError> {
+        Ok(self
+            .download_store_mut()?
+            .abandon_download_export(id, expected_intent)?)
     }
     /// Native-only set download paused; does not grant a renderer or external path capability.
     pub fn set_download_paused(

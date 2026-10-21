@@ -11,6 +11,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
 mod bridge;
+mod export;
 
 /// These manually driven unit owners share production limits within each test, not with
 /// unrelated parallel tests in this executable. Actual actor/transport integration retains the

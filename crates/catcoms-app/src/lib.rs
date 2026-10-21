@@ -69,8 +69,8 @@ pub mod store;
 pub mod studio;
 pub mod studio_exchange;
 pub use actor::{
-    spawn, AppCommand, AppEvent, DownloadReady, Envelope, ServerActor, Trace, TracedEvent,
-    VoiceEndpointCommand, VoiceEndpointError,
+    spawn, AppCommand, AppEvent, DownloadExportEdge, DownloadExportTransition, DownloadReady,
+    Envelope, ServerActor, Trace, TracedEvent, VoiceEndpointCommand, VoiceEndpointError,
 };
 pub use moderation::{
     ModerationEvent, ModerationState, ModerationVote, MAX_MOD_EVIDENCE_BYTES, MAX_MOD_EVIDENCE_IDS,
