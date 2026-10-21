@@ -1,5 +1,15 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Process-only retained capacity (21 October)
+
+`Resources::charge_process_retained(bytes)` returns a noncloneable `ProcessRetainedCredit`
+for trusted native fixed process infrastructure. Zero, oversize and capacity refusal change
+no accounting. Bytes share the existing2MiB process cap with group credits; no group record
+or Crypto/Forward slot is created. The owner exposes no partition/conversion/early-release
+API. An adapter must prepay its measured infrastructure peak, including owner/task overhead,
+before allocation/bind and retain the credit through actual task/output collection. It cannot
+pay for group/member payloads or authorize protocol work. Aggregate `counts().0` includes it.
+
 ## Disabled native handoff framing candidate (21 October)
 
 The private native codec in voice_handoff/channel and pure browser voice-ipc-frame.ts agree on

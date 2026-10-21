@@ -1,5 +1,14 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Fixed native infrastructure capacity (21 October)
+
+The distinct process-retained credit shares the existing2MiB total with all groups. It is
+capacity for trusted fixed native listener/router/task overhead only, with no group, Crypto
+slot, forwarding lane, lending or effect authority. Group-scoped input, crypto and outputs
+must not use it to bypass the256KiB group cap. Retain it until actual infrastructure/output
+drainage, including after cancellation or group retirement. It does not bound OS socket
+buffers, SDK heaps or allocator metadata outside the adapter's documented measured charge.
+
 ## Disabled local framing candidate (21 October)
 
 The native candidate authenticates canonical fixed-size headers before body admission. Closed

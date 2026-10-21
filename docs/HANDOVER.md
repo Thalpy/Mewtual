@@ -1,5 +1,23 @@
 # Mewtual; Handover
 
+## Bootstrap continuation (21 October, integration open)
+
+Published checkpoint is `c5c52fd8`; active work is isolated in
+target/communication-bootstrap-channel-worktree. A fresh complete Root run failed1209/1 in
+catcoms-app: the source-custody test assumed an empty process-wide pool while parallel actor
+tests legitimately used it. Commit `dda602f3` moves that unchanged scenario to its own Cargo
+integration executable, preserves the real shared pool, and adds an explicit linked/native
+adapter sharing assertion. Its focused regression passes; complete Root must be rerun.
+
+The next process-only retained-credit primitive prepays fixed native infrastructure without
+inventing an MLS group or changing any byte/slot limit. All seven focused regressions pass,
+covering exact capacity, overflow/refusal, full group table, Crypto/Forward isolation, group
+retirement, concurrency and actual last task/output custody. All27 resource tests pass; actual-
+diff read-only review has no findings. Complete gates remain pending. No bootstrap/listener/
+live V2/media relay is enabled by this step.
+
+Earlier notes that a fresh Root run is still executing describe the superseded failed run.
+
 ## Native framed handoff continuation (21 October, in progress)
 
 Published checkpoint is `71d11284`; the next file-fixture correction is `7609b66b`. Work is isolated in

@@ -1,5 +1,14 @@
 # Mewtual; Architecture
 
+## Fixed native process infrastructure (21 October)
+
+`Resources::charge_process_retained` prepays fixed listener/router/task overhead against the
+existing2MiB process ceiling. Its distinct affine `ProcessRetainedCredit` creates no group
+record, work slot or reservation and cannot convert into a group budget. Real group payloads
+and bootstrap computation still require their ordinary group bytes and Crypto permits. The
+actual last worker/output owner releases this payment; group retirement does not release it.
+This primitive alone starts no listener and enables no V2 dispatch.
+
 ## Disabled framed handoff continuation (21 October)
 
 The new native channel codec conserves a single paid physical position across header scratch,

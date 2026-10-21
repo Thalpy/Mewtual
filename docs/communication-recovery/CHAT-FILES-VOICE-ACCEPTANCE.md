@@ -1,5 +1,24 @@
 # Chat, files and voice implementation evidence
 
+## Bootstrap continuation (21 October, gates pending)
+
+Active checkout is target/communication-bootstrap-channel-worktree, based on published
+`c5c52fd8`. Fresh Root stopped with1209 passed/1 failed in the app library: a capacity-custody
+test raced unrelated users of its real global source pool. `dda602f3` isolates the original
+scenario in a dedicated integration process, also proving its source adapter and linked
+public factory share that same pool. Focused regression passes; full rerun is required.
+
+Seven new focused process-retained-capacity tests pass (0.01s after75s compile). The separate
+affine owner shares existing process bytes but has no group/budget/work-slot conversion. It
+covers fixed native infrastructure only, not group payloads or computation. Exact/overflow
+refusal, both drop orders, full group table, unchanged Crypto/Forward limits, concurrent
+admission and uncollected output/last Arc custody are checked. All27 resource tests pass;
+actual-diff read-only review has no findings. Full gates remain pending. An earlier cached
+invocation matched zero tests and is not evidence;
+only sync fingerprint result markers were invalidated before the actual seven-case run.
+Native/browser bootstrap, framed action delivery, RTC/legacy isolation, media and combined/
+physical acceptance remain open. Earlier running-Root notes below are superseded.
+
 ## Framed handoff continuation (21 October, acceptance still open)
 
 Published checkpoint is `71d11284`; reviewed file-fixture correction is `7609b66b`. Work is isolated in
