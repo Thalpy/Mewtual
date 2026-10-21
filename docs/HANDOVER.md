@@ -1,5 +1,37 @@
 # Mewtual; Handover
 
+## Selected V2 join-key integration in progress (21 October)
+
+Published checkpoint remains `f5ae59a3`; the uncommitted continuation is in this same isolated
+checkout. It adds exact native join-key admission, public-key endpoint publication through the
+actual ServerActor, and selected-key computation on the retained WebCrypto broker. One paid
+generation is selected per actual native owner/executor. Lost replies recover the same permit,
+join and frozen point; another executor cannot adopt it. Settlement-before-admission creates a
+paid closed row, and retired unknown owners create none. Temporary publication Capacity retains
+the original generated key. A native worker owns UI commit across actor completion independently
+of a canceled IPC waiter. Settlement awaits actual publication drainage through a retained watch.
+
+The browser path shares the existing bounded queue, uses no second generic generate admission,
+and retains original crypto/publication/settlement work across End and HMR. Broker version 7
+refuses a retained older pool. Three fixed public-metadata commands are main-window only; no
+private key, confirmation plaintext, SDP or ICE crosses them. Application-owned record charges
+do not establish a stock-framework/SDK allocation bound. No listener or CSP change is introduced.
+
+Focused browser/security checks pass 26 tests (17 selected-key cases plus nine command security
+checks), including End during a failed settlement reply and bounded orphan cleanup on remount.
+The wake identity is sampled before each RPC, so retirement cannot be lost before a retry wait,
+and persistent failure cannot spin. Svelte reports zero errors/warnings. All nine new native
+regressions pass (four actual bridge/actor cases, five Coordinator cases; 0.35s after6m48s compile).
+Read-only implementation re-review has no remaining blocker/high/medium. Full native/frontend/
+build/startup/flow checks remain required. The complete evidence below applies to the
+published source through `23bbeac8`, not this uncommitted continuation.
+
+Normal V2 dispatch is still disabled. Native action registration and byte-bearing IPC custody,
+exact result/ACK/settlement delivery, SDP key/phase transfer, automatic epoch replacement,
+SDP/ICE/RTC and legacy-session isolation, media relay, combined acceptance and separate-device
+physical testing remain open. The selected-key adapter is ready for driver integration only
+after its new acceptance gates; no complete-call claim is made here.
+
 ## Validated native activation checkpoint (21 October)
 
 Source through `23bbeac8` is validated in `target/communication-activation-recovery-worktree`.

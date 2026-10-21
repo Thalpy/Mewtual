@@ -479,7 +479,7 @@ test("every non-bootstrap native command visibly crosses the unlocked-session ga
     // Idempotent, reveals no token-existence bit, and only removes bounded native work.
     "cancel_inline_download",
     // Exact native revocation/settlement survives UI lock. No fresh work or existence bit.
-    "end_call_mapping_owner", "unmap_call_port", "end_voice_owner", "settle_voice_crypto",
+    "end_call_mapping_owner", "unmap_call_port", "end_voice_owner", "settle_voice_crypto", "settle_voice_join_key",
     "log_ui",
     "log_ui_batch",
     "record_ui_events",

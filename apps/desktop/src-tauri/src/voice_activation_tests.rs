@@ -4,6 +4,8 @@ use catcoms_rt::{Hub, ManualClock};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+mod join_key;
+
 struct Fixture {
     state: AppState,
     _root: tempfile::TempDir,

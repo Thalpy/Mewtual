@@ -28,7 +28,13 @@ export const TAURI_COMMAND_GROUPS = {
       // Exact ephemeral revocation/settlement only. These must work after lock or remount;
       // they expose no existence bit and never authorize fresh engine/network work.
       "end_call_mapping_owner", "end_voice_owner", "settle_voice_crypto",
+      // Selected-key cleanup can close one paid selection before a delayed admission and
+      // waits for actual publication drainage; it never returns engine/network authority.
+      "settle_voice_join_key",
       // CAS lifecycle and bounded engine admission, independent of optional router grants.
+      // Selected-key admission recovers its original permit until settlement; publication
+      // installs only that accepted owner's frozen public point through the actual actor.
+      "admit_voice_join_key", "publish_voice_join_key",
       "prepare_voice_controller", "prepare_voice_owner", "activate_voice_owner", "admit_voice_crypto",
       "prepare_call_mapping_controller", "prepare_call_mapping_owner", "activate_call_mapping_owner",
       "create_backup", "change_vault_secret", "get_debug_logging", "set_debug_logging",

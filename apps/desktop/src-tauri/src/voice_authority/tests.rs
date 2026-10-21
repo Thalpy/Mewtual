@@ -1,6 +1,7 @@
 use super::*;
 
 mod activation;
+mod join_key;
 
 fn action_coordinator() -> Coordinator {
     Coordinator::with_runtime(Runtime::new(Arc::new(catcoms_rt::ManualClock::new(1000))))

@@ -114,6 +114,22 @@ export type VoiceDerivationHandle = Readonly<{
 }>;
 /** Opaque: only the creating broker's WeakMap contains the non-extractable private key. */
 export type VoiceJoinKeyHandle = Readonly<{ publicKey(): Uint8Array<ArrayBuffer> }>;
+export type VoiceSelectedKeyAdmission = Readonly<{
+  owner: string; executor: string; permit: string; join: string; kind: "admitted" | "closed";
+}>;
+export type VoiceSelectedKeyPublication = Readonly<{
+  owner: string; executor: string; permit: string; join: string; keyRef: string;
+}>;
+/** Fixed public bootstrap metadata only. Settlement resolves after actual native publication
+ * drainage; it also fences a delayed admission when its permit reply was never received. */
+export interface VoiceSelectedKeyNative {
+  admit(owner: string, executor: string): Promise<VoiceSelectedKeyAdmission>;
+  publish(owner: string, executor: string, permit: string, point: Uint8Array): Promise<VoiceSelectedKeyPublication>;
+  settle(owner: string, executor: string): Promise<void>;
+}
+export type VoiceSelectedKeyOutcome = Readonly<{ kind: "accepted"; key: VoiceJoinKeyHandle }> |
+  Readonly<{ kind: "uncertain" | "retired" | "failed" | "busy" }>;
+export type VoiceSelectedKeyHandle = Readonly<{ attempt(): Promise<VoiceSelectedKeyOutcome> }>;
 export type VoiceCryptoChain = Readonly<{ close(): void; isCurrent(): boolean }>;
 export type VoiceDerivationSetup = Readonly<{ localPublicKey: Uint8Array; peerPublicKey: Uint8Array; transcript: Uint8Array }>;
 
@@ -137,6 +153,18 @@ type JoinKeyRecord = {
   owner: VoiceCryptoOwner; privateKey: CryptoKey | null; point: Uint8Array<ArrayBuffer>;
   join: string | null; key: string | null;
 };
+type SelectedKeyRecord = {
+  owner: VoiceCryptoOwner; key: JoinKeyRecord; native: VoiceSelectedKeyNative;
+  executor: string; permit: string | null; join: string | null;
+  attempt: Signal<VoiceSelectedKeyOutcome> | null; retry: Signal<void> | null;
+  outcome: VoiceSelectedKeyOutcome | null; handle: VoiceSelectedKeyHandle;
+  wake: object;
+  started: boolean; drained: boolean; retired: boolean; released: boolean;
+  unsubscribe: () => void;
+};
+// Application-owned generation state, key and fixed public-metadata projections. This is not
+// a bound on opaque SDK/GC heaps or the stock framework's request/response copies.
+const SELECTED_KEY_BYTES = 4096;
 type BrowserChain = {
   owner: VoiceCryptoOwner; key: JoinKeyRecord; binding: VoiceCryptoChainBinding;
   expires: number; closed: boolean; rowIssued: boolean; reservedRows: number;
@@ -263,7 +291,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 6;
+  readonly version = 7;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -278,6 +306,8 @@ export class VoiceCryptoBroker {
   private protectedNative: VoiceProtectedConfirmationNative | null = null;
   private readonly joinKeys = new WeakMap<VoiceJoinKeyHandle, JoinKeyRecord>();
   private readonly keys = new Set<JoinKeyRecord>();
+  private readonly selectedKeys = new Map<string, SelectedKeyRecord>();
+  private selectedExecutor: string | null = null;
   private readonly chains = new WeakMap<VoiceCryptoChain, BrowserChain>();
   private readonly chainStamps = new Map<VoiceCryptoOwner, Map<string, BrowserChain>>();
   private readonly progress = new Map<string, BrowserChain>();
@@ -299,6 +329,156 @@ export class VoiceCryptoBroker {
     this.bytes -= bytes;
     const remaining = (this.groupBytes.get(owner.group) ?? 0) - bytes;
     if (remaining) this.groupBytes.set(owner.group, remaining); else this.groupBytes.delete(owner.group);
+  }
+
+  /** Select one key for the original accepted native join. Repeated calls share the retained
+   * job, including uncertain admission/publication/settlement. Compatibility fixture APIs below
+   * deliberately still permit independent keys; upgraded callers must use this selection. */
+  selectJoinKey(owner: VoiceCryptoOwner, native: VoiceSelectedKeyNative): VoiceSelectedKeyHandle {
+    current(owner);
+    const prior = this.selectedKeys.get(owner.token);
+    if (prior) {
+      if (prior.owner !== owner || prior.native !== native) throw new Error("voice key selection changed");
+      return prior.handle;
+    }
+    if (this.keys.size >= 128 || [...this.keys].filter(key => key.owner === owner).length >= 16) throw new Error("voice join key capacity reached");
+    if (!this.selectedExecutor) {
+      // This identity lives with the retained broker, not a component. A new WebView cannot
+      // adopt an earlier uncertain generation merely by repeating the native owner string.
+      this.selectedExecutor = [...globalThis.crypto.getRandomValues(new Uint8Array(32))].map(n => n.toString(16).padStart(2, "0")).join("");
+    }
+    this.charge(owner, SELECTED_KEY_BYTES);
+    const key: JoinKeyRecord = { owner, privateKey: null, point: new Uint8Array(), join: null, key: null };
+    const record: SelectedKeyRecord = {
+      owner, key, native, executor: this.selectedExecutor, permit: null, join: null,
+      attempt: null, retry: null, outcome: null, handle: null!, started: false, drained: true,
+      retired: false, released: false, unsubscribe: () => {}, wake: {},
+    };
+    record.handle = Object.freeze({ attempt: () => this.attemptSelectedKey(record) });
+    this.selectedKeys.set(owner.token, record); this.keys.add(key);
+    try {
+      record.unsubscribe = owner.onRetired(() => {
+        record.retired = true;
+        this.wakeSelectedKey(record);
+        record.attempt?.resolve(Object.freeze({ kind: "retired" })); record.attempt = null;
+        if (record.drained) this.releaseSelectedKey(record);
+      });
+    } catch (error) { this.releaseSelectedKey(record); throw error; }
+    return record.handle;
+  }
+
+  private releaseSelectedKey(record: SelectedKeyRecord): void {
+    if (record.released) return;
+    record.released = true; record.unsubscribe();
+    record.key.privateKey = null; record.key.point.fill(0);
+    this.keys.delete(record.key); this.selectedKeys.delete(record.owner.token);
+    this.refund(record.owner, SELECTED_KEY_BYTES);
+  }
+
+  private attemptSelectedKey(record: SelectedKeyRecord): Promise<VoiceSelectedKeyOutcome> {
+    // Old handles can wake their sole cleanup owner even after End. They never restart crypto.
+    this.wakeSelectedKey(record);
+    if (record.retired || !record.owner.isCurrent()) return Promise.resolve(Object.freeze({ kind: "retired" }));
+    if (record.outcome) return Promise.resolve(record.outcome);
+    if (record.attempt) return record.attempt.promise;
+    record.attempt = signal<VoiceSelectedKeyOutcome>();
+    const attempt = record.attempt.promise;
+    if (record.started) return attempt;
+    if (this.queue.length >= MAX_QUEUED) {
+      record.attempt.resolve(Object.freeze({ kind: "busy" })); record.attempt = null; return attempt;
+    }
+    try { this.charge(record.owner, 128); }
+    catch { record.attempt.resolve(Object.freeze({ kind: "busy" })); record.attempt = null; return attempt; }
+    record.started = true; record.drained = false;
+    const finish = () => {
+      record.drained = true; this.refund(record.owner, 128);
+      if (record.retired || !record.owner.isCurrent()) this.releaseSelectedKey(record);
+    };
+    this.queue.push({ owner: record.owner, bytes: 128,
+      refuse: () => { record.retired = true; record.attempt?.resolve(Object.freeze({ kind: "retired" })); record.attempt = null; finish(); },
+      start: async () => { try { await this.driveSelectedKey(record); } finally { finish(); } },
+    });
+    this.pump(); return attempt;
+  }
+
+  private wakeSelectedKey(record: SelectedKeyRecord): void {
+    record.wake = {}; record.retry?.resolve();
+  }
+
+  /** One bounded availability wake for existing flights, including orphan cleanup after End.
+   * Remount/native availability can recover them without retaining every component handle.
+   * This never queues a fresh generation, repeats crypto, or starts a retry timer. */
+  retrySelectedJoinKeys(): void {
+    for (const record of this.selectedKeys.values()) {
+      if (record.started && !record.drained) this.wakeSelectedKey(record);
+    }
+  }
+
+  private async waitSelectedKeyRetry(record: SelectedKeyRecord, observed: object): Promise<void> {
+    // End/availability may arrive while the RPC is still pending. Consume that one wake even
+    // if it predates retry installation. The next RPC samples the new identity, so a permanently
+    // failed retired operation cannot turn this into an immediate infinite retry loop.
+    if (record.wake !== observed) return;
+    record.retry = signal<void>();
+    record.attempt?.resolve(Object.freeze({ kind: "uncertain" })); record.attempt = null;
+    await record.retry.promise; record.retry = null;
+  }
+
+  private async driveSelectedKey(record: SelectedKeyRecord): Promise<void> {
+    const live = () => !record.retired && record.owner.isCurrent();
+    let attempted = false, historical = false;
+    let outcome: VoiceSelectedKeyOutcome = Object.freeze({ kind: "failed" });
+    try {
+      while (live() && !record.permit) {
+        attempted = true;
+        const observed = record.wake;
+        let reply: unknown;
+        try { reply = await record.native.admit(record.owner.token, record.executor); } catch { /* Recover the same native selection. */ }
+        if (!live()) return;
+        if (exactKeys(reply, ["owner", "executor", "permit", "join", "kind"]) && reply.owner === record.owner.token && reply.executor === record.executor &&
+            boundText(reply.permit) && typeof reply.join === "string" && /^[0-9a-f]{64}$/.test(reply.join) && (reply.kind === "admitted" || reply.kind === "closed")) {
+          if (reply.kind === "closed") { historical = true; return; }
+          record.permit = reply.permit; record.join = reply.join;
+        } else await this.waitSelectedKeyRetry(record, observed);
+      }
+      if (!live()) return;
+      // Share only provider computation, never ordinary run()/fresh-token admission. The whole
+      // native/engine/publication/settlement flight holds this broker's one queue position.
+      const keys = await this.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
+      if (!live()) return;
+      record.key.privateKey = keys.privateKey;
+      record.key.point = new Uint8Array(await this.subtle.exportKey("raw", keys.publicKey));
+      if (!live()) return;
+      while (live()) {
+        const observed = record.wake;
+        let reply: unknown;
+        try { reply = await record.native.publish(record.owner.token, record.executor, record.permit!, record.key.point.slice()); }
+        catch { /* Temporary Root capacity and lost replies retain the original key/point. */ }
+        if (!live()) return;
+        if (exactKeys(reply, ["owner", "executor", "permit", "join", "keyRef"]) && reply.owner === record.owner.token && reply.executor === record.executor &&
+            reply.permit === record.permit && reply.join === record.join && typeof reply.keyRef === "string" && /^[0-9a-f]{64}$/.test(reply.keyRef)) {
+          record.key.join = record.join; record.key.key = reply.keyRef;
+          const handle = Object.freeze({ publicKey: () => { current(record.owner); return record.key.point.slice(); } });
+          this.joinKeys.set(handle, record.key);
+          outcome = Object.freeze({ kind: "accepted", key: handle }); return;
+        }
+        await this.waitSelectedKeyRetry(record, observed);
+      }
+    } catch { /* A failed provider operation is terminal; never compute again for this join. */ }
+    finally {
+      // An uncertain admit may have succeeded without returning its permit. Settlement names
+      // the immutable owner/executor, fences delayed admission and awaits actual native drain.
+      if (attempted && !historical) {
+        for (;;) {
+          const observed = record.wake;
+          try { await record.native.settle(record.owner.token, record.executor); break; }
+          catch { await this.waitSelectedKeyRetry(record, observed); }
+        }
+      }
+      if (!live()) outcome = Object.freeze({ kind: "retired" });
+      record.outcome = outcome;
+      record.attempt?.resolve(outcome); record.attempt = null;
+    }
   }
 
   /** Generate on this retained broker. There is deliberately no private-key adoption API. */
@@ -929,11 +1109,12 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 6 || typeof previous.run !== "function" ||
+    if (previous.version !== 7 || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");
     }
+    previous.retrySelectedJoinKeys();
     return previous;
   }
   const broker = new VoiceCryptoBroker(native, subtle); host[BROKER] = broker; return broker;

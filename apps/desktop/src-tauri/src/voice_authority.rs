@@ -15,6 +15,9 @@ use catcoms_sync::voice_v2::{CallGrant, CallLease, Nonce, Scope};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod join_key;
+pub(crate) use join_key::{JoinKeyAdmission, JoinKeyPublication, PublicationPlan};
+
 const CANDIDATES: usize = 8;
 const CANDIDATE_TTL: u64 = 30_000;
 #[cfg(test)]
@@ -188,6 +191,9 @@ pub(crate) struct Coordinator {
     // These charges deliberately outlive every controller/owner and UI authorization epoch.
     // Dropping a WebView or IPC waiter is not evidence that WebCrypto settled.
     operations: HashMap<String, Credit>,
+    // A selected join has one generation, unlike the compatibility fresh-token operations.
+    // Uncertain generation/publication survives owner retirement until actual work drains.
+    join_generations: HashMap<String, join_key::Generation>,
     // Registered only from opaque Root-issued owners, before pull/admission can race. These
     // survive End/lock/replacement while an engine is admitted but actual settlement is unknown.
     // Lock order is Coordinator -> action fence. Root never calls Coordinator under its fence.
@@ -215,6 +221,7 @@ impl Coordinator {
             owner: None,
             candidates: HashMap::new(),
             operations: HashMap::new(),
+            join_generations: HashMap::new(),
             #[cfg(test)]
             actions: HashMap::new(),
             resources: runtime.resources(),
@@ -409,6 +416,7 @@ impl Coordinator {
                 self.prune_actions();
             }
         }
+        self.prune_join_generations();
     }
     #[cfg(test)]
     fn prune_actions(&mut self) {

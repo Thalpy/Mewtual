@@ -73,6 +73,7 @@ mod studio_exports;
 #[cfg(test)]
 mod voice_activation_tests;
 mod voice_authority;
+mod voice_join_key;
 // This broker model has no registered command consumers yet. Retain its contract tests without
 // presenting the unwired implementation as a production pairing boundary.
 #[cfg(test)]
@@ -466,7 +467,7 @@ struct AppState {
     media_mappings: Arc<StdMutex<call_mappings::Coordinator<catcoms_net::MediaPortMapping>>>,
     /// Distinct voice-session authority and active-or-uncertain process crypto charges. Revoking
     /// a UI/controller ends effects immediately but cannot refund unresolved engine work.
-    voice_authority: StdMutex<voice_authority::Coordinator>,
+    voice_authority: Arc<StdMutex<voice_authority::Coordinator>>,
     next_id: Mutex<u64>,
     /// Serialize first mount and already-mounted authentication. A duplicate frontend unlock must
     /// never race two reloads, while an explicitly UI-locked session must authenticate against
@@ -17959,6 +17960,9 @@ pub fn run() {
             end_voice_owner,
             admit_voice_crypto,
             settle_voice_crypto,
+            voice_join_key::admit_voice_join_key,
+            voice_join_key::publish_voice_join_key,
+            voice_join_key::settle_voice_join_key,
             default_route_address,
             unmap_call_port,
             get_switchboard_status,

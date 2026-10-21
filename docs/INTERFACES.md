@@ -1,5 +1,24 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Selected join-key bootstrap (21 October, validation in progress)
+
+Main-window commands `admit_voice_join_key(owner, executor)` and
+`publish_voice_join_key(owner, executor, permit, publicKey)` carry fixed public metadata only.
+The executor is a canonical 32-byte hex identity retained by one browser broker; publicKey is
+exactly 65 SEC1 bytes encoded as canonical hex. Admission returns the original native permit/
+join and either admitted or closed history. A closed response cannot reconstruct private keys
+or authorize recomputation. Publication fixes its original point before actual actor handoff;
+successful exact retries return the same native key reference, including after settlement.
+
+`settle_voice_join_key(owner, executorId)` also works while locked. It closes one paid current-
+owner selection even if a delayed admission has not run, or recognizes an exact existing
+selection after retirement. An unknown retired owner allocates nothing. Its promise resolves
+only after any actual native publisher drains; it grants no engine, signing or RTC authority.
+The retained WebCrypto broker's `selectJoinKey` coalesces computation and uncertain replies,
+preserves the same key through temporary publication Capacity, and never uses generic fresh-
+token generate admission. Compatibility key APIs remain available for existing fixtures.
+New validation is pending; ordinary V2 dispatch and the application call driver remain disabled.
+
 ## Accepted native voice activation retries (21 October, complete gates passed)
 
 `activate_voice_owner(candidate)` can recover that exact currently installed controller or call

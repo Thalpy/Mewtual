@@ -1,5 +1,23 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Selected browser key-generation ownership (21 October, validation in progress)
+
+A new browser broker cannot adopt a still-admitted generation by repeating its native owner ID.
+Native selects one executor per actual accepted owner/grant, preserves its original join/permit
+and frozen public point, and returns closed history after settlement. Settlement-first closes a
+paid selection before a delayed first admission. One record per owner, at most 32 retained
+records, existing group/process Crypto limits and paid fixed metadata bound native custody.
+Revocation, IPC loss and elapsed time never refund admitted work. A native publication worker
+retains UI commit through actual actor completion; cancellation of its outer waiter cannot
+release that ordering guard. A stale completion cannot finish a newer publication retry.
+
+The main-window ACL alone exposes these fixed public bootstrap commands; there is no private-
+key export/adoption, listener, CSP source or byte-bearing result command. The executor is
+lifecycle bookkeeping within the trusted main window, not remote protocol authentication.
+Application record charges do not claim physical SDK/GC or stock IPC allocation bounds. Normal
+V2 ingress, RTC mode isolation, result/ACK/settlement IPC and SDP phase transfer remain separate
+enablement requirements. Existing complete-suite evidence applies only to the published source.
+
 ## Native pair authority (21 October, full gates pending)
 
 A peer/device ID alone cannot bind an uncertain pair request: it now also names remote join,
