@@ -23,8 +23,10 @@ body allocation and burns RX before intake. Browser absolute five-second IO expi
 keeps funding through actual fetch/read cancellation and SDK settlement. Lost setup replies,
 End/lock, native no-row/no-work and known closed metadata have distinct cleanup paths. Static
 adversarial re-review has no remaining findings. Focused browser set54/full frontend2,341 and
-complete Root3,233 pass; all82 focused native handoff tests and native check/strict Clippy
-pass, with the complete native suite running. Exact evidence is in
+complete Root3,233 pass; all82 focused native handoff tests and native check/strict Clippy/format
+pass. Complete native passes553 library plus five ACL tests, zero failures (630.91s gate).
+Current status source is de082d87; next collection work is isolated in
+target/communication-browser-action-worktree and is not yet native-validated. Exact evidence is in
 HANDOVER.md and retained target/voice-browser-channel-* / voice-status-* logs.
 
 Next: reusable lifecycle collection (closed native Sessions currently retain control slots),

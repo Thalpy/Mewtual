@@ -8,8 +8,9 @@ Setup/control capacity remains paid through actual SDK/read/cancel drainage, inc
 lost replies and native no-work history. The current54 focused browser regressions and full
 frontend2,341 pass; Svelte/build/all ten rendered flows pass. Complete Root passes3,233, zero
 failures,24 existing ignored/59 summaries (2,234.97s), plus format/strict Clippy/ambient/deny.
-All82 native handoff regressions, native check and strict Clippy pass; the complete native suite
-is running serially, so this delta is not yet native-complete evidence.
+All82 native handoff regressions, native check, strict Clippy and format pass. Complete native
+passes553 library plus five ACL tests, zero failures (630.91s gate), on status source de082d87.
+The separate browser-action checkout's collection continuation is still native-uncompiled.
 Actual-diff static review/re-review has no remaining findings.
 
 Native's actual socket tests and browser tests with an independent WebCrypto native fixture do

@@ -2,7 +2,7 @@
 
 ## Active native/browser handoff (21 October, integration open)
 
-Published PR48 is `f227b4f7`; active source remains isolated in
+Validated status source is `de082d87`, following PR48 checkpoint `f227b4f7`, isolated in
 target/communication-bootstrap-channel-worktree. Internal real-TCP Status transport is committed
 as `2fd0fad0`. The continuation adds the retained v8 browser Session, immutable selected-key
 construction, permanent physical counters, fixed BYOB response admission prefix and absolute
@@ -17,9 +17,11 @@ history, stale-port deadline and actual cancellation drainage. Full frontend pas
 Svelte zero errors/warnings, build and all ten rendered flows pass. Complete Root passes3,233,
 zero failures,24 existing ignored,59 summaries (2,234.97s); format4.30s, strict Clippy13.45s,
 ambient1.01s and all four Root deny categories1.78s pass. All82 focused native handoff tests
-pass (31.19s including rebuild), strict native Clippy56.70s and native check29.27s pass; the
-complete native suite is running serially. Logs are target/voice-browser-channel-*
-and target/voice-status-*; do not describe the native delta as fully validated yet.
+pass (31.19s including rebuild), strict native Clippy56.70s and native check29.27s pass. Complete
+native passes553 library plus five ACL tests, zero failures (630.91s gate); native format0.84s
+passes. Logs are target/voice-browser-channel-* and target/voice-status-*. Startup/build were
+not rerun for this unstarted internal service: application setup/runtime placement is unchanged.
+The preceding executable/startup evidence below belongs to its stated source, not this delta.
 
 Two initial native focus attempts failed only new test accounting assertions that conflated
 independent Root CallGrant retirement with setup retirement. Baselines now follow each actual
@@ -36,6 +38,14 @@ Sessions still retain control capacity until registry teardown; this finite pilo
 be activated as a reusable call service. Live V2/SDP/ICE/RTC and legacy isolation belong to the
 next integration owner; media relay and combined/physical acceptance remain open. Only one
 physical desktop is available. Preserve unrelated main-worktree UI/combo edits.
+
+The next collection continuation is isolated in target/communication-browser-action-worktree,
+based on de082d87. It adds original-owner closure, paid weak Session/public-output witnesses and
+slot reclamation only after actual owners and the permanently retired lease drain. Its browser
+v9 final-collection/reply-loss set passes30 tests. New native collection cases (held independent
+owners, pressure, replacement/lock and68 sequential generations) are compiling; this draft is
+not yet acceptance evidence or application activation. Continue development there, keep this
+validated status checkout fixed, and serialize Cargo ownership.
 
 Hosted `f227b4f7` is also not green: CI run39649824415/Linux job119394907283 again fails
 six_client_native_reversed_reopen_gossip_loss_and_command_load (531 native passes/1 failure).
