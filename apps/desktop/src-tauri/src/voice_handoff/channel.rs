@@ -53,6 +53,18 @@ pub(super) struct Session {
 }
 impl Session {
     #[cfg(test)]
+    pub(super) fn fixture_counts(&self) -> (bool, u64, u64) {
+        let counters = self
+            .counters
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        (
+            counters.busy,
+            counters.request_floor,
+            counters.response_sequence,
+        )
+    }
+    #[cfg(test)]
     pub(super) fn new(
         resources: Arc<Resources>,
         group: [u8; 32],
@@ -131,6 +143,26 @@ impl HeaderWorker {
         origin: &str,
         phase: Option<&Arc<Phase>>,
     ) -> Result<Incoming, Refused> {
+        self.admit_inner(port, origin, phase, None)
+    }
+    /// Closed status-only service seam: operation/class/exact length/logical session are
+    /// authenticated BEFORE counter debit. No callback or renderer-selected predicate runs
+    /// under the counter fence. An admitted malformed body still permanently spends both.
+    pub(super) fn admit_status(
+        self,
+        port: u16,
+        origin: &str,
+        session: [u8; 16],
+    ) -> Result<Incoming, Refused> {
+        self.admit_inner(port, origin, None, Some(session))
+    }
+    fn admit_inner(
+        self,
+        port: u16,
+        origin: &str,
+        phase: Option<&Arc<Phase>>,
+        status: Option<[u8; 16]>,
+    ) -> Result<Incoming, Refused> {
         let head = http::parse(&self.scratch[..self.filled], port, origin)
             .map_err(|_| Refused::Header)?
             .ok_or(Refused::Header)?;
@@ -142,6 +174,14 @@ impl HeaderWorker {
             .keys
             .authenticate_request(head.admission.ok_or(Refused::Header)?)?;
         if request.slot() != self.session.slot || request.length() != head.length {
+            return Err(Refused::Binding);
+        }
+        if status.is_some_and(|session| {
+            request.operation() != Operation::Status
+                || request.kind() != BodyKind::Control
+                || request.length() != 49 + 16
+                || request.logical() != session
+        }) {
             return Err(Refused::Binding);
         }
         let mut body = Body::new(

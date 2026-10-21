@@ -7,3 +7,4 @@ pub(crate) mod custody;
 pub(crate) mod factory;
 mod http;
 pub(crate) mod ledger;
+mod service;

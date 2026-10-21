@@ -72,6 +72,35 @@ struct Ticket {
 }
 
 impl Registry {
+    /// Bind the fixed service infrastructure to the SAME native process pool before opening
+    /// a listener. This may allocate the separately prepaid empty index, never a group/row.
+    pub(super) fn bind_pool(&self, resources: &Arc<Resources>) -> Result<(), Refused> {
+        let mut held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        Self::index(&mut held, resources)?;
+        Ok(())
+    }
+
+    /// An unauthenticated slot is only a bounded index hint. Resolve the original immutable
+    /// Session/public allocation; lookup cannot create or restart setup, even after End.
+    /// Closed history can answer status only, without granting any current effect authority.
+    pub(super) fn route(&self, slot: u8) -> Result<Route, Refused> {
+        let slot = slot
+            .checked_sub(1)
+            .filter(|slot| *slot < 64)
+            .ok_or(Refused::Binding)?;
+        let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        let row = held
+            .as_ref()
+            .and_then(|index| index.rows[usize::from(slot)].as_ref())
+            .ok_or(Refused::Binding)?;
+        let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+        Ok(Route {
+            row: row.clone(),
+            session: state.session.clone().ok_or(Refused::Binding)?,
+            public: state.public.clone().ok_or(Refused::Binding)?,
+        })
+    }
+
     fn index<'a>(
         held: &'a mut Option<Box<Index>>,
         resources: &Arc<Resources>,
@@ -226,6 +255,35 @@ impl Registry {
         Ok(Status::Closed {
             native_setup_drained: true,
         })
+    }
+}
+/// Native-only immutable control routing. Retain the actual row, Session and paid public
+/// output across IO; copied session IDs alone cannot create this owner or authorize actions.
+pub(super) struct Route {
+    row: Arc<Row>,
+    session: Arc<Session>,
+    public: Arc<SetupOutput>,
+}
+impl Route {
+    pub(super) fn session(&self) -> &Arc<Session> {
+        &self.session
+    }
+    pub(super) fn session_id(&self) -> [u8; 16] {
+        self.row.session_id
+    }
+    pub(super) fn hash(&self) -> [u8; 32] {
+        self.public.public.hash
+    }
+    /// A snapshot of NATIVE setup state only. It neither proves browser drainage nor lets a
+    /// late Ready response revive a retired call, room, join or action.
+    pub(super) fn snapshot(&self) -> [u8; 3] {
+        let state = self
+            .row
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let closed = state.closed || !self.row.selected.lease().is_live();
+        [1, if closed { 2 } else { 1 }, u8::from(!state.pending)]
     }
 }
 impl Row {
