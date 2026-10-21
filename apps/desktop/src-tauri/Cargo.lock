@@ -728,6 +728,7 @@ dependencies = [
  "catcoms-rt",
  "catcoms-wire",
  "hex",
+ "libc",
  "thiserror 2.0.18",
  "tokio",
  "winapi-util",
