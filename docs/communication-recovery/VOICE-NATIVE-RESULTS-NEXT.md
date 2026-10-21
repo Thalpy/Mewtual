@@ -1,5 +1,25 @@
 # Next voice milestone: native result recovery
 
+## Protected Proof/Finish (21 October, implementation awaiting validation)
+
+The next checkout now implements the reviewed role-inbox and response-lane design below through
+protected intake and `Root::respond_voice_confirmation`. Incoming role identities are independent
+of arrival attempts, with an explicit typed ProtectedInbox owner. Closed native echoes alone may
+progress the current nonces. Rejections retain original token/pair/chain history without borrowing
+an unrelated current attempt. High Proof and low Finish outputs follow the actual incoming receipt
+lane; a malformed earlier input does not shift that mapping. Exact produced factory history
+recovers the original action before allocations/current-trigger checks; a superseded unproduced
+trigger refuses. Old unstarted responses retire outside the current decrypt Engine fence.
+
+All **365 focused voice tests pass**, zero failures in 15.76s (`voice-followup-all-3.log`),
+including original 2 KiB metadata/1,536-byte row guards. Bounded links and exact response pointers
+live in their paid input records. AEAD is mocked at the same trusted
+output seam as existing state tests; interoperability and physical media are separate. All fixed
+layout guards remain unchanged and pass. Complete combined gates are pending. Normal dispatch,
+production crypto/IPC/RTC,
+SDP transfer and live V2 remain unfinished. Native signalling crypto ownership is under design
+investigation only; no provider dependency or ADR selection has changed.
+
 ## Protected high-side Hello (20 October, private native seam)
 
 The first protected consumer is implemented in LocalJoin and the Root endpoint/transport seam.
@@ -98,8 +118,9 @@ trigger, with immutable response receipts recovered before output allocation:
 | Proof | Input 2/5/8, independent admission order | Output 2/5/8, exact accepted Hello |
 | Finish | Output 3/6/9, exact accepted Proof/candidate | Input 3/6/9, independent admission order |
 
-Incoming ordinals are not causal candidate indexes. Capture the actual arrival-attempt lease for
-cancellation, then validate nonce echoes and exact continuation intent after decrypt. Valid
+Incoming ordinals are not causal candidate indexes. Retain distinct original pair/chain inbox
+authority for bounded opening across attempt replacement, then validate nonce echoes and exact
+continuation intent after decrypt. Never label this as arrival-attempt authority. Valid
 ownership plus stale/malformed plaintext consumes that exact token and records a rejection;
 revoked ownership refuses before effects. A proven local capacity refusal leaves the token and
 protocol state unchanged. No accepted transition may regenerate its nonce after a lost reply.

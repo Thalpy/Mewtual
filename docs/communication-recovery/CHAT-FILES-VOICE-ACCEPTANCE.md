@@ -1,5 +1,38 @@
 # Chat, files and voice implementation evidence
 
+## Protected Proof/Finish work in progress (21 October)
+
+The `communication-proof-finish-worktree` (base local `600186e5`) contains protected follow-up
+intake and immutable output factories. New tests cover all three flights, full ordinary
+pressure, three input identities/fourth refusal, malformed Hello intake-lane mapping, reversed
+Proof arrival, supersession before/after engine admission, old Finish crossing a new Hello,
+terminal input compaction and old produced/unproduced response retries. Original resource/layout
+allowances are unchanged. This is **uncommitted work**, with read-only re-review clear. The
+latest focused run passes all365 cases; complete combined gates remain pending. The complete native suite against frozen low source `600186e5` passes **443 library
+plus five ACL tests**, zero failures (885.37s for the library, `voice-low-native-full.log` in low
+checkout); root deny also passes there. Native check/build/startup and combined full root remain
+pending. No prior passing suite establishes this new increment.
+
+The first follow-up invocation (`voice-followup-all-1.log`) reused the old shared-target 352-test
+binary, with none of the new cases. It is **not accepted evidence**. The catcoms-sync compiled
+fingerprint files were invalidated without cleaning target or deleting any source/worktree.
+The actual fresh compile/test ran **363 passed, two failed** (`voice-followup-all-2.log`, 16.70s).
+The fixed metadata guard measured 2,088 bytes against the unchanged 2,048-byte allowance. The
+correction moves bounded follow-up links and exact response pointers into their separately paid
+input records, retaining only one follow-up head in shared metadata; it raises no allowance.
+The other fixture held the sole protected engine while requesting another, correctly receiving
+Capacity. It now defers opening old Finish until after the newer Hello finishes. No execution
+limit or runtime refusal was weakened. A new compile/test retry is running
+(`voice-followup-all-3.log`) passes **365/365**, zero failures in 15.76s. Both unchanged layout
+guards pass. The remaining unused-state warning is corrected with an actual held-History
+closed-state and input-pointer check. Final focused verification passes **365/365**, zero failures
+in 15.67s (`voice-followup-all-4.log`). Strict whole-root Clippy passes in 1m15s
+(`voice-followup-root-clippy-1.log`); full frontend passes **2,254/2,254**, zero failures in69.50s
+(`voice-followup-frontend-full.log`). Root/native formatting and ambient checks pass. Read-only
+adversarial re-review is clear, including the revised acyclic history graph. Complete combined
+root/native/check/build/startup gates remain pending. No live V2/crypto
+interoperability/IPC/RTC claim.
+
 The communication programme remains **open**. File bridging and explicit private Download resume
 are implemented and exercised; live V2, production member media relay, combined rollout and
 independent physical audio/network acceptance are not complete. The dated sections distinguish

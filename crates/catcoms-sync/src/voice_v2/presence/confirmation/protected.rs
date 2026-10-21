@@ -1,19 +1,19 @@
-//! Protected high-side Hello intake. All packet/action/receipt preparation precedes one short
+//! Protected confirmation intake. All packet/action/receipt preparation precedes one short
 //! Group -> Policy -> try-History publication. No engine or browser work runs in that fence.
 use super::*;
-use crate::voice_v2::chain::HelloAdmission;
+use crate::voice_v2::chain::ConfirmationAdmission;
 use crate::voice_v2::crypto_actions::ActionQueue;
 use crate::voice_v2::runtime::{ActorOwner, IngressTicket};
 
 impl LocalJoin {
-    /// Admit one authenticated Hello to its original native pair's reserved decrypt lane.
+    /// Admit one authenticated confirmation to its original native pair's reserved role lane.
     /// The Root must first classify its shared public/encrypted message namespace, and supply
     /// a pure final room/call observer. This grants endpoint custody, never successful AEAD,
     /// a confirmed pair, permission to send Proof or live RTC readiness.
     // Keep the original actor, transport ticket, envelope and room witnesses explicit at this
     // native boundary; none is derivable from another's serialized IDs.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn admit_protected_hello(
+    pub(crate) fn admit_protected_confirmation(
         &mut self,
         actor: &ActorOwner,
         ticket: &IngressTicket,
@@ -22,7 +22,7 @@ impl LocalJoin {
         authority: &Authority<'_>,
         clock: Arc<dyn Clock>,
         final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
-    ) -> Result<Arc<HelloAdmission>, VoiceError> {
+    ) -> Result<Arc<ConfirmationAdmission>, VoiceError> {
         if room.scope != self.scope
             || !room.lease.is_live()
             || !actor.uses_resources(&self.resources)
@@ -35,13 +35,20 @@ impl LocalJoin {
         let Body::Encrypted { header, .. } = object.body() else {
             return Err(VoiceError::Malformed);
         };
-        if header.kind != EncryptedKind::ConfirmHello {
+        if !confirmation(header.kind) {
             return Err(VoiceError::Unauthorized);
         }
         self.pair_current(header.handshake, authority, clock.as_ref())?;
         let pair = &self.confirmations.pairs[&header.handshake];
         let chain = pair.chain.clone().ok_or(VoiceError::Unauthorized)?;
-        if pair.low
+        let incoming_role = matches!(
+            (pair.low, header.kind),
+            (
+                false,
+                EncryptedKind::ConfirmHello | EncryptedKind::ConfirmFinish
+            ) | (true, EncryptedKind::ConfirmProof)
+        );
+        if !incoming_role
             || pair.protected_epoch != Some(authority.context.epoch)
             || !chain.matches(
                 &self.chain_binding(header.handshake, authority),
@@ -52,7 +59,7 @@ impl LocalJoin {
         {
             return Err(VoiceError::Unauthorized);
         }
-        if let Some(receipt) = chain.find_hello(object)? {
+        if let Some(receipt) = chain.find_confirmation(object)? {
             if !receipt.same_room(&room.lease) {
                 return Err(VoiceError::Unauthorized);
             }
@@ -77,24 +84,27 @@ impl LocalJoin {
         if pair.established {
             return Err(VoiceError::Unauthorized);
         }
-        let floor = pair.hello.candidate(header.sequence)?;
+        let pending = if header.kind == EncryptedKind::ConfirmHello {
+            super::super::super::packets::PendingConfirmation::Hello(
+                pair.hello.candidate(header.sequence)?,
+            )
+        } else {
+            super::super::super::packets::PendingConfirmation::ProtectedInbox(chain.lease())
+        };
         let deadline = pair.deadline;
         let workflow = chain.workflow()?;
         let prepared = self
             .ledger
-            .prepare_protected_hello(object.clone(), authority, clock.as_ref(), workflow)?
-            .bind_confirmation(
-                super::super::super::packets::PendingConfirmation::Hello(floor),
-                deadline,
-            )?;
+            .prepare_protected_confirmation(object.clone(), authority, clock.as_ref(), workflow)?
+            .bind_confirmation(pending, deadline)?;
         let (publication, event) =
             self.ledger
                 .validate_prepared_inbound(prepared, authority, clock.as_ref())?;
         let effect = actor.effect(object.issuer(), authority.context.local, object.expires())?;
-        let (history, receipt, workflow) = chain.prepare_hello(
+        let (history, receipt, workflow) = chain.prepare_confirmation(
             object,
             event.token,
-            crate::voice_v2::chain::HelloConsent {
+            crate::voice_v2::chain::ConfirmationConsent {
                 room: room.lease.clone(),
                 _room_custody: room.custody.clone(),
                 effect,
@@ -103,9 +113,14 @@ impl LocalJoin {
         )?;
         let (payload_bytes, engine_bytes) =
             crypto_actions::confirmation_bytes(event.aad().len(), event.ciphertext().len())?;
-        let pending = publication
-            .crypto_authority(clock)?
-            .with_pending(chain.lease())?;
+        let pending = publication.crypto_authority(clock)?;
+        // ProtectedInbox already holds the original chain. Hello instead has its sequence
+        // floor, so add the independent chain gate only for that role.
+        let pending = if header.kind == EncryptedKind::ConfirmHello {
+            pending.with_pending(chain.lease())?
+        } else {
+            pending
+        };
         let prepared_action = self.actions.prepare(
             Key::Decrypt(event.token),
             Allocation {
@@ -132,7 +147,7 @@ impl LocalJoin {
                 .expect("unpublished token")
                 .admission()
                 .check_at(wall, mono)?;
-            issue.publish_hello(&receipt, origin, wall, mono, || {
+            issue.publish_confirmation(&receipt, origin, wall, mono, || {
                 publication.take().expect("one token publication").publish();
                 published = Some(
                     self.actions

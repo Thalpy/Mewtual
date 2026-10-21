@@ -370,6 +370,33 @@ async fn protected_root_hello_returns_signed_admission_and_exact_lost_ack_withou
     assert!(actions(&mut f)
         .iter()
         .all(|action| Arc::ptr_eq(action, &first[0])));
+    let Body::Encrypted { header, .. } = f.object.body() else {
+        panic!("Hello");
+    };
+    let handshake = header.handshake;
+    let proof = f
+        .receiver
+        .respond_voice_confirmation(&f.grant, handshake, &first[0])
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        &proof,
+        &f.receiver
+            .respond_voice_confirmation(&f.grant, handshake, &first[0])
+            .unwrap()
+    ));
+    assert!(
+        matches!(proof.input().unwrap().as_input(), CryptoInput::EncryptConfirmation(flight)
+        if flight.handshake == handshake && flight.reservation.sequence == 1)
+    );
+    let foreign = Arc::new(f.receiver.voice_call_grant(f.grant.scope().room).unwrap());
+    let before = f.runtime.resources().counts();
+    assert_eq!(
+        f.receiver
+            .respond_voice_confirmation(&foreign, handshake, &first[0])
+            .err(),
+        Some(VoiceError::Unauthorized)
+    );
+    assert_eq!(f.runtime.resources().counts(), before);
 }
 
 #[tokio::test]
@@ -545,4 +572,83 @@ async fn protected_root_actual_room_delete_recreate_cannot_revive_ack_or_origina
     assert!(actions(&mut f).is_empty());
     assert!(action.admit_engine(action.engine_bytes()).is_err());
     assert!(!receipt.authorized());
+}
+
+#[tokio::test]
+async fn protected_root_response_factory_refuses_real_epoch_and_room_replacement_before_and_after_output(
+) {
+    for replace_room in [false, true] {
+        for produced in [false, true] {
+            let mut f = fixture_in_room(2).await;
+            let object = f.object.clone();
+            let Body::Encrypted { header, .. } = object.body() else {
+                panic!("Hello");
+            };
+            let handshake = header.handshake;
+            admit(&mut f, object).unwrap();
+            let trigger = actions(&mut f).pop().unwrap();
+            trigger.admit_engine(trigger.engine_bytes()).unwrap();
+            let context = f.receiver.voice_v2_context(2).unwrap();
+            let result = f
+                .receiver
+                .voice_runtime
+                .as_mut()
+                .unwrap()
+                .endpoints
+                .participant
+                .as_mut()
+                .unwrap()
+                .join
+                .commit_confirmation_result(
+                    &trigger,
+                    &f.plaintext,
+                    trigger.output_tag(&f.plaintext).unwrap(),
+                    &authority(&context, &f.grant.lease()),
+                    f.clock.as_ref(),
+                    &mut f.receiver.rng,
+                )
+                .unwrap();
+            trigger.settle_engine();
+            trigger.acknowledge_result(&result).unwrap();
+            let _output = produced.then(|| {
+                f.receiver
+                    .respond_voice_confirmation(&f.grant, handshake, &trigger)
+                    .unwrap()
+            });
+            if replace_room {
+                f.receiver
+                    .post(DocType::ChannelIndex, 991, |doc| doc.delete(ROOT, "2"))
+                    .await
+                    .unwrap();
+                f.receiver
+                    .post(DocType::ChannelIndex, 991, |doc| doc.put(ROOT, "2", true))
+                    .await
+                    .unwrap();
+                let fresh = Arc::new(f.receiver.voice_call_grant(2).unwrap());
+                let local_key = key(81);
+                f.receiver
+                    .start_voice_endpoint(fresh.clone(), local_key.join, local_key.public_key)
+                    .unwrap();
+                f.grant = fresh;
+            } else {
+                let joiner = MlsDevice::generate().unwrap();
+                let package = joiner.key_package().unwrap();
+                f.receiver
+                    .with_observed_mls_transition(|node| {
+                        node.group.add_member(&node.device, package)
+                    })
+                    .unwrap();
+            }
+            assert_eq!(
+                f.receiver
+                    .respond_voice_confirmation(&f.grant, handshake, &trigger)
+                    .err(),
+                Some(VoiceError::Unauthorized)
+            );
+            assert!(
+                trigger.input().is_err(),
+                "history never recreates the compacted decrypt input"
+            );
+        }
+    }
 }

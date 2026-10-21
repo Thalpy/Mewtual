@@ -1,14 +1,14 @@
-//! One endpoint admission namespace for public controls and protected encrypted Hello.
-//! Live kind28 dispatch remains disabled while other protected roles and IPC are incomplete.
+//! One endpoint admission namespace for public controls and protected encrypted confirmation.
+//! Live kind28 dispatch remains disabled while SDP transfer and production IPC are incomplete.
 use super::*;
-use voice_v2::chain::HelloAdmission;
+use voice_v2::chain::ConfirmationAdmission;
 
 struct ProtectedPacket {
-    admission: Arc<HelloAdmission>,
+    admission: Arc<ConfirmationAdmission>,
 }
 #[derive(Clone)]
-pub(crate) struct HelloReceipt(Arc<ProtectedPacket>);
-impl HelloReceipt {
+pub(crate) struct ConfirmationReceipt(Arc<ProtectedPacket>);
+impl ConfirmationReceipt {
     pub(super) fn retain(&self) -> bool {
         self.0.admission.retains_identity() || Arc::strong_count(&self.0) > 1
     }
@@ -18,19 +18,19 @@ impl HelloReceipt {
 }
 pub(crate) enum EndpointReceipt {
     Public(PublicReceipt),
-    Hello(HelloReceipt),
+    Confirmation(ConfirmationReceipt),
 }
 impl EndpointReceipt {
     pub(crate) fn authorized(&self) -> bool {
         match self {
             Self::Public(receipt) => receipt.authorized(),
-            Self::Hello(receipt) => receipt.0.admission.authorized(),
+            Self::Confirmation(receipt) => receipt.0.admission.authorized(),
         }
     }
     pub(crate) fn object_hash(&self) -> [u8; 32] {
         match self {
             Self::Public(receipt) => receipt.object_hash(),
-            Self::Hello(receipt) => receipt.object_hash(),
+            Self::Confirmation(receipt) => receipt.object_hash(),
         }
     }
     pub(crate) fn authorized_at(&self, wall: u64, mono: u64) -> bool {
@@ -38,7 +38,7 @@ impl EndpointReceipt {
             Self::Public(receipt) => receipt.authorized_at(wall, mono),
             // Epoch currency is ALSO required from the original Root reply route. This fixed
             // metadata cannot inspect or recreate Root; direct recovery repeats current Context.
-            Self::Hello(receipt) => {
+            Self::Confirmation(receipt) => {
                 receipt
                     .0
                     .admission
@@ -49,7 +49,7 @@ impl EndpointReceipt {
     pub(crate) async fn revoked(&self) {
         match self {
             Self::Public(receipt) => receipt.revoked().await,
-            Self::Hello(receipt) => receipt.0.admission.revoked().await,
+            Self::Confirmation(receipt) => receipt.0.admission.revoked().await,
         }
     }
 }
@@ -85,7 +85,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // bit, token, candidate or action. Separate maps are only work representations.
         voice.endpoints.public.check_identity(envelope.object())?;
         let key = (envelope.object().issuer(), envelope.object().id());
-        let existing = voice.endpoints.public.hellos.get(&key).cloned();
+        let existing = voice.endpoints.public.encrypted.get(&key).cloned();
         if existing.is_none() && voice.endpoints.public.full() {
             return Err(VoiceError::Capacity);
         }
@@ -119,7 +119,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             lease: &participant.lease,
             member: &|id| members.contains(&id),
         };
-        let admission = participant.join.admit_protected_hello(
+        let admission = participant.join.admit_protected_confirmation(
             actor,
             &ticket,
             &envelope,
@@ -142,21 +142,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             if !Arc::ptr_eq(&existing.0.admission, &admission) {
                 return Err(VoiceError::RetryMismatch);
             }
-            return Ok(EndpointReceipt::Hello(existing));
+            return Ok(EndpointReceipt::Confirmation(existing));
         }
         // The Hello row's fixed receipt portion pays this small wrapper/Arc and map entry.
         // No recoverable allocation/queue operation follows the origin transaction.
-        let receipt = HelloReceipt(Arc::new(ProtectedPacket { admission }));
+        let receipt = ConfirmationReceipt(Arc::new(ProtectedPacket { admission }));
         assert!(
             voice
                 .endpoints
                 .public
-                .hellos
+                .encrypted
                 .insert(key, receipt.clone())
                 .is_none(),
             "native endpoint identity uniqueness"
         );
         voice.endpoints.changed();
-        Ok(EndpointReceipt::Hello(receipt))
+        Ok(EndpointReceipt::Confirmation(receipt))
     }
 }

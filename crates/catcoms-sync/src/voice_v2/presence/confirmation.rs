@@ -19,7 +19,9 @@ const MAX_CONFIRMING: usize = 8;
 const PAIR_BYTES: usize = 6144;
 const CONFIRM_DOMAIN: &str = "mewtual/voice/key-confirm/v2";
 mod protected;
+mod response;
 mod start;
+pub(crate) use response::ProtectedResponse;
 pub(crate) use start::ProtectedStart;
 
 #[derive(Default)]
@@ -267,12 +269,39 @@ fn confirmation_tag(bytes: &[u8]) -> Nonce {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes).into()
 }
-fn apply_action(pair: &mut Pair, prepared: PreparedActionChange, ledger: &PacketLedger) {
+fn replace_action(
+    pair: &mut Pair,
+    prepared: PreparedActionChange,
+    ledger: &PacketLedger,
+) -> Option<Action> {
     if let Some(id) = prepared.retire {
         ledger.retire_outgoing_validated(id);
     }
     pair.action_serial = prepared.action.serial;
-    pair.action = Some(prepared.action);
+    if let Some(old) = &pair.action {
+        old.live.0.revoke();
+    }
+    pair.action.replace(prepared.action)
+}
+fn apply_action(pair: &mut Pair, prepared: PreparedActionChange, ledger: &PacketLedger) {
+    drop(replace_action(pair, prepared, ledger));
+}
+
+#[derive(Default)]
+struct ConfirmationRetirement {
+    action: Option<Action>,
+    attempt: Option<RevocationOwner>,
+    crypto: Option<Arc<CryptoAction>>,
+}
+impl ConfirmationRetirement {
+    fn finish(self) {
+        // Called only after the current decrypt Engine/result fence has returned. A different
+        // action's engine/payload locks and credit destruction must never nest inside that fence.
+        if let Some(crypto) = &self.crypto {
+            crypto.retire_if_unstarted();
+        }
+        drop(self);
+    }
 }
 impl LocalJoin {
     fn chain_binding(
@@ -731,7 +760,8 @@ impl LocalJoin {
         let CryptoInput::DecryptConfirmation(packet) = input.as_input() else {
             return Err(VoiceError::Unauthorized);
         };
-        action.with_result(plaintext, claimed_tag, || {
+        let mut retirement = ConfirmationRetirement::default();
+        let result = action.with_result(plaintext, claimed_tag, || {
             // Pending token authority alone does not bind a protected chain's MLS epoch.
             // Check before any nonce/token/Hello transition; historical recovery stays first.
             action.check_chain_epoch(authority.context.epoch)?;
@@ -746,8 +776,11 @@ impl LocalJoin {
                 authority,
                 clock,
                 rng,
+                &mut retirement,
             )
-        })
+        });
+        retirement.finish();
+        result
     }
 
     fn result_binding(&self, handshake: Nonce, deadline: u64, expires: u64) -> ResultBinding {
@@ -1302,10 +1335,11 @@ impl LocalJoin {
             clock,
         )?;
         self.require_ordinary_confirmation(prepared.header.handshake)?;
-        match self
-            .commit_confirmation_terminal(opened, authority, clock, rng)?
-            .outcome
-        {
+        let mut retirement = ConfirmationRetirement::default();
+        let result =
+            self.commit_confirmation_terminal(opened, authority, clock, rng, &mut retirement);
+        retirement.finish();
+        match result?.outcome {
             CryptoOutcome::Opened => Ok(()),
             CryptoOutcome::Rejected(error) => Err(error),
             _ => unreachable!("closed confirmation outcome"),
@@ -1324,6 +1358,7 @@ impl LocalJoin {
         authority: &Authority<'_>,
         clock: &dyn Clock,
         rng: &mut dyn CryptoRngCore,
+        retirement: &mut ConfirmationRetirement,
     ) -> Result<TerminalResult, VoiceError> {
         let OpenedFlight {
             token,
@@ -1360,6 +1395,23 @@ impl LocalJoin {
         let expires = prepared.expires;
         let hash = prepared.hash;
         let sequence = prepared.header.sequence;
+        if matches!(
+            change,
+            PreparedConfirmation::Hello {
+                action: Some(_),
+                ..
+            } | PreparedConfirmation::Proof { .. }
+        ) {
+            retirement.crypto = self.confirmations.pairs[&handshake]
+                .action
+                .as_ref()
+                .and_then(|old| {
+                    old.draft.as_ref().and_then(|draft| {
+                        self.actions
+                            .get(Key::Encrypt(handshake, old.serial, draft.id))
+                    })
+                });
+        }
         let _receipt = self.ledger.consume_validated_inbound(prepared);
         // No fallible work follows this point. The action's result fence encloses consumption,
         // state application and receipt installation; neither settlement nor a second commit
@@ -1378,8 +1430,9 @@ impl LocalJoin {
                     .get_mut(&handshake)
                     .expect("checked pair");
                 if let Some(action) = action {
-                    pair.attempt = RevocationOwner::default();
-                    apply_action(pair, action, &self.ledger);
+                    pair.attempt.0.revoke();
+                    retirement.attempt = Some(std::mem::take(&mut pair.attempt));
+                    retirement.action = replace_action(pair, action, &self.ledger);
                     pair.low_nonce = Some(low);
                     pair.high_nonce = high;
                     if let Some(tag) = nonce_tag {
@@ -1398,7 +1451,7 @@ impl LocalJoin {
                     .pairs
                     .get_mut(&handshake)
                     .expect("checked pair");
-                apply_action(pair, action, &self.ledger);
+                retirement.action = replace_action(pair, action, &self.ledger);
                 pair.high_nonce = Some(high);
                 pair.accepted_proof = Some(hash);
                 CryptoOutcome::Opened
@@ -1413,10 +1466,17 @@ impl LocalJoin {
                 CryptoOutcome::Opened
             }
         };
-        Ok(TerminalResult {
-            binding: self.result_binding(handshake, deadline, expires),
-            outcome,
-        })
+        let mut binding = self.result_binding(handshake, deadline, expires);
+        if matches!(outcome, CryptoOutcome::Rejected(_))
+            && self.confirmations.pairs[&handshake]
+                .protected_epoch
+                .is_some()
+        {
+            // A rejected protected inbox belongs to its original pair/token, never an unrelated
+            // attempt which happened to be current when delayed plaintext finally arrived.
+            binding.attempt = None;
+        }
+        Ok(TerminalResult { binding, outcome })
     }
     fn prepare_confirmation_change(
         &self,

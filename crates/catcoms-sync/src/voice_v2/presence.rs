@@ -13,10 +13,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 mod confirmation;
-pub(crate) use confirmation::ProtectedStart;
 pub use confirmation::{
     ConfirmationOutput, CryptoFlight, FlightSubmission, OpenedFlight, PairSetup, ReceiveProgress,
 };
+pub(crate) use confirmation::{ProtectedResponse, ProtectedStart};
 
 const RECORD_BYTES: usize = 1536;
 const MAX_PENDING: usize = 32;

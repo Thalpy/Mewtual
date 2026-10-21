@@ -1,7 +1,7 @@
 //! Actual LocalJoin/packet/action/origin composition. Browser AEAD is the same trusted-output
 //! seam as the neighboring tests; these do not claim Root namespace, IPC or audible acceptance.
 use super::*;
-use crate::voice_v2::chain::{HelloAdmission, PreparedChain};
+use crate::voice_v2::chain::{ConfirmationAdmission, PreparedChain};
 use crate::voice_v2::runtime::{ActorOwner, Runtime, View};
 
 fn protected_fixture() -> (Fixture, Arc<Runtime>, ActorOwner, Arc<PreparedChain>) {
@@ -35,7 +35,7 @@ fn admit(
     f: &mut Fixture,
     actor: &ActorOwner,
     object: SignedObject,
-) -> Result<Arc<HelloAdmission>, VoiceError> {
+) -> Result<Arc<ConfirmationAdmission>, VoiceError> {
     let envelope = Envelope::Direct(object);
     let ticket = actor.admit_transport_verification(f.low.context.local, &envelope.encode())?;
     admit_verified(f, actor, &ticket, &envelope)
@@ -46,14 +46,14 @@ fn admit_verified(
     actor: &ActorOwner,
     ticket: &crate::voice_v2::runtime::IngressTicket,
     envelope: &Envelope,
-) -> Result<Arc<HelloAdmission>, VoiceError> {
+) -> Result<Arc<ConfirmationAdmission>, VoiceError> {
     let parent = f.high.lease.clone();
     let room = crate::voice_v2::helper::RoomAuthority {
         scope: f.high.context.scope,
         lease: parent.clone(),
         custody: None, // Unit confirmation fixture; Root tests use the real directory owner.
     };
-    f.high.join.admit_protected_hello(
+    f.high.join.admit_protected_confirmation(
         actor,
         ticket,
         envelope,

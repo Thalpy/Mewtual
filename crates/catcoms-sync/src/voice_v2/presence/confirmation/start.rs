@@ -129,7 +129,7 @@ impl LocalJoin {
             reservation.id,
             change.action.serial,
             reservation.expires,
-            crate::voice_v2::chain::HelloConsent {
+            crate::voice_v2::chain::ConfirmationConsent {
                 room: room.lease.clone(),
                 _room_custody: room.custody.clone(),
                 effect,

@@ -1,5 +1,18 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Protected confirmation response (21 October, awaiting validation)
+
+`Root::respond_voice_confirmation(grant, handshake, trigger)` takes an actual retained
+`Arc<CryptoAction>`, not caller-supplied terminal fields. It repeats the same current native
+call/room/member/epoch boundary as start. The native-only LocalJoin factory chooses Proof or
+Finish from the exact accepted input and existing native response state. Cached output identities
+are recovered before current-trigger checks, allocations or RNG; they retain their original
+packet/action/chain gates. Unknown, rejected, foreign and unproduced superseded triggers refuse.
+Protected incoming Proof/Finish have distinct pair/chain inbox authority for bounded classification;
+no changed wire/storage format or exposed browser command is introduced. This increment is not
+yet through complete combined gates; all 365 focused voice tests pass. It does not enable V2
+dispatch or RTC.
+
 ## Native protected local start (21 October, pending validation)
 
 `Root::start_voice_confirmation(&Arc<CallGrant>, handshake, predecessor)` recognizes the exact

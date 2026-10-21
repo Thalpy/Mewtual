@@ -123,7 +123,7 @@ fn low_final_history_contention_preserves_the_original_lane_for_an_exact_fresh_r
     };
     let pool = runtime.resources();
     let chain = prepare_chain(pool, bound.clone(), Arc::new(slots::Slots::default())).unwrap();
-    let consent = || HelloConsent {
+    let consent = || ConfirmationConsent {
         room: bound.call.clone(),
         _room_custody: None,
         effect: actor.effect(bound.local, bound.peer, 16_000).unwrap(),
@@ -253,8 +253,9 @@ fn hello_final_history_contention_spends_no_origin_or_candidate_and_exact_row_re
     let ticket = actor
         .admit_transport_verification(bound.peer, &envelope.encode())
         .unwrap();
-    let consent = || HelloConsent {
-        room: CallLease::default(),
+    let room = CallLease::default();
+    let consent = || ConfirmationConsent {
+        room: room.clone(),
         _room_custody: None,
         effect: actor
             .effect(bound.peer, bound.local, object.expires())
@@ -270,12 +271,12 @@ fn hello_final_history_contention_spends_no_origin_or_candidate_and_exact_row_re
             Ok(())
         })
         .unwrap();
-    let (mut row, receipt, workflow) = chain.prepare_hello(&object, 1, consent()).unwrap();
+    let (mut row, receipt, workflow) = chain.prepare_confirmation(&object, 1, consent()).unwrap();
     let guard = chain.history.state.lock().unwrap();
     let mut published = false;
     let result = actor.with_endpoint_origin(&ticket, &envelope, &context, |wall, mono, origin| {
         row.issue
-            .publish_hello(&receipt, origin, wall, mono, || published = true)
+            .publish_confirmation(&receipt, origin, wall, mono, || published = true)
     });
     assert_eq!(result, Err(VoiceError::Capacity));
     assert!(!published);
@@ -284,18 +285,68 @@ fn hello_final_history_contention_spends_no_origin_or_candidate_and_exact_row_re
     // deliberately held History guard. Otherwise RowIssue::drop would synchronously deadlock.
     drop(guard);
     drop((row, receipt, workflow));
-    let (mut row, receipt, _workflow) = chain.prepare_hello(&object, 1, consent()).unwrap();
+    let (mut row, receipt, _workflow) = chain.prepare_confirmation(&object, 1, consent()).unwrap();
     assert_eq!(receipt.candidate(), 0);
     actor
         .with_endpoint_origin(&ticket, &envelope, &context, |wall, mono, origin| {
             row.issue
-                .publish_hello(&receipt, origin, wall, mono, || published = true)
+                .publish_confirmation(&receipt, origin, wall, mono, || published = true)
         })
         .unwrap();
     assert!(published);
     assert!(Arc::ptr_eq(
-        &chain.find_hello(&object).unwrap().unwrap(),
+        &chain.find_confirmation(&object).unwrap().unwrap(),
         &receipt
+    ));
+    // Exercise the distinct response publication fence, not just Hello's fence. Hold History
+    // after actual output-row preparation; refusal must leave the very same lane unpublished.
+    let output_consent = || ConfirmationConsent {
+        room: room.clone(),
+        _room_custody: None,
+        effect: actor.effect(bound.local, bound.peer, 16_000).unwrap(),
+        clock: clock.clone(),
+    };
+    let (mut output, response, workflow) = chain
+        .prepare_response(&receipt, [80; 32], 1, 16_000, output_consent())
+        .unwrap();
+    let guard = chain.history.state.lock().unwrap();
+    let mut output_published = false;
+    assert_eq!(
+        actor.with_local_origin(bound.peer, &context, |wall, mono, origin| {
+            output
+                .issue
+                .publish_response(&response, &receipt, origin, (wall, mono), || {
+                    output_published = true
+                })
+        }),
+        Err(VoiceError::Capacity)
+    );
+    assert!(!output_published);
+    assert_eq!(guard.issued, 1 << 1);
+    assert!(receipt.response.get().is_none());
+    drop(guard);
+    drop((output, response, workflow));
+    assert!(chain.cached_response(&receipt).unwrap().is_none());
+    let (mut output, response, _workflow) = chain
+        .prepare_response(&receipt, [81; 32], 1, 16_000, output_consent())
+        .unwrap();
+    actor
+        .with_local_origin(bound.peer, &context, |wall, mono, origin| {
+            output
+                .issue
+                .publish_response(&response, &receipt, origin, (wall, mono), || {
+                    output_published = true
+                })
+        })
+        .unwrap();
+    assert!(output_published);
+    assert_eq!(
+        chain.history.state.lock().unwrap().issued,
+        (1 << 1) | (1 << 2)
+    );
+    assert!(Arc::ptr_eq(
+        &chain.cached_response(&receipt).unwrap().unwrap(),
+        &response
     ));
 }
 fn publish_unregistered(

@@ -55,7 +55,7 @@ impl ConfirmationCapacity {
     pub(super) fn outgoing_slot(&self, slots: &PacketSlots) -> Result<slots::Slot, VoiceError> {
         self.outgoing.loan(&slots.outgoing)
     }
-    pub(super) fn hello_incoming_slot(
+    pub(super) fn confirmation_incoming_slot(
         &self,
         slots: &PacketSlots,
     ) -> Result<slots::Slot, VoiceError> {
@@ -143,11 +143,14 @@ struct Outgoing {
 pub(super) enum PendingConfirmation {
     Attempt(CallLease),
     Hello(super::crypto_authority::SequenceAuthority),
+    // Opening/classification only: the authenticated header cannot identify its echoed nonce.
+    // Closed plaintext must validate the actual current attempt before any progression.
+    ProtectedInbox(CallLease),
 }
 impl PendingConfirmation {
     fn authorized(&self) -> bool {
         match self {
-            Self::Attempt(lease) => lease.is_live(),
+            Self::Attempt(lease) | Self::ProtectedInbox(lease) => lease.is_live(),
             Self::Hello(gate) => gate.authorized(),
         }
     }
@@ -283,7 +286,8 @@ impl PreparedTokenPublication<'_> {
             .ok_or(VoiceError::Unauthorized)?
         {
             PendingConfirmation::Hello(gate) => grant.with_hello(gate.clone()),
-            PendingConfirmation::Attempt(attempt) => grant.with_pending(attempt.clone()),
+            PendingConfirmation::Attempt(attempt)
+            | PendingConfirmation::ProtectedInbox(attempt) => grant.with_pending(attempt.clone()),
         }
     }
     pub(super) fn admission(&self) -> &InboundAdmission {
@@ -319,7 +323,7 @@ impl PreparedInbound {
             (&confirmation, self.event.header.kind),
             (PendingConfirmation::Hello(_), EncryptedKind::ConfirmHello)
                 | (
-                    PendingConfirmation::Attempt(_),
+                    PendingConfirmation::Attempt(_) | PendingConfirmation::ProtectedInbox(_),
                     EncryptedKind::ConfirmProof | EncryptedKind::ConfirmFinish
                 )
         ) || self.incoming.confirmation.is_some()
@@ -1095,7 +1099,8 @@ impl PacketLedger {
                 .as_ref()
                 .ok_or(VoiceError::Unauthorized)?
             {
-                PendingConfirmation::Attempt(lease) => grant.with_pending(lease.clone()),
+                PendingConfirmation::Attempt(lease)
+                | PendingConfirmation::ProtectedInbox(lease) => grant.with_pending(lease.clone()),
                 PendingConfirmation::Hello(gate) => grant.with_hello(gate.clone()),
             }
         } else {
@@ -1231,9 +1236,9 @@ impl PacketLedger {
     ) -> Result<PreparedInbound, VoiceError> {
         self.prepare_inbound_with_workflow(object, authority, clock, None)
     }
-    /// Protected high-side Hello only. Both retained serialized copies borrow bytes and the
+    /// Protected native confirmation. Both retained serialized copies borrow bytes and the
     /// actual incoming-table position from the original workflow, never ordinary spare capacity.
-    pub(super) fn prepare_protected_hello(
+    pub(super) fn prepare_protected_confirmation(
         &mut self,
         object: SignedObject,
         authority: &Authority<'_>,
@@ -1261,7 +1266,7 @@ impl PacketLedger {
             return Err(VoiceError::Capacity);
         }
         let slot = if let Some(workflow) = &workflow {
-            workflow.hello_packet_slot(
+            workflow.incoming_confirmation_slot(
                 &self.resources,
                 self.scope,
                 &self.lease,

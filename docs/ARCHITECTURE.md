@@ -1,5 +1,24 @@
 # Mewtual; Architecture
 
+## Protected three-flight continuation (21 October, awaiting validation)
+
+The continuation checkout generalizes protected intake to Hello/Proof/Finish and adds a native
+response factory. Proof (low endpoint) and Finish (high endpoint) use three independent incoming
+role positions, because their authenticated headers do not expose the echoed Hello nonce. A
+separate `ProtectedInbox` owner permits bounded opening across attempt replacement; closed
+plaintext must still match the current native nonces before any progression. This supersedes
+arrival-attempt cancellation for these protected role inboxes; ordinary compatibility is unchanged.
+
+High Proof output belongs to the accepted Hello intake lane (rows2/5/8); low Finish output belongs
+to the accepted Proof intake lane (rows3/6/9). First production recognizes the actual retained
+decrypt action and accepted terminal result, plus current native trigger/response/attempt. Exact
+produced output history precedes those current-trigger checks and recovers its original action
+without restoring authority. Unproduced superseded triggers refuse. No plaintext or Workflow is
+retained in fixed response history. All original limits remain unchanged; their growth guards
+pass in the 365-case focused run. Bounded follow-up links and each exact response pointer live
+in their paid input rows, keeping shared metadata within the original 2 KiB allowance. Complete
+combined gates remain pending. Normal kind28 dispatch, IPC/RTC and SDP transfer remain open.
+
 ## Protected outgoing Hello (21 October, pending validation)
 
 The next worktree adds a native Root/local-join producer for the low side. Outgoing preparation

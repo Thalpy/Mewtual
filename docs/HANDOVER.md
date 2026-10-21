@@ -1,6 +1,33 @@
 # Mewtual; Handover
 
-## Where to resume (2026-10-21)
+## Active continuation (21 October)
+
+Reviewed low Hello is committed locally at `600186e5`, with 352 focused voice tests, 2,254 full
+frontend tests, strict root Clippy, root/native formatting and ambient checks passing. Its complete
+native suite passes **443 library plus five ACL tests**, zero failures (885.37s for the library,
+`voice-low-native-full.log` in frozen low checkout). Root deny also passes. The full root result
+of 3,096 belongs to earlier `53191c87`, not the low increment; combined full root and native
+check/build/startup remain pending.
+
+Active implementation is now `M:\Git (local)\CatComs\target\communication-proof-finish-worktree`,
+based on `600186e5`. It adds protected Proof/Finish inboxes, exact response factories and deferred
+response-engine retirement. Code/tests are uncommitted; static read-only re-review is clear.
+The first focused invocation reused a stale shared-target binary (352 tests, none of the new
+cases) and is **not accepted validation**. Only the catcoms-sync compiled fingerprint files were
+invalidated; no clean or source deletion was performed. Fresh execution ran 363 passed/two failed:
+the metadata guard caught a 40-byte excess; an old-Finish fixture simultaneously occupied the
+sole crypto lane while requesting new work. The correction relocates bounded pointers into paid
+input rows and fixes fixture scheduling without increasing limits. The final focused rerun passes
+**365/365**, zero failures in 15.67s, including the original layout guards. Strict whole-root
+Clippy passes (1m15s), as do root/native formatting, ambient and the full frontend suite
+(**2,254 passed**, zero failures, 69.50s). The unused-state warning is corrected with actual
+closed-state/input-pointer checks. Complete combined root/native/check/build/startup gates follow
+before publishing. Static adversarial re-review has no remaining blocker/high/medium finding.
+Do not push or attribute earlier suites to this work. Native crypto provider changes
+are only an unselected design investigation; the browser-provider ADR is unchanged. Remaining
+live dispatch, crypto/IPC/RTC, SDP transfer, relay and combined/physical acceptance stay open.
+
+## Previous low-side checkpoint (2026-10-21)
 
 **The communication programme is not finished.** Published branch `chat-update-implementation`
 is at `d7d0586f` (PR48 targets `Gate7`). Reviewed local checkpoint `53191c87` includes protected

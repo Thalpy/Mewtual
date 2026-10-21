@@ -7,6 +7,7 @@ use catcoms_rt::ManualClock;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 mod protected;
+mod protected_followup;
 mod protected_start;
 
 fn members(_: DeviceId) -> bool {

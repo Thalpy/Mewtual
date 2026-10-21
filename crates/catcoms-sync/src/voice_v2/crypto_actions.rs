@@ -372,6 +372,13 @@ impl ActionQueue {
     pub(super) fn get(&self, key: Key) -> Option<Arc<CryptoAction>> {
         self.actions.get(&key).cloned()
     }
+    /// Recognize an actual retained action allocation. Serial, input tag or JSON equality is
+    /// insufficient; the bounded native queue remains the authority after input compaction.
+    pub(super) fn key_of(&self, action: &Arc<CryptoAction>) -> Option<Key> {
+        self.actions
+            .iter()
+            .find_map(|(key, original)| Arc::ptr_eq(original, action).then_some(*key))
+    }
 
     /// Prepay the bounded record, owned input and eventual small closed receipt before creating
     /// another input copy. The combined pending/terminal budget never resets within this join.

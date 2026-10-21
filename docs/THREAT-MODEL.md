@@ -1,5 +1,23 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Delayed protected follow-up classification (21 October, awaiting validation)
+
+Protected Proof/Finish intake deliberately retains original pair/chain inbox authority across
+nonce-attempt replacement. This replaces the earlier arrival-attempt binding for those protected
+roles only. Three fixed identities per incoming role bound the work. A delayed plaintext echo
+must match the current native nonce and response phase to progress; stale/malformed plaintext
+consumes only its exact token and retains a closed rejection. Such rejected history has no
+attachment to an unrelated current nonce attempt. Accepted progression captures its real attempt.
+
+First response publication requires the actual accepted decrypt action, original native owners,
+current accepted signed hash and native response kind. An old unproduced trigger cannot copy new
+response state. A previously produced response can recover its exact action, whose original
+revocation/deadline still prevents stale encryption/signing/sending. Old response engine retirement
+runs after the current decrypt result fence returns; running work and lost-ACK custody remain
+charged. All 365 focused voice tests pass and read-only re-review is clear. The original fixed
+layout guards pass; bounded links/response pointers live in their paid input records. Complete
+combined gates remain pending; no live V2/media claim follows.
+
 ## Protected local Hello publication (21 October, pending validation)
 
 The low-side producer prepares actual packet/action/row owners before a dedicated local

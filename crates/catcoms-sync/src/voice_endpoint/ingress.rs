@@ -1,6 +1,6 @@
 //! Bounded native control intake with one public/encrypted identity namespace. Announcements
 //! remain candidates; only a current native watch challenge/proof promotes presence. Protected
-//! Hello admission is custody only, and does not establish confirmation or enable live dispatch.
+//! Confirmation admission is custody only, and does not establish a pair or enable live dispatch.
 use super::*;
 use catcoms_rt::RequestAuthority;
 use voice_v2::helper::RoomAuthority;
@@ -22,7 +22,7 @@ enum Targets {
 mod encrypted;
 #[cfg(test)]
 mod tests;
-pub(crate) use encrypted::{EndpointReceipt, HelloReceipt};
+pub(crate) use encrypted::{ConfirmationReceipt, EndpointReceipt};
 impl Targets {
     fn live(&self) -> bool {
         match self {
@@ -96,7 +96,7 @@ pub(super) struct PublicInbox {
     packets: BTreeMap<Key, Work>,
     // Two work representations share ONE classifier and combined capacity. Never insert in
     // either map before check_identity: public control cannot reuse an encrypted admission ID.
-    hellos: BTreeMap<Key, HelloReceipt>,
+    encrypted: BTreeMap<Key, ConfirmationReceipt>,
     cursor: Option<Key>,
 }
 impl PublicInbox {
@@ -107,7 +107,7 @@ impl PublicInbox {
             .get(&key)
             .is_some_and(|work| work.packet.object != *object)
             || self
-                .hellos
+                .encrypted
                 .get(&key)
                 .is_some_and(|receipt| receipt.object_hash() != object.hash())
         {
@@ -116,7 +116,7 @@ impl PublicInbox {
         Ok(())
     }
     fn full(&self) -> bool {
-        self.packets.len() + self.hellos.len() >= PACKETS
+        self.packets.len() + self.encrypted.len() >= PACKETS
     }
     pub(super) fn prune(&mut self, clock: &dyn Clock) {
         let now = clock.now_ms();
@@ -130,10 +130,10 @@ impl PublicInbox {
                 || mono < work.packet.deadline
                 || Arc::strong_count(&work.packet) > 1
         });
-        // At most three candidates per protected pair. Keep their immutable identities for
+        // Three identities per incoming role (at most six for the high endpoint). Keep them for
         // the original call, including closed-rejected results; actual ACK holders may outlive
         // End. This fixed metadata does not retain an action, engine or Workflow.
-        self.hellos.retain(|_, receipt| receipt.retain());
+        self.encrypted.retain(|_, receipt| receipt.retain());
     }
 }
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
