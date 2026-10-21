@@ -38,6 +38,8 @@ mod fair_tests;
 mod file_transfers;
 mod member_maintenance;
 mod member_reconnect;
+mod voice_endpoint;
+pub use voice_endpoint::{VoiceEndpointCommand, VoiceEndpointError};
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
 const DISCOVERY_DRAIN_MS: u64 = 500;
@@ -732,6 +734,9 @@ pub enum AppCommand {
         room: u128,
         reply: oneshot::Sender<Result<catcoms_sync::voice_v2::CallGrant, String>>,
     },
+    /// Opaque, body-free native V2 controls. No serialized ID or uncharged IPC payload is
+    /// authority; the sole Root recognizes actual call, watch and action allocations again.
+    VoiceEndpoint(VoiceEndpointCommand),
     /// This call's E2E media base key + epoch (derived from MLS; never sent on the wire).
     MediaKey {
         call_id: u128,
@@ -3928,8 +3933,9 @@ impl ServerActor {
     }
 
     /// Stop before retiring a native incarnation. Already closed actors are safely stopped.
-    /// Dropping a queued request cancels it; a concurrent acknowledgement can still complete,
-    /// so a timed-out caller must keep local state and may retry this idempotent operation.
+    /// Dropping a queued request cancels it. Once the handler observes a live waiter, stopping
+    /// is irreversible even if the ACK is lost during teardown. A timed-out caller must keep
+    /// local state and may retry this idempotent operation; a closed mailbox is safely stopped.
     pub async fn stop_and_wait(&self) -> Result<(), String> {
         let (stopped, result) = oneshot::channel();
         if self
@@ -4182,6 +4188,20 @@ pub(crate) fn studio_pools_for_next_spawn(
     preview: std::sync::Arc<tokio::sync::Semaphore>,
 ) {
     STUDIO_POOLS_FOR_NEXT_SPAWN.with(|pools| *pools.borrow_mut() = Some((shared, preview)));
+}
+
+/// Queued cancellation precedes irreversible teardown. Loss of the ACK after admission must
+/// never resume an actor whose original authority was just destroyed by `retire`.
+fn admit_terminal_stop(stopped: oneshot::Sender<()>, retire: impl FnOnce()) -> bool {
+    if stopped.is_closed() {
+        return false;
+    }
+    // This observation admits terminal teardown, not just an attempted ACK. Undoing teardown
+    // after a lost ACK would revive an actor whose original voice/file owners are already dead.
+    // Keep queued cancellation above, but complete stopping after this boundary in either case.
+    retire();
+    let _ = stopped.send(());
+    true
 }
 
 /// Move `server` into a background task. Returns a [`ServerActor`] handle, a receiver of
@@ -5142,6 +5162,7 @@ where
                     Some(AppCommand::VoiceCallGrant { room, reply }) => {
                         let _ = reply.send(server.voice_call_grant(room));
                     }
+                    Some(AppCommand::VoiceEndpoint(command)) => command.apply(&mut server),
                     Some(AppCommand::MediaKey { call_id, reply }) => {
                         let res = server
                             .media_key(call_id)
@@ -5794,31 +5815,34 @@ where
                         // a NEW generation; saved Keep allowance and intent remain unchanged.
                         file_transfers.retire();
                         if crate::shutdown::save_and_freeze(&mut server, ready).await {
+                            server.sync.retire_voice_actor();
+                            drop(cmd_rx);
                             let _ = event_tx.send(AppEvent::Closed).await;
                             break;
                         }
                         file_transfers.resume();
                     }
                     Some(AppCommand::StopAndWait { stopped }) => {
-                        // A timed-out request which is still queued must not later stop a live
-                        // group unexpectedly. Once acknowledged this branch is terminal; close
-                        // the command receiver before awaiting the UI event consumer.
-                        if !stopped.is_closed() {
-                            // Revoke BEFORE send wakes the native close coordinator. A full
-                            // event sink may suspend us below, retaining the entire actor.
+                        if admit_terminal_stop(stopped, || {
                             file_transfers.retire();
-                            if stopped.send(()).is_ok() {
-                                cmd_rx.close();
-                                let _ = event_tx.send(AppEvent::Closed).await;
-                                break;
+                            server.sync.retire_voice_actor();
+                            // Wake waiting producers and reject/drop already queued replies
+                            // before ACK. Drop the receiver itself below before the event await,
+                            // including permits acquired by a producer before close.
+                            cmd_rx.close();
+                            while let Ok(command) = cmd_rx.try_recv() {
+                                drop(command);
                             }
-                            // The acknowledgement receiver raced with retirement. The actor
-                            // stays usable, but its old file effects are permanently retired.
-                            file_transfers.resume();
+                        }) {
+                            drop(cmd_rx);
+                            let _ = event_tx.send(AppEvent::Closed).await;
+                            break;
                         }
                     }
                     Some(AppCommand::Shutdown) | None => {
                         file_transfers.retire();
+                        server.sync.retire_voice_actor();
+                        drop(cmd_rx);
                         let _ = event_tx.send(AppEvent::Closed).await;
                         break;
                     }
@@ -6118,6 +6142,8 @@ where
                     }
                     _ => {
                         file_transfers.retire();
+                        server.sync.retire_voice_actor();
+                        drop(cmd_rx);
                         let _ = event_tx.send(AppEvent::Closed).await;
                         break;
                     }

@@ -1,5 +1,22 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Native actor shutdown and voice controls (21 October, full gates pending)
+
+Opaque native actor controls preserve allocation identity and never turn serialized IDs into
+authority. They expose no browser/RTC or wire ingress. Reply loss is uncertain; fresh candidates
+or replacement grants cannot be inferred from it. Watch reply loss drops its affine observer.
+An admitted stop retires original Root-local actor/routes/endpoints and queued replies before
+acknowledgment, regardless of Closed event backpressure or later ACK loss. A queued canceled stop
+and canceled freeze preserve the original installation. Other groups sharing Runtime remain live.
+Actual running preparation, held inputs and lower transport owners retain their charges until
+drainage; shutdown provides no resource refund. Original CallGrant and revision owners are revoked.
+
+Final forward authorization observes route/connection/room gates after callback-bearing Clock
+and effect checks, including callbacks that retire the native Root. Deterministic regressions
+exercise these orderings. A dedicated sync-error fault-injection test remains open. Production
+pair orchestration, serialized native IPC/copy/settlement, SDP transfer, live V2/legacy isolation,
+media relay and physical acceptance remain enablement blockers.
+
 ## Root derivation and late first publication (21 October, focused checks passed)
 
 Derivation factories recognize original call/action/chain allocations. Final native origin

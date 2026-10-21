@@ -216,6 +216,44 @@ async fn voice_transport_driver_time_sample_precedes_all_negative_and_positive_r
 }
 
 #[tokio::test]
+async fn voice_transport_pending_driver_checks_all_route_and_room_owners_after_original_clocks() {
+    for boundary in ["wrapper root", "packet connection", "packet room"] {
+        let mut f = VoiceForwardFixture::new().await;
+        let mut pending = f.helper.prepare_voice_forwards().unwrap().pop().unwrap();
+        let resources = f.helper_runtime.resources();
+        let authority = if boundary == "wrapper root" {
+            let helper = Arc::new(std::sync::Mutex::new(f.helper));
+            let original = helper.clone();
+            let clock = Arc::new(ReplySampleClock {
+                inner: f.clock.clone(),
+                on_mono: std::sync::Mutex::new(Some((0, Box::new(move || {
+                    original.lock().unwrap().retire_voice_actor();
+                })))),
+            });
+            pending.authority_with_clock_for_test(clock)
+        } else {
+            // Packet clocks use the original Runtime probe. Keep the outer wrapper at the
+            // same monotonic origin, with no callback, to isolate a late packet-clock change.
+            let authority = pending.authority_with_clock_for_test(f.clock.clone());
+            let retire: Box<dyn FnOnce() + Send> = if boundary == "packet connection" {
+                let hub = f._hub.clone(); let peer = f.recipient.local_peer();
+                Box::new(move || { drop(hub.join(peer)); })
+            } else {
+                let room = f.helper.voice_room_authority(1).unwrap().lease;
+                Box::new(move || room.revoke())
+            };
+            *f.reply_clock.on_mono.lock().unwrap() = Some((0, retire));
+            authority
+        };
+        assert!(!authority.authorized(), "{boundary}");
+        let held = resources.counts().0;
+        assert!(held >= 512, "dead effects still retain actual route/flight custody");
+        drop(pending); drop(authority);
+        assert!(resources.counts().0 < held, "{boundary}: release only on actual last owner");
+    }
+}
+
+#[tokio::test]
 async fn voice_transport_reply_route_capacity_refuses_before_original_packet_admission() {
     let mut f = VoiceForwardFixture::empty().await;
     let frame = incoming_helper_frame(&mut f, 155);

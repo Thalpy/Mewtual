@@ -1,5 +1,32 @@
 # Chat, files and voice implementation evidence
 
+## Native actor and terminal lifecycle (21 October, full gates pending)
+
+The body-free trusted actor bridge and terminal-retirement correction pass **10 actor tests**,
+**one external API test** and **411 Root voice tests**, zero failures (Root16.46s). Original
+Root state and affine grants remain authoritative. The mailbox exposes no renderer command or
+byte-bearing result path. Stopped means uncertain outcome; exact native retry identity survives.
+
+Tests exercise reply loss during watch creation, independent lock/unlock/replacement, canceled
+queued stop, lost ACK after admitted stop, saturated Closed delivery, explicit shutdown and
+canceled/completed saved freeze. Actual native terminal cleanup conserves engine/input custody
+until external owners drain and leaves another Runtime group live. Pending transport authority
+refuses when its actual Clock callback retires Root, replaces the connection or closes its room;
+held lower custody is returned only when actual pending/authority owners drop. No limits changed.
+
+Logs in communication-derived-origin-worktree/target: voice-actor-native-focused-3.log,
+voice-actor-public-api.log and voice-actor-root-focused.log. First actor run passed7; the second
+attempt failed to compile an across-crate private wait-method call in a test. The corrected test
+uses actual queued reply disconnection, without widening the production API; all fresh cases pass.
+Read-only static re-review has no blocker/high/medium. LOW diagnostic wording is corrected.
+Dedicated sync-error fault injection is a residual test gap. Full current Rust/native gates are
+pending; the identical frontend already passes 2,268. Strict whole-root Clippy passes with warnings
+denied (1m35s), formatting, Git Bash ambient and root dependency policy pass. Initial ambient
+invocation chose Windows WSL Bash and was denied before running; explicit Git Bash passes.
+Logs: voice-actor-{format,clippy,ambient-2,deny}.log. Historical full results below apply only
+to the published c153 checkpoint. Production pair orchestration/IPC/RTC/V2, media relay, combined
+rollout and physical acceptance remain open. Only one physical desktop is available.
+
 ## Root derivation and late-publication deadline (21 October, full gates pending)
 
 Active continuation in communication-derived-origin-worktree, based on local fe9c1048, connects

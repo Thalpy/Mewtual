@@ -1,5 +1,48 @@
 # Mewtual; Handover
 
+## Active native actor and terminal lifecycle work (21 October, full gates pending)
+
+Published checkpoint remains `c1532331` on PR48. Local `fe9c1048` and `a5fc6e2a`
+add reviewed Root result/derivation/deadline corrections. The active continuation is
+communication-derived-origin-worktree. Its body-free ServerActor bridge now carries original
+native call/action/watch owners through the existing bounded mailbox with typed protocol versus
+uncertain-stop errors. It exposes no serialized commands or live V2/RTC. Root remains authoritative.
+
+Terminal stop now revokes Root-local voice and closes queued replies before its ACK, independent
+of a full Closed event sink. Once admitted, lost ACK cannot resume the actor. Queued cancellation
+and canceled/failed saved freezes preserve the original installation. Successful freeze, explicit
+shutdown and sync-error termination retire before Closed delivery. Shared Runtime groups remain
+live; externally held crypto/input/lower-work credits remain charged until actual owners drain.
+Final forward checks sample callback-bearing clocks/effects before pure route/connection/room
+checks, covering revocation or connection replacement during those callbacks.
+
+Focused execution passes **10 actor tests**, **one external public-API test**, and **411 Root voice
+tests**, zero failures (Root16.46s). The actor cases cover actual admitted lost replies, exact
+retries, foreign/equal-join owners, lock/unlock, queued stop cancellation, lost stop ACK, full
+event queues, explicit shutdown and saved freeze cancellation/completion. Root cases preserve
+actual engine/input custody after terminal teardown and reject final-clock Root/room/connection
+retirement. Logs: target/voice-actor-native-focused-3.log, voice-actor-public-api.log and
+voice-actor-root-focused.log. Earlier first actor run passed7; a second compile failed because
+a test tried to use a crate-private wait method. Tests now use actual queued reply disconnection;
+no production API was widened. The fresh rerun above passes. Static read-only re-review has no
+remaining blocker/high/medium. Its LOW wording correction is applied. Dedicated sync-error
+fault injection remains a test follow-up; normal shutdown tests do not establish that scenario.
+
+Strict whole-root Clippy passes with warnings denied (1m35s); formatting, Git Bash ambient
+checks and root dependency policy pass. The initial ambient invocation selected Windows WSL
+Bash and was denied before running the script; the explicit Git Bash rerun passes.
+Full frontend already passes 2,268 on identical frontend source. Current Root/native full gates
+are pending; the interrupted fe9 run is not a pass. Earlier complete root 3,146/native 443+5
+results below apply to c153, not these local changes. Keep one heavy Cargo job at a time.
+
+Next live-V2 gap: Root proves peer observations but production orchestration does not yet create
+the LocalJoin pair; positive fixtures do that privately. Then: registered native IPC/copy and
+exact result/ACK/settlement custody, authorized SDP/key phase transfer, normal V2/RTC and legacy
+isolation, media relay, combined rollout and physical audio/network acceptance. Only one physical
+desktop is available. Preserve the separate unselected native-provider experiment. Gate7 native
+upload HIGH fixes are separate reviewable PR48 commits; Gate7 integration remains separate.
+
+
 ## Active Root derivation and deadline correction (21 October, focused checks passed)
 
 Latest pushed checkpoint remains `c1532331` on PR48. Local `fe9c1048` adds Root confirmation

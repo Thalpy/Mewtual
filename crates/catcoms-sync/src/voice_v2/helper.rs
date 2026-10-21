@@ -550,7 +550,10 @@ struct ForwardAuthority {
 #[async_trait::async_trait]
 impl RequestAuthority for ForwardAuthority {
     fn authorized(&self) -> bool {
-        self.room.is_live() && self.effect.authorized()
+        // Effect samples its original native Clock before pure actor/member gates. Observe
+        // this separate room gate afterward too: the callback can delete/recreate that room.
+        let effect = self.effect.authorized();
+        effect && self.room.is_live()
     }
     async fn revoked(&self) {
         if !self.authorized() {

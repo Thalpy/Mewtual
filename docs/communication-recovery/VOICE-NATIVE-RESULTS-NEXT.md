@@ -1,5 +1,21 @@
 # Next voice milestone: native result recovery
 
+## Native actor bridge (21 October, full gates pending)
+
+The body-free trusted ServerActor bridge now reaches Root endpoint/watch/derivation/confirmation
+factories with original affine owners and typed uncertain-stop errors. Terminal lifecycle paths
+retire local voice before ACK/Closed backpressure; actual external crypto/input/transport owners
+remain charged. This is not the production IPC adapter. No serialized projections, byte-bearing
+result commands, action registry or live V2 dispatch have been enabled.
+
+Next orchestration gap: production Root pump proves JoinProof observations but does not create
+LocalJoin pairs. Positive derivation fixtures create those pairs privately. A native pair driver
+must select from the actual implicit participant watch, preserve original call/session/room/
+epoch and exact retry identity, and prepare Clock/RNG/allocations outside final admission.
+Do not expose a caller-supplied FreshPeer as authority or present the fixtures as live integration.
+Then implement the registered result/ACK/settlement and copy-custody contract below, authorized
+SDP/key transfer and normal V2/RTC isolation. Relay and combined/physical acceptance remain open.
+
 ## Active Root derivation and expiry correction (21 October, focused checks passed)
 
 communication-derived-origin-worktree now supplies native Root derivation producer/result

@@ -1,5 +1,26 @@
 # Mewtual; Architecture
 
+## Native actor controls and terminal voice retirement (21 October, full gates pending)
+
+ServerActor now carries fixed-size, native-only voice controls through its existing bounded
+mailbox. Root remains the only protocol state owner; commands retain original CallGrant,
+CryptoAction and watch allocations. The opaque envelope exposes no serialized constructor,
+plaintext, ciphertext, renderer projection or normal V2 dispatch. Mailbox capacity bounds
+admitted commands, not waiting producers; the future IPC adapter must separately bound/coalesce
+requests and account for every serialized copy. Actor loss is an uncertain result, not evidence
+that a first effect did not happen. Retry only the original request and owners.
+
+Terminal stop closes Root-local voice installation and queued command replies before its ACK,
+even when the Closed event sink is full. Once an open stop waiter is admitted, losing its ACK
+does not resume the actor. Already-canceled queued stops and canceled/failed saved freezes keep
+the original installation. Successful freeze, explicit shutdown and sync-error terminal paths
+retire before awaiting Closed. Shared Runtime groups and actual externally held engine/input/
+transport custody remain intact until their owners drain; retirement never refunds that work.
+
+Transport authority samples callback-bearing clocks/effects before its final pure route,
+connection and room checks. A clock that retires the Root, replaces a connection or closes a
+room cannot leave the pending forward authorized. This does not enable production IPC or RTC.
+
 ## Root derivation and final deadlines (21 October, focused checks passed)
 
 Root now produces row zero and admits Derived metadata for its actual affine call, proven pair,

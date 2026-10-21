@@ -84,10 +84,15 @@ impl fmt::Debug for FlightAuthority {
 #[async_trait::async_trait]
 impl RequestAuthority for FlightAuthority {
     fn authorized(&self) -> bool {
-        self.route.live.is_live()
+        // Sample this outer Clock before invoking the packet's original clocks. Both are
+        // injected callbacks; they may retire the Root, room or driver. Only then observe the
+        // pure route/connection gates, so no later callback escapes an earlier owner check.
+        let mono = self.clock.monotonic_ms();
+        let packet = self.packet.authorized();
+        packet
+            && self.route.live.is_live()
             && self.route.connection.is_live()
-            && self.packet.authorized()
-            && self.clock.monotonic_ms() < self.deadline
+            && mono < self.deadline
     }
     async fn revoked(&self) {
         if !self.authorized() {
@@ -271,6 +276,18 @@ impl fmt::Debug for CompletedVoiceForward {
     }
 }
 impl<T: MeshTransport> PendingVoiceForward<T> {
+    #[cfg(test)]
+    pub(crate) fn authority_with_clock_for_test(
+        &mut self,
+        clock: Arc<dyn Clock>,
+    ) -> Arc<dyn RequestAuthority> {
+        // Keep the actual prepared job, route, connection and custody. Isolate the outer Clock
+        // callback from packet clocks at the same ManualClock origin, before any driver clone.
+        Arc::get_mut(&mut self.authority)
+            .expect("unsubmitted native fixture")
+            .clock = clock;
+        self.authority.clone()
+    }
     pub fn peer(&self) -> PeerId {
         self.job.peer()
     }

@@ -1,5 +1,22 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Body-free ServerActor voice API (21 October, full gates pending)
+
+ServerActor exposes start_voice_endpoint, start_voice_watch, voice_watch_peers,
+voice_endpoint_changes, prepare_voice_derivation, commit_voice_derivation_result,
+start_voice_confirmation and respond_voice_confirmation. These trusted Rust APIs retain actual
+affine grants/actions and return native charged owners, not renderer DTOs. VoiceEndpointCommand
+is an opaque public envelope with private variants; VoiceEndpointError exposes Protocol(error)
+and Stopped so callers can distinguish capacity from uncertain actor/reply loss without parsing
+text. A closed reply is skipped before effects; reply loss after admission never rolls back
+native history. A lost watch reply drops precisely its abandoned affine observer.
+
+The existing mailbox bounds admitted envelopes only. The future native IPC adapter must own
+bounded waiting requests, projections, copy accounting and exact retry/ACK/settlement custody.
+No Tauri commands or byte-bearing result requests are introduced. Existing Root derivation
+requires a proven native pair; production pair orchestration is still missing. Stop ACK now
+follows local voice revocation and queued-reply retirement, independently of Closed delivery.
+
 ## Root derivation (21 October, focused checks passed)
 
 `Root::prepare_voice_derivation(grant, handshake)` returns the exact charged CryptoAction for

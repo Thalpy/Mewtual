@@ -34,6 +34,14 @@ impl VoiceRuntime {
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
+    /// Terminal per-Root teardown before stop acknowledgement or any blocked close-event await.
+    /// This closes original actors, rooms, local routes and revision subscribers synchronously.
+    /// Do not revoke the shared process Runtime or clear group helper/source ledgers: other
+    /// servers still use them, and external admitted action/input/lower owners must retain their
+    /// actual charges until they drain. A cancelled freeze must not call this terminal method.
+    pub fn retire_voice_actor(&mut self) {
+        drop(self.voice_runtime.take());
+    }
     pub(super) fn voice_transport_actor(&self) -> Result<&ActorOwner, VoiceError> {
         self.voice_runtime
             .as_ref()
