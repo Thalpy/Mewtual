@@ -96,7 +96,7 @@
   import {
     completedDownload, downloadSavedNotice, guideSavedNotice, saveGroupFile, resumeGroupFile, saveSpaceGuide,
   } from "./native-download";
-  import { acceptSaveProgress, checkedPrivateDownloads, privateDownloadLabel, type PrivateDownload } from "./private-downloads";
+  import { acceptSaveProgress, checkedPrivateDownloads, privateDownloadActions, privateDownloadChatSave, privateDownloadDetail, privateDownloadOffers, type PrivateDownload, type PrivateDownloadActionKind } from "./private-downloads";
   import {
     newVaultSecretError, vaultSecretChangeNotice, type VaultSecretChangeResult,
   } from "./vault-secret-change";
@@ -12034,7 +12034,8 @@
     if (saveInProgress(f.cid)) return;
     const existing = privateDownloads.find(row => row.cid === f.cid);
     if (existing) {
-      if (existing.status === "exhausted") { switchView("downloads"); return; }
+      // Running, halted, saved, removing or exhausted rows need an explicit choice in Transfers.
+      if (privateDownloadChatSave(existing) === "transfers") { switchView("downloads"); return; }
       await resumePrivateDownload(existing);
       return;
     }
@@ -12087,9 +12088,9 @@
     }
   }
 
-  async function resumePrivateDownload(row: PrivateDownload) {
+  async function resumePrivateDownload(row: PrivateDownload, fresh = false) {
     const server = activeServerId, gen = viewGeneration;
-    if (server === null || locked || privateDownloadBusy || privateDownloadSaves[row.id] || saveInProgress(row.cid) || row.status === "receiving" || row.status === "removing") return;
+    if (server === null || locked || privateDownloadBusy || privateDownloadSaves[row.id] || saveInProgress(row.cid) || !privateDownloadOffers(row, fresh ? "fresh" : "resume")) return;
     const mutation = Symbol("private download");
     error = "";
     privateDownloadBusy = mutation;
@@ -12113,7 +12114,7 @@
       // Acquisition may wait for a member. Keep Pause/Remove available during that wait;
       // this separate token blocks only a duplicate Save of this same native owner.
       if (privateDownloadBusy === mutation) privateDownloadBusy = null;
-      const saved = await resumeGroupFile(invoke, server, row.cid, name, row.id, row.intent, operation);
+      const saved = await resumeGroupFile(invoke, server, row.cid, name, row.id, row.intent, operation, fresh);
       if (!unlockedViewCurrent(gen, server)) return;
       if (downloads[key]?.operation === operation) Object.assign(downloads[key], completedDownload(downloads[key], saved, Date.now()));
       const notice = downloadSavedNotice(name, saved);
@@ -12131,20 +12132,28 @@
       if (unlockedViewCurrent(gen, server)) await refreshFiles();
     }
   }
-  async function changePrivateDownload(row: PrivateDownload, remove: boolean) {
+  async function changePrivateDownload(row: PrivateDownload, remove: boolean, keepPartial = false) {
     const server = activeServerId, gen = viewGeneration;
     if (server === null || locked || privateDownloadBusy) return;
     const mutation = Symbol("private download intent");
     privateDownloadBusy = mutation;
     fileInventoryGate.invalidate();
     try {
-      if (remove) await invoke("cancel_private_download", { server, download: row.id });
+      // Remove deletes encrypted progress and only a partly saved file native proves it created;
+      // keepPartial releases the record and leaves that file in place.
+      if (remove) await invoke("cancel_private_download", { server, download: row.id, ...(keepPartial ? { keepPartial: true } : {}) });
       else await invoke("set_private_download_paused", { server, download: row.id, expectedIntent: row.intent, paused: true });
     } catch (e) { if (unlockedViewCurrent(gen, server)) error = String(e); }
     finally {
       if (privateDownloadBusy === mutation) privateDownloadBusy = null;
       if (unlockedViewCurrent(gen, server)) await refreshFiles();
     }
+  }
+  function runPrivateDownloadAction(row: PrivateDownload, kind: PrivateDownloadActionKind) {
+    if (kind === "resume") return resumePrivateDownload(row);
+    if (kind === "fresh") return resumePrivateDownload(row, true);
+    if (kind === "pause") return changePrivateDownload(row, false);
+    return changePrivateDownload(row, true, kind === "keep");
   }
 
   // The file info pane: click a file to inspect it (preview, availability, uploader, delete).
@@ -28189,17 +28198,18 @@
             {#if privateDownloadError}<p class="muted" role="status">{privateDownloadError}</p>{/if}
             {#if privateDownloads.length}
               <h3>Saved download progress</h3>
-              <p class="muted small">If a save was interrupted, check Downloads before saving again. Saving again creates another copy.</p>
+              <p class="muted small">Resume continues a partly saved file only if it is still the file Mewtual created. Save new copy starts a separate file. Remove deletes saved progress and a partly saved file Mewtual created.</p>
               <ul class="dl-list">
                 {#each privateDownloads as saved (saved.id)}
                   <li class="dl-item">
                     <b>{filesByCid.get(saved.cid)?.name ?? `File ${saved.cid.slice(0, 12)}`}</b>
-                    <span>{privateDownloadLabel(saved)} · {saved.verifiedChunks}/{saved.totalChunks} chunks</span>
+                    <span>{privateDownloadDetail(saved)}</span>
                     <div>
-                      <button disabled={!!privateDownloadBusy || !!privateDownloadSaves[saved.id] || saveInProgress(saved.cid) || saved.status === "receiving" || saved.status === "removing"}
-                        onclick={() => resumePrivateDownload(saved)}>{saved.status === "exhausted" ? "Retry download" : saved.status === "ready" ? "Save to Downloads" : "Resume download"}</button>
-                      {#if saved.status === "receiving"}<button disabled={!!privateDownloadBusy} onclick={() => changePrivateDownload(saved, false)}>Pause</button>{/if}
-                      <button class="ghost" disabled={!!privateDownloadBusy} onclick={() => changePrivateDownload(saved, true)}>Remove progress</button>
+                      {#each privateDownloadActions(saved) as action (action.kind)}
+                        <button class={action.ghost ? "ghost" : undefined}
+                          disabled={!!privateDownloadBusy || (action.needsIdle && (!!privateDownloadSaves[saved.id] || saveInProgress(saved.cid)))}
+                          onclick={() => runPrivateDownloadAction(saved, action.kind)}>{action.label}</button>
+                      {/each}
                     </div>
                   </li>
                 {/each}

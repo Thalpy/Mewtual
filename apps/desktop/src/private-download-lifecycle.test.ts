@@ -3,14 +3,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { saveGroupFile, resumeGroupFile, completedDownload, downloadSavedNotice } from "./native-download.ts";
-import { acceptSaveProgress } from "./private-downloads.ts";
+import { acceptSaveProgress, privateDownloadChatSave, privateDownloadOffers } from "./private-downloads.ts";
 
 // Execute the real App handlers and real progress listener across held native replies. This
 // catches races that pure status-label tests cannot see without compiling another fake app.
 const source = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
 const script = source.slice(source.indexOf(">", source.indexOf("<script")) + 1, source.indexOf("</script>"));
 const tree = ts.createSourceFile("App.ts", script, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
-const names = new Set(["downloadFile", "resumePrivateDownload", "changePrivateDownload", "saveInProgress"]);
+const names = new Set(["downloadFile", "resumePrivateDownload", "changePrivateDownload", "runPrivateDownloadAction", "saveInProgress"]);
 const handlers = tree.statements.filter(n => ts.isFunctionDeclaration(n) && n.name && names.has(n.name.text));
 assert.equal(handlers.length, names.size);
 let progress: ts.ArrowFunction | undefined;
@@ -25,24 +25,26 @@ visit(tree); assert.ok(progress);
 const production = ts.transpileModule(handlers.map(n => n.getFullText(tree)).join("\n") +
   `\nfunction applyProgress(e) ${progress.body.getText(tree)}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 const file = { cid: "c".repeat(64), name: "cat.bin", author: "cat", held: 0, total: 2, size: 100 };
-const saved = { id: "d".repeat(64), cid: file.cid, intent: "3", grant: "1", status: "incomplete", verifiedChunks: 1, totalChunks: 2 };
+const saved = { id: "d".repeat(64), cid: file.cid, intent: "3", grant: "1", status: "incomplete", verifiedChunks: 1, savedChunks: 0, totalChunks: 2 };
 const result = { path: "/Downloads/cat.bin", displayed: true };
 function deferred() { let resolve!: (value: unknown) => void, reject!: (error: unknown) => void; const promise = new Promise((yes,no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 function fixture() {
-  return new Function("saveGroupFile", "resumeGroupFile", "completedDownload", "downloadSavedNotice", "acceptSaveProgress", "file", `
+  return new Function("saveGroupFile", "resumeGroupFile", "completedDownload", "downloadSavedNotice", "acceptSaveProgress",
+    "privateDownloadChatSave", "privateDownloadOffers", "file", `
     let activeServerId = 1, viewGeneration = 2, locked = false, error = "", privateDownloadBusy = null;
     let privateDownloads = [], privateDownloadSaves = {}, downloads = {}, activeSaves = {}, uuid = 0, refreshes = 0;
-    const calls = [], notices = [], replies = new Map(), filesByCid = new Map([[file.cid, file]]);
+    const calls = [], notices = [], views = [], replies = new Map(), filesByCid = new Map([[file.cid, file]]);
     const crypto = { randomUUID: () => "op-" + (++uuid) }, fileInventoryGate = { invalidate() {} };
     const dlKey = (server,cid) => server + ":" + cid;
     const unlockedViewCurrent = (gen,server) => !locked && gen === viewGeneration && server === activeServerId;
     const invoke = async (command,args) => { calls.push([command,args]); return await (replies.get(command) ?? ${JSON.stringify(result)}); };
     const refreshFiles = async () => { refreshes++; privateDownloads = []; };
-    const toast = (...args) => notices.push(args), switchView = () => {};
+    const toast = (...args) => notices.push(args), switchView = (view) => views.push(view);
     const jukeTakeProgressLease = null, activeCallLease = null, inCall = false, callServer = null, jukeKind = "", jukeNow = null;
     const shouldApplyJamTakeProgress = () => false, sampleRate = () => 0, onlineCount = 2;
     ${production}
-    return { calls, replies, notices, start: downloadFile, resume: resumePrivateDownload, pause: row => changePrivateDownload(row,false),
+    return { calls, replies, notices, views, start: downloadFile, resume: resumePrivateDownload, pause: row => changePrivateDownload(row,false),
+      act: runPrivateDownloadAction,
       rows(value) { privateDownloads = value; },
       lock() { locked = true; viewGeneration++; },
       unlock() { locked = false; viewGeneration++; },
@@ -50,7 +52,8 @@ function fixture() {
       progress(operation) { applyProgress({ payload: { server: 1, cid: file.cid, cancellation: operation, done: 2, total: 2,
         bytes_done: 100, bytes_total: 100, network_bytes_done: 0, provider: null } }); },
       state: () => ({ error, refreshes, downloads, activeSaves, busy: privateDownloadBusy, saves: privateDownloadSaves }) };
-  `)(saveGroupFile, resumeGroupFile, completedDownload, downloadSavedNotice, acceptSaveProgress, file);
+  `)(saveGroupFile, resumeGroupFile, completedDownload, downloadSavedNotice, acceptSaveProgress,
+    privateDownloadChatSave, privateDownloadOffers, file);
 }
 test("resumed save settles its exact row and late/preview progress cannot revive it", async () => {
   const app = fixture(), held = deferred(); app.replies.set("save_group_file", held.promise);
@@ -98,4 +101,32 @@ test("server ABA retires only the old busy owner on success and failure without 
     assert.equal(app.calls.filter(([name]: [string]) => name === "save_group_file").length, 2);
     assert.equal(Object.values(app.state().downloads)[0].status, "done");
   }
+});
+test("Save new copy sends freshCopy with the exact revision and Keep partly saved file sends keepPartial", async () => {
+  const app = fixture();
+  await app.act({ ...saved, status: "destination-changed" }, "fresh");
+  const [name, args] = app.calls[0];
+  assert.equal(name, "save_group_file");
+  assert.equal(args.freshCopy, true);
+  assert.equal(args.resume, saved.id);
+  assert.equal(args.expectedIntent, "3");
+  await app.act({ ...saved, status: "destination-changed" }, "resume"); // not offered: no call
+  assert.equal(app.calls.length, 1);
+  await app.act({ ...saved, status: "removing" }, "keep");
+  assert.deepEqual(app.calls[1], ["cancel_private_download", { server: 1, download: saved.id, keepPartial: true }]);
+  await app.act({ ...saved, status: "saved" }, "remove");
+  assert.deepEqual(app.calls[2], ["cancel_private_download", { server: 1, download: saved.id }]);
+});
+test("saving a halted, saved or running file from the list opens Transfers instead of acting", async () => {
+  for (const status of ["destination-changed", "destination-unavailable", "saved", "removing", "exhausted", "saving", "receiving"]) {
+    const app = fixture(); app.rows([{ ...saved, status }]);
+    await app.start(file);
+    assert.equal(app.calls.length, 0, status);
+    assert.deepEqual(app.views, ["downloads"], status);
+  }
+  const app = fixture(); app.rows([{ ...saved, status: "save-interrupted" }]);
+  await app.start(file);
+  assert.equal(app.calls[0][0], "save_group_file");
+  assert.equal(app.calls[0][1].resume, saved.id);
+  assert.equal(app.calls[0][1].freshCopy, undefined, "continuing never forgets the partial file");
 });

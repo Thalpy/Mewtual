@@ -49,22 +49,26 @@ export async function saveGroupFile(
   server: number,
   cid: string,
   name: string,
-  options?: { resume?: string; expectedIntent?: string; operation?: string },
+  options?: { resume?: string; expectedIntent?: string; operation?: string; freshCopy?: boolean },
 ): Promise<SavedFileResult> {
   return checkedResult(await invoke<unknown>("save_group_file", {
     server, cid, name,
     ...(options?.resume ? { resume: options.resume, expectedIntent: options.expectedIntent } : {}),
+    // Only meaningful with a resume ID: native removes the partly saved file it can prove it
+    // created, forgets that journal under the same intent CAS, then saves a separate file.
+    ...(options?.resume && options.freshCopy ? { freshCopy: true } : {}),
     ...(options?.operation ? { operation: options.operation } : {}),
   }));
 }
 
-/** Explicit resume selects saved encrypted work by ID/revision; native captures a fresh
- * session and destination. A browser path, plaintext offset or new allowance is never sent. */
+/** Explicit resume selects saved encrypted work by ID/revision. Native revalidates the saved
+ * destination (or captures a fresh one for a new copy). A browser path, plaintext offset or new
+ * allowance is never sent. */
 export async function resumeGroupFile(
   invoke: NativeInvoker, server: number, cid: string, name: string,
-  resume: string, expectedIntent: string, operation?: string,
+  resume: string, expectedIntent: string, operation?: string, freshCopy = false,
 ): Promise<SavedFileResult> {
-  return saveGroupFile(invoke, server, cid, name, { resume, expectedIntent, operation });
+  return saveGroupFile(invoke, server, cid, name, { resume, expectedIntent, operation, freshCopy });
 }
 
 export async function saveSpaceGuide(
