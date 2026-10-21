@@ -6,9 +6,18 @@ use catcoms_rt::{CryptoRng, RngCore};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+mod collection;
+
 const POINT: &str = "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5";
 async fn select(f: &Fixture, point: [u8; 65]) -> (String, Arc<SelectedHandoffOwner>) {
     let owner = f.candidate().await;
+    select_candidate(f, owner, point).await
+}
+async fn select_candidate(
+    f: &Fixture,
+    owner: String,
+    point: [u8; 65],
+) -> (String, Arc<SelectedHandoffOwner>) {
     crate::activate_voice_owner_inner(&f.state, owner.clone())
         .await
         .unwrap();
@@ -83,7 +92,10 @@ fn ready(status: Status) -> Arc<SetupOutput> {
 #[test]
 fn fixed_index_and_row_graph_fit_their_separate_real_payments() {
     let arc_words = 2 * std::mem::size_of::<usize>();
-    let index = std::mem::size_of::<Registry>() + std::mem::size_of::<Index>() + arc_words;
+    let index = std::mem::size_of::<Registry>()
+        + std::mem::size_of::<Index>()
+        + arc_words
+        + std::mem::size_of::<[Option<Arc<Row>>; ROWS]>();
     assert!(index <= INDEX_BYTES, "index requires {index}");
     // Include retained row, its Arc, preparation, Session result/projection and a second
     // returned descriptor copy. SelectedHandoffOwner has its separate original paid owner.
@@ -95,8 +107,63 @@ fn fixed_index_and_row_graph_fit_their_separate_real_payments() {
         + arc_words * 2
         + std::mem::size_of::<Arc<Session>>()
         + std::mem::size_of::<Begin>()
-        + std::mem::size_of::<Status>();
+        + std::mem::size_of::<Status>()
+        + std::mem::size_of::<PublicProjection>()
+        + std::mem::size_of::<MetadataProjection>()
+        + std::mem::size_of::<Vec<u8>>() // hard-capped JSON writer
+        + 64 // serializer references and fixed integer-format scratch
+        + std::mem::size_of::<crate::voice_handoff::commands::SetupReply>()
+        + 2048 // fixed hex serialization scratch
+        + crate::voice_handoff::commands::PUBLIC_REPLY_BYTES; // hard-capped JSON allocation
     assert!(row <= ROW_BYTES, "row/output peak requires {row}");
+}
+
+#[tokio::test]
+async fn maximum_public_projection_fits_the_actual_fixed_json_capacity() {
+    let f = Fixture::new().await;
+    let (owner, selected) = select(&f, point()).await;
+    let mut output = ready(
+        ensure(&f.state, &owner, [9; 32], &mut Rng::new())
+            .await
+            .unwrap(),
+    );
+    let projection = f.state.voice_channels.project(&owner, [9; 32]).unwrap();
+    // Serialization-only white-box bound, never a routable protocol fixture. Remove the
+    // registry's public owner before mutating its sole output. Even the full1024-byte buffer,
+    // larger than a canonical transcript, must fit without native String growth.
+    drop(projection.row.state.lock().unwrap().public.take());
+    let public = &mut Arc::get_mut(&mut output).unwrap().public;
+    public.transcript.fill(255);
+    public.length = 1024;
+    let reply = crate::voice_handoff::commands::SetupReply::new(
+        Status::Ready(output.clone()),
+        owner.clone(),
+        hex::encode([9; 32]),
+        65535,
+        projection,
+    )
+    .unwrap();
+    assert!(f.state.voice_channels.project(&owner, [9; 32]).is_err());
+    use tauri::ipc::IpcResponse;
+    let tauri::ipc::InvokeResponseBody::Json(json) = reply.body().unwrap() else {
+        panic!("fixed JSON metadata")
+    };
+    assert_eq!(
+        json.capacity(),
+        crate::voice_handoff::commands::PUBLIC_REPLY_BYTES
+    );
+    assert!(json.len() <= json.capacity());
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&json).unwrap()["transcript"],
+        "ff".repeat(1024)
+    );
+    assert!(
+        f.state.voice_channels.project(&owner, [9; 32]).is_ok(),
+        "projection released at actual framework handoff"
+    );
+    drop(output);
+    drop(selected);
+    f.close().await;
 }
 
 #[tokio::test]

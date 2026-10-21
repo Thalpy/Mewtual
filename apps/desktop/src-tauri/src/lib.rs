@@ -73,8 +73,8 @@ mod studio_exports;
 #[cfg(test)]
 mod voice_activation_tests;
 mod voice_authority;
-// The native pilot is compiled/tested while its listener/commands/live driver remain disabled.
-// Remove this temporary unused-item allowance when that integration owns these private APIs.
+// Status bootstrap is app-owned; action transport/live dispatch remain disabled. Remove the
+// temporary unused-item allowance as the live driver takes ownership of those private APIs.
 #[allow(dead_code)]
 mod voice_handoff;
 mod voice_join_key;
@@ -476,7 +476,7 @@ struct AppState {
     /// The disabled pilot has no command consumer yet; do not clear uncertain rows on End.
     #[allow(dead_code)]
     voice_handoff: Arc<voice_handoff::ledger::Ledger>,
-    /// Immutable local-channel setup/counters outlive an invoke waiter. Disabled pilot only;
+    /// Immutable local-channel setup/counters outlive an invoke waiter. Status bootstrap only;
     /// End/lock cannot clear uncertain setup or install a new session for the original owner.
     #[allow(dead_code)]
     voice_channels: Arc<voice_handoff::bootstrap::Registry>,
@@ -10828,6 +10828,10 @@ async fn prepare_voice_controller(state: State<'_, AppState>) -> Result<String, 
 }
 
 async fn prepare_voice_controller_inner(state: &AppState) -> Result<String, String> {
+    // A last detached IO owner may drain after final-close returned. Reclaim only its proven
+    // dead history BEFORE any new grant/key admission can be blocked by that paid metadata.
+    // This bounded pass is grant-independent and runs outside Coordinator; it refunds no work.
+    state.voice_channels.collect_retired();
     let generation = unlocked_ui_session_generation(state).await?;
     let _commit = require_ui_session_generation(state, generation).await?;
     state
@@ -10850,6 +10854,7 @@ async fn prepare_voice_owner_inner(
     if room_id.to_string() != room {
         return Err("invalid voice room".into());
     }
+    state.voice_channels.collect_retired();
     let generation = unlocked_ui_session_generation(state).await?;
     let (actor, instance, group) = {
         let servers = state.servers.lock().await;
@@ -10898,6 +10903,7 @@ async fn activate_voice_owner_inner(
     state: &AppState,
     candidate: String,
 ) -> Result<VoiceActivation, String> {
+    state.voice_channels.collect_retired();
     // Successful activation consumes its candidate. Resolve the original current installation
     // first, or a lost accepted reply would force a new join/key generation. This is metadata
     // recovery only: never adopt a past grant or skip the actor/UI/native identity checks.
@@ -11036,6 +11042,7 @@ async fn end_voice_owner(state: State<'_, AppState>, owner: String) -> Result<()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .end(&owner);
+    state.voice_channels.collect_retired();
     Ok(())
 }
 
@@ -11046,6 +11053,7 @@ async fn admit_voice_crypto_inner(
     bytes: usize,
 ) -> Result<String, String> {
     let operation = voice_authority::Operation::parse(&operation)?;
+    state.voice_channels.collect_retired();
     let binding = state
         .voice_authority
         .lock()
@@ -17760,12 +17768,22 @@ fn record_ui_log(level: &str, message: String, repeats: u32) -> bool {
 
 /// Build and run the Tauri application.
 pub fn run() {
-    tauri::Builder::default()
+    let state = AppState::default();
+    let mut context = tauri::generate_context!();
+    // Tauri creates configured windows BEFORE calling user setup. Bind the paid socket and
+    // add only its exact numeric-loopback source before build/run, never in a late setup hook.
+    let voice_host = Arc::new(
+        voice_handoff::application::Host::prepare(&state, context.config_mut(), tauri::is_dev())
+            .unwrap_or_else(voice_handoff::application::Host::unavailable),
+    );
+    let exit_voice_host = voice_host.clone();
+    let app = tauri::Builder::default()
         // Update checking lives in Rust so the download and its minisign verification never
         // touch the webview: the frontend only asks "is there one?" and "install it".
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .manage(AppState::default())
+        .manage(state)
+        .manage(voice_host)
         // Shared media plays straight out of the vault instead of crossing the IPC bridge as a
         // base64 string. The handler answers Range requests, so a player starts on the first
         // chunk and a seek costs one chunk, and the bytes never become a JS string at all.
@@ -17821,6 +17839,14 @@ pub fn run() {
                 init_error,
                 dir,
             });
+            if let Err(reason) = app
+                .state::<Arc<voice_handoff::application::Host>>()
+                .start_in_tauri_runtime()
+            {
+                // Fixed native metadata only. No owner, point, transcript or port is logged.
+                // Local handoff failure must not prevent chat/the rest of the app starting.
+                tracing::warn!(?reason, "VOICE.HANDOFF.UNAVAILABLE");
+            }
             spawn_network_monitor(&handle);
             app.manage(voice_authority::CollectionTask::start(&voice_runtime(
                 &app.state::<AppState>(),
@@ -17982,6 +18008,9 @@ pub fn run() {
             voice_join_key::admit_voice_join_key,
             voice_join_key::publish_voice_join_key,
             voice_join_key::settle_voice_join_key,
+            voice_handoff::commands::setup_voice_channel,
+            voice_handoff::commands::settle_voice_channel_setup,
+            voice_handoff::commands::collect_voice_channel,
             default_route_address,
             unmap_call_port,
             get_switchboard_status,
@@ -18046,8 +18075,20 @@ pub fn run() {
             private_downloads::retry_private_download,
             private_downloads::cancel_private_download
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running the Mewtual desktop app");
+        .build(context)
+        .expect("error while building the Mewtual desktop app");
+    app.run(move |_, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            // App::run never returns, and restart also exits directly. The Exit callback runs
+            // before Tauri cleanup/restart. Stop and collect here while IO runtime and logging
+            // still exist. This status worker has no UI/actor dependency that could deadlock
+            // the final event callback; preserve that invariant when adding action transport.
+            match tauri::async_runtime::block_on(exit_voice_host.finish()) {
+                Ok(()) => tracing::info!(target: "catcoms_app", "VOICE.HANDOFF.STOPPED"),
+                Err(reason) => tracing::warn!(?reason, "VOICE.HANDOFF.STOP_FAILED"),
+            }
+        }
+    });
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-//! Internal status-only local handoff IO. Nothing starts this service in the application.
+//! Status-only local handoff IO, owned by the application host when supported.
 //! A confirmed channel is not a call grant, room proof, action admission or browser-drain proof.
 use super::bootstrap::{Registry, Route};
 use super::channel::{BodyKind, CompletedReply, Incoming};
@@ -44,7 +44,7 @@ impl Origin {
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Refused {
+pub(crate) enum Refused {
     Capacity,
     Binding,
     Io,
@@ -139,6 +139,8 @@ fn worker_layout<F>(future: &F) -> usize {
         + std::mem::size_of::<BoundServer>()
         + std::mem::size_of::<RunningServer>()
         + std::mem::size_of::<Completion>()
+        + std::mem::size_of::<super::application::Host>()
+        + 2 * std::mem::size_of::<usize>() // managed Host's Arc control block
         + TASK_AND_HANDLE_BYTES
 }
 
@@ -163,6 +165,11 @@ pub(super) struct RunningServer {
     phase: Arc<std::sync::atomic::AtomicU8>,
 }
 impl RunningServer {
+    pub(super) fn is_finished(&self) -> bool {
+        self.task
+            .as_ref()
+            .is_none_or(tokio::task::JoinHandle::is_finished)
+    }
     pub(super) fn stop(&mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());

@@ -9,6 +9,7 @@ import {
   decodeVoiceIpcAdmission, encodeVoiceIpcAdmission,
   voiceIpcNonce, voiceIpcResponseAad, type VoiceIpcHeader,
 } from "./voice-ipc-frame.ts";
+import { windowVoiceIpcNative } from "./voice-ipc-native.ts";
 
 const real = webcrypto.subtle as unknown as SubtleCrypto;
 const utf8 = new TextEncoder();
@@ -25,6 +26,7 @@ const integer = (n: bigint, size: number) => Buffer.from(n.toString(16).padStart
 async function fixture(t: TestContext) {
   let ordinary = 0, setups = 0, settlements = 0, loseSetup = false, loseSettle = false;
   let setupClosed = false, published: Uint8Array | null = null, executor = "";
+  let collections = 0, loseCollection = false;
   let tamperSetup = false, badBody = false, failEncrypt = false;
   let forceSequence: bigint | null = null, nativeSequence = 0n;
   const requestSequences: bigint[] = [], engineSteps: string[] = [];
@@ -96,6 +98,11 @@ async function fixture(t: TestContext) {
       settlements++; assert.equal(value, owner.token); assert.equal(execution, executor); setupClosed = true;
       if (loseSettle) { loseSettle = false; throw new Error("settlement reply lost"); }
     },
+    async collectChannel(value, execution) {
+      collections++; assert.equal(value, owner.token); assert.equal(execution, executor);
+      assert.equal(setupClosed, true, "final collection follows exact setup closure");
+      if (loseCollection) { loseCollection = false; throw new Error("collection reply lost"); }
+    },
   };
   const transport: typeof fetch = async (input, init) => {
     assert.equal(input, "http://127.0.0.1:43210/voice/v2");
@@ -146,10 +153,11 @@ async function fixture(t: TestContext) {
   return {
     owner, broker, native, transport, key: selected.key, admission,
     channel() { return broker.nativeChannel(owner, selected.key, native, transport); },
-    counts: () => ({ ordinary, setups, settlements, steps: [...engineSteps], tx: [...requestSequences], reads: bodyReads.length }),
+    counts: () => ({ ordinary, setups, settlements, collections, steps: [...engineSteps], tx: [...requestSequences], reads: bodyReads.length }),
     hold(index: number) { holdAt = index; held = gate(); return { release: held.release, entered: () => observedStep === index }; },
     loseSetup() { loseSetup = true; }, loseSettle() { loseSettle = true; }, tamperSetup() { tamperSetup = true; },
     closeBeforeSetup() { setupClosed = true; },
+    loseCollection() { loseCollection = true; },
     failEncrypt() { failEncrypt = true; }, badBody(value = true) { badBody = value; }, forceSequence(value: bigint | null) { forceSequence = value; },
     stallBody() { stalled = true; cancelGate = gate(); return { entered: () => cancelEntered, release: cancelGate.release }; },
     hostileHeaders() { hostileHeaders = true; },
@@ -171,6 +179,32 @@ test("retained channel derives from actual selected key once, coalesces and adva
   assert.equal(f.channel(), channel, "close history cannot reconstruct a Session for this selection");
 });
 
+test("production native adapter remount and lost setup reply retain one selected channel and original counters", async t => {
+  const f = await fixture(t), host = {};
+  const invoke = async <T>(command: string, args: Record<string, unknown>): Promise<T> => {
+    assert.deepEqual(Object.keys(args).sort(), ["executor", "owner"]);
+    const owner = args.owner as string, executor = args.executor as string;
+    if (command === "setup_voice_channel") return await f.native.setup(owner, executor) as T;
+    if (command === "settle_voice_channel_setup") return await f.native.settleSetup(owner, executor) as T;
+    if (command === "collect_voice_channel") return await f.native.collectChannel(owner, executor) as T;
+    throw new Error("unexpected native command");
+  };
+  const native = windowVoiceIpcNative(invoke, host);
+  const channel = f.broker.nativeChannel(f.owner, f.key, native, f.transport);
+  f.loseSetup(); assert.equal((await channel.status()).kind, "uncertain");
+  assert.deepEqual(f.counts().steps, []);
+  const remounted = await import("./voice-ipc-native.ts?remount=session");
+  const retained = remounted.windowVoiceIpcNative(invoke, host);
+  assert.equal(retained, native);
+  assert.equal(f.broker.nativeChannel(f.owner, f.key, retained, f.transport), channel);
+  assert.equal((await channel.status()).kind, "ready");
+  assert.equal((await channel.status()).kind, "ready");
+  assert.deepEqual(f.counts().tx, [1n, 2n]);
+  assert.equal(f.counts().setups, 2);
+  await channel.close();
+  assert.equal(f.counts().settlements, 1); assert.equal(f.counts().collections, 1);
+});
+
 test("lost public setup reply retries the original identity before any browser computation", async t => {
   const f = await fixture(t); f.loseSetup(); const channel = f.channel();
   assert.equal((await channel.status()).kind, "uncertain"); assert.deepEqual(f.counts().steps, []);
@@ -183,6 +217,7 @@ test("End before first status drains proven-unstarted custody without settling a
   f.owner.retire(); await channel.close();
   await until(() => f.broker.counts().active === 0);
   assert.equal(f.counts().setups, 0); assert.equal(f.counts().settlements, 0);
+  assert.equal(f.counts().collections, 0);
   assert.deepEqual(f.counts().steps, []); assert.equal(f.broker.counts().bytes, 0);
 });
 
@@ -256,6 +291,17 @@ test("lost cleanup reply retains position and funding until availability wake, w
   assert.equal(f.counts().steps.length, steps); assert.equal(f.counts().settlements, 2);
 });
 
+test("lost final collection reply retains original custody and retries only that exact final operation", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status(); f.loseCollection();
+  const before = f.broker.counts().bytes, steps = f.counts().steps.length;
+  let done = false; const closed = channel.close().then(() => { done = true; });
+  await until(() => f.counts().collections === 1); await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(done, false); assert.equal(f.broker.counts().active, 1); assert.equal(f.broker.counts().bytes, before);
+  f.broker.retrySelectedJoinKeys(); await closed;
+  assert.equal(f.counts().collections, 2); assert.equal(f.counts().settlements, 1);
+  assert.equal(f.counts().steps.length, steps, "lost final reply never re-derives, seals or reopens");
+});
+
 test("occupied browser positions reject channel before native setup, then the original handle can proceed", async t => {
   const f = await fixture(t), hold = gate();
   let started = 0;
@@ -283,8 +329,8 @@ test("absolute IO deadline aborts stale-port fetch but retains custody until act
   assert.equal((await channel.status()).kind, "ready"); assert.deepEqual(f.counts().tx, [2n]);
 });
 
-test("HMR refuses v7 retained pool rather than creating a second channel allocator", () => {
-  const host = { [Symbol.for("mewtual.voice.crypto-broker.v2")]: { version: 7 } };
+for (const version of [7, 8]) test(`HMR refuses v${version} retained pool rather than creating a second channel allocator`, () => {
+  const host = { [Symbol.for("mewtual.voice.crypto-broker.v2")]: { version } };
   const native = { async admit() { return ""; }, async settle() {}, async commitInbound() {} };
   assert.throws(() => windowVoiceCryptoBroker(native, host, real), /reload required/);
 });

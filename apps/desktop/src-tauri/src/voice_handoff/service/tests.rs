@@ -980,3 +980,47 @@ async fn fixed_runner_future_and_output_fit_the_prepaid_infrastructure_peak() {
         "native status peak needs {peak}"
     );
 }
+
+#[tokio::test]
+async fn completed_reply_without_a_row_reference_keeps_native_control_paid_through_final_close() {
+    use crate::voice_handoff::bootstrap::collect_channel;
+    use crate::voice_handoff::channel::{BOOTSTRAP_BYTES, BROWSER_CONTROL_BYTES, CONTROL_BYTES};
+    let (f, owner, output, runtime, client) = setup().await;
+    let route = f.state.voice_channels.route(client.slot).unwrap();
+    let session = Arc::downgrade(route.session());
+    let (_, admission, body) = client.status(1);
+    let submitted = wire(41891, &admission, &body);
+    let mut worker = route.session().header().unwrap();
+    worker.scratch_mut()[..submitted.len()].copy_from_slice(&submitted);
+    worker.set_filled(submitted.len()).unwrap();
+    let mut incoming = worker
+        .admit_status(41891, Origin::PackagedHttp.value(), client.session)
+        .unwrap();
+    assert_eq!(incoming.open().unwrap(), client.plain());
+    let mut prepared = incoming.reply(BodyKind::Control, 3, None).unwrap();
+    prepared.plain_mut().copy_from_slice(&route.snapshot());
+    let completed = prepared.seal().unwrap();
+    drop(route); // CompletedReply directly owns Session, not Row.
+    f.state.voice_authority.lock().unwrap().end(&owner);
+    collect_channel(&f.state, &owner, [9; 32]).await.unwrap();
+    assert!(f.state.voice_channels.route(client.slot).is_err());
+    assert_eq!(session.strong_count(), 1);
+    assert_eq!(runtime.resources().counts().1, 1);
+    assert_eq!(completed.body().len(), 19);
+    let paid = runtime.resources().counts().0;
+    drop(completed);
+    assert_eq!(session.strong_count(), 0);
+    assert_eq!(
+        runtime.resources().counts(),
+        (
+            paid - CONTROL_BYTES - BOOTSTRAP_BYTES - BROWSER_CONTROL_BYTES,
+            0
+        )
+    );
+    drop(output);
+    collect_channel(&f.state, &owner, [9; 32]).await.unwrap();
+    let collected = runtime.resources().counts();
+    collect_channel(&f.state, &owner, [9; 32]).await.unwrap();
+    assert_eq!(runtime.resources().counts(), collected);
+    f.close().await;
+}

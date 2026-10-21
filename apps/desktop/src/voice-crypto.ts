@@ -186,6 +186,10 @@ export type VoiceIpcSetupReply =
 export interface VoiceIpcNative {
   setup(owner: string, executor: string): Promise<VoiceIpcSetupReply>;
   settleSetup(owner: string, executor: string): Promise<void>;
+  /** Exact final closure AFTER every real SDK/IO/cancel operation and local buffer disposal.
+   * Native detaches its Session only after fencing new routing; live native replies retain
+   * their original capacity until their actual last owner drains. Reply loss is retryable. */
+  collectChannel(owner: string, executor: string): Promise<void>;
 }
 export type VoiceIpcStatus = Readonly<{ kind: "ready" | "closed"; nativeSetupDrained: boolean }> |
   Readonly<{ kind: "uncertain" | "retired" | "failed" }>;
@@ -325,7 +329,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 8;
+  readonly version = 9;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -1449,7 +1453,16 @@ class RetainedIpcChannel {
     this.keys = null; this.construction = null;
     this.hash?.fill(0); this.hash = null;
     this.bootstrap?.transcript.fill(0); this.bootstrap?.nativePoint.fill(0); this.bootstrap = null;
-    this.port = 0; this.drained = true;
+    this.port = 0;
+    while (this.attempted) {
+      const observed = this.wakeIdentity;
+      try { await this.native.collectChannel(this.selected.owner.token, this.selected.executor); break; }
+      catch {
+        this.request?.resolve(Object.freeze({ kind: "uncertain" })); this.request = null;
+        if (this.wakeIdentity === observed) { this.retry = signal<void>(); await this.retry.promise; this.retry = null; }
+      }
+    }
+    this.drained = true;
     this.custody.setupDrained(); this.custody.closed(); this.completion.resolve();
   }
 }
@@ -1466,7 +1479,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 8 || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 9 || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");
