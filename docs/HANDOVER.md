@@ -1,5 +1,34 @@
 # Mewtual; Handover
 
+## Current native activation retry work (21 October, Rust validation pending)
+
+Active next checkout is `target/communication-activation-recovery-worktree`, based on `319db214`.
+The frozen pair checkpoint's root suite is still running separately in session14577. Do not
+start another Cargo build or edit its sources. No new Rust test result is claimed here.
+
+Accepted activation now recovers the original current controller/call before consumed-candidate
+lookup. Its original controller allocation, actor grant/child, UI generation and server entry
+are checked after actual actor/commit waits. Concurrent early misses repeat lookup before RNG;
+accepted retries do not retire an active call, create a nonce/grant or advance revision/expiry.
+End, lock/unlock, actor stop and replacement cannot recover a historical activation. Refused
+fresh admission leaves its borrowed affine grant with the bridge until native guards leave.
+
+Thirteen new Rust regressions are authored, not yet compiled: five synthetic Coordinator identity/
+custody cases and eight native cases, including actual actor/bridge barriers and generation
+registration before delayed voice revocation. Static read-only review/re-review
+has no remaining blocker/high/medium after correcting consume-on-refusal cleanup. Dedicated
+actual room/policy closure remains a coverage follow-up; actor-stop evidence does not establish
+that case. Full frontend passes2,268 (68.38s), native command-security9 pass (22.16s). No
+generic crypto/broker contract, command registration, listener, CSP, wire or persistence changed.
+
+After Rust focused/full validation, publish the cumulative reviewed checkpoint and exact evidence
+to PR48. Published head is still `c1532331`. Exact key-generation admission, action registration/
+IPC copies, result/ACK/settlement drainage, authorized SDP phase transfer, normal V2/RTC and legacy
+isolation, media relay and combined/physical acceptance remain open. Only one desktop exists.
+The bounded encrypted loopback channel is the preferred transport candidate for a later disabled
+pilot; browser/bootstrap copy retirement and other platforms are still unproved. Do not enable
+a listener/CSP or stack the existing96KiB confirmation and224KiB SDP reserves on that basis.
+
 ## Active production pair continuation (21 October, focused Root checks passed)
 
 Current next checkout: communication-pair-origin-worktree, based on local actor commit 7e19b948.

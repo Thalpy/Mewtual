@@ -1,5 +1,17 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Accepted native voice activation retries (21 October, validation pending)
+
+`activate_voice_owner(candidate)` can recover that exact currently installed controller or call
+after a lost accepted reply. It returns the original owner/group/join metadata; it creates no
+new nonce, key, lease or protocol authority. Recovery checks actual retained controller/grant
+allocations, the original UI generation and server incarnation after actor/commit waits. It
+does not recover Ended, locked, replaced or otherwise revoked installations. A controller retry
+preserves its current call. Concurrent duplicates share the first accepted installation; they
+cannot replay activation side effects. Pending candidates keep their existing TTL/CAS refusal.
+Native admission borrows its temporary grant and consumes it only on success; all refusal and
+duplicate-recovery cleanup occurs after Coordinator/UI guards. Normal V2/RTC remains disabled.
+
 ## Native protected pair factory (21 October, full gates pending)
 
 Root::prepare_voice_pair(&Arc<CallGrant>, PairSelector) and its typed ServerActor wrapper accept

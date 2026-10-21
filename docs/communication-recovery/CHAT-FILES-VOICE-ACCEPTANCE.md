@@ -1,5 +1,26 @@
 # Chat, files and voice implementation evidence
 
+## Current accepted-activation retry correction (21 October, Rust checks pending)
+
+In communication-activation-recovery-worktree on319db214, accepted native controller/call
+activation now recovers exact current metadata before consumed-candidate lookup. The final
+native fence checks original allocations/lease/controller, UI generation and server incarnation.
+Concurrent duplicate misses recover before RNG. Refused fresh activation leaves temporary grant
+cleanup outside Coordinator/UI guards; it cannot revoke an existing owner. No new allowance,
+registry, serialized command, listener/CSP, wire/persistence format or live V2 is introduced.
+
+Thirteen new Rust tests are authored but NOT compiled/run: five Coordinator tests distinguish
+synthetic grant provenance; seven native tests use actual actor queries and held UI commit
+barriers for accepted reply loss, concurrent early misses, End, entry replacement, pending-End,
+actual actor-stop and lock/unlock. One additional native test isolates actual lock registration
+while original child recognition is still live, proving generation refusal before its delayed
+voice revocation hook. Dedicated actual room/policy closure remains a test follow-up.
+Read-only static review/re-review has no remaining blocker/high/medium after the borrowed-grant
+correction. Standalone native rustfmt, full frontend2,268 (68.38s) and native command-security9
+(22.16s) pass. The later pure final-generation repeat remains queued for Rust validation. Complete Rust/native
+checks are pending behind the frozen319db214 root suite, session14577; no duplicate Cargo run.
+Current PR48 head remainsc1532331. No physical or live RTC acceptance is claimed.
+
 ## Native pair continuation (21 October, focused Root checks passed; full gates pending)
 
 Next source is communication-pair-origin-worktree based on 7e19b948. New Root/Actor pair factory,

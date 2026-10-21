@@ -133,6 +133,26 @@ pub(crate) struct Owner {
     _grant: Arc<CallGrant>,
 }
 
+/// A metadata-only snapshot of one accepted activation. Keeping the original parent and actor
+/// grant distinguishes a retry from an equal-scope replacement. The bridge rechecks this exact
+/// snapshot after its actor query and UI commit wait; it cannot reactivate a historical owner.
+#[derive(Clone)]
+pub(crate) struct AcceptedActivation {
+    id: String,
+    controller: String,
+    generation: u64,
+    parent: CallLease,
+    owner: Option<Owner>,
+}
+impl AcceptedActivation {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub fn owner(&self) -> Option<&Owner> {
+        self.owner.as_ref()
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Operation {
     Generate,
@@ -255,14 +275,73 @@ impl Coordinator {
             .filter(|candidate| candidate.expires > now)
             .map(|candidate| candidate.kind.clone())
     }
+    /// Recover only a currently installed activation, before looking for its consumed candidate.
+    /// Candidate expiry does not expire an accepted call, and a lost reply must not allocate a
+    /// second join nonce or actor grant. This creates no registry, serial, revision or new lease.
+    pub fn accepted_activation(&self, id: &str) -> Option<AcceptedActivation> {
+        let controller = self.controller.as_ref().filter(|c| c.lease.is_live())?;
+        let owner = if id == controller.id {
+            None
+        } else {
+            let owner = self.owner(id)?;
+            if owner.binding.generation != controller.generation {
+                return None;
+            }
+            Some(owner)
+        };
+        Some(AcceptedActivation {
+            id: id.into(),
+            controller: controller.id.clone(),
+            generation: controller.generation,
+            parent: controller.lease.clone(),
+            owner,
+        })
+    }
+    /// Final native identity fence, after every asynchronous snapshot/commit wait. Equal scopes
+    /// and live-looking renderer IDs cannot substitute for the original controller/actor owners.
+    /// A receipt is metadata only; later protocol work still validates the actual CallGrant.
+    pub fn validate_accepted_activation(
+        &self,
+        accepted: &AcceptedActivation,
+    ) -> Result<(), String> {
+        let controller = self
+            .controller
+            .as_ref()
+            .filter(|current| {
+                current.id == accepted.controller
+                    && current.generation == accepted.generation
+                    && current.lease.is_live()
+                    && current.lease.is_same(&accepted.parent)
+            })
+            .ok_or("voice controller changed")?;
+        match &accepted.owner {
+            None if accepted.id == controller.id => Ok(()),
+            Some(original) => {
+                let current = self.owner(&accepted.id).ok_or("voice owner changed")?;
+                if current.binding == original.binding
+                    && current.join == original.join
+                    && current.lease.is_same(&original.lease)
+                    && original.lease.is_live()
+                    && Arc::ptr_eq(&current._grant, &original._grant)
+                {
+                    Ok(())
+                } else {
+                    Err("voice owner changed".into())
+                }
+            }
+            None => Err("voice controller changed".into()),
+        }
+    }
     /// CAS activation after the bridge revalidates the exact UI/actor/group/room/policy. Native
     /// supplies a fresh injected-RNG nonce; a failed/stale candidate can never revoke a new call.
+    /// Borrow the pending grant until admission succeeds: refusal must leave its affine cleanup
+    /// to the bridge, after the Coordinator and UI commit guards have both been released.
     pub fn activate(
         &mut self,
         id: &str,
         join: Nonce,
         now: u64,
-        grant: Option<CallGrant>,
+        grant: &mut Option<CallGrant>,
     ) -> Result<(), String> {
         let candidate = self
             .candidates
@@ -301,7 +380,11 @@ impl Coordinator {
                 })
             }
             CandidateKind::Call { binding, .. } => {
-                let grant = Arc::new(grant.expect("call grant checked before retiring owner"));
+                let grant = Arc::new(
+                    grant
+                        .take()
+                        .expect("call grant checked before retiring owner"),
+                );
                 self.owner = Some(Owner {
                     id: id.into(),
                     binding,

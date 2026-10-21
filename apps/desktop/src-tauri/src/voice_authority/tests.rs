@@ -1,5 +1,7 @@
 use super::*;
 
+mod activation;
+
 fn action_coordinator() -> Coordinator {
     Coordinator::with_runtime(Runtime::new(Arc::new(catcoms_rt::ManualClock::new(1000))))
 }
@@ -425,7 +427,7 @@ fn controller(coordinator: &mut Coordinator) -> String {
     let id = coordinator
         .prepare(CandidateKind::Controller(1), 0)
         .unwrap();
-    coordinator.activate(&id, [0; 32], 0, None).unwrap();
+    coordinator.activate(&id, [0; 32], 0, &mut None).unwrap();
     id
 }
 fn call(coordinator: &mut Coordinator, controller: &str, group: u8, instance: u64) -> String {
@@ -440,7 +442,7 @@ fn call(coordinator: &mut Coordinator, controller: &str, group: u8, instance: u6
         .unwrap();
     let grant = CallGrant::from_lease(CallLease::default(), binding(group, instance).scope);
     coordinator
-        .activate(&id, [instance as u8; 32], 0, Some(grant))
+        .activate(&id, [instance as u8; 32], 0, &mut Some(grant))
         .unwrap();
     id
 }
@@ -460,7 +462,7 @@ fn stale_activation_and_end_cannot_retire_a_replacement_call() {
         .unwrap();
     let current = call(&mut c, &controller, 1, 2);
     let lease = c.owner(&current).unwrap().lease;
-    assert!(c.activate(&old_candidate, [1; 32], 0, None).is_err());
+    assert!(c.activate(&old_candidate, [1; 32], 0, &mut None).is_err());
     c.end(&old_candidate);
     assert!(lease.is_live());
     assert!(c.owner(&current).is_some());
@@ -672,7 +674,9 @@ fn candidates_are_bounded_expire_and_never_revoke_until_successful_cas() {
     assert!(c.prepare(CandidateKind::Controller(1), 0).is_err());
     assert!(lease.is_live());
     assert!(c.candidate(&candidates[0], 30_000).is_none());
-    assert!(c.activate(&candidates[0], [0; 32], 30_000, None).is_err());
+    assert!(c
+        .activate(&candidates[0], [0; 32], 30_000, &mut None)
+        .is_err());
     assert!(lease.is_live());
     assert!(c
         .prepare(
@@ -687,7 +691,8 @@ fn candidates_are_bounded_expire_and_never_revoke_until_successful_cas() {
         )
         .is_err());
     let new_controller = c.prepare(CandidateKind::Controller(1), 30_000).unwrap();
-    c.activate(&new_controller, [0; 32], 30_000, None).unwrap();
+    c.activate(&new_controller, [0; 32], 30_000, &mut None)
+        .unwrap();
     assert!(!lease.is_live());
 }
 
@@ -730,7 +735,7 @@ fn activation_requires_exact_live_actor_grant_and_failed_candidates_preserve_cur
                 Some(CallGrant::from_lease(lease.clone(), binding(1, 2).scope))
             }
         };
-        assert!(c.activate(&id, [2; 32], 0, grant).is_err());
+        assert!(c.activate(&id, [2; 32], 0, &mut { grant }).is_err());
         assert!(old.lease.is_live());
         assert!(c.owner(&current).is_some());
         if mode != 0 {

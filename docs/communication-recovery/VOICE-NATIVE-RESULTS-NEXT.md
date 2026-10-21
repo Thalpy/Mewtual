@@ -1,5 +1,48 @@
 # Next voice milestone: native result recovery
 
+## Current bootstrap correction and next disabled transport pilot (21 October)
+
+Accepted-current native activation recovery is isolated in communication-activation-recovery-
+worktree on319db214. It preserves the actual original controller/call allocations, join nonce,
+UI generation and server incarnation after lost replies, and rechecks current identity after
+asynchronous queries/commit waits. Concurrent early misses recover before another nonce. End,
+lock/replacement and revoked actor grants cannot recover historical authority. Temporary fresh
+grants remain with the bridge through all refusal paths and drop after native guards. Thirteen
+Rust regressions are authored but not yet compiled; static re-review and frontend checks pass.
+Exact join-key generation admission and native action/settlement delivery are still separate.
+
+The next transport candidate is the application-owned bounded encrypted loopback channel tested
+in the [packaged experiment](experiments/loopback-ipc/README.md). A response-only Wry hook would
+leave its growing request-body allocation before Tauri/ACL, and would also need Windows/Linux/
+macOS response-owner plumbing. No production listener, CSP change or dependency is selected or
+enabled by this note. Other-platform packaged origin, secure-context/CORS/CSP and private-network
+behavior remain unproved; do not replace exact origin checks with wildcards or security bypasses.
+
+Scope the first disabled pilot to one real native derivation/confirmation transaction. Separate
+physical request sequences from the immutable logical action so a fresh physical retry recovers
+the original output/receipt without another AEAD, nonce or commit. Prepay a measured serial IPC
+loan from the existing confirmation envelope, not a second independent reserve. Cap the complete
+physical flight, including input snapshot, encryption, fetch, reader and cancellation, rather than
+readers alone. Keep native permits through actual worker/result collection and browser custody
+through actual crypto/read/cancellation settlement. Clear/drop application references before
+returning the loan. Bootstrap copies and known outstanding framework queues/copies count too;
+the fixture's finite successful-grant count is not complete bootstrap-copy accounting.
+
+This custody contract covers application-reachable buffers, known framework copies/queues and
+observable outstanding API work. It cannot prove physical deallocation of unreachable SDK/GC
+heap, total WebView/network-service RSS or library zeroization. Those are explicit residual
+risks after observable owners drain, not an indefinitely live application loan. This distinction
+does not excuse a concrete still-owned Wry Vec/COM stream or an unfinished cancellation. Prove
+the maximum application-owned peak and one-at-a-time lane through request/result/settlement loss,
+delayed native preparation, End/remount and a queued next action. Preserve a single settlement
+retry owner and non-reusable drained receipt. Actual native proof of drainage remains required;
+the current Coordinator recognition boolean cannot provide it.
+
+SDP still needs an explicit measured phase transfer after engine/RPC drainage. Existing
+split_retained forbids converting Crypto/Forward/lane credits; do not stack96KiB confirmation
+and224KiB SDP reservations or silently enlarge limits. Live V2/RTC, media relay, combined rollout
+and separate-device audio/network acceptance remain open. Only one physical desktop is available.
+
 ## Production pair continuation (21 October, focused Root checks passed)
 
 communication-pair-origin-worktree now implements the native pair factory and passes 426 focused

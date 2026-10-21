@@ -70,6 +70,8 @@ mod media_worker;
 mod member_reconnect;
 mod private_downloads;
 mod studio_exports;
+#[cfg(test)]
+mod voice_activation_tests;
 mod voice_authority;
 // This broker model has no registered command consumers yet. Retain its contract tests without
 // presenting the unwired implementation as a production pairing boundary.
@@ -10769,6 +10771,13 @@ struct VoiceActivation {
     join: Option<String>,
 }
 
+/// Resolve a consumed activation and a pending candidate under one Coordinator observation.
+/// Otherwise a concurrent winner could consume the candidate between two separate lookups.
+enum VoiceActivationPlan {
+    Accepted(voice_authority::AcceptedActivation),
+    Candidate(voice_authority::CandidateKind),
+}
+
 async fn voice_binding_current(state: &AppState, binding: &voice_authority::Binding) -> bool {
     let servers = state.servers.lock().await;
     !ui_session_closed(state)
@@ -10876,13 +10885,46 @@ async fn activate_voice_owner_inner(
     state: &AppState,
     candidate: String,
 ) -> Result<VoiceActivation, String> {
-    let kind = state
-        .voice_authority
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .candidate(&candidate, SystemClock.monotonic_ms())
-        .ok_or("voice candidate expired")?;
-    let (generation, grant) = match &kind {
+    // Successful activation consumes its candidate. Resolve the original current installation
+    // first, or a lost accepted reply would force a new join/key generation. This is metadata
+    // recovery only: never adopt a past grant or skip the actor/UI/native identity checks.
+    let plan = {
+        let authority = state
+            .voice_authority
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(accepted) = authority.accepted_activation(&candidate) {
+            VoiceActivationPlan::Accepted(accepted)
+        } else {
+            VoiceActivationPlan::Candidate(
+                authority
+                    .candidate(&candidate, SystemClock.monotonic_ms())
+                    .ok_or("voice candidate expired")?,
+            )
+        }
+    };
+    let kind = match plan {
+        VoiceActivationPlan::Accepted(accepted) => {
+            if let Some(owner) = accepted.owner() {
+                check_voice_binding(state, &owner.binding).await?;
+            }
+            let _commit = require_ui_session_generation(state, accepted.generation()).await?;
+            if let Some(owner) = accepted.owner() {
+                if !voice_binding_current(state, &owner.binding).await {
+                    return Err("voice server changed".into());
+                }
+            }
+            let authority = state
+                .voice_authority
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            check_voice_activation_generation(state, accepted.generation())?;
+            authority.validate_accepted_activation(&accepted)?;
+            return Ok(voice_activation_projection(candidate, accepted.owner()));
+        }
+        VoiceActivationPlan::Candidate(kind) => kind,
+    };
+    let (generation, mut grant) = match &kind {
         voice_authority::CandidateKind::Controller(generation) => (*generation, None),
         voice_authority::CandidateKind::Call { binding, .. } => {
             let actor = {
@@ -10911,21 +10953,57 @@ async fn activate_voice_owner_inner(
             return Err("voice server changed".into());
         }
     }
+    // Two duplicate invokes can both observe the candidate before either reaches UI commit.
+    // That guard serializes this tail: recover the winner before sampling RNG or publishing.
+    // The unused temporary affine grant is declared before _commit, so all return/error paths
+    // release Coordinator and UI guards before its destructor revokes the unused actor child.
+    {
+        let authority = state
+            .voice_authority
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        check_voice_activation_generation(state, generation)?;
+        if let Some(accepted) = authority.accepted_activation(&candidate) {
+            authority.validate_accepted_activation(&accepted)?;
+            if accepted.generation() != generation {
+                return Err("voice controller changed".into());
+            }
+            return Ok(voice_activation_projection(candidate, accepted.owner()));
+        }
+    }
     let mut nonce = [0; 32];
     OsCryptoRng.fill_bytes(&mut nonce);
     let mut authority = state
         .voice_authority
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    authority.activate(&candidate, nonce, SystemClock.monotonic_ms(), grant)?;
+    check_voice_activation_generation(state, generation)?;
+    authority.activate(&candidate, nonce, SystemClock.monotonic_ms(), &mut grant)?;
     let owner = authority.owner(&candidate);
-    Ok(VoiceActivation {
-        owner: candidate,
-        group: owner
-            .as_ref()
-            .map(|owner| hex::encode(owner.binding.scope.group)),
-        join: owner.map(|owner| hex::encode(owner.join)),
-    })
+    Ok(voice_activation_projection(candidate, owner.as_ref()))
+}
+
+/// Lock registration publishes a new generation before it can acquire Coordinator. Repeat its
+/// pure atomic fence inside the final native guard, including after nonce generation, so a
+/// delayed revocation hook cannot make an already registered lock look like a current session.
+fn check_voice_activation_generation(state: &AppState, generation: u64) -> Result<(), String> {
+    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::Acquire) != generation
+    {
+        return Err("the UI session changed while the operation was in progress".into());
+    }
+    Ok(())
+}
+
+/// Fixed public activation metadata. This does not return a key, actor grant or RTC authority.
+fn voice_activation_projection(
+    owner: String,
+    accepted: Option<&voice_authority::Owner>,
+) -> VoiceActivation {
+    VoiceActivation {
+        owner,
+        group: accepted.map(|owner| hex::encode(owner.binding.scope.group)),
+        join: accepted.map(|owner| hex::encode(owner.join)),
+    }
 }
 
 #[tauri::command]
