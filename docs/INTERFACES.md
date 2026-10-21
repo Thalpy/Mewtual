@@ -1,5 +1,28 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Disabled native handoff framing candidate (21 October)
+
+The private native codec in voice_handoff/channel and pure browser voice-ipc-frame.ts agree on
+40-byte headers,144 lowercase-hex admission characters, big-endian nonzero u64 sequences and
+the domain `Mewtual native voice handoff v1`. Directional HKDF labels separate header HMAC and
+AES-256-GCM body keys. A response authenticates responseHeader || exactOriginalRequestHeader.
+The local framing format is not a member wire packet or new room/signalling authority.
+
+Requests use operations Input1, Admit2, Result3, ReceiptAck4, Settle5, ClosePhase6, FinalAck7,
+BeginDerive8 and Status9. Only Result requests and Input responses may use Data (up to2064
+cipher bytes). Result requests require Data; all other bodies use Control (up to272 cipher
+bytes). Input responses may instead carry Control. The minimum body is the16-byte AEAD tag.
+Slot is1..64; magic/version/reserved bytes and HTTP Content-Length are exact. Unknown fields,
+classes and noncanonical values refuse before admission. TypeScript sequences remain bigint.
+
+Session owns one physical position from fixed header scratch to completed reply collection.
+Header MAC/class/length and data capacity precede RX/TX debit. Once admitted, either counter
+stays spent on body failure, cancellation or reply loss. Consuming PreparedReply prevents a
+second encryption under its issued response nonce. Actual data owns its original Phase; control
+uses separate paid capacity. The browser codec authenticates nothing and creates no Session.
+Session seed export, bootstrap ownership, actual IO deadlines and actor/browser transfer are
+still unimplemented; no listener/command/CSP/live dispatch is enabled by this candidate.
+
 ## Validated protected native handoff loan (21 October)
 
 CryptoAction::protected_binding returns immutable native-selected metadata, including after

@@ -1,5 +1,60 @@
 # Mewtual; Handover
 
+## Native framed handoff continuation (21 October, in progress)
+
+Published checkpoint is `dbb8d36b` (validated runtime `fef81f48`). New work is isolated in
+target/communication-framed-handoff-worktree; the validated activation worktree stays frozen.
+The current delta is not yet a full-suite-validated or published checkpoint.
+
+The disabled native framing candidate now uses a fresh injected RNG seed, directional HKDF/
+HMAC/AES-GCM, canonical40-byte headers and144-character admission values. One prepaid physical
+position survives body intake, reply sealing and completed-output collection. Capacity refusal
+before admission spends neither counter; admitted truncation, bad bodies and cancellation never
+refund either. Data uses the original Phase; independent control replies can outlive its closure.
+The12KiB control and2KiB bootstrap payments stay inside the existing group/process limits.
+There is no seed-export/bootstrap API, listener, CSP change or active browser Session.
+
+Thirteen actual-native framing tests pass, including correctly MACed malformed headers,
+wrong-pool/group/full-phase refusal, concurrent claims, partial-body drop, completed-output
+custody and counter exhaustion. A pure browser metadata codec adds eight passing tests using
+actual WebCrypto and shared fixed vectors (Control, wide u64 sequences, maximum Result Data,
+maximum Input Data). It has no key/session constructor or counter allocator. The full frontend
+passes2,305 tests, Svelte reports zero errors/warnings, and production build passes36.06s.
+
+The next internal factory consumer resolves the actual selected key/actor, repeats generation
+and Arc identity under final Coordinator, then carries owned UI commit through detached native
+Pair/Derive registration. Pending RowId is metadata only; failed or lost handed-off work retains
+the same counted purpose. A separately paid4KiB worker/output includes a pinned-Tokio task/reply
+allowance and retains its credit through actual output collection. Six actual-native lifecycle
+tests pass (0.78s after4m41s compile). Successful proven-pair Actor registration remains unproved
+while ordinary V2 ingress is disabled. Codec/factory read-only re-review has no remaining findings.
+The reviewer found a test-only readiness wait that could hang on panic; a oneshot now wakes it
+with an error. On that correction the complete Windows native suite passes515 library plus five
+ACL tests (667.92s gate), check/build/startup pass, and all100 focused native voice tests pass.
+Strict native Clippy and formatting pass on the final fixture location and documented local
+lint attributes; no security or runtime behavior was changed to silence lint. All ten rendered
+flows pass with normal Windows access after the sandbox CDP connection failed. Root manifests,
+lockfile, crates, bins and scripts match the frozen3,226-pass checkpoint (621 files compared).
+Do not substitute any of this evidence for a working call or a green hosted revision.
+
+Hosted `dbb8d36b` fails Linux missed-membership acceptance and the native Studio inspection
+mutation gate. Initial fixture dial() only queued work; it did not establish the sealed3->1
+route needed when only those clients later reopen. The corrected admission barrier now requires
+that route, without restoring injected hints, changing deadlines or weakening history/member
+proofs. Timeout observations distinguish saved-route custody, requested/submitted dials and
+actor progress. Both focused chat-matrix scenarios pass on Windows (74.13s tests;146.60s gate).
+Static review confirms the prerequisite gap, but a Linux rerun is still required; it is not
+established as the only cause. The Studio mutation now recognizes the exact original-context
+diagnostic assertion as well as conversion failure, retaining strict failure-count checks and
+byte-for-byte restoration. Corrected mutation and complete native gates are running serially.
+Fresh full Root execution and Docker context acceptance remain pending; the local Docker daemon
+is unavailable. Published Root CI is still running. No complete-programme sign-off is made.
+
+Still open: native/browser bootstrap ownership and actual framed result/ACK/settlement delivery,
+whole-chain native/browser admission, confirmation-to-SDP capacity transfer, epoch replacement,
+SDP/ICE/RTC and legacy-mode isolation, media relay, external destination resume, combined
+acceptance and independent physical audio/network testing. Only one physical desktop is available.
+
 ## Validated protected handoff checkpoint (21 October)
 
 Validated runtime source is `fef81f48`, isolated in

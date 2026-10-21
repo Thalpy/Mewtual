@@ -1,5 +1,47 @@
 # Chat, files and voice implementation evidence
 
+## Framed handoff continuation (21 October, acceptance still open)
+
+Published checkpoint is `dbb8d36b`; this continuation is isolated in
+target/communication-framed-handoff-worktree. The disabled native codec prepays one physical
+position through header/body/reply/completed-output ownership, authenticates canonical metadata
+before body allocation/counter debit, and never refunds admitted failed or lost flights.
+Independent control custody survives data-phase closure. Its13 actual-native regressions and
+eight real-WebCrypto/shared-vector cases pass, including maximum Data and sequences above JS's
+safe integer range. There is no application listener, seed export, browser Session or V2 ingress.
+
+The internal factory consumer resolves the actual selected native key/actor, fences original
+UI generation again under final Coordinator, and retains owned UI commit across detached Pair/
+Derive work. Pending RowId is only metadata. Six native regressions cover definitive refusal,
+capacity before actor work, pending duplicates, canceled callers, lock ordering and completed
+uncollected error ownership. Successful proven-pair Actor registration remains unproved through
+normal disabled ingress. Static review/re-review has no remaining findings in this boundary.
+
+Complete Windows native passes515 library plus five ACL tests (667.92s gate); native check,
+executable build274.05s and actual startup6.20s pass. Final100 focused voice tests, strict native
+Clippy and formatting pass after lint-only attributes and vector relocation. Four strict-lint
+findings were corrected with documented local attributes preserving prepaid inline custody and
+existing command signatures. Frontend passes2,305, Svelte zero errors/warnings, production build
+36.06s and all ten rendered Edge flows pass. The sandbox CDP attempt failed; the unchanged flow
+gate passes with normal Windows access. Root's621 source/manifest/script inputs are identical
+to the frozen3,226-pass checkpoint, but fresh complete Root execution is still pending.
+
+Hosted `dbb8d36b` is not green: Linux native membership recovery fails with both returning peers
+disconnected, and the native Studio mutation gate fails its expected assertion marker. The
+continuation now waits for a real sealed3->1 route at original admission; dial queue admission
+alone was not that prerequisite. It adds bounded sealed-target/current-listener and requested/
+submitted dial observations without injecting restore hints or extending deadlines. Both
+focused Windows chat-matrix cases pass (74.13s tests;146.60s gate). Static tracing confirms the
+fixture gap, not that it is the sole Linux cause. The Studio mutation marker now includes the
+exact diagnostic assertion reached by a recreated context, preserving exact expected errors,
+one intended failing test and byte-for-byte restoration. Corrected mutation/full native gates
+are running; hosted Linux confirmation remains required. The local Docker daemon is unavailable,
+so the new exact public-vector context allowlist and context assertion await actual CI execution.
+
+Native/browser bootstrap, actual framed input/result/ACK/settlement, whole-chain/SDP phase
+transfer, RTC and legacy-mode isolation, live V2, media relay, external destination resume,
+combined rollout and physical audio/network acceptance remain open. Only one desktop is available.
+
 ## Validated handoff prerequisites (21 October)
 
 Validated runtime source is `fef81f48`. Current code passes434 focused Root voice tests, including eight new

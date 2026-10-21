@@ -1,5 +1,19 @@
 # Mewtual; Architecture
 
+## Disabled framed handoff continuation (21 October)
+
+The new native channel codec conserves a single paid physical position across header scratch,
+authenticated body and reply/completed-task custody. Fresh injected RNG creates directional
+keys; no renderer seed can reinstall a native session. Canonical framing and request-bound
+responses are pinned against independent WebCrypto vectors. Pure browser metadata helpers
+provide no keys, counter allocator, channel authentication or effect authority.
+
+Control/setup payments are independent of the original action Phase. This lets fixed terminal
+control replies remain possible after actual data drainage. Session/header authentication is
+local transport authority only; every Root action still needs its actual native selected owner,
+call, actor, member/room/epoch and original deadline. No listener/bootstrap/dispatch is enabled.
+Actual factory registration and the native/browser result protocol remain under integration.
+
 ## Validated protected handoff capacity (21 October)
 
 An actual protected CryptoAction lends one chain-wide HandoffLoan from its existing96KiB

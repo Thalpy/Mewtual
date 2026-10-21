@@ -1,5 +1,21 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Disabled local framing candidate (21 October)
+
+The native candidate authenticates canonical fixed-size headers before body admission. Closed
+direction/operation/body-class rules, exact HTTP length and native slot binding precede variable
+allocation and counter debit. Admitted invalid/truncated bodies and cancellation permanently
+spend both physical counters. A consumed reply owner prevents outgoing nonce reuse; response
+MAC/AEAD bind the exact original request. A single position stays paid through actual output
+collection, independently of caller lifetime. Control replies do not borrow a closed data Phase.
+
+This local MAC does not authenticate a remote member or authorize a Root effect. Pool/group
+identity checks are capacity binding only; registered opaque Actions and current native owners
+remain mandatory. No browser raw-seed Session constructor was introduced: the experiment's
+resettable codec remains fixture-only. Native/browser bootstrap, SDK delivery custody, IO
+deadlines and authenticated browser closure are separate open gates. No listener/CSP/ordinary
+V2 ingress or RTC call has been enabled by the codec.
+
 ## Protected handoff custody prerequisite (21 October)
 
 Waiter loss, End, expiry or engine settlement is not evidence of application-copy drainage.

@@ -1,5 +1,76 @@
 # Next voice milestone: native result recovery
 
+## Current continuation (21 October)
+
+Published checkpoint is `dbb8d36b`. Active uncommitted work is in
+target/communication-framed-handoff-worktree. The native fixed framing codec and pure browser
+metadata counterpart now pass13 actual-native and8 real-WebCrypto tests, including shared
+fixed bidirectional vectors at maximum Data sizes and exact u64 sequences. Full frontend
+passes2,305 tests, Svelte zero errors/warnings and production build36.06s. Codec-only static
+re-review has no remaining findings. Complete Windows native passes515 library plus five ACL
+tests, check/build/startup and strict native Clippy/format pass; all100 focused native voice
+tests pass. Current-delta complete Root and hosted Linux/context gates are not yet established.
+
+The current internal native factory worker wires actual selected-owner/actor registration,
+original UI-generation ordering and separately paid completed-output custody. Its six focused
+actual-native regressions pass (0.78s;4m41s compile); read-only re-review has no remaining
+findings after a test-only panic-wake correction. Full native validation passes on that correction.
+Its pending RowId is not readiness. Positive proven-pair Actor registration is still unproved
+through normal ingress.
+
+Published-head Linux membership recovery and the native Studio mutation gate have since failed.
+The continuation strengthens original admission to wait for the actual sealed3->1 route needed
+by the membership restart topology, adds bounded saved-route/dial observations, and corrects
+the mutation's expected assertion marker without loosening security checks. Focused Windows
+chat-matrix scenarios pass; corrected full/mutation execution and Linux confirmation are pending.
+
+Next connect immutable native/browser bootstrap ownership and actual framed action input,
+result, exact receipt ACK, settlement, browser closure and final delivery collection. Do not
+copy the experiment's resettable seed constructor into app code. The future browser Session
+must spend TX before WebCrypto and spend authenticated RX before body intake; failed body or
+lost reply never refunds either. Its sole prepaid position survives fetch/read cancellation,
+crypto settlement and explicit returned-buffer disposal. The current pure codec owns no keys.
+Whole-chain/SDP/RTC activation and relay/combined/physical work below remain open.
+
+### Next bootstrap design: selected-key ECDH (reviewed, not implemented)
+
+Use the actual selected browser join key and a fresh native local-channel P-256 ephemeral key.
+Return only the immutable native public point/session metadata through the trusted main-WebView
+bridge. Native retains the original Session/counters before any publication; browser retains
+one constructor promise before its first await. Retries recover that identity; they never
+install another allocator or substitute another native point. A hard remount with a different
+executor must replace its original controller/join explicitly. Generic same-owner compatibility
+key handles do not qualify: require the exact accepted selectedKeys record and executor.
+
+Current native selected-key checks validate the SEC1 prefix/reference, not the curve. The new
+consumer must require exact65-byte uncompressed encoding and successful p256::PublicKey parsing
+before scalar multiplication; the browser independently imports the native point as P-256.
+Bind an injective versioned transcript to native session ID/slot, original native binding,
+owner/executor, selected point and native point in fixed roles. Preserve all32 big-endian bytes
+of WebCrypto's256-bit ECDH result, including leading zeroes. Derive a32-byte seed under a new
+bootstrap domain/label, then use the already tested directional handoff key schedule.
+
+Prepay setup bytes and an ordinary Crypto permit before native RNG/ECDH, outside Coordinator
+and ledger locks. Cache Pending identity first and repeat current generation/selection at final
+native installation. Settlement-first latches closure against a delayed admission. Actual
+browser setup and outgoing seal/MAC must settle and release setup buffers before a first frame
+can acknowledge that setup phase; physical response verification/decryption has its own custody.
+Cancellation before any frame needs exact cleanup/settlement, with no timeout refund.
+
+This adds direct native secret-ECDH reachability. Pinned p256's README reports no independent
+audit/assembly constant-time assessment of its arithmetic; record a fresh dependency/source
+review rather than treating existing lockfile presence as assurance. Owned ephemeral/shared
+secret types zeroize their own storage, without a broader provider/SDK erasure claim. Local
+channel keys confer no remote signalling/media authority, and this exchange does not provide
+forward secrecy against later compromise of the still-retained browser join private key.
+
+Required tests include shared Rust/WebCrypto ECDH vectors with leading zeroes; valid-prefix
+off-curve points; transcript/point/session substitution; distinct native session IDs under
+repeated RNG fixtures; wrong actual selected handle; accepted reply loss; concurrent startup;
+End/lock during computation; and settlement before delayed first admission. Start with a
+harmless authenticated Control exchange before adding Root effects. This design is not an
+implemented bootstrap, application listener or live V2 call.
+
 ## Validated handoff prerequisites (21 October)
 
 An actual native action can now lend one chain-wide HandoffLoan from its existing96KiB
