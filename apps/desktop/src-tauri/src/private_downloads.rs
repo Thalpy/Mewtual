@@ -11,9 +11,10 @@
 use super::*;
 use catcoms_app::{DownloadExportEdge, DownloadExportTransition, DownloadReady};
 use catcoms_storage::kept::{
-    flush_destination, remove_partial, ChosenDestination, DownloadId, DownloadStatus, ExportError,
-    ExportFile, ExportHalt, ExportJournal, ExportProbe, ExportProgress, ExportReopen, ExportState,
-    ExportView, KeepPhase, PartialRemoval, Publication, EXPORT_CHECKPOINT_CHUNKS,
+    flush_destination, partial_presence, remove_partial, ChosenDestination, DownloadId,
+    DownloadStatus, ExportError, ExportFile, ExportHalt, ExportJournal, ExportProbe,
+    ExportProgress, ExportReopen, ExportState, ExportView, KeepPhase, PartialPresence,
+    PartialRemoval, Publication, EXPORT_CHECKPOINT_CHUNKS,
 };
 
 #[derive(Serialize)]
@@ -212,41 +213,233 @@ pub(super) async fn remove_download(
     id: DownloadId,
     keep_partial: bool,
 ) -> Result<Option<&'static str>, String> {
-    let pending = commit_kept_command(
+    let claim = CleanupClaim::acquire(server, id)?;
+    let ports = ActorCleanup {
         state,
         server,
         instance,
         generation,
-        actor.cancel_download(id),
-    )
-    .await?;
-    let Some(saved) = pending else {
-        return Ok(None);
+        actor,
+        id,
     };
-    let mut notice = None;
-    if !keep_partial {
-        let published = matches!(saved, ExportState::Published(_));
-        let journal = saved.journal().clone();
-        // Only an outcome that settles the question may forget the journal. A partial that cannot
-        // be checked right now stays tracked in Removing.
-        match blocking(move || remove_partial(&journal)).await? {
-            Ok(outcome) if outcome.settled() => notice = outcome.notice(published),
-            Ok(PartialRemoval::FolderUnreachable) => return Err(REMOVE_UNREACHABLE.into()),
-            Ok(_) | Err(_) => return Err(REMOVE_RETRY.into()),
-        }
-    }
-    commit_kept_command(
-        state,
-        server,
-        instance,
-        generation,
-        actor.finish_download_cleanup(id),
-    )
-    .await?;
-    Ok(notice)
+    remove_sequence(&ports, claim, keep_partial).await
 }
 const REMOVE_RETRY: &str = "The partly saved file could not be removed. Close any app using it, then choose Remove again, or choose Keep partly saved file.";
 const REMOVE_UNREACHABLE: &str = "The folder with the partly saved file is unavailable. Reconnect it and choose Remove again, or choose Keep partly saved file.";
+const CLEANUP_BUSY: &str = "This file is still being removed. Try again shortly.";
+const ALREADY_REMOVED: &str =
+    "The partly saved file had already been removed, so there was nothing to keep.";
+
+/// Process-wide ownership of every destructive cleanup (Remove, Save new copy) and every
+/// preserve decision ("Keep partly saved file") for one Download, keyed by (server, Download ID).
+///
+/// Review U-H1: without it, a Remove stalled just before deleting the partial and a later Keep
+/// could both act on the same Deleting journal; Keep reported the file preserved and released the
+/// encrypted copy, then the stalled Remove deleted the only remaining copy. A second claimant now
+/// gets Busy instead of a promise. The claim is shared with the blocking worker that deletes, so
+/// it outlives a dropped invocation (Lock, a closed window) until the delete has actually ended.
+#[derive(Clone)]
+pub(super) struct CleanupClaim {
+    /// Released when the last clone (the invocation's or its blocking worker's) drops.
+    _held: Arc<ClaimKey>,
+}
+struct ClaimKey(u64, [u8; 32]);
+impl Drop for ClaimKey {
+    fn drop(&mut self) {
+        claimed()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&(self.0, self.1));
+    }
+}
+/// Claimed (server, Download ID) pairs.
+type Claimed = StdMutex<std::collections::HashSet<(u64, [u8; 32])>>;
+fn claimed() -> &'static Claimed {
+    static CLAIMED: std::sync::OnceLock<Claimed> = std::sync::OnceLock::new();
+    CLAIMED.get_or_init(Default::default)
+}
+impl CleanupClaim {
+    pub(super) fn acquire(server: u64, id: DownloadId) -> Result<Self, String> {
+        let key = (server, *id.as_bytes());
+        if !claimed()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key)
+        {
+            return Err(CLEANUP_BUSY.into());
+        }
+        Ok(Self {
+            _held: Arc::new(ClaimKey(key.0, key.1)),
+        })
+    }
+}
+
+/// The effects a cleanup sequence needs, behind a seam so the real sequences run in tests with
+/// barriers between awaits. Production is [`ActorCleanup`]: guarded actor commands and blocking
+/// filesystem workers.
+#[async_trait::async_trait]
+pub(super) trait CleanupPorts: Send + Sync {
+    /// Durably publish Deleting (or release at once without a journal); `Some` is the journal
+    /// native must clean up before [`CleanupPorts::finish_cleanup`].
+    async fn cancel(&self) -> Result<Option<ExportState>, String>;
+    async fn export_state(&self) -> Result<Option<ExportState>, String>;
+    /// The blocking work that deletes the proven partial. [`delete_owned`] runs it on a worker
+    /// that also owns the claim, so the claim lasts exactly as long as the delete can happen.
+    fn remover(&self, journal: ExportJournal) -> Result<Remover, String>;
+    /// Read-only: is anything of this save still on disk?
+    async fn presence(&self, journal: ExportJournal) -> Result<PartialPresence, String>;
+    async fn finish_cleanup(&self) -> Result<(), String>;
+    /// Save new copy, step one: retire every observer under the intent CAS, keeping the journal.
+    async fn retire(&self, expected_intent: u64) -> Result<u64, String>;
+    /// Save new copy, step two: forget the journal under the intent CAS.
+    async fn abandon(&self, expected_intent: u64) -> Result<u64, String>;
+}
+
+/// Production cleanup effects for one Download of one server instance and UI generation.
+pub(super) struct ActorCleanup<'a> {
+    pub(super) state: &'a AppState,
+    pub(super) server: u64,
+    pub(super) instance: u64,
+    pub(super) generation: u64,
+    pub(super) actor: &'a ServerActor,
+    pub(super) id: DownloadId,
+}
+#[async_trait::async_trait]
+impl CleanupPorts for ActorCleanup<'_> {
+    async fn cancel(&self) -> Result<Option<ExportState>, String> {
+        let (state, server, instance, generation) =
+            (self.state, self.server, self.instance, self.generation);
+        commit_kept_command(
+            state,
+            server,
+            instance,
+            generation,
+            self.actor.cancel_download(self.id),
+        )
+        .await
+    }
+    async fn export_state(&self) -> Result<Option<ExportState>, String> {
+        self.actor.download_export_state(self.id).await
+    }
+    fn remover(&self, journal: ExportJournal) -> Result<Remover, String> {
+        // Review L9: a bounded number of cleanup workers, so a compromised renderer cannot pin
+        // unlimited blocking threads on a stalled volume. The permit moves into the worker.
+        let slot = cleanup_slot()?;
+        Ok(Box::new(move || {
+            let _slot = slot;
+            remove_partial(&journal)
+        }))
+    }
+    async fn presence(&self, journal: ExportJournal) -> Result<PartialPresence, String> {
+        let slot = cleanup_slot()?;
+        blocking(move || {
+            let _held = slot;
+            partial_presence(&journal)
+        })
+        .await
+    }
+    async fn finish_cleanup(&self) -> Result<(), String> {
+        let (state, server, instance, generation) =
+            (self.state, self.server, self.instance, self.generation);
+        commit_kept_command(
+            state,
+            server,
+            instance,
+            generation,
+            self.actor.finish_download_cleanup(self.id),
+        )
+        .await
+    }
+    async fn retire(&self, expected_intent: u64) -> Result<u64, String> {
+        let (state, server, instance, generation) =
+            (self.state, self.server, self.instance, self.generation);
+        commit_kept_command(
+            state,
+            server,
+            instance,
+            generation,
+            self.actor.retire_download_export(self.id, expected_intent),
+        )
+        .await
+        .map_err(|_| STALE_DOWNLOAD.to_string())
+    }
+    async fn abandon(&self, expected_intent: u64) -> Result<u64, String> {
+        let (state, server, instance, generation) =
+            (self.state, self.server, self.instance, self.generation);
+        commit_kept_command(
+            state,
+            server,
+            instance,
+            generation,
+            self.actor.abandon_download_export(self.id, expected_intent),
+        )
+        .await
+    }
+}
+const STALE_DOWNLOAD: &str = "This download changed. Open Transfers and try again.";
+
+/// Small dedicated bound on blocking cleanup workers, separate from the export slots so a Remove
+/// can still run while saves are busy.
+fn cleanup_slot() -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+    static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    SLOTS
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| CLEANUP_BUSY.into())
+}
+
+/// Blocking delete work for one proven partial; see [`CleanupPorts::remover`].
+pub(super) type Remover = Box<dyn FnOnce() -> Result<PartialRemoval, ExportError> + Send>;
+
+/// Run a delete on a blocking worker that owns a clone of `claim`. If the awaiting invocation is
+/// dropped (Lock, a closed window), the worker keeps the claim until the delete has finished, so
+/// no preserve decision can be made while the file may still disappear.
+async fn delete_owned(
+    ports: &impl CleanupPorts,
+    journal: ExportJournal,
+    claim: &CleanupClaim,
+) -> Result<Result<PartialRemoval, ExportError>, String> {
+    let work = ports.remover(journal)?;
+    let claim = claim.clone();
+    blocking(move || {
+        let _claim = claim;
+        work()
+    })
+    .await
+}
+
+/// Remove/Clear under a held [`CleanupClaim`]. With `keep_partial`, the record is released
+/// without deleting the file, after reassessing (under the claim) whether the file still exists:
+/// it never reports a file kept that an earlier removal already deleted.
+pub(super) async fn remove_sequence(
+    ports: &impl CleanupPorts,
+    claim: CleanupClaim,
+    keep_partial: bool,
+) -> Result<Option<&'static str>, String> {
+    let Some(saved) = ports.cancel().await? else {
+        return Ok(None);
+    };
+    let published = matches!(saved, ExportState::Published(_));
+    let journal = saved.journal().clone();
+    let notice = if keep_partial {
+        match ports.presence(journal).await? {
+            PartialPresence::Gone => Some(ALREADY_REMOVED),
+            PartialPresence::Present | PartialPresence::Unknown => None,
+        }
+    } else {
+        // Only an outcome that settles the question may forget the journal. A partial that cannot
+        // be checked right now stays tracked in Removing.
+        match delete_owned(ports, journal, &claim).await? {
+            Ok(outcome) if outcome.settled() => outcome.notice(published),
+            Ok(PartialRemoval::FolderUnreachable) => return Err(REMOVE_UNREACHABLE.into()),
+            Ok(_) | Err(_) => return Err(REMOVE_RETRY.into()),
+        }
+    };
+    ports.finish_cleanup().await?;
+    drop(claim);
+    Ok(notice)
+}
 
 /// Capacity follows the entire export, including its queued actor plaintext reply. Acquiring
 /// this before plan/manifest work and staging prevents unbounded save invocations from waiting
@@ -463,8 +656,8 @@ const OLD_PARTIAL_UNREACHABLE: &str =
     "The folder with the old partly saved file is unavailable, so that file was left in place.";
 
 /// "Save new copy" / "Save another copy": remove our proven partial (never the final name), then
-/// forget the journal under the explicit intent CAS. Returns the intent to use next and, when a
-/// file of the old save stays on disk, the notice to attach to the new save's result.
+/// forget the journal. Returns the intent to use next and, when a file of the old save stays on
+/// disk, the notice to attach to the new save's result.
 pub(super) async fn abandon_partial(
     state: &AppState,
     server: u64,
@@ -474,24 +667,43 @@ pub(super) async fn abandon_partial(
     id: DownloadId,
     expected_intent: u64,
 ) -> Result<(u64, Option<&'static str>), String> {
-    let Some(saved) = actor.download_export_state(id).await? else {
+    let claim = CleanupClaim::acquire(server, id)?;
+    let ports = ActorCleanup {
+        state,
+        server,
+        instance,
+        generation,
+        actor,
+        id,
+    };
+    abandon_sequence(&ports, claim, expected_intent).await
+}
+
+/// Save new copy under a held [`CleanupClaim`] (review U-H1). The intent CAS and the retirement
+/// of every observer of the old journal happen in one actor step BEFORE the external delete, so
+/// a delayed click, a concurrent Resume or a live writer of the old journal cannot act on it
+/// while it is being deleted. The journal stays durable until that delete is settled; only then
+/// is it forgotten. A failed delete leaves the journal (with its new intent) naming the partial.
+pub(super) async fn abandon_sequence(
+    ports: &impl CleanupPorts,
+    claim: CleanupClaim,
+    expected_intent: u64,
+) -> Result<(u64, Option<&'static str>), String> {
+    let Some(saved) = ports.export_state().await? else {
         return Ok((expected_intent, None));
     };
     let published = matches!(saved, ExportState::Published(_));
-    // Refuse a stale click before deleting anything; the abandon below repeats the exact CAS.
-    let current = actor.downloads().await?;
-    if !current
-        .iter()
-        .any(|row| row.id == id && row.state.intent == expected_intent)
-    {
-        return Err("This download changed. Open Transfers and try again.".into());
-    }
+    let retired = ports.retire(expected_intent).await?;
+    // Re-read under the new intent: the journal being deleted is the one just retired.
+    let Some(saved) = ports.export_state().await? else {
+        return Err(STALE_DOWNLOAD.into());
+    };
     let journal = saved.journal().clone();
     // A folder that cannot be reached is usually why the user wants a new copy; the old partial
     // then stays wherever it is, and the user is told. A reachable partial that cannot be checked
     // is not forgotten.
     let notice =
-        match blocking(move || remove_partial(&journal)).await? {
+        match delete_owned(ports, journal, &claim).await? {
             Ok(PartialRemoval::FolderUnreachable) => Some(OLD_PARTIAL_UNREACHABLE),
             Ok(outcome) if outcome.settled() => outcome.notice(published),
             Ok(_) | Err(_) => return Err(
@@ -499,14 +711,8 @@ pub(super) async fn abandon_partial(
                     .into(),
             ),
         };
-    let intent = commit_kept_command(
-        state,
-        server,
-        instance,
-        generation,
-        actor.abandon_download_export(id, expected_intent),
-    )
-    .await?;
+    let intent = ports.abandon(retired).await?;
+    drop(claim);
     Ok((intent, notice))
 }
 
@@ -1188,3 +1394,7 @@ mod tests {
         assert!(matches!(outcome, Err(ExportError::Inactive)));
     }
 }
+
+#[cfg(test)]
+#[path = "private_downloads/cleanup_tests.rs"]
+mod cleanup_tests;

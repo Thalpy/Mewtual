@@ -909,6 +909,11 @@ pub enum AppCommand {
         cancel: RequestCancellation,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    RetireDownloadExport {
+        id: catcoms_storage::kept::DownloadId,
+        expected_intent: u64,
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
     AbandonDownloadExport {
         id: catcoms_storage::kept::DownloadId,
         expected_intent: u64,
@@ -3307,6 +3312,25 @@ impl ServerActor {
             .map_err(|_| "server stopped".to_string())?;
         receiver.await.map_err(|_| "server stopped".to_string())?
     }
+    /// "Save new copy", first step: retire every observer of the journal under the explicit
+    /// intent CAS while keeping it durable, before native deletes the old partial. Returns the
+    /// new intent, which the later [`Self::abandon_download_export`] must present.
+    pub async fn retire_download_export(
+        &self,
+        id: catcoms_storage::kept::DownloadId,
+        expected_intent: u64,
+    ) -> Result<u64, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::RetireDownloadExport {
+                id,
+                expected_intent,
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
+    }
     /// "Save new copy" / "Save another copy" under an explicit intent CAS. Returns the new intent.
     pub async fn abandon_download_export(
         &self,
@@ -5433,6 +5457,7 @@ where
                         let _ = reply.send(result);
                         let _ = event_tx.send(AppEvent::FilesUpdated).await;
                     }
+                    Some(AppCommand::RetireDownloadExport { id, expected_intent, reply }) => { let _ = reply.send(server.sync.retire_download_export(id, expected_intent).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
                     Some(AppCommand::AbandonDownloadExport { id, expected_intent, reply }) => { let _ = reply.send(server.sync.abandon_download_export(id, expected_intent).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
                     Some(AppCommand::RequestKeptFile { cid, reply }) => {
                         let session = keep_sessions.borrow().clone();

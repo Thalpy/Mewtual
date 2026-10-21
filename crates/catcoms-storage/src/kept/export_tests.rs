@@ -1091,6 +1091,68 @@ fn save_new_copy_retires_the_old_session_and_keep_partly_saved_file_releases_wit
 }
 
 #[test]
+fn save_new_copy_retires_every_observer_before_the_delete_and_keeps_the_journal() {
+    // Review U-H1: the intent CAS and the observer retirement come first, the journal stays until
+    // native's delete is settled, and only the retired intent can then forget it.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (id, lease) = completed(&mut store);
+    let mut file = started(&mut store, &lease, &fx.downloads);
+    file.accept(0, CHUNKS[0]).unwrap();
+    let before = state(&store, id);
+    let intent = store.downloads().unwrap()[0].state.intent;
+    assert!(
+        store.retire_download_export(id, intent + 7).is_err(),
+        "intent CAS"
+    );
+    let retired = store.retire_download_export(id, intent).unwrap();
+    assert_eq!(retired, intent + 1);
+    assert_eq!(state(&store, id), before, "the journal is kept");
+    assert!(!lease.is_current(), "every export observer is retired");
+    assert!(store
+        .checkpoint_download_export(&lease, file.journal(), file.journal())
+        .is_err());
+    // The old click can neither retire again nor forget the journal.
+    assert!(store.retire_download_export(id, intent).is_err());
+    assert!(store.abandon_download_export(id, intent).is_err());
+    drop(file);
+    drop(store); // a crash between the retirement and the delete keeps everything tracked
+    let mut store = open(&fx.vault);
+    assert_eq!(state(&store, id), before);
+    assert_eq!(
+        remove_partial(before.journal()).unwrap(),
+        PartialRemoval::Removed
+    );
+    assert_eq!(
+        store.abandon_download_export(id, retired).unwrap(),
+        retired + 1
+    );
+    assert!(store.download_export_state(id).unwrap().is_none());
+}
+
+#[test]
+fn partial_presence_reports_only_what_is_provably_there() {
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (_id, lease) = completed(&mut store);
+    let mut file = started(&mut store, &lease, &fx.downloads);
+    file.accept(0, CHUNKS[0]).unwrap();
+    let journal = file.journal().clone();
+    drop(file);
+    assert_eq!(partial_presence(&journal), PartialPresence::Present);
+    fs::remove_file(staging(&fx.downloads)).unwrap();
+    assert_eq!(partial_presence(&journal), PartialPresence::Gone);
+    fs::write(staging(&fx.downloads), b"someone else's").unwrap();
+    assert_eq!(
+        partial_presence(&journal),
+        PartialPresence::Gone,
+        "another file at our name is not our partial"
+    );
+    fs::rename(&fx.downloads, fx.downloads.with_file_name("Moved")).unwrap();
+    assert_eq!(partial_presence(&journal), PartialPresence::Unknown);
+}
+
+#[test]
 fn finish_cannot_release_a_writing_journal_through_the_fallback_path() {
     let fx = fixture();
     let mut store = open(&fx.vault);

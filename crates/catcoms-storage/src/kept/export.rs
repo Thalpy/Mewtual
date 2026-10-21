@@ -1030,6 +1030,40 @@ pub fn remove_partial(journal: &ExportJournal) -> Result<PartialRemoval, ExportE
     }
 }
 
+/// Read-only answer to "is the partly saved file still there?", for "Keep partly saved file".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartialPresence {
+    /// Our partial (or our saved final name) is still on disk.
+    Present,
+    /// The folder is reachable and ours, and nothing of this save is at its names any more.
+    Gone,
+    /// The folder or the file cannot be checked right now.
+    Unknown,
+}
+
+/// Whether anything of this save is still on disk. Nothing is opened for writing, created or
+/// deleted. "Keep partly saved file" uses it to avoid promising a file that an earlier removal
+/// already deleted.
+pub fn partial_presence(journal: &ExportJournal) -> PartialPresence {
+    let Some(folder) = journal.folder_path() else {
+        return PartialPresence::Unknown;
+    };
+    match external::folder_identity(&folder) {
+        Ok(id) if id == journal.folder_id => {}
+        _ => return PartialPresence::Unknown,
+    }
+    let ours = |leaf: &str| match external::open_leaf(&folder.join(leaf), false) {
+        Ok(Leaf::Opened(_, observed)) if observed.identity == journal.file_id => Some(true),
+        Ok(_) => Some(false),
+        Err(_) => None,
+    };
+    match (ours(&journal.staging), ours(&journal.final_leaf)) {
+        (Some(true), _) | (_, Some(true)) => PartialPresence::Present,
+        (Some(false), Some(false)) => PartialPresence::Gone,
+        _ => PartialPresence::Unknown,
+    }
+}
+
 /// Delete a staging name already proven ours. Windows refuses to delete a read-only file, so for
 /// a proven partial clear only that attribute and try once more; Unix unlink ignores the mode.
 /// `may_clear` must be false when the object has any other name: hard links share attributes, so
@@ -1888,6 +1922,39 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
         let mut next = transfer.record.successor()?;
         next.export = Export::Writing(journal);
         transfer.publish(next, &self.metadata_key, &mut self.rng)
+    }
+
+    /// "Save new copy", first step: under the explicit intent CAS, retire every observer of the
+    /// current journal (read epoch, so in-flight exports stop at their next actor call; the new
+    /// intent, so a delayed Resume click fails its own CAS) while keeping the journal durable.
+    /// Native then deletes the old partial while it is provably nobody's live save, and calls
+    /// [`Self::abandon_download_export`] with the returned intent once that delete is settled. If
+    /// the delete fails, the journal is still here and still names the partial.
+    pub fn retire_download_export(
+        &mut self,
+        id: DownloadId,
+        expected_intent: u64,
+    ) -> Result<u64, StorageError> {
+        self.ready()?;
+        let index = self.download_index(id)?;
+        let transfer = &mut self.transfers[index];
+        if transfer.poisoned
+            || transfer.record.phase != KeepPhase::Completed
+            || transfer.record.intent != expected_intent
+            || transfer.record.export == Export::None
+        {
+            return Err(StorageError::Malformed);
+        }
+        let intent = expected_intent
+            .checked_add(1)
+            .ok_or(StorageError::Malformed)?;
+        let mut next = transfer.record.successor()?;
+        next.intent = intent;
+        transfer.publish(next, &self.metadata_key, &mut self.rng)?;
+        // Only after the durable intent change: a failed publish leaves every observer valid.
+        transfer.read_epoch.retire();
+        transfer.checked = false;
+        Ok(intent)
     }
 
     /// "Save new copy" / "Save another copy": forget the journal under an explicit intent CAS.

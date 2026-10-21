@@ -588,6 +588,12 @@ pub trait DownloadStore {
         expected: &ExportJournal,
         halt: ExportHalt,
     ) -> Result<(), StorageError>;
+    /// Save new copy, first step: retire observers under the intent CAS, keeping the journal.
+    fn retire_download_export(
+        &mut self,
+        id: DownloadId,
+        expected_intent: u64,
+    ) -> Result<u64, StorageError>;
     fn abandon_download_export(
         &mut self,
         id: DownloadId,
@@ -753,6 +759,13 @@ impl<R: CryptoRngCore> DownloadStore for KeptBlobStore<R> {
         halt: ExportHalt,
     ) -> Result<(), StorageError> {
         KeptBlobStore::halt_download_export(self, id, expected, halt)
+    }
+    fn retire_download_export(
+        &mut self,
+        id: DownloadId,
+        expected_intent: u64,
+    ) -> Result<u64, StorageError> {
+        KeptBlobStore::retire_download_export(self, id, expected_intent)
     }
     fn abandon_download_export(
         &mut self,

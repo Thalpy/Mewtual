@@ -207,6 +207,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .download_store_mut()?
             .halt_download_export(id, expected, halt)?)
     }
+    /// Save new copy, first step: retire observers under the intent CAS, keeping the journal.
+    pub fn retire_download_export(
+        &mut self,
+        id: DownloadId,
+        expected_intent: u64,
+    ) -> Result<u64, SyncError> {
+        Ok(self
+            .download_store_mut()?
+            .retire_download_export(id, expected_intent)?)
+    }
     pub fn abandon_download_export(
         &mut self,
         id: DownloadId,

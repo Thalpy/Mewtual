@@ -32,9 +32,10 @@ mod record;
 use downloads::Owner;
 pub use downloads::{DownloadExportLease, DownloadId, DownloadRun, DownloadStatus, DownloadStore};
 pub use export::{
-    flush_destination, remove_partial, ChoiceRefusal, ChosenDestination, ExportError, ExportFile,
-    ExportHalt, ExportJournal, ExportPlan, ExportPresence, ExportProbe, ExportProgress,
-    ExportReopen, ExportState, ExportView, PartialRemoval, Publication, EXPORT_CHECKPOINT_CHUNKS,
+    flush_destination, partial_presence, remove_partial, ChoiceRefusal, ChosenDestination,
+    ExportError, ExportFile, ExportHalt, ExportJournal, ExportPlan, ExportPresence, ExportProbe,
+    ExportProgress, ExportReopen, ExportState, ExportView, PartialPresence, PartialRemoval,
+    Publication, EXPORT_CHECKPOINT_CHUNKS,
 };
 use persistence::{Transfer, DELETING, FORMAT, FORMAT_CHARGE, TRANSFERS};
 pub use record::{

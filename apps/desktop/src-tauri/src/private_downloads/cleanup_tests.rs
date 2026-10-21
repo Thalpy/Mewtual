@@ -1,0 +1,297 @@
+//! The real Remove, Keep and Save new copy sequences across awaits (review U-H1), driven through
+//! [`CleanupPorts`] with real partial files and a deterministic barrier inside the deleting
+//! worker. The actor-side transitions are covered by the storage and app crates; what these pin
+//! is the native interleaving: no preserve decision while a delete may still happen.
+use super::*;
+use catcoms_storage::kept::ExportPlan;
+use std::sync::mpsc;
+
+/// Upper bound on any barrier wait; a correct run releases each barrier within milliseconds.
+const BARRIER: Duration = Duration::from_secs(20);
+
+/// One real `.mewtual-part` with its real journal, in a temporary Downloads folder.
+fn partial() -> (tempfile::TempDir, PathBuf, ExportJournal) {
+    let root = tempfile::tempdir().unwrap();
+    let downloads = root.path().join("Downloads");
+    let chunk = catcoms_storage::FileRef {
+        plaintext_cid: catcoms_storage::Cid::of(b"x"),
+        ciphertext_cid: catcoms_storage::Cid::of(b"y"),
+        wrapped_key: catcoms_app::SealedBlob {
+            nonce: [0; 24],
+            ciphertext: vec![0; 48],
+        },
+        size: 1,
+        mime: "application/octet-stream".into(),
+    };
+    let manifest = catcoms_storage::FileManifest {
+        plaintext_cid: catcoms_storage::Cid::of(b"x"),
+        total_size: 1,
+        mime: "application/octet-stream".into(),
+        chunks: vec![chunk],
+    };
+    let plan = ExportPlan::from_manifest(&manifest).unwrap();
+    let file = ExportFile::create(&downloads, "notes.txt", plan).unwrap();
+    let journal = file.journal().clone();
+    drop(file); // the session ended (Pause, Lock or a crash); the partial stays
+    let staging = downloads.join("notes.txt.mewtual-part");
+    assert!(staging.exists());
+    (root, staging, journal)
+}
+
+#[derive(Default)]
+struct Record {
+    exists: bool,
+    deleting: bool,
+    intent: u64,
+    export: Option<ExportState>,
+}
+
+/// In-memory actor state plus a barrier the first delete waits on inside its blocking worker.
+struct Fake {
+    record: StdMutex<Record>,
+    gate: StdMutex<Option<mpsc::Receiver<()>>>,
+    entered: StdMutex<Option<mpsc::Sender<()>>>,
+    deletes: std::sync::atomic::AtomicUsize,
+}
+impl Fake {
+    fn new(journal: &ExportJournal) -> (Arc<Self>, mpsc::Sender<()>, mpsc::Receiver<()>) {
+        let (release, gate) = mpsc::channel();
+        let (entered, inside) = mpsc::channel();
+        let fake = Arc::new(Self {
+            record: StdMutex::new(Record {
+                exists: true,
+                deleting: false,
+                intent: 3,
+                export: Some(ExportState::Writing(journal.clone())),
+            }),
+            gate: StdMutex::new(Some(gate)),
+            entered: StdMutex::new(Some(entered)),
+            deletes: Default::default(),
+        });
+        (fake, release, inside)
+    }
+    fn exists(&self) -> bool {
+        self.record.lock().unwrap().exists
+    }
+}
+#[async_trait::async_trait]
+impl CleanupPorts for Arc<Fake> {
+    async fn cancel(&self) -> Result<Option<ExportState>, String> {
+        let mut record = self.record.lock().unwrap();
+        if !record.exists {
+            return Ok(None);
+        }
+        if record.export.is_none() {
+            record.exists = false;
+            return Ok(None);
+        }
+        record.deleting = true;
+        Ok(record.export.clone())
+    }
+    async fn export_state(&self) -> Result<Option<ExportState>, String> {
+        let record = self.record.lock().unwrap();
+        Ok(if record.exists && !record.deleting {
+            record.export.clone()
+        } else {
+            None
+        })
+    }
+    fn remover(&self, journal: ExportJournal) -> Result<Remover, String> {
+        // The first delete waits at the barrier inside the blocking worker, after the claim moved
+        // there and before the real `remove_partial`.
+        let gate = self.gate.lock().unwrap().take();
+        let entered = self.entered.lock().unwrap().take();
+        let fake = self.clone();
+        Ok(Box::new(move || {
+            if let (Some(gate), Some(entered)) = (gate, entered) {
+                entered.send(()).unwrap();
+                // Bounded so a failing assertion elsewhere can never hang the suite.
+                let _ = gate.recv_timeout(BARRIER);
+            }
+            fake.deletes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            remove_partial(&journal)
+        }))
+    }
+    async fn presence(&self, journal: ExportJournal) -> Result<PartialPresence, String> {
+        Ok(partial_presence(&journal))
+    }
+    async fn finish_cleanup(&self) -> Result<(), String> {
+        let mut record = self.record.lock().unwrap();
+        if !record.exists || !record.deleting {
+            return Err("malformed data".into());
+        }
+        record.exists = false;
+        Ok(())
+    }
+    async fn retire(&self, expected: u64) -> Result<u64, String> {
+        let mut record = self.record.lock().unwrap();
+        if record.intent != expected || record.deleting || record.export.is_none() {
+            return Err(STALE_DOWNLOAD.into());
+        }
+        record.intent += 1;
+        Ok(record.intent)
+    }
+    async fn abandon(&self, expected: u64) -> Result<u64, String> {
+        let mut record = self.record.lock().unwrap();
+        if record.intent != expected || record.export.is_none() {
+            return Err(STALE_DOWNLOAD.into());
+        }
+        record.export = None;
+        record.intent += 1;
+        Ok(record.intent)
+    }
+}
+
+fn id(byte: u8) -> DownloadId {
+    DownloadId::from_bytes([byte; 32])
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keep_partial_cannot_promise_a_file_while_an_older_remove_may_still_delete_it() {
+    let (_root, staging, journal) = partial();
+    let (fake, release, inside) = Fake::new(&journal);
+    let key = id(0xA1);
+    // Remove(keepPartial=false) reaches the barrier inside its deleting worker.
+    let older = tokio::spawn({
+        let fake = fake.clone();
+        async move {
+            let claim = CleanupClaim::acquire(7, key).unwrap();
+            remove_sequence(&fake, claim, false).await
+        }
+    });
+    inside.recv_timeout(BARRIER).unwrap();
+    // Keep partly saved file: refused, nothing released, the file and record untouched.
+    let keep = CleanupClaim::acquire(7, key);
+    assert_eq!(keep.err().as_deref(), Some(CLEANUP_BUSY));
+    assert!(staging.exists() && fake.exists());
+    release.send(()).unwrap();
+    assert_eq!(older.await.unwrap(), Ok(None));
+    assert!(!staging.exists() && !fake.exists());
+    // Once the delete is over a later Keep reassesses instead of promising anything.
+    let claim = CleanupClaim::acquire(7, key).expect("the claim was released");
+    assert_eq!(remove_sequence(&fake, claim, true).await, Ok(None));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_remove_still_owns_its_delete_until_the_worker_ends() {
+    // Lock, a closed window or a dropped invoke abandons the invocation, not its worker.
+    let (_root, staging, journal) = partial();
+    let (fake, release, inside) = Fake::new(&journal);
+    let key = id(0xA2);
+    let older = tokio::spawn({
+        let fake = fake.clone();
+        async move {
+            let claim = CleanupClaim::acquire(7, key).unwrap();
+            remove_sequence(&fake, claim, false).await
+        }
+    });
+    inside.recv_timeout(BARRIER).unwrap();
+    older.abort();
+    let _ = older.await;
+    assert_eq!(
+        CleanupClaim::acquire(7, key).err().as_deref(),
+        Some(CLEANUP_BUSY),
+        "the deleting worker still holds the claim after its invocation is gone"
+    );
+    release.send(()).unwrap();
+    // The worker finishes its delete; the record stays Deleting because nothing finished it.
+    let mut spins = 0u32;
+    let claim = loop {
+        if let Ok(claim) = CleanupClaim::acquire(7, key) {
+            break claim;
+        }
+        spins += 1;
+        assert!(spins < 5_000_000, "the worker never released its claim");
+        tokio::task::yield_now().await;
+    };
+    assert!(!staging.exists());
+    assert!(
+        fake.exists(),
+        "the encrypted record waits for a finished cleanup"
+    );
+    // Keep now: the file is already gone, and Keep says so instead of reporting it kept.
+    assert_eq!(
+        remove_sequence(&fake, claim, true).await,
+        Ok(Some(ALREADY_REMOVED))
+    );
+    assert!(!fake.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keep_partial_releases_without_deleting_when_nothing_else_owns_the_cleanup() {
+    let (_root, staging, journal) = partial();
+    let (fake, _release, _inside) = Fake::new(&journal);
+    let claim = CleanupClaim::acquire(7, id(0xA3)).unwrap();
+    assert_eq!(remove_sequence(&fake, claim, true).await, Ok(None));
+    assert!(staging.exists(), "the kept partial is untouched");
+    assert!(!fake.exists());
+    assert_eq!(fake.deletes.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn save_new_copy_retires_the_old_journal_before_deleting_and_excludes_keep() {
+    let (_root, staging, journal) = partial();
+    let (fake, release, inside) = Fake::new(&journal);
+    let key = id(0xA4);
+    let older = tokio::spawn({
+        let fake = fake.clone();
+        async move {
+            let claim = CleanupClaim::acquire(7, key).unwrap();
+            abandon_sequence(&fake, claim, 3).await
+        }
+    });
+    inside.recv_timeout(BARRIER).unwrap();
+    {
+        let record = fake.record.lock().unwrap();
+        assert_eq!(
+            record.intent, 4,
+            "the intent moved before any external delete"
+        );
+        assert!(
+            record.export.is_some(),
+            "the journal stays durable until the delete is settled"
+        );
+    }
+    // A delayed Resume click carries the old intent and can no longer act.
+    assert!(fake.retire(3).await.is_err());
+    assert_eq!(
+        CleanupClaim::acquire(7, key).err().as_deref(),
+        Some(CLEANUP_BUSY),
+        "Keep partly saved file cannot interleave"
+    );
+    release.send(()).unwrap();
+    assert_eq!(older.await.unwrap(), Ok((5, None)));
+    assert!(!staging.exists());
+    assert!(fake.record.lock().unwrap().export.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stale_save_new_copy_deletes_nothing() {
+    let (_root, staging, journal) = partial();
+    let (fake, _release, _inside) = Fake::new(&journal);
+    fake.record.lock().unwrap().intent = 9; // paused or resumed since the click
+    let claim = CleanupClaim::acquire(7, id(0xA5)).unwrap();
+    assert_eq!(
+        abandon_sequence(&fake, claim, 3).await,
+        Err(STALE_DOWNLOAD.into())
+    );
+    assert!(staging.exists());
+    assert_eq!(fake.deletes.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn claims_are_per_download_and_released_by_the_last_holder() {
+    let first = CleanupClaim::acquire(7, id(0xB1)).unwrap();
+    let other = CleanupClaim::acquire(7, id(0xB2)).expect("another download is independent");
+    let elsewhere = CleanupClaim::acquire(8, id(0xB1)).expect("another server is independent");
+    let worker = first.clone();
+    drop(first);
+    assert!(
+        CleanupClaim::acquire(7, id(0xB1)).is_err(),
+        "a clone still holds it"
+    );
+    drop(worker);
+    assert!(CleanupClaim::acquire(7, id(0xB1)).is_ok());
+    drop((other, elsewhere));
+}
