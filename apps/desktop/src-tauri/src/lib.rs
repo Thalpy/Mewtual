@@ -14755,6 +14755,9 @@ async fn publish_download_for_generation(
 /// Unlike `<a download>`, this has an observable result in a Tauri webview. The file is revealed,
 /// never executed automatically.
 #[tauri::command]
+// Each argument is a named Tauri command field. Preserve that existing frontend/native wire
+// contract rather than introducing a differently shaped request just to shorten this signature.
+#[allow(clippy::too_many_arguments)]
 async fn save_group_file(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -14919,6 +14922,10 @@ where
     .await
 }
 
+// Keep original session/read owners and the independently testable authorization/publication
+// callbacks explicit. Their ordering is a security boundary; an argument-bundle refactor is not
+// needed to preserve this established helper's contract.
+#[allow(clippy::too_many_arguments)]
 async fn finish_saved_read_if<I, R, A>(
     state: &AppState,
     generation: u64,

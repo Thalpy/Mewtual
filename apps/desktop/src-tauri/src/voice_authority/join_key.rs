@@ -118,6 +118,9 @@ impl JoinKeyWork {
         self.point
     }
 }
+// Keep the affine native work inline: its already paid generation metadata covers this wrapper.
+// Boxing Start would add an otherwise unnecessary heap allocation and a new custody obligation.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum PublicationPlan {
     Accepted(JoinKeyPublication),
     Start(JoinKeyWork),
