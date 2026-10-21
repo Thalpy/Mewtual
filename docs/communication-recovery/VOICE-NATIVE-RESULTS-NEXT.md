@@ -1,6 +1,37 @@
 # Next voice milestone: native result recovery
 
-## Current app-owned status continuation (21 October)
+## Current action-row ownership continuation (21 October)
+
+Source b0b303ebcc140f6414e89ae4b06ee8a46ece5175 follows the published edb00dda app-owned
+Status checkpoint in target/communication-browser-action-worktree. The native/browser handoff
+remains the active assignment. All raw RowId-taking operational helpers are now private;
+Ledger::resolve requires the original native-selected grant allocation, executor, lease and
+complete peer/join/key/epoch purpose. A native-only ResolvedRow retains the actual paid Row.
+Repeated resolution is not a once-only work permit; physical callers still must account and
+bound their handles. The complete layout remains inside the original2KiB Row payment.
+
+Historical lookup/receipt ACK/settlement remains usable after End and actual CallGrant drop.
+Data work checks the original lease under State before copy/worker admission, including when
+End won during a wait. Four new regressions cover foreign equal-field owners/all selector
+fields/invalid IDs, each key component, exact post-End recovery and the actual held-State race.
+All112 focused handoff tests pass (2.03s after49.66s compile). Actual-diff adversarial review/
+re-review has no remaining findings. Full frontend2,348 passes (68.32s). Full native583 library
+plus five ACL tests pass, zero failures (523.69s library;526.92s gate). Native check48.50s,
+strict all-target/all-feature Clippy50.34s, format0.76s and the fresh Root construction scanner
+(one test,0.97s gate) pass. These ran serially; no validation process remains active. Failed
+test-Barrier compile and interrupted focus3 are retained; the final barrier samples
+credits after End's legitimate independent generation retirement, without weakening work,
+receipt, copy or worker assertions. Logs: target/voice-scoped-row-*.
+
+This adds no action opcode, new command, live V2 driver or Root/wire/storage change. The passing
+packaged probe/build/startup evidence below belongs to unchanged bac90 application lifetime;
+it does not prove action delivery. Native/browser action/result/ACK/settlement/phase closure and
+final delivery remain open. Native context, full Workflow/copy funding, sharing the original
+browser execution position and safe32-row action-history collection still require integration.
+Root Rust/Cargo/policy and frontend/build inputs are unchanged; preserve their recorded exact
+provenance rather than treating previous gates as fresh runs. One physical desktop is available.
+
+## App-owned status checkpoint (21 October)
 
 Source bac90cfa is isolated in target/communication-browser-action-worktree, following published
 PR48 checkpoint 9218d179. Application host, exact pre-window CSP, fixed main-only bootstrap/cleanup
@@ -24,6 +55,23 @@ v9 cleanup awaits all SDK/IO, then exact setup settlement, buffer disposal and f
 Every public reply variant retains one original paid serialization position through framework
 handoff. Framework/WebView public-metadata copies beyond that boundary remain excluded; private
 or action bytes must never use stock IPC. Only one physical desktop is available.
+
+Before serving action bytes, retain only Weak references to actual native state in the
+application host. Per-call context upgrades must fail closed, use the SAME borrowed UI gate as
+AppState (including actual store presence), then repeat original selection/registry/generation
+checks after awaits under the existing commit. Drop broad context references before detached
+work; workers retain only the actual actor, selected owner, grant, commit and paid work owners.
+Weak references prevent persistent ownership cycles; they are not a revocation mechanism.
+
+Lost BeginDerive replies need original-purpose lookup before new-work/current-owner eligibility:
+a requester may have no RowId yet while the original actor handoff remains uncertain. Resolve
+historical native identity without rearming a factory or treating unknown as drained. Any such
+API must retain the same grant/executor/lease/purpose checks as ResolvedRow and distinguish
+history from admission. No such lookup or action transport is implemented by this slice.
+
+The existing Phase.close returns a16KiB HandoffLoan, not the original96KiB Workflow. Full-chain
+closure needs an exact native original-chain retirement capability or explicit original-call
+End for a derivation-only pilot; Phase.drained must never be described as full Workflow release.
 
 Next implement original factory/action input, result, exact receipt ACK, settlement, authenticated
 browser phase closure and final delivery collection over this same immutable Session. Resolve
