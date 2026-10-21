@@ -206,6 +206,37 @@ fn journaled_records_stay_private_and_survive_remount_as_download_v2() {
 }
 
 #[test]
+fn a_second_writer_is_refused_by_the_file_lock_even_without_store_presence() {
+    // Review M1: the store's presence token is per mount. A session stalled on a hung share can
+    // outlive Lock and remount; the OS lock on its handle must still refuse a second writer.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (_id, lease) = completed(&mut store);
+    let mut first = started(&mut store, &lease, &fx.downloads);
+    first.accept(0, CHUNKS[0]).unwrap();
+    let journal = first.journal().clone();
+    assert!(matches!(
+        ExportFile::reopen(&journal, export_plan()),
+        Err(ExportError::Busy)
+    ));
+    drop(first);
+    assert_eq!(
+        fs::metadata(staging(&fx.downloads)).unwrap().len(),
+        CHUNKS[0].len() as u64,
+        "the refused reopen touched nothing"
+    );
+    let ExportReopen::Ready(second) = ExportFile::reopen(&journal, export_plan()).unwrap() else {
+        panic!("the partial reopens once the first session is gone");
+    };
+    // And the second session now excludes any third.
+    assert!(matches!(
+        ExportFile::reopen(&journal, export_plan()),
+        Err(ExportError::Busy)
+    ));
+    drop(second);
+}
+
+#[test]
 fn crash_after_exclusive_create_leaves_an_unadopted_orphan_and_a_fresh_name() {
     let fx = fixture();
     let mut store = open(&fx.vault);
@@ -254,6 +285,7 @@ fn torn_or_extra_tail_after_the_checkpoint_is_verified_then_rewritten() {
         .unwrap();
     write_all(&mut file);
     let path = publish(&mut store, &lease, &mut file);
+    file.finish(); // releases the session lock, which on Windows also blocks other readers
     assert_eq!(fs::read(path).unwrap(), CHUNKS.concat());
 }
 
@@ -295,6 +327,7 @@ fn checkpoint_claiming_more_than_the_file_rewinds_but_a_changed_byte_inside_it_h
                 file.accept(0, CHUNKS[0]),
                 Err(ExportError::Halted(ExportHalt::Changed))
             ));
+            drop(file);
             assert_eq!(fs::read(&partial).unwrap(), modified, "nothing is repaired");
             store
                 .halt_download_export(id, &checkpoint, ExportHalt::Changed)
@@ -309,6 +342,7 @@ fn checkpoint_claiming_more_than_the_file_rewinds_but_a_changed_byte_inside_it_h
         } else {
             write_all(&mut file);
             let path = publish(&mut store, &lease, &mut file);
+            file.finish();
             assert_eq!(fs::read(path).unwrap(), CHUNKS.concat());
         }
     }
@@ -550,16 +584,25 @@ fn a_live_older_session_blocks_a_second_writer_until_it_is_dropped() {
     ));
     store.set_download_paused(id, intent + 1, false).unwrap();
     let lease = reverified(&mut store, id);
-    let ExportReopen::Ready(newer) = ExportFile::reopen(&journal, export_plan()).unwrap() else {
-        panic!();
-    };
+    // Two layers: the OS lock refuses a second handle onto the partial outright, and the store's
+    // presence refuses any other session's registration while the older one is alive.
+    assert!(matches!(
+        ExportFile::reopen(&journal, export_plan()),
+        Err(ExportError::Busy)
+    ));
+    let elsewhere = fx.downloads.with_file_name("Elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let unrelated = ExportFile::create(&elsewhere, "other.txt", export_plan()).unwrap();
     assert!(
         store
-            .resume_download_export(&lease, &journal, newer.presence())
+            .resume_download_export(&lease, &journal, unrelated.presence())
             .is_err(),
         "the paused session still owns a live handle onto the partial"
     );
     drop(older);
+    let ExportReopen::Ready(newer) = ExportFile::reopen(&journal, export_plan()).unwrap() else {
+        panic!();
+    };
     store
         .resume_download_export(&lease, &journal, newer.presence())
         .unwrap();
@@ -661,6 +704,7 @@ fn disk_full_while_writing_persists_nothing_and_a_later_attempt_completes() {
     );
     write_all(&mut file);
     let path = publish(&mut store, &lease, &mut file);
+    file.finish();
     assert_eq!(fs::read(path).unwrap(), CHUNKS.concat());
 }
 

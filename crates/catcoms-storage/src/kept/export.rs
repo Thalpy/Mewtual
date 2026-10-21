@@ -384,6 +384,9 @@ pub enum ExportError {
     /// writer or tool truncated it). Never zero-extend over that gap and never checkpoint it: stop,
     /// keep the journal Writing, and let the next Resume re-verify from chunk zero.
     Conflict,
+    /// Another `ExportFile` (in this process, a previous mount, or another process) still holds
+    /// the partial's exclusive lock. Nothing was written; try again once that session ends.
+    Busy,
     /// A "Save as" destination was refused before anything was written there.
     Refused(ChoiceRefusal),
     Storage(StorageError),
@@ -719,6 +722,7 @@ impl std::fmt::Display for ExportError {
             Self::Conflict => f.write_str(
                 "The partly saved file changed while saving. Resume saving to check it again.",
             ),
+            Self::Busy => f.write_str("This file is already being saved. Try again shortly."),
             Self::Refused(refusal) => write!(f, "{refusal}"),
             Self::Storage(error) => write!(f, "{error}"),
         }
@@ -991,6 +995,24 @@ fn remove_proven(staging: &Path, read_only: bool) -> io::Result<()> {
     removed
 }
 
+/// One live writer per partial, independent of any mount or process. The store's presence token
+/// is per mount and in memory, so a writer stalled inside a filesystem call on a hung share could
+/// outlive Lock and remount, wake after a newer session published, and truncate the saved file
+/// (staging and final are one object). Every [`ExportFile`] therefore holds an exclusive OS lock
+/// (`flock` on Unix, `LockFileEx` on Windows) on its own handle until it is dropped. On Windows
+/// the lock never blocks deleting or hard-linking the file, but it does make other handles' reads
+/// of the locked bytes fail while a session is open.
+fn exclusive(file: &File) -> Result<(), ExportError> {
+    match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(std::fs::TryLockError::WouldBlock) => Err(ExportError::Busy),
+        Err(std::fs::TryLockError::Error(error)) => Err(ExportError::Local {
+            retryable: false,
+            reason: error.to_string(),
+        }),
+    }
+}
+
 /// Outcome of the hard-link probe on a freshly created partial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LinkProbe {
@@ -1186,6 +1208,9 @@ impl ExportFile {
     ) -> Result<Self, ExportError> {
         let path = folder.join(&staging);
         let failure = match external::observe(&file) {
+            // A journal needs the single-writer lock; a folder whose filesystem cannot lock (or
+            // anything else holding our brand-new file) gets the non-resumable writer instead.
+            Ok(_) if exclusive(&file).is_err() => Err(ExportError::Unsupported),
             Ok(observed) if observed.regular && observed.links == 1 => {
                 match links_supported(folder, &staging, Some(observed.identity)) {
                     LinkProbe::Works => Ok(observed),
@@ -1248,6 +1273,9 @@ impl ExportFile {
         if plan.prefix(journal.written_chunks()) != Some(journal.written_bytes) {
             return Ok(ExportReopen::Halt(ExportHalt::Changed));
         }
+        // Before reading the length or touching a byte: refuse while any older session (a writer
+        // stalled on a hung share across Lock and remount, or another process) still holds it.
+        exclusive(&file)?;
         let present = file.metadata().map_err(local)?.len();
         Ok(ExportReopen::Ready(Box::new(Self::session(
             file,
@@ -1554,10 +1582,12 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
         }
     }
 
-    /// One live writer per partial. An older `ExportFile` (for example one sleeping in a retry
-    /// after Lock, or still finishing a blocking write after Pause) keeps its token alive until it
-    /// is dropped; a new session must not open a second handle onto the same file meanwhile. The
-    /// token is deliberately not cleared by Pause, halts or Save new copy, only by its own drop.
+    /// One live writer per partial, within this mount. An older `ExportFile` (for example one
+    /// sleeping in a retry after Lock, or still finishing a blocking write after Pause) keeps its
+    /// token alive until it is dropped; a new session must not register meanwhile. The token is
+    /// deliberately not cleared by Pause, halts or Save new copy, only by its own drop. The token
+    /// is in memory and per mount; across remounts and processes the OS lock every `ExportFile`
+    /// holds on its handle (see `exclusive`) is what refuses a second writer.
     fn presence_free(&self, index: usize, presence: &ExportPresence) -> Result<(), StorageError> {
         let busy = self.transfers[index]
             .export_presence

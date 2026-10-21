@@ -253,6 +253,8 @@ async fn pause_mid_export_stops_effects_and_resume_continues_the_same_partial_fi
     .unwrap();
     write_all(&run, &second, &mut file).await;
     let path = publish(&run, &second, &mut file).await;
+    // Native finishes the session (releasing its file lock) before anything reads the file.
+    file.finish();
     assert_eq!(
         path.file_name().unwrap(),
         "cat.bin",
@@ -375,6 +377,7 @@ async fn save_new_copy_and_replacement_transfers_release_stale_export_results() 
     let mut file = begin(&run, &replacement).await;
     write_all(&run, &replacement, &mut file).await;
     let path = publish(&run, &replacement, &mut file).await;
+    file.finish();
     assert_eq!(std::fs::read(path).unwrap(), run.data);
     run.close().await;
 }

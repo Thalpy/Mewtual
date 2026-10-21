@@ -135,6 +135,7 @@ fn a_chosen_destination_publishes_at_the_exact_name_and_resumes_there_after_rest
         .unwrap();
     write_all(&mut file);
     let path = publish(&mut store, &lease, &mut file);
+    file.finish();
     assert_eq!(path, folder.join("report.bin"));
     assert_eq!(fs::read(path).unwrap(), CHUNKS.concat());
 }
