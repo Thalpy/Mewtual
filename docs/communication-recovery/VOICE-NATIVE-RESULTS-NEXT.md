@@ -1,6 +1,6 @@
 # Next voice milestone: native result recovery
 
-## Native bootstrap candidate (21 October, complete native gates running)
+## Native bootstrap candidate (21 October, local complete gates passed)
 
 Active checkout is target/communication-bootstrap-channel-worktree, based on published
 `c5c52fd8`; Root resource primitive is separately committed `a695470d`. The current candidate
@@ -15,7 +15,8 @@ capacity, separate from the existing12KiB control/2KiB Session payments. Native 
 prepays an ordinary8KiB Crypto owner. The concrete future, named setup owners and pinned
 primeorder16-point table have layout regression guards. All13 new native bootstrap tests pass
 within61 passing handoff tests, including actual ServerActor selected-key fixtures. Complete
-native gates are running serially. No complete allocation/RSS bound is claimed.
+native passes532 library plus five ACL tests, check/strict Clippy/format/build/startup. Exact
+counts/timings and source provenance are in HANDOVER.md. No complete allocation/RSS bound is claimed.
 There is no uncertain-row eviction; this finite pilot requires lifecycle collection before
 live activation. `Closed.native_setup_drained` currently describes native computation only, never actual
 browser/provider drainage. Before browser crypto is connected, retain/transfer a corresponding

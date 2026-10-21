@@ -3,20 +3,51 @@
 ## Bootstrap continuation (21 October, integration open)
 
 Published checkpoint is `c5c52fd8`; active work is isolated in
-target/communication-bootstrap-channel-worktree. A fresh complete Root run failed1209/1 in
-catcoms-app: the source-custody test assumed an empty process-wide pool while parallel actor
-tests legitimately used it. Commit `dda602f3` moves that unchanged scenario to its own Cargo
-integration executable, preserves the real shared pool, and adds an explicit linked/native
-adapter sharing assertion. Its focused regression passes; complete Root must be rerun.
+target/communication-bootstrap-channel-worktree. Commits `dda602f3` and `a695470d` isolate the
+real process-wide source-custody scenario in its own executable and add fixed process-only
+infrastructure credit within the unchanged2MiB shared ceiling. The fresh complete Root suite
+passes3,233 tests, zero failures,24 existing ignored (2,055.81s). Root format, strict all-target/
+all-feature Clippy, ambient check and all four deny categories pass. This supersedes the earlier
+1209/1 app-library failure and running-Root notes below; no production source-pool limit changed.
 
-The next process-only retained-credit primitive prepays fixed native infrastructure without
-inventing an MLS group or changing any byte/slot limit. All seven focused regressions pass,
-covering exact capacity, overflow/refusal, full group table, Crypto/Forward isolation, group
-retirement, concurrency and actual last task/output custody. All27 resource tests pass; actual-
-diff read-only review has no findings. Complete gates remain pending. No bootstrap/listener/
-live V2/media relay is enabled by this step.
+The internal ECDH bootstrap candidate retains Pending before native RNG and installs one
+immutable Session under the original UI generation and selected-owner Arc. Exact retries share
+the same paid public output, even after registry removal. Curve validation precedes native
+scalar work; canonical transcript/shared real-WebCrypto vectors pin role, owner, group, join,
+session and fixed-width leading-zero ECDH bindings. All61 focused native handoff tests pass,
+including13 new bootstrap cases. Complete native passes532 library plus five ACL tests,
+zero failures (517.09s library;676.16s gate). Native check60.72s, strict all-target/all-feature
+Clippy72.50s, format0.94s, executable build219.59s and real startup4.38s pass. Full frontend
+passes2,312 tests, Svelte zero errors/warnings, production build and all ten rendered flows pass.
+The cherry-picked publication source tree matches the validated tree exactly. Logs are retained
+under target/voice-bootstrap-* in the active checkout; no validation process remains running.
 
-Earlier notes that a fresh Root run is still executing describe the superseded failed run.
+The paid64-slot setup index has no uncertain-row eviction. Lifecycle collection remains an
+enablement requirement. Native computation drainage is not browser/provider drainage; actual
+browser crypto must retain its corresponding engine owner through setup and authenticated ACK.
+No renderer bootstrap command, application listener, CSP change, browser Session or live V2
+dispatch is enabled. The fresh p256 source-review limitations are recorded in
+communication-recovery/VOICE-NATIVE-RESULTS-NEXT.md. Root deny does not clear the separate
+native/experiment dependency-audit findings.
+
+Hosted `c5c52fd8` is not green. Linux exact-history recovery times out in the reversed-reopen
+scenario: client5 has14/15 original signed operations while bridge4 and client6 have15/15.
+Current diagnostics add bounded phase, ordinary request/lower-result/observer-loss and passive
+history-count timelines, plus missing-message author/labels. They preserve the original exact
+union, transport behavior and time bounds; they are not a fix or evidence of flakiness. Windows
+Root also times out in a file-range actor test while the old global custody fixture overlaps;
+isolation removes that known interference, but a hosted rerun is still required. Static
+adversarial re-review has no remaining findings; all four new diagnostic regressions pass in
+the complete native suite. Live V2, member media relay, combined and independent physical acceptance remain
+open. Only one physical desktop is available.
+
+Next local-channel slice has an ignored, uncompiled draft at
+target/voice-status-service-draft.rs. It is not application code or acceptance evidence.
+The internal Status-only IO design passed read-only review after fixing abort custody with
+an ordered ServerState and private RunningServer retaining shared process credit through task
+collection. Actual Registry routing, closed admit_status, runtime/socket tests and concrete
+layout guards still need implementation. Do not start the listener or change CSP/live dispatch
+from this draft. Keep native/browser handoff ownership separate from parallel RTC/media work.
 
 ## Native framed handoff continuation (21 October, in progress)
 

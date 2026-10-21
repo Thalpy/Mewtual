@@ -1,23 +1,43 @@
 # Chat, files and voice implementation evidence
 
-## Bootstrap continuation (21 October, gates pending)
+## Bootstrap continuation (21 October, local complete gates passed)
 
 Active checkout is target/communication-bootstrap-channel-worktree, based on published
-`c5c52fd8`. Fresh Root stopped with1209 passed/1 failed in the app library: a capacity-custody
+`c5c52fd8`. An earlier fresh Root stopped with1209 passed/1 failed in the app library: a capacity-custody
 test raced unrelated users of its real global source pool. `dda602f3` isolates the original
 scenario in a dedicated integration process, also proving its source adapter and linked
-public factory share that same pool. Focused regression passes; full rerun is required.
+public factory share that same pool. The fresh complete Root rerun passes3,233, zero failures,
+24 existing ignored,59 summaries (2,055.81s). Root format, strict all-target/all-feature Clippy,
+ambient and all four deny categories pass.
 
 Seven new focused process-retained-capacity tests pass (0.01s after75s compile). The separate
 affine owner shares existing process bytes but has no group/budget/work-slot conversion. It
 covers fixed native infrastructure only, not group payloads or computation. Exact/overflow
 refusal, both drop orders, full group table, unchanged Crypto/Forward limits, concurrent
 admission and uncollected output/last Arc custody are checked. All27 resource tests pass;
-actual-diff read-only review has no findings. Full gates remain pending. An earlier cached
+actual-diff read-only review has no findings. An earlier cached
 invocation matched zero tests and is not evidence;
 only sync fingerprint result markers were invalidated before the actual seven-case run.
-Native/browser bootstrap, framed action delivery, RTC/legacy isolation, media and combined/
-physical acceptance remain open. Earlier running-Root notes below are superseded.
+The internal selected-owner ECDH bootstrap has13 new passing native regressions, within61
+passing handoff tests. Seven new real-WebCrypto/metadata tests and eight existing framing
+tests pass. Full frontend passes2,312, Svelte zero errors/warnings, production build and all ten
+rendered Edge flows pass. Complete native passes532 library plus five ACL tests, zero failures
+(517.09s library;676.16s gate). Native check60.72s, strict all-target/all-feature Clippy72.50s,
+format0.94s, build219.59s and actual startup4.38s pass. All four new diagnostic regressions pass.
+Immutable shared output custody and UTF8 BOM identity regressions resolve the initial review
+findings. p256 source review documents limited stored-value zeroization and no independent
+arithmetic/assembly audit; separate native/experiment dependency findings remain open.
+
+Hosted `c5c52fd8` Linux fails reversed-reopen exact-history recovery (client5 retains14/15 ops;
+bridge4/client6 have15/15). The ordinary-request and passive-history observations added here
+retain bounded fixture metadata and keep all original oracles/deadlines. They do not establish
+the cause or fix it. Windows Root also fails the file-range actor bound during overlap with
+the global custody fixture; the new process isolation removes that interference, without
+establishing it as the sole hosted cause. Fresh hosted acceptance remains required.
+
+No renderer bootstrap command, listener/CSP, browser Session or live dispatch is enabled.
+Native/browser action delivery, actual setup ACK/provider custody, RTC/legacy isolation,
+media and combined/physical acceptance remain open. Earlier running-Root notes are superseded.
 
 ## Framed handoff continuation (21 October, acceptance still open)
 
