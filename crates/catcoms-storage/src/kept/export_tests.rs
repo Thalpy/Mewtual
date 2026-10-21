@@ -952,6 +952,82 @@ fn a_retry_after_an_unconfirmed_link_never_trims_or_claims_a_changed_final_file(
 }
 
 #[test]
+fn a_failed_removal_write_keeps_the_live_session_exclusive() {
+    // Review L7: Remove's Deleting write fails on a full vault. The record is still
+    // Completed/Writing, so the older session's presence must still refuse a second writer.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (id, lease) = completed(&mut store);
+    let older = started(&mut store, &lease, &fx.downloads);
+    let journal = older.journal().clone();
+    assert!(
+        injected(Effect::RecordWrite, io::ErrorKind::StorageFull, || {
+            store.cancel_download(id)
+        })
+        .is_err()
+    );
+    assert_eq!(state(&store, id), ExportState::Writing(journal.clone()));
+    let lease = reverified(&mut store, id);
+    let elsewhere = fx.downloads.with_file_name("Elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let unrelated = ExportFile::create(&elsewhere, "other.txt", export_plan()).unwrap();
+    assert!(
+        store
+            .resume_download_export(&lease, &journal, unrelated.presence())
+            .is_err(),
+        "the older session still owns the partial"
+    );
+    drop(older);
+    store
+        .resume_download_export(&lease, &journal, unrelated.presence())
+        .expect("free once the older session is gone");
+}
+
+#[test]
+fn a_chat_save_of_a_halted_journal_is_refused_before_any_reverification() {
+    // Review L10: only the explicit Resume (intent CAS clears the halt) or Save new copy may
+    // continue a halted save; a plain Save must not spend a re-verification first.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (id, lease) = completed(&mut store);
+    let file = started(&mut store, &lease, &fx.downloads);
+    let journal = file.journal().clone();
+    drop(file);
+    halt(&mut store, id, &journal, ExportHalt::Unavailable).unwrap();
+    let refused = store.resume_download(id).unwrap_err();
+    assert!(
+        refused.to_string().contains("Saving this file stopped"),
+        "{refused}"
+    );
+    let again = store.begin_download(vec![plan()], 0, [9; 32]).unwrap_err();
+    assert!(
+        again.to_string().contains("Saving this file stopped"),
+        "{again}"
+    );
+    let intent = store.downloads().unwrap()[0].state.intent;
+    store.set_download_paused(id, intent, false).unwrap();
+    store
+        .resume_download(id)
+        .expect("the explicit Resume cleared the halt");
+}
+
+#[test]
+fn admission_on_a_full_vault_fails_cleanly_without_faulting_the_store() {
+    // Review L6: the new transfer directory itself cannot be created.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let refused = injected(Effect::CreateDir, io::ErrorKind::StorageFull, || {
+        store.begin_download(vec![plan()], 0, [9; 32])
+    });
+    assert!(matches!(&refused, Err(error) if persistence::is_clean_disk_full(error)));
+    assert!(store.downloads().unwrap().is_empty(), "nothing admitted");
+    let run = store
+        .begin_download(vec![plan()], 0, [9; 32])
+        .expect("the store is not faulted; a later admission works");
+    verify_private(&mut store, run);
+}
+
+#[test]
 fn an_empty_file_saves_as_one_empty_chunk_across_restart() {
     // Review U-M5: an empty file is one empty chunk. Its plan, its complete checkpoint (1, 0),
     // restart, resume and publication must all work, ending in a zero-byte final file.

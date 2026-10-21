@@ -681,6 +681,16 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
                         .into(),
                 ));
             }
+            if matches!(&transfer.record.export, export::Export::Writing(journal) if journal.halt().is_some())
+            {
+                // Review L10: a halted save needs the explicit Resume (its intent CAS clears the
+                // halt after the destination preflight) or Save new copy. A plain chat Save must
+                // not spend a re-verification and then fail at the journal.
+                return Err(StorageError::Io(
+                    "Saving this file stopped. Open Transfers to resume it or save a new copy."
+                        .into(),
+                ));
+            }
             if transfer.record.exhausted {
                 return Err(StorageError::KeepExhausted);
             }

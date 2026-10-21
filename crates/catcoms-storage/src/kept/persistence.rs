@@ -304,7 +304,18 @@ impl<R: CryptoRngCore> Transfer<R> {
         if path.file_name().and_then(|name| name.to_str()) != Some(record.owner().name().as_str()) {
             return Err(StorageError::Malformed);
         }
-        fs::create_dir(&path).map_err(io)?;
+        // Review L6: on a full volume the directory creation is usually the first step to fail.
+        // Nothing was created, so report the same clean disk-full outcome as a refused first
+        // record: admission fails and the store is not faulted.
+        if let Err(error) = super::external::inject(super::external::Effect::CreateDir)
+            .and_then(|()| fs::create_dir(&path))
+        {
+            return Err(if error.kind() == std::io::ErrorKind::StorageFull {
+                StorageError::Io(RECORD_DISK_FULL.into())
+            } else {
+                io(error)
+            });
+        }
         if let Some(parent) = path.parent() {
             directory_barrier(parent)?;
         }

@@ -401,14 +401,18 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
             self.active = None;
         }
         let transfer = &mut self.transfers[index];
+        // Retiring the epoch first stops every export observer even if the write below fails.
         transfer.read_epoch.retire();
         transfer.checked = false;
-        transfer.export_presence = None;
         if transfer.record.phase != KeepPhase::Deleting {
             let mut next = transfer.record.successor()?;
             next.phase = KeepPhase::Deleting;
             transfer.publish(next, &self.metadata_key, &mut self.rng)?;
         }
+        // Review L7: only once Deleting is durable. If that write failed (for example a full
+        // vault), the record is still Completed/Writing and a live older session's presence must
+        // keep refusing a second writer in this mount.
+        transfer.export_presence = None;
         Ok(transfer.record.export.state())
     }
     /// Cleanup after committed external publication may remove only the exact exported

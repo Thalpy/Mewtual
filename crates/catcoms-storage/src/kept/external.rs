@@ -556,6 +556,8 @@ pub(super) enum Effect {
     /// The sealed record write in `persistence.rs` (not an external path); shares the seam so a
     /// test can model a full vault volume.
     RecordWrite,
+    /// Creation of a new transfer directory in the vault (admission), likewise.
+    CreateDir,
 }
 #[cfg(test)]
 thread_local! {
