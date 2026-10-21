@@ -269,6 +269,168 @@ fn routes(seeds: &[u8]) -> Vec<BoundRoute> {
         .collect()
 }
 
+enum FinalRevocation {
+    Lease(CallLease),
+    Session(Arc<Runtime>),
+}
+struct FinalPacketClock {
+    inner: Arc<ManualClock>,
+    target: FinalRevocation,
+    armed: std::sync::atomic::AtomicBool,
+}
+redacted_debug!(FinalPacketClock);
+impl Clock for FinalPacketClock {
+    fn now_ms(&self) -> u64 {
+        self.inner.now_ms()
+    }
+    fn monotonic_ms(&self) -> u64 {
+        if self.armed.swap(false, Ordering::AcqRel) {
+            match &self.target {
+                FinalRevocation::Lease(owner) => owner.revoke(),
+                FinalRevocation::Session(runtime) => runtime.revoke_session(),
+            }
+        }
+        self.inner.monotonic_ms()
+    }
+    fn sleep(
+        &self,
+        duration: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        self.inner.sleep(duration)
+    }
+}
+
+#[test]
+fn queued_source_final_packet_clock_revocation_closes_the_same_lower_observation() {
+    for owner in ["call", "room", "session"] {
+        let f = Fixture::new(true);
+        let object = f.targeted(90, 32);
+        let target = match owner {
+            "call" => FinalRevocation::Lease(f.lease.clone()),
+            "room" => FinalRevocation::Lease(f.room.lease.clone()),
+            "session" => FinalRevocation::Session(f.runtime.clone()),
+            _ => unreachable!(),
+        };
+        let clock = Arc::new(FinalPacketClock {
+            inner: f.clock.clone(),
+            target,
+            armed: std::sync::atomic::AtomicBool::new(false),
+        });
+        let activity = f
+            .join
+            .borrow()
+            .source_packet_activity(
+                &object,
+                &Authority {
+                    context: &f.context,
+                    lease: &f.lease,
+                    member: &|_| true,
+                },
+                clock.clone(),
+            )
+            .unwrap();
+        f.source
+            .admit(&f.actor, object, activity, f.room.clone())
+            .unwrap();
+        let job = f.jobs(&[3]).pop().unwrap();
+        assert!(job.authority().authorized());
+        // The packet's clock is the LAST constituent sampled by this actual lower job. It can
+        // revoke earlier hop/origin/room owners too; none may retain a stale positive result.
+        clock.armed.store(true, Ordering::Release);
+        assert!(!job.authority().authorized(), "{owner}");
+    }
+}
+
+#[test]
+fn queued_source_preserves_the_original_packet_clock_when_monotonic_origins_differ() {
+    let f = Fixture::new(true);
+    let object = f.targeted(91, 32);
+    let packet_clock = Arc::new(ManualClock::new(1000));
+    let activity = f
+        .join
+        .borrow()
+        .source_packet_activity(
+            &object,
+            &Authority {
+                context: &f.context,
+                lease: &f.lease,
+                member: &|_| true,
+            },
+            packet_clock.clone(),
+        )
+        .unwrap();
+    f.source
+        .admit(&f.actor, object, activity, f.room.clone())
+        .unwrap();
+    let job = f.jobs(&[3]).pop().unwrap();
+    assert!(job.authority().authorized());
+    packet_clock.advance_ms(MAX_PACKET_LIFETIME_MS);
+    packet_clock.set_wall_ms(1000);
+    assert_eq!(f.clock.monotonic_ms(), 1000);
+    assert_eq!(f.clock.now_ms(), packet_clock.now_ms());
+    assert!(
+        !job.authority().authorized(),
+        "a valid-looking job clock cannot revive the expired original packet clock"
+    );
+}
+
+#[test]
+fn source_later_effect_contention_preserves_prepared_jobs_and_the_unstarted_packet_allowance() {
+    let f = Fixture::new(true);
+    let a = f.targeted(93, 32);
+    let b = f.targeted(94, 32);
+    f.admit(a.clone()).unwrap();
+    f.admit(b.clone()).unwrap();
+    let mut keys = [(a.issuer(), a.id()), (b.issuer(), b.id())];
+    keys.sort();
+    let mut calls = 0;
+    let mut jobs = f
+        .source
+        .take_ready_using(&f.actor, &routes(&[3]), 4, |origin, target, expires| {
+            calls += 1;
+            assert_eq!(origin, f.context.local);
+            assert_eq!(target, id(3));
+            if calls == 2 {
+                Err(VoiceError::Capacity)
+            } else {
+                f.actor.effect(origin, target, expires)
+            }
+        })
+        .unwrap();
+    assert_eq!(calls, 2);
+    assert_eq!(
+        jobs.len(),
+        1,
+        "earlier debited job must escape rather than be dropped"
+    );
+    let first = jobs.pop().unwrap();
+    assert_eq!(first.key, keys[0]);
+    assert_eq!(first.hop(), SourceHop::Direct(id(3)));
+    assert!(first.authority().authorized());
+    {
+        let state = f.source.state.lock().unwrap();
+        let ready = state.packets[&keys[0]].state.lock().unwrap();
+        assert_eq!(ready.attempts, 1);
+        assert_eq!(ready.direct, BTreeSet::from([id(3)]));
+        let unstarted = state.packets[&keys[1]].state.lock().unwrap();
+        assert_eq!(unstarted.attempts, 0);
+        assert_eq!(unstarted.selected, 0);
+        assert!(unstarted.direct.is_empty() && unstarted.helpers.is_empty());
+    }
+    let mut resumed = f.jobs(&[3]);
+    assert_eq!(
+        resumed.len(),
+        1,
+        "only the untouched second packet is ready immediately"
+    );
+    let second = resumed.pop().unwrap();
+    assert_eq!(second.key, keys[1]);
+    assert_eq!(second.hop(), SourceHop::Direct(id(3)));
+    assert!(second.authority().authorized());
+    assert_eq!(f.source.counts(), (2, 2, 2));
+    drop((first, second));
+}
+
 #[test]
 fn source_three_total_submissions_mix_direct_and_two_helpers_without_refill() {
     let f = Fixture::new(true);

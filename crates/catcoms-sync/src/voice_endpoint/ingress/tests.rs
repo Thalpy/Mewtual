@@ -3,6 +3,7 @@ use crate::voice_endpoint::tests::{attach, Node};
 use catcoms_rt::ManualClock;
 use voice_v2::runtime::Runtime;
 mod protected;
+mod protected_start;
 
 async fn fixture() -> (Node, Node, Arc<Runtime>, Arc<ManualClock>) {
     let (_hub, mut nodes, _) = crate::tests::build_members(2).await;

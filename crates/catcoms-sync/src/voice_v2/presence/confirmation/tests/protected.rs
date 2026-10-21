@@ -208,6 +208,82 @@ fn action(f: &mut Fixture) -> Arc<CryptoAction> {
 }
 
 #[test]
+fn protected_high_rejects_distinct_hello_ids_repeating_accepted_nonce_without_replacing_progress() {
+    // Both immediate A -> A and A -> B -> A are possible malicious-peer inputs. The trusted
+    // AEAD seam supplies repeated valid canonical plaintext under distinct authenticated IDs.
+    for count in [2u8, 3] {
+        let (mut f, _runtime, actor, _chain) = protected_fixture();
+        let mut first_plaintext = None;
+        let mut saved = None;
+        for index in 0..count {
+            let (flight, object) = hello(&mut f);
+            let bytes = if index == count - 1 {
+                first_plaintext.clone().unwrap()
+            } else {
+                first_plaintext.get_or_insert_with(|| flight.plaintext.clone());
+                flight.plaintext
+            };
+            admit(&mut f, &actor, object).unwrap();
+            let action = action(&mut f);
+            action.admit_engine(action.engine_bytes()).unwrap();
+            let result = f
+                .high
+                .join
+                .commit_confirmation_result(
+                    &action,
+                    &bytes,
+                    action.output_tag(&bytes).unwrap(),
+                    &ca(&f.high.context, &f.high.lease),
+                    &f.clock,
+                    &mut f.rng,
+                )
+                .unwrap();
+            let pair = &f.high.join.confirmations.pairs[&f.id];
+            let current = (
+                pair.starts,
+                pair.action_serial,
+                pair.low_nonce,
+                pair.high_nonce,
+            );
+            if index == count - 1 {
+                assert!(matches!(
+                    result.outcome,
+                    CryptoOutcome::Rejected(VoiceError::Replay)
+                ));
+                assert_eq!(Some(current), saved);
+                assert!(
+                    pair.hello.candidate(u64::from(count)).is_ok(),
+                    "rejected nonce reuse cannot advance accepted-Hello floor"
+                );
+            } else {
+                assert!(matches!(result.outcome, CryptoOutcome::Opened));
+                saved = Some(current);
+            }
+            action.settle_engine();
+            action.acknowledge_result(&result).unwrap();
+            let recovered = f
+                .high
+                .join
+                .commit_confirmation_result(
+                    &action,
+                    &bytes,
+                    action.output_tag(&bytes).unwrap(),
+                    &ca(&f.high.context, &f.high.lease),
+                    &f.clock,
+                    &mut f.rng,
+                )
+                .unwrap();
+            assert!(result.same_transition(&recovered));
+        }
+        let pair = &f.high.join.confirmations.pairs[&f.id];
+        assert_eq!(
+            pair.protected_hello_tags.iter().flatten().count(),
+            count as usize - 1
+        );
+    }
+}
+
+#[test]
 fn protected_hello_atomically_publishes_action_and_exact_admission_without_decoding() {
     let (mut f, _runtime, actor, _chain) = protected_fixture();
     let (_, object) = hello(&mut f);

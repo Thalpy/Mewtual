@@ -7,6 +7,7 @@ use catcoms_rt::ManualClock;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 mod protected;
+mod protected_start;
 
 fn members(_: DeviceId) -> bool {
     true
@@ -248,6 +249,17 @@ fn hello(f: &mut Fixture) -> (CryptoFlight, SignedObject) {
     let flight = f.low.flight(f.id, &f.clock, &mut f.rng);
     let signed = f.low.sign(&flight, &f.clock).unwrap();
     (flight, signed)
+}
+
+#[test]
+fn native_pair_nonce_tags_fit_existing_record_with_maximum_derivation_transcript() {
+    // PairSetup derivation input is capped at4096; canonical native pair transcripts are
+    // smaller. Include the actual enlarged Pair layout without raising its original allowance.
+    assert!(std::mem::size_of::<Pair>() + 4096 <= PAIR_BYTES);
+    let f = fixture();
+    for end in [&f.low, &f.high] {
+        assert!(end.join.confirmations.pairs[&f.id].transcript.len() <= 4096);
+    }
 }
 
 #[test]

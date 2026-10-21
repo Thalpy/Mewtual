@@ -1,5 +1,24 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native protected local start (21 October, pending validation)
+
+`Root::start_voice_confirmation(&Arc<CallGrant>, handshake, predecessor)` recognizes the exact
+native affine call owner, current directory room, member/epoch view and original participant.
+It prepares protected capacity only for an already proven pristine pair. `predecessor = None`
+always identifies the first start; `Some(packet_id)` always identifies that exact predecessor's
+successor. Repeated requests recover the original registered action, including after terminal
+input compaction; no public payload or identifier manufactures fresh engine/send authority.
+
+`LocalJoin::start_protected_hello` is a native-only consumer. Its final local origin has no
+IngressTicket or incoming quota. Packet, action and fixed history publication occurs together;
+local refusal before admission leaves the candidate/sequence/nonce unchanged. Original packet,
+action and chain revocation occupy three bounded CryptoAuthority positions. Layout guards pass
+within the original row budget. No browser command or wire/storage format changed.
+
+This increment passes all 352 focused voice tests and read-only adversarial review; complete
+combined gates remain pending. It exposes no native IPC, browser protected seal or live V2
+dispatch. The earlier inactive checkpoints remain below.
+
 ## Native streamed-upload publication (20 October)
 
 `begin_file_upload` captures the native UI-session generation before actor awaits. Each registered

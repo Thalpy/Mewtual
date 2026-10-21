@@ -5,6 +5,40 @@ are implemented and exercised; live V2, production member media relay, combined 
 independent physical audio/network acceptance are not complete. The dated sections distinguish
 current runtime paths from inactive prerequisites and experiments.
 
+## Low-side protected Hello work in progress (21 October)
+
+The separate `communication-low-hello-worktree`, based on reviewed local source `53191c87`,
+now contains the native Root/local low producer and affine outgoing preparation. New tests target
+exact predecessor retries, all three lanes, packet/action/chain cancellation, ordinary pressure,
+final History contention, real Root call/epoch replacement and original-clock source custody.
+The fixed row/metadata/Pair allowances have not changed; their growth guards pass.
+
+Adversarial review found two medium issues during implementation: a later busy effect discarded
+earlier prepared source jobs after attempt debit, and Clock callbacks could revoke a previously
+checked capability while the same observation returned true. Both are corrected and have focused
+regressions. Re-review found no remaining actionable defect. Formatting and whitespace checks
+pass. All **352 focused voice tests pass**, zero failures in 15.33s (`voice-low-all-4.log`).
+The first two compile attempts exposed fixture-only MLS key-package/Context ownership mistakes
+(`voice-low-all-1.log`, `voice-low-all-2.log`). The third ran 350 passing and two failing cases:
+one incorrectly expected a still-open Workflow's protected engine lane to disappear; the other
+mutated a roster without its epoch, correctly refusing freshness (`voice-low-all-3.log`). Corrected
+fixtures assert original reservation lifetime and actual epoch/member rejection semantics.
+No production rejection, deadline, capacity or assertion contract was loosened.
+
+The frozen previous source `53191c87` passes its full root suite: **3,096 passed**, zero failures,
+24 existing ignored across 57 summaries (`voice-hello-root-full-2.log` in atomic-intake checkout).
+Its full unchanged frontend suite passes 2,254 tests (`voice-hello-frontend-full.log`). Frozen
+Clippy found only the high-intake argument count; the low increment narrowly allows that lint
+with its independent-capability rationale. The combined strict Clippy first found a default-value
+replacement style lint (`voice-low-root-clippy-1.log`), corrected to `mem::take`. Strict whole-root
+Clippy now passes (`voice-low-root-clippy-2.log`), and the final focused rerun passes all 352 cases
+in 17.81s (`voice-low-all-5.log`). The full frontend suite passes **2,254 tests**, zero failures in
+75.82s (`voice-low-frontend-full.log`). Root/native formatting and the ambient gate pass. Complete
+combined root/native suites and native check/build/startup remain pending; earlier results are not
+attributed to this increment.
+
+This is no live dispatch, IPC/browser/RTC, Proof/Finish, relay or physical acceptance claim.
+
 Private Download resume preserves verified encrypted acquisition progress and its spent execution
 allowance across restart. External export uses a fresh destination; continuing a partly written
 external plaintext file at its old offset is not implemented.
@@ -26,7 +60,7 @@ findings (`voice-hello-native-deny-final-2.log`). No new exception suppresses th
 IPC experiment audit also remains open. The first audit attempt was sandbox-blocked on the
 advisory-db lock, and the first native final attempt was offline before its new DER artifact
 was fetched. Those are not accepted audit results. The initial full Rust run was deliberately
-stopped before tests to avoid validating obsolete locks; final full gates below are pending.
+stopped before tests to avoid validating obsolete locks; the frozen full root result is recorded above.
 
 ## Protected native Hello consumer (20 October, live dispatch disabled)
 
@@ -64,8 +98,8 @@ release at End. No runtime refusal, quota, row limit or assertion contract was r
 
 Read-only design/implementation review found no remaining functional blocker/high/medium in this
 Hello-only increment. Its requested effect-allocation accounting correction is included and its
-layout guard passes. Full root/native/frontend gates for this increment are pending.
-Production kind28 dispatch, low-side Hello and Proof/Finish, SDP phase transfer, native/browser
+layout guard passes. Frozen full root/frontend results are recorded above; combined native gates
+remain pending. Production kind28 dispatch, Proof/Finish, SDP phase transfer, native/browser
 IPC/RTC, helper compatibility, media relay and combined/physical acceptance remain unfinished.
 
 ## Native event-drain follow-up (20 October)

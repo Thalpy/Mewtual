@@ -12,6 +12,8 @@ use futures::FutureExt;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod outgoing;
+
 const PAIRS: usize = 16;
 const RESERVATIONS: usize = 32;
 const CONSTRUCTION_MS: u64 = 5000;
@@ -50,6 +52,9 @@ impl PacketSlots {
     }
 }
 impl ConfirmationCapacity {
+    pub(super) fn outgoing_slot(&self, slots: &PacketSlots) -> Result<slots::Slot, VoiceError> {
+        self.outgoing.loan(&slots.outgoing)
+    }
     pub(super) fn hello_incoming_slot(
         &self,
         slots: &PacketSlots,
@@ -126,6 +131,9 @@ struct Outgoing {
     cached: Option<SignedObject>,
     live: CallLease,
     crypto: RevocationOwner,
+    // Protected output remains tied to its original chain after encryption has settled.
+    // This is a revocation identity only, never Workflow progress custody.
+    chain: Option<CallLease>,
     _credit: Credit,
     exchange: Option<Arc<Exchange>>,
     // Native table custody, separate from retained bytes and actual transport copies.
@@ -396,12 +404,32 @@ pub(super) struct SourcePacketAuthority {
     local: CallLease,
     pair: CallLease,
     packet: CallLease,
+    chain: Option<CallLease>,
     clock: Arc<dyn Clock>,
     deadline: u64,
     exchange: Option<Arc<Exchange>>,
     expires: u64,
 }
 impl SourcePacketAuthority {
+    /// Always use this packet's actual original clock. The caller may not replace its
+    /// monotonic origin with the enclosing source job's clock, even if wall time agrees.
+    pub(super) fn observation_time(&self) -> (u64, u64) {
+        (self.clock.now_ms(), self.clock.monotonic_ms())
+    }
+    /// Pure composition after ALL constituent clocks have been sampled through their owners.
+    /// No callback may follow these gates in its containing final authority observation.
+    pub(super) fn authorized_at(&self, wall: u64, mono: u64) -> bool {
+        self.local.is_live()
+            && self.pair.is_live()
+            && self.packet.is_live()
+            && self.chain.as_ref().is_none_or(CallLease::is_live)
+            && mono < self.deadline
+            && wall < self.expires
+            && self
+                .exchange
+                .as_ref()
+                .is_none_or(|exchange| exchange.is_live())
+    }
     pub(super) fn exchange(&self) -> Option<Arc<Exchange>> {
         self.exchange.clone()
     }
@@ -426,6 +454,11 @@ impl SourcePacketAuthority {
             && self.local.is_same(&other.local)
             && self.pair.is_same(&other.pair)
             && self.packet.is_same(&other.packet)
+            && match (&self.chain, &other.chain) {
+                (None, None) => true,
+                (Some(first), Some(second)) => first.is_same(second),
+                _ => false,
+            }
             && self.deadline == other.deadline
             && self.expires == other.expires
             && match (&self.exchange, &other.exchange) {
@@ -438,15 +471,11 @@ impl SourcePacketAuthority {
 #[async_trait::async_trait]
 impl catcoms_rt::RequestAuthority for SourcePacketAuthority {
     fn authorized(&self) -> bool {
-        self.local.is_live()
-            && self.pair.is_live()
-            && self.packet.is_live()
-            && self.clock.monotonic_ms() < self.deadline
-            && self.clock.now_ms() < self.expires
-            && self
-                .exchange
-                .as_ref()
-                .is_none_or(|exchange| exchange.is_live())
+        // Sampling can synchronously revoke any captured native owner. No Clock/callback may
+        // follow these irreversible lease observations in this capability check.
+        let mono = self.clock.monotonic_ms();
+        let wall = self.clock.now_ms();
+        self.authorized_at(wall, mono)
     }
     async fn revoked(&self) {
         if !self.authorized() {
@@ -462,6 +491,9 @@ impl catcoms_rt::RequestAuthority for SourcePacketAuthority {
         ];
         if let Some(exchange) = &self.exchange {
             waits.push(exchange.revoked().boxed());
+        }
+        if let Some(chain) = &self.chain {
+            waits.push(chain.wait_revoked().boxed());
         }
         futures::future::select_all(waits).await;
     }
@@ -887,104 +919,18 @@ impl PacketLedger {
         rng: &mut impl CryptoRngCore,
     ) -> Result<ReservedPacket, VoiceError> {
         self.prune(clock);
-        if DeviceId::from_public_key_bytes(&public_key) != self.local {
-            return Err(VoiceError::Unauthorized);
-        }
-        let pair = self.pair(&request.handshake, authority)?;
-        let confirmation = matches!(
-            request.kind,
-            EncryptedKind::ConfirmHello
-                | EncryptedKind::ConfirmProof
-                | EncryptedKind::ConfirmFinish
-        );
-        if confirmation != (pair.status == Status::Confirming) {
-            return Err(VoiceError::Unauthorized);
-        }
-        if self.outgoing.len() >= RESERVATIONS {
-            return Err(VoiceError::Capacity);
-        }
-        let slot = self.packet_slots.outgoing.charge(1)?;
-        if request.ciphertext_bytes < 16
-            || request.ciphertext_bytes > request.kind.max_plaintext() + 16
-        {
-            return Err(VoiceError::Bounds);
-        }
-        let sequence = pair.next.checked_add(1).ok_or(VoiceError::Reservation)?;
-        let binding = pair.binding.clone();
-        let mut id = [0; 32];
-        rng.fill_bytes(&mut id);
-        if self.outgoing.contains_key(&id) {
-            return Err(VoiceError::Reservation);
-        }
-        let offer = if request.kind == EncryptedKind::Offer {
-            if request.offer.is_some() {
-                return Err(VoiceError::Malformed);
-            }
-            Some(OfferId {
-                issuer: self.local,
-                message: id,
-            })
-        } else {
-            request.offer
-        };
-        let header = EncryptedHeader {
-            source_join: self.join,
-            target: binding.peer,
-            target_join: binding.join,
-            source_key_ref: self.key_ref,
-            target_key_ref: binding.key_ref,
-            handshake: binding.handshake,
-            low_to_high: self.local < binding.peer,
-            kind: request.kind,
-            sequence,
-            offer,
-        };
-        let issued = clock.now_ms();
-        let expires = issued
-            .checked_add(MAX_PACKET_LIFETIME_MS)
-            .ok_or(VoiceError::Freshness)?;
-        let draft = PacketDraft::new(self.scope, public_key, id, issued, expires, header)?;
-        let aad = draft.aad();
-        let exchange = self.sdp_owner(&draft.header, false)?;
-        // Prepay canonical bytes plus the cache/event copy and bounded record overhead before
-        // returning AAD. Native engine permits use this same process pool concurrently.
-        let bytes = 2 * (aad.len() + request.ciphertext_bytes) + 256;
-        let mono = clock.monotonic_ms();
-        let credit = if let Some(exchange) = &exchange {
-            exchange.charge(Stage::LocalPacket, bytes)?
-        } else {
-            self.resources
-                .charge(self.scope.group, bytes, ResourceKind::Retained)?
-        };
-        self.publish_sdp_identity(&draft.header, id, false, mono);
-        self.pairs
-            .get_mut(&binding.handshake)
-            .expect("checked pair")
-            .next = sequence;
-        self.outgoing.insert(
-            id,
-            Outgoing {
-                draft,
-                ciphertext_bytes: request.ciphertext_bytes,
-                construction: mono.saturating_add(CONSTRUCTION_MS),
-                retire: mono.saturating_add(MAX_PACKET_LIFETIME_MS + CLOCK_SKEW_MS),
-                // Source eligibility is fixed at native reservation, independently of later
-                // wall corrections and separate clock sample timing on exact admission retries.
-                source_deadline: mono.saturating_add(MAX_PACKET_LIFETIME_MS),
-                cached: None,
-                live: CallLease::default(),
-                crypto: RevocationOwner::default(),
-                _credit: credit,
-                exchange,
-                _slot: slot,
-            },
-        );
-        Ok(ReservedPacket {
-            id,
-            aad,
-            sequence,
-            expires,
-        })
+        let prepared = self.prepare_outgoing(public_key, request, authority, clock, rng)?;
+        let (publication, reservation) =
+            self.validate_prepared_outgoing(prepared, authority, clock)?;
+        publication.admission().check_at(
+            authority.context.epoch,
+            clock.now_ms(),
+            clock.monotonic_ms(),
+        )?;
+        // Ordinary callers receive no reservation until its sequence and row are published.
+        // A protected producer instead composes this loan with its final candidate/action fence.
+        publication.publish();
+        Ok(reservation)
     }
     /// One atomic ciphertext pin/signature. A cancelled IPC response can retry exact bytes; an
     /// altered retry never replaces the signed cache. Expired ids cannot reconstruct a draft.
@@ -1042,6 +988,10 @@ impl PacketLedger {
         // irreversible owners after their last sample and immediately before first signing.
         self.pair(&outgoing.draft.header.handshake, authority)?;
         if !outgoing.live.is_live()
+            || outgoing
+                .chain
+                .as_ref()
+                .is_some_and(|chain| !chain.is_live())
             || !outgoing.crypto.0.is_live()
             || outgoing
                 .exchange
@@ -1086,7 +1036,7 @@ impl PacketLedger {
         {
             return Err(VoiceError::Unauthorized);
         }
-        super::crypto_authority::CryptoAuthority::new(
+        let grant = super::crypto_authority::CryptoAuthority::new(
             self.lease.clone(),
             pair.live.clone(),
             clock,
@@ -1096,7 +1046,11 @@ impl PacketLedger {
                 .min(self.sdp_deadline(outgoing.exchange.as_ref())?),
             outgoing.draft.expires,
         )?
-        .with_pending(outgoing.crypto.0.clone())
+        .with_pending(outgoing.crypto.0.clone())?;
+        match &outgoing.chain {
+            Some(chain) => grant.with_pending(chain.clone()),
+            None => Ok(grant),
+        }
     }
     pub(super) fn incoming_crypto_authority(
         &self,
@@ -1167,6 +1121,10 @@ impl PacketLedger {
             .ok_or(VoiceError::Reservation)?;
         if !outgoing.live.is_live()
             || outgoing.cached.as_ref() != Some(object)
+            || outgoing
+                .chain
+                .as_ref()
+                .is_some_and(|chain| !chain.is_live())
             || object.issuer() != self.local
             || object.scope() != self.scope
             || clock.monotonic_ms() >= outgoing.source_deadline
@@ -1180,6 +1138,7 @@ impl PacketLedger {
             local: self.lease.clone(),
             pair: pair.live.clone(),
             packet: outgoing.live.clone(),
+            chain: outgoing.chain.clone(),
             deadline: outgoing
                 .source_deadline
                 .min(self.sdp_deadline(outgoing.exchange.as_ref())?),

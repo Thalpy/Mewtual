@@ -3,6 +3,7 @@ use catcoms_crypto::DeviceKeypair;
 use catcoms_rt::{ManualClock, RequestCancellation};
 use std::future::Future;
 use tokio::sync::watch;
+mod local;
 
 fn device(seed: u8) -> DeviceId {
     DeviceKeypair::from_seed(&[seed; 32]).device_id()

@@ -328,6 +328,17 @@ pub(super) fn fixed_record_layout_bytes() -> usize {
 }
 
 impl ActionQueue {
+    pub(super) fn build_chain_encrypt(
+        mut prepared: PreparedAction,
+        input: CryptoFlight,
+        authority: CryptoAuthority,
+    ) -> Result<(super::chain::RowIssue, InactiveAction), VoiceError> {
+        let issue = prepared.chain_issue.take().ok_or(VoiceError::Scope)?;
+        let (key, action, exchange) = Self::build(prepared, Input::Encrypt(input), authority);
+        assert!(exchange.is_none(), "confirmation cannot adopt an SDP issue");
+        Ok((issue, InactiveAction { key, action }))
+    }
+
     pub(super) fn build_chain_decrypt(
         mut prepared: PreparedAction,
         input: InboundPacket,

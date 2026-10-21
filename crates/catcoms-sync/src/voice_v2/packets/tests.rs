@@ -3,6 +3,7 @@ use catcoms_crypto::DeviceKeypair;
 use catcoms_rt::ManualClock;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
+mod outgoing;
 
 const HANDSHAKE: [u8; 32] = [9; 32];
 

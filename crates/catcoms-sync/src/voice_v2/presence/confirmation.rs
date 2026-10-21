@@ -19,6 +19,8 @@ const MAX_CONFIRMING: usize = 8;
 const PAIR_BYTES: usize = 6144;
 const CONFIRM_DOMAIN: &str = "mewtual/voice/key-confirm/v2";
 mod protected;
+mod start;
+pub(crate) use start::ProtectedStart;
 
 #[derive(Default)]
 pub(super) struct Confirmations {
@@ -38,6 +40,9 @@ pub(super) struct Pair {
     action_serial: u64,
     low_nonce: Option<Nonce>,
     high_nonce: Option<Nonce>,
+    // Protected Hello identity cannot cycle A -> B -> A. Keep bounded canonical-plaintext
+    // hashes in this existing prepaid Pair record, never another action/engine lock or input.
+    protected_hello_tags: [Option<Nonce>; 3],
     hello: super::super::crypto_authority::SequenceGate,
     accepted_hello: Option<[u8; 32]>,
     accepted_proof: Option<[u8; 32]>,
@@ -209,6 +214,7 @@ enum PreparedConfirmation {
         action: Option<PreparedActionChange>,
         low: Nonce,
         high: Option<Nonce>,
+        nonce_tag: Option<Nonce>,
     },
     Proof {
         action: PreparedActionChange,
@@ -255,6 +261,11 @@ fn prepare_action(
         },
         retire,
     })
+}
+
+fn confirmation_tag(bytes: &[u8]) -> Nonce {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).into()
 }
 fn apply_action(pair: &mut Pair, prepared: PreparedActionChange, ledger: &PacketLedger) {
     if let Some(id) = prepared.retire {
@@ -326,6 +337,7 @@ impl LocalJoin {
                 || pair.action.is_some()
                 || pair.low_nonce.is_some()
                 || pair.high_nonce.is_some()
+                || pair.protected_hello_tags.iter().any(Option::is_some)
                 || pair.accepted_hello.is_some()
                 || pair.accepted_proof.is_some()
                 || pair.accepted_finish.is_some()
@@ -939,6 +951,7 @@ impl LocalJoin {
                 action_serial: 0,
                 low_nonce: None,
                 high_nonce: None,
+                protected_hello_tags: [None; 3],
                 hello: super::super::crypto_authority::SequenceGate::default(),
                 accepted_hello: None,
                 accepted_proof: None,
@@ -1353,7 +1366,12 @@ impl LocalJoin {
         // can observe the intermediate state.
         let outcome = match change {
             PreparedConfirmation::Rejected(error) => CryptoOutcome::Rejected(error),
-            PreparedConfirmation::Hello { action, low, high } => {
+            PreparedConfirmation::Hello {
+                action,
+                low,
+                high,
+                nonce_tag,
+            } => {
                 let pair = self
                     .confirmations
                     .pairs
@@ -1364,6 +1382,9 @@ impl LocalJoin {
                     apply_action(pair, action, &self.ledger);
                     pair.low_nonce = Some(low);
                     pair.high_nonce = high;
+                    if let Some(tag) = nonce_tag {
+                        pair.protected_hello_tags[usize::from(pair.starts)] = Some(tag);
+                    }
                     pair.starts += 1; // prepared after the strict starts < 3 check
                     pair.accepted_finish = None;
                 }
@@ -1414,6 +1435,13 @@ impl LocalJoin {
         match header.kind {
             EncryptedKind::ConfirmHello if !pair.low && !pair.established => {
                 pair.hello.candidate(header.sequence)?;
+                let nonce_tag = pair.protected_epoch.map(|_| confirmation_tag(bytes));
+                if nonce_tag.is_some_and(|tag| pair.protected_hello_tags.contains(&Some(tag))) {
+                    // Exact signed-ID retries recover their original action/result before here.
+                    // A distinct identity reusing accepted canonical plaintext is not a fresh
+                    // attempt; reject without replacing current nonces or advancing the floor.
+                    return Err(VoiceError::Replay);
+                }
                 if pair.low_nonce != Some(low) {
                     if pair.starts >= 3 {
                         return Err(VoiceError::RateLimited);
@@ -1432,12 +1460,14 @@ impl LocalJoin {
                         action: Some(action),
                         low,
                         high: Some(nonce),
+                        nonce_tag,
                     });
                 }
                 Ok(PreparedConfirmation::Hello {
                     action: None,
                     low,
                     high: pair.high_nonce,
+                    nonce_tag: None,
                 })
             }
             EncryptedKind::ConfirmProof if pair.low && !pair.established => {

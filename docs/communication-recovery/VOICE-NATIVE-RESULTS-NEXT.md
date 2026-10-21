@@ -25,14 +25,44 @@ advance with queued driver custody, document room deletion/recreation, three mal
 full-pool consumer/engine custody after a prepaid verification ticket, and final History contention
 with exactly one remaining original allowance. The earlier failed test assumptions are recorded
 in the acceptance ledger. Read-only review requested explicit effect accounting; that correction
-fits the original row. Final full-suite verification is pending for this increment.
+fits the original row. Frozen source `53191c87` passes the full root suite (3,096 passed, zero
+failures, 24 existing ignored) and unchanged frontend suite (2,254 passed). Native gates are
+being consolidated with the low-side increment; its Clippy argument-count finding has a narrow
+documented exception in that increment.
 
-This is not live V2. Low-side start/Hello encryption, Proof/Finish, SDP phase transfer, production
+This is not live V2. Proof/Finish, SDP phase transfer, production
 native/browser IPC, compatible helpers, RTC dispatch and legacy-session isolation remain open.
 The browser protected broker still supports derivation only. The historical prerequisite sections
 below describe earlier checkpoints; this section supersedes their native Hello/epoch-fence gaps.
 
-## Next protected consumer: low-side Hello start (design reviewed, not implemented)
+## Low-side Hello start (21 October, focused verification passed)
+
+The next worktree now implements the design below through actual
+`Root::start_voice_confirmation` and `LocalJoin::start_protected_hello`. None always recovers the
+original request; Some(previous packet ID) always recovers that exact successor, even after all
+three lanes are spent. A changed native call cannot adopt the history with equal join bytes.
+Outgoing packet preparation is affine: abandonment publishes no sequence, outgoing row or SDP
+identity. Its packet/action/candidate and native nonce are published together under a dedicated
+local Group -> Policy -> try-History fence, without an IngressTicket or incoming-origin debit.
+
+Three bounded pending leases retain the independent packet, action and chain gates. Fixed action
+and low/high history layout guards still enforce the original 1,536-byte row and 2 KiB metadata
+allowances. A protected sealed packet also retains chain cancellation in queued source work.
+Each original constituent clock is sampled before pure owner checks; a source job cannot use its
+own monotonic origin to revive an expired packet. Busy effect preparation skips the untouched
+packet while returning any earlier prepared jobs whose attempts have already been spent.
+
+New tests cover exact lost replies after terminal compaction, immutable predecessors/fourth
+refusal, full ordinary pressure, final refusal and History contention, delayed old seals after
+replacement/close, original deadlines and epoch changes, actual Root call replacement/MLS epoch
+addition, native owner/table substitutions and final Clock revocation. Read-only re-review has no
+remaining actionable finding. All **352 focused voice tests pass**, zero failures in 15.33s
+(`target/voice-low-all-4.log`), including unchanged row, metadata and Pair layout guards.
+Complete combined gates remain pending. The previous checkpoint's full root/frontend results
+belong to frozen source `53191c87`, not this increment. No live V2/IPC/browser/Proof/Finish/SDP
+readiness is claimed.
+
+The design constraints remain:
 
 The next native increment must prepare an outgoing packet transaction without publishing its
 sequence, row or SDP identity. Ordinary reserve can wrap the same affine preparation/publish
@@ -46,14 +76,46 @@ lost fresh-start reply cannot cause another nonce, reservation, candidate or eng
 Use rows1/4/7 for at most three Hello identities, preserving the other three low-side outgoing
 claims for Finish. Do not re-reserve automatically after five seconds within an issued row.
 Keep action/attempt supersession, actual outgoing crypto and chain revocation independent.
-The current CryptoAuthority has only two pending positions and ordinary encryption fills both;
-resolve that finite composition explicitly and recheck the unchanged row layout before adding
-another gate. Keep inactive owners outside final guards and retire old engines after them.
+CryptoAuthority now has three finite pending positions; the unchanged layout guard passes.
+Keep inactive owners outside final guards and retire old engines after them.
 
 Required focused boundaries include each local refusal before publication, exact retry without
 RNG, three starts/fourth refusal/last retry, full ordinary pressure, epoch/room/call replacement,
 old running seal during supersession, construction expiry, actual retained input/engine drainage,
-and unchanged ordinary packet/SDP reservation semantics. This design enables no producer yet.
+and unchanged ordinary packet/SDP reservation semantics. The producer remains outside live dispatch.
+
+### Next Proof/Finish consumers: reviewed delay constraints
+
+Proof and Finish headers cannot identify their Hello candidate until plaintext is opened. Their
+three incoming identities must therefore be allocated globally per role, by authenticated
+issuer/ID/hash, rather than consuming the current Hello candidate's sole row. A late Proof(A)
+must not strand valid Proof(B). Outgoing responses remain bound to the exact accepted native
+trigger, with immutable response receipts recovered before output allocation:
+
+| Role | Low side | High side |
+| --- | --- | --- |
+| Hello | Output 1/4/7, native start identity | Input 1/4/7 |
+| Proof | Input 2/5/8, independent admission order | Output 2/5/8, exact accepted Hello |
+| Finish | Output 3/6/9, exact accepted Proof/candidate | Input 3/6/9, independent admission order |
+
+Incoming ordinals are not causal candidate indexes. Capture the actual arrival-attempt lease for
+cancellation, then validate nonce echoes and exact continuation intent after decrypt. Valid
+ownership plus stale/malformed plaintext consumes that exact token and records a rejection;
+revoked ownership refuses before effects. A proven local capacity refusal leaves the token and
+protocol state unchanged. No accepted transition may regenerate its nonce after a lost reply.
+
+The low increment now retains at most three canonical Hello plaintext hashes in the existing
+prepaid Pair record. It refuses native A -> B -> A nonce reuse before allocating another packet;
+the protected high side rejects a distinct Hello identity repeating any accepted nonce before
+changing the attempt or accepted sequence floor. Ordinary compatibility behavior is unchanged.
+This avoids ambiguous continuation identity without changing the wire format or nesting another
+action's Engine lock inside the current result fence. The Pair growth guard uses its unchanged
+6,144-byte allowance; these focused regressions pass with the full 352-test voice selection.
+
+Required next tests include all crossed Hello/Proof/Finish orderings, old running results after
+replacement, repeated canonical plaintext under distinct signed IDs, lost intake/result/factory
+replies after compaction, all three role identities/fourth refusal, original deadlines and full
+ordinary pressure. Production Root namespace integration and native/browser IPC remain separate.
 
 ## Confirmation packet capacity (20 October, inactive)
 

@@ -23,6 +23,8 @@ const CHILDREN: usize = 64;
 // authentication transcripts are dropped before decode; the small ACK fits the fixed allowance.
 const VERIFICATION_BUFFERS: usize = 5;
 const VERIFICATION_OVERHEAD: usize = 4096;
+mod local;
+pub(crate) use local::LocalOrigin;
 
 /// Affine final origin transaction lent only while the original Group -> Policy locks and
 /// native route/epoch/membership checks remain held. A protected row fence must perform every
@@ -949,7 +951,15 @@ impl ActorOwner {
         expires: u64,
     ) -> Result<Arc<EffectAuthority>, VoiceError> {
         self.current()?;
-        let state = self.group.state.lock().unwrap_or_else(|e| e.into_inner());
+        // Clock is an injected callback. Never invoke it under Group/Policy, and do not wait
+        // after freezing these samples: contention is retryable before any effect is issued.
+        let wall = self.clock.now_ms();
+        let mono = self.clock.monotonic_ms();
+        let state = match self.group.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
         if state.revision != self.revision {
             return Err(VoiceError::Unauthorized);
         }
@@ -963,13 +973,16 @@ impl ActorOwner {
             .get(&target)
             .ok_or(VoiceError::Unauthorized)?
             .clone();
-        let policy = self.gate.policy.lock().unwrap_or_else(|e| e.into_inner());
+        let policy = match self.gate.policy.try_lock() {
+            Ok(policy) => policy,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        self.current()?;
         if !policy.eligible || !policy.live.is_live() {
             return Err(VoiceError::Unauthorized);
         }
-        let remaining = expires
-            .saturating_add(CLOCK_SKEW_MS)
-            .saturating_sub(self.clock.now_ms());
+        let remaining = expires.saturating_add(CLOCK_SKEW_MS).saturating_sub(wall);
         if remaining == 0 || remaining > super::MAX_REMOTE_DELEGATION_REMAINING_MS {
             return Err(VoiceError::Freshness);
         }
@@ -980,7 +993,7 @@ impl ActorOwner {
             policy: policy.live.clone(),
             clock: self.clock.clone(),
             expires,
-            deadline: self.clock.monotonic_ms().saturating_add(remaining),
+            deadline: mono.saturating_add(remaining),
         }))
     }
 }
@@ -1270,7 +1283,12 @@ impl RequestAuthority for VerificationReplyAuthority {
     }
 }
 impl EffectAuthority {
-    /// Final transactions already sampled native time under their locks. Check those samples
+    /// Composite lower work samples every owner's ORIGINAL time source before observing any
+    /// irreversible gates. Equal wall values do not prove equal monotonic clock origins.
+    pub(crate) fn observation_time(&self) -> (u64, u64) {
+        (self.clock.now_ms(), self.clock.monotonic_ms())
+    }
+    /// Final transactions already sampled native time before their short guards. Check those samples
     /// and irreversible gates without reentering the Clock seam or any runtime lock.
     pub(crate) fn authorized_at(&self, wall: u64, mono: u64) -> bool {
         self.actor.authorized()

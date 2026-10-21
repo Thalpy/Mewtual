@@ -10,6 +10,9 @@ impl LocalJoin {
     /// The Root must first classify its shared public/encrypted message namespace, and supply
     /// a pure final room/call observer. This grants endpoint custody, never successful AEAD,
     /// a confirmed pair, permission to send Proof or live RTC readiness.
+    // Keep the original actor, transport ticket, envelope and room witnesses explicit at this
+    // native boundary; none is derivable from another's serialized IDs.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn admit_protected_hello(
         &mut self,
         actor: &ActorOwner,

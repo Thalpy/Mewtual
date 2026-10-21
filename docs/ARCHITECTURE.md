@@ -1,5 +1,30 @@
 # Mewtual; Architecture
 
+## Protected outgoing Hello (21 October, pending validation)
+
+The next worktree adds a native Root/local-join producer for the low side. Outgoing preparation
+retains the original call/pair/chain/resource/table owners but publishes no sequence or SDP
+identity. An exclusive ledger loan then participates in one local Group -> Policy -> try-History
+transaction that publishes the packet, nonce/attempt, crypto action and candidate receipt. No
+incoming ticket or origin allowance is manufactured for unsigned local work; signed source
+admission remains separate. Exact predecessor IDs distinguish the first request and each of its
+two possible successors, preventing lost replies from restarting confirmation.
+
+Three canonical Hello plaintext hashes in the existing Pair allowance prevent A -> B -> A nonce
+reuse. Protected high-side distinct IDs repeating an accepted nonce receive a closed rejection
+without replacing current progress. Exact signed-ID/action retries still recover original history.
+
+Low and high roles share three history positions, within the original fixed limits. Three pending
+crypto leases independently observe packet, action and chain cancellation. Sealed source packets
+retain chain cancellation after crypto settlement. Composite queued source checks sample every
+constituent's original clock before pure owner checks; deadlines are not moved between monotonic
+origins. A busy effect skips its untouched packet without discarding earlier prepared jobs.
+
+Read-only adversarial review is clear and all 352 focused voice tests pass, including the
+unchanged layout guards. Complete combined gates remain pending. Proof/Finish, SDP transfer,
+production IPC/browser/RTC integration and
+normal kind28 dispatch remain open. The following sections record earlier checkpoints.
+
 ## Confirmation packet tables (20 October, inactive)
 
 Incoming and outgoing native V2 packets now each retain a position from their independent
@@ -29,7 +54,7 @@ metadata remains 2 KiB. These structural guards exclude allocator slack and fram
 Protected mode is selected only for a pristine native pair and stays selected after a capacity
 refusal. Ordinary confirmation factories refuse selected pairs. First confirmation results check
 the original epoch before effects; exact accepted/rejected terminal history remains recoverable.
-Low-side start/encryption, Proof/Finish, SDP phase transfer, production IPC and RTC remain open.
+At this checkpoint low-side start/encryption, Proof/Finish, SDP phase transfer, production IPC and RTC remained open.
 No normal kind28 dispatch, browser protected confirmation or whole-chain readiness is enabled.
 
 ## Chat history and MLS epoch separation (20 October, continuation)

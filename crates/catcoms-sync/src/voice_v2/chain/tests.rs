@@ -84,6 +84,103 @@ fn hello_receipt_and_action_layouts_fit_the_original_single_row() {
 }
 
 #[test]
+fn low_start_receipt_and_all_three_crypto_gates_fit_the_original_single_row() {
+    let receipt = super::start::START_RECORD_BYTES;
+    let action = crate::voice_v2::crypto_actions::fixed_record_layout_bytes();
+    assert!(receipt < ROW_BYTES);
+    assert!(
+        action <= ROW_BYTES - receipt,
+        "fixed action {action} plus low start {receipt} exceeds original {ROW_BYTES}-byte row"
+    );
+}
+
+#[test]
+fn low_final_history_contention_preserves_the_original_lane_for_an_exact_fresh_retry() {
+    use crate::voice_v2::runtime::{Runtime, View};
+    let runtime = Runtime::new(Arc::new(ManualClock::new(1000)));
+    let bound = binding(8);
+    let ticket = runtime.session_ticket();
+    runtime.activate_session(&ticket).unwrap();
+    let (mut actor, registration) = runtime
+        .prepare_actor(bound.scope.group, bound.local, &ticket)
+        .unwrap();
+    registration.register().unwrap();
+    actor
+        .sync_view(View {
+            epoch: bound.epoch,
+            members: [bound.local, bound.peer].into(),
+            policy: bound.scope.policy,
+            eligible: true,
+            indirect: true,
+        })
+        .unwrap();
+    let context = crate::voice_v2::Context {
+        scope: bound.scope,
+        local: bound.local,
+        epoch: bound.epoch,
+        now: 1000,
+        indirect: true,
+    };
+    let pool = runtime.resources();
+    let chain = prepare_chain(pool, bound.clone(), Arc::new(slots::Slots::default())).unwrap();
+    let consent = || HelloConsent {
+        room: bound.call.clone(),
+        _room_custody: None,
+        effect: actor.effect(bound.local, bound.peer, 16_000).unwrap(),
+        clock: runtime.clock(),
+    };
+    let (first, receipt, workflow) = chain
+        .prepare_start(None, [31; 32], 1, 16_000, consent())
+        .unwrap();
+    let PreparedHistory {
+        record,
+        slot,
+        mut issue,
+    } = first;
+    let mut published = false;
+    let guard = chain.history.state.lock().unwrap();
+    assert_eq!(
+        actor.with_local_origin(bound.peer, &context, |wall, mono, origin| {
+            issue.publish_start(&receipt, origin, wall, mono, || {
+                published = true;
+            })
+        }),
+        Err(VoiceError::Capacity)
+    );
+    assert!(!published);
+    assert_eq!(guard.issued, 0);
+    assert!(guard.candidates.low().unwrap().iter().all(Option::is_none));
+    drop(guard);
+    // RowIssue::drop reacquires History. It must happen after the final native guards, never
+    // as destruction of a moved closure inside a refused Group/Policy/History transaction.
+    drop((issue, record, slot, receipt, workflow));
+    assert!(matches!(
+        chain.classify_start(None).unwrap(),
+        StartCandidate::New(0)
+    ));
+    let (retry, receipt, _workflow) = chain
+        .prepare_start(None, [32; 32], 1, 16_000, consent())
+        .unwrap();
+    let PreparedHistory {
+        record: _record,
+        slot: _slot,
+        mut issue,
+    } = retry;
+    actor
+        .with_local_origin(bound.peer, &context, |wall, mono, origin| {
+            issue.publish_start(&receipt, origin, wall, mono, || {
+                published = true;
+            })
+        })
+        .unwrap();
+    assert!(published);
+    assert!(
+        matches!(chain.classify_start(None).unwrap(), StartCandidate::Cached(actual)
+        if Arc::ptr_eq(&actual, &receipt))
+    );
+}
+
+#[test]
 fn hello_final_history_contention_spends_no_origin_or_candidate_and_exact_row_retries() {
     use crate::voice_v2::runtime::{Runtime, View};
     use crate::voice_v2::{Body, Context, EncryptedHeader, EncryptedKind, Envelope, SignedObject};
@@ -182,7 +279,7 @@ fn hello_final_history_contention_spends_no_origin_or_candidate_and_exact_row_re
     });
     assert_eq!(result, Err(VoiceError::Capacity));
     assert!(!published);
-    assert!(guard.candidates.iter().all(Option::is_none));
+    assert!(guard.candidates.high().unwrap().iter().all(Option::is_none));
     // The outer owner must be destroyed only after the final guards, including our test's
     // deliberately held History guard. Otherwise RowIssue::drop would synchronously deadlock.
     drop(guard);

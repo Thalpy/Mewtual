@@ -117,7 +117,7 @@ impl PreparedChain {
         object: &SignedObject,
     ) -> Result<Option<Arc<HelloAdmission>>, VoiceError> {
         let state = self.history.state.lock().unwrap_or_else(|e| e.into_inner());
-        for receipt in state.candidates.iter().flatten() {
+        for receipt in state.candidates.high()?.iter().flatten() {
             if receipt.issuer == object.issuer() && receipt.message == object.id() {
                 return if receipt.hash == object.hash()
                     && matches!(object.body(), Body::Encrypted { header, .. } if header.sequence == receipt.sequence)
@@ -158,9 +158,10 @@ impl PreparedChain {
         let workflow = self.workflow()?;
         let lane = {
             let state = self.history.state.lock().unwrap_or_else(|e| e.into_inner());
+            let candidates = state.candidates.high()?;
             (0..3)
                 .find(|lane| {
-                    state.issued & (1 << (1 + lane * 3)) == 0 && state.candidates[*lane].is_none()
+                    state.issued & (1 << (1 + lane * 3)) == 0 && candidates[*lane].is_none()
                 })
                 .ok_or(VoiceError::RateLimited)?
         };
@@ -246,7 +247,7 @@ impl RowIssue {
             || self.key != Key::Decrypt(receipt.token)
             || state.closed
             || (state.active_row != self.row as u8 || state.serial != self.ticket)
-            || state.candidates[lane].is_some()
+            || state.candidates.high()?[lane].is_some()
             || !Arc::ptr_eq(&receipt.binding, &self.plan.binding)
             || !receipt.authorized_at(origin.epoch(), wall, mono)
         {
@@ -255,7 +256,7 @@ impl RowIssue {
         origin.publish(|| {
             state.issued |= 1 << self.row;
             state.active_row = NO_ROW;
-            state.candidates[lane] = Some(receipt.clone());
+            state.candidates.high_mut().expect("validated high role")[lane] = Some(receipt.clone());
             self.unpublished = false;
             publish();
         })

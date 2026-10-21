@@ -1,8 +1,8 @@
 //! Inactive native confirmation capacity. This is NOT whole-chain readiness: protected native
 //! and browser registry rows, atomic encrypted intake, helper agreement and measured SDP/IPC
 //! phase transfer must still compose before live dispatch. Packet-table claims also protect the
-//! actual pair role's three confirmation candidates. Derivation and high-side Hello have native
-//! consumers; the other protected roles still refuse and no live dispatch is enabled.
+//! actual pair role's three confirmation candidates. Derivation, low Hello start and high Hello
+//! intake have native consumers; the other protected roles still refuse and live dispatch stays off.
 //!
 //! Fixed history never owns Workflow, an engine lender or a native registry cell. Workflow owns
 //! capacity only and references its control weakly. Actual input/engine/lower credits keep retired
@@ -17,8 +17,11 @@ pub(super) const ROW_BYTES: usize = 1536;
 const ROWS: usize = 12;
 const NO_ROW: u8 = u8::MAX;
 mod admission;
+mod outgoing;
+mod start;
 pub(crate) use admission::HelloAdmission;
 pub(super) use admission::HelloConsent;
+pub(in crate::voice_v2) use start::{StartAdmission, StartCandidate};
 // Confirmation-only envelope. Stacking this on the existing SDP reserve is not whole-chain
 // readiness; the supported chain still needs a measured, explicit phase transfer.
 const VARIABLE_BYTES: usize = 96 * 1024;
@@ -86,7 +89,27 @@ struct HistoryState {
     // abandonment/publication while this compact mask keeps the original metadata allowance.
     active_row: u8,
     issued: u16,
-    candidates: [Option<Arc<HelloAdmission>>; 3],
+    // The native canonical role is immutable. Share the original three positions instead of
+    // allocating independent low/high tables which could conceal another candidate allowance.
+    candidates: Candidates,
+}
+enum Candidates {
+    Low([Option<Arc<StartAdmission>>; 3]),
+    High([Option<Arc<HelloAdmission>>; 3]),
+}
+impl Candidates {
+    fn high(&self) -> Result<&[Option<Arc<HelloAdmission>>; 3], VoiceError> {
+        match self {
+            Self::High(rows) => Ok(rows),
+            Self::Low(_) => Err(VoiceError::Unauthorized),
+        }
+    }
+    fn high_mut(&mut self) -> Result<&mut [Option<Arc<HelloAdmission>>; 3], VoiceError> {
+        match self {
+            Self::High(rows) => Ok(rows),
+            Self::Low(_) => Err(VoiceError::Unauthorized),
+        }
+    }
 }
 struct HistoryPlan {
     resources: Arc<Resources>,
@@ -118,7 +141,7 @@ struct Control {
 }
 
 /// Opaque inactive native plan. Twelve local rows are protected (derive, three flights for
-/// each of three candidates, two SDP directions). Derive and high-side Hello consume rows;
+/// each of three candidates, two SDP directions). Derive and both native Hello roles consume rows;
 /// the other roles remain reserved, without factories or readiness claims.
 /// This grants no network, engine, browser or RTC readiness. Close is irreversible.
 pub struct PreparedChain {
@@ -291,7 +314,11 @@ impl PreparedChain {
                 serial: 0,
                 active_row: NO_ROW,
                 issued: 0,
-                candidates: std::array::from_fn(|_| None),
+                candidates: if binding.low {
+                    Candidates::Low(std::array::from_fn(|_| None))
+                } else {
+                    Candidates::High(std::array::from_fn(|_| None))
+                },
             }),
         });
         let reserve = resources.reserve(binding.scope.group, VARIABLE_BYTES)?;

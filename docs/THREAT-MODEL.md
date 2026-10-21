@@ -1,5 +1,33 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Protected local Hello publication (21 October, pending validation)
+
+The low-side producer prepares actual packet/action/row owners before a dedicated local
+Group -> Policy -> try-History publication. It has no fabricated incoming ticket and spends no
+peer's incoming allowance. A delayed request names immutable predecessor history; None remains
+the original request after every successor. Unknown/cross-pair predecessors and a fourth lane
+refuse. Root recognition uses the actual call allocation and room incarnation, so equal join
+bytes cannot adopt an older native action. Ordinary-active pairs cannot silently switch modes.
+
+Three bounded canonical Hello plaintext hashes also prevent A -> B -> A nonce reuse from making
+an old Proof answer a distinct new start. Protected receivers reject distinct signed Hello IDs
+repeating an accepted nonce before replacing the attempt or accepted sequence floor. These
+hashes use the existing Pair record allowance; exact original-ID retries remain recoverable.
+
+Attempt replacement closes old packet/action gates before replacement becomes visible. Chain
+closure also closes sealed source custody. Running engines and held inputs retain their actual
+credit until settlement/release; fixed history holds no engine lender, input or Workflow. The
+three independent pending crypto gates and low/high role history pass the unchanged fixed-layout
+guards. No resource allowance has been raised.
+
+Clock callbacks precede irreversible observations. Composite source work samples each original
+clock rather than interpreting old packet deadlines using another monotonic origin. A busy later
+effect must not discard previously prepared source jobs after their attempts were spent. New
+regressions target these races, exact retries and original owner substitutions. Static re-review
+has no remaining actionable finding; all 352 focused voice tests pass. Complete combined gates
+remain pending. These constraints
+are not evidence of live IPC, browser confirmation, Proof/Finish, SDP, relay or physical audio.
+
 ## Inactive confirmation packet capacity (20 October)
 
 Native V2 packet tables count actual rows and unused workflow claims in the same immutable

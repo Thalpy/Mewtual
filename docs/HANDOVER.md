@@ -1,12 +1,21 @@
 # Mewtual; Handover
 
-## Where to resume (2026-10-20)
+## Where to resume (2026-10-21)
 
-**The communication programme is not finished.** Current source `985c1f1d` belongs to
-`chat-update-implementation` (PR48 targets `Gate7`) and includes Gate7's image-viewer changes
-through `f87058f0`, merged at `88b87dfe`. Development checkout:
-`M:\Git (local)\CatComs\target\communication-atomic-intake-worktree`; branch checkout:
-`M:\Git (local)\CatComs\target\communication-review-worktree`.
+**The communication programme is not finished.** Published branch `chat-update-implementation`
+is at `d7d0586f` (PR48 targets `Gate7`). Reviewed local checkpoint `53191c87` includes protected
+high-side Hello and TLS updates at `a611c6ad`; its full root suite passed **3,096 tests**, zero
+failures, 24 existing ignored across 57 summaries in the frozen
+`M:\Git (local)\CatComs\target\communication-atomic-intake-worktree`. Its unchanged frontend passed
+2,254 tests. Strict Clippy found an argument-count lint, corrected with a narrowly documented
+exception in the next checkout. Native gates are being consolidated with the low-side increment.
+The active next implementation is the separate checkout
+`M:\Git (local)\CatComs\target\communication-low-hello-worktree`, based on `53191c87`.
+Its low-side producer, source cancellation fixes and new tests pass all **352 focused voice tests**
+(final rerun 17.81s), including unchanged layout guards. Strict root Clippy, root/native formatting,
+ambient gate and the full frontend suite (2,254 passed, 75.82s) pass. Read-only re-review has no
+remaining code finding; complete combined root/native validation remains pending. The branch checkout remains
+`M:\Git (local)\CatComs\target\communication-review-worktree`; do not push unvalidated low-side work.
 
 The separately reviewed native upload/lock fix is `c4005b89`. Its required follow-up,
 `985c1f1d`, removes a production deadlock between admitted publication and the saturated actor
@@ -16,7 +25,7 @@ emission or publication. Fourteen upload regressions plus actual cancelled-lock 
 cases pass; malformed continuity preserves prior saved bytes and refuses destruction on retry.
 Read-only re-review has no remaining findings. Gate7 still needs both native corrections integrated.
 
-Final complete suites: root **3,079 passed**, zero failures, 24 existing ignored across 57 summaries;
+Previous completed baseline (`985c1f1d`): root **3,079 passed**, zero failures, 24 existing ignored across 57 summaries;
 native **443 library plus five ACL passed**, zero failures (895.76s for the library); frontend
 **2,254 passed**, zero failures (84.44s). Root crates are unchanged by the native-only follow-up.
 The unchanged frontend also passes Svelte check (zero errors/warnings), production build (47.64s)
@@ -58,8 +67,12 @@ Next steps, in order:
    [VOICE-NATIVE-RESULTS-NEXT](communication-recovery/VOICE-NATIVE-RESULTS-NEXT.md).
    Protected high-side `ConfirmHello` now has a private Root consumer: 315 focused voice-related
    tests pass, including actual signed replies, epoch/room/call replacement, three malformed
-   candidates, ordinary pressure and final History contention. Full gates for this increment
-   are pending. Complete low-side start/Hello encryption, Proof/Finish, SDP transfer and the
+   candidates, ordinary pressure and final History contention. The frozen root and frontend suites
+   pass as recorded above. Low-side start/Hello encryption is implemented in the next worktree
+   and passes all 352 focused voice tests. It uses exact predecessor identities, an actual Root call/
+   room boundary and one local Group/Policy/History transaction, with no inbound origin debit.
+   New source checks retain original clocks and cancellation owners; a later busy effect no longer
+   discards an earlier prepared source job. Complete verification, Proof/Finish, SDP transfer and the
    protected confirmation/SDP consumers, production native/browser IPC and RTC dispatch, compatible
    helper selection and legacy/V2 session isolation before enabling V2. Keep unsupported roles
    refused until their actual consumers exist.

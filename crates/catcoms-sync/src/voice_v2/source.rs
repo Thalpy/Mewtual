@@ -105,6 +105,17 @@ impl SourceActivity {
                 .as_ref()
                 .is_none_or(RequestAuthority::authorized)
     }
+    fn observation_time(&self) -> Option<(u64, u64)> {
+        self.packet.as_ref().map(|packet| packet.observation_time())
+    }
+    fn is_live_at(&self, packet_time: Option<(u64, u64)>) -> bool {
+        self.lease.is_live()
+            && match (&self.packet, packet_time) {
+                (None, None) => true,
+                (Some(packet), Some((wall, mono))) => packet.authorized_at(wall, mono),
+                _ => false,
+            }
+    }
     async fn revoked(&self) {
         if let Some(packet) = &self.packet {
             futures::future::select(self.lease.revoked().boxed(), packet.revoked().boxed()).await;
@@ -213,12 +224,23 @@ struct FlightAuthority {
 #[async_trait::async_trait]
 impl RequestAuthority for FlightAuthority {
     fn authorized(&self) -> bool {
-        self.hop.authorized()
-            && self.packet.authority.authorized()
-            && self.packet.activity.is_live()
+        // Sample EVERY original clock before checking ANY irreversible owner. Production
+        // currently shares Runtime time, but native APIs also accept independent clocks;
+        // using the job's monotonic origin for the packet could revive an expired old packet.
+        let wall = self.clock.now_ms();
+        let mono = self.clock.monotonic_ms();
+        let (hop_wall, hop_mono) = self.hop.observation_time();
+        let (packet_wall, packet_mono) = self.packet.authority.observation_time();
+        let activity_time = self.packet.activity.observation_time();
+        self.hop.authorized_at(hop_wall, hop_mono)
+            && self
+                .packet
+                .authority
+                .authorized_at(packet_wall, packet_mono)
+            && self.packet.activity.is_live_at(activity_time)
             && self.packet.room.lease.is_live()
-            && self.clock.now_ms() < self.packet.object.expires()
-            && self.clock.monotonic_ms() < self.deadline
+            && wall < self.packet.object.expires()
+            && mono < self.deadline
     }
     async fn revoked(&self) {
         if !self.authorized() {
@@ -478,6 +500,25 @@ impl SourceLedger {
         routes: &[BoundRoute],
         limit: usize,
     ) -> Result<Vec<SourceJob>, VoiceError> {
+        self.take_ready_using(actor, routes, limit, |origin, target, expires| {
+            actor.effect(origin, target, expires)
+        })
+    }
+
+    // Keep effect preparation synchronous and native-owned. This narrow dependency seam lets
+    // deterministic tests place a retryable refusal after an earlier real job was prepared;
+    // production always delegates to the original actor above, never caller-supplied authority.
+    fn take_ready_using(
+        &self,
+        actor: &ActorOwner,
+        routes: &[BoundRoute],
+        limit: usize,
+        mut prepare_effect: impl FnMut(
+            DeviceId,
+            DeviceId,
+            u64,
+        ) -> Result<Arc<EffectAuthority>, VoiceError>,
+    ) -> Result<Vec<SourceJob>, VoiceError> {
         self.current(actor)?;
         let limit = limit.min(4);
         if limit == 0 {
@@ -579,7 +620,13 @@ impl SourceLedger {
             } else {
                 continue;
             };
-            let effect = actor.effect(key.0, hop.device(), packet.object.expires())?;
+            let effect = match prepare_effect(key.0, hop.device(), packet.object.expires()) {
+                Ok(effect) => effect,
+                // A later busy Group/Policy must not drop earlier unsubmitted jobs after their
+                // attempts were spent. This packet stays untouched; return the earlier jobs.
+                Err(VoiceError::Capacity) => continue,
+                Err(error) => return Err(error),
+            };
             // Root framing and route authority share this same affine lower credit. Reserving
             // route metadata here avoids a fallible ordinary allocation after attempt debit.
             let bytes = 4 * packet.bytes + 4096 + ROUTE_METADATA_BYTES;
