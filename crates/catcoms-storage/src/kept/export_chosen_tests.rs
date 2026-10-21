@@ -86,6 +86,12 @@ fn selection_checks_refuse_unusable_paths_and_never_touch_an_existing_file() {
         );
     }
     assert!(ChosenDestination::validate(&folder.join("COM10.txt")).is_ok());
+    // A chosen name is never shortened: one without room for the suffixes is refused.
+    let long = folder.join(format!("{}.txt", "\u{1F600}".repeat(120)));
+    assert_eq!(
+        ChosenDestination::validate(&long).unwrap_err(),
+        ChoiceRefusal::NameTooLong
+    );
     let fine = ChosenDestination::validate(&folder.join("fresh.bin")).unwrap();
     assert_eq!(fine.folder, folder);
     assert_eq!(fine.name(), "fresh.bin");

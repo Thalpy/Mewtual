@@ -515,6 +515,61 @@ fn windows_device_name(leaf: &str) -> bool {
     matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered
 }
 
+/// Longest path component the destination accepts, in its own units: NTFS allows 255 UTF-16 code
+/// units, and ext4, APFS and most Unix filesystems allow 255 bytes.
+const MAX_COMPONENT_UNITS: usize = 255;
+/// Room reserved for the longest suffixes Mewtual appends to a final name: a collision number
+/// (" (999)"), the staging suffix and the link-probe suffix ("-probe3").
+const SUFFIX_RESERVE: usize = " (999)".len() + STAGING_SUFFIX.len() + "-probe3".len();
+
+/// Length of `leaf` in the running platform's component units.
+pub(super) fn component_units(leaf: &str) -> usize {
+    #[cfg(windows)]
+    {
+        leaf.encode_utf16().count()
+    }
+    #[cfg(not(windows))]
+    {
+        leaf.len()
+    }
+}
+
+/// Whether every name Mewtual may derive from `name` (numbered, staging, probe) stays within the
+/// component limit. Review U-L3: the old `.part` writer only needed five extra bytes, so a long
+/// multibyte name that it could save must not fail (or look like a no-link folder) here.
+pub(super) fn leaf_fits(name: &str) -> bool {
+    component_units(name) + SUFFIX_RESERVE <= MAX_COMPONENT_UNITS
+}
+
+/// Shorten a Downloads name so that [`leaf_fits`] holds, keeping a short extension. A name chosen
+/// in "Save as" is never shortened; it is refused instead (the user picked that exact name).
+pub(super) fn fit_leaf(name: &str) -> String {
+    if leaf_fits(name) {
+        return name.to_string();
+    }
+    let (stem, extension) = match name.rfind('.') {
+        Some(dot) if dot > 0 && component_units(&name[dot..]) <= 16 => name.split_at(dot),
+        _ => (name, ""),
+    };
+    let budget = MAX_COMPONENT_UNITS - SUFFIX_RESERVE - component_units(extension);
+    let mut kept = String::new();
+    for c in stem.chars() {
+        let mut next = kept.clone();
+        next.push(c);
+        if component_units(&next) > budget {
+            break;
+        }
+        kept = next;
+    }
+    let kept = kept.trim_end_matches(['.', ' ']);
+    let kept = if kept.is_empty() {
+        "mewtual-download"
+    } else {
+        kept
+    };
+    format!("{kept}{extension}")
+}
+
 /// Collision candidate `number` for a sanitized name, matching the native writer's convention:
 /// `name`, `name (1).ext`, `name (2).ext`, ...
 pub(super) fn numbered(name: &str, number: usize) -> String {

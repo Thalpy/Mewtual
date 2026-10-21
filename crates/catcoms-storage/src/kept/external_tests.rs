@@ -212,6 +212,46 @@ fn a_fifo_at_a_leaf_or_folder_path_never_blocks_an_open() {
 }
 
 #[test]
+fn long_multibyte_names_are_shortened_to_leave_room_for_every_suffix() {
+    // Review U-L3: the staging, probe and numbering suffixes must fit the component limit in
+    // this platform's units (UTF-16 on Windows, bytes elsewhere), keeping the extension.
+    assert_eq!(fit_leaf("notes.txt"), "notes.txt");
+    let emoji = |count: usize| format!("{}.txt", "\u{1F600}".repeat(count));
+    for name in [
+        emoji(62),
+        emoji(120),
+        format!("{}.pdf", "a".repeat(300)),
+        format!("{}. .txt", "\u{4E2D}".repeat(200)),
+    ] {
+        let fitted = fit_leaf(&name);
+        assert!(leaf_fits(&fitted), "{} units", component_units(&fitted));
+        for derived in [
+            numbered(&fitted, 999),
+            staging_for(&fitted),
+            format!("{}-probe3", staging_for(&fitted)),
+        ] {
+            assert!(component_units(&derived) <= 255, "{derived}");
+        }
+        assert!(valid_leaf(&fitted) && valid_leaf(&staging_for(&fitted)));
+        assert_eq!(
+            Path::new(&fitted).extension(),
+            Path::new(&name).extension(),
+            "the extension is kept"
+        );
+        if leaf_fits(&name) {
+            assert_eq!(fitted, name, "a name that already fits is unchanged");
+        }
+    }
+    // 120 non-BMP characters (240 UTF-16 units, 480 bytes) never fit as they are.
+    assert!(!leaf_fits(&emoji(120)));
+    assert_eq!(
+        fit_leaf("..."),
+        "...",
+        "fits already; validity is checked separately"
+    );
+}
+
+#[test]
 fn only_name_surrogate_reparse_points_make_a_file_foreign() {
     const DIRECTORY: u64 = 0x10;
     const REPARSE: u64 = 0x400;

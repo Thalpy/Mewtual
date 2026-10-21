@@ -952,6 +952,30 @@ fn a_retry_after_an_unconfirmed_link_never_trims_or_claims_a_changed_final_file(
 }
 
 #[test]
+fn a_long_multibyte_name_saves_with_its_extension_and_numbering_room() {
+    // Review U-L3: 120 non-BMP characters made the probe name exceed 255 UTF-16 units (or the
+    // staging name exceed 255 bytes on Unix), which looked like a folder without links.
+    let fx = fixture();
+    let name = format!("{}.txt", "\u{1F600}".repeat(120));
+    for expected_number in [0, 1] {
+        let file = ExportFile::create(&fx.downloads, &name, export_plan()).unwrap();
+        let journal = file.journal().clone();
+        assert!(journal.final_leaf.ends_with(".txt"));
+        assert!(external::component_units(&journal.staging) <= 255);
+        if expected_number == 1 {
+            assert!(
+                journal.final_leaf.contains(" (1)"),
+                "{}",
+                journal.final_leaf
+            );
+        }
+        drop(file);
+        // Occupy the final name so the next save is numbered.
+        fs::write(fx.downloads.join(&journal.final_leaf), b"taken").unwrap();
+    }
+}
+
+#[test]
 fn a_failed_removal_write_keeps_the_live_session_exclusive() {
     // Review L7: Remove's Deleting write fails on a full vault. The record is still
     // Completed/Writing, so the older session's presence must still refuse a second writer.

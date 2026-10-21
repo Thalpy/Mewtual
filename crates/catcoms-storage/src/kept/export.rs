@@ -423,6 +423,9 @@ pub enum ChoiceRefusal {
     /// The operating system refused to let Mewtual create a file there (a protected folder, or
     /// controlled folder access).
     NotWritable,
+    /// The name leaves no room for the partial and numbering suffixes within the filesystem's
+    /// name limit. A chosen name is never shortened silently.
+    NameTooLong,
 }
 impl std::fmt::Display for ChoiceRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -437,6 +440,7 @@ impl std::fmt::Display for ChoiceRefusal {
             }
             Self::FolderChanged => "The chosen folder changed before saving started. Choose it again.",
             Self::NotWritable => "Mewtual cannot write to that folder. Choose another folder.",
+            Self::NameTooLong => "That file name is too long. Choose a shorter name.",
         })
     }
 }
@@ -486,6 +490,9 @@ impl ChosenDestination {
             })
             .ok_or(ChoiceRefusal::InvalidName)?
             .to_owned();
+        if !external::leaf_fits(&name) {
+            return Err(ChoiceRefusal::NameTooLong);
+        }
         let folder = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -1343,6 +1350,10 @@ impl ExportFile {
         if encoded.is_empty() || encoded.len() > external::MAX_FOLDER_BYTES {
             return Err(ExportError::Unsupported);
         }
+        // Review U-L3: leave room for the numbering, staging and probe suffixes in this platform's
+        // component units, keeping the extension.
+        let fitted = external::fit_leaf(name);
+        let name = fitted.as_str();
         if !external::valid_leaf(name) || !external::valid_leaf(&external::staging_for(name)) {
             return Err(ExportError::Storage(StorageError::Malformed));
         }
