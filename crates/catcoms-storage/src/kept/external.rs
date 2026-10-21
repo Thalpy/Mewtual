@@ -613,19 +613,30 @@ pub(super) enum Effect {
     RecordWrite,
     /// Creation of a new transfer directory in the vault (admission), likewise.
     CreateDir,
+    /// The exclusive creation of a record's `next` file.
+    RecordCreate,
+    /// The flush of a record's `next` file before the rename.
+    RecordSync,
+    /// Removal of a torn `next` after a disk-full refusal.
+    RecordDiscard,
+    /// The directory flush after that removal.
+    RecordDiscardBarrier,
 }
 #[cfg(test)]
 thread_local! {
     /// Per-test-thread injected failure: (effect, error kind, remaining count).
     pub(in crate::kept) static INJECT: std::cell::Cell<Option<(Effect, io::ErrorKind, u32)>> =
         const { std::cell::Cell::new(None) };
+    /// A second, independent slot, for tests that combine two failures.
+    pub(in crate::kept) static INJECT_ALSO: std::cell::Cell<Option<(Effect, io::ErrorKind, u32)>> =
+        const { std::cell::Cell::new(None) };
 }
 pub(super) fn inject(effect: Effect) -> io::Result<()> {
     #[cfg(test)]
-    {
-        if let Some((target, kind, remaining)) = INJECT.with(std::cell::Cell::get) {
+    for slot in [&INJECT, &INJECT_ALSO] {
+        if let Some((target, kind, remaining)) = slot.with(std::cell::Cell::get) {
             if target == effect && remaining > 0 {
-                INJECT.with(|slot| slot.set(Some((target, kind, remaining - 1))));
+                slot.with(|slot| slot.set(Some((target, kind, remaining - 1))));
                 return Err(io::Error::from(kind));
             }
         }

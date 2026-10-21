@@ -379,10 +379,13 @@ impl<R: CryptoRngCore> Transfer<R> {
                 return Err(StorageError::BlobSizeLimit);
             }
             let encoded = encode_sealed(&seal(key, &plain, rng)?);
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(self.path.join(NEXT))
+            let mut file = super::external::inject(super::external::Effect::RecordCreate)
+                .and_then(|()| {
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(self.path.join(NEXT))
+                })
                 .map_err(|error| {
                     full = disk_full(&error);
                     io(error)
@@ -396,10 +399,12 @@ impl<R: CryptoRngCore> Transfer<R> {
                     io(error)
                 })?;
             hook(WritePhase::Written, &self.path.join(NEXT))?;
-            file.sync_all().map_err(|error| {
-                full = disk_full(&error);
-                io(error)
-            })?;
+            super::external::inject(super::external::Effect::RecordSync)
+                .and_then(|()| file.sync_all())
+                .map_err(|error| {
+                    full = disk_full(&error);
+                    io(error)
+                })?;
             drop(file);
             hook(WritePhase::FileFlushed, &self.path.join(NEXT))?;
             // std uses same-directory replacement on Windows as well. Deleting current first
@@ -426,13 +431,16 @@ impl<R: CryptoRngCore> Transfer<R> {
     }
     fn discard_torn_next(&self, created: bool) -> bool {
         if created {
-            match fs::remove_file(self.path.join(NEXT)) {
+            match super::external::inject(super::external::Effect::RecordDiscard)
+                .and_then(|()| fs::remove_file(self.path.join(NEXT)))
+            {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => return false,
             }
         }
-        directory_barrier(&self.path).is_ok()
+        super::external::inject(super::external::Effect::RecordDiscardBarrier).is_ok()
+            && directory_barrier(&self.path).is_ok()
     }
     pub(super) fn publish(
         &mut self,

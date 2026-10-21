@@ -1,7 +1,7 @@
 //! Journaled external export: storage transitions plus real-filesystem `ExportFile` behavior.
 //! Each crash-table row from EXTERNAL-DOWNLOAD-RESUME.md is modelled by stopping at that step,
 //! dropping the store (process restart) and reopening the same vault directory.
-use super::super::external::{self, Effect, INJECT};
+use super::super::external::{self, Effect, INJECT, INJECT_ALSO};
 use super::*;
 use crate::MemoryBlobStore;
 use catcoms_crypto::DeviceId;
@@ -1951,6 +1951,85 @@ fn disk_full_record_writes_leave_no_torn_successor_and_no_store_fault() {
         before,
         "remount after the refusal is clean"
     );
+}
+
+#[test]
+fn every_exempted_pre_rename_step_refuses_cleanly_and_a_failed_cleanup_still_fails_closed() {
+    // Review follow-up: the open, write and flush of `next` are the exempted disk-full steps.
+    // Each refuses cleanly; a cleanup that cannot remove the torn `next` or flush its removal
+    // keeps the fail-closed poison path.
+    for effect in [
+        Effect::RecordCreate,
+        Effect::RecordWrite,
+        Effect::RecordSync,
+    ] {
+        let fx = fixture();
+        let mut store = open(&fx.vault);
+        let (id, lease) = completed(&mut store);
+        let mut file = started(&mut store, &lease, &fx.downloads);
+        write_all(&mut file);
+        let checkpoint = file.checkpoint().unwrap();
+        let before = state(&store, id);
+        let refused = injected(effect, io::ErrorKind::StorageFull, || {
+            store.checkpoint_download_export(&lease, file.journal(), &checkpoint)
+        });
+        assert!(
+            matches!(&refused, Err(error) if persistence::is_clean_disk_full(error)),
+            "{effect:?}"
+        );
+        let index = store.download_index(id).unwrap();
+        assert!(!store.transfers[index].poisoned, "{effect:?}");
+        assert!(!store.transfers[index].path.join("next").exists());
+        assert_eq!(state(&store, id), before);
+        store
+            .checkpoint_download_export(&lease, file.journal(), &checkpoint)
+            .expect("a later write succeeds");
+    }
+    for cleanup in [Effect::RecordDiscard, Effect::RecordDiscardBarrier] {
+        let fx = fixture();
+        let mut store = open(&fx.vault);
+        let (id, lease) = completed(&mut store);
+        let mut file = started(&mut store, &lease, &fx.downloads);
+        write_all(&mut file);
+        let checkpoint = file.checkpoint().unwrap();
+        INJECT_ALSO.with(|slot| slot.set(Some((cleanup, io::ErrorKind::PermissionDenied, 1))));
+        let refused = injected(Effect::RecordWrite, io::ErrorKind::StorageFull, || {
+            store.checkpoint_download_export(&lease, file.journal(), &checkpoint)
+        });
+        INJECT_ALSO.with(|slot| slot.set(None));
+        assert!(
+            matches!(&refused, Err(error) if !persistence::is_clean_disk_full(error)),
+            "{cleanup:?}"
+        );
+        // Fail closed: the transfer is poisoned and the store refuses it until a storage check.
+        let failed_closed = store
+            .download_index(id)
+            .map_or(true, |index| store.transfers[index].poisoned);
+        assert!(
+            failed_closed,
+            "an unproven cleanup fails closed ({cleanup:?})"
+        );
+    }
+}
+
+#[test]
+fn a_keep_record_write_on_a_full_vault_refuses_cleanly() {
+    // The persistence change also covers public Keep transitions.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let run = store.begin_keep_with_listing(plan(), [8; 32]).unwrap();
+    store.keep_work(run, None, 0).unwrap();
+    let refused = injected(Effect::RecordWrite, io::ErrorKind::StorageFull, || {
+        store.put_keep(run, b"first")
+    });
+    assert!(matches!(&refused, Err(error) if persistence::is_clean_disk_full(error)));
+    assert!(store.kept_files().error.is_none());
+    assert!(!store.transfers[0].poisoned);
+    assert_eq!(store.kept_files().transfers[0].verified_chunks, 0);
+    store
+        .put_keep(run, b"first")
+        .expect("a later write succeeds");
+    assert_eq!(store.kept_files().transfers[0].verified_chunks, 1);
 }
 
 #[test]
