@@ -1,5 +1,38 @@
 # Mewtual; Architecture
 
+## Retained browser channel and native status transport (21 October, integration in progress)
+
+The internal service now exercises the immutable native Session over real loopback TCP. Its
+single connection has one original five-second deadline, fixed router scratch and a prepaid
+24KiB process infrastructure envelope. No application startup or command starts this service.
+The retained v8 browser broker constructs a private Session only from its exact accepted
+selected-key record/executor. Generic bound keys and supplied seeds cannot construct it.
+One constructor promise, original TX/RX floors and a prepaid control execution position survive
+remounts. Ordinary and protected admission share the existing two-position browser ceiling;
+control does not join an ordinary queue that protected work could be waiting on.
+
+Native setup's original8KiB Crypto credit remains in the registry through real browser
+ECDH/HKDF/outgoing seal/MAC drainage. Complete authenticated Status retires that credit; exact
+trusted setup cleanup also works without channel keys, after End/lock and after lost replies.
+The original control Crypto lane, native12KiB and separate browser8KiB control bytes remain
+paid within the existing group/process limits. No timeout or caller loss releases actual work.
+Unknown retired cleanup returns native-authoritative closed/no-work metadata only while UI
+commit excludes admission and no current same-owner generation can still admit. Proven
+unstarted browser channels perform no native settlement. These are distinct safe cases.
+
+Responses place their fixed144-character admission prefix inside the BYOB stream. The browser
+authenticates it and spends RX before allocating/reading the body; it never copies untrusted
+HTTP header values. Its own original five-second IO deadline aborts a stale-port fetch/read,
+then awaits actual cancellation and SDK drainage. Fixed owner charges cover application
+metadata/copies, not opaque SDK/GC heaps, OS buffers, allocator RSS or physical erasure.
+
+This is a status-only integration stage. Application listener/CSP/bootstrap commands,
+authenticated action input/result/receipt ACK/settlement/final delivery and lifecycle collection
+remain open. Native closed rows retain their original control slots, so the finite disabled
+pilot must not be activated as a reusable live-call service. Live V2/SDP/ICE/RTC, protocol-mode
+isolation, relay and combined/physical acceptance remain separate work. Historical candidate
+descriptions below do not supersede this scope or the current gate evidence in HANDOVER.md.
+
 ## Internal immutable local-channel bootstrap (21 October)
 
 The disabled ECDH candidate retains Pending before native RNG, validates the actual selected

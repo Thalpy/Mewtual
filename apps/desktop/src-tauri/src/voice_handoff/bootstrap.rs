@@ -36,6 +36,9 @@ struct State {
     closed: bool,
     session: Option<Arc<Session>>,
     public: Option<Arc<SetupOutput>>,
+    // Original native ECDH credit continues through browser setup/outgoing SDK promises.
+    // Lease revocation and caller loss are NOT evidence that this work has drained.
+    browser_setup: Option<Credit>,
 }
 /// Exact retries share ONE immutable projection/allocation. Every returned owner retains the
 /// original row payment even after the registry is destroyed; a caller cannot clone raw public
@@ -180,6 +183,7 @@ impl Registry {
                 closed: false,
                 session: None,
                 public: None,
+                browser_setup: None,
             }),
             _credit: Arc::new(credit),
         });
@@ -247,6 +251,7 @@ impl Registry {
                 closed: true,
                 session: None,
                 public: None,
+                browser_setup: None,
             }),
             _credit: Arc::new(credit),
         });
@@ -255,6 +260,23 @@ impl Registry {
         Ok(Status::Closed {
             native_setup_drained: true,
         })
+    }
+    /// Only the trusted setup-settlement adapter may call this after SDK drainage, or the
+    /// Status route after complete AEAD/session/transcript validation. Drop outside all
+    /// Index/Row/Coordinator guards; unknown history supplies no drainage proof.
+    fn retire_setup(&self, owner: &str, executor: [u8; 32]) -> Result<(), Refused> {
+        let row = {
+            let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+            held.as_ref()
+                .and_then(|index| {
+                    index.rows.iter().flatten().find(|row| {
+                        row.selected.id() == owner && row.selected.executor() == executor
+                    })
+                })
+                .cloned()
+                .ok_or(Refused::Binding)?
+        };
+        row.retire_setup()
     }
 }
 /// Native-only immutable control routing. Retain the actual row, Session and paid public
@@ -274,6 +296,11 @@ impl Route {
     pub(super) fn hash(&self) -> [u8; 32] {
         self.public.public.hash
     }
+    /// Complete authenticated body validation is the prerequisite. Header MAC, bad AEAD,
+    /// timeout and End cannot acknowledge the browser's original setup work.
+    pub(super) fn acknowledge_setup(&self) -> Result<(), Refused> {
+        self.row.retire_setup()
+    }
     /// A snapshot of NATIVE setup state only. It neither proves browser drainage nor lets a
     /// late Ready response revive a retired call, room, join or action.
     pub(super) fn snapshot(&self) -> [u8; 3] {
@@ -287,6 +314,17 @@ impl Route {
     }
 }
 impl Row {
+    fn retire_setup(&self) -> Result<(), Refused> {
+        let credit = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.pending {
+                return Err(Refused::Capacity);
+            }
+            state.browser_setup.take()
+        };
+        drop(credit);
+        Ok(())
+    }
     fn status(&self) -> Status {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.closed || !self.selected.lease().is_live() {
@@ -304,7 +342,7 @@ impl Ticket {
     fn compute(
         &mut self,
         rng: &mut dyn CryptoRngCore,
-    ) -> Result<(Arc<Session>, PublicSetup), Refused> {
+    ) -> Result<(Arc<Session>, PublicSetup, Credit), Refused> {
         // The registry owns Pending before this first possible callback. Taking the sole
         // preparation is irreversible: an error/panic cannot create another scalar on retry.
         let prepared = self.prepared.take().ok_or(Refused::Binding)?;
@@ -323,7 +361,7 @@ impl Ticket {
     /// this installation. Failed output stays in caller's Option and drops AFTER guards.
     fn install(
         &mut self,
-        output: &mut Option<(Arc<Session>, Arc<SetupOutput>)>,
+        output: &mut Option<(Arc<Session>, Arc<SetupOutput>, Credit)>,
     ) -> Result<(), Refused> {
         let mut state = self
             .row
@@ -333,14 +371,15 @@ impl Ticket {
         if state.closed || !state.pending || !self.row.selected.lease().is_live() {
             return Err(Refused::Binding);
         }
-        let (session, public) = output.take().ok_or(Refused::Binding)?;
+        let (session, public, setup) = output.take().ok_or(Refused::Binding)?;
         if public.public.session != self.row.session_id || public.public.slot != self.row.slot {
             // This is an internal invariant, but do not drop keys under the caller's fence.
-            *output = Some((session, public));
+            *output = Some((session, public, setup));
             return Err(Refused::Binding);
         }
         state.session = Some(session);
         state.public = Some(public);
+        state.browser_setup = Some(setup);
         state.pending = false;
         self.installed = true;
         Ok(())
@@ -412,12 +451,12 @@ pub(crate) async fn ensure(
     };
     // No await after Pending admission. Injected RNG/arithmetic can run no final native lock;
     // the original UI commit still orders admission/completion against lock's report.
-    let (session, public) = ticket.compute(rng)?;
+    let (session, public, setup) = ticket.compute(rng)?;
     let reply = Arc::new(SetupOutput {
         public,
         _credit: ticket.row._credit.clone(),
     });
-    let mut output = Some((session, reply.clone()));
+    let mut output = Some((session, reply.clone(), setup));
     {
         let mut authority = state
             .voice_authority
@@ -427,6 +466,53 @@ pub(crate) async fn ensure(
         ticket.install(&mut output)?;
     }
     Ok(Status::Ready(reply))
+}
+
+/// Exact trusted-main-window failure cleanup, including when no channel keys could be made.
+/// The retained broker must first await every real setup SDK promise/intermediate. No boolean
+/// assertion or arbitrary row descriptor is accepted. A delayed ensure stays permanently closed.
+/// This native-only consumer is not exposed as a command until its browser adapter is wired.
+pub(crate) async fn settle_setup(
+    state: &AppState,
+    owner: &str,
+    executor: [u8; 32],
+) -> Result<Status, Refused> {
+    let _commit = state.ui_session_commit.clone().lock_owned().await;
+    let status = {
+        let mut authority = state
+            .voice_authority
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let selected = authority
+            .selected_handoff_owner(owner, executor)
+            .ok()
+            .filter(|selected| {
+                check_voice_activation_generation(state, selected.binding().generation).is_ok()
+            });
+        let may_admit = authority.owner(owner).is_some_and(|current| {
+            check_voice_activation_generation(state, current.binding.generation).is_ok()
+        });
+        // Existing exact cleanup works after lock/End. Unknown retired owners allocate none;
+        // only a current selection can install the close-first fence under Coordinator.
+        match state
+            .voice_channels
+            .close(owner, executor, selected.clone())
+        {
+            Ok(status) => status,
+            Err(Refused::Binding) if selected.is_none() && !may_admit => {
+                // UI commit excludes a pending/new ensure. No exact historical row exists,
+                // and this accepted purpose cannot admit in its original generation anymore.
+                // This is authoritative no-work metadata, not a browser inference from a
+                // lost/error reply. Allocate no tombstone for unknown retired identities.
+                return Ok(Status::Closed {
+                    native_setup_drained: true,
+                });
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    state.voice_channels.retire_setup(owner, executor)?;
+    Ok(status)
 }
 
 fn require_selected(

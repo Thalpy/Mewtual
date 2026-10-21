@@ -1,5 +1,36 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Browser/native status transport boundary (21 October, disabled integration stage)
+
+Native original setup funding now survives native arithmetic and transfers into registry
+ownership before Ready. Only complete authenticated Status version/Session/transcript validation
+or exact trusted setup cleanup can retire it. Native End, timeout, bad body, waiter loss and
+unknown IDs do not prove browser drainage. A separate original control Crypto slot and native
+and browser control envelopes remain within existing caps, so full ordinary capacity cannot
+require a fresh slot for terminal control. Pre-admission pure resource rollback is permitted
+under Coordinator/Index; no active engine, affine grant, RNG or row/serial effect exists there.
+Actual transferred setup/output owners retire outside those guards.
+
+The browser's private Session uses only its retained exact selected key/executor. Refcounts
+keep that key's metadata/point/private-key custody through actual SDK drainage after End.
+TX burns before WebCrypto; authenticated request-bound RX burns before BYOB body allocation.
+Physical errors never reset counters or recreate construction. One original reserved browser
+execution position avoids ordinary/protected queue deadlock without raising the two-slot cap.
+
+Port takeover is treated as hostile input. Fetch uses only an exact trusted literal-loopback
+port, rejects redirects and omits credentials/referrers. Fixed BYOB admission prefix intake
+avoids allocating attacker-sized HTTP header strings. One injected absolute IO deadline aborts
+fetch/read while retaining custody through actual cancellation and SDK settlement. It cannot
+force a hung SDK to drain or prove opaque SDK/GC erasure/RSS bounds. HTTP fields are not crypto
+authority; exact prefix MAC, body AEAD, Session/request binding and replay floors remain required.
+
+Proven unstarted channels need no native cleanup. An ambiguous setup attempt requires exact
+native settlement; a missing historical row is declared no-work only under UI commit when no
+current same-owner generation could still admit. A generic error is never treated as drainage.
+The service remains status-only and unstarted by the application. No listener/CSP/command,
+action/receipt/final-delivery chain or reusable lifecycle collection is enabled; live V2/RTC,
+legacy isolation, media relay and combined/physical acceptance remain open.
+
 ## Internal ECDH bootstrap boundary (21 October)
 
 The candidate checks the actual selected-owner Arc, original UI generation and live lease at

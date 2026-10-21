@@ -1,6 +1,42 @@
 # Next voice milestone: native result recovery
 
-## Native bootstrap candidate (21 October, local complete gates passed)
+## Current status-only native/browser continuation (21 October)
+
+Active source is target/communication-bootstrap-channel-worktree, based on published f227b4f7.
+The internal native TCP service and private retained v8 browser Session now share the immutable
+ECDH/framing contract. Actual native TCP tests and independent real-WebCrypto/browser-composition
+tests cover their respective boundaries; application IPC/startup/CSP integration is still absent.
+The service is not started by the app, and this is not a live byte-bearing action channel.
+
+The browser constructor consumes only its retained exact selected key/executor, never imported
+seeds or generic equal-owner handles. Original TX/RX and constructor promise survive remounts.
+Native's original8KiB setup Crypto credit stays through browser ECDH/HKDF/outgoing seal/MAC;
+complete authenticated Status or trusted post-SDK setup cleanup retires it. An original control
+Crypto lane, native12KiB control and separate browser8KiB control coexist within existing limits.
+The browser reserves control execution before native admission from the existing two positions.
+Future protected-action integration must explicitly share/lend this position rather than stack
+another protected slot or enqueue channel control behind the chain it must settle.
+
+HTTP200 response body begins with144 canonical admission bytes, followed by authenticated
+ciphertext. The BYOB reader never copies untrusted HTTP header values, authenticates before
+body allocation and burns RX before intake. Browser absolute five-second IO expiry aborts but
+keeps funding through actual fetch/read cancellation and SDK settlement. Lost setup replies,
+End/lock, native no-row/no-work and known closed metadata have distinct cleanup paths. Static
+adversarial re-review has no remaining findings. Focused browser set54/full frontend2,341 and
+complete Root3,233 pass; all82 focused native handoff tests and native check/strict Clippy
+pass, with the complete native suite running. Exact evidence is in
+HANDOVER.md and retained target/voice-browser-channel-* / voice-status-* logs.
+
+Next: reusable lifecycle collection (closed native Sessions currently retain control slots),
+trusted main-window setup/cleanup commands and exact pre-window CSP/listener integration, then
+actual factory/action input, result, exact receipt ACK, settlement, browser closure and final
+delivery collection. No stock-framework plaintext/result channel or arbitrary drain flag may
+substitute for those boundaries. Normal proven-pair Actor registration, whole-chain admission,
+SDP phase/key transfer, live RTC/mode isolation, relay and physical acceptance remain open.
+The historical candidate sections below retain their original evidence, not current absence
+or readiness claims.
+
+## Historical native bootstrap candidate (21 October, preceding complete gates)
 
 Active checkout is target/communication-bootstrap-channel-worktree, based on published
 `c5c52fd8`; Root resource primitive is separately committed `a695470d`. The current candidate

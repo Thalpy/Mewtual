@@ -158,7 +158,7 @@ test("invalid lengths, encoding and status refuse before any application BYOB al
     await assert.rejects(readVoiceIpcBody(f.response, bytes, signal()), refused("metadata"));
     assert.deepEqual(f.offered, []);
   }
-  for (const headers of [{ "content-length": "020" }, { "content-length": "20", "content-encoding": "gzip" }]) {
+  for (const headers of [{ "content-length": "20", "content-encoding": "gzip" }]) {
     const f = packet(20);
     const response = new Response(f.response.body, { headers });
     await assert.rejects(readVoiceIpcBody(response, 20, signal()), refused("metadata"));
@@ -166,4 +166,11 @@ test("invalid lengths, encoding and status refuse before any application BYOB al
   }
   const f = packet(20);
   await assert.rejects(readVoiceIpcBody(new Response(f.response.body, { status: 503, headers: { "content-length": "20" } }), 20, signal()), refused("metadata"));
+});
+
+test("HTTP length strings are not copied; authenticated bytes and exact stream EOF are authoritative", async () => {
+  const f = packet(20);
+  f.response.headers.set("content-length", "0".repeat(65536));
+  f.response.headers.get = () => { throw new Error("untrusted header value copied"); };
+  assert.equal((await readVoiceIpcBody(f.response, 20, signal())).length, 20);
 });

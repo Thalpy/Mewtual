@@ -48,7 +48,7 @@ fn incoming(
 }
 
 #[test]
-fn paid_fixed_storage_covers_codec_peak_without_an_extra_crypto_lane() {
+fn paid_fixed_storage_and_original_control_lane_cover_codec_peak() {
     use aes_gcm::Aes256Gcm;
     use hkdf::Hkdf;
     use hmac::Hmac;
@@ -61,6 +61,8 @@ fn paid_fixed_storage_covers_codec_peak_without_an_extra_crypto_lane() {
     // known live codec temporaries, canonical encoding and a reserved 1 KiB for the future IO
     // wrapper. That wrapper still requires its own actual layout/copy/collection proof.
     let peak = std::mem::size_of::<Session>()
+        + std::mem::size_of::<WorkLane>()
+        + 2 * std::mem::size_of::<usize>()
         + 2 * std::mem::size_of::<usize>()
         + state
         + std::mem::size_of::<Aes256Gcm>()
@@ -185,7 +187,11 @@ fn completed_output_keeps_the_original_credit_after_all_outer_session_waiters_dr
     reply.plain_mut()[0] = 7;
     let completed = reply.seal().unwrap();
     let held = pool.counts();
-    assert_eq!(held, (CONTROL_BYTES + BOOTSTRAP_BYTES, 0));
+    assert_eq!(
+        held,
+        (CONTROL_BYTES + BOOTSTRAP_BYTES + BROWSER_CONTROL_BYTES, 1),
+        "the original control lane stays prepaid through actual output collection"
+    );
     let weak = Arc::downgrade(&session);
     drop(session);
     assert!(weak.upgrade().is_some());

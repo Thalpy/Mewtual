@@ -21,9 +21,28 @@ export class VoiceIpcBodyError extends Error {
 export async function readVoiceIpcBody(
   response: Response, authenticatedBytes: number, signal: AbortSignal,
 ): Promise<Uint8Array<ArrayBuffer>> {
+  return readBody(response, authenticatedBytes, signal);
+}
+
+/** Authenticate an EXACT144-byte ASCII prefix from the bounded stream, then admit its body.
+ * No HTTP header value is materialized: a keyless process taking over a stale loopback port
+ * cannot force an application-sized string allocation before the MAC/length check. The
+ * caller must verify original direction/request/session and debit RX inside authenticate.
+ * Returned bytes remain owned by the enclosing prepaid flight until explicitly disposed. */
+export async function readVoiceIpcResponse(
+  response: Response, signal: AbortSignal, authenticate: (admission: string) => Promise<number>,
+): Promise<Uint8Array<ArrayBuffer>> {
+  return readBody(response, null, signal, authenticate);
+}
+
+async function readBody(
+  response: Response, authenticatedBytes: number | null, signal: AbortSignal,
+  authenticate?: (admission: string) => Promise<number>,
+): Promise<Uint8Array<ArrayBuffer>> {
   let reader: ReadableStreamBYOBReader | null = null;
   let body: Uint8Array<ArrayBuffer> | null = null;
   let eof: Uint8Array<ArrayBuffer> | null = null;
+  let prefix: Uint8Array<ArrayBuffer> | null = null;
   let cleanup: Promise<void> | null = null;
   const closed = () => { if (signal.aborted) throw new VoiceIpcBodyError("closed"); };
   const cancel = (): Promise<void> => {
@@ -45,10 +64,10 @@ export async function readVoiceIpcBody(
   const abort = () => { void cancel().catch(() => {}); };
   try {
     closed();
-    if (!Number.isSafeInteger(authenticatedBytes) || authenticatedBytes < 16 ||
-        authenticatedBytes > VOICE_IPC_PILOT_CIPHER_MAX || response.status !== 200 ||
-        response.headers.has("content-encoding") ||
-        response.headers.get("content-length") !== String(authenticatedBytes)) {
+    const validLength = (value: number | null): value is number => typeof value === "number" &&
+      Number.isSafeInteger(value) && value >= 16 && value <= VOICE_IPC_PILOT_CIPHER_MAX;
+    if ((authenticatedBytes !== null && !validLength(authenticatedBytes)) || response.status !== 200 ||
+        response.headers.has("content-encoding")) {
       throw new VoiceIpcBodyError("metadata");
     }
     if (!response.body || response.body.locked) throw new VoiceIpcBodyError("reader");
@@ -56,6 +75,29 @@ export async function readVoiceIpcBody(
     catch { throw new VoiceIpcBodyError("unsupported"); }
     signal.addEventListener("abort", abort, { once: true });
     closed(); // no async gap, but keep the original signal gate next to allocation
+    if (authenticate) {
+      prefix = new Uint8Array(144);
+      let used = 0;
+      while (used < 144) {
+        if (!prefix) throw new VoiceIpcBodyError("reader");
+        const result: ReadableStreamReadResult<Uint8Array<ArrayBuffer>> = await reader.read(prefix.subarray(used));
+        prefix = result.value ? new Uint8Array(result.value.buffer) : null;
+        closed();
+        if (result.done || !result.value || !result.value.byteLength) throw new VoiceIpcBodyError("truncated");
+        if (result.value.buffer.byteLength !== 144 || result.value.byteOffset !== used || result.value.byteLength > 144 - used) throw new VoiceIpcBodyError("reader");
+        used += result.value.byteLength;
+      }
+      // Construct at most144 characters from our OWN fixed buffer, never Headers.get().
+      let admission = "";
+      if (!prefix) throw new VoiceIpcBodyError("reader");
+      for (const byte of prefix) {
+        if (!((byte >= 48 && byte <= 57) || (byte >= 97 && byte <= 102))) throw new VoiceIpcBodyError("metadata");
+        admission += String.fromCharCode(byte);
+      }
+      authenticatedBytes = await authenticate(admission);
+      closed(); prefix.fill(0); prefix = null;
+    }
+    if (!validLength(authenticatedBytes)) throw new VoiceIpcBodyError("metadata");
     body = new Uint8Array(authenticatedBytes);
     let used = 0;
     while (used < authenticatedBytes) {
@@ -97,6 +139,7 @@ export async function readVoiceIpcBody(
     finally {
       if (body?.byteLength) body.fill(0);
       if (eof?.byteLength) eof.fill(0);
+      if (prefix?.byteLength) prefix.fill(0);
       signal.removeEventListener("abort", abort);
     }
   }

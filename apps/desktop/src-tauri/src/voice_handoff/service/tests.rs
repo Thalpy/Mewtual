@@ -154,10 +154,8 @@ impl Client {
         assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(text.contains("Cache-Control: no-store\r\n"));
         assert!(text.contains("Connection: close\r\n"));
-        let admission = text
-            .lines()
-            .find_map(|line| line.strip_prefix("x-voice-admission: "))
-            .unwrap();
+        assert!(text.contains("Content-Length: 163\r\n"));
+        let admission = std::str::from_utf8(&bytes[end..end + 144]).unwrap();
         let decoded = hex::decode(admission).unwrap();
         assert_eq!(decoded.len(), 72);
         let response = &decoded[..40];
@@ -175,7 +173,7 @@ impl Client {
         let mut nonce = [0; 12];
         nonce[..4].copy_from_slice(b"VHP1");
         nonce[4..].copy_from_slice(&response[8..16]);
-        let mut body = bytes[end..].to_vec();
+        let mut body = bytes[end + 144..].to_vec();
         assert_eq!(body.len(), 19);
         let tag: [u8; 16] = body[3..].try_into().unwrap();
         Aes256Gcm::new_from_slice(&self.key(b"v1 n2c body AES-256-GCM"))
@@ -211,10 +209,8 @@ impl Client {
                 .try_into()
                 .unwrap();
         let mut output = Output::new();
-        output
-            .reply(Origin::PackagedHttp, &admission, body.len())
-            .unwrap();
-        [output.bytes(), body.as_slice()].concat()
+        output.reply(Origin::PackagedHttp, body.len()).unwrap();
+        [output.bytes(), admission.as_slice(), body.as_slice()].concat()
     }
 }
 fn wire(port: u16, admission: &str, body: &[u8]) -> Vec<u8> {
@@ -282,6 +278,85 @@ async fn real_tcp_status_needs_no_request_eof_and_closed_history_cannot_revive_a
 }
 
 #[tokio::test]
+async fn prepaid_status_makes_progress_with_every_crypto_slot_and_process_byte_occupied() {
+    use catcoms_sync::voice_v2::resources::ResourceKind;
+    let (f, owner, _public, runtime, client) = setup().await;
+    let resources = runtime.resources();
+    let group = f
+        .state
+        .voice_authority
+        .lock()
+        .unwrap()
+        .owner(&owner)
+        .unwrap()
+        .binding
+        .scope
+        .group;
+    let bound = BoundServer::bind(
+        f.state.voice_channels.clone(),
+        runtime,
+        Origin::PackagedHttp,
+    )
+    .unwrap();
+    let port = bound.port();
+    let running = bound.start().unwrap();
+    let mut lanes = Vec::new();
+    for _ in 0..2 {
+        lanes.push(resources.reserve_crypto_lane(group).unwrap());
+    }
+    for _ in 0..4 {
+        lanes.push(resources.reserve_crypto_lane([97; 32]).unwrap());
+    }
+    assert_eq!(resources.counts().1, 8);
+    assert!(resources.reserve_crypto_lane([98; 32]).is_err());
+    // This isolated fixture has one group before pressure, plus the separately measured
+    // 4KiB process index and production infrastructure envelope. Fill its remaining bytes,
+    // then the other bounded test groups, without increasing any configured limit.
+    let group_used = resources.counts().0 - 4096 - INFRASTRUCTURE_BYTES;
+    let mut pressure = vec![resources
+        .charge(group, 256 * 1024 - group_used, ResourceKind::Retained)
+        .unwrap()];
+    for value in 97..=104 {
+        let left = 2 * 1024 * 1024 - resources.counts().0;
+        if left == 0 {
+            break;
+        }
+        pressure.push(
+            resources
+                .charge([value; 32], left.min(256 * 1024), ResourceKind::Retained)
+                .unwrap(),
+        );
+    }
+    assert_eq!(resources.counts(), (2 * 1024 * 1024, 8));
+    let (header, admission, body) = client.status(1);
+    let reply = exchange(port, &wire(port, &admission, &body), false).await;
+    assert_eq!(client.response(&reply, &header), (1, [1, 1, 1]));
+    assert_eq!(
+        resources.counts().1,
+        7,
+        "only completed setup retires; original control slot survives"
+    );
+    let refill = resources.reserve_crypto_lane(group).unwrap();
+    assert_eq!(resources.counts().1, 8);
+    f.state.voice_authority.lock().unwrap().end(&owner);
+    let (header, admission, body) = client.status(2);
+    let reply = exchange(port, &wire(port, &admission, &body), false).await;
+    assert_eq!(client.response(&reply, &header), (2, [1, 2, 1]));
+    assert_eq!(
+        resources.counts().1,
+        8,
+        "historical status obtains no fresh work slot"
+    );
+    running.finish().await.unwrap();
+    refill.close();
+    for lane in lanes {
+        lane.close();
+    }
+    drop(pressure);
+    f.close().await;
+}
+
+#[tokio::test]
 async fn authenticated_wrong_operation_class_length_and_logical_id_refuse_before_debit() {
     let (f, _, _public, runtime, client) = setup().await;
     let bound = BoundServer::bind(
@@ -331,16 +406,20 @@ async fn admitted_bad_plaintext_bad_tag_truncation_and_lost_response_never_refun
     let (f, _, _public, runtime, client) = setup().await;
     let bound = BoundServer::bind(
         f.state.voice_channels.clone(),
-        runtime,
+        runtime.clone(),
         Origin::PackagedHttp,
     )
     .unwrap();
     let port = bound.port();
     let running = bound.start().unwrap();
-    for sequence in 1..=3 {
+    for sequence in 1..=5 {
         let mut plain = client.plain();
         if sequence == 1 {
             plain[0] = 2;
+        } else if sequence == 4 {
+            plain[1] ^= 1; // Valid AEAD, wrong body Session.
+        } else if sequence == 5 {
+            plain[17] ^= 1; // Valid AEAD, wrong immutable transcript hash.
         }
         let (_, admission, mut body) = client.packet(sequence, 9, 0, client.session, &plain);
         if sequence == 2 {
@@ -351,6 +430,11 @@ async fn admitted_bad_plaintext_bad_tag_truncation_and_lost_response_never_refun
             submitted.pop();
         }
         assert!(exchange(port, &submitted, true).await.is_empty());
+        assert_eq!(
+            runtime.resources().counts().1,
+            2,
+            "invalid/truncated bodies do not settle browser setup"
+        );
         let (_, admission, body) = client.status(sequence);
         assert!(exchange(port, &wire(port, &admission, &body), false)
             .await
@@ -365,9 +449,14 @@ async fn admitted_bad_plaintext_bad_tag_truncation_and_lost_response_never_refun
             (false, sequence, sequence)
         );
     }
-    let (header, admission, body) = client.status(4);
+    let (header, admission, body) = client.status(6);
     let reply = exchange(port, &wire(port, &admission, &body), false).await;
-    assert_eq!(client.response(&reply, &header).0, 4);
+    assert_eq!(client.response(&reply, &header).0, 6);
+    assert_eq!(
+        runtime.resources().counts().1,
+        1,
+        "only the complete authenticated Status settles setup, preserving control capacity"
+    );
     // Throw away that valid response. Repeating the original request is still a replay.
     assert!(exchange(port, &wire(port, &admission, &body), false)
         .await
@@ -756,7 +845,7 @@ fn fixed_response_headers_fit_for_every_allowed_origin() {
     let origins = origins.chain([Origin::Development]);
     for origin in origins {
         let mut head = Output::new();
-        head.reply(origin, &[b'a'; 144], 19).unwrap();
+        head.reply(origin, 19).unwrap();
         assert!(head.filled < RESPONSE_HEAD_BYTES);
         let mut head = Output::new();
         head.preflight(origin).unwrap();
@@ -819,7 +908,8 @@ impl Drop for Parked {
     }
 }
 #[tokio::test]
-async fn cancellation_while_writing_header_body_or_shutdown_closes_stream_before_reply_custody() {
+async fn cancellation_while_writing_header_prefix_body_or_shutdown_closes_stream_before_reply_custody(
+) {
     let (f, _, _public, runtime, client) = setup().await;
     // Direct Connection tests still prepay the production infrastructure envelope.
     let _credit = runtime
@@ -827,7 +917,7 @@ async fn cancellation_while_writing_header_body_or_shutdown_closes_stream_before
         .charge_process_retained(INFRASTRUCTURE_BYTES)
         .unwrap();
     let clock = ManualClock::new(1000);
-    for at in 1..=3 {
+    for at in 1..=4 {
         let (_, admission, body) = client.status(at as u64);
         let session = f
             .state

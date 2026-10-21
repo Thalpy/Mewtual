@@ -1,6 +1,31 @@
 # Chat, files and voice implementation evidence
 
-## Bootstrap continuation (21 October, local complete gates passed)
+## Native/browser status continuation (21 October, implementation still partial)
+
+The active bootstrap-channel checkout now contains internal native TCP Status IO plus a
+retained selected-key browser Session with exact physical counters and bounded BYOB admission.
+Setup/control capacity remains paid through actual SDK/read/cancel drainage, including End,
+lost replies and native no-work history. The current54 focused browser regressions and full
+frontend2,341 pass; Svelte/build/all ten rendered flows pass. Complete Root passes3,233, zero
+failures,24 existing ignored/59 summaries (2,234.97s), plus format/strict Clippy/ambient/deny.
+All82 native handoff regressions, native check and strict Clippy pass; the complete native suite
+is running serially, so this delta is not yet native-complete evidence.
+Actual-diff static review/re-review has no remaining findings.
+
+Native's actual socket tests and browser tests with an independent WebCrypto native fixture do
+not establish the full packaged native IPC/browser connection. No app listener/CSP/bootstrap
+commands, action payload/result/ACK/settlement/final collection, reusable lifecycle collection
+or live V2 dispatch are enabled. Closed native Sessions retain control capacity, so the pilot
+cannot yet be activated for repeated calls. SDP/RTC/mode isolation, relay and combined/physical
+acceptance remain open; one physical desktop cannot establish independent-network acceptance.
+
+Published f227b4f7 CI run39649824415/Linux job119394907283 fails the reversed-reopen chat union
+again:531 native passes/1 failure, client5 has14/15 while bridge4/client6 have15/15 operations.
+The missing operation is isolated client6's original signed message. Diagnostics now expose
+actual recovery state; they are not a fix. The chat recovery owner must resolve this before
+sign-off. The historical evidence below is scoped to its original sources and gates.
+
+## Historical bootstrap checkpoint (21 October, preceding complete gates)
 
 Active checkout is target/communication-bootstrap-channel-worktree, based on published
 `c5c52fd8`. An earlier fresh Root stopped with1209 passed/1 failed in the app library: a capacity-custody

@@ -1,5 +1,36 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Browser/native status candidate (21 October, not application-enabled)
+
+`VoiceCryptoBroker.nativeChannel(owner, key, native)` requires the retained broker's actual
+accepted selected key/owner/executor, captures the first stateless adapter and returns the
+same private Session handle on exact remount. `status()` coalesces its current physical flight;
+later attempts spend fresh TX on the original allocator. `close()` waits for actual SDK/IO
+drainage and exact native setup cleanup. The broker refuses a retained version7 pool rather
+than installing a second pool alongside unresolved work. This handle grants no Root/RTC effect.
+
+The proposed trusted metadata adapter supplies `setup(owner, executor)` with exact public
+Ready{port,transcript}, Pending or Closed{nativeSetupDrained} fields. `settleSetup` is exact
+close-first cleanup and must resolve on native-authoritative no-work history after lock/End.
+No command exposes this adapter yet. Native's original setup credit remains paid until valid
+Status or trusted cleanup; the latter is called only after real browser promises drain.
+
+HTTP requests still contain the fixed144-character admission header and exact cipher body.
+HTTP200 responses now contain a fixed144-byte lowercase-hex admission prefix followed by the
+authenticated cipher body (Status19bytes, hence HTTP Content-Length163). HTTP204 preflight has
+neither body nor Content-Length. `readVoiceIpcResponse` owns the exact prefix BYOB buffer,
+authenticates before body admission, then checks exact body length and EOF. It does not read
+HTTP header values into application strings. `readVoiceIpcBody` likewise uses authenticated
+bytes and EOF; its earlier Content-Length-string equality rule is superseded. Unsupported
+BYOB, encoding, bad MAC/AEAD, truncation, excess and replay close the physical attempt without
+refund. An absolute injected browser IO deadline aborts but never detaches live SDK/cancel work.
+
+Status request plaintext is version1 + original16-byte Session +32-byte transcript hash. Its
+only reply is version1 + Ready1/Closed2 + native-setup-drained0/1. A header MAC alone or a valid
+AEAD body with the wrong Session/hash cannot settle setup. The native snapshot says nothing
+about browser, action, pair, remote endpoint or RTC readiness. Closed metadata is returned as
+closed, not an ambiguous result. Action payload/ACK/settlement and final collection remain open.
+
 ## Internal channel bootstrap candidate (21 October)
 
 Native-only voice_handoff::bootstrap::ensure resolves the actual selected owner/executor and

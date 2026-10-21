@@ -339,6 +339,9 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
             {
                 return Err(Refused::Body);
             }
+            // The retained browser constructs this only after ECDH/HKDF and outgoing seal/MAC
+            // promises have settled. Response crypto uses its separately prepaid control lane.
+            route.acknowledge_setup().map_err(|_| Refused::Body)?;
             let snapshot = route.snapshot();
             let incoming = self.incoming.take().ok_or(Refused::Body)?;
             let mut prepared = incoming
@@ -347,8 +350,7 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
             prepared.plain_mut().copy_from_slice(&snapshot);
             self.reply = Some(prepared.seal().map_err(|_| Refused::Body)?);
             let reply = self.reply.as_ref().ok_or(Refused::Body)?;
-            self.output
-                .reply(origin, reply.admission(), reply.body().len())?;
+            self.output.reply(origin, reply.body().len())?;
         }
         current(clock, deadline)?;
         self.stream
@@ -356,6 +358,13 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
             .await
             .map_err(|_| Refused::Io)?;
         if let Some(reply) = &self.reply {
+            // Fixed BYOB prefix: reading an HTTP header value would materialize an unbounded
+            // browser string before its length could be checked after a local port takeover.
+            current(clock, deadline)?;
+            self.stream
+                .write_all(reply.admission())
+                .await
+                .map_err(|_| Refused::Io)?;
             current(clock, deadline)?;
             self.stream
                 .write_all(reply.body())
@@ -388,14 +397,9 @@ impl Output {
         write!(self, "HTTP/1.1 204 No Content\r\nConnection: close\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: {}\r\nVary: Origin\r\nAccess-Control-Allow-Methods: POST\r\nAccess-Control-Allow-Headers: content-type, x-voice-admission\r\nAccess-Control-Max-Age: 0\r\n\r\n", origin.value())
             .map_err(|_| Refused::Header)
     }
-    fn reply(
-        &mut self,
-        origin: Origin,
-        admission: &[u8; 144],
-        length: usize,
-    ) -> Result<(), Refused> {
-        let admission = std::str::from_utf8(admission).map_err(|_| Refused::Header)?;
-        write!(self, "HTTP/1.1 200 OK\r\nConnection: close\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: {}\r\nVary: Origin\r\nAccess-Control-Expose-Headers: x-voice-admission\r\nContent-Type: application/octet-stream\r\nContent-Length: {length}\r\nx-voice-admission: {admission}\r\n\r\n", origin.value())
+    fn reply(&mut self, origin: Origin, length: usize) -> Result<(), Refused> {
+        let length = length.checked_add(144).ok_or(Refused::Header)?;
+        write!(self, "HTTP/1.1 200 OK\r\nConnection: close\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: {}\r\nVary: Origin\r\nContent-Type: application/octet-stream\r\nContent-Length: {length}\r\n\r\n", origin.value())
             .map_err(|_| Refused::Header)
     }
 }

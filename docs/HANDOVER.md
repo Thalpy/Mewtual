@@ -1,6 +1,51 @@
 # Mewtual; Handover
 
-## Bootstrap continuation (21 October, integration open)
+## Active native/browser handoff (21 October, integration open)
+
+Published PR48 is `f227b4f7`; active source remains isolated in
+target/communication-bootstrap-channel-worktree. Internal real-TCP Status transport is committed
+as `2fd0fad0`. The continuation adds the retained v8 browser Session, immutable selected-key
+construction, permanent physical counters, fixed BYOB response admission prefix and absolute
+IO cancellation. Native setup credit transfers into registry custody through real browser
+setup/outgoing SDK work; a separate original control lane and browser control envelope remain
+inside existing caps. Exact cleanup handles End, lock, lost setup replies and authoritative
+native no-work. Proven unstarted browser channels allocate no native purpose.
+
+All54 focused browser bootstrap/frame/body/Session checks pass, including End at each of14
+SDK steps, bad-body RX/replay, failed-seal TX, generic-key/executor substitution, native closed
+history, stale-port deadline and actual cancellation drainage. Full frontend passes2,341,
+Svelte zero errors/warnings, build and all ten rendered flows pass. Complete Root passes3,233,
+zero failures,24 existing ignored,59 summaries (2,234.97s); format4.30s, strict Clippy13.45s,
+ambient1.01s and all four Root deny categories1.78s pass. All82 focused native handoff tests
+pass (31.19s including rebuild), strict native Clippy56.70s and native check29.27s pass; the
+complete native suite is running serially. Logs are target/voice-browser-channel-*
+and target/voice-status-*; do not describe the native delta as fully validated yet.
+
+Two initial native focus attempts failed only new test accounting assertions that conflated
+independent Root CallGrant retirement with setup retirement. Baselines now follow each actual
+End/lock transition, retaining exact8KiB/one-slot and no-work/no-allocation cleanup assertions.
+The failed logs remain evidence; no production allowance or rejection check was weakened.
+
+Actual-diff adversarial review/re-review has no remaining findings after resolving unstarted/
+pre-admission cleanup, hostile HTTP header copying, missing browser IO deadline and closed-result
+truthfulness. This is static boundary review plus the stated focused tests, not physical
+native/browser/RTC acceptance. The native service remains status-only and is not started by
+the app. Application listener/CSP/bootstrap commands, actual factory/action input/result/receipt
+ACK/settlement/final-delivery integration and lifecycle collection remain open. Native closed
+Sessions still retain control capacity until registry teardown; this finite pilot must not
+be activated as a reusable call service. Live V2/SDP/ICE/RTC and legacy isolation belong to the
+next integration owner; media relay and combined/physical acceptance remain open. Only one
+physical desktop is available. Preserve unrelated main-worktree UI/combo edits.
+
+Hosted `f227b4f7` is also not green: CI run39649824415/Linux job119394907283 again fails
+six_client_native_reversed_reopen_gossip_loss_and_command_load (531 native passes/1 failure).
+Bridge4 and client6 hold15/15 original operations; client5 holds14/15, missing the isolated
+client6 operation. Current bounded diagnostics report actual routes/recovery state but are
+not a production fix. Windows/Ubuntu Root jobs were still running at the inspection. Keep
+this separate chat recovery issue with its assigned owner; do not soften the exact union or
+raise timeouts. Root deny passing does not clear separate native/experiment audit findings.
+
+## Historical bootstrap checkpoint (21 October, preceding source)
 
 Published checkpoint is `c5c52fd8`; active work is isolated in
 target/communication-bootstrap-channel-worktree. Commits `dda602f3` and `a695470d` isolate the
