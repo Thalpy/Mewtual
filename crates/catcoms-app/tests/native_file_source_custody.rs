@@ -5,6 +5,9 @@
 //! Compile the exact native executor source to install its private before-read barrier, and
 //! also exercise the linked public factory below to pin their shared production pool.
 #[path = "../src/file_source.rs"]
+// The exact production source exports runtime(); within this private integration-test module
+// that public spelling is intentionally retained, while linked public API calls below are real.
+#[allow(unreachable_pub)]
 mod native_adapter;
 
 use catcoms_rt::RequestAuthority;
