@@ -5,6 +5,7 @@ use crate::voice_v2::chain::ConfirmationAdmission;
 use crate::voice_v2::helper::RoomAuthority;
 use crate::voice_v2::runtime::{ActorOwner, Runtime, View};
 use rand_core::RngCore;
+mod derivation;
 mod result;
 
 struct ProtectedFixture {
@@ -20,6 +21,7 @@ struct OriginClock {
     inner: ManualClock,
     reads: std::sync::atomic::AtomicUsize,
     revoke: std::sync::Mutex<Option<(usize, CallLease)>>,
+    advance: std::sync::Mutex<Option<(usize, u64)>>,
 }
 impl Clock for OriginClock {
     fn now_ms(&self) -> u64 {
@@ -30,6 +32,10 @@ impl Clock for OriginClock {
         let mut revoke = self.revoke.lock().unwrap();
         if revoke.as_ref().is_some_and(|(at, _)| *at == read) {
             revoke.take().unwrap().1.revoke();
+        }
+        let mut advance = self.advance.lock().unwrap();
+        if advance.as_ref().is_some_and(|(at, _)| *at == read) {
+            self.inner.advance_ms(advance.take().unwrap().1);
         }
         self.inner.monotonic_ms()
     }
@@ -64,6 +70,7 @@ fn fixture() -> ProtectedFixture {
         inner: clock.clone(),
         reads: std::sync::atomic::AtomicUsize::new(0),
         revoke: std::sync::Mutex::new(None),
+        advance: std::sync::Mutex::new(None),
     });
     let a_rt = Runtime::new(origin_clock.clone());
     let b_rt = Runtime::new(origin_clock.clone());

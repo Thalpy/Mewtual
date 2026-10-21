@@ -8,6 +8,7 @@ use voice_v2::{CallGrant, CallLease, JoinKey, Scope, VoiceError, WatchLease};
 
 const WATCHES: usize = 8;
 mod confirmation;
+mod derivation;
 mod ingress;
 pub(crate) use ingress::EndpointReceipt;
 

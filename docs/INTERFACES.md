@@ -1,5 +1,15 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Root derivation (21 October, focused checks passed)
+
+`Root::prepare_voice_derivation(grant, handshake)` returns the exact charged CryptoAction for
+row zero of an already proven native pair. `Root::commit_voice_derivation_result(grant, action,
+tag)` accepts only that action's empty output marker after actual engine admission. Both require
+the original registered CallGrant and current native actor/session/room/epoch. Equal IDs and
+replacement joins cannot adopt the action. Exact metadata recovery does not reconstruct input
+or browser keys; production orphan-history/ACK/settlement custody remains a separate adapter.
+These are native Rust APIs, not exposed serialized commands. Verification is recorded in handover.
+
 ## Root confirmation results (21 October, validation pending)
 
 `Root::submit_voice_confirmation_result(grant, action, ciphertext, tag)` and

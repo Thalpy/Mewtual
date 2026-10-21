@@ -125,6 +125,47 @@ fn final_signed_publication_rejects_original_owner_epoch_and_deadline_changes() 
 }
 
 #[test]
+fn prepared_seal_first_publication_uses_source_and_exchange_deadlines_before_construction() {
+    for exchange_bound in [false, true] {
+        let mut f = fixture();
+        let exchange = exchange_bound.then(|| f.a.prepare_sdp(&f.clock).unwrap());
+        f.clock.advance_ms(14_000);
+        let draft = f.a.reserve(&f.clock, &mut f.rng).unwrap();
+        // Isolate each original bound at this pure lower fence. The actual late pair/flight
+        // construction is separately exercised through all three LocalJoin protected roles.
+        if exchange_bound {
+            f.a.ledger.sdp.as_mut().unwrap().retire = Some(16_000);
+            f.a.ledger.outgoing.get_mut(&draft.id).unwrap().exchange = exchange;
+        } else {
+            f.a.ledger
+                .outgoing
+                .get_mut(&draft.id)
+                .unwrap()
+                .source_deadline = 16_000;
+        }
+        assert!(f.a.ledger.outgoing[&draft.id].construction > 17_000);
+        let prepared =
+            f.a.ledger
+                .prepare_sealed_publication(
+                    draft.id,
+                    &[7; 32],
+                    &f.a.signer,
+                    &authority(&f.a.context, &f.a.lease),
+                    &f.clock,
+                )
+                .unwrap();
+        f.clock.advance_ms(2_000);
+        assert_eq!(
+            prepared.check_at(f.a.context.epoch, f.clock.now_ms(), f.clock.monotonic_ms()),
+            Err(VoiceError::Reservation)
+        );
+        drop(prepared);
+        assert!(f.a.ledger.outgoing[&draft.id].sealed.published().is_none());
+        assert!(f.a.ledger.outgoing[&draft.id].crypto.0.is_live());
+    }
+}
+
+#[test]
 fn signer_revocation_leaves_only_an_inert_signature_and_no_crypto_consumption() {
     let mut f = fixture();
     let draft = f.a.reserve(&f.clock, &mut f.rng).unwrap();

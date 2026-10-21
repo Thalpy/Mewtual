@@ -17,6 +17,7 @@ pub(super) const ROW_BYTES: usize = 1536;
 const ROWS: usize = 12;
 const NO_ROW: u8 = u8::MAX;
 mod admission;
+mod derivation;
 mod outgoing;
 mod start;
 pub(crate) use admission::ConfirmationAdmission;

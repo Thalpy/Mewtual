@@ -397,6 +397,21 @@ pub(super) fn fixed_record_layout_bytes() -> usize {
 }
 
 impl ActionQueue {
+    /// Prepare the same native derive row/input as compatibility publication, without issuing
+    /// it. Root borrows the outer issue into its final origin fence; no action escapes early.
+    pub(super) fn build_chain_derive(
+        mut prepared: PreparedAction,
+        input: PairSetup,
+        authority: CryptoAuthority,
+    ) -> Result<(super::chain::RowIssue, InactiveAction), VoiceError> {
+        let issue = prepared.chain_issue.take().ok_or(VoiceError::Scope)?;
+        let (key, action, exchange) = Self::build(prepared, Input::Derive(input), authority);
+        assert!(
+            exchange.is_none(),
+            "chain and Exchange cannot share an action"
+        );
+        Ok((issue, InactiveAction { key, action }))
+    }
     pub(super) fn build_chain_encrypt(
         mut prepared: PreparedAction,
         input: CryptoFlight,
@@ -637,23 +652,12 @@ impl ActionQueue {
     /// all recoverable errors are prepaid, not a promise to survive process allocation failure.
     pub(super) fn publish_chain_derive(
         &mut self,
-        mut prepared: PreparedAction,
+        prepared: PreparedAction,
         input: PairSetup,
         authority: CryptoAuthority,
     ) -> Result<Arc<CryptoAction>, VoiceError> {
-        let issue = prepared.chain_issue.take().ok_or(VoiceError::Scope)?;
-        let (key, action, exchange_issue) = Self::build(prepared, Input::Derive(input), authority);
-        assert!(
-            exchange_issue.is_none(),
-            "chain and Exchange cannot share action allocation"
-        );
-        issue.publish(|| {
-            assert!(
-                self.actions.insert(key, action.clone()).is_none(),
-                "native action uniqueness"
-            );
-            action
-        })
+        let (issue, inactive) = Self::build_chain_derive(prepared, input, authority)?;
+        issue.publish(|| self.publish_inactive(inactive))
     }
     pub(super) fn publish_derive(
         &mut self,

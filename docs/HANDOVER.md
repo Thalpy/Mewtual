@@ -1,5 +1,53 @@
 # Mewtual; Handover
 
+## Active Root derivation and deadline correction (21 October, focused checks passed)
+
+Latest pushed checkpoint remains `c1532331` on PR48. Local `fe9c1048` adds Root confirmation
+results and passes 389 focused voice tests, 2,268 frontend tests, strict Clippy, root dependency
+policy, formatting and ambient checks. Its sequential full root/native/check/build run was
+deliberately interrupted after static review found a later deadline gap; it has no full-pass
+claim. Logs and interrupted phase remain in communication-root-results-worktree/target.
+
+Active source is communication-derived-origin-worktree, based on fe9. It adds actual Root
+derivation factory/result admission for the original CallGrant, proven pair, actor/session and
+room. Row zero publishes under nonblocking Group/Policy/History checks; exact factory retries
+return the original action after ACK/compaction without recreating input or keys. First Derived
+results use the existing affine preparation loan and check the original chain against the last
+native time sample. Historical result lookup precedes pending authority; metadata cannot grant
+key, source or RTC authority.
+
+Review also found that a late confirmation packet's construction window can outlive its pair
+deadline. The shared first-seal fence now checks the minimum of construction, source and original
+SDP exchange deadlines; already-published compatibility lookup remains historical. Regressions
+reserve Hello/Proof/Finish at15s against a16s pair deadline and advance final native time to17s,
+before the20s construction bound. No expired Finish promotion, packet publication or terminal
+success is allowed. Lower tests isolate source/exchange deadlines. Derivation coverage includes
+both roles, Group/History/final Capacity, full ordinary bytes, exact compacted recovery, native
+session revocation blocked on Policy, last-Clock owner closure/expiry, settlement/unwind, wall
+rollback/epoch changes and actual Root allocation/replacement/room/session boundaries.
+
+Static read-only re-review has no remaining blocker/high/medium. It corrected test assumptions
+about idle Workflow lanes: an open chain still owns its prepaid lane after settlement. Tests now
+close the original chain before asserting zero; running preparation retains custody until its
+loan drains. No runtime limit or conservation rule was weakened. The first fresh focused run
+passed all 407 tests (17.07s, compile2m16). Two additional evidence cases then brought the rerun
+to **409 passed, zero failed** (18.62s, compile1m01). Full frontend passes **2,268**, zero failures
+(211.08s, two workers). Strict whole-root Clippy passes with warnings denied (37.86s), formatting,
+ambient and root dependency policy pass. The first sandboxed deny attempt could not lock Cargo's
+external advisory cache; the authorized normal-OS retry passes all four policy categories.
+Logs: target/voice-derived-origin-{focused-1,focused-2,frontend-full,clippy,format,ambient,deny-2}.log.
+Complete root/native tests/check/build/startup remain required for the final stable implementation;
+earlier full passes apply to the pushed checkpoint, not this increment.
+
+Next: production native registration/IPC, exact history/ACK/settlement retry custody, authorized
+confirmation-to-SDP phase/key transfer, normal V2/RTC and legacy isolation, media relay and
+combined/physical acceptance. Only one physical desktop exists. The two latest tests directly
+cover a separate thread holding the actual Policy mutex and actual signed compound room deletion/
+recreation through Root. Static re-review is clear of blocker/high/medium. Residual LOW harness
+follow-up: a regression from try-lock to blocking Policy acquisition could hang the contention
+test until an external suite watchdog; its real barrier ordering and unwind cleanup are covered.
+Preserve the isolated unselected native-provider experiment. Avoid duplicate heavy Cargo jobs.
+
 ## Validated protected confirmation checkpoint (21 October)
 
 Published code through `9dc1b8d3` (`73c444a5` browser implementation) has identical Rust/native
@@ -21,9 +69,10 @@ for the protected confirmation increments. This is a validated partial checkpoin
 Separate native/packaged-experiment dependency audit failures remain recorded; root cargo-deny
 passing does not clear them. Only one physical desktop is available.
 
-The newer Root result-safety code remains UNCOMMITTED in communication-root-results-worktree
-and is not included in this published checkpoint. Its focused compilation is now running;
-prior complete suites do not validate it. Production native registration/IPC/result settlement,
+The newer Root result-safety code is committed locally as fe9c1048 in
+communication-root-results-worktree and is not included in this published checkpoint. The active
+continuation and interrupted full validation are recorded above; prior complete suites do not
+validate it. Production native registration/IPC/result settlement,
 SDP/key phase transfer, normal V2/RTC and legacy isolation, member media relay, combined rollout
 and physical audio/network acceptance remain unfinished.
 
@@ -49,7 +98,7 @@ use Directory's registered CallGrant. No runtime check or limit was weakened.
 Static adversarial re-review has no remaining blocker/high/medium, including derivation cleanup
 and the RNG-settlement addition. Formatting and ambient pass. Strict whole-root Clippy passes with warnings denied (2m25s), root dependency policy passes,
 and the complete frontend passes 2,268 tests with zero failures (216.25s, two workers).
-Complete root/native gates are now queued against this frozen source. The earlier
+The full fe9 run was subsequently interrupted for the reviewed deadline correction above. The earlier
 complete 3,146-root/443-native/2,268-frontend evidence above belongs to c1532331, not this increment.
 Keep unpublished and retired owners outer, destroy them after all final guards, and recheck the
 original actor/session after the LAST injected callback. Child leases alone are insufficient.

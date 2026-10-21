@@ -181,6 +181,82 @@ fn low_final_history_contention_preserves_the_original_lane_for_an_exact_fresh_r
 }
 
 #[test]
+fn derivation_final_history_contention_does_not_issue_row_zero_and_refused_owner_retries() {
+    use crate::voice_v2::runtime::{Runtime, View};
+    let runtime = Runtime::new(Arc::new(ManualClock::new(1000)));
+    let bound = binding(8);
+    let ticket = runtime.session_ticket();
+    runtime.activate_session(&ticket).unwrap();
+    let (mut actor, registration) = runtime
+        .prepare_actor(bound.scope.group, bound.local, &ticket)
+        .unwrap();
+    registration.register().unwrap();
+    actor
+        .sync_view(View {
+            epoch: bound.epoch,
+            members: [bound.local, bound.peer].into(),
+            policy: bound.scope.policy,
+            eligible: true,
+            indirect: true,
+        })
+        .unwrap();
+    let context = crate::voice_v2::Context {
+        scope: bound.scope,
+        local: bound.local,
+        epoch: bound.epoch,
+        now: 1000,
+        indirect: true,
+    };
+    let chain = prepare_chain(
+        runtime.resources(),
+        bound.clone(),
+        Arc::new(slots::Slots::default()),
+    )
+    .unwrap();
+    let (
+        PreparedHistory {
+            record,
+            slot,
+            mut issue,
+        },
+        workflow,
+    ) = chain.prepare_derive().unwrap();
+    let guard = chain.history.state.lock().unwrap();
+    let mut published = false;
+    assert_eq!(
+        actor.with_local_origin(bound.peer, &context, |_, mono, origin| {
+            issue.publish_derivation(origin, mono, || {
+                published = true;
+            })
+        }),
+        Err(VoiceError::Capacity)
+    );
+    assert!(!published);
+    assert_eq!(guard.issued, 0);
+    drop(guard);
+    // The unpublished issue destructor must reacquire History AFTER Group/Policy are released.
+    drop((issue, record, slot, workflow));
+    let (
+        PreparedHistory {
+            record: _record,
+            slot: _slot,
+            mut issue,
+        },
+        _workflow,
+    ) = chain.prepare_derive().unwrap();
+    actor
+        .with_local_origin(bound.peer, &context, |_, mono, origin| {
+            issue.publish_derivation(origin, mono, || {
+                published = true;
+            })
+        })
+        .unwrap();
+    assert!(published);
+    assert_eq!(chain.history.state.lock().unwrap().issued, 1);
+    assert_eq!(chain.prepare_derive().err(), Some(VoiceError::Capacity));
+}
+
+#[test]
 fn hello_final_history_contention_spends_no_origin_or_candidate_and_exact_row_retries() {
     use crate::voice_v2::runtime::{Runtime, View};
     use crate::voice_v2::{Body, Context, EncryptedHeader, EncryptedKind, Envelope, SignedObject};

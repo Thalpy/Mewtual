@@ -1,5 +1,22 @@
 # Next voice milestone: native result recovery
 
+## Active Root derivation and expiry correction (21 October, focused checks passed)
+
+communication-derived-origin-worktree now supplies native Root derivation producer/result
+consumers. It preserves exact action/row-zero identity, original actor/session/room authority,
+affine result preparation custody and historical metadata without key reconstruction. Final
+checks use the original native clock/deadline after callbacks. The shared first-seal fence also
+rejects source/pair/SDP expiry when a late output still has construction time left. Static
+adversarial re-review is clear after deadline and test reservation corrections; all 409 focused
+voice and 2,268 full frontend tests pass. Strict Clippy, formatting, ambient and root dependency
+policy also pass. Complete Rust/native gates remain required. The earlier full fe9 run was deliberately interrupted
+for this correction; do not report it green. Published c153 evidence remains separate.
+
+The next production boundary remains registered historical result/ACK/settlement and exact retry
+delivery, plus native/browser IPC copy ownership. The settlement contract below still applies.
+Then implement authorized confirmation-to-SDP key/phase transfer, current SDP/ICE/RTC and live
+dispatch isolation; relay and combined/physical acceptance remain open.
+
 ## Prepared Root seal/open continuation (21 October, uncompiled)
 
 The active next checkout now adds Root seal/open result consumers, actual call/action identity,

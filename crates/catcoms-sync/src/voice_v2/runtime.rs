@@ -528,6 +528,13 @@ pub struct View {
 redacted_debug!(View);
 impl ActorOwner {
     #[cfg(test)]
+    pub(crate) fn with_held_policy_for_test<T>(&self, check: impl FnOnce() -> T) -> T {
+        // A separate fixture thread holds the actual Policy mutex. The caller under test must
+        // refuse at try_lock, without imposing a lock order on its own executing thread.
+        let _policy = self.gate.policy.lock().unwrap_or_else(|e| e.into_inner());
+        check()
+    }
+    #[cfg(test)]
     pub(crate) fn revocation_observer_for_test(&self) -> CallLease {
         // Tests wait for the actual atomic close while revoke_session is blocked on Policy.
         // This clones its original observation gate; it does not fabricate child authority.

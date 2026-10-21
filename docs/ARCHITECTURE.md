@@ -1,5 +1,24 @@
 # Mewtual; Architecture
 
+## Root derivation and final deadlines (21 October, focused checks passed)
+
+Root now produces row zero and admits Derived metadata for its actual affine call, proven pair,
+original actor/session and directory room. Input, tag and action construction precede the short
+native fence. An outer unpublished History issue is borrowed into Group/Policy and try-History;
+refusal destroys its owners after those guards and permits the same pair to retry. Cached factory
+lookup returns the actual action allocation, including after ACK/input compaction; it cannot
+rebuild browser keys. First results retain the existing preparation loan through settlement and
+repeat original chain/deadline checks at the last native time observation. Root supplies the
+same original Runtime clock to the pair, action and native origin.
+
+First signed publication now respects the minimum construction/source/original SDP deadline.
+A late confirmation output can have construction time remaining after the pair expired; it
+must refuse before packet visibility or Finish promotion. Already-published lookup remains
+historical and separately requires current source authority to send. No new allowance, wire,
+persistence format, IPC command or live V2/RTC enablement is introduced by this increment.
+All 409 focused voice tests pass, with unchanged layout guards. Full frontend, strict Clippy,
+formatting, ambient and root dependency policy pass; complete Rust/native gates remain pending.
+
 ## Prepared native confirmation results (21 October, validation pending)
 
 The next native increment splits sealing into Unsigned, private Prepared and source-visible

@@ -17,7 +17,8 @@ pub use confirmation::{
     ConfirmationOutput, CryptoFlight, FlightSubmission, OpenedFlight, PairSetup, ReceiveProgress,
 };
 pub(crate) use confirmation::{
-    ProtectedOpenedResult, ProtectedResponse, ProtectedSealedResult, ProtectedStart,
+    ProtectedDerivation, ProtectedDerivationResult, ProtectedOpenedResult, ProtectedResponse,
+    ProtectedSealedResult, ProtectedStart,
 };
 
 const RECORD_BYTES: usize = 1536;

@@ -622,6 +622,133 @@ struct PreparationClock {
     reads: AtomicUsize,
 }
 
+#[test]
+fn late_protected_seal_last_native_clock_cannot_publish_or_promote_after_original_pair_deadline() {
+    for role in ["hello", "proof", "finish"] {
+        let mut p = fixture();
+        let trigger = if role == "hello" {
+            None
+        } else {
+            let hello = start(&mut p, None);
+            let (object, plain) = protected_seal(&mut p.f.low, &p.low, &hello, &p.f.clock);
+            let (_, high_open) = admit(&mut p.f.high, &p.high, object, &p.f.clock);
+            opened(
+                &mut p.f.high,
+                &p.high,
+                &high_open,
+                &plain,
+                &p.f.clock,
+                &mut p.f.rng,
+            );
+            if role == "proof" {
+                Some(high_open)
+            } else {
+                let proof = respond(
+                    &mut p.f.high,
+                    &p.high,
+                    p.f.id,
+                    &high_open,
+                    &p.f.clock,
+                    &mut p.f.rng,
+                )
+                .unwrap();
+                let (object, plain) = protected_seal(&mut p.f.high, &p.high, &proof, &p.f.clock);
+                let (_, low_open) = admit(&mut p.f.low, &p.low, object, &p.f.clock);
+                opened(
+                    &mut p.f.low,
+                    &p.low,
+                    &low_open,
+                    &plain,
+                    &p.f.clock,
+                    &mut p.f.rng,
+                );
+                Some(low_open)
+            }
+        };
+        // Pair admitted at1s expires at16s. Reserve at15s: construction lasts until20s,
+        // but the final native callback advances to17s, past the immutable source/pair bound.
+        p.f.clock.advance_ms(14_000);
+        let action = if role == "hello" {
+            start(&mut p, None)
+        } else {
+            let (end, actor) = if role == "proof" {
+                (&mut p.f.high, &p.high)
+            } else {
+                (&mut p.f.low, &p.low)
+            };
+            respond(
+                end,
+                actor,
+                p.f.id,
+                trigger.as_ref().unwrap(),
+                &p.f.clock,
+                &mut p.f.rng,
+            )
+            .unwrap()
+        };
+        let (end, actor) = if role == "proof" {
+            (&mut p.f.high, &p.high)
+        } else {
+            (&mut p.f.low, &p.low)
+        };
+        let input = action.input().unwrap();
+        let CryptoInput::EncryptConfirmation(flight) = input.as_input() else {
+            panic!("seal")
+        };
+        let bytes = vec![22; flight.plaintext.len() + 16];
+        let room = room(end);
+        action.admit_engine(action.engine_bytes()).unwrap();
+        let last = p.origin_clock.reads.load(Ordering::Acquire) + 2;
+        *p.origin_clock.advance.lock().unwrap() = Some((last, 2_000));
+        assert_eq!(
+            end.join
+                .submit_protected_confirmation_result(
+                    ProtectedSealedResult {
+                        actor,
+                        room: &room,
+                        action: &action,
+                        ciphertext: &bytes,
+                        claimed_tag: action.output_tag(&bytes).unwrap()
+                    },
+                    &end.signer,
+                    &ca(&end.context, &end.lease),
+                    &p.f.clock,
+                    |_, _| Ok(())
+                )
+                .err(),
+            Some(VoiceError::Reservation),
+            "{role}"
+        );
+        assert!(action.terminal_status().receipt.is_none());
+        let pair = &end.join.confirmations.pairs[&p.f.id];
+        assert!(!pair.established, "{role}: no expired Finish promotion");
+        assert!(pair.action.as_ref().unwrap().signed.is_none());
+        // A retained private signature is still inert; no queued source may adopt it.
+        let private = end
+            .join
+            .ledger
+            .prepare_sealed_publication(
+                flight.reservation.id,
+                &bytes,
+                &end.signer,
+                &ca(&end.context, &end.lease),
+                &p.f.clock,
+            )
+            .unwrap();
+        let private_signed = private.signed().clone();
+        drop(private);
+        assert!(end
+            .join
+            .source_packet_activity(
+                &private_signed,
+                &ca(&end.context, &end.lease),
+                Arc::new(p.f.clock.clone())
+            )
+            .is_err());
+        action.settle_engine();
+    }
+}
+
 struct PreparationRng<'a> {
     inner: &'a mut ChaCha20Rng,
     action: &'a CryptoAction,

@@ -1,5 +1,20 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Root derivation and late first publication (21 October, focused checks passed)
+
+Derivation factories recognize original call/action/chain allocations. Final native origin
+rechecks actor/session, room, member/epoch, original chain leases and deadline after injected
+callbacks. Contention consumes neither the row-zero issue nor engine capacity; abandoned action
+serials remain burned. A cached Derived marker grants no key reconstruction, signing or RTC
+authority. Actual input/preparation custody remains charged until drainage, including settlement
+and unwind; idle open-Workflow reservations are independently retained.
+
+Late confirmation outputs must satisfy their original source/pair deadline as well as their
+construction window before first signed publication or Finish promotion. The same pure fence
+observes original SDP bounds where present. Historical published retries do not regain pending
+or send authority. Native IPC/copy/settlement, SDP phase transfer, live isolation and media relay
+remain enablement blockers; this increment changes no wire or persistence format.
+
 ## Native confirmation result admission (21 October, validation pending)
 
 Private prepared signatures grant no source authority. Final Capacity retains the exact artifact

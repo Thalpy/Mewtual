@@ -4,6 +4,7 @@ use super::*;
 use voice_v2::crypto_actions::{CryptoAction, CryptoInput};
 use voice_v2::presence::{LocalJoin, WatchAuthority};
 use voice_v2::JoinKey;
+mod derivation;
 
 fn key(seed: u8) -> JoinKey {
     JoinKey::new([seed; 32], hex::decode("046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5").unwrap().try_into().unwrap()).unwrap()
@@ -16,24 +17,56 @@ fn authority<'a>(context: &'a Context, lease: &'a CallLease) -> Authority<'a> {
     }
 }
 
-async fn low_fixture() -> (
+type LowFixture = (
     Node,
     Node,
     Arc<Runtime>,
     Arc<ManualClock>,
     Arc<CallGrant>,
     voice_v2::Nonce,
-) {
+);
+
+async fn low_fixture() -> LowFixture {
+    low_fixture_room(1).await
+}
+
+async fn low_fixture_room(room: u128) -> LowFixture {
     let (mut local, mut remote, _remote_runtime, clock) = super::fixture().await;
     assert!(local.device_id() < remote.device_id());
     let runtime = Runtime::new(clock.clone());
-    attach(&mut local, &runtime);
-    let grant = Arc::new(local.voice_call_grant(1).unwrap());
+    if room == 1 {
+        attach(&mut local, &runtime);
+    } else {
+        use automerge::{transaction::Transactable, ROOT};
+        assert_eq!(room, 2);
+        local
+            .open_channel(DocType::ChannelIndex, 991)
+            .await
+            .unwrap();
+        local
+            .post(DocType::ChannelIndex, 991, |doc| doc.put(ROOT, "2", true))
+            .await
+            .unwrap();
+        let ticket = runtime.session_ticket();
+        runtime.activate_session(&ticket).unwrap();
+        local
+            .prepare_voice_actor(
+                &runtime,
+                &ticket,
+                991,
+                derivation::read_rooms,
+                derivation::deleted_rooms,
+            )
+            .unwrap()
+            .register()
+            .unwrap();
+    }
+    let grant = Arc::new(local.voice_call_grant(room).unwrap());
     let local_key = key(81);
     local
         .start_voice_endpoint(grant.clone(), local_key.join, local_key.public_key)
         .unwrap();
-    let context = local.voice_v2_context(1).unwrap();
+    let context = local.voice_v2_context(room).unwrap();
     let remote_context = Context {
         local: remote.device_id(),
         ..context

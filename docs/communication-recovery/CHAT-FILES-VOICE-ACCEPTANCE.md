@@ -1,5 +1,36 @@
 # Chat, files and voice implementation evidence
 
+## Root derivation and late-publication deadline (21 October, full gates pending)
+
+Active continuation in communication-derived-origin-worktree, based on local fe9c1048, connects
+actual Root row-zero production and Derived result to original call/action/pair/chain allocations,
+native actor/session, current room/member/epoch and final immutable deadline. Exact cached action
+lookup survives ACK/input compaction without key reconstruction. Affine preparation retains real
+custody through settlement/unwind. The shared first-seal fence now checks minimum construction,
+source and original SDP deadline, preventing a late output from promoting an expired Finish.
+
+Fresh focused tests pass **407/407** (17.07s, compile2m16); after adding direct busy-Policy and
+actual signed room-delete/recreate evidence, the rerun passes **409/409** (18.62s, compile1m01).
+Tests cover both derive roles, exact compacted recovery, Group/History/Policy/final Capacity,
+full ordinary-pool pressure, original native closure, last Clock owner/expiry, actual session
+close blocked on Policy with live child, settlement/unwind, wall rollback/epoch, Root substitutions
+and late Hello/Proof/Finish at15s -> final17s against pair16s/construction20s. Original row/metadata
+allowances are unchanged. Full frontend passes **2,268**, zero failures (211.08s, two workers).
+Strict root Clippy (37.86s), formatting, ambient and root dependency policy pass. A sandboxed deny
+attempt could not acquire its external advisory lock; authorized normal-OS retry passes.
+
+Read-only review found and fixed one MEDIUM late-seal deadline gap and LOW test assumptions about
+idle Workflow reservations. Short re-review has no remaining blocker/high/medium. Residual LOW:
+the deterministic Policy holder test relies on an external suite watchdog if a regression replaces
+try-lock with a blocking acquisition. It releases safely on normal return and unwind.
+Logs: active target/voice-derived-origin-{focused-1,focused-2,frontend-full,clippy,format,ambient,deny-2}.log.
+
+The full fe9 root/native/check/build run was deliberately interrupted for this correction; it
+has no full-pass claim. Published checkpoint remains c1532331 with the complete evidence below.
+Complete current Rust/native validation, production native registration/IPC/result-settlement
+retry custody, authorized SDP key/phase transfer, normal V2/RTC and isolation, member media relay,
+combined rollout and physical acceptance remain open. Only one physical desktop is available.
+
 ## Validated protected confirmation checkpoint (21 October)
 
 Published code through `9dc1b8d3` (`73c444a5` browser implementation) has identical Rust/native
@@ -21,9 +52,10 @@ for the protected confirmation increments. This is a validated partial checkpoin
 Separate native/packaged-experiment dependency audit failures remain recorded; root cargo-deny
 passing does not clear them. Only one physical desktop is available.
 
-The newer Root result-safety code remains UNCOMMITTED in communication-root-results-worktree
-and is not included in this published checkpoint. Its focused compilation is now running;
-prior complete suites do not validate it. Production native registration/IPC/result settlement,
+The newer Root result-safety code is committed locally as fe9c1048 in
+communication-root-results-worktree and is not included in this published checkpoint. Its full
+attempt was interrupted for the reviewed deadline correction above; prior complete suites do
+not validate it. Production native registration/IPC/result settlement,
 SDP/key phase transfer, normal V2/RTC and legacy isolation, member media relay, combined rollout
 and physical audio/network acceptance remain unfinished.
 
@@ -50,7 +82,7 @@ Static adversarial re-review found no remaining blocker/high/medium after fixing
 inside admission, cleanup under Engine and premature credit return during preparation. Formatting
 and ambient pass. Strict whole-root Clippy passes (2m25s), root dependency policy passes, and the complete frontend
 passes 2,268 tests with zero failures (216.25s, two workers). Complete root/native validation
-is now queued against this frozen source. Earlier complete results above apply only to published c1532331.
+was subsequently interrupted for the later deadline correction. Earlier complete results above apply only to published c1532331.
 Production native IPC/RTC/V2, complete Root derivation, authorized SDP phase transfer, member media
 relay, combined rollout and physical acceptance remain open. Only one physical desktop exists.
 

@@ -80,7 +80,14 @@ impl PreparedSealedPublication<'_> {
             {
                 return Err(VoiceError::Unauthorized);
             }
-            if mono >= outgoing.construction {
+            // A late reservation may have construction time left after its original pair or
+            // SDP exchange has expired. First publication can promote confirmation state, so
+            // source-side refusal alone is too late. Use all original bounds at this fence.
+            let deadline = outgoing
+                .construction
+                .min(outgoing.source_deadline)
+                .min(self.ledger.sdp_deadline(outgoing.exchange.as_ref())?);
+            if mono >= deadline {
                 return Err(VoiceError::Reservation);
             }
         }
@@ -163,7 +170,11 @@ impl PacketLedger {
                 return Err(VoiceError::RetryMismatch);
             }
         } else {
-            if clock.monotonic_ms() >= outgoing.construction {
+            let deadline = outgoing
+                .construction
+                .min(outgoing.source_deadline)
+                .min(self.sdp_deadline(outgoing.exchange.as_ref())?);
+            if clock.monotonic_ms() >= deadline {
                 return Err(VoiceError::Reservation);
             }
             if ciphertext.len() != outgoing.ciphertext_bytes {
