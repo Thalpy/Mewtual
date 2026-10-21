@@ -1,5 +1,31 @@
 # Next voice milestone: native result recovery
 
+## Selected browser consumer and next Root boundary (21 October)
+
+Protected WebCrypto seal/open now consumes the original prepaid chain rows and serial execution
+position after accepted derivation. Real-crypto/fault-seam checks pass105 cases; full frontend
+passes2,268, Svelte reports no errors/warnings, production build and ten rendered flows pass.
+This is not production native IPC or RTC. The unselected native-provider experiment stays isolated.
+
+Next implement a prepared Root result transaction, not a thin wrapper around LocalJoin commits.
+Directory::call_lease registers the actual child in BOTH actor policy and room; validate_call_grant
+recognizes that same child. Match the original participant grant allocation and actual ActionQueue
+allocation. Exact registered-action terminal lookup may recover only metadata after retirement;
+a miss cannot adopt an equal-ID replacement. Current-context checks belong to first effects.
+
+Crucially, Runtime::revoke_session flips the original session atomic before ActorGate::revoke can
+take Policy and revoke children. An actual child CallLease alone can briefly remain live while
+Policy is held. Prepare all Clock/signer/RNG/allocation work outside the final Group/Policy fence,
+then recheck the original actor/session, room, call, epoch and action/token owners after the LAST
+callback immediately before infallible packet/token/state publication. Existing result methods
+enter Engine and Clock: wrapping them wholesale under Group/Policy creates a lock-order/reentrancy
+hazard. Preserve actual input/engine/retirement owners across local Capacity and drop them after
+guards. Pin the final boundary with blocked-Policy session-revocation and final-callback tests.
+
+The future driver must also retry original browser rows refused before derivation readiness and
+uncertain earlier result handles; otherwise a lost result reply occupies the sole serial lane
+ahead of later inputs. Keep those retries quiet and bounded, without another AEAD or fresh row.
+
 ## Protected Proof/Finish (21 October, implementation awaiting validation)
 
 The next checkout now implements the reviewed role-inbox and response-lane design below through
