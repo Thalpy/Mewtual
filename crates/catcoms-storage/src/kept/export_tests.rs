@@ -921,6 +921,86 @@ fn a_retry_after_an_unconfirmed_link_never_trims_or_claims_a_changed_final_file(
 }
 
 #[test]
+fn an_empty_file_saves_as_one_empty_chunk_across_restart() {
+    // Review U-M5: an empty file is one empty chunk. Its plan, its complete checkpoint (1, 0),
+    // restart, resume and publication must all work, ending in a zero-byte final file.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let ciphertext = b"empty file ciphertext";
+    let empty = KeepPlan {
+        cid: Cid::of(b""),
+        version: [2; 32],
+        manifest: b"opaque empty manifest".to_vec(),
+        chunks: vec![(Cid::of(ciphertext), ciphertext.len() as u64)],
+    };
+    let run = store.begin_download(vec![empty], 0, [9; 32]).unwrap();
+    let id = run.id();
+    store.put_download(run, ciphertext).unwrap();
+    let lease = store.finish_download(run).unwrap();
+    let plan = ExportPlan::for_test(&[b""]);
+    let mut file = ExportFile::create(&fx.downloads, "empty.txt", plan.clone()).unwrap();
+    store
+        .begin_download_export(&lease, file.journal(), file.presence())
+        .unwrap();
+    assert_eq!(file.accept(0, b"").unwrap().done, 1);
+    let checkpoint = file.checkpoint().unwrap();
+    assert_eq!(
+        (checkpoint.written_chunks, checkpoint.written_bytes),
+        (1, 0)
+    );
+    store
+        .checkpoint_download_export(&lease, file.journal(), &checkpoint)
+        .unwrap();
+    drop(file);
+    drop(store); // restart with the complete checkpoint
+    let mut store = open(&fx.vault);
+    assert_eq!(state(&store, id), ExportState::Writing(checkpoint.clone()));
+    let run = store.resume_download(id).unwrap();
+    store.put_download(run, ciphertext).unwrap();
+    let lease = store.finish_download(run).unwrap();
+    let ExportReopen::Ready(mut file) = ExportFile::reopen(&checkpoint, plan).unwrap() else {
+        panic!("the (1, 0) checkpoint reopens");
+    };
+    store
+        .resume_download_export(&lease, &checkpoint, file.presence())
+        .unwrap();
+    file.accept(0, b"").unwrap();
+    let path = publish(&mut store, &lease, &mut file);
+    file.finish();
+    assert_eq!(path, fx.downloads.join("empty.txt"));
+    assert_eq!(fs::read(&path).unwrap(), b"");
+    assert_eq!(view(&store), ExportView::Published);
+    // The (1, 0) journal round-trips through the sealed record.
+    let index = store.download_index(id).unwrap();
+    let record = store.transfers[index].record.clone();
+    assert_eq!(record::Record::decode(&record.encode()).unwrap(), record);
+}
+
+#[test]
+fn only_the_canonical_empty_manifest_may_carry_an_empty_chunk() {
+    let chunk = |size: u64| crate::FileRef {
+        plaintext_cid: Cid::of(b"p"),
+        ciphertext_cid: Cid::of(b"c"),
+        wrapped_key: catcoms_crypto::SealedBlob {
+            nonce: [0; 24],
+            ciphertext: vec![0; 48],
+        },
+        size,
+        mime: String::new(),
+    };
+    let manifest = |sizes: &[u64]| crate::FileManifest {
+        plaintext_cid: Cid::of(b""),
+        total_size: sizes.iter().sum(),
+        mime: String::new(),
+        chunks: sizes.iter().map(|size| chunk(*size)).collect(),
+    };
+    assert!(ExportPlan::from_manifest(&manifest(&[0])).is_ok());
+    assert!(ExportPlan::from_manifest(&manifest(&[5, 0])).is_err());
+    assert!(ExportPlan::from_manifest(&manifest(&[0, 0])).is_err());
+    assert!(ExportPlan::from_manifest(&manifest(&[])).is_err());
+}
+
+#[test]
 fn a_stream_that_fails_verification_never_reaches_a_publishable_checkpoint() {
     // Review L4: every chunk was written, but the stream does not hash to the plan's CID. No
     // checkpoint may follow, so the saved journal never claims every chunk and recovery refuses.

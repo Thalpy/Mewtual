@@ -29,13 +29,17 @@ impl Running {
 
 /// A holder with the file locally and the native protected store, so acquisition is local.
 async fn running() -> Running {
+    running_with(pair().await).await
+}
+
+async fn running_with(pair: Pair) -> Running {
     let Pair {
         mut holder,
         cid,
         data,
         entered: _entered,
         ..
-    } = pair().await;
+    } = pair;
     let vault = tempfile::tempdir().unwrap();
     let _store = attach_protected_kept(&mut holder, vault.path());
     let (actor, mut events, task) = spawn(holder);
@@ -151,6 +155,23 @@ async fn journaled_export_through_the_actor_publishes_the_verified_plaintext_onc
         .unwrap();
     assert!(bounded(run.actor.downloads()).await.unwrap().is_empty());
     assert_eq!(std::fs::read(&path).unwrap(), run.data);
+    run.close().await;
+}
+
+#[tokio::test]
+async fn an_empty_file_is_acquired_and_saved_as_one_empty_chunk() {
+    // Review U-M5: the manifest format writes an empty file as one empty chunk; the journaled
+    // export (plan, checkpoint, publication) must accept exactly that.
+    let run = running_with(bounded(pair_with_data(Vec::new())).await).await;
+    let ready = ready(&run, None).await;
+    assert_eq!((ready.chunks(), ready.total_size()), (1, 0));
+    let mut file = begin(&run, &ready).await;
+    write_all(&run, &ready, &mut file).await;
+    let checkpoint = file.checkpoint().unwrap();
+    assert_eq!(checkpoint.written_chunks(), 1);
+    let path = publish(&run, &ready, &mut file).await;
+    file.finish();
+    assert_eq!(std::fs::read(&path).unwrap(), b"");
     run.close().await;
 }
 

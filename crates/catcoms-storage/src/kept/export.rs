@@ -155,7 +155,10 @@ impl ExportJournal {
             && self.staging.ends_with(external::STAGING_SUFFIX)
             && self.staging != self.final_leaf
             && self.written_bytes <= EXPORT_MAX_BYTES
-            && (self.written_chunks == 0) == (self.written_bytes == 0)
+            // Bytes imply whole chunks. Chunks without bytes is the complete checkpoint (1, 0) of
+            // an empty file (one empty chunk, review U-M5); the reopen's plan-prefix check
+            // refuses that shape for any non-empty manifest.
+            && (self.written_bytes == 0 || self.written_chunks > 0)
     }
     fn folder_path(&self) -> Option<PathBuf> {
         external::decode_os(self.folder_id.platform(), &self.folder).map(PathBuf::from)
@@ -766,11 +769,15 @@ impl ExportPlan {
             .iter()
             .try_fold(0u64, |sum, size| sum.checked_add(*size))
             .ok_or(StorageError::BlobSizeLimit)?;
+        // Review U-M5: the manifest format writes an empty file as exactly one empty chunk
+        // (`FileManifest::validate_layout`). That is the only shape with a zero-size chunk.
+        let empty_file = sizes == [0];
         if sizes.is_empty()
             || sizes.len() > CHUNK_LIMIT
-            || sizes
-                .iter()
-                .any(|size| *size == 0 || *size > crate::CHUNK_PAD_CEILING as u64)
+            || (!empty_file
+                && sizes
+                    .iter()
+                    .any(|size| *size == 0 || *size > crate::CHUNK_PAD_CEILING as u64))
             || sum != manifest.total_size
             || sum > EXPORT_MAX_BYTES
         {
