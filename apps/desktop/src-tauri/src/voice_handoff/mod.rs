@@ -5,6 +5,7 @@ pub(crate) mod application;
 pub(crate) mod bootstrap;
 mod channel;
 pub(crate) mod commands;
+mod context;
 pub(crate) mod custody;
 pub(crate) mod factory;
 mod http;

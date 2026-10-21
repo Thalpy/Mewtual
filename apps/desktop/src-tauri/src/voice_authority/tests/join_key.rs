@@ -25,6 +25,7 @@ fn native_handoff_selection_requires_actual_published_generation_and_reuses_its_
     c.finish_join_key_publication(&mut work, true).unwrap();
     assert!(c.selected_handoff_owner(&owner, [8; 32]).is_err());
     let selected = c.selected_handoff_owner(&owner, [9; 32]).unwrap();
+    assert!(c.is_current_handoff_owner(&selected));
     let before = c.resources.counts();
     let group = selected.binding().scope.group;
     let pressure = c
@@ -49,6 +50,7 @@ fn native_handoff_selection_requires_actual_published_generation_and_reuses_its_
         &c.owner(&owner).unwrap()._grant
     ));
     c.end(&owner);
+    assert!(!c.is_current_handoff_owner(&selected));
     assert!(!selected.lease().is_live());
     assert!(selected.grant().is_err());
     let identity = selected.grant_identity();
@@ -222,4 +224,54 @@ fn selected_join_key_preparation_capacity_does_not_burn_generation_or_serial() {
     drop(pressure);
     c.admit_join_key(&owner, [9; 32]).unwrap();
     assert_eq!(c.serial, serial + 1);
+}
+
+#[test]
+fn supplied_selection_check_never_materializes_a_local_cache_for_foreign_equal_labels() {
+    fn published(c: &mut Coordinator) -> String {
+        let controller = controller(c);
+        let owner = call(c, &controller, 1, 1);
+        let admission = c.admit_join_key(&owner, [9; 32]).unwrap();
+        let PublicationPlan::Start(mut work) = c
+            .prepare_join_key_publication(&owner, [9; 32], &admission.permit, point())
+            .unwrap()
+        else {
+            panic!("publication")
+        };
+        c.finish_join_key_publication(&mut work, true).unwrap();
+        c.settle_join_key(&owner, [9; 32]).unwrap();
+        owner
+    }
+    let mut local = action_coordinator();
+    let local_id = published(&mut local); // no selected snapshot has been requested here
+    let mut foreign = action_coordinator();
+    let foreign_id = published(&mut foreign);
+    assert_eq!(local_id, foreign_id);
+    let other = foreign
+        .selected_handoff_owner(&foreign_id, [9; 32])
+        .unwrap();
+    let before = local.resources.counts();
+    for _ in 0..4 {
+        assert!(!local.is_current_handoff_owner(&other));
+        assert_eq!(local.resources.counts(), before);
+    }
+    let group = local.owner(&local_id).unwrap().binding.scope.group;
+    let pressure = local
+        .resources
+        .charge(group, 256 * 1024 - before.0, ResourceKind::Retained)
+        .unwrap();
+    let full = local.resources.counts();
+    assert!(!local.is_current_handoff_owner(&other));
+    assert_eq!(
+        local.resources.counts(),
+        full,
+        "no allocation or capacity dependency in a check"
+    );
+    drop(pressure);
+    let selected = local.selected_handoff_owner(&local_id, [9; 32]).unwrap();
+    assert!(local.is_current_handoff_owner(&selected));
+    assert!(!local.is_current_handoff_owner(&other));
+    let cached = local.resources.counts();
+    assert!(local.is_current_handoff_owner(&selected));
+    assert_eq!(local.resources.counts(), cached);
 }

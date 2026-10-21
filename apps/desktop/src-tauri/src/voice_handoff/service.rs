@@ -2,6 +2,7 @@
 //! A confirmed channel is not a call grant, room proof, action admission or browser-drain proof.
 use super::bootstrap::{Registry, Route};
 use super::channel::{BodyKind, CompletedReply, Incoming};
+use super::context::Context;
 use super::http;
 use catcoms_rt::Clock;
 use catcoms_sync::voice_v2::resources::ProcessRetainedCredit;
@@ -14,10 +15,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
-// Current concrete task/owner peak is 20,528 bytes in the native debug tests. Charge a fixed
-// 24 KiB envelope before bind; this spends more of the SAME process ceiling, never group work.
+// Current concrete task/owner/weak-retained allocation peak is 32,256 bytes in Windows native
+// debug tests. Prepay 32 KiB before bind: 8 KiB more fixed cost than the status-only context.
+// This reduces available bytes within the SAME 2 MiB process cap, never increasing that cap
+// or any group/engine limit. Other layouts still refuse if their actual peak cannot fit.
 // Both runtime admission and the regression below measure the actual nested future.
-const INFRASTRUCTURE_BYTES: usize = 24 * 1024;
+const INFRASTRUCTURE_BYTES: usize = 32 * 1024;
 // Pinned Tokio task/oneshot/Arc overhead and one boxed production Clock sleep. This is not a
 // claim about arbitrary Clock providers, OS socket buffers, thread stacks or allocator RSS.
 const TASK_AND_HANDLE_BYTES: usize = 2048;
@@ -61,6 +64,7 @@ pub(super) struct BoundServer {
     clock: Arc<dyn Clock>,
     origin: Origin,
     port: u16,
+    context: Option<Context>,
     credit: Arc<ProcessRetainedCredit>,
 }
 /// Even a finished, uncollected JoinHandle retains the original process payment. Group/input
@@ -70,10 +74,29 @@ pub(super) struct Completion {
     pub(super) io_failed: bool,
 }
 impl BoundServer {
+    #[cfg(test)]
     pub(super) fn bind(
         registry: Arc<Registry>,
         runtime: Arc<Runtime>,
         origin: Origin,
+    ) -> Result<Self, Refused> {
+        Self::bind_inner(registry, runtime, origin, None)
+    }
+    /// Production owns the original weak context inside the same paid IO state. It cannot
+    /// outlive the process payment through a separately managed host clone or teardown field.
+    pub(super) fn bind_application(
+        registry: Arc<Registry>,
+        runtime: Arc<Runtime>,
+        origin: Origin,
+        context: Context,
+    ) -> Result<Self, Refused> {
+        Self::bind_inner(registry, runtime, origin, Some(context))
+    }
+    fn bind_inner(
+        registry: Arc<Registry>,
+        runtime: Arc<Runtime>,
+        origin: Origin,
+        context: Option<Context>,
     ) -> Result<Self, Refused> {
         let resources = runtime.resources();
         let clock = runtime.clock();
@@ -93,6 +116,7 @@ impl BoundServer {
             clock,
             origin,
             port,
+            context,
             credit: Arc::new(credit),
         })
     }
@@ -113,6 +137,7 @@ impl BoundServer {
             clock: self.clock,
             origin: self.origin,
             port: self.port,
+            context: self.context,
             credit: self.credit,
             #[cfg(test)]
             phase: phase.clone(),
@@ -142,6 +167,7 @@ fn worker_layout<F>(future: &F) -> usize {
         + std::mem::size_of::<super::application::Host>()
         + 2 * std::mem::size_of::<usize>() // managed Host's Arc control block
         + TASK_AND_HANDLE_BYTES
+        + Context::retained_layout_bytes()
 }
 
 /// Keep infrastructure in ONE state with known field order even when the future is aborted.
@@ -152,6 +178,7 @@ struct ServerState {
     clock: Arc<dyn Clock>,
     origin: Origin,
     port: u16,
+    context: Option<Context>,
     credit: Arc<ProcessRetainedCredit>,
     /// Passive test-only scheduling observation. It creates no production callback or API.
     #[cfg(test)]

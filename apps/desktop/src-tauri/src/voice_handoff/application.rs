@@ -1,7 +1,9 @@
 //! Application lifetime for the status-only native/browser channel. Bind and constrain CSP
 //! before Tauri creates any windows; enter its IO runtime explicitly during setup. Neither
 //! this owner nor its worker holds an AppHandle/AppState, so application teardown cannot form
-//! a reference cycle. Call/action authority is deliberately absent from this service.
+//! a reference cycle. Its weak native context alone grants no call/action authority; the
+//! currently exposed service still handles authenticated Status only.
+use super::context::Context;
 use super::service::{BoundServer, Origin, Refused, RunningServer};
 use crate::{voice_runtime, AppState};
 use std::collections::HashMap;
@@ -31,7 +33,12 @@ impl Host {
         development: bool,
     ) -> Result<Self, Refused> {
         let origin = application_origin(config, development, cfg!(windows))?;
-        let bound = BoundServer::bind(state.voice_channels.clone(), voice_runtime(state), origin)?;
+        let bound = BoundServer::bind_application(
+            state.voice_channels.clone(),
+            voice_runtime(state),
+            origin,
+            Context::new(state),
+        )?;
         let port = bound.port();
         // Compute BOTH policies before changing either. A missing policy/directive must not
         // silently disable CSP or leave a half-configured context. The bound socket is dropped

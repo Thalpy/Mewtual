@@ -35,6 +35,17 @@ starts with 144 lowercase admission bytes, then ciphertext; Status has 19 cipher
 Content-Length 163. Preflight 204 has neither body nor Content-Length. BYOB prefix authentication
 and RX debit precede body allocation. Browser IO expiry aborts, then awaits actual cancellation.
 
+The private native factory takes Context + the actual original SelectedHandoffOwner Arc and
+PairSelector. Context upgrades the nine actual state owners and reuses AppState's borrowed UI
+gate; it accepts no cached unlocked flag, serialized grant or alternate mutex. Its exact actor
+query is shared with ordinary native commands. Early/final supplied-selection checks are pure,
+including when no local selected snapshot exists. Broad upgraded context drops outside guards
+before the admitted worker spawns. The worker retains original actor/grant/commit/work/payment.
+The IO state's weak context and retained inline allocations are included in a32KiB process
+payment (8KiB more than before) within the same2MiB process ceiling. No command or opcode was
+added for this private factory. Final channel-closure, action delivery and browser drainage
+remain separate preconditions.
+
 Status plaintext is version1 + original 16-byte Session + 32-byte transcript hash. Its only
 reply is version1 + Ready1/Closed2 + native-setup-drained0/1. This grants no action, remote room,
 pair or RTC authority. Native routing is fenced before final closure; independent header/reply/

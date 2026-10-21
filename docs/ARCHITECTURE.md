@@ -9,6 +9,26 @@ mode and validated main-window configuration, including packaged debug builds. S
 enters Tauri's IO runtime; the Exit callback collects the actual task/socket before SDK cleanup
 or restart. Bind/start failure disables this channel while the rest of the app can start.
 
+The original IO state now retains a weak native action context. All nine references must
+upgrade before any ledger/factory admission. Ordinary IPC and the upgraded context borrow the
+same UI gate, including actual mounted-store presence, resumable-to-store lock order and the
+post-await lock/generation check. Three existing policy fields now use shared Arc ownership;
+no cached authorization snapshot or second commit mutex is introduced. The detached native
+worker retains only its actual actor, original selection/grant/commit and paid work owners.
+
+Weak references retain the original inline Arc allocations after their values drop. The fixed
+listener payment is now32KiB, up8KiB from24KiB, covering a32,256-byte measured Windows native
+peak including those allocations/control blocks and context wrappers. This spends more of the
+same2MiB process cap, without changing group or engine limits. Context drops before the IO
+credit; completed/uncollected native output retains that same original payment. Other platform
+layouts still fail closed if their measured peak does not fit.
+
+Factory admission now accepts the actual original SelectedHandoffOwner Arc, not owner/executor
+strings from a request body. Pure early/final Coordinator predicates compare the already-cached
+original allocation and current grant/lease/binding/generation. Refusal creates no local snapshot.
+Actual channel closure must still be checked at final admission under the same UI commit before
+any action opcode is exposed; this context alone enables no byte-bearing operation.
+
 Three main-only commands expose fixed public setup and exact cleanup metadata. They carry no
 private key, seed, plaintext, SDP, ICE or action constructor. Ready, Pending and Closed replies
 share the original Row's serial projection guard and payment through body handoff. A capped

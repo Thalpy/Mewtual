@@ -496,17 +496,17 @@ struct AppState {
     store: Arc<Mutex<Option<ServerStore>>>,
     /// Whether a freshly-mounted frontend may restore the already-unlocked UI session. This stays
     /// true across F5/HMR, but an explicit Ctrl+L clears it so a reload cannot bypass the lock.
-    session_resumable: Mutex<bool>,
+    session_resumable: Arc<Mutex<bool>>,
     /// Set before an explicit lock performs any awaited cleanup. Commands check this as well as
     /// `session_resumable`, so new IPC cannot slip through while the lock is waiting to serialize
     /// against an older command's final native commit.
-    session_lock_requested: AtomicBool,
+    session_lock_requested: Arc<AtomicBool>,
     /// Every explicit lock invalidates work that began in an earlier UI authorization epoch.
     /// Long-running joins carry the captured value to both their reply event and durable commit.
     ui_session_generation: Arc<AtomicU64>,
     /// Exact generation last committed by authenticated unlock. Publishing a newer lock
     /// generation closes IPC even if that thread stops before setting the separate request flag.
-    ui_authorized_generation: AtomicU64,
+    ui_authorized_generation: Arc<AtomicU64>,
     /// Orders the externally-visible parts of a long command against explicit lock completion.
     /// The lock-request atomic closes new IPC immediately; this mutex makes it impossible for a
     /// reply event or server registration to occur after `lock_session` itself has completed.
@@ -1100,24 +1100,59 @@ struct PendingGrant {
 /// Reject webview IPC while the explicit UI lock is active. Server actors intentionally continue
 /// networking in the background, but that must not leave their plaintext projections callable by
 /// injected/stale frontend code behind the lock screen.
+/// Borrow the actual session policy, including its mounted store. This is not a cached
+/// authorization decision or owned grant. Both ordinary IPC and the native handoff context
+/// use this same implementation so lock/unlock cannot make their policies diverge.
+#[derive(Clone, Copy)]
+struct UiSessionGate<'a> {
+    resumable: &'a Mutex<bool>,
+    requested: &'a AtomicBool,
+    generation: &'a AtomicU64,
+    authorized: &'a AtomicU64,
+    store: &'a Mutex<Option<ServerStore>>,
+}
+impl UiSessionGate<'_> {
+    fn is_closed(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+            || self.generation.load(Ordering::Acquire) != self.authorized.load(Ordering::Acquire)
+    }
+    async fn require_unlocked(&self) -> Result<(), String> {
+        if self.is_closed() {
+            return Err("the vault is locked".into());
+        }
+        // Preserve the existing resumable -> actual store lock order and repeat the atomic
+        // fence AFTER both awaits. A lock request can arrive while either mutex is busy.
+        if *self.resumable.lock().await && self.store.lock().await.is_some() && !self.is_closed() {
+            Ok(())
+        } else {
+            Err("the vault is locked".into())
+        }
+    }
+    /// Pure final fence, safe while Coordinator is held. No await or native callback.
+    fn check_generation(&self, expected: u64) -> Result<(), String> {
+        if self.is_closed() || self.generation.load(Ordering::Acquire) != expected {
+            return Err("the UI session changed while the operation was in progress".into());
+        }
+        Ok(())
+    }
+}
+impl AppState {
+    fn ui_session_gate(&self) -> UiSessionGate<'_> {
+        UiSessionGate {
+            resumable: &self.session_resumable,
+            requested: &self.session_lock_requested,
+            generation: &self.ui_session_generation,
+            authorized: &self.ui_authorized_generation,
+            store: &self.store,
+        }
+    }
+}
 fn ui_session_closed(state: &AppState) -> bool {
-    state.session_lock_requested.load(Ordering::Acquire)
-        || state.ui_session_generation.load(Ordering::Acquire)
-            != state.ui_authorized_generation.load(Ordering::Acquire)
+    state.ui_session_gate().is_closed()
 }
 
 async fn require_unlocked_session(state: &AppState) -> Result<(), String> {
-    if ui_session_closed(state) {
-        return Err("the vault is locked".into());
-    }
-    if *state.session_resumable.lock().await
-        && state.store.lock().await.is_some()
-        && !ui_session_closed(state)
-    {
-        Ok(())
-    } else {
-        Err("the vault is locked".into())
-    }
+    state.ui_session_gate().require_unlocked().await
 }
 
 /// Capture an unlocked UI epoch while serialized with the final phase of any older command.
@@ -10806,8 +10841,17 @@ async fn check_voice_binding(
     state: &AppState,
     binding: &voice_authority::Binding,
 ) -> Result<(), String> {
+    check_voice_binding_in(&state.servers, binding).await
+}
+
+/// The same exact registry/actor query for ordinary IPC and an upgraded handoff context.
+/// Its result is only a snapshot; both callers still need final commit/selection fencing.
+async fn check_voice_binding_in(
+    servers: &Mutex<HashMap<u64, ServerEntry>>,
+    binding: &voice_authority::Binding,
+) -> Result<(), String> {
     let actor = {
-        let servers = state.servers.lock().await;
+        let servers = servers.lock().await;
         let entry = servers
             .get(&binding.server)
             .filter(|entry| entry.instance == binding.instance && entry.group_id == binding.group)
@@ -11006,11 +11050,7 @@ async fn activate_voice_owner_inner(
 /// pure atomic fence inside the final native guard, including after nonce generation, so a
 /// delayed revocation hook cannot make an already registered lock look like a current session.
 fn check_voice_activation_generation(state: &AppState, generation: u64) -> Result<(), String> {
-    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::Acquire) != generation
-    {
-        return Err("the UI session changed while the operation was in progress".into());
-    }
-    Ok(())
+    state.ui_session_gate().check_generation(generation)
 }
 
 /// Fixed public activation metadata. This does not return a key, actor grant or RTC authority.

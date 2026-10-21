@@ -968,6 +968,7 @@ async fn fixed_runner_future_and_output_fit_the_prepaid_infrastructure_peak() {
         clock: bound.clock,
         origin: bound.origin,
         port: bound.port,
+        context: bound.context,
         credit: bound.credit,
         phase: Arc::new(std::sync::atomic::AtomicU8::new(0)),
     };
@@ -975,6 +976,10 @@ async fn fixed_runner_future_and_output_fit_the_prepaid_infrastructure_peak() {
     // Include the concrete nested async frame (router + Session header coexist), the
     // public handle/completed output and pinned Tokio task/Arc/oneshot bookkeeping allowance.
     let peak = worker_layout(&future);
+    eprintln!(
+        "native IO peak {peak}; weak context footprint {}",
+        super::super::context::Context::retained_layout_bytes()
+    );
     assert!(
         peak <= INFRASTRUCTURE_BYTES,
         "native status peak needs {peak}"

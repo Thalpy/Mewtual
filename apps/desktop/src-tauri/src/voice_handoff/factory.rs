@@ -1,11 +1,10 @@
 //! Native-owned derivation registration. No command/listener exposes this pilot yet. The
 //! selected key, original actor and UI commit travel with actual work rather than an invoke
 //! waiter. A lost reply must recover the same counted ledger purpose, never create new work.
+use super::context::Context;
 use super::ledger::{Begin, Purpose, Registration, RowId};
 use crate::voice_authority::SelectedHandoffOwner;
-use crate::{
-    check_voice_activation_generation, check_voice_binding, require_unlocked_session, AppState,
-};
+use crate::{check_voice_binding_in, UiSessionGate};
 use catcoms_app::{ServerActor, VoiceEndpointError};
 use catcoms_sync::voice_v2::presence::PairSelector;
 use catcoms_sync::voice_v2::resources::{Credit, ResourceKind};
@@ -51,35 +50,41 @@ struct Completion {
     _credit: Credit,
 }
 
-/// Resolve the actual selected generation before any native factory is called. All first
-/// effects run under the original UI commit. Lock may revoke the affine lease immediately,
+/// Consume the ORIGINAL native-selected allocation before any factory is called. A local
+/// channel must pass its retained selection, never owner/executor strings from a body.
+/// Matching public fields cannot adopt a replacement selection. This API still needs the
+/// future channel's actual closed-state fence at final admission under the same UI commit.
+/// First effects run under the original UI commit. Lock may revoke the affine lease immediately,
 /// but cannot report completion ahead of an already admitted actor turn. A subsequent unlock
 /// never makes this generation current again. Historical metadata has separate ledger APIs.
 /// An existing Pending row is returned as metadata only: inspect ledger status before asking
 /// for input. Receiving RowId never asserts that an action is attached or a browser is ready.
-pub(crate) async fn ensure_derivation_row(
-    state: &AppState,
-    owner: &str,
-    executor: [u8; 32],
+pub(super) async fn ensure_derivation_row(
+    context: &Context,
+    selected: Arc<SelectedHandoffOwner>,
     selector: PairSelector,
 ) -> Result<RowId, Refused> {
-    let selected = state
-        .voice_authority
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .selected_handoff_owner(owner, executor)
-        .map_err(|_| Refused::Closed)?;
-    check_voice_binding(state, selected.binding())
+    let context = context.upgrade().ok_or(Refused::Closed)?;
+    {
+        let authority = context
+            .authority
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        require_current_selection(context.gate(), &authority, &selected)?;
+    }
+    check_voice_binding_in(&context.servers, selected.binding())
         .await
         .map_err(|_| Refused::Closed)?;
     // Owned equivalent of require_ui_session_generation: cancellation of the outer future
     // must not return this guard while an admitted actor request is still outstanding.
-    let commit = state.ui_session_commit.clone().lock_owned().await;
-    require_unlocked_session(state)
+    let commit = context.commit.clone().lock_owned().await;
+    context
+        .gate()
+        .require_unlocked()
         .await
         .map_err(|_| Refused::Closed)?;
     let actor = {
-        let servers = state.servers.lock().await;
+        let servers = context.servers.lock().await;
         let binding = selected.binding();
         servers
             .get(&binding.server)
@@ -88,16 +93,16 @@ pub(crate) async fn ensure_derivation_row(
             .ok_or(Refused::Closed)?
     };
     {
-        let mut authority = state
-            .voice_authority
+        let authority = context
+            .authority
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        require_current_selection(state, &mut authority, owner, executor, &selected)?;
+        require_current_selection(context.gate(), &authority, &selected)?;
     }
     // Weak grant upgrade and all affine destruction occur outside Coordinator/ledger fences.
     let grant = selected.grant()?;
-    let registration = match state
-        .voice_handoff
+    let registration = match context
+        .ledger
         .begin(selected.clone(), Purpose::Derive(selector))?
     {
         Begin::Existing(id) => return Ok(id),
@@ -108,6 +113,10 @@ pub(crate) async fn ensure_derivation_row(
         FACTORY_BYTES,
         ResourceKind::Retained,
     )?;
+    // Do not let the detached task retain the whole registry, mounted store, Coordinator or
+    // authorization fields. The original actor/grant and owned commit below are sufficient.
+    // This drop is outside every native guard, including the final selection fence above.
+    drop(context);
     let work = run(
         registration,
         selected,
@@ -131,18 +140,13 @@ pub(crate) async fn ensure_derivation_row(
 /// Keep the atomic lock-registration fence inside the same Coordinator turn as selection.
 /// A lock may publish its new generation before its revocation hook can acquire this mutex.
 fn require_current_selection(
-    state: &AppState,
-    authority: &mut crate::voice_authority::Coordinator,
-    owner: &str,
-    executor: [u8; 32],
+    gate: UiSessionGate<'_>,
+    authority: &crate::voice_authority::Coordinator,
     selected: &Arc<SelectedHandoffOwner>,
 ) -> Result<(), Refused> {
-    check_voice_activation_generation(state, selected.binding().generation)
+    gate.check_generation(selected.binding().generation)
         .map_err(|_| Refused::Closed)?;
-    let current = authority
-        .selected_handoff_owner(owner, executor)
-        .map_err(|_| Refused::Closed)?;
-    if !Arc::ptr_eq(selected, &current) {
+    if !authority.is_current_handoff_owner(selected) {
         return Err(Refused::Closed);
     }
     Ok(())
@@ -187,4 +191,4 @@ async fn run(
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

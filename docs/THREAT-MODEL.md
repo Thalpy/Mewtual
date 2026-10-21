@@ -10,6 +10,23 @@ channel rather than widen CORS. Startup failure leaves other app functions avail
 IO runtime entry avoids setup panics; Exit drains the actual status worker before SDK cleanup
 and restart. An interrupted observer or concurrent finish cannot fabricate completed drainage.
 
+The paid IO state holds nine Weak references to the actual native state, with no strong
+AppState/AppHandle or registry/store/Coordinator owner in the process host. Every context upgrade
+is all-or-nothing before factory admission; partial upgrades drain outside native fences. This
+is lifetime access, not revocation. The same borrowed UI gate as ordinary IPC checks actual store
+presence, original flags and generations after awaits. Weak references still retain inline Arc
+allocations/control blocks; the measured32,256-byte Windows peak is prepaid by32KiB instead of
+24KiB, reducing other available bytes within the unchanged2MiB process cap. Context fields drop
+before the original IO payment; uncollected task output retains its payment as before.
+
+Factories accept the original native-selected Arc and use pure early/final checks of actual
+cached allocation, grant/lease, generation and binding. A foreign equal-label selection cannot
+materialize or pay for a local snapshot. Broad live context drops before detached actor work;
+that work alone retains its original actor/selected/grant/commit/registration/credit. A lock
+cannot finish ahead of an admitted actor request after caller loss. A future action handler must
+also repeat actual channel closure under the same final UI commit; weak context or selection
+provenance alone does not authorize effects or claim the channel stayed open.
+
 The three fixed-metadata commands are granted only to main, with remote/restricted surfaces
 excluded by the real ACL. Setup also requires unlocked session, selected native owner, original
 generation and actor binding. Exact cleanup remains possible while locked; it cannot install

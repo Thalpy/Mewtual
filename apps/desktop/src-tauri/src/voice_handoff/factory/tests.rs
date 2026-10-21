@@ -13,7 +13,9 @@ use std::task::Poll;
 async fn poll_once<F: Future>(mut future: Pin<&mut F>) -> Poll<F::Output> {
     poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await
 }
-async fn selection(f: &Fixture) -> (String, Arc<SelectedHandoffOwner>, PairSelector) {
+pub(in crate::voice_handoff) async fn selection(
+    f: &Fixture,
+) -> (String, Arc<SelectedHandoffOwner>, PairSelector) {
     let owner = f.candidate().await;
     activate_voice_owner_inner(&f.state, owner.clone())
         .await
@@ -44,7 +46,9 @@ async fn selection(f: &Fixture) -> (String, Arc<SelectedHandoffOwner>, PairSelec
     };
     (owner, selected, selector)
 }
-async fn park(actor: &ServerActor) -> catcoms_app::durable_chat::DurableSendReady {
+pub(in crate::voice_handoff) async fn park(
+    actor: &ServerActor,
+) -> catcoms_app::durable_chat::DurableSendReady {
     let expected_context = actor.durable_send_context().await.unwrap();
     actor
         .prepare_durable_send(catcoms_app::durable_chat::DurableSendRequest {
@@ -61,9 +65,10 @@ async fn park(actor: &ServerActor) -> catcoms_app::durable_chat::DurableSendRead
 #[tokio::test]
 async fn registration_rejection_retries_the_same_counted_native_purpose() {
     let f = Fixture::new().await;
-    let (owner, selected, selector) = selection(&f).await;
+    let context = Context::new(&f.state);
+    let (_owner, selected, selector) = selection(&f).await;
     assert!(matches!(
-        ensure_derivation_row(&f.state, &owner, [9; 32], selector).await,
+        ensure_derivation_row(&context, selected.clone(), selector).await,
         Err(Refused::Protocol(VoiceError::Unauthorized))
     ));
     let Begin::Factory(first) = f
@@ -77,7 +82,7 @@ async fn registration_rejection_retries_the_same_counted_native_purpose() {
     let first_id = first.id();
     drop(first);
     assert!(matches!(
-        ensure_derivation_row(&f.state, &owner, [9; 32], selector).await,
+        ensure_derivation_row(&context, selected.clone(), selector).await,
         Err(Refused::Protocol(VoiceError::Unauthorized))
     ));
     let Begin::Factory(retry) = f
@@ -105,17 +110,17 @@ async fn registration_rejection_retries_the_same_counted_native_purpose() {
 #[tokio::test]
 async fn registration_final_generation_fence_refuses_a_registered_lock_before_its_hook_runs() {
     let f = Fixture::new().await;
-    let (owner, selected, _) = selection(&f).await;
+    let (_owner, selected, _) = selection(&f).await;
     {
-        let mut authority = f.state.voice_authority.lock().unwrap();
-        require_current_selection(&f.state, &mut authority, &owner, [9; 32], &selected).unwrap();
+        let authority = f.state.voice_authority.lock().unwrap();
+        require_current_selection(f.state.ui_session_gate(), &authority, &selected).unwrap();
         register_ui_lock_request(&f.state);
         assert!(
             selected.lease().is_live(),
             "revocation hook is deliberately held behind this same Coordinator guard"
         );
         assert_eq!(
-            require_current_selection(&f.state, &mut authority, &owner, [9; 32], &selected),
+            require_current_selection(f.state.ui_session_gate(), &authority, &selected),
             Err(Refused::Closed)
         );
     }
@@ -127,9 +132,10 @@ async fn registration_final_generation_fence_refuses_a_registered_lock_before_it
 async fn registration_pending_duplicate_returns_only_original_metadata_without_another_actor_turn()
 {
     let f = Fixture::new().await;
-    let (owner, selected, selector) = selection(&f).await;
+    let context = Context::new(&f.state);
+    let (_owner, selected, selector) = selection(&f).await;
     let boundary = f.state.ui_session_commit.lock().await;
-    let mut pending = Box::pin(ensure_derivation_row(&f.state, &owner, [9; 32], selector));
+    let mut pending = Box::pin(ensure_derivation_row(&context, selected.clone(), selector));
     assert!(poll_once(pending.as_mut()).await.is_pending());
     f.actor.member_count().await;
     assert!(poll_once(pending.as_mut()).await.is_pending());
@@ -168,9 +174,10 @@ async fn registration_pending_duplicate_returns_only_original_metadata_without_a
 #[tokio::test]
 async fn registration_payment_refusal_before_handoff_calls_no_actor_and_removes_unused_row() {
     let f = Fixture::new().await;
-    let (owner, selected, selector) = selection(&f).await;
+    let context = Context::new(&f.state);
+    let (_owner, selected, selector) = selection(&f).await;
     let boundary = f.state.ui_session_commit.lock().await;
-    let mut pending = Box::pin(ensure_derivation_row(&f.state, &owner, [9; 32], selector));
+    let mut pending = Box::pin(ensure_derivation_row(&context, selected.clone(), selector));
     assert!(poll_once(pending.as_mut()).await.is_pending());
     f.actor.member_count().await;
     assert!(poll_once(pending.as_mut()).await.is_pending());
@@ -207,9 +214,22 @@ async fn registration_payment_refusal_before_handoff_calls_no_actor_and_removes_
 #[tokio::test]
 async fn registration_detached_worker_holds_commit_after_caller_loss_and_unlock_cannot_revive_it() {
     let f = Fixture::new().await;
-    let (owner, _selected, selector) = selection(&f).await;
+    let context = Context::new(&f.state);
+    let (_owner, selected, selector) = selection(&f).await;
+    let broad_counts = || {
+        [
+            Arc::strong_count(&f.state.servers),
+            Arc::strong_count(&f.state.store),
+            Arc::strong_count(&f.state.voice_authority),
+            Arc::strong_count(&f.state.session_resumable),
+            Arc::strong_count(&f.state.session_lock_requested),
+            Arc::strong_count(&f.state.ui_session_generation),
+            Arc::strong_count(&f.state.ui_authorized_generation),
+        ]
+    };
+    let before = broad_counts();
     let boundary = f.state.ui_session_commit.lock().await;
-    let mut pending = Box::pin(ensure_derivation_row(&f.state, &owner, [9; 32], selector));
+    let mut pending = Box::pin(ensure_derivation_row(&context, selected.clone(), selector));
     assert!(poll_once(pending.as_mut()).await.is_pending());
     f.actor.member_count().await;
     assert!(poll_once(pending.as_mut()).await.is_pending());
@@ -217,6 +237,11 @@ async fn registration_detached_worker_holds_commit_after_caller_loss_and_unlock_
     drop(boundary);
     assert!(poll_once(pending.as_mut()).await.is_pending());
     drop(pending); // dropping JoinHandle's waiter does not abort actual admitted native work
+    assert_eq!(
+        broad_counts(),
+        before,
+        "worker cannot retain broad native context owners"
+    );
     assert!(f.state.ui_session_commit.try_lock().is_err());
     let mut lock = Box::pin(lock_session_inner(&f.state, None));
     assert!(poll_once(lock.as_mut()).await.is_pending());
@@ -231,7 +256,7 @@ async fn registration_detached_worker_holds_commit_after_caller_loss_and_unlock_
         .await
         .unwrap();
     assert!(matches!(
-        ensure_derivation_row(&f.state, &owner, [9; 32], selector).await,
+        ensure_derivation_row(&context, selected.clone(), selector).await,
         Err(Refused::Closed)
     ));
     f.close().await;
@@ -295,4 +320,56 @@ async fn registration_completed_uncollected_error_keeps_factory_payment_until_co
     drop(output);
     assert_eq!(pool.counts(), before);
     f.close().await;
+}
+
+#[tokio::test]
+async fn actual_store_removed_during_commit_wait_refuses_before_ledger_or_actor_admission() {
+    let f = Fixture::new().await;
+    let context = Context::new(&f.state);
+    let (_owner, selected, selector) = selection(&f).await;
+    let boundary = f.state.ui_session_commit.lock().await;
+    let before = selected.resources().counts();
+    let mut pending = Box::pin(ensure_derivation_row(&context, selected, selector));
+    assert!(poll_once(pending.as_mut()).await.is_pending());
+    f.actor.member_count().await; // the preceding exact context query has completed
+    assert!(poll_once(pending.as_mut()).await.is_pending());
+    let parked = park(&f.actor).await;
+    let mounted = f.state.store.lock().await.take();
+    assert!(mounted.is_some());
+    drop(boundary);
+    assert!(
+        matches!(
+            poll_once(pending.as_mut()).await,
+            Poll::Ready(Err(Refused::Closed))
+        ),
+        "store absence must refuse without waiting for the parked actor"
+    );
+    assert_eq!(crate::voice_runtime(&f.state).resources().counts(), before);
+    drop(pending);
+    *f.state.store.lock().await = mounted;
+    drop(parked);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn original_selected_allocation_cannot_be_substituted_by_equal_public_owner_identity() {
+    let f = Fixture::new().await;
+    let foreign = Fixture::new().await;
+    let context = Context::new(&f.state);
+    let (_owner, selected, _) = selection(&f).await;
+    let (_foreign_owner, other, selector) = selection(&foreign).await;
+    assert_eq!(selected.id(), other.id());
+    assert_eq!(selected.executor(), other.executor());
+    let before = selected.resources().counts();
+    let parked = park(&f.actor).await;
+    let mut pending = Box::pin(ensure_derivation_row(&context, other, selector));
+    assert!(matches!(
+        poll_once(pending.as_mut()).await,
+        Poll::Ready(Err(Refused::Closed))
+    ));
+    assert_eq!(selected.resources().counts(), before);
+    drop(pending);
+    drop(parked);
+    f.close().await;
+    foreign.close().await;
 }
