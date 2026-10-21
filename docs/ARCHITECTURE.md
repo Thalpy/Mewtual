@@ -29,6 +29,13 @@ no setup is pending and every actual owner has drained. Serial IDs never reset. 
 runs outside Coordinator before new controller/owner/key admission, including late last-owner
 drops after the collection reply. No uncertain history is evicted to make capacity.
 
+Action lookup now produces a native-only ResolvedRow only after checking the actual original
+grant allocation, executor, lease and complete purpose. It retains the paid Row through delayed
+metadata/cleanup use, without upgrading the grant for historical recovery. All raw ID-taking
+operational helpers are module-private. Data admission tests the original lease under State;
+this lookup is not current UI/channel/Root effect authority. Actual physical callers still
+need to bound simultaneous handles and complete funding/drainage before serving action bytes.
+
 This service still handles authenticated Status only. Factory/action input, result, exact
 receipt ACK, settlement, phase closure and final delivery remain open. Starting the local
 listener does not enable V2 signalling, SDP/ICE/RTC or legacy-mode isolation. The action ledger's

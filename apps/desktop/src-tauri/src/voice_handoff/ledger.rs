@@ -110,7 +110,67 @@ pub(crate) enum Begin {
     Factory(Registration),
     Existing(RowId),
 }
+/// Native-only access to one original action row. A MAC or copied RowId is only a lookup
+/// hint: the native-selected grant allocation, executor, lease and complete purpose must all
+/// match before any input, terminal history or cleanup operation is available. Keep the Row
+/// itself alive so its original metadata payment covers a delayed response/cleanup owner.
+///
+/// This is row provenance, not current first-effect authority. The channel must still fence
+/// actual closure/current selection under the original UI commit, and Root checks current
+/// membership/epoch/deadlines before a protocol effect. Historical methods intentionally do
+/// not upgrade a dead CallGrant: End must not prevent exact ACK/settlement recovery.
+/// No Clone, public constructor, serialization or conversion from renderer metadata exists.
+/// Repeated resolutions are possible: this is metadata ownership, not a once-only worker
+/// capability. Actual physical/cleanup callers must bound their simultaneous handles within
+/// their existing payments; work/observer/waiter admission keeps its original separate gates.
+pub(crate) struct ResolvedRow {
+    ledger: Arc<Ledger>,
+    row: Arc<Row>,
+}
+impl ResolvedRow {
+    pub(crate) fn status(&self) -> Result<Status, VoiceError> {
+        self.ledger.status(self.row.id)
+    }
+    pub(crate) fn reconcile(&self) -> Result<Status, VoiceError> {
+        self.ledger.reconcile(self.row.id)
+    }
+    pub(crate) fn acknowledge(&self, receipt: &CryptoResultReceipt) -> Result<(), VoiceError> {
+        self.ledger.acknowledge(self.row.id, receipt)
+    }
+    pub(crate) fn settle(&self) -> Result<Status, VoiceError> {
+        self.ledger.settle(self.row.id)
+    }
+    /// Historical provenance alone cannot restart data work after End. This early fence is
+    /// not the channel's final admission or a replacement for Root's actual effect checks.
+    pub(crate) fn work(&self) -> Result<Work, VoiceError> {
+        self.ledger.work(self.row.id)
+    }
+    /// Requires prior authenticated browser closure; neither this handle nor a renderer's
+    /// claim of drainage can establish that protocol precondition by itself.
+    pub(crate) async fn wait_compacted(&self) -> Result<Status, VoiceError> {
+        self.ledger.wait_compacted(self.row.id).await
+    }
+}
+
 impl Ledger {
+    /// Resolve against the ORIGINAL native-selected owner, not the current replacement and
+    /// not strings from the request. Preserve access to exact historical cleanup after End;
+    /// no grant upgrade, Clock callback, resource charge or data loan occurs in this lookup.
+    pub(crate) fn resolve(
+        self: &Arc<Self>,
+        selected: &SelectedHandoffOwner,
+        purpose: Purpose,
+        id: RowId,
+    ) -> Result<ResolvedRow, VoiceError> {
+        let row = self.row(id)?;
+        if !row.key.matches(selected, purpose) {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(ResolvedRow {
+            ledger: self.clone(),
+            row,
+        })
+    }
     pub(crate) fn begin(
         self: &Arc<Self>,
         selected: Arc<SelectedHandoffOwner>,
@@ -206,7 +266,7 @@ impl Ledger {
             .cloned()
             .ok_or(VoiceError::Unauthorized)
     }
-    pub(crate) fn status(&self, id: RowId) -> Result<Status, VoiceError> {
+    fn status(&self, id: RowId) -> Result<Status, VoiceError> {
         let row = self.row(id)?;
         let status = row
             .state
@@ -219,7 +279,7 @@ impl Ledger {
     /// Recover actual terminal/settlement metadata even after phase closure or a native
     /// worker lost its last refresh. This admits no data copy, engine, computation or first
     /// effect. A single observer is prepaid per row; callers coalesce/retry Capacity outside.
-    pub(crate) fn reconcile(&self, id: RowId) -> Result<Status, VoiceError> {
+    fn reconcile(&self, id: RowId) -> Result<Status, VoiceError> {
         self.reconcile_inner(id, true)
     }
     fn reconcile_inner(&self, id: RowId, notify: bool) -> Result<Status, VoiceError> {
@@ -257,11 +317,7 @@ impl Ledger {
     }
     /// Fixed history ACK recovery needs no data-phase loan and remains available after End
     /// or a lost earlier ACK reply. It cannot acknowledge a different terminal transition.
-    pub(crate) fn acknowledge(
-        &self,
-        id: RowId,
-        receipt: &CryptoResultReceipt,
-    ) -> Result<(), VoiceError> {
+    fn acknowledge(&self, id: RowId, receipt: &CryptoResultReceipt) -> Result<(), VoiceError> {
         let row = self.row(id)?;
         if let Some(observer) = Self::observe(&row, true)? {
             observer.action().acknowledge_result(receipt)?;
@@ -291,7 +347,7 @@ impl Ledger {
     /// Native cleanup after the selected executor's actual provider/result/RPC work drained.
     /// This is NOT a callable IPC assertion of drainage. The future authenticated control
     /// adapter must establish those preconditions before invoking irreversible settlement.
-    pub(crate) fn settle(&self, id: RowId) -> Result<Status, VoiceError> {
+    fn settle(&self, id: RowId) -> Result<Status, VoiceError> {
         let row = self.row(id)?;
         if let Some(observer) = Self::observe(&row, true)? {
             observer.action().settle_engine();
@@ -313,10 +369,16 @@ impl Ledger {
     }
     /// One actual native data worker per row. The future physical channel must additionally
     /// serialize across sibling rows and independently pay fixed control/reply copies.
-    pub(crate) fn work(&self, id: RowId) -> Result<Work, VoiceError> {
+    fn work(&self, id: RowId) -> Result<Work, VoiceError> {
         let row = self.row(id)?;
         let owners = {
             let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+            // End can win while this caller waits for Index/State. Check the ORIGINAL
+            // lease only after those waits, before admitting a copy or publishing worker.
+            // A later End still requires the final channel/UI/Root effect fences.
+            if !row.key.lease.is_live() {
+                return Err(VoiceError::Unauthorized);
+            }
             let Body::Live(live) = &mut state.body else {
                 return Err(VoiceError::Unauthorized);
             };
@@ -382,7 +444,7 @@ impl Ledger {
     /// authenticated browser closure and closes Phase. Native data drainage and metadata/ACK
     /// readiness are distinct events: observing the first must never lose the second wake.
     /// This future creates no retry timer, new factory, engine or variable data loan.
-    pub(crate) async fn wait_compacted(&self, id: RowId) -> Result<Status, VoiceError> {
+    async fn wait_compacted(&self, id: RowId) -> Result<Status, VoiceError> {
         let row = self.row(id)?;
         if row
             .cleanup_waiter

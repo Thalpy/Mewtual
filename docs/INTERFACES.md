@@ -107,7 +107,17 @@ actor await. Lost/Stopped replies retain that exact counted purpose. attach veri
 Root Action and original pair binding and installs it before returning an ID. No renderer may
 register an action by copying fields. The pilot supports derivation only, with 32 total rows.
 
-Ledger::reconcile, acknowledge and settle are bounded metadata-only native operations, including
+Ledger::resolve(original_selected, complete_purpose, row_id) is now the only cross-module
+operational lookup. Slot/serial is a hint, not authority: the actual Weak<CallGrant> allocation,
+executor, original CallLease allocation and entire peer/join/key/epoch selector must match.
+It returns a native-only ResolvedRow retaining the actual paid row; it is neither serialized
+nor a once-only worker token. Physical callers must bound simultaneous handles in their own
+existing payments. Raw ID-taking status/work/ACK/settle/cleanup helpers are module-private.
+Resolution deliberately works after End and actual grant destruction so exact history cleanup
+cannot be stranded. Work rechecks the original lease under State immediately before copy and
+worker admission; this does not replace final channel/UI/Root first-effect fences.
+
+ResolvedRow::reconcile, acknowledge and settle are bounded metadata-only native operations, including
 after End/phase closure. They never reloan variable capacity or admit computation. settle and
 Phase::close require actual selected-browser/provider/RPC drainage established by the future
 authenticated adapter. No IPC accepts a boolean assertion of that proof. compact retains exact

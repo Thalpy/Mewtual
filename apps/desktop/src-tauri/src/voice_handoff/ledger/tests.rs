@@ -110,6 +110,7 @@ fn complete_records_index_handles_and_one_worker_fit_existing_fixed_payments() {
         + std::mem::size_of::<Option<Arc<Row>>>()
         + std::mem::size_of::<Registration>()
         + std::mem::size_of::<Work>()
+        + std::mem::size_of::<ResolvedRow>()
         + std::mem::size_of::<Observation>()
         + std::mem::size_of_val(&waiter)
         + std::mem::size_of::<Status>();
@@ -584,4 +585,222 @@ fn pending_history_shares_the_finite_row_bound_without_eviction_or_ttl() {
     for id in ids {
         assert!(!ledger.status(id).unwrap().drained);
     }
+}
+
+#[test]
+fn resolved_row_rejects_equal_field_foreign_native_owner_and_each_wrong_selector_field() {
+    let (coordinator, selected, selector) = selection();
+    let (_foreign_coordinator, foreign, _) = selection();
+    // Equal public projections do not identify the actual affine grant/lease allocation.
+    assert_eq!(selected.id(), foreign.id());
+    assert_eq!(selected.executor(), foreign.executor());
+    assert_eq!(selected.join(), foreign.join());
+    assert_eq!(selected.point(), foreign.point());
+    assert_eq!(selected.binding().scope, foreign.binding().scope);
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let (_join, action, pair) = actual_action(&coordinator, &selected);
+    let id = registration.attach(action, pair, 16 * 1024).unwrap();
+    let before = selected.resources().counts();
+    assert!(matches!(
+        ledger.resolve(&foreign, Purpose::Derive(selector), id),
+        Err(VoiceError::Unauthorized)
+    ));
+    let mut wrong_peer = selector;
+    wrong_peer.peer = DeviceKeypair::from_seed(&[5; 32]).device_id();
+    let mut wrong_join = selector;
+    wrong_join.join[0] ^= 1;
+    let mut wrong_key = selector;
+    wrong_key.key_ref[0] ^= 1;
+    let mut wrong_epoch = selector;
+    wrong_epoch.epoch += 1;
+    for wrong in [wrong_peer, wrong_join, wrong_key, wrong_epoch] {
+        assert!(matches!(
+            ledger.resolve(&selected, Purpose::Derive(wrong), id),
+            Err(VoiceError::Unauthorized)
+        ));
+    }
+    for wrong in [
+        RowId {
+            slot: id.slot,
+            serial: id.serial + 1,
+        },
+        RowId {
+            slot: ROWS,
+            serial: id.serial,
+        },
+        RowId {
+            slot: usize::MAX,
+            serial: id.serial,
+        },
+    ] {
+        assert!(matches!(
+            ledger.resolve(&selected, Purpose::Derive(selector), wrong),
+            Err(VoiceError::Unauthorized)
+        ));
+    }
+    assert_eq!(
+        selected.resources().counts(),
+        before,
+        "refusal creates no credit/work"
+    );
+    let row = ledger
+        .resolve(&selected, Purpose::Derive(selector), id)
+        .unwrap();
+    assert!(row.status().unwrap().action.is_some());
+    assert!(
+        row.work().is_ok(),
+        "exact native provenance still reaches the original work"
+    );
+    assert_eq!(selected.resources().counts(), before);
+}
+
+#[test]
+fn every_original_key_component_is_required_even_when_other_identity_components_match() {
+    let (_coordinator, selected, selector) = selection();
+    let (_foreign_coordinator, foreign, _) = selection();
+    let purpose = Purpose::Derive(selector);
+    let mut key = Key {
+        grant: selected.grant_identity(),
+        executor: selected.executor(),
+        lease: selected.lease().clone(),
+        purpose,
+    };
+    assert!(key.matches(&selected, purpose));
+    key.grant = foreign.grant_identity();
+    assert!(!key.matches(&selected, purpose));
+    key.grant = selected.grant_identity();
+    key.executor[0] ^= 1;
+    assert!(!key.matches(&selected, purpose));
+    key.executor = selected.executor();
+    key.lease = CallLease::default();
+    assert!(!key.matches(&selected, purpose));
+    key.lease = selected.lease().clone();
+    let mut changed = selector;
+    changed.join[0] ^= 1;
+    key.purpose = Purpose::Derive(changed);
+    assert!(!key.matches(&selected, purpose));
+}
+
+#[test]
+fn resolved_row_preserves_exact_terminal_cleanup_after_end_and_actual_grant_drop() {
+    use std::future::Future;
+    use std::task::{Context, Poll};
+    let (mut coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let (mut join, action, pair) = actual_action(&coordinator, &selected);
+    let id = registration
+        .attach(action.clone(), pair, 16 * 1024)
+        .unwrap();
+    let row = ledger
+        .resolve(&selected, Purpose::Derive(selector), id)
+        .unwrap();
+    let work = row.work().unwrap();
+    action.admit_engine(action.engine_bytes()).unwrap();
+    let receipt = crate::voice_authority::tests::derivation_receipt(
+        &coordinator,
+        selected.id(),
+        &mut join,
+        &action,
+    );
+    work.refresh().unwrap();
+    coordinator.end(selected.id());
+    drop(coordinator);
+    assert!(!selected.lease().is_live());
+    assert!(
+        selected.grant_identity().upgrade().is_none(),
+        "no live affine grant is needed for exact cleanup"
+    );
+    let recovered = ledger
+        .resolve(&selected, Purpose::Derive(selector), id)
+        .unwrap();
+    assert!(matches!(recovered.work(), Err(VoiceError::Unauthorized)));
+    assert!(
+        matches!(row.work(), Err(VoiceError::Unauthorized)),
+        "a pre-End handle gains no data authority"
+    );
+    assert!(recovered.reconcile().unwrap().engine.receipt.is_some());
+    let mut wrong = receipt.clone();
+    wrong.output_tag[0] ^= 1;
+    assert!(recovered.acknowledge(&wrong).is_err());
+    recovered.acknowledge(&receipt).unwrap();
+    recovered.acknowledge(&receipt).unwrap(); // lost ACK reply recovers the same transition
+    assert!(recovered.settle().unwrap().engine.settled);
+    let phase = work.phase().clone();
+    phase.close(); // models the separate, still-unimplemented authenticated browser closure
+    assert!(!phase.is_drained());
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let mut waiter = Box::pin(recovered.wait_compacted());
+    assert!(waiter.as_mut().poll(&mut context).is_pending());
+    drop(work);
+    assert!(
+        matches!(waiter.as_mut().poll(&mut context), Poll::Ready(Ok(status)) if status.drained)
+    );
+    drop(waiter);
+    assert!(row.status().unwrap().drained);
+    assert!(row.reconcile().unwrap().drained);
+    assert!(row.settle().unwrap().drained);
+    row.acknowledge(&receipt).unwrap();
+    assert!(row.acknowledge(&wrong).is_err());
+    assert!(row.work().is_err());
+}
+
+#[test]
+fn end_before_blocked_state_admission_refuses_work_without_copy_or_worker_mutation() {
+    let (mut coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let (_join, action, pair) = actual_action(&coordinator, &selected);
+    let id = registration.attach(action, pair, 16 * 1024).unwrap();
+    let resolved = ledger
+        .resolve(&selected, Purpose::Derive(selector), id)
+        .unwrap();
+    let row = ledger.row(id).unwrap();
+    let held = row.state.lock().unwrap();
+    let Body::Live(live) = &held.body else {
+        panic!("live registered work")
+    };
+    let phase = live.phase.clone();
+    assert!(!live.worker);
+    let status = held.status.clone();
+    // The actual State guard prevents final admission until AFTER revocation. The wrapper
+    // has no separate early lease check, so success cannot be hidden by testing only End
+    // before an outer check. Both possible thread schedules reach the same held-state fence.
+    let entered = std::sync::Barrier::new(2);
+    let baseline = std::thread::scope(|scope| {
+        let pending = scope.spawn(|| {
+            entered.wait();
+            resolved.work()
+        });
+        entered.wait();
+        coordinator.end(selected.id());
+        assert!(!selected.lease().is_live());
+        // End legitimately prunes its settled generation metadata. Measure only the
+        // rejected work after that independent retirement, while admission is still held.
+        let baseline = selected.resources().counts();
+        drop(held);
+        assert!(matches!(
+            pending.join().unwrap(),
+            Err(VoiceError::Unauthorized)
+        ));
+        baseline
+    });
+    let held = row.state.lock().unwrap();
+    let Body::Live(live) = &held.body else {
+        panic!("same live record")
+    };
+    assert!(!live.worker);
+    assert!(
+        held.status == status,
+        "refusal does not alter receipt or history"
+    );
+    assert_eq!(selected.resources().counts(), baseline);
+    drop(held);
+    phase.close();
+    assert!(
+        phase.is_drained(),
+        "no copy was admitted behind the blocked State guard"
+    );
 }

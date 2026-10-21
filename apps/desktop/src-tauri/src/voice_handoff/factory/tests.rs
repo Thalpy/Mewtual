@@ -83,7 +83,7 @@ async fn registration_rejection_retries_the_same_counted_native_purpose() {
     let Begin::Factory(retry) = f
         .state
         .voice_handoff
-        .begin(selected, Purpose::Derive(selector))
+        .begin(selected.clone(), Purpose::Derive(selector))
         .unwrap()
     else {
         panic!("same retry factory");
@@ -93,7 +93,9 @@ async fn registration_rejection_retries_the_same_counted_native_purpose() {
     assert!(f
         .state
         .voice_handoff
-        .status(first_id)
+        .resolve(&selected, Purpose::Derive(selector), first_id)
+        .unwrap()
+        .status()
         .unwrap()
         .action
         .is_none());
@@ -135,7 +137,7 @@ async fn registration_pending_duplicate_returns_only_original_metadata_without_a
     let Begin::Factory(original) = f
         .state
         .voice_handoff
-        .begin(selected, Purpose::Derive(selector))
+        .begin(selected.clone(), Purpose::Derive(selector))
         .unwrap()
     else {
         panic!("original");
@@ -147,7 +149,14 @@ async fn registration_pending_duplicate_returns_only_original_metadata_without_a
         matches!(poll_once(pending.as_mut()).await, Poll::Ready(Ok(recovered)) if recovered == id)
     );
     assert!(
-        f.state.voice_handoff.status(id).unwrap().action.is_none(),
+        f.state
+            .voice_handoff
+            .resolve(&selected, Purpose::Derive(selector), id)
+            .unwrap()
+            .status()
+            .unwrap()
+            .action
+            .is_none(),
         "Pending RowId does not imply attached input/readiness"
     );
     drop(pending);

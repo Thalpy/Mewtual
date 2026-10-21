@@ -36,6 +36,17 @@ Paid weak witnesses include headers and completed replies that hold no Row. Seri
 reset; stale cleanup cannot affect a replacement. Late drops are reclaimed before new admission,
 outside Coordinator. Uncertain history is never evicted for capacity.
 
+The internal action ledger now resolves every cross-module operation against the actual
+native-selected grant allocation, original lease, executor and full pair selector before
+returning a native-only paid-row handle. Authentication of a channel or equality of public
+fields cannot substitute another owner's row. Raw ID-taking operation helpers are private.
+Historical resolution and exact receipt ACK/settlement do not upgrade a dead grant; data work
+checks the original lease under State before copy/worker admission, including after waits.
+This proves row provenance only. The future transport must still check actual channel closure,
+current selection and UI generation at final effect admission, with Root's membership/epoch/
+deadline checks. Repeated resolution is possible; physical callers must bound concurrent
+handles in their existing payments rather than interpreting non-Clone as an admission gate.
+
 Only Status is served. No factory/action input/result/ACK/settlement/final-delivery chain, live
 V2/SDP/ICE/RTC, legacy-mode isolation or member media relay is enabled by this increment. Packaged
 Windows committed document/reload, enforced CSP/CORS, public metadata and native shutdown checks
