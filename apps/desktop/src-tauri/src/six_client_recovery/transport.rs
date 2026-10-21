@@ -7,8 +7,253 @@ use catcoms_rt::{
     PublishSubmission, Topic, TransportError,
 };
 
+const ORDINARY_TRACE_LIMIT: usize = 192;
+const PHASE_TRACE_LIMIT: usize = 16;
+
+#[test]
+fn ordinary_trace_bounds_phase_and_request_history_with_explicit_truncation() {
+    let scenario = Scenario::new(false);
+    for _ in 0..PHASE_TRACE_LIMIT + 3 {
+        scenario.rules.begin_phase(&"λ".repeat(200));
+    }
+    for _ in 0..ORDINARY_TRACE_LIMIT + 5 {
+        let observation = scenario
+            .rules
+            .observe_ordinary(0, scenario.rules.peers[1], 19);
+        observation.lower(&Ok(Bytes::new()));
+        observation.complete();
+    }
+    for count in 0..ORDINARY_TRACE_LIMIT + 5 {
+        scenario.rules.observe_history(0, count, count);
+        scenario.rules.observe_history(0, count, count); // No allocation for unchanged oracle.
+    }
+    let trace = scenario.rules.trace.lock().unwrap();
+    assert_eq!(trace.ordinary.len(), ORDINARY_TRACE_LIMIT);
+    assert_eq!(trace.ordinary_evicted, 5);
+    assert_eq!(trace.phases.len(), PHASE_TRACE_LIMIT);
+    assert_eq!(trace.history_samples.len(), ORDINARY_TRACE_LIMIT);
+    assert_eq!(
+        trace.history_samples.back().unwrap().4,
+        ORDINARY_TRACE_LIMIT + 4
+    );
+    assert!(trace
+        .phases
+        .iter()
+        .all(|(_, _, label)| label.chars().count() == 96));
+    assert!(trace.ordinary.iter().all(|row| row.kind == 19
+        && row.observer_completed.is_some()
+        && row.observer_dropped.is_none()));
+    assert!(trace.ordinary.front().unwrap().id < trace.ordinary.back().unwrap().id);
+}
+
+#[test]
+fn ordinary_trace_distinguishes_lost_waiter_from_a_returned_transport_error() {
+    let scenario = Scenario::new(false);
+    let observation = scenario
+        .rules
+        .observe_ordinary(0, scenario.rules.peers[1], 19);
+    observation.lower(&Err(TransportError::NoResponse));
+    observation.complete();
+    let waiting = scenario
+        .rules
+        .observe_ordinary(0, scenario.rules.peers[1], 19);
+    drop(waiting);
+    let trace = scenario.rules.trace.lock().unwrap();
+    let returned = &trace.ordinary[0];
+    assert_eq!(
+        returned.lower_completed.unwrap().1,
+        OrdinaryOutcome::NoResponse
+    );
+    assert!(returned.observer_completed.is_some() && returned.observer_dropped.is_none());
+    let abandoned = &trace.ordinary[1];
+    assert!(abandoned.lower_completed.is_none() && abandoned.observer_completed.is_none());
+    assert!(abandoned.observer_dropped.is_some());
+}
+
+#[test]
+fn ordinary_trace_retains_only_byte_count_after_a_reply_then_outer_waiter_is_lost() {
+    struct Payload(Arc<AtomicBool>, [u8; 4]);
+    impl AsRef<[u8]> for Payload {
+        fn as_ref(&self) -> &[u8] {
+            &self.1
+        }
+    }
+    impl Drop for Payload {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let scenario = Scenario::new(false);
+    let dropped = Arc::new(AtomicBool::new(false));
+    let answer = Ok(Bytes::from_owner(Payload(dropped.clone(), [9; 4])));
+    let observation = scenario
+        .rules
+        .observe_ordinary(0, scenario.rules.peers[1], 19);
+    observation.lower(&answer);
+    drop(answer);
+    assert!(
+        dropped.load(Ordering::Acquire),
+        "trace must not retain the reply payload"
+    );
+    drop(observation); // Mirrors cancellation during the intentional post-response delay.
+    let trace = scenario.rules.trace.lock().unwrap();
+    let row = trace.ordinary.back().unwrap();
+    assert_eq!(row.lower_completed.unwrap().1, OrdinaryOutcome::Reply(4));
+    assert!(row.observer_dropped.is_some() && row.observer_completed.is_none());
+}
+
+/// Test observations only. These fixed codes retain no payload, address or arbitrary driver
+/// error string. A received reply is distinct from its eventual return through injected delay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OrdinaryOutcome {
+    Reply(usize),
+    Unreachable,
+    Timeout,
+    Closed,
+    NoResponse,
+    Cancelled,
+    InvalidDialBatch,
+}
+pub(super) struct OrdinaryRequest {
+    id: u64,
+    phase: u64,
+    from: usize,
+    to: usize,
+    kind: u8,
+    began: u64,
+    lower_completed: Option<(u64, OrdinaryOutcome)>,
+    observer_completed: Option<u64>,
+    observer_dropped: Option<u64>,
+}
+impl std::fmt::Debug for OrdinaryRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OrdinaryRequest")
+            .field("id", &self.id)
+            .field("phase", &self.phase)
+            .field("from_client", &(self.from + 1))
+            .field("to_client", &(self.to + 1))
+            .field("kind", &self.kind)
+            .field("began_mono_ms", &self.began)
+            .field(
+                "lower_elapsed_and_outcome",
+                &self
+                    .lower_completed
+                    .map(|(at, outcome)| (at.saturating_sub(self.began), outcome)),
+            )
+            .field(
+                "observer_completed_after_ms",
+                &self
+                    .observer_completed
+                    .map(|at| at.saturating_sub(self.began)),
+            )
+            .field(
+                "observer_dropped_after_ms",
+                &self
+                    .observer_dropped
+                    .map(|at| at.saturating_sub(self.began)),
+            )
+            .finish()
+    }
+}
+
+/// The observer follows the OUTER test adapter future, not the driver's stream. Dropping it
+/// records waiter loss only; it cannot cancel native custody or claim a transport terminal.
+struct OrdinaryObservation {
+    rules: Arc<NetworkRules>,
+    id: u64,
+    completed: bool,
+}
+impl OrdinaryObservation {
+    fn lower(&self, answer: &Result<Bytes, TransportError>) {
+        let outcome = match answer {
+            Ok(bytes) => OrdinaryOutcome::Reply(bytes.len()),
+            Err(TransportError::Unreachable(_)) => OrdinaryOutcome::Unreachable,
+            Err(TransportError::Timeout(_)) => OrdinaryOutcome::Timeout,
+            Err(TransportError::Closed) => OrdinaryOutcome::Closed,
+            Err(TransportError::NoResponse) => OrdinaryOutcome::NoResponse,
+            Err(TransportError::Cancelled) => OrdinaryOutcome::Cancelled,
+            Err(TransportError::InvalidDialBatch) => OrdinaryOutcome::InvalidDialBatch,
+        };
+        let now = SystemClock.monotonic_ms();
+        if let Some(row) = self
+            .rules
+            .trace
+            .lock()
+            .unwrap()
+            .ordinary
+            .iter_mut()
+            .find(|row| row.id == self.id)
+        {
+            row.lower_completed = Some((now, outcome));
+        }
+    }
+    fn complete(mut self) {
+        let now = SystemClock.monotonic_ms();
+        if let Some(row) = self
+            .rules
+            .trace
+            .lock()
+            .unwrap()
+            .ordinary
+            .iter_mut()
+            .find(|row| row.id == self.id)
+        {
+            row.observer_completed = Some(now);
+        }
+        self.completed = true;
+    }
+}
+impl Drop for OrdinaryObservation {
+    fn drop(&mut self) {
+        if !self.completed {
+            let now = SystemClock.monotonic_ms();
+            if let Some(row) = self
+                .rules
+                .trace
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .ordinary
+                .iter_mut()
+                .find(|row| row.id == self.id)
+            {
+                row.observer_dropped = Some(now);
+            }
+        }
+    }
+}
+
+#[test]
+fn ordinary_trace_drop_preserves_an_original_failure_after_trace_poisoning() {
+    let scenario = Scenario::new(false);
+    let observation = scenario
+        .rules
+        .observe_ordinary(0, scenario.rules.peers[1], 19);
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _held = scenario.rules.trace.lock().unwrap();
+        panic!("injected original diagnostic assertion");
+    }));
+    assert!(poisoned.is_err());
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(observation))).is_ok());
+    let trace = scenario
+        .rules
+        .trace
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert!(trace.ordinary.back().unwrap().observer_dropped.is_some());
+}
+
 #[derive(Default)]
 pub(super) struct Trace {
+    phase: u64,
+    next_ordinary: u64,
+    /// Ring truncation is explicit; this never claims a complete lifetime network trace.
+    pub ordinary_evicted: usize,
+    pub ordinary: std::collections::VecDeque<OrdinaryRequest>,
+    pub phases: std::collections::VecDeque<(u64, u64, String)>,
+    /// phase/client1/monotonic time/message count/original-op count. Sample only changes
+    /// from the existing exact oracle; no extra actor command or recovery work is introduced.
+    pub history_samples: std::collections::VecDeque<(u64, usize, u64, usize, usize)>,
+    history_last: [Option<(u64, usize, usize)>; 6],
     pub connections: BTreeSet<(usize, usize)>,
     pub received_requests: BTreeSet<(usize, usize)>,
     pub received_kinds: BTreeMap<(usize, usize, u8), usize>,
@@ -54,6 +299,71 @@ pub(super) fn forbidden(left: usize, right: usize) -> bool {
 }
 
 impl NetworkRules {
+    pub fn observe_history(&self, client: usize, messages: usize, operations: usize) {
+        let now = SystemClock.monotonic_ms();
+        let mut trace = self.trace.lock().unwrap();
+        let phase = trace.phase;
+        let sample = (phase, messages, operations);
+        if trace.history_last[client] == Some(sample) {
+            return;
+        }
+        trace.history_last[client] = Some(sample);
+        if trace.history_samples.len() == ORDINARY_TRACE_LIMIT {
+            trace.history_samples.pop_front();
+        }
+        trace
+            .history_samples
+            .push_back((phase, client + 1, now, messages, operations));
+    }
+    pub fn begin_phase(&self, label: &str) {
+        let now = SystemClock.monotonic_ms();
+        let mut trace = self.trace.lock().unwrap();
+        trace.phase = trace.phase.checked_add(1).expect("bounded fixture phases");
+        let phase = trace.phase;
+        if trace.phases.len() == PHASE_TRACE_LIMIT {
+            trace.phases.pop_front();
+        }
+        trace
+            .phases
+            .push_back((phase, now, label.chars().take(96).collect()));
+    }
+
+    fn observe_ordinary(
+        self: &Arc<Self>,
+        from: usize,
+        peer: PeerId,
+        kind: u8,
+    ) -> OrdinaryObservation {
+        let to = self.index(peer);
+        let now = SystemClock.monotonic_ms();
+        let mut trace = self.trace.lock().unwrap();
+        trace.next_ordinary = trace
+            .next_ordinary
+            .checked_add(1)
+            .expect("bounded fixture request count");
+        let id = trace.next_ordinary;
+        let phase = trace.phase;
+        if trace.ordinary.len() == ORDINARY_TRACE_LIMIT {
+            trace.ordinary.pop_front();
+            trace.ordinary_evicted += 1;
+        }
+        trace.ordinary.push_back(OrdinaryRequest {
+            id,
+            phase,
+            from,
+            to,
+            kind,
+            began: now,
+            lower_completed: None,
+            observer_completed: None,
+            observer_dropped: None,
+        });
+        OrdinaryObservation {
+            rules: self.clone(),
+            id,
+            completed: false,
+        }
+    }
     fn index(&self, peer: PeerId) -> usize {
         self.peers
             .iter()
@@ -189,8 +499,16 @@ impl MeshTransport for Transport {
         proto: ProtocolId,
         data: Bytes,
     ) -> Result<Bytes, TransportError> {
-        self.completed(peer, self.inner.request(peer, proto, data).await)
-            .await
+        // Queued document recovery (kind19) uses this ordinary request path, NOT the
+        // connected-cancellable maintenance counters. Observe both sides of injected delay.
+        let observation =
+            self.rules
+                .observe_ordinary(self.index, peer, data.first().copied().unwrap_or(0));
+        let answer = self.inner.request(peer, proto, data).await;
+        observation.lower(&answer);
+        let answer = self.completed(peer, answer).await;
+        observation.complete();
+        answer
     }
     async fn request_connected(
         &self,

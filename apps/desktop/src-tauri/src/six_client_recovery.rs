@@ -543,7 +543,10 @@ impl Scenario {
             observe(running.actor.member_routes()),
         );
         let history = history.map_or_else(|| "history actor/snapshot probe exceeded 500ms".to_owned(), |history| {
-            let missing_messages: Vec<_> = expected.messages.keys().filter(|id| !history.messages.contains_key(*id)).collect();
+            // Fixed fixture labels/author identities identify which partition's operation is
+            // missing. Cap observations; never dump signed payloads or unbounded history.
+            let missing_messages: Vec<_> = expected.messages.iter().filter(|(id, _)| !history.messages.contains_key(*id))
+                .take(4).map(|(id, (author, label))| (id, author, label.chars().take(80).collect::<String>())).collect();
             let unexpected_messages: Vec<_> = history.messages.keys().filter(|id| !expected.messages.contains_key(*id)).collect();
             let changed_messages: Vec<_> = expected.messages.iter().filter(|(id, value)| history.messages.get(*id).is_some_and(|actual| actual != *value)).map(|(id, _)| id).collect();
             let missing_operations: Vec<_> = expected.operations.keys().filter(|id| !history.operations.contains_key(*id)).map(hex::encode).collect();
@@ -588,11 +591,16 @@ impl Scenario {
 
     async fn converge_in(&self, channel: u128, indices: &[usize], expected: &History, phase: &str) {
         eprintln!("six-client phase: {phase}");
+        self.rules.begin_phase(phase);
         tokio::select! {
             _ = async {
                 loop {
                     let mut complete = true;
-                    for index in indices { complete &= self.online(*index).history_in(channel).await == *expected; }
+                    for index in indices {
+                        let history = self.online(*index).history_in(channel).await;
+                        self.rules.observe_history(*index, history.messages.len(), history.operations.len());
+                        complete &= history == *expected;
+                    }
                     if complete { break; }
                     SystemClock.sleep(Duration::from_millis(100)).await;
                 }
@@ -606,7 +614,7 @@ impl Scenario {
                 }
                 let trace = {
                     let trace = self.rules.trace.lock().unwrap();
-                    format!("received_kinds={:?}; connected_submissions={:?}; peer_dials={:?}", trace.received_kinds, trace.connected_submissions, trace.peer_dials)
+                    format!("received_kinds={:?}; connected_maintenance_submissions={:?}; peer_dials={:?}; phases={:?}; history_samples_phase_client1_mono_messages_ops={:?}; ordinary_last_192_evicted={}; ordinary_requests={:?}", trace.received_kinds, trace.connected_submissions, trace.peer_dials, trace.phases, trace.history_samples, trace.ordinary_evicted, trace.ordinary)
                 }; // Release the diagnostic mutex before panic; secondary tasks retain usable logs.
                 panic!("{phase} failed exact ID/author/text/original-signed-operation convergence; expected_messages={} expected_ops={} recipients={actual:?}; {trace}",
                     expected.messages.len(), expected.operations.len());
