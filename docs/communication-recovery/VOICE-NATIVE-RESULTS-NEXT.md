@@ -2,14 +2,15 @@
 
 ## Current continuation (21 October)
 
-Published checkpoint is `dbb8d36b`. Active uncommitted work is in
+Published checkpoint is `71d11284`; reviewed file-fixture correction is `7609b66b`. Active work is in
 target/communication-framed-handoff-worktree. The native fixed framing codec and pure browser
 metadata counterpart now pass13 actual-native and8 real-WebCrypto tests, including shared
 fixed bidirectional vectors at maximum Data sizes and exact u64 sequences. Full frontend
 passes2,305 tests, Svelte zero errors/warnings and production build36.06s. Codec-only static
 re-review has no remaining findings. Complete Windows native passes515 library plus five ACL
 tests, check/build/startup and strict native Clippy/format pass; all100 focused native voice
-tests pass. Current-delta complete Root and hosted Linux/context gates are not yet established.
+tests pass. Current-delta complete Root and hosted Linux native gates are not yet established;
+the hosted71d11284 Docker context audit passes.
 
 The current internal native factory worker wires actual selected-owner/actor registration,
 original UI-generation ordering and separately paid completed-output custody. Its six focused
@@ -22,7 +23,11 @@ Published-head Linux membership recovery and the native Studio mutation gate hav
 The continuation strengthens original admission to wait for the actual sealed3->1 route needed
 by the membership restart topology, adds bounded saved-route/dial observations, and corrects
 the mutation's expected assertion marker without loosening security checks. Focused Windows
-chat-matrix scenarios pass; corrected full/mutation execution and Linux confirmation are pending.
+chat-matrix scenarios pass; the corrected mutation gate passes389.75s. A subsequent full run
+exposed C's file directory arriving before B's queued copy was applied. Requiring both exact
+catalogs within the original30-second barrier preserves all bridge/byte/restart oracles. All
+seven file scenarios pass44.56s; final native passes515+5ACL (521.62s), check/strict Clippy/format
+pass. Fresh complete Root is running serially; Linux native confirmation remains required.
 
 Next connect immutable native/browser bootstrap ownership and actual framed action input,
 result, exact receipt ACK, settlement, browser closure and final delivery collection. Do not

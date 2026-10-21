@@ -2,9 +2,9 @@
 
 ## Native framed handoff continuation (21 October, in progress)
 
-Published checkpoint is `dbb8d36b` (validated runtime `fef81f48`). New work is isolated in
+Published checkpoint is `71d11284`; the next file-fixture correction is `7609b66b`. Work is isolated in
 target/communication-framed-handoff-worktree; the validated activation worktree stays frozen.
-The current delta is not yet a full-suite-validated or published checkpoint.
+Native/frontend validation is complete on this source; fresh Root and hosted confirmation remain open.
 
 The disabled native framing candidate now uses a fresh injected RNG seed, directional HKDF/
 HMAC/AES-GCM, canonical40-byte headers and144-character admission values. One prepaid physical
@@ -29,8 +29,9 @@ allowance and retains its credit through actual output collection. Six actual-na
 tests pass (0.78s after4m41s compile). Successful proven-pair Actor registration remains unproved
 while ordinary V2 ingress is disabled. Codec/factory read-only re-review has no remaining findings.
 The reviewer found a test-only readiness wait that could hang on panic; a oneshot now wakes it
-with an error. On that correction the complete Windows native suite passes515 library plus five
-ACL tests (667.92s gate), check/build/startup pass, and all100 focused native voice tests pass.
+with an error. The corrected final Windows native suite passes515 library plus five ACL tests
+(518.49s library;521.62s gate), check19.73s, strict native Clippy10.42s and formatting0.78s pass.
+Executable build274.05s/startup6.20s passed on unchanged production runtime; all100 focused native voice tests pass.
 Strict native Clippy and formatting pass on the final fixture location and documented local
 lint attributes; no security or runtime behavior was changed to silence lint. All ten rendered
 flows pass with normal Windows access after the sandbox CDP connection failed. Root manifests,
@@ -46,9 +47,20 @@ actor progress. Both focused chat-matrix scenarios pass on Windows (74.13s tests
 Static review confirms the prerequisite gap, but a Linux rerun is still required; it is not
 established as the only cause. The Studio mutation now recognizes the exact original-context
 diagnostic assertion as well as conversion failure, retaining strict failure-count checks and
-byte-for-byte restoration. Corrected mutation and complete native gates are running serially.
-Fresh full Root execution and Docker context acceptance remain pending; the local Docker daemon
-is unavailable. Published Root CI is still running. No complete-programme sign-off is made.
+byte-for-byte restoration. Both injected failures and restored cases pass the mutation gate
+(389.75s). The subsequent full native run exposed another fixture ordering race: C's file
+directory could arrive before B applied its queued copy (B plan None vs expected150000 bytes).
+The existing30-second barrier now observes both exact catalogs before the unchanged bridge,
+private-storage, restart and byte oracles. All seven file scenarios pass44.56s; reviewed final
+native rerun passes as above. The failed514/1 run is retained, not accepted evidence.
+
+All24 final source hashes are frozen. A fresh complete Root run is now executing serially after
+native, with separate logs under target/voice-frame-root-*. Only three disposable construction-
+test fingerprint result markers were invalidated so that source-reading gate scans this checkout;
+no artifacts/worktrees were cleaned. Root formatting, ambient and all four dependency categories
+pass freshly. Sandboxed WSL/advisory-lock attempts failed; Git Bash/normal-access retries passed.
+The local Docker daemon is unavailable, but hosted71d11284 context audit passes. Hosted Linux
+native and full Root results remain pending. No complete-programme sign-off is made.
 
 Still open: native/browser bootstrap ownership and actual framed result/ACK/settlement delivery,
 whole-chain native/browser admission, confirmation-to-SDP capacity transfer, epoch replacement,

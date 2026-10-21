@@ -2,7 +2,7 @@
 
 ## Framed handoff continuation (21 October, acceptance still open)
 
-Published checkpoint is `dbb8d36b`; this continuation is isolated in
+Published checkpoint is `71d11284`; reviewed file-fixture correction is `7609b66b`. Work is isolated in
 target/communication-framed-handoff-worktree. The disabled native codec prepays one physical
 position through header/body/reply/completed-output ownership, authenticates canonical metadata
 before body allocation/counter debit, and never refunds admitted failed or lost flights.
@@ -17,14 +17,19 @@ capacity before actor work, pending duplicates, canceled callers, lock ordering 
 uncollected error ownership. Successful proven-pair Actor registration remains unproved through
 normal disabled ingress. Static review/re-review has no remaining findings in this boundary.
 
-Complete Windows native passes515 library plus five ACL tests (667.92s gate); native check,
+Complete final Windows native passes515 library plus five ACL tests (518.49s tests;521.62s gate);
+native check19.73s, strict Clippy10.42s and formatting0.78s pass. The earlier native check,
 executable build274.05s and actual startup6.20s pass. Final100 focused voice tests, strict native
 Clippy and formatting pass after lint-only attributes and vector relocation. Four strict-lint
 findings were corrected with documented local attributes preserving prepaid inline custody and
 existing command signatures. Frontend passes2,305, Svelte zero errors/warnings, production build
 36.06s and all ten rendered Edge flows pass. The sandbox CDP attempt failed; the unchanged flow
 gate passes with normal Windows access. Root's621 source/manifest/script inputs are identical
-to the frozen3,226-pass checkpoint, but fresh complete Root execution is still pending.
+to the frozen3,226-pass checkpoint; fresh complete Root is now running serially after native.
+Root formatting, ambient and all four dependency categories pass freshly. Normal-access Git
+Bash/advisory-lock retries passed after sandboxed WSL/Cargo-lock failures. All24 final source
+hashes are frozen; only three disposable construction-test fingerprint result markers were
+invalidated to force the source-reading test to scan this checkout. No cache tree was cleaned.
 
 Hosted `dbb8d36b` is not green: Linux native membership recovery fails with both returning peers
 disconnected, and the native Studio mutation gate fails its expected assertion marker. The
@@ -34,9 +39,14 @@ submitted dial observations without injecting restore hints or extending deadlin
 focused Windows chat-matrix cases pass (74.13s tests;146.60s gate). Static tracing confirms the
 fixture gap, not that it is the sole Linux cause. The Studio mutation marker now includes the
 exact diagnostic assertion reached by a recreated context, preserving exact expected errors,
-one intended failing test and byte-for-byte restoration. Corrected mutation/full native gates
-are running; hosted Linux confirmation remains required. The local Docker daemon is unavailable,
-so the new exact public-vector context allowlist and context assertion await actual CI execution.
+one intended failing test and byte-for-byte restoration. Both injected failures and restored
+cases pass (389.75s). The subsequent full native run failed514/1 at the file bridge's immediate
+manifest assertion: C had received the directory before B applied its independently queued
+copy. The original30-second barrier now observes both exact catalogs before exercising the
+unchanged bridge, private-storage, restart and byte assertions. All seven file scenarios pass
+44.56s, and the final complete native rerun passes as above. Static re-review has no findings.
+Hosted Linux native confirmation remains required. The local Docker daemon is unavailable,
+but the new exact public-vector allowlist and context assertion pass on hosted71d11284.
 
 Native/browser bootstrap, actual framed input/result/ACK/settlement, whole-chain/SDP phase
 transfer, RTC and legacy-mode isolation, live V2, media relay, external destination resume,
