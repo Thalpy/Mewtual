@@ -60,7 +60,7 @@ local exchanges; this construction does not claim forward secrecy against that c
 Existing separate native/experiment dependency-audit findings remain open; Root deny passing
 does not clear them, and this change adds no advisory exemption.
 
-## Current continuation (21 October)
+## Historical framed-handoff continuation (21 October)
 
 Published checkpoint is `71d11284`; reviewed file-fixture correction is `7609b66b`. Active work is in
 target/communication-framed-handoff-worktree. The native fixed framing codec and pure browser
@@ -133,9 +133,9 @@ Required tests include shared Rust/WebCrypto ECDH vectors with leading zeroes; v
 off-curve points; transcript/point/session substitution; distinct native session IDs under
 repeated RNG fixtures; wrong actual selected handle; accepted reply loss; concurrent startup;
 End/lock during computation; and settlement before delayed first admission. Start with a
-harmless authenticated Control exchange before adding Root effects. This design is not an
+harmless authenticated Control exchange before adding Root effects. This design is not a
 validated operational bootstrap, application listener or live V2 call. The candidate above
-implements the internal native setup and awaits compilation/integration.
+implements the internal native setup and awaits application/browser integration.
 
 ## Validated handoff prerequisites (21 October)
 
