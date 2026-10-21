@@ -856,6 +856,200 @@ fn a_failed_check_after_the_link_retries_into_saved_and_recovery_clears_halt_and
 }
 
 #[test]
+fn a_retry_after_an_unconfirmed_link_never_trims_or_claims_a_changed_final_file() {
+    // Review U-M1: the link succeeded, its confirmation failed, and another program changed the
+    // now-visible final file before the retry. The retry must not trim it and must not report
+    // success for content that is not ours.
+    for append in [true, false] {
+        let fx = fixture();
+        let mut store = open(&fx.vault);
+        let (_id, lease) = completed(&mut store);
+        let mut file = started(&mut store, &lease, &fx.downloads);
+        write_all(&mut file);
+        let Publication::Ready(journal) = file.prepare_publication().unwrap() else {
+            panic!();
+        };
+        store
+            .checkpoint_download_export(&lease, file.journal(), &journal)
+            .unwrap();
+        file.checkpointed(journal);
+        assert!(injected(Effect::Check, io::ErrorKind::Other, || file.link()).is_err());
+        let path = fx.downloads.join("notes.txt");
+        file.release_lock_for_test();
+        let mut handle = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let expected = if append {
+            std::io::Seek::seek(&mut handle, SeekFrom::End(0)).unwrap();
+            std::io::Write::write_all(&mut handle, b" appended by the user").unwrap();
+            [CHUNKS.concat(), b" appended by the user".to_vec()].concat()
+        } else {
+            std::io::Write::write_all(&mut handle, b"X").unwrap(); // same length, one byte changed
+            let mut changed = CHUNKS.concat();
+            changed[0] = b'X';
+            changed
+        };
+        drop(handle);
+        assert!(
+            matches!(
+                file.prepare_publication(),
+                Err(ExportError::Halted(ExportHalt::Changed))
+            ),
+            "append={append}"
+        );
+        // A write is refused too: the file may be visible under its final name.
+        drop(file);
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            expected,
+            "every final byte survives"
+        );
+    }
+}
+
+#[test]
+fn a_partial_that_gained_another_name_is_never_written_again() {
+    // Review U-M1: someone hard-linked our partial elsewhere mid-save; those bytes are visible
+    // there now, so the session halts instead of truncating or extending them.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (_id, lease) = completed(&mut store);
+    let mut file = started(&mut store, &lease, &fx.downloads);
+    file.accept(0, CHUNKS[0]).unwrap();
+    let other = fx.downloads.join("someone else's name.bin");
+    fs::hard_link(staging(&fx.downloads), &other).unwrap();
+    assert!(matches!(
+        file.accept(1, CHUNKS[1]),
+        Err(ExportError::Halted(ExportHalt::Changed))
+    ));
+    drop(file);
+    assert_eq!(fs::read(&other).unwrap(), CHUNKS[0], "nothing was written");
+}
+
+#[test]
+fn a_matching_final_identity_is_not_saved_until_its_content_is_verified() {
+    // Review U-M2: the full checkpoint is durable and the app stops before the link. A local
+    // program rewrites or truncates the partial in place (same identity), then links or renames it
+    // to the final name. Neither the probe nor a reopen may report it saved.
+    #[derive(Debug, Clone, Copy)]
+    enum Tamper {
+        SameLength,
+        Shortened,
+    }
+    for (tamper, rename) in [
+        (Tamper::SameLength, false),
+        (Tamper::Shortened, false),
+        (Tamper::SameLength, true),
+    ] {
+        let fx = fixture();
+        let mut store = open(&fx.vault);
+        let (id, lease) = completed(&mut store);
+        let mut file = started(&mut store, &lease, &fx.downloads);
+        write_all(&mut file);
+        let Publication::Ready(journal) = file.prepare_publication().unwrap() else {
+            panic!();
+        };
+        store
+            .checkpoint_download_export(&lease, file.journal(), &journal)
+            .unwrap();
+        drop(file); // stop before the link
+        let partial = staging(&fx.downloads);
+        let mut handle = fs::OpenOptions::new().write(true).open(&partial).unwrap();
+        match tamper {
+            Tamper::SameLength => std::io::Write::write_all(&mut handle, b"X").unwrap(),
+            Tamper::Shortened => handle.set_len(3).unwrap(),
+        }
+        drop(handle);
+        let final_path = fx.downloads.join("notes.txt");
+        if rename {
+            fs::rename(&partial, &final_path).unwrap();
+        } else {
+            fs::hard_link(&partial, &final_path).unwrap();
+        }
+        let tampered = fs::read(&final_path).unwrap();
+        drop(store);
+        let mut store = open(&fx.vault);
+        let ExportProbe::Published(candidate) = ExportFile::probe(&journal) else {
+            panic!("the identity matches, so this is only a candidate ({tamper:?})");
+        };
+        assert!(matches!(
+            candidate.verify(&export_plan()),
+            Err(ExportError::Halted(ExportHalt::Changed))
+        ));
+        let lease = reverified(&mut store, id);
+        assert!(matches!(
+            ExportFile::reopen(&journal, export_plan()).unwrap(),
+            ExportReopen::Halt(ExportHalt::Changed)
+        ));
+        assert_eq!(fs::read(&final_path).unwrap(), tampered, "never repaired");
+        assert!(matches!(state(&store, id), ExportState::Writing(_)));
+        let _ = lease;
+    }
+}
+
+#[test]
+fn a_straddling_chunk_inside_the_checkpoint_must_match_before_any_rewrite() {
+    // Review L1: the checkpoint covers chunk 0, but the file is now 3 bytes that do not match.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (id, lease) = completed(&mut store);
+    let mut file = started(&mut store, &lease, &fx.downloads);
+    file.accept(0, CHUNKS[0]).unwrap();
+    let checkpoint = file.checkpoint().unwrap();
+    store
+        .checkpoint_download_export(&lease, file.journal(), &checkpoint)
+        .unwrap();
+    drop(file);
+    let mut handle = fs::OpenOptions::new()
+        .write(true)
+        .open(staging(&fx.downloads))
+        .unwrap();
+    handle.set_len(0).unwrap();
+    std::io::Write::write_all(&mut handle, b"zzz").unwrap();
+    drop(handle);
+    drop(store);
+    let mut store = open(&fx.vault);
+    let lease = reverified(&mut store, id);
+    let ExportReopen::Ready(mut file) = ExportFile::reopen(&checkpoint, export_plan()).unwrap()
+    else {
+        panic!();
+    };
+    assert!(matches!(
+        file.accept(0, CHUNKS[0]),
+        Err(ExportError::Halted(ExportHalt::Changed))
+    ));
+    drop(file);
+    assert_eq!(
+        fs::read(staging(&fx.downloads)).unwrap(),
+        b"zzz",
+        "bytes intact"
+    );
+    let _ = lease;
+}
+
+#[cfg(windows)]
+#[test]
+fn an_occupied_final_name_that_cannot_be_opened_is_numbered_around() {
+    // Review L8: a file another program holds without sharing occupies the final name.
+    use std::os::windows::fs::OpenOptionsExt;
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (_id, lease) = completed(&mut store);
+    let mut file = started(&mut store, &lease, &fx.downloads);
+    write_all(&mut file);
+    fs::write(fx.downloads.join("notes.txt"), b"held elsewhere").unwrap();
+    let holder = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(fx.downloads.join("notes.txt"))
+        .unwrap();
+    let Publication::Ready(journal) = file.prepare_publication().unwrap() else {
+        panic!();
+    };
+    assert_eq!(journal.final_leaf, "notes (1).txt");
+    drop(holder);
+    drop(file);
+}
+
+#[test]
 fn disk_full_while_writing_persists_nothing_and_a_later_attempt_completes() {
     let fx = fixture();
     let mut store = open(&fx.vault);
@@ -985,9 +1179,12 @@ fn crash_between_link_and_published_recovers_to_saved_without_a_second_copy() {
     drop(file); // crash before Published
     drop(store);
     let mut store = open(&fx.vault);
-    let ExportProbe::Published(path) = ExportFile::probe(&journal) else {
+    let ExportProbe::Published(candidate) = ExportFile::probe(&journal) else {
         panic!("the published final name is found before any re-verification");
     };
+    let path = candidate
+        .verify(&export_plan())
+        .expect("the genuine saved file passes read-only verification");
     store.recover_download_export(id, &journal).unwrap();
     assert_eq!(view(&store), ExportView::Published);
     assert!(

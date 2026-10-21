@@ -616,8 +616,6 @@ where
 /// the encrypted copy.
 pub(super) enum Preflight {
     Continue,
-    /// The final name already holds our file (crash after the link): recorded as saved.
-    Saved(PathBuf),
 }
 
 /// Destination preflight for Resume. Records a halt or a recovered publication by exact journal
@@ -635,17 +633,10 @@ pub(super) async fn resume_preflight(
     let probe = journal.clone();
     match blocking(move || ExportFile::probe(&probe)).await? {
         ExportProbe::Ready => Ok(Preflight::Continue),
-        ExportProbe::Published(path) => {
-            actor
-                .download_export_edge(
-                    id,
-                    journal,
-                    DownloadExportEdge::RecoverPublished,
-                    origin.clone(),
-                )
-                .await?;
-            Ok(Preflight::Saved(path))
-        }
+        // The final name holds our identity, but its content is unproven (review U-M2) and this
+        // preflight has no plan to verify it against. Continue: after re-verification the reopen
+        // verifies it read-only against the manifest and only then records Published.
+        ExportProbe::Published(_candidate) => Ok(Preflight::Continue),
         ExportProbe::Halt(halt) => Err(record_halt(actor, id, journal, halt, origin).await),
         ExportProbe::Local(reason) => Err(format!("Saving to Downloads failed: {reason}")),
     }
@@ -769,24 +760,7 @@ pub(super) async fn prepare_resume(
         notice = left;
         intent
     } else {
-        if let Preflight::Saved(path) = resume_preflight(actor, id, origin).await? {
-            let saved = finish_saved_read_if(
-                state,
-                generation,
-                origin,
-                &path,
-                "application/octet-stream",
-                exported_media_validation,
-                reveal_path,
-                || !origin.is_cancelled(),
-            )
-            .await?;
-            let _ = remove_download(state, server, instance, generation, actor, id, false).await;
-            return Ok(Prepared {
-                saved: Some(saved),
-                notice: None,
-            });
-        }
+        let Preflight::Continue = resume_preflight(actor, id, origin).await?;
         expected_intent
     };
     commit_kept_command(

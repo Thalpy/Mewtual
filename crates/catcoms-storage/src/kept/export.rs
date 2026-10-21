@@ -804,11 +804,67 @@ pub struct ExportPresence(Weak<()>);
 /// Result of a preflight that retains no handle and modifies nothing.
 pub enum ExportProbe {
     Ready,
-    /// The final name already holds our file (crash after the link, before Published).
-    Published(PathBuf),
+    /// The final name holds our file's identity (crash after the link, before Published). Its
+    /// content is not yet proven; see [`SavedCandidate`].
+    Published(SavedCandidate),
     Halt(ExportHalt),
     /// A transient failure; nothing is known either way.
     Local(String),
+}
+
+/// The final name holds the identity of the partial this journal created, but identity says
+/// nothing about content: a local program could rewrite or truncate the partial in place (same
+/// identity) and then link or rename it to the final name (review U-M2). Only
+/// [`SavedCandidate::verify`] against the saved plan, reading the file and changing nothing,
+/// turns it into a saved path that may be recorded as Published.
+pub struct SavedCandidate {
+    path: PathBuf,
+    file_id: FileIdentity,
+}
+impl std::fmt::Debug for SavedCandidate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SavedCandidate { .. }")
+    }
+}
+impl SavedCandidate {
+    /// Read-only: the file at the final name must still be our object, exactly `plan`'s length,
+    /// and hash to `plan`'s plaintext CID. A mismatch is `Halted(Changed)`, keeping the external
+    /// bytes and the private record; it is never repaired or truncated.
+    pub fn verify(self, plan: &ExportPlan) -> Result<PathBuf, ExportError> {
+        let mut file = match external::open_leaf(&self.path, false).map_err(local)? {
+            Leaf::Opened(file, observed) if observed.identity == self.file_id => file,
+            _ => return Err(ExportError::Halted(ExportHalt::Changed)),
+        };
+        if content_matches(&mut file, plan).map_err(local)? {
+            Ok(self.path)
+        } else {
+            Err(ExportError::Halted(ExportHalt::Changed))
+        }
+    }
+}
+
+/// Read `file` from the start and compare it with the plan: exact length, whole plaintext CID.
+/// Nothing is written.
+fn content_matches(file: &mut File, plan: &ExportPlan) -> io::Result<bool> {
+    if file.metadata()?.len() != plan.total {
+        return Ok(false);
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let mut hasher = CidHasher::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    let mut seen = 0u64;
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        seen += read as u64;
+        if seen > plan.total {
+            return Ok(false);
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(seen == plan.total && hasher.cid() == plan.cid)
 }
 
 /// Result of reopening a saved journal for writing.
@@ -1183,6 +1239,10 @@ pub struct ExportFile {
     durable: u64,
     /// Set at the first byte the session writes; verification never resumes after that.
     diverged: bool,
+    /// Set just before the publication link is attempted (review U-M1). From then on the file may
+    /// already be visible under its final name, so the session only verifies, never trims or
+    /// writes, even if the link reported an error or its confirmation failed.
+    linked: bool,
     hasher: CidHasher,
     presence: Arc<()>,
 }
@@ -1347,7 +1407,10 @@ impl ExportFile {
         // here, before any allowance is spent. Nothing is written through this handle.
         match locate(journal, true) {
             Ok(Located::Ready(..)) => ExportProbe::Ready,
-            Ok(Located::Published(path)) => ExportProbe::Published(path),
+            Ok(Located::Published(path)) => ExportProbe::Published(SavedCandidate {
+                path,
+                file_id: journal.file_id,
+            }),
             Ok(Located::Halt(halt)) => ExportProbe::Halt(halt),
             Err(ExportError::Halted(halt)) => ExportProbe::Halt(halt),
             Err(error) => ExportProbe::Local(error.to_string()),
@@ -1357,10 +1420,23 @@ impl ExportFile {
     /// Reopen a saved partial for writing. A final name that became occupied is replaced at
     /// publication by a numbered name derived from the journal's own staging name, so nothing
     /// from this invocation (such as today's listed file name) can redirect it.
+    ///
+    /// A final name already holding our identity is returned as `Published` only after its
+    /// content was verified read-only against `plan` (review U-M2); otherwise it is `Changed`.
     pub fn reopen(journal: &ExportJournal, plan: ExportPlan) -> Result<ExportReopen, ExportError> {
         let (file, folder) = match locate(journal, true)? {
             Located::Ready(file, folder) => (file, folder),
-            Located::Published(path) => return Ok(ExportReopen::Published(path)),
+            Located::Published(path) => {
+                let candidate = SavedCandidate {
+                    path,
+                    file_id: journal.file_id,
+                };
+                return match candidate.verify(&plan) {
+                    Ok(path) => Ok(ExportReopen::Published(path)),
+                    Err(ExportError::Halted(halt)) => Ok(ExportReopen::Halt(halt)),
+                    Err(error) => Err(error),
+                };
+            }
             Located::Halt(halt) => return Ok(ExportReopen::Halt(halt)),
         };
         // The checkpoint must describe whole chunks of THIS manifest; equivalent encrypted
@@ -1394,6 +1470,7 @@ impl ExportFile {
             durable: journal.written_bytes,
             verify_limit: present.min(plan.total),
             diverged: false,
+            linked: false,
             base_name: journal.base_name().to_owned(),
             journal,
             plan,
@@ -1455,6 +1532,32 @@ impl ExportFile {
                 Err(error) => return Err(local(error)),
             }
         }
+        // Review L1: the file ends inside this chunk while part of the chunk lies inside the
+        // durable checkpoint. Those present, acknowledged bytes must match before anything is
+        // rewritten; otherwise this is not the file we checkpointed and nothing is modified.
+        if !self.diverged && self.offset < self.durable {
+            let inside = self
+                .verify_limit
+                .min(self.durable)
+                .saturating_sub(self.offset)
+                .min(plaintext.len() as u64) as usize;
+            if inside > 0 {
+                let mut held = vec![0; inside];
+                self.file
+                    .seek(SeekFrom::Start(self.offset))
+                    .and_then(|_| self.file.read_exact(&mut held))
+                    .map_err(local)?;
+                if held[..] != plaintext[..inside] {
+                    return Err(ExportError::Halted(ExportHalt::Changed));
+                }
+            }
+        }
+        // Review U-M1: never write to a file that has another name. After our own link attempt it
+        // may already be the user's saved file; an extra name we did not make means someone else
+        // can see these bytes. Either way nothing is modified.
+        if self.linked || external::observe(&self.file).map_err(local)?.links != 1 {
+            return Err(ExportError::Halted(ExportHalt::Changed));
+        }
         // From here on this session writes. A file shorter than its checkpoint (torn or lost
         // tail) rewinds to this whole-chunk boundary, which every earlier chunk just verified.
         self.diverged = true;
@@ -1507,12 +1610,41 @@ impl ExportFile {
 
     /// Check the whole plaintext, trim any trailing bytes past the declared size, flush, and
     /// choose the final name. The returned journal must be persisted before [`Self::link`].
+    ///
+    /// Review U-M1: before ANY mutation, find out whether the file may already be visible under
+    /// another name: our own earlier link (a retry after an unconfirmed final-name check, or crash
+    /// row 6) or a name someone else made. Then nothing is trimmed or written: the final name must
+    /// hold our identity and its content is verified read-only, or the save halts as Changed.
     pub fn prepare_publication(&mut self) -> Result<Publication, ExportError> {
         if self.next_index().is_some()
             || self.offset != self.plan.total
             || self.hasher.cid() != self.plan.cid
         {
             return Err(ExportError::Storage(StorageError::Malformed));
+        }
+        let current = self.folder.join(&self.journal.final_leaf);
+        let final_is_ours = match external::open_leaf(&current, false) {
+            Ok(Leaf::Opened(_, observed)) => observed.identity == self.journal.file_id,
+            Ok(_) => false,
+            // Review L8: something we cannot open (permission, a sharing violation) occupies the
+            // name. It cannot be proven ours, so it is someone else's: number around it below
+            // instead of halting on it forever.
+            Err(_) if matches!(external::occupied(&current), Ok(true)) => false,
+            Err(error) => return Err(local(error)),
+        };
+        let links = external::observe(&self.file).map_err(local)?.links;
+        if self.linked || final_is_ours || links != 1 {
+            if !final_is_ours {
+                // Another name exists that is not our final name: someone else can see these
+                // bytes, so this file is not a private partial any more.
+                return Err(ExportError::Halted(ExportHalt::Changed));
+            }
+            // Read through our own handle: the Windows session lock blocks other readers.
+            if !content_matches(&mut self.file, &self.plan).map_err(local)? {
+                return Err(ExportError::Halted(ExportHalt::Changed));
+            }
+            let journal = self.checkpoint()?;
+            return Ok(Publication::AlreadyPublished(journal, current));
         }
         // The plaintext CID covers what this session fed, not the file. A file now shorter than
         // the declared size was truncated by someone else: never publish it (see `accept`).
@@ -1528,13 +1660,12 @@ impl ExportFile {
         })();
         trimmed.map_err(local)?;
         let mut journal = self.checkpoint()?;
-        let current = self.folder.join(&journal.final_leaf);
-        match external::open_leaf(&current, false) {
-            Ok(Leaf::Opened(_, observed)) if observed.identity == journal.file_id => {
-                return Ok(Publication::AlreadyPublished(journal, current));
-            }
-            Ok(Leaf::Missing) => {}
-            Ok(_) => {
+        // Any occupant, including one we cannot open (review L8) and our own identity appearing
+        // only now (between the checks above and here), gets a fresh numbered name, never a claim
+        // of success.
+        match external::occupied(&current) {
+            Ok(false) => {}
+            Ok(true) => {
                 // Occupied by something else since the save started. Choose the next absent
                 // numbered name; it is persisted before any link attempt.
                 let candidate = (0..external::MAX_CANDIDATES)
@@ -1559,7 +1690,7 @@ impl ExportFile {
     /// Publish without replacement. Call only after the [`Publication::Ready`] journal is
     /// persisted, and under the native session commit guard so Remove/Pause/Lock cannot
     /// interleave. The final name is verified to hold our identity; it is never deleted.
-    pub fn link(&self) -> Result<PathBuf, ExportError> {
+    pub fn link(&mut self) -> Result<PathBuf, ExportError> {
         let staging = self.folder.join(&self.journal.staging);
         let target = self.folder.join(&self.journal.final_leaf);
         // Pinned (Windows): until this handle drops after the final-name check, nobody can rename,
@@ -1575,6 +1706,9 @@ impl ExportFile {
             Ok(_) => return Err(ExportError::Halted(ExportHalt::Changed)),
             Err(error) => return Err(local(error)),
         };
+        // From this point the link may exist even if the call below reports an error, so the
+        // session never trims or writes again (see `prepare_publication` and `accept`).
+        self.linked = true;
         match external::link(&staging, &target) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -1607,6 +1741,13 @@ impl ExportFile {
             }
         }
         Ok(target)
+    }
+
+    /// Test-only: drop the session lock so a test can model another program writing through its
+    /// own handle, as an advisory Unix lock would allow.
+    #[cfg(test)]
+    pub(super) fn release_lock_for_test(&self) {
+        self.file.unlock().unwrap();
     }
 
     /// The journal to persist as Published after a successful [`Self::link`].
