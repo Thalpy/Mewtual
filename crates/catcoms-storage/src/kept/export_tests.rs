@@ -779,6 +779,37 @@ fn clearing_a_saved_row_never_changes_the_saved_files_attributes() {
     fs::set_permissions(&path, permissions).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn a_fifo_in_place_of_the_saved_folder_fails_resume_and_remove_promptly() {
+    // Review U-M6: pause, rename the folder, put a FIFO at its old path, then Resume or Remove.
+    // Unix-only and compile-unverified on the Windows development host.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (id, lease) = completed(&mut store);
+    let mut file = started(&mut store, &lease, &fx.downloads);
+    file.accept(0, CHUNKS[0]).unwrap();
+    let journal = file.journal().clone();
+    drop(file);
+    fs::rename(&fx.downloads, fx.downloads.with_file_name("Moved")).unwrap();
+    if !external::tests::mkfifo(&fx.downloads) {
+        eprintln!("skipping: mkfifo is unavailable");
+        return;
+    }
+    let probed = journal.clone();
+    assert!(matches!(
+        external::tests::bounded(move || ExportFile::probe(&probed)),
+        ExportProbe::Halt(ExportHalt::Unavailable)
+    ));
+    let ExportState::Writing(saved) = store.cancel_download(id).unwrap().unwrap() else {
+        panic!();
+    };
+    assert_eq!(
+        external::tests::bounded(move || remove_partial(&saved)).unwrap(),
+        PartialRemoval::FolderUnreachable
+    );
+}
+
 #[test]
 fn removal_reports_every_name_it_leaves_behind() {
     // Review L2. (a) Remove racing publication: the link exists but Published was never

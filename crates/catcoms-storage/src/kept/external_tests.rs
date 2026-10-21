@@ -159,6 +159,58 @@ fn a_pinned_leaf_cannot_be_swapped_while_our_own_hard_link_still_works() {
     fs::rename(&staging, folder.join("swapped")).expect("free again once the pin drops");
 }
 
+/// Create a FIFO without `unsafe` (the workspace denies it): the `mkfifo` utility.
+#[cfg(unix)]
+pub(in crate::kept) fn mkfifo(path: &Path) -> bool {
+    std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Run `work` on its own thread and fail (rather than hang the suite) if it does not return
+/// promptly. A regression that blocks on a FIFO leaks that one thread and fails here.
+#[cfg(unix)]
+pub(in crate::kept) fn bounded<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    let (done, wait) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(work());
+    });
+    wait.recv_timeout(std::time::Duration::from_secs(10))
+        .expect("an open blocked on a FIFO")
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_at_a_leaf_or_folder_path_never_blocks_an_open() {
+    // Review L11 and U-M6. Unix-only and compile-unverified on the Windows development host.
+    let dir = tempfile::tempdir().unwrap();
+    let leaf = dir.path().join("notes.txt.mewtual-part");
+    let folder = dir.path().join("Downloads");
+    if !mkfifo(&leaf) || !mkfifo(&folder) {
+        eprintln!("skipping: mkfifo is unavailable");
+        return;
+    }
+    let path = leaf.clone();
+    assert!(matches!(
+        bounded(move || open_leaf(&path, false)),
+        Ok(Leaf::Foreign)
+    ));
+    let path = leaf.clone();
+    assert!(matches!(
+        bounded(move || open_leaf(&path, true)),
+        Ok(Leaf::Foreign)
+    ));
+    let path = folder.clone();
+    let refused = bounded(move || folder_identity(&path));
+    assert!(refused.is_err(), "a FIFO is not a folder");
+    let path = folder.clone();
+    assert!(
+        bounded(move || super::super::persistence::directory_barrier(&path)).is_err(),
+        "the destination flush fails promptly too"
+    );
+}
+
 #[test]
 fn only_name_surrogate_reparse_points_make_a_file_foreign() {
     const DIRECTORY: u64 = 0x10;

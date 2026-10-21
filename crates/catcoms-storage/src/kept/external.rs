@@ -143,6 +143,7 @@ pub(super) struct Observed {
     /// Windows only: the object carries a reparse point that is NOT a name surrogate (a cloud
     /// files placeholder, WOF compression, deduplication). It is still the same plain file, but
     /// its data must be read through a normal handle so the filter can present it.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub reparse: bool,
 }
 
@@ -259,7 +260,18 @@ pub(super) fn folder_identity(folder: &Path) -> io::Result<FileIdentity> {
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
             .open(folder)?
     };
-    #[cfg(not(windows))]
+    // Review U-M6: a directory-only, non-blocking open. A FIFO (or anything else) put at the saved
+    // folder path fails at once with "not a directory" instead of blocking forever, while a
+    // folder-level symlink to a directory is still followed.
+    #[cfg(unix)]
+    let handle = {
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NONBLOCK)
+            .open(folder)?
+    };
+    #[cfg(not(any(windows, unix)))]
     let handle = File::open(folder)?;
     let observed = observe(&handle)?;
     if !observed.directory {
@@ -333,9 +345,24 @@ fn open_leaf_as(path: &Path, write: bool, pinned: bool) -> io::Result<Leaf> {
             options.share_mode(PINNED_SHARE);
         }
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Review L11: a symlink swapped to a FIFO between the lstat above and this open must not
+        // block forever (with Lock waiting behind the commit guard). O_NOFOLLOW refuses a link
+        // at the final component; O_NONBLOCK makes a FIFO open return at once. On a regular
+        // file O_NONBLOCK has no effect on reads or writes.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
     let file = match options.open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Leaf::Missing),
+        // A link (ELOOP under O_NOFOLLOW) or a FIFO without a reader (ENXIO under O_NONBLOCK)
+        // swapped in after the lstat: never ours, and never followed or waited on.
+        #[cfg(unix)]
+        Err(error) if matches!(error.raw_os_error(), Some(libc::ELOOP) | Some(libc::ENXIO)) => {
+            return Ok(Leaf::Foreign)
+        }
         Err(error) => return Err(error),
     };
     let observed = observe(&file)?;

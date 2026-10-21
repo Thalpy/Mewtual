@@ -23,6 +23,13 @@ tokio = { workspace = true, features = ["sync"] }
 # reuses the windows-sys 0.61 already resolved in this workspace.
 winapi-util = "0.1.11"
 
+[target.'cfg(unix)'.dependencies]
+# Open flags std does not name (O_NONBLOCK, O_NOFOLLOW, O_DIRECTORY), passed through std's safe
+# `OpenOptionsExt::custom_flags`, so a FIFO swapped in for a destination file or folder cannot
+# block an open forever (review L11 and U-M6). Constants only, no `unsafe` calls. MIT OR
+# Apache-2.0; already resolved in this workspace at the same version.
+libc = "0.2"
+
 [dev-dependencies]
 rand_chacha = "0.3"
 rand_core = "0.6"
