@@ -1001,7 +1001,7 @@ pub fn remove_partial(journal: &ExportJournal) -> Result<PartialRemoval, ExportE
                 .metadata()
                 .is_ok_and(|metadata| metadata.permissions().readonly());
             drop(file);
-            match remove_proven(&staging, read_only) {
+            match remove_proven(&staging, read_only && observed.links == 1) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => {
@@ -1032,13 +1032,17 @@ pub fn remove_partial(journal: &ExportJournal) -> Result<PartialRemoval, ExportE
 
 /// Delete a staging name already proven ours. Windows refuses to delete a read-only file, so for
 /// a proven partial clear only that attribute and try once more; Unix unlink ignores the mode.
-fn remove_proven(staging: &Path, read_only: bool) -> io::Result<()> {
+/// `may_clear` must be false when the object has any other name: hard links share attributes, so
+/// clearing it would also change the user's saved file. Removal then fails and stays in Removing,
+/// where "Keep partly saved file" remains the escape.
+fn remove_proven(staging: &Path, may_clear: bool) -> io::Result<()> {
     let removed = external::remove(staging);
     #[cfg(windows)]
-    if read_only
+    if may_clear
         && matches!(&removed, Err(error) if error.kind() == io::ErrorKind::PermissionDenied)
     {
-        if let Ok(metadata) = fs::metadata(staging) {
+        // symlink_metadata: never follow a link that replaced the name since the identity check.
+        if let Ok(metadata) = fs::symlink_metadata(staging) {
             let mut permissions = metadata.permissions();
             #[allow(clippy::permissions_set_readonly_false)]
             permissions.set_readonly(false);
@@ -1048,7 +1052,7 @@ fn remove_proven(staging: &Path, read_only: bool) -> io::Result<()> {
         }
     }
     #[cfg(not(windows))]
-    let _ = read_only;
+    let _ = may_clear;
     removed
 }
 
@@ -1524,13 +1528,19 @@ impl ExportFile {
     pub fn link(&self) -> Result<PathBuf, ExportError> {
         let staging = self.folder.join(&self.journal.staging);
         let target = self.folder.join(&self.journal.final_leaf);
-        match external::open_leaf(&staging, false) {
-            Ok(Leaf::Opened(_, observed))
-                if observed.identity == self.journal.file_id && observed.links == 1 => {}
+        // Pinned (Windows): until this handle drops after the final-name check, nobody can rename,
+        // replace or delete the staging file or rename its folder, so the object proven here is
+        // the one the path-based link below names.
+        let _pinned = match external::open_leaf_pinned(&staging) {
+            Ok(Leaf::Opened(pinned, observed))
+                if observed.identity == self.journal.file_id && observed.links == 1 =>
+            {
+                pinned
+            }
             Ok(Leaf::Missing) => return Err(ExportError::Halted(ExportHalt::Unavailable)),
             Ok(_) => return Err(ExportError::Halted(ExportHalt::Changed)),
             Err(error) => return Err(local(error)),
-        }
+        };
         match external::link(&staging, &target) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {

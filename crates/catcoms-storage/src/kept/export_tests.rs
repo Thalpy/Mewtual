@@ -688,6 +688,80 @@ fn a_compressed_or_cloud_tagged_partial_probes_ready_and_is_removed() {
     store.finish_download_cleanup(id).unwrap();
 }
 
+#[cfg(windows)]
+#[test]
+fn publication_pins_the_proven_staging_file_across_the_link() {
+    // Review M3: between the identity check and the path-based link, another program tries to
+    // move our staging file away (and could put its own file there). The pin refuses that.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (_id, lease) = completed(&mut store);
+    let mut file = started(&mut store, &lease, &fx.downloads);
+    write_all(&mut file);
+    let Publication::Ready(journal) = file.prepare_publication().unwrap() else {
+        panic!();
+    };
+    store
+        .checkpoint_download_export(&lease, file.journal(), &journal)
+        .unwrap();
+    file.checkpointed(journal);
+    let swapped = std::rc::Rc::new(std::cell::Cell::new(None));
+    let seen = swapped.clone();
+    let elsewhere = fx.downloads.join("moved away");
+    external::BEFORE_LINK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |from: &Path| {
+            seen.set(Some(fs::rename(from, &elsewhere).is_ok()));
+        }))
+    });
+    let linked = file.link();
+    external::BEFORE_LINK.with(|hook| *hook.borrow_mut() = None);
+    assert_eq!(
+        swapped.get(),
+        Some(false),
+        "the swap was attempted and refused"
+    );
+    let path = linked.unwrap();
+    file.finish();
+    assert_eq!(fs::read(path).unwrap(), CHUNKS.concat());
+}
+
+#[test]
+fn clearing_a_saved_row_never_changes_the_saved_files_attributes() {
+    // Review U-L2: hard links share attributes. A read-only saved file must not lose that
+    // attribute just so the staging name can be removed.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (id, lease) = completed(&mut store);
+    let mut file = started(&mut store, &lease, &fx.downloads);
+    write_all(&mut file);
+    let path = publish(&mut store, &lease, &mut file);
+    drop(file); // both names still present (no finish)
+    let mut permissions = fs::metadata(&path).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&path, permissions).unwrap();
+    let ExportState::Published(saved) = store.cancel_download(id).unwrap().unwrap() else {
+        panic!();
+    };
+    // Model a filesystem that refuses to delete a read-only name (older Windows std did): the
+    // read-only retry must not run for a multiply-linked file, so removal stays in Removing.
+    let refused = injected(Effect::Remove, io::ErrorKind::PermissionDenied, || {
+        remove_partial(&saved)
+    });
+    assert!(refused.is_err(), "removal stays in Removing instead");
+    assert!(staging(&fx.downloads).exists());
+    assert!(fs::metadata(&path).unwrap().permissions().readonly());
+    // Where deletion of the name is allowed, it leaves the shared attributes alone.
+    assert_eq!(remove_partial(&saved).unwrap(), PartialRemoval::KeptSaved);
+    assert!(!staging(&fx.downloads).exists());
+    assert!(fs::metadata(&path).unwrap().permissions().readonly());
+    assert_eq!(fs::read(&path).unwrap(), CHUNKS.concat());
+    // Let the temporary directory clean up.
+    let mut permissions = fs::metadata(&path).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    fs::set_permissions(&path, permissions).unwrap();
+}
+
 #[test]
 fn removal_reports_every_name_it_leaves_behind() {
     // Review L2. (a) Remove racing publication: the link exists but Published was never

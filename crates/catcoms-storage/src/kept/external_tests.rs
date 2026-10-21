@@ -129,6 +129,36 @@ pub(in crate::kept) fn compact_wof(path: &Path) -> bool {
         })
 }
 
+#[cfg(windows)]
+#[test]
+fn a_pinned_leaf_cannot_be_swapped_while_our_own_hard_link_still_works() {
+    // Review M3: publication holds this handle across the path-based hard link.
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("Downloads");
+    fs::create_dir(&folder).unwrap();
+    let staging = folder.join("notes.txt.mewtual-part");
+    drop(create_leaf(&staging).unwrap());
+    let Leaf::Opened(pinned, observed) = open_leaf_pinned(&staging).unwrap() else {
+        panic!();
+    };
+    assert!(
+        fs::rename(&staging, folder.join("swapped")).is_err(),
+        "renaming the pinned file is refused"
+    );
+    assert!(fs::remove_file(&staging).is_err(), "deleting it is refused");
+    assert!(
+        fs::rename(&folder, dir.path().join("Elsewhere")).is_err(),
+        "renaming its folder is refused"
+    );
+    fs::hard_link(&staging, folder.join("notes.txt")).expect("our own link still works");
+    let Leaf::Opened(_, linked) = open_leaf(&folder.join("notes.txt"), false).unwrap() else {
+        panic!();
+    };
+    assert_eq!(linked.identity, observed.identity);
+    drop(pinned);
+    fs::rename(&staging, folder.join("swapped")).expect("free again once the pin drops");
+}
+
 #[test]
 fn only_name_surrogate_reparse_points_make_a_file_foreign() {
     const DIRECTORY: u64 = 0x10;

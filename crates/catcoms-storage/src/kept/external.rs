@@ -30,10 +30,15 @@
 //! itself a junction or symlink is the user's configured location, and its target's identity is
 //! what the journal records and later compares.
 //!
-//! Residual limit (documented in THREAT-MODEL): identity checks and the path-based `hard_link` /
-//! `remove_file` that follow them are separate system calls. A same-user process that swaps files
-//! at exactly that moment can win the race. Such a process already has equivalent authority over
-//! the user's Downloads folder.
+//! Residual limit (documented in THREAT-MODEL): std offers no delete-by-handle, and a handle-based
+//! delete needs `SetFileInformationByHandle`/`unlinkat` through `unsafe`, which the workspace
+//! denies. So deletion, the link-probe cleanup and (on Unix) publication are path-based calls made
+//! after a handle-based identity check. On Windows, publication holds a delete-denying handle on
+//! the staging file across its hard link ([`open_leaf_pinned`]), which closes that window there.
+//! What remains is: removing a proven staging name, removing the link probe, and the Unix
+//! publication link. Anyone with write access to that folder (the same user, or another user of a
+//! shared folder) who swaps the name at exactly that moment can make Mewtual delete or publish
+//! the swapped object.
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -290,6 +295,24 @@ impl std::fmt::Debug for Leaf {
 /// requests write access; cleanup probes use read access so a read-only attribute set by the
 /// user cannot make a proven partial look foreign.
 pub(super) fn open_leaf(path: &Path, write: bool) -> io::Result<Leaf> {
+    open_leaf_as(path, write, false)
+}
+
+/// Like [`open_leaf`] (read access), but on Windows the handle denies delete sharing for as long
+/// as it is open: nobody can rename, replace or delete this file, or rename the folder that
+/// contains it, until it is dropped. Publication holds it across the hard link so the object it
+/// just proved is ours is exactly the object that gains the final name. Our own `hard_link` still
+/// works (it does not ask for delete access). Unix has no share modes; there the check and the
+/// path-based link remain separate calls (documented in THREAT-MODEL).
+pub(super) fn open_leaf_pinned(path: &Path) -> io::Result<Leaf> {
+    open_leaf_as(path, false, true)
+}
+
+#[cfg(windows)]
+const PINNED_SHARE: u32 = 0x1 | 0x2; // FILE_SHARE_READ | FILE_SHARE_WRITE, never FILE_SHARE_DELETE
+
+#[cfg_attr(not(windows), allow(unused_variables))]
+fn open_leaf_as(path: &Path, write: bool, pinned: bool) -> io::Result<Leaf> {
     let linked = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Leaf::Missing),
@@ -306,6 +329,9 @@ pub(super) fn open_leaf(path: &Path, write: bool) -> io::Result<Leaf> {
         // Open a reparse point as itself. If a link replaced our file after the metadata probe
         // above, the handle names the link object, whose identity cannot match the journal.
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        if pinned {
+            options.share_mode(PINNED_SHARE);
+        }
     }
     let file = match options.open(path) {
         Ok(file) => file,
@@ -321,7 +347,13 @@ pub(super) fn open_leaf(path: &Path, write: bool) -> io::Result<Leaf> {
         // A plain file behind a non-surrogate reparse point (cloud placeholder, WOF, dedup). The
         // flagged handle bypasses the filter that presents its data, so do I/O through a normal
         // handle, and require that handle to name the same object.
-        let plain = match OpenOptions::new().read(true).write(write).open(path) {
+        let mut plain = OpenOptions::new();
+        plain.read(true).write(write);
+        if pinned {
+            use std::os::windows::fs::OpenOptionsExt;
+            plain.share_mode(PINNED_SHARE);
+        }
+        let plain = match plain.open(path) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Leaf::Missing),
             Err(error) => return Err(error),
@@ -517,9 +549,22 @@ pub(super) fn inject(effect: Effect) -> io::Result<()> {
     let _ = effect;
     Ok(())
 }
+#[cfg(test)]
+thread_local! {
+    /// Test-only interleaving point just before the path-based hard link: a test models another
+    /// program acting on the source path at exactly that moment.
+    pub(in crate::kept) static BEFORE_LINK: std::cell::RefCell<Option<Box<dyn FnMut(&Path)>>> =
+        std::cell::RefCell::new(None);
+}
 /// No-replace publication primitive: refuses an existing destination on every platform.
 pub(super) fn link(from: &Path, to: &Path) -> io::Result<()> {
     inject(Effect::Link)?;
+    #[cfg(test)]
+    BEFORE_LINK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(from);
+        }
+    });
     fs::hard_link(from, to)
 }
 pub(super) fn remove(path: &Path) -> io::Result<()> {
