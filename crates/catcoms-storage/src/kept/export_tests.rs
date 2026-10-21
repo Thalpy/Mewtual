@@ -117,6 +117,25 @@ fn view(store: &KeptBlobStore<ChaCha20Rng>) -> ExportView {
 fn staging(downloads: &Path) -> PathBuf {
     downloads.join("notes.txt.mewtual-part")
 }
+/// A preflight halt, fenced by a fresh observation as native's preflight would take.
+fn halt(
+    store: &mut KeptBlobStore<ChaCha20Rng>,
+    id: DownloadId,
+    journal: &ExportJournal,
+    halt: ExportHalt,
+) -> Result<(), StorageError> {
+    let (observation, _) = store.download_observation(id)?;
+    store.halt_download_export(ExportFence::Observation(&observation), journal, halt)
+}
+/// A preflight recovery of crash row 6, fenced like [`halt`].
+fn recover(
+    store: &mut KeptBlobStore<ChaCha20Rng>,
+    id: DownloadId,
+    journal: &ExportJournal,
+) -> Result<(), StorageError> {
+    let (observation, _) = store.download_observation(id)?;
+    store.recover_download_export(ExportFence::Observation(&observation), journal)
+}
 fn injected<T>(effect: Effect, kind: io::ErrorKind, run: impl FnOnce() -> T) -> T {
     INJECT.with(|slot| slot.set(Some((effect, kind, 1))));
     let result = run();
@@ -329,9 +348,7 @@ fn checkpoint_claiming_more_than_the_file_rewinds_but_a_changed_byte_inside_it_h
             ));
             drop(file);
             assert_eq!(fs::read(&partial).unwrap(), modified, "nothing is repaired");
-            store
-                .halt_download_export(id, &checkpoint, ExportHalt::Changed)
-                .unwrap();
+            halt(&mut store, id, &checkpoint, ExportHalt::Changed).unwrap();
             assert!(matches!(
                 view(&store),
                 ExportView::Writing {
@@ -508,7 +525,7 @@ fn destination_changes_while_paused_become_typed_halts_without_touching_other_fi
             ),
             "{change:?}"
         );
-        store.halt_download_export(id, &journal, expected).unwrap();
+        halt(&mut store, id, &journal, expected).unwrap();
         // Removal of a halted record never deletes anything it cannot prove is ours, and says
         // which: FolderUnreachable keeps Removing; the others finish, with a notice whenever a
         // file stays on disk.
@@ -839,15 +856,13 @@ fn a_failed_check_after_the_link_retries_into_saved_and_recovery_clears_halt_and
     assert_eq!(again, journal);
     drop(file);
     // Even an older build's halt plus a Pause cannot strand the saved file.
-    store
-        .halt_download_export(id, &journal, ExportHalt::Changed)
-        .unwrap();
+    halt(&mut store, id, &journal, ExportHalt::Changed).unwrap();
     let ExportState::Writing(halted) = state(&store, id) else {
         panic!();
     };
     let intent = store.downloads().unwrap()[0].state.intent;
     store.set_download_paused(id, intent, true).unwrap();
-    store.recover_download_export(id, &halted).unwrap();
+    recover(&mut store, id, &halted).unwrap();
     let saved = store.downloads().unwrap().remove(0);
     assert_eq!(saved.export, ExportView::Published);
     assert!(!saved.state.user_paused);
@@ -903,6 +918,70 @@ fn a_retry_after_an_unconfirmed_link_never_trims_or_claims_a_changed_final_file(
             "every final byte survives"
         );
     }
+}
+
+#[test]
+fn a_stream_that_fails_verification_never_reaches_a_publishable_checkpoint() {
+    // Review L4: every chunk was written, but the stream does not hash to the plan's CID. No
+    // checkpoint may follow, so the saved journal never claims every chunk and recovery refuses.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (id, lease) = completed(&mut store);
+    let file = started(&mut store, &lease, &fx.downloads);
+    let journal = file.journal().clone();
+    drop(file);
+    let ExportReopen::Ready(mut file) = ExportFile::reopen(
+        &journal,
+        ExportPlan {
+            cid: Cid::of(b"some other file"),
+            ..export_plan()
+        },
+    )
+    .unwrap() else {
+        panic!();
+    };
+    write_all(&mut file);
+    assert!(matches!(
+        file.prepare_publication(),
+        Err(ExportError::Storage(StorageError::Malformed))
+    ));
+    assert!(file.checkpoint().is_err(), "no checkpoint after a mismatch");
+    drop(file);
+    assert_eq!(state(&store, id), ExportState::Writing(journal.clone()));
+    assert!(recover(&mut store, id, &journal).is_err());
+}
+
+#[test]
+fn preflight_edges_need_a_current_observation_of_this_mount_and_transfer() {
+    // Review U-M3, storage half: a preflight observation retires with a re-verification, a
+    // removal step or a remount, so a probe released late records nothing.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (id, lease) = completed(&mut store);
+    let mut file = started(&mut store, &lease, &fx.downloads);
+    file.accept(0, CHUNKS[0]).unwrap();
+    let journal = file.journal().clone();
+    drop(file);
+    let (stale, _) = store.download_observation(id).unwrap();
+    let _ = reverified(&mut store, id); // a newer Resume re-verified meanwhile
+    let fence = ExportFence::Observation(&stale);
+    assert!(store
+        .halt_download_export(fence, &journal, ExportHalt::Unavailable)
+        .is_err());
+    assert!(store.recover_download_export(fence, &journal).is_err());
+    let (before_remount, _) = store.download_observation(id).unwrap();
+    drop(store);
+    let mut store = open(&fx.vault);
+    assert!(!before_remount.is_current());
+    assert!(store
+        .halt_download_export(
+            ExportFence::Observation(&before_remount),
+            &journal,
+            ExportHalt::Unavailable
+        )
+        .is_err());
+    assert_eq!(state(&store, id), ExportState::Writing(journal.clone()));
+    halt(&mut store, id, &journal, ExportHalt::Unavailable).expect("a fresh observation works");
 }
 
 #[test]
@@ -1185,7 +1264,7 @@ fn crash_between_link_and_published_recovers_to_saved_without_a_second_copy() {
     let path = candidate
         .verify(&export_plan())
         .expect("the genuine saved file passes read-only verification");
-    store.recover_download_export(id, &journal).unwrap();
+    recover(&mut store, id, &journal).unwrap();
     assert_eq!(view(&store), ExportView::Published);
     assert!(
         !fx.downloads.join("notes (1).txt").exists(),
@@ -1366,9 +1445,7 @@ fn pause_retires_presence_and_lease_and_resume_clears_a_halt_by_intent_change() 
     let (id, lease) = completed(&mut store);
     let file = started(&mut store, &lease, &fx.downloads);
     let journal = file.journal().clone();
-    store
-        .halt_download_export(id, &journal, ExportHalt::Unavailable)
-        .unwrap();
+    halt(&mut store, id, &journal, ExportHalt::Unavailable).unwrap();
     assert!(matches!(
         view(&store),
         ExportView::Writing {

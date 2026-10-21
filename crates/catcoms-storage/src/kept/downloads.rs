@@ -577,14 +577,19 @@ pub trait DownloadStore {
         lease: &DownloadExportLease,
         expected: &ExportJournal,
     ) -> Result<(), StorageError>;
+    /// Preflight observation taken before any re-verification; fences the lease-free edges.
+    fn download_observation(
+        &self,
+        id: DownloadId,
+    ) -> Result<(super::DownloadObservation, Option<ExportState>), StorageError>;
     fn recover_download_export(
         &mut self,
-        id: DownloadId,
+        fence: super::ExportFence<'_>,
         expected: &ExportJournal,
     ) -> Result<(), StorageError>;
     fn halt_download_export(
         &mut self,
-        id: DownloadId,
+        fence: super::ExportFence<'_>,
         expected: &ExportJournal,
         halt: ExportHalt,
     ) -> Result<(), StorageError>;
@@ -745,20 +750,26 @@ impl<R: CryptoRngCore> DownloadStore for KeptBlobStore<R> {
     ) -> Result<(), StorageError> {
         KeptBlobStore::publish_download_export(self, lease, expected)
     }
+    fn download_observation(
+        &self,
+        id: DownloadId,
+    ) -> Result<(super::DownloadObservation, Option<ExportState>), StorageError> {
+        KeptBlobStore::download_observation(self, id)
+    }
     fn recover_download_export(
         &mut self,
-        id: DownloadId,
+        fence: super::ExportFence<'_>,
         expected: &ExportJournal,
     ) -> Result<(), StorageError> {
-        KeptBlobStore::recover_download_export(self, id, expected)
+        KeptBlobStore::recover_download_export(self, fence, expected)
     }
     fn halt_download_export(
         &mut self,
-        id: DownloadId,
+        fence: super::ExportFence<'_>,
         expected: &ExportJournal,
         halt: ExportHalt,
     ) -> Result<(), StorageError> {
-        KeptBlobStore::halt_download_export(self, id, expected, halt)
+        KeptBlobStore::halt_download_export(self, fence, expected, halt)
     }
     fn retire_download_export(
         &mut self,

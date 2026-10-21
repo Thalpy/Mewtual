@@ -21,6 +21,7 @@ use catcoms_rt::{Clock, CryptoRngCore, MeshTransport, PeerId, RequestCancellatio
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use catcoms_storage::kept::ExportFence;
 use catcoms_storage::{Cid, FileRef};
 
 use crate::{
@@ -90,14 +91,67 @@ pub enum DownloadExportTransition {
     Publish {
         expected: catcoms_storage::kept::ExportJournal,
     },
+    /// A typed halt found during the session (reopen, a stopped write).
+    Halt {
+        expected: catcoms_storage::kept::ExportJournal,
+        halt: catcoms_storage::kept::ExportHalt,
+    },
+    /// The reopen found our file under its final name and verified its content read-only.
+    RecoverPublished {
+        expected: catcoms_storage::kept::ExportJournal,
+    },
 }
 
-/// Lease-free journal edges a preflight may record before any re-verification.
+/// Journal edges a preflight may record before any re-verification, each fenced by the
+/// [`DownloadPreflight`] observation that found it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DownloadExportEdge {
     Halt(catcoms_storage::kept::ExportHalt),
-    /// Crash between link and Published: the final name already holds our file.
+    /// Crash between link and Published: the final name already holds our file, and native
+    /// verified its content read-only against [`DownloadPreflight::plan`].
     RecoverPublished,
+}
+
+/// Native-only observation of one saved Download for the Resume preflight, made before any
+/// re-verification (review U-M3). It carries the saved export state, the plaintext layout of the
+/// saved manifest (for read-only verification of an already linked file), and guards on the
+/// original actor lifetime (freeze/thaw), Root authority, the storage mount and the transfer's
+/// read epoch. It grants no plaintext read and spends no allowance. Every preflight edge and
+/// every recovery effect after it requires it to be current. Not serializable.
+#[derive(Clone)]
+pub struct DownloadPreflight {
+    observation: catcoms_storage::kept::DownloadObservation,
+    state: Option<catcoms_storage::kept::ExportState>,
+    plan: Option<catcoms_storage::kept::ExportPlan>,
+    root: Arc<dyn catcoms_rt::RequestAuthority>,
+    actor: tokio::sync::watch::Receiver<bool>,
+}
+impl std::fmt::Debug for DownloadPreflight {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DownloadPreflight { .. }")
+    }
+}
+impl DownloadPreflight {
+    pub fn id(&self) -> catcoms_storage::kept::DownloadId {
+        self.observation.id()
+    }
+    /// The saved journal, if any. Native-only: it names an external path.
+    pub fn state(&self) -> Option<&catcoms_storage::kept::ExportState> {
+        self.state.as_ref()
+    }
+    /// Plaintext layout of the saved manifest, when it decodes.
+    pub fn plan(&self) -> Option<&catcoms_storage::kept::ExportPlan> {
+        self.plan.as_ref()
+    }
+    /// Original actor and Root generation without storage custody: fences the final response
+    /// after a recovery's cleanup intentionally released the record.
+    pub fn invocation_current(&self) -> bool {
+        *self.actor.borrow() && self.actor.has_changed().is_ok() && self.root.authorized()
+    }
+    /// Actor, Root, storage mount and transfer epoch are all still the observed ones.
+    pub fn is_current(&self) -> bool {
+        self.invocation_current() && self.observation.is_current()
+    }
 }
 
 /// One private plaintext reply retains the native whole-export slot even if its waiter was
@@ -186,6 +240,37 @@ fn apply_download_export_transition<T: MeshTransport, R: CryptoRngCore>(
             .checkpoint_download_export(lease, &expected, &next),
         DownloadExportTransition::Publish { expected } => {
             server.sync.publish_download_export(lease, &expected)
+        }
+        DownloadExportTransition::Halt { expected, halt } => {
+            server
+                .sync
+                .halt_download_export(ExportFence::Lease(lease), &expected, halt)
+        }
+        DownloadExportTransition::RecoverPublished { expected } => server
+            .sync
+            .recover_download_export(ExportFence::Lease(lease), &expected),
+    }
+    .map_err(|e| e.to_string())
+}
+
+/// Apply one preflight edge. The original native invocation and every generation the preflight
+/// observed (actor lifetime, Root, mount, transfer epoch) must still be current: a probe released
+/// after freeze/thaw, Lock, remount or a newer Resume records nothing.
+fn apply_download_export_edge<T: MeshTransport, R: CryptoRngCore>(
+    server: &mut Server<T, R>,
+    preflight: &DownloadPreflight,
+    expected: &catcoms_storage::kept::ExportJournal,
+    edge: DownloadExportEdge,
+    cancel: &RequestCancellation,
+) -> Result<(), String> {
+    if cancel.is_cancelled() || !preflight.is_current() {
+        return Err("The download is no longer active.".to_string());
+    }
+    let fence = ExportFence::Observation(&preflight.observation);
+    match edge {
+        DownloadExportEdge::Halt(halt) => server.sync.halt_download_export(fence, expected, halt),
+        DownloadExportEdge::RecoverPublished => {
+            server.sync.recover_download_export(fence, expected)
         }
     }
     .map_err(|e| e.to_string())
@@ -902,8 +987,13 @@ pub enum AppCommand {
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Lease-free preflight edge (halt or recovered publication) by exact journal CAS.
-    DownloadExportEdge {
+    DownloadPreflight {
         id: catcoms_storage::kept::DownloadId,
+        cancel: RequestCancellation,
+        reply: oneshot::Sender<Result<DownloadPreflight, String>>,
+    },
+    DownloadExportEdge {
+        preflight: Box<DownloadPreflight>,
         expected: catcoms_storage::kept::ExportJournal,
         edge: DownloadExportEdge,
         cancel: RequestCancellation,
@@ -3291,10 +3381,24 @@ impl ServerActor {
             .map_err(|_| "server stopped".to_string())?;
         receiver.await.map_err(|_| "server stopped".to_string())?
     }
-    /// Lease-free preflight edge by exact journal CAS, refused once `cancel` is cancelled.
-    pub async fn download_export_edge(
+    /// Observe a saved Download for the Resume preflight, before any re-verification.
+    pub async fn download_preflight(
         &self,
         id: catcoms_storage::kept::DownloadId,
+        cancel: RequestCancellation,
+    ) -> Result<DownloadPreflight, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::DownloadPreflight { id, cancel, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
+    }
+    /// Preflight edge by exact journal CAS, refused once `cancel` is cancelled or any generation
+    /// `preflight` observed has moved on.
+    pub async fn download_export_edge(
+        &self,
+        preflight: DownloadPreflight,
         expected: catcoms_storage::kept::ExportJournal,
         edge: DownloadExportEdge,
         cancel: RequestCancellation,
@@ -3302,7 +3406,7 @@ impl ServerActor {
         let (reply, receiver) = oneshot::channel();
         self.cmd_tx
             .send(AppCommand::DownloadExportEdge {
-                id,
+                preflight: Box::new(preflight),
                 expected,
                 edge,
                 cancel,
@@ -5443,18 +5547,11 @@ where
                         let _ = reply.send(apply_download_export_transition(&mut server, &ready, *transition, &cancel));
                         let _ = event_tx.send(AppEvent::FilesUpdated).await;
                     }
-                    Some(AppCommand::DownloadExportEdge { id, expected, edge, cancel, reply }) => {
-                        // Lock does not retire storage leases; the original invocation does stop here.
-                        let result = if cancel.is_cancelled() {
-                            Err("The download is no longer active.".to_string())
-                        } else {
-                            match edge {
-                                DownloadExportEdge::Halt(halt) => server.sync.halt_download_export(id, &expected, halt),
-                                DownloadExportEdge::RecoverPublished => server.sync.recover_download_export(id, &expected),
-                            }
-                            .map_err(|e| e.to_string())
-                        };
-                        let _ = reply.send(result);
+                    Some(AppCommand::DownloadPreflight { id, cancel, reply }) => {
+                        let _ = reply.send(file_transfers.download_preflight(&mut server, id, &cancel));
+                    }
+                    Some(AppCommand::DownloadExportEdge { preflight, expected, edge, cancel, reply }) => {
+                        let _ = reply.send(apply_download_export_edge(&mut server, &preflight, &expected, edge, &cancel));
                         let _ = event_tx.send(AppEvent::FilesUpdated).await;
                     }
                     Some(AppCommand::RetireDownloadExport { id, expected_intent, reply }) => { let _ = reply.send(server.sync.retire_download_export(id, expected_intent).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }

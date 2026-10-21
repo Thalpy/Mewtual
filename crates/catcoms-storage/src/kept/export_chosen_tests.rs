@@ -198,7 +198,7 @@ fn a_chosen_folder_renamed_or_replaced_while_paused_halts_without_touching_anyth
             matches!(ExportFile::probe(&journal), ExportProbe::Halt(halt) if halt == expected),
             "replaced={replaced}"
         );
-        store.halt_download_export(id, &journal, expected).unwrap();
+        halt(&mut store, id, &journal, expected).unwrap();
         assert!(
             moved.join("report.bin.mewtual-part").exists(),
             "the moved partial is left alone"

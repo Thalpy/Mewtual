@@ -161,6 +161,9 @@ async fn journal_writes_after_lock_are_refused_even_though_the_lease_is_live() {
     let mut file = begin(&run, &ready).await;
     write_all(&run, &ready, &mut file).await; // a blocking write that completes...
     let before = saved_state(&run).await;
+    let preflight = bounded(run.actor.download_preflight(ready.id(), run.origin.clone()))
+        .await
+        .unwrap();
     run.signal.send_replace(true); // ...after Lock retired the original invocation
     assert!(
         ready.is_current(),
@@ -177,11 +180,20 @@ async fn journal_writes_after_lock_are_refused_even_though_the_lease_is_live() {
     ))
     .await
     .is_err());
-    let id = ready.id();
     assert!(bounded(run.actor.download_export_edge(
-        id,
+        preflight,
         file.journal().clone(),
         DownloadExportEdge::Halt(ExportHalt::Unavailable),
+        run.origin.clone(),
+    ))
+    .await
+    .is_err());
+    assert!(bounded(run.actor.download_export_transition(
+        ready.clone(),
+        DownloadExportTransition::Halt {
+            expected: file.journal().clone(),
+            halt: ExportHalt::Unavailable,
+        },
         run.origin.clone(),
     ))
     .await
@@ -380,6 +392,95 @@ async fn save_new_copy_and_replacement_transfers_release_stale_export_results() 
     file.finish();
     assert_eq!(std::fs::read(path).unwrap(), run.data);
     run.close().await;
+}
+
+#[tokio::test]
+async fn preflight_edges_from_before_a_freeze_and_thaw_record_nothing() {
+    // Review U-M3: a Resume preflight snapshots the journal and starts its blocking probe; the
+    // actor freezes and thaws meanwhile. The probe's late Halt or RecoverPublished must be
+    // refused, leaving the journal unchanged; a fresh preflight after the thaw still works.
+    let Pair {
+        mut holder,
+        cid,
+        entered: _entered,
+        ..
+    } = pair().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = attach_protected_kept(&mut holder, dir.path());
+    let vault = Arc::new(tokio::sync::Mutex::new(Some(store)));
+    let (actor, mut events, task) = spawn(holder);
+    let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+    let (_signal, watch) = watch::channel(false);
+    let origin = RequestCancellation::new(watch, None);
+    let ready = bounded(actor.acquire_download(cid.as_bytes().to_vec(), None, origin.clone()))
+        .await
+        .unwrap()
+        .with_export_custody(Arc::new(()));
+    let downloads = tempfile::tempdir().unwrap();
+    let file =
+        ExportFile::create(downloads.path(), "cat.bin", ready.export_plan().unwrap()).unwrap();
+    bounded(actor.download_export_transition(
+        ready.clone(),
+        DownloadExportTransition::Begin {
+            journal: file.journal().clone(),
+            presence: file.presence(),
+        },
+        origin.clone(),
+    ))
+    .await
+    .unwrap();
+    let journal = file.journal().clone();
+    drop(file);
+    let id = ready.id();
+    let old = bounded(actor.download_preflight(id, origin.clone()))
+        .await
+        .unwrap();
+    assert!(old.is_current());
+    assert!(old.plan().is_some(), "the saved manifest gives the plan");
+    let preparing = bounded(actor.prepare_shutdown()).await.unwrap();
+    let frozen = bounded(
+        preparing.save_and_freeze(crate::shutdown::ShutdownLease::new(
+            vault.lock_owned().await,
+            79,
+            (),
+        )),
+    )
+    .await
+    .unwrap();
+    drop(frozen); // a cancelled freeze thaws the actor with a fresh file-transfer lifetime
+    assert!(!old.is_current() && !old.invocation_current());
+    for edge in [
+        DownloadExportEdge::Halt(ExportHalt::Changed),
+        DownloadExportEdge::RecoverPublished,
+    ] {
+        assert!(bounded(actor.download_export_edge(
+            old.clone(),
+            journal.clone(),
+            edge,
+            origin.clone(),
+        ))
+        .await
+        .is_err());
+    }
+    assert_eq!(
+        bounded(actor.download_export_state(id)).await.unwrap(),
+        Some(ExportState::Writing(journal.clone())),
+        "the journal is unchanged"
+    );
+    let fresh = bounded(actor.download_preflight(id, origin.clone()))
+        .await
+        .unwrap();
+    bounded(actor.download_export_edge(
+        fresh,
+        journal.clone(),
+        DownloadExportEdge::Halt(ExportHalt::Unavailable),
+        origin.clone(),
+    ))
+    .await
+    .expect("a fresh explicit Resume's preflight still records");
+    actor.shutdown().await;
+    bounded(task).await.unwrap();
+    bounded(drain).await.unwrap();
 }
 
 #[tokio::test]

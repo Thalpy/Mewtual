@@ -501,6 +501,68 @@ mod read_tests {
     }
 
     #[tokio::test]
+    async fn a_recovered_save_returns_its_path_only_if_still_authorized_after_cleanup() {
+        // Review U-M4: the preflight found an already linked, verified file. Cleanup is blocked
+        // while Lock, an entry retirement or an actor/Root change completes; the stale response
+        // must be refused and the published file kept.
+        for edge in 0..4 {
+            let state = AppState::default();
+            let directory = tempfile::tempdir().unwrap();
+            *state.store.lock().await =
+                Some(ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap());
+            *state.session_resumable.lock().await = true;
+            let path = directory.path().join("recovered.bin");
+            std::fs::write(&path, b"verified file").unwrap();
+            let entry = EntryOwner::new();
+            let origin = entry.scope(current(&state, 0).unwrap());
+            let actor_current = std::cell::Cell::new(true);
+            let (cleanup_done, cleanup_wait) = tokio::sync::oneshot::channel::<bool>();
+            let mut response = Box::pin(private_downloads::finish_recovered_save(
+                &state,
+                0,
+                &origin,
+                &path,
+                || actor_current.get(),
+                |_| Ok(()),
+                async {
+                    match cleanup_wait.await {
+                        Ok(true) => Ok(()),
+                        _ => Err("cleanup failed".to_string()),
+                    }
+                },
+            ));
+            std::future::poll_fn(|cx| {
+                assert!(response.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            match edge {
+                0 => {
+                    register_ui_lock_request(&state);
+                }
+                1 => entry.retire(),
+                2 => actor_current.set(false),
+                _ => {} // still authorized; the cleanup itself fails
+            }
+            cleanup_done.send(edge != 3).unwrap();
+            let outcome = response.await;
+            if edge == 3 {
+                let saved = outcome.expect("a live session still gets its saved file");
+                assert!(
+                    saved.warning.is_some(),
+                    "a failed cleanup is reported, not discarded"
+                );
+            } else {
+                assert!(
+                    outcome.is_err(),
+                    "edge {edge}: no path into a retired invocation"
+                );
+            }
+            assert_eq!(std::fs::read(&path).unwrap(), b"verified file");
+        }
+    }
+
+    #[tokio::test]
     async fn private_download_cleanup_wait_cannot_return_success_into_a_retired_invocation() {
         for edge in 0..3 {
             let state = AppState::default();

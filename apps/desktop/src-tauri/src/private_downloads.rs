@@ -9,7 +9,7 @@
 //! transitions, each fenced by the original invocation, actor/Root generation and storage lease.
 //! Publication alone holds the session commit guard, so Pause/Remove/Lock serialize with it.
 use super::*;
-use catcoms_app::{DownloadExportEdge, DownloadExportTransition, DownloadReady};
+use catcoms_app::{DownloadExportEdge, DownloadExportTransition, DownloadPreflight, DownloadReady};
 use catcoms_storage::kept::{
     flush_destination, partial_presence, remove_partial, ChosenDestination, DownloadId,
     DownloadStatus, ExportError, ExportFile, ExportHalt, ExportJournal, ExportProbe,
@@ -616,30 +616,106 @@ where
 /// the encrypted copy.
 pub(super) enum Preflight {
     Continue,
+    /// The final name already holds our file (crash after the link), its content was verified
+    /// read-only against the saved plan, and Published is recorded. The preflight observation
+    /// still fences the response (review U-M4).
+    Saved(PathBuf, Box<DownloadPreflight>),
 }
 
-/// Destination preflight for Resume. Records a halt or a recovered publication by exact journal
-/// CAS, refused by the actor once the original invocation is cancelled.
+/// Destination preflight for Resume. Every effect is fenced by one [`DownloadPreflight`]
+/// observation (review U-M3): a probe released after freeze/thaw, Lock, remount or a newer
+/// Resume records nothing. A final name holding our identity is recorded as Published only after
+/// read-only verification against the saved plan (review U-M2).
 pub(super) async fn resume_preflight(
     actor: &ServerActor,
     id: DownloadId,
     origin: &RequestCancellation,
 ) -> Result<Preflight, String> {
-    let journal = match actor.download_export_state(id).await? {
+    let preflight = actor.download_preflight(id, origin.clone()).await?;
+    let journal = match preflight.state() {
         None => return Ok(Preflight::Continue),
         Some(ExportState::Published(_)) => return Err(ALREADY_SAVED.into()),
-        Some(ExportState::Writing(journal)) => journal,
+        Some(ExportState::Writing(journal)) => journal.clone(),
     };
     let probe = journal.clone();
     match blocking(move || ExportFile::probe(&probe)).await? {
         ExportProbe::Ready => Ok(Preflight::Continue),
-        // The final name holds our identity, but its content is unproven (review U-M2) and this
-        // preflight has no plan to verify it against. Continue: after re-verification the reopen
-        // verifies it read-only against the manifest and only then records Published.
-        ExportProbe::Published(_candidate) => Ok(Preflight::Continue),
-        ExportProbe::Halt(halt) => Err(record_halt(actor, id, journal, halt, origin).await),
-        ExportProbe::Local(reason) => Err(format!("Saving to Downloads failed: {reason}")),
+        ExportProbe::Published(candidate) => {
+            // Without a decodable saved manifest, leave it to the reopen after re-verification,
+            // which verifies against the acquired manifest.
+            let Some(plan) = preflight.plan().cloned() else {
+                return Ok(Preflight::Continue);
+            };
+            match blocking(move || candidate.verify(&plan)).await? {
+                Ok(path) => {
+                    actor
+                        .download_export_edge(
+                            preflight.clone(),
+                            journal,
+                            DownloadExportEdge::RecoverPublished,
+                            origin.clone(),
+                        )
+                        .await
+                        .map_err(user_message)?;
+                    Ok(Preflight::Saved(path, Box::new(preflight)))
+                }
+                Err(ExportError::Halted(halt)) => {
+                    Err(record_preflight_halt(actor, &preflight, journal, halt, origin).await)
+                }
+                Err(error) => Err(error.to_string()),
+            }
+        }
+        ExportProbe::Halt(halt) => {
+            Err(record_preflight_halt(actor, &preflight, journal, halt, origin).await)
+        }
+        // Review L5: the probe's text is already a complete message; never prefix it again.
+        ExportProbe::Local(reason) => Err(reason),
     }
+}
+
+/// Review L5: storage refusals reach the actor boundary as terse internal texts. Show the user
+/// what they mean instead.
+pub(super) fn user_message(error: String) -> String {
+    let malformed = catcoms_storage::StorageError::Malformed.to_string();
+    if error == malformed {
+        STALE_DOWNLOAD.to_string()
+    } else if let Some(reason) = error.strip_prefix("io error: ") {
+        reason.to_string()
+    } else {
+        error
+    }
+}
+
+/// Finish a save the preflight recovered (crash after the link): inspect and reveal the verified
+/// file, clear the record, and return the path only if the original invocation, UI session and
+/// the observed actor/Root generation are all still current AFTER that cleanup (review U-M4).
+/// A cleanup failure in a live session is reported as a warning on the success, never discarded.
+pub(super) async fn finish_recovered_save<A, R, F>(
+    state: &AppState,
+    generation: u64,
+    origin: &RequestCancellation,
+    path: &Path,
+    allowed: A,
+    reveal: R,
+    cleanup: F,
+) -> Result<SavedFileResult, String>
+where
+    A: Fn() -> bool,
+    R: FnOnce(&Path) -> Result<(), String>,
+    F: Future<Output = Result<(), String>>,
+{
+    let saved = finish_saved_read_if(
+        state,
+        generation,
+        origin,
+        path,
+        "application/octet-stream",
+        exported_media_validation,
+        reveal,
+        || !origin.is_cancelled() && allowed(),
+    )
+    .await?;
+    finish_download_response(state, generation, origin, saved, allowed, cleanup).await
 }
 
 /// Shown when Save new copy goes ahead although the old partial could not be reached.
@@ -760,7 +836,27 @@ pub(super) async fn prepare_resume(
         notice = left;
         intent
     } else {
-        let Preflight::Continue = resume_preflight(actor, id, origin).await?;
+        if let Preflight::Saved(path, preflight) = resume_preflight(actor, id, origin).await? {
+            let cleanup = async {
+                remove_download(state, server, instance, generation, actor, id, false)
+                    .await
+                    .map(|_| ())
+            };
+            let saved = finish_recovered_save(
+                state,
+                generation,
+                origin,
+                &path,
+                || preflight.invocation_current(),
+                reveal_path,
+                cleanup,
+            )
+            .await?;
+            return Ok(Prepared {
+                saved: Some(saved),
+                notice: None,
+            });
+        }
         expected_intent
     };
     commit_kept_command(
@@ -777,17 +873,23 @@ pub(super) async fn prepare_resume(
     })
 }
 
-async fn record_halt(
+/// Record a halt the preflight found, fenced by its observation. Best effort: a refusal means
+/// something newer (a remount, a newer Resume, Lock) already moved on.
+async fn record_preflight_halt(
     actor: &ServerActor,
-    id: DownloadId,
+    preflight: &DownloadPreflight,
     journal: ExportJournal,
     halt: ExportHalt,
     origin: &RequestCancellation,
 ) -> String {
     if journal.halt() != Some(halt) {
-        // Best effort: a refused CAS means something newer already changed the record.
         let _ = actor
-            .download_export_edge(id, journal, DownloadExportEdge::Halt(halt), origin.clone())
+            .download_export_edge(
+                preflight.clone(),
+                journal,
+                DownloadExportEdge::Halt(halt),
+                origin.clone(),
+            )
             .await;
     }
     ExportError::Halted(halt).to_string()
@@ -858,27 +960,43 @@ impl ExportContext<'_> {
         file.checkpointed(journal);
         Ok(file)
     }
-    /// End a session on an error. A halt is persisted; disk full writes nothing (the vault may
-    /// share that volume); any other failure checkpoints what is durable if it still can.
+    /// Record a halt found during the session, fenced by this session's export lease. Best
+    /// effort: a refusal means something newer already changed the record.
+    async fn record_halt(
+        &self,
+        ready: &DownloadReady,
+        journal: ExportJournal,
+        halt: ExportHalt,
+    ) -> String {
+        if journal.halt() != Some(halt) {
+            let _ = self
+                .transition(
+                    ready,
+                    DownloadExportTransition::Halt {
+                        expected: journal,
+                        halt,
+                    },
+                )
+                .await;
+        }
+        ExportError::Halted(halt).to_string()
+    }
+    /// End a session on an error. A halt is persisted. Only a transient local failure (after its
+    /// bounded retries) checkpoints what is durable. Review L4: a verification failure (a CID or
+    /// layout mismatch, `Storage`), a conflict, disk full or an inactive session never advance the
+    /// checkpoint, so a mismatched stream can never reach the every-chunk journal that recovery
+    /// would accept.
     async fn stop(&self, ready: &DownloadReady, file: ExportFile, error: ExportError) -> String {
         match error {
             ExportError::Halted(halt) => {
-                record_halt(
-                    self.actor,
-                    ready.id(),
-                    file.journal().clone(),
-                    halt,
-                    self.origin,
-                )
-                .await
+                self.record_halt(ready, file.journal().clone(), halt).await
             }
-            // Conflict: the partial shrank under this session, so its offset no longer describes
-            // durable bytes. Write no checkpoint; the next Resume re-verifies from chunk zero.
-            ExportError::Full | ExportError::Inactive | ExportError::Conflict => error.to_string(),
-            other => {
+            ExportError::Local { .. } => {
+                let message = error.to_string();
                 let _ = self.checkpoint(ready, file).await;
-                other.to_string()
+                message
             }
+            other => other.to_string(),
         }
     }
 }
@@ -950,21 +1068,22 @@ pub(super) async fn export_journaled(
                     .await?;
                     *file
                 }
+                // The reopen verified the content read-only against this manifest (review U-M2).
                 ExportReopen::Published(path) => {
-                    ctx.actor
-                        .download_export_edge(
-                            id,
-                            journal.clone(),
-                            DownloadExportEdge::RecoverPublished,
-                            ctx.origin.clone(),
-                        )
-                        .await?;
+                    ctx.transition(
+                        ready,
+                        DownloadExportTransition::RecoverPublished {
+                            expected: journal.clone(),
+                        },
+                    )
+                    .await
+                    .map_err(user_message)?;
                     // The caller releases the record next; drop our second (staging) name first.
                     let _ = blocking(move || remove_partial(&journal)).await;
                     return Ok(Some(path));
                 }
                 ExportReopen::Halt(halt) => {
-                    return Err(record_halt(ctx.actor, id, journal, halt, ctx.origin).await)
+                    return Err(ctx.record_halt(ready, journal, halt).await)
                 }
             }
         }
@@ -1133,6 +1252,24 @@ mod tests {
             planned: false,
         }
     }
+    #[test]
+    fn storage_refusals_become_user_messages_without_doubled_prefixes() {
+        // Review L5.
+        let malformed = catcoms_storage::StorageError::Malformed.to_string();
+        assert_eq!(user_message(malformed), STALE_DOWNLOAD);
+        assert_eq!(
+            user_message("io error: This file is already being saved. Try again shortly.".into()),
+            "This file is already being saved. Try again shortly."
+        );
+        assert_eq!(user_message("Server stopped".into()), "Server stopped");
+        let probe = ExportError::Local {
+            retryable: true,
+            reason: "busy".into(),
+        }
+        .to_string();
+        assert_eq!(probe.matches("failed").count(), 1, "{probe}");
+    }
+
     fn writing(halt: Option<ExportHalt>, active: bool) -> ExportView {
         ExportView::Writing {
             saved_chunks: 1,

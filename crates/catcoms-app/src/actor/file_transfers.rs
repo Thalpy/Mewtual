@@ -803,6 +803,47 @@ impl FileTransfers {
         )
     }
 
+    /// Observe a saved Download for the Resume preflight (review U-M3). Captures the CURRENT actor
+    /// lifetime and Root authority, so a freeze/thaw or Root change after this call retires every
+    /// edge and recovery effect made from it. The plan comes from the sealed saved manifest; it is
+    /// used only to verify an already linked external file read-only.
+    pub(super) fn download_preflight<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &self,
+        server: &mut Server<T, R>,
+        id: catcoms_storage::kept::DownloadId,
+        cancel: &RequestCancellation,
+    ) -> Result<super::DownloadPreflight, String> {
+        if cancel.is_cancelled() {
+            return Err("The download is no longer active.".into());
+        }
+        let root = server
+            .sync
+            .file_effect_authority()
+            .map_err(|e| e.to_string())?;
+        let (observation, state) = server
+            .sync
+            .download_observation(id)
+            .map_err(|e| e.to_string())?;
+        // Equivalent encrypted variants share one plaintext layout, so the first saved plan's
+        // manifest describes the file; one that does not decode simply yields no plan.
+        let plan = server
+            .sync
+            .download_saved_plans(id)
+            .ok()
+            .and_then(|plans| plans.into_iter().next())
+            .and_then(|plan| kept_plan(plan.manifest, plan.cid).ok())
+            .and_then(|(_, manifest)| {
+                catcoms_storage::kept::ExportPlan::from_manifest(&manifest).ok()
+            });
+        Ok(super::DownloadPreflight {
+            observation,
+            state,
+            plan,
+            root,
+            actor: self.lifetime.subscribe(),
+        })
+    }
+
     pub(super) fn download<T: MeshTransport + 'static, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,

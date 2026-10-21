@@ -801,6 +801,62 @@ impl ExportPlan {
 #[derive(Debug, Clone)]
 pub struct ExportPresence(Weak<()>);
 
+/// Observation of one Download for the Resume preflight (see
+/// [`KeptBlobStore::download_observation`]). Remount, re-verification, removal and Save new copy
+/// retire it. It is an in-process native value, never a renderer capability.
+#[derive(Clone)]
+pub struct DownloadObservation {
+    pub(super) id: DownloadId,
+    pub(super) guard: crate::blob_read::ReadGuard,
+    pub(super) mount: crate::blob_read::ReadGuard,
+}
+impl std::fmt::Debug for DownloadObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DownloadObservation { .. }")
+    }
+}
+impl DownloadObservation {
+    pub fn id(&self) -> DownloadId {
+        self.id
+    }
+    /// Observes storage custody only: this mount and this transfer's read epoch.
+    pub fn is_current(&self) -> bool {
+        self.guard.current() && self.mount.current()
+    }
+}
+
+/// What may fence the lease-free journal edges (halt, recovered publication): the preflight's
+/// observation before re-verification, or the session's export lease after it.
+#[derive(Clone, Copy)]
+pub enum ExportFence<'a> {
+    Observation(&'a DownloadObservation),
+    Lease(&'a DownloadExportLease),
+}
+impl std::fmt::Debug for ExportFence<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Observation(_) => "ExportFence::Observation(..)",
+            Self::Lease(_) => "ExportFence::Lease(..)",
+        })
+    }
+}
+impl ExportFence<'_> {
+    fn parts(
+        &self,
+    ) -> (
+        DownloadId,
+        &crate::blob_read::ReadGuard,
+        &crate::blob_read::ReadGuard,
+    ) {
+        match self {
+            Self::Observation(observation) => {
+                (observation.id, &observation.guard, &observation.mount)
+            }
+            Self::Lease(lease) => (lease.id, &lease.guard, &lease.mount),
+        }
+    }
+}
+
 /// Result of a preflight that retains no handle and modifies nothing.
 pub enum ExportProbe {
     Ready,
@@ -1243,6 +1299,10 @@ pub struct ExportFile {
     /// already be visible under its final name, so the session only verifies, never trims or
     /// writes, even if the link reported an error or its confirmation failed.
     linked: bool,
+    /// Review L4: set when the stream failed verification (a plaintext CID mismatch, or a
+    /// Changed halt). Such a session never produces a checkpoint again, so a mismatched stream can
+    /// never reach the every-chunk journal that recovery or publication would accept.
+    failed: bool,
     hasher: CidHasher,
     presence: Arc<()>,
 }
@@ -1471,6 +1531,7 @@ impl ExportFile {
             verify_limit: present.min(plan.total),
             diverged: false,
             linked: false,
+            failed: false,
             base_name: journal.base_name().to_owned(),
             journal,
             plan,
@@ -1525,6 +1586,7 @@ impl ExportFile {
                     return Ok(self.progress());
                 }
                 Ok(()) if self.offset < self.durable => {
+                    self.failed = true;
                     return Err(ExportError::Halted(ExportHalt::Changed));
                 }
                 Ok(()) => {}
@@ -1548,6 +1610,7 @@ impl ExportFile {
                     .and_then(|_| self.file.read_exact(&mut held))
                     .map_err(local)?;
                 if held[..] != plaintext[..inside] {
+                    self.failed = true;
                     return Err(ExportError::Halted(ExportHalt::Changed));
                 }
             }
@@ -1556,6 +1619,7 @@ impl ExportFile {
         // may already be the user's saved file; an extra name we did not make means someone else
         // can see these bytes. Either way nothing is modified.
         if self.linked || external::observe(&self.file).map_err(local)?.links != 1 {
+            self.failed = true;
             return Err(ExportError::Halted(ExportHalt::Changed));
         }
         // From here on this session writes. A file shorter than its checkpoint (torn or lost
@@ -1593,6 +1657,9 @@ impl ExportFile {
     /// bytes into an "unacknowledged tail" that a later resume truncates instead of halting on.
     /// Once the session writes (after a short file rewound it), the lower value is the truth.
     pub fn checkpoint(&mut self) -> Result<ExportJournal, ExportError> {
+        if self.failed {
+            return Err(ExportError::Storage(StorageError::Malformed));
+        }
         self.file.sync_all().map_err(local)?;
         let mut journal = self.journal.clone();
         if self.diverged || self.offset >= self.journal.written_bytes {
@@ -1616,10 +1683,12 @@ impl ExportFile {
     /// row 6) or a name someone else made. Then nothing is trimmed or written: the final name must
     /// hold our identity and its content is verified read-only, or the save halts as Changed.
     pub fn prepare_publication(&mut self) -> Result<Publication, ExportError> {
-        if self.next_index().is_some()
-            || self.offset != self.plan.total
-            || self.hasher.cid() != self.plan.cid
-        {
+        if self.next_index().is_some() || self.offset != self.plan.total {
+            return Err(ExportError::Storage(StorageError::Malformed));
+        }
+        if self.hasher.cid() != self.plan.cid {
+            // The whole stream was fed but is not this file: never checkpoint it (review L4).
+            self.failed = true;
             return Err(ExportError::Storage(StorageError::Malformed));
         }
         let current = self.folder.join(&self.journal.final_leaf);
@@ -1637,10 +1706,12 @@ impl ExportFile {
             if !final_is_ours {
                 // Another name exists that is not our final name: someone else can see these
                 // bytes, so this file is not a private partial any more.
+                self.failed = true;
                 return Err(ExportError::Halted(ExportHalt::Changed));
             }
             // Read through our own handle: the Windows session lock blocks other readers.
             if !content_matches(&mut self.file, &self.plan).map_err(local)? {
+                self.failed = true;
                 return Err(ExportError::Halted(ExportHalt::Changed));
             }
             let journal = self.checkpoint()?;
@@ -1993,15 +2064,53 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
         self.mark_published(index, expected)
     }
 
-    /// Lease-free recovery of crash row 6: the saved journal already covers every chunk and native
-    /// proved, before any re-verification, that the final name holds our file.
+    /// Native-only observation for the Resume preflight, taken before any re-verification: the
+    /// saved export state plus guards on this mount and this transfer's read epoch. It grants no
+    /// read and spends no allowance; it only fences the preflight's own journal edges.
+    pub fn download_observation(
+        &self,
+        id: DownloadId,
+    ) -> Result<(DownloadObservation, Option<ExportState>), StorageError> {
+        let index = self.download_index(id)?;
+        let transfer = &self.transfers[index];
+        if transfer.poisoned || transfer.record.phase == KeepPhase::Deleting {
+            return Err(StorageError::Malformed);
+        }
+        Ok((
+            DownloadObservation {
+                id,
+                guard: transfer.read_epoch.guard(),
+                mount: self.read_epoch.guard(),
+            },
+            transfer.record.export.state(),
+        ))
+    }
+
+    /// Review U-M3: a lease-free edge is accepted only while the observation or lease it carries
+    /// is still current for this exact mount and transfer epoch. A remount, re-verification,
+    /// removal or Save new copy since the observation retires it.
+    fn fence_index(&self, fence: ExportFence<'_>) -> Result<usize, StorageError> {
+        self.ready()?;
+        let (id, guard, mount) = fence.parts();
+        if !guard.current() || !mount.current() || !mount.issued_by(&self.read_epoch) {
+            return Err(StorageError::Malformed);
+        }
+        let index = self.download_index(id)?;
+        if !guard.issued_by(&self.transfers[index].read_epoch) {
+            return Err(StorageError::Malformed);
+        }
+        Ok(index)
+    }
+
+    /// Recovery of crash row 6: the saved journal already covers every chunk and native proved
+    /// that the final name holds our file AND verified its content read-only against the plan
+    /// ([`SavedCandidate::verify`]). Fenced by a current preflight observation or export lease.
     pub fn recover_download_export(
         &mut self,
-        id: DownloadId,
+        fence: ExportFence<'_>,
         expected: &ExportJournal,
     ) -> Result<(), StorageError> {
-        self.ready()?;
-        let index = self.download_index(id)?;
+        let index = self.fence_index(fence)?;
         self.mark_published(index, expected)
     }
 
@@ -2038,16 +2147,15 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
         Ok(())
     }
 
-    /// Persist a typed halt by exact journal CAS. Lease-free so a preflight before re-verification
-    /// can record it; it grants nothing and only stops work.
+    /// Persist a typed halt by exact journal CAS, fenced by a current preflight observation (before
+    /// re-verification) or export lease (during a session). It grants nothing and only stops work.
     pub fn halt_download_export(
         &mut self,
-        id: DownloadId,
+        fence: ExportFence<'_>,
         expected: &ExportJournal,
         halt: ExportHalt,
     ) -> Result<(), StorageError> {
-        self.ready()?;
-        let index = self.download_index(id)?;
+        let index = self.fence_index(fence)?;
         let transfer = &mut self.transfers[index];
         if transfer.poisoned
             || transfer.record.phase != KeepPhase::Completed

@@ -3,9 +3,9 @@
 //! live group/file-key authority at every acquisition/export effect, including local cache hits.
 use super::*;
 use catcoms_storage::kept::{
-    DownloadExportLease, DownloadId, DownloadRun, DownloadStatus, DownloadStore, ExportHalt,
-    ExportJournal, ExportPresence, ExportState, KeepNetworkWork, KeepPlan, KeepRetry,
-    KeepRetryReceipt, KeepWork,
+    DownloadExportLease, DownloadId, DownloadObservation, DownloadRun, DownloadStatus,
+    DownloadStore, ExportFence, ExportHalt, ExportJournal, ExportPresence, ExportState,
+    KeepNetworkWork, KeepPlan, KeepRetry, KeepRetryReceipt, KeepWork,
 };
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
@@ -185,27 +185,34 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .download_store_mut()?
             .publish_download_export(lease, expected)?)
     }
+    /// Native-only preflight observation; names an external path, never projected to the renderer.
+    pub fn download_observation(
+        &self,
+        id: DownloadId,
+    ) -> Result<(DownloadObservation, Option<ExportState>), SyncError> {
+        Ok(self.download_store()?.download_observation(id)?)
+    }
     pub fn recover_download_export(
         &mut self,
-        id: DownloadId,
+        fence: ExportFence<'_>,
         expected: &ExportJournal,
     ) -> Result<(), SyncError> {
         self.download_authorized()?;
         Ok(self
             .download_store_mut()?
-            .recover_download_export(id, expected)?)
+            .recover_download_export(fence, expected)?)
     }
     /// A halt only stops work, so it needs no file-key authority; it still requires the exact
-    /// saved journal.
+    /// saved journal and a current observation or lease.
     pub fn halt_download_export(
         &mut self,
-        id: DownloadId,
+        fence: ExportFence<'_>,
         expected: &ExportJournal,
         halt: ExportHalt,
     ) -> Result<(), SyncError> {
         Ok(self
             .download_store_mut()?
-            .halt_download_export(id, expected, halt)?)
+            .halt_download_export(fence, expected, halt)?)
     }
     /// Save new copy, first step: retire observers under the intent CAS, keeping the journal.
     pub fn retire_download_export(
