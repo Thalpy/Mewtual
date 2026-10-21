@@ -1,5 +1,13 @@
 # Packaged WebView IPC experiment
 
+The21October runner additionally transpiles the current application's voice-ipc-body helper
+with the existing frontend TypeScript dependency and executes it in the actual packaged
+WebView. It fetches a second fixed17-byte response, requires real BYOB support, checks EOF and
+reader release, and records two successful GETs. Edg155.0.4283.62 passes using the existing
+generated-data native fixture binary; no assets/security flags/account state are changed.
+Ten helper regressions cover transfer/detachment, truncation/excess and cancellation of stalled
+body/EOF reads. This checks one response reader, not complete production flight custody.
+
 Manual, disposable Windows compatibility harness. This is **not production IPC, live V2 or a
 member-media relay**. It never opens an account and uses generated fixture key material only.
 

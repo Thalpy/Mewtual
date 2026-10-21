@@ -1,5 +1,29 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Protected handoff custody prerequisite (21 October)
+
+Waiter loss, End, expiry or engine settlement is not evidence of application-copy drainage.
+HandoffLoan retains the original Workflow through its actual last owner; a chain-wide busy
+bit covers sibling rows. Borrow samples callback-bearing Clock before Engine, then checks pure
+original gates. It conserves the existing96KiB envelope and adds no Crypto slot. Shared paid
+historical PlanBinding metadata supplies no progress, key or first-effect authority.
+
+The candidate body reader requires BYOB on the actual fetched stream, with no oversized-chunk
+default-reader fallback. Supplied views are bounded by authenticated length plus one EOF byte,
+and read/cancel promises drain before return. It does not authenticate a channel, cover the
+remaining flight or prove physical SDK/GC heap zeroization.
+
+The disabled native ledger binds registration to the original published selected key and
+actual opaque Root action, not equal renderer fields. It prepays fixed row/phase metadata
+before factories and retains uncertain purposes across lost replies. Worker/data contribution
+retirement precedes the sole phase notification. Bounded metadata-only recovery samples actual
+action history outside native locks; reordered observations cannot erase a terminal result,
+settlement or retirement. Compacted tombstones retain no strong Action/Phase/Grant. Selected
+snapshots use Weak grants so Generation pruning cannot become affine last-drop under Coordinator.
+Pending/live/drained rows share 32 positions; saturation refuses further pilot work without
+evicting uncertain history. Actual actor/browser integration, authenticated browser closure,
+prepaid terminal replies and complete physical copy accounting remain enablement requirements.
+
 ## Selected browser key-generation ownership (21 October, complete gates passed)
 
 A new browser broker cannot adopt a still-admitted generation by repeating its native owner ID.

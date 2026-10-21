@@ -1,0 +1,680 @@
+//! Process-owned registration for the disabled row-zero pilot. Reserve before either native
+//! pair/derivation factory, retain the native task independently of its invoke waiter, and attach
+//! before exposing input. No renderer descriptor can create a SelectedHandoffOwner or Action.
+//!
+//! This is deliberately a finite pilot: pending, live and drained rows share 32 positions. A
+//! live owner cannot evict old uncertain history to make space. Physical reply/control-flight
+//! prepayment, authenticated browser drainage and live dispatch are separate integration gates.
+use super::custody::{CopyCustody, Phase, PreparedPhase};
+use crate::voice_authority::SelectedHandoffOwner;
+use catcoms_sync::voice_v2::crypto_actions::{
+    CryptoAction, CryptoOperation, CryptoResultReceipt, CryptoResultStatus,
+};
+use catcoms_sync::voice_v2::presence::{PairReceipt, PairSelector};
+use catcoms_sync::voice_v2::resources::{Credit, ResourceKind};
+use catcoms_sync::voice_v2::{CallGrant, CallLease, VoiceError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+use tokio::sync::Notify;
+
+const ROWS: usize = 32;
+const ROW_BYTES: usize = 2048;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RowId {
+    slot: usize,
+    serial: u64,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Purpose {
+    Derive(PairSelector),
+}
+/// Fixed historical evidence. It is neither permission to retry computation nor an RTC grant.
+/// Unknown rows are errors, never an assertion that an engine, phase or reply has drained.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Status {
+    pub action: Option<(u64, u64, [u8; 32])>,
+    pub engine: CryptoResultStatus,
+    pub acknowledged: bool,
+    pub drained: bool,
+}
+struct Key {
+    grant: Weak<CallGrant>,
+    executor: [u8; 32],
+    lease: CallLease,
+    purpose: Purpose,
+}
+impl Key {
+    fn matches(&self, selected: &SelectedHandoffOwner, purpose: Purpose) -> bool {
+        self.grant.ptr_eq(&selected.grant_identity())
+            && self.executor == selected.executor()
+            && self.lease.is_same(selected.lease())
+            && self.purpose == purpose
+    }
+}
+struct Pending {
+    selected: Arc<SelectedHandoffOwner>,
+    prepared: Option<PreparedPhase>,
+    worker: bool,
+    handed_off: bool,
+}
+struct Live {
+    selected: Arc<SelectedHandoffOwner>,
+    action: Arc<CryptoAction>,
+    phase: Arc<Phase>,
+    worker: bool,
+    observer: bool,
+}
+enum Body {
+    Pending(Pending),
+    Live(Live),
+    Drained,
+}
+struct State {
+    body: Body,
+    status: Status,
+}
+struct Row {
+    id: RowId,
+    key: Key,
+    state: Mutex<State>,
+    changed: Notify,
+    cleanup_waiter: AtomicBool,
+    _metadata: Credit,
+}
+struct Index {
+    serial: u64,
+    rows: [Option<Arc<Row>>; ROWS],
+}
+pub(crate) struct Ledger {
+    index: Mutex<Index>,
+}
+impl Default for Ledger {
+    fn default() -> Self {
+        Self {
+            index: Mutex::new(Index {
+                serial: 0,
+                rows: std::array::from_fn(|_| None),
+            }),
+        }
+    }
+}
+/// Only the native task owns this ticket. Dropping after actor handoff retains a counted
+/// uncertain purpose, even if no browser ever received input. An exact retry reuses that row.
+pub(crate) struct Registration {
+    ledger: Arc<Ledger>,
+    row: Arc<Row>,
+    attached: bool,
+}
+pub(crate) enum Begin {
+    Factory(Registration),
+    Existing(RowId),
+}
+impl Ledger {
+    pub(crate) fn begin(
+        self: &Arc<Self>,
+        selected: Arc<SelectedHandoffOwner>,
+        purpose: Purpose,
+    ) -> Result<Begin, VoiceError> {
+        if !selected.lease().is_live() {
+            return Err(VoiceError::Unauthorized);
+        }
+        let mut index = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(row) = index
+            .rows
+            .iter()
+            .flatten()
+            .find(|row| row.key.matches(&selected, purpose))
+        {
+            let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+            if let Body::Pending(pending) = &mut state.body {
+                if !pending.worker {
+                    if pending.prepared.is_none() {
+                        pending.prepared = Some(PreparedPhase::new(
+                            selected.resources(),
+                            selected.binding().scope,
+                            selected.lease().clone(),
+                        )?);
+                    }
+                    pending.worker = true;
+                    return Ok(Begin::Factory(Registration {
+                        ledger: self.clone(),
+                        row: row.clone(),
+                        attached: false,
+                    }));
+                }
+            }
+            return Ok(Begin::Existing(row.id));
+        }
+        let slot = index
+            .rows
+            .iter()
+            .position(Option::is_none)
+            .ok_or(VoiceError::Capacity)?;
+        let serial = index.serial.checked_add(1).ok_or(VoiceError::Capacity)?;
+        let resources = selected.resources();
+        let scope = selected.binding().scope;
+        // Both fixed records are paid BEFORE either factory. No callback-bearing Clock or
+        // action method runs under Index/State. Resource accounting is a pure bounded fence.
+        let metadata = resources.charge(scope.group, ROW_BYTES, ResourceKind::Retained)?;
+        let prepared = PreparedPhase::new(resources, scope, selected.lease().clone())?;
+        let row = Arc::new(Row {
+            id: RowId { slot, serial },
+            key: Key {
+                grant: selected.grant_identity(),
+                executor: selected.executor(),
+                lease: selected.lease().clone(),
+                purpose,
+            },
+            state: Mutex::new(State {
+                body: Body::Pending(Pending {
+                    selected,
+                    prepared: Some(prepared),
+                    worker: true,
+                    handed_off: false,
+                }),
+                status: Status {
+                    action: None,
+                    engine: CryptoResultStatus {
+                        settled: false,
+                        receipt: None,
+                    },
+                    acknowledged: false,
+                    drained: false,
+                },
+            }),
+            _metadata: metadata,
+            changed: Notify::new(),
+            cleanup_waiter: AtomicBool::new(false),
+        });
+        index.serial = serial;
+        index.rows[slot] = Some(row.clone());
+        Ok(Begin::Factory(Registration {
+            ledger: self.clone(),
+            row,
+            attached: false,
+        }))
+    }
+    fn row(&self, id: RowId) -> Result<Arc<Row>, VoiceError> {
+        self.index
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .rows
+            .get(id.slot)
+            .and_then(Option::as_ref)
+            .filter(|row| row.id == id)
+            .cloned()
+            .ok_or(VoiceError::Unauthorized)
+    }
+    pub(crate) fn status(&self, id: RowId) -> Result<Status, VoiceError> {
+        let row = self.row(id)?;
+        let status = row
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .status
+            .clone();
+        Ok(status)
+    }
+    /// Recover actual terminal/settlement metadata even after phase closure or a native
+    /// worker lost its last refresh. This admits no data copy, engine, computation or first
+    /// effect. A single observer is prepaid per row; callers coalesce/retry Capacity outside.
+    pub(crate) fn reconcile(&self, id: RowId) -> Result<Status, VoiceError> {
+        self.reconcile_inner(id, true)
+    }
+    fn reconcile_inner(&self, id: RowId, notify: bool) -> Result<Status, VoiceError> {
+        let row = self.row(id)?;
+        let Some(observer) = Self::observe(&row, notify)? else {
+            return self.status(id);
+        };
+        // Original callback-bearing Clock/history observations run outside ALL native gates.
+        let observed = observer.action().terminal_status();
+        let status = {
+            let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+            merge_observed(&mut state.status, observed)?;
+            state.status.clone()
+        };
+        drop(observer);
+        Ok(status)
+    }
+    fn observe(row: &Arc<Row>, notify: bool) -> Result<Option<Observation>, VoiceError> {
+        let action = {
+            let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Body::Live(live) = &mut state.body else {
+                return Ok(None);
+            };
+            if live.observer {
+                return Err(VoiceError::Capacity);
+            }
+            live.observer = true;
+            live.action.clone()
+        };
+        Ok(Some(Observation {
+            row: row.clone(),
+            action: Some(action),
+            notify,
+        }))
+    }
+    /// Fixed history ACK recovery needs no data-phase loan and remains available after End
+    /// or a lost earlier ACK reply. It cannot acknowledge a different terminal transition.
+    pub(crate) fn acknowledge(
+        &self,
+        id: RowId,
+        receipt: &CryptoResultReceipt,
+    ) -> Result<(), VoiceError> {
+        let row = self.row(id)?;
+        if let Some(observer) = Self::observe(&row, true)? {
+            observer.action().acknowledge_result(receipt)?;
+            let observed = observer.action().terminal_status();
+            let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+            merge_observed(&mut state.status, observed)?;
+            state.status.acknowledged = true;
+            // Drop native guard before Observation's actual Action owner/cleanup.
+            drop(state);
+            drop(observer);
+            return Ok(());
+        }
+        let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.status.acknowledged
+            && state
+                .status
+                .engine
+                .receipt
+                .as_ref()
+                .is_some_and(|original| original.same_transition(receipt))
+        {
+            Ok(())
+        } else {
+            Err(VoiceError::Unauthorized)
+        }
+    }
+    /// Native cleanup after the selected executor's actual provider/result/RPC work drained.
+    /// This is NOT a callable IPC assertion of drainage. The future authenticated control
+    /// adapter must establish those preconditions before invoking irreversible settlement.
+    pub(crate) fn settle(&self, id: RowId) -> Result<Status, VoiceError> {
+        let row = self.row(id)?;
+        if let Some(observer) = Self::observe(&row, true)? {
+            observer.action().settle_engine();
+            let observed = observer.action().terminal_status();
+            let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+            merge_observed(&mut state.status, observed)?;
+            let status = state.status.clone();
+            drop(state);
+            drop(observer);
+            Ok(status)
+        } else {
+            let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.status.drained {
+                Ok(state.status.clone())
+            } else {
+                Err(VoiceError::Capacity)
+            }
+        }
+    }
+    /// One actual native data worker per row. The future physical channel must additionally
+    /// serialize across sibling rows and independently pay fixed control/reply copies.
+    pub(crate) fn work(&self, id: RowId) -> Result<Work, VoiceError> {
+        let row = self.row(id)?;
+        let owners = {
+            let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Body::Live(live) = &mut state.body else {
+                return Err(VoiceError::Unauthorized);
+            };
+            if live.worker {
+                return Err(VoiceError::Capacity);
+            }
+            // Phase copy admission is pure and never calls Root/Clock. It keeps even a completed
+            // but uncollected native task in the actual phase-drain count.
+            let custody = live.phase.copy(0)?;
+            live.worker = true;
+            WorkOwners {
+                selected: live.selected.clone(),
+                action: live.action.clone(),
+                phase: live.phase.clone(),
+                _custody: custody,
+            }
+        };
+        Ok(Work {
+            row,
+            owners: Some(owners),
+        })
+    }
+    /// Compact only after the original phase has actually returned its loan, all native work
+    /// was collected, engine settlement is observed and any terminal receipt was acknowledged.
+    /// The caller must first establish browser closure through the separate authenticated
+    /// protocol; this method never accepts a renderer-provided "drained" boolean.
+    fn compact(&self, id: RowId) -> Result<bool, VoiceError> {
+        // Only wait_compacted's gated sole waiter may call this quiet path in production.
+        // Another native caller could otherwise overlap an unnotified quiet observation.
+        // The sole cleanup waiter must not wake itself merely by observing unchanged history.
+        // External observation retirement still notifies readiness after releasing its fence.
+        self.reconcile_inner(id, false)?;
+        let row = self.row(id)?;
+        let retired = {
+            let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+            if matches!(state.body, Body::Drained) {
+                return Ok(true);
+            }
+            let Body::Live(live) = &state.body else {
+                return Ok(false);
+            };
+            if live.worker
+                || live.observer
+                || !live.phase.is_drained()
+                || !state.status.engine.settled
+                || (state.status.engine.receipt.is_some() && !state.status.acknowledged)
+            {
+                return Ok(false);
+            }
+            state.status.drained = true;
+            if let Some(receipt) = &mut state.status.engine.receipt {
+                receipt.retired = true; // this closed phase can never admit another first effect
+            }
+            std::mem::replace(&mut state.body, Body::Drained)
+        };
+        // Native input/action/Workflow owners and affine worker grants must never destruct
+        // beneath State/Index. The retained tombstone contains only fixed evidence and Weak.
+        drop(retired);
+        row.changed.notify_waiters();
+        Ok(true)
+    }
+    /// Coalesce the sole process-owned native cleanup waiter. The caller first establishes
+    /// authenticated browser closure and closes Phase. Native data drainage and metadata/ACK
+    /// readiness are distinct events: observing the first must never lose the second wake.
+    /// This future creates no retry timer, new factory, engine or variable data loan.
+    pub(crate) async fn wait_compacted(&self, id: RowId) -> Result<Status, VoiceError> {
+        let row = self.row(id)?;
+        if row
+            .cleanup_waiter
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(VoiceError::Capacity);
+        }
+        let _waiter = CleanupWaiter(row.clone());
+        let phase = {
+            let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+            match &state.body {
+                Body::Live(live) => Some(live.phase.clone()),
+                Body::Drained => None,
+                Body::Pending(_) => return Err(VoiceError::Capacity),
+            }
+        };
+        if let Some(phase) = phase {
+            phase.wait_drained().await;
+        }
+        loop {
+            let changed = row.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            match self.compact(id) {
+                Ok(true) => return self.status(id),
+                Ok(false) | Err(VoiceError::Capacity) => changed.await,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+impl Registration {
+    pub(crate) fn id(&self) -> RowId {
+        self.row.id
+    }
+    /// Call immediately BEFORE awaiting the actor. A lost/Stopped reply is not no-publication
+    /// evidence. Once marked, Drop cannot clear the original row or give the next retry new ID.
+    pub(crate) fn mark_handoff(&self) -> Result<(), VoiceError> {
+        let mut state = self
+            .row
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Body::Pending(pending) = &mut state.body else {
+            return Err(VoiceError::Unauthorized);
+        };
+        pending.handed_off = true;
+        Ok(())
+    }
+    /// PairReceipt must be the exact trusted native factory reply. Neither it nor matching
+    /// metadata substitutes for the actual returned Action allocation or its current authority.
+    pub(crate) fn attach(
+        mut self,
+        action: Arc<CryptoAction>,
+        pair: PairReceipt,
+        bytes: usize,
+    ) -> Result<RowId, VoiceError> {
+        // Receiving an actual factory output is itself publication evidence, even if a future
+        // native caller mistakenly omitted mark_handoff before its await. Refusal below may
+        // not turn that proven publication into a fresh uncounted purpose.
+        self.mark_handoff()?;
+        let selected = {
+            let state = self
+                .row
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let Body::Pending(pending) = &state.body else {
+                return Err(VoiceError::Unauthorized);
+            };
+            pending.selected.clone()
+        };
+        let binding = action.protected_binding()?;
+        let Purpose::Derive(selector) = self.row.key.purpose;
+        if !selected.lease().is_live()
+            || action.operation() != CryptoOperation::Derive
+            || !action.belongs_to(selected.binding().scope, selected.lease())
+            || !action.uses_resources(&selected.resources())
+            || binding.local_join != selected.join()
+            || binding.local_key != catcoms_sync::voice_v2::key_reference(&selected.point())
+            || binding.peer != selector.peer
+            || binding.peer_join != selector.join
+            || binding.peer_key != selector.key_ref
+            || binding.epoch != selector.epoch
+            || binding.handshake != pair.handshake
+            || pair.peer != selector.peer
+            || binding.local_is_low != pair.local_is_low
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let prepared = {
+            let mut state = self
+                .row
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let Body::Pending(pending) = &mut state.body else {
+                return Err(VoiceError::Unauthorized);
+            };
+            pending.prepared.take().ok_or(VoiceError::Capacity)?
+        };
+        // Includes original Clock observation. It MUST run outside native registry gates.
+        let phase = prepared.bind(&action, bytes)?;
+        let retired = {
+            let mut state = self
+                .row
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if !selected.lease().is_live() || !matches!(state.body, Body::Pending(_)) {
+                return Err(VoiceError::Unauthorized);
+            }
+            state.status.action = Some((action.serial(), action.version(), action.input_tag()));
+            std::mem::replace(
+                &mut state.body,
+                Body::Live(Live {
+                    selected,
+                    action,
+                    phase,
+                    worker: false,
+                    observer: false,
+                }),
+            )
+        };
+        drop(retired);
+        self.attached = true;
+        // The index owns the actual Action/Phase before any caller receives this identity.
+        Ok(self.row.id)
+    }
+}
+impl Drop for Registration {
+    fn drop(&mut self) {
+        if self.attached {
+            return;
+        }
+        let removed = {
+            // Same Index -> State order as begin. Publishing idle and removing an unstarted
+            // row must be atomic with a retry, or that retry could acquire an orphaned ticket.
+            let mut index = self
+                .ledger
+                .index
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let mut state = self
+                .row
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let Body::Pending(pending) = &mut state.body else {
+                return;
+            };
+            pending.worker = false;
+            let slot = &mut index.rows[self.row.id.slot];
+            if !pending.handed_off
+                && slot
+                    .as_ref()
+                    .is_some_and(|row| row.id == self.row.id && Arc::ptr_eq(row, &self.row))
+            {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        drop(removed);
+    }
+}
+struct WorkOwners {
+    selected: Arc<SelectedHandoffOwner>,
+    action: Arc<CryptoAction>,
+    phase: Arc<Phase>,
+    // Actual objects drop before the final phase contribution.
+    _custody: CopyCustody,
+}
+pub(crate) struct Work {
+    row: Arc<Row>,
+    owners: Option<WorkOwners>,
+}
+impl Work {
+    pub(crate) fn action(&self) -> &Arc<CryptoAction> {
+        &self.owners.as_ref().expect("live work").action
+    }
+    pub(crate) fn phase(&self) -> &Arc<Phase> {
+        &self.owners.as_ref().expect("live work").phase
+    }
+    pub(crate) fn selected(&self) -> &SelectedHandoffOwner {
+        &self.owners.as_ref().expect("live work").selected
+    }
+    /// Observe the actual Root action OUTSIDE State/Index; never accept serialized terminal
+    /// claims. The single worker prevents stale observations from overwriting newer history.
+    pub(crate) fn refresh(&self) -> Result<Status, VoiceError> {
+        let observed = self.action().terminal_status();
+        let mut state = self
+            .row
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        merge_observed(&mut state.status, observed)?;
+        let status = state.status.clone();
+        drop(state);
+        self.row.changed.notify_waiters();
+        Ok(status)
+    }
+    pub(crate) fn acknowledge(&self, receipt: &CryptoResultReceipt) -> Result<(), VoiceError> {
+        self.action().acknowledge_result(receipt)?;
+        let mut state = self
+            .row
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.status.acknowledged = true;
+        drop(state);
+        self.row.changed.notify_waiters();
+        Ok(())
+    }
+}
+/// Concurrent metadata observations can finish out of order. Preserve immutable terminal
+/// identity and monotonic settlement/retirement; an older empty snapshot cannot erase proof.
+fn merge_observed(status: &mut Status, observed: CryptoResultStatus) -> Result<(), VoiceError> {
+    if let Some(receipt) = observed.receipt {
+        if let Some(old) = &mut status.engine.receipt {
+            if !old.same_transition(&receipt) {
+                return Err(VoiceError::RetryMismatch);
+            }
+            old.retired |= receipt.retired;
+        } else {
+            status.engine.receipt = Some(receipt);
+        }
+    }
+    status.engine.settled |= observed.settled;
+    Ok(())
+}
+struct Observation {
+    row: Arc<Row>,
+    action: Option<Arc<CryptoAction>>,
+    notify: bool,
+}
+impl Drop for Observation {
+    fn drop(&mut self) {
+        drop(self.action.take());
+        let mut state = self
+            .row
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Body::Live(live) = &mut state.body {
+            live.observer = false;
+        }
+        drop(state);
+        if self.notify {
+            self.row.changed.notify_waiters();
+        }
+    }
+}
+impl Observation {
+    fn action(&self) -> &CryptoAction {
+        self.action.as_ref().expect("original observation")
+    }
+}
+struct CleanupWaiter(Arc<Row>);
+impl Drop for CleanupWaiter {
+    fn drop(&mut self) {
+        self.0.cleanup_waiter.store(false, Ordering::Release);
+    }
+}
+impl Drop for Work {
+    fn drop(&mut self) {
+        // JoinHandle availability is not collection. All real worker owners drain first,
+        // outside State. Publish worker retirement BEFORE the final contribution can wake the
+        // sole phase waiter; otherwise it could observe drained + worker=true, miss compaction
+        // and never receive another notification. No real objects/work remain at that point.
+        let WorkOwners {
+            selected,
+            action,
+            phase,
+            _custody: custody,
+        } = self.owners.take().expect("one original worker");
+        drop((selected, action, phase));
+        {
+            let mut state = self
+                .row
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Body::Live(live) = &mut state.body {
+                live.worker = false;
+            }
+        }
+        self.row.changed.notify_waiters();
+        drop(custody);
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -61,6 +61,44 @@ async fn probed() -> (DiscoveredFixture, Arc<std::sync::Mutex<Probe>>) {
     (fixture, probe)
 }
 
+#[tokio::test]
+async fn root_handoff_samples_its_original_clock_before_engine_and_observes_callback_revocation() {
+    let ((mut root, remote, runtime, _clock, grant), probe) = probed().await;
+    let receipt = root
+        .prepare_voice_pair(&grant, selector(&root, &remote))
+        .unwrap();
+    let action = root
+        .prepare_voice_derivation(&grant, receipt.handshake)
+        .unwrap();
+    let before = runtime.resources().counts();
+    let observed_action = action.clone();
+    let lease = grant.lease();
+    *probe.lock().unwrap() = Probe {
+        reads: 0,
+        trigger: 1,
+        hook: Some(Box::new(move || {
+            assert!(
+                observed_action.result_fence_available_for_test(),
+                "callback-bearing Clock must precede Engine"
+            );
+            lease.revoke();
+        })),
+    };
+    assert_eq!(
+        action.borrow_handoff(16 * 1024).err(),
+        Some(VoiceError::Unauthorized)
+    );
+    assert!(
+        probe.lock().unwrap().hook.is_none(),
+        "actual original Clock ran"
+    );
+    assert_eq!(
+        runtime.resources().counts(),
+        before,
+        "refusal cannot consume a loan"
+    );
+}
+
 fn selector(root: &Node, remote: &Node) -> PairSelector {
     PairSelector {
         peer: remote.device_id(),

@@ -1,5 +1,29 @@
 # Next voice milestone: native result recovery
 
+## Implemented handoff prerequisites (21 October, full suites pending)
+
+An actual native action can now lend one chain-wide HandoffLoan from its existing96KiB
+confirmation envelope and expose metadata from the original paid fixed PlanBinding. Eight new
+cases are included in434 passing focused Root voice tests, with unchanged layout/budget guards.
+End/expiry/settlement cannot return an actual outstanding loan. The adapter must retain the exact
+action independently; capacity is not effect authority.
+
+The candidate reader passes ten regressions and an actual packaged Windows BYOB response check.
+It requires authenticated length, exclusive response and enclosing copy prepayment; it is not
+channel authentication/registration or complete flight custody. Full-suite status is in handover.
+The disabled pilot now implements the original native ledger and fixed drained history, with
+row/phase prepayment, original selected-key/action/pair binding and metadata-only reconcile/
+ACK/settlement after phase closure. Its process-owned pending/live/drained rows share 32 slots;
+there is no eviction. All 60 included harness tests pass; the native full gate remains pending.
+Ledger re-review has no remaining blocker/high/medium. Snapshots retain Weak grants; tombstones
+retain no strong Action/Phase/Grant. Reviewed cleanup dead ends and observer wake races now
+have deterministic regressions, including cancellation and late exact ACK.
+
+Next implement actual Actor registration and framed derivation/result/ACK/settlement delivery,
+independently prepaid terminal replies, authenticated browser drainage and final delivery ACK/
+collection. The retained metadata alone does not prove a physical response was drained. Application
+listener/CSP/dispatch stays off; live V2/media/combined/physical work remains open.
+
 ## Validated selected join-key bootstrap (21 October)
 
 The new selected-key path reaches actual native endpoint installation, with original owner/

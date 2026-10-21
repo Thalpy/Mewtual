@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 mod join_key;
+pub(crate) use join_key::SelectedHandoffOwner;
 pub(crate) use join_key::{JoinKeyAdmission, JoinKeyPublication, PublicationPlan};
 
 const CANDIDATES: usize = 8;
@@ -623,4 +624,4 @@ impl Coordinator {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

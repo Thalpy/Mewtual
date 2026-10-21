@@ -8,6 +8,89 @@ fn point() -> [u8; 65] {
 }
 
 #[test]
+fn native_handoff_selection_requires_actual_published_generation_and_reuses_its_owner() {
+    let mut c = action_coordinator();
+    let controller = controller(&mut c);
+    let owner = call(&mut c, &controller, 1, 1);
+    assert!(c.selected_handoff_owner(&owner, [9; 32]).is_err());
+    let admission = c.admit_join_key(&owner, [9; 32]).unwrap();
+    assert!(c.selected_handoff_owner(&owner, [9; 32]).is_err());
+    let PublicationPlan::Start(mut work) = c
+        .prepare_join_key_publication(&owner, [9; 32], &admission.permit, point())
+        .unwrap()
+    else {
+        panic!("first publication")
+    };
+    assert!(c.selected_handoff_owner(&owner, [9; 32]).is_err());
+    c.finish_join_key_publication(&mut work, true).unwrap();
+    assert!(c.selected_handoff_owner(&owner, [8; 32]).is_err());
+    let selected = c.selected_handoff_owner(&owner, [9; 32]).unwrap();
+    let before = c.resources.counts();
+    let group = selected.binding().scope.group;
+    let pressure = c
+        .resources
+        .charge(group, 256 * 1024 - before.0, ResourceKind::Retained)
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        &selected,
+        &c.selected_handoff_owner(&owner, [9; 32]).unwrap()
+    ));
+    drop(pressure);
+    assert_eq!(c.resources.counts(), before);
+    c.settle_join_key(&owner, [9; 32]).unwrap();
+    assert!(Arc::ptr_eq(
+        &selected,
+        &c.selected_handoff_owner(&owner, [9; 32]).unwrap()
+    ));
+    assert_eq!(selected.executor(), [9; 32]);
+    assert_eq!(selected.point(), point());
+    assert!(Arc::ptr_eq(
+        &selected.grant().unwrap(),
+        &c.owner(&owner).unwrap()._grant
+    ));
+    c.end(&owner);
+    assert!(!selected.lease().is_live());
+    assert!(selected.grant().is_err());
+    let identity = selected.grant_identity();
+    drop(work);
+    assert!(
+        identity.upgrade().is_none(),
+        "the cached snapshot must never own an affine grant"
+    );
+    assert!(c.selected_handoff_owner(&owner, [9; 32]).is_err());
+    let replacement = call(&mut c, &controller, 1, 2);
+    assert!(c.selected_handoff_owner(&replacement, [9; 32]).is_err());
+}
+
+#[test]
+fn native_handoff_selection_capacity_refusal_does_not_consume_its_published_generation() {
+    let mut c = action_coordinator();
+    let controller = controller(&mut c);
+    let owner = call(&mut c, &controller, 1, 1);
+    let admission = c.admit_join_key(&owner, [9; 32]).unwrap();
+    let PublicationPlan::Start(mut work) = c
+        .prepare_join_key_publication(&owner, [9; 32], &admission.permit, point())
+        .unwrap()
+    else {
+        panic!("publication")
+    };
+    c.finish_join_key_publication(&mut work, true).unwrap();
+    let before = c.resources.counts();
+    let pressure = c
+        .resources
+        .charge(
+            c.owner(&owner).unwrap().binding.scope.group,
+            256 * 1024 - before.0,
+            ResourceKind::Retained,
+        )
+        .unwrap();
+    assert!(c.selected_handoff_owner(&owner, [9; 32]).is_err());
+    drop(pressure);
+    assert_eq!(c.resources.counts(), before);
+    assert!(c.selected_handoff_owner(&owner, [9; 32]).is_ok());
+}
+
+#[test]
 fn selected_join_key_lost_admission_recovers_one_paid_operation_under_pressure() {
     let mut c = action_coordinator();
     let controller = controller(&mut c);

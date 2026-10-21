@@ -1,5 +1,28 @@
 # Mewtual; Architecture
 
+## Protected handoff capacity (21 October, full validation pending)
+
+An actual protected CryptoAction lends one chain-wide HandoffLoan from its existing96KiB
+Workflow. Retained copy capacity adds no Crypto slot; Clock sampling precedes Engine, followed
+by pure original gates and the Workflow fence. Actual loan owners keep an ended Workflow
+nonreplaceable. Fixed historical actions share the original paid PlanBinding, never Workflow.
+The adapter must retain the original action and separately prove real copy/worker drainage.
+
+The candidate browser reader follows actual BYOB transfers, caps a body at2064 bytes plus one
+EOF byte and awaits cancellation/release. It is not a complete flight/copy budget or a live
+transport. Focused/static review and a generated-data packaged Windows probe pass; complete
+current-source Root suite passes 3,226; native gates remain pending. Full frontend (2,297), static/build and rendered
+flows pass. No application listener/CSP/dispatch is enabled.
+
+The disabled pilot's process-owned native ledger reserves row and phase metadata before
+factory handoff. Pending/live/drained rows share 32 slots, without uncertain-history eviction.
+Selected key snapshots keep Weak affine-grant identity; attachment still resolves the original
+Action and complete pair binding. Actual native data owners contribute to one shared Phase.
+Metadata-only terminal recovery and exact ACK/settlement need no new copy loan after closure.
+Compaction removes strong Action/Phase/selected snapshot owners outside native guards. The
+32-row lifetime limit is intentional for this disabled pilot. Actual Actor integration, physical
+control/reply custody and authenticated browser drainage remain required before enablement.
+
 ## Selected native/browser key bootstrap (21 October)
 
 One retained WebCrypto broker selects one nonextractable key for an actual accepted native

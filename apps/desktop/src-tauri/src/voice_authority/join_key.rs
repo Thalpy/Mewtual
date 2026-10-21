@@ -7,6 +7,7 @@ use serde::Serialize;
 const MAX_GENERATIONS: usize = 32;
 const GENERATION_BYTES: usize = 1024;
 const GENERATE_BYTES: usize = 128;
+const SELECTED_BYTES: usize = 1024;
 
 pub(super) struct Generation {
     executor: [u8; 32],
@@ -20,6 +21,62 @@ pub(super) struct Generation {
     publishing: bool,
     published: bool,
     drained: tokio::sync::watch::Sender<bool>,
+    selected: Option<Arc<SelectedHandoffOwner>>,
+}
+
+/// Native-only identity for the byte-bearing pilot. Constructed once from the actual published
+/// generation, never from a renderer projection. Keeping this snapshot cannot keep an ended
+/// call live: End revokes the original shared lease synchronously. Root must still check the
+/// actual grant, actor incarnation, membership and epoch at every first protocol effect.
+pub(crate) struct SelectedHandoffOwner {
+    id: String,
+    binding: Binding,
+    join: Nonce,
+    lease: CallLease,
+    // Generation pruning runs under Coordinator. Its cached snapshot must never become the
+    // last affine CallGrant owner there; only native workers upgrade outside native locks.
+    grant: std::sync::Weak<CallGrant>,
+    executor: [u8; 32],
+    point: [u8; 65],
+    resources: Arc<Resources>,
+    _metadata: Credit,
+}
+impl SelectedHandoffOwner {
+    // Native actor consumer remains disabled with the byte-bearing pilot.
+    #[allow(dead_code)]
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+    pub(crate) fn binding(&self) -> &Binding {
+        &self.binding
+    }
+    pub(crate) fn join(&self) -> Nonce {
+        self.join
+    }
+    pub(crate) fn lease(&self) -> &CallLease {
+        &self.lease
+    }
+    pub(crate) fn executor(&self) -> [u8; 32] {
+        self.executor
+    }
+    pub(crate) fn point(&self) -> [u8; 65] {
+        self.point
+    }
+    pub(crate) fn resources(&self) -> Arc<Resources> {
+        self.resources.clone()
+    }
+    /// Upgrade outside Coordinator/ledger locks and retain through the actual actor turn.
+    /// This historical snapshot cannot resurrect an affine grant that has already gone away.
+    #[allow(dead_code)] // consumed by the next native actor integration, not a renderer command
+    pub(crate) fn grant(&self) -> Result<Arc<CallGrant>, catcoms_sync::voice_v2::VoiceError> {
+        self.grant
+            .upgrade()
+            .filter(|grant| grant.lease().is_live())
+            .ok_or(catcoms_sync::voice_v2::VoiceError::Unauthorized)
+    }
+    pub(crate) fn grant_identity(&self) -> std::sync::Weak<CallGrant> {
+        self.grant.clone()
+    }
 }
 
 /// All fields are public metadata. `closed` is history only and never permission to generate
@@ -112,7 +169,81 @@ impl Coordinator {
             publishing: false,
             published: false,
             drained: tokio::sync::watch::channel(!generate).0,
+            selected: None,
         })
+    }
+
+    /// Cache the same actual selection before a native factory begins. Lost callers obtain
+    /// the original Arc without another fixed charge, key generation or publication. A closed
+    /// generation with no published key, another executor or an equal-scope replacement fails.
+    /// Ordinary key-generation settlement is allowed after successful publication: it retires
+    /// the generation operation, not the selected browser's still-held nonextractable key.
+    // The byte-bearing pilot is deliberately disabled until complete physical-flight custody.
+    #[allow(dead_code)]
+    pub(crate) fn selected_handoff_owner(
+        &mut self,
+        owner_id: &str,
+        executor: [u8; 32],
+    ) -> Result<Arc<SelectedHandoffOwner>, String> {
+        let owner = self
+            .owner
+            .as_ref()
+            .filter(|owner| owner.id == owner_id && owner.lease.is_live())
+            .ok_or("voice owner changed")?;
+        let generation = self
+            .join_generations
+            .get_mut(owner_id)
+            .ok_or("voice key is unavailable")?;
+        if generation.executor != executor
+            || !generation.grant.ptr_eq(&Arc::downgrade(&owner._grant))
+            || !generation.published
+            || generation.publishing
+        {
+            return Err("voice key is unavailable".into());
+        }
+        if let Some(selected) = &generation.selected {
+            return Ok(selected.clone());
+        }
+        let layout = std::mem::size_of::<SelectedHandoffOwner>()
+            .checked_add(2 * std::mem::size_of::<usize>())
+            // Weak keeps the original Arc allocation alive after its affine value drains.
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    std::mem::size_of::<CallGrant>()
+                        + 2 * std::mem::size_of::<usize>()
+                        + std::mem::size_of::<Arc<SelectedHandoffOwner>>(),
+                )
+            })
+            .and_then(|bytes| bytes.checked_add(owner.id.len()))
+            .and_then(|bytes| bytes.checked_add(owner.binding.group.len()));
+        if layout.is_none_or(|bytes| bytes > SELECTED_BYTES) {
+            return Err("voice selection capacity reached".into());
+        }
+        // This metadata is independent of Workflow/data capacity. Prepay before the Arc or
+        // Owner strings are allocated, and retain that credit if history outlives Generation.
+        let metadata = self
+            .resources
+            .charge(
+                owner.binding.scope.group,
+                SELECTED_BYTES,
+                ResourceKind::Retained,
+            )
+            .map_err(|error| error.to_string())?;
+        let selected = Arc::new(SelectedHandoffOwner {
+            id: owner.id.clone(),
+            binding: owner.binding.clone(),
+            join: owner.join,
+            lease: owner.lease.clone(),
+            grant: Arc::downgrade(&owner._grant),
+            executor,
+            point: generation
+                .point
+                .expect("published generation has its frozen point"),
+            resources: self.resources.clone(),
+            _metadata: metadata,
+        });
+        generation.selected = Some(selected.clone());
+        Ok(selected)
     }
 
     pub fn admit_join_key(

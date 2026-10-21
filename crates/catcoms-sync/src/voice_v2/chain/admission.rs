@@ -272,8 +272,8 @@ impl Workflow {
         let Body::Encrypted { header, .. } = object.body() else {
             return Err(VoiceError::Malformed);
         };
-        let closed = self.closed.lock().unwrap_or_else(|e| e.into_inner());
-        if *closed
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.closed
             || !self.live.is_live()
             || !self.binding.live()
             || !Arc::ptr_eq(resources, &self.resources)

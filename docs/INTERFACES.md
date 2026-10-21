@@ -1,5 +1,34 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Protected native handoff loan (21 October, full validation pending)
+
+CryptoAction::protected_binding returns immutable native-selected metadata, including after
+input compaction. Its original fixed PlanBinding remains charged; projection equality supplies
+no engine/result/RTC authority. borrow_handoff(bytes) accepts a trusted adapter's measured peak
+and returns an affine HandoffLoan from its existing Workflow. Terminal/settled/expired work,
+unsupported budgets, bounds and occupied/capacity lanes refuse without spending identity.
+Retain the original loan across uncertain delivery; drop only after actual work/copies drain,
+outside Engine/Coordinator/final native guards. Historical retries cannot borrow fresh capacity.
+
+readVoiceIpcBody requires exclusive Response ownership, authenticated metadata and a prepaid
+enclosing flight. It returns an owned<=2064-byte buffer after exact BYOB intake, EOF checking
+and cancellation/release. The caller owns and charges that buffer until its own drainage.
+Errors are fixed metadata. No serialized action constructor or byte-bearing command was added.
+
+Native-only SelectedHandoffOwner comes from the actual published generation and retains Weak
+grant identity, fixed original lifecycle binding and a separate paid record. Ledger::begin
+reserves row and Phase metadata before pair/derivation factories; mark_handoff precedes the
+actor await. Lost/Stopped replies retain that exact counted purpose. attach verifies the actual
+Root Action and original pair binding and installs it before returning an ID. No renderer may
+register an action by copying fields. The pilot supports derivation only, with 32 total rows.
+
+Ledger::reconcile, acknowledge and settle are bounded metadata-only native operations, including
+after End/phase closure. They never reloan variable capacity or admit computation. settle and
+Phase::close require actual selected-browser/provider/RPC drainage established by the future
+authenticated adapter. No IPC accepts a boolean assertion of that proof. compact retains exact
+nonreusable historical evidence while removing strong Action/Phase/Grant owners. Independent
+terminal control/reply prepayment and final delivery ACK/collection are not implemented yet.
+
 ## Selected join-key bootstrap (21 October, complete gates passed)
 
 Main-window commands `admit_voice_join_key(owner, executor)` and

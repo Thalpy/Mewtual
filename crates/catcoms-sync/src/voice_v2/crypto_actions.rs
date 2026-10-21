@@ -21,8 +21,11 @@ const ACTIONS: usize = 32;
 const CONTEXT_BYTES: usize = 4096;
 const CONFIRM_BYTES: usize = 512;
 const RECORD_BYTES: usize = 1024;
+mod handoff;
 mod results;
 pub(crate) mod slots;
+pub use super::chain::HandoffLoan;
+pub use handoff::ProtectedCryptoBinding;
 pub use results::{CryptoOutcome, CryptoResultReceipt, CryptoResultStatus};
 pub(super) use results::{ResultBinding, TerminalResult};
 
@@ -125,6 +128,9 @@ pub struct CryptoAction {
     // irreversible chain lease; fixed historical results do not own a live Workflow.
     chain: Option<CallLease>,
     chain_epoch: Option<u64>,
+    // Fixed identity shares the existing paid plan object. It must never retain Workflow:
+    // terminal action history is independent of variable progress/IPC capacity.
+    binding: Option<Arc<super::chain::PlanBinding>>,
     // Lock order is Engine -> payload. An input lease clones its Arc under this mutex and
     // releases the guard before any engine operation. Actual payload/credit drops occur after
     // releasing BOTH locks, so downstream destructors cannot reenter an action fence.
@@ -366,6 +372,7 @@ pub(super) struct PreparedAction {
     chain_issue: Option<super::chain::RowIssue>,
     chain: Option<CallLease>,
     chain_epoch: Option<u64>,
+    binding: Option<Arc<super::chain::PlanBinding>>,
 }
 
 pub(super) struct Allocation {
@@ -485,6 +492,7 @@ impl ActionQueue {
             return Err(VoiceError::Capacity);
         }
         let serial = self.serial.checked_add(1).ok_or(VoiceError::Capacity)?;
+        let binding = history.as_ref().map(|history| history.issue.binding());
         if let Some(history) = &history {
             history
                 .issue
@@ -578,6 +586,7 @@ impl ActionQueue {
             chain_issue,
             chain,
             chain_epoch,
+            binding,
         })
     }
 
@@ -614,6 +623,7 @@ impl ActionQueue {
             authority,
             chain: prepared.chain,
             chain_epoch: prepared.chain_epoch,
+            binding: prepared.binding,
             input: Mutex::new(Some(Arc::new(ActionPayload {
                 input,
                 _credit: prepared.payload,

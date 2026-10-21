@@ -3,6 +3,87 @@
 use super::*;
 use voice_v2::crypto_actions::CryptoOutcome;
 
+#[tokio::test]
+async fn root_handoff_expiry_refuses_new_capacity_but_preserves_the_actual_old_loan() {
+    for admitted in [false, true] {
+        let (mut root, _remote, runtime, clock, grant, handshake) = low_fixture().await;
+        let action = root.prepare_voice_derivation(&grant, handshake).unwrap();
+        let bound = action.protected_binding().unwrap();
+        let loan = admitted.then(|| action.borrow_handoff(16 * 1024).unwrap());
+        clock.advance_ms(bound.deadline);
+        let before = runtime.resources().counts();
+        assert_eq!(
+            action.borrow_handoff(16 * 1024).err(),
+            Some(VoiceError::Unauthorized)
+        );
+        assert_eq!(
+            runtime.resources().counts(),
+            before,
+            "expiry refusal spends no capacity"
+        );
+        runtime.collect_expired();
+        let collected = runtime.resources().counts();
+        drop(loan);
+        assert_eq!(
+            runtime.resources().counts().0,
+            collected.0 - if admitted { 16 * 1024 } else { 0 },
+            "actual old copy ownership, not expiry, returns its handoff loan"
+        );
+        assert_eq!(action.protected_binding().unwrap(), bound);
+    }
+}
+
+#[tokio::test]
+async fn root_handoff_binding_and_lane_are_original_and_shared_between_distinct_rows() {
+    let (mut root, remote, runtime, _clock, grant, handshake) = low_fixture().await;
+    let action = root.prepare_voice_derivation(&grant, handshake).unwrap();
+    let bound = action.protected_binding().unwrap();
+    let context = root.voice_v2_context(1).unwrap();
+    assert_eq!(bound.scope, grant.scope());
+    assert_eq!(bound.epoch, context.epoch);
+    assert_eq!(bound.local, root.device_id());
+    assert_eq!(bound.peer, remote.device_id());
+    assert_eq!(bound.local_join, key(81).join);
+    assert_eq!(bound.local_key, key(81).key_ref);
+    assert_eq!(bound.peer_join, key(82).join);
+    assert_eq!(bound.peer_key, key(82).key_ref);
+    assert_eq!(bound.handshake, handshake);
+    assert!(bound.local_is_low);
+    let before = runtime.resources().counts();
+    let loan = action.borrow_handoff(16 * 1024).unwrap();
+    assert_eq!(runtime.resources().counts(), before);
+    assert!(Arc::ptr_eq(
+        &action,
+        &root.prepare_voice_derivation(&grant, handshake).unwrap(),
+    ));
+    action.admit_engine(action.engine_bytes()).unwrap();
+    let receipt = root
+        .commit_voice_derivation_result(&grant, &action, action.output_tag(&[]).unwrap())
+        .unwrap();
+    action.settle_engine();
+    action.acknowledge_result(&receipt).unwrap();
+    assert!(action.input().is_err());
+    let next = root
+        .start_voice_confirmation(&grant, handshake, None)
+        .unwrap();
+    assert_eq!(next.protected_binding().unwrap(), bound);
+    assert_eq!(
+        next.borrow_handoff(16 * 1024).err(),
+        Some(VoiceError::Capacity)
+    );
+    assert_eq!(
+        action.borrow_handoff(16 * 1024).err(),
+        Some(VoiceError::Unauthorized)
+    );
+    drop(loan);
+    let next_loan = next.borrow_handoff(16 * 1024).unwrap();
+    grant.lease().revoke();
+    root.reconcile_voice_actor();
+    assert_eq!(next.borrow_handoff(1).err(), Some(VoiceError::Unauthorized));
+    assert_eq!(action.protected_binding().unwrap(), bound);
+    drop(next_loan);
+}
+
 pub(super) fn read_rooms(
     doc: Option<&automerge::AutoCommit>,
 ) -> Result<BTreeSet<u128>, VoiceError> {

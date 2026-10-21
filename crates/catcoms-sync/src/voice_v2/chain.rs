@@ -71,7 +71,7 @@ impl Binding {
 // Shared fixed-object custody, independent of progress. A closed control or an abandoned row
 // can retain these objects after Workflow drains, so their charge must follow the last such
 // owner too. No reference points from this owner back into Workflow/control/actions.
-struct PlanBinding {
+pub(super) struct PlanBinding {
     value: Binding,
     _metadata: Credit,
 }
@@ -138,7 +138,39 @@ pub struct Workflow {
     crypto: Arc<WorkLane>,
     lowers: [Arc<WorkLane>; 2],
     packets: super::packets::ConfirmationCapacity,
-    closed: Mutex<bool>,
+    state: Mutex<WorkflowState>,
+}
+struct WorkflowState {
+    closed: bool,
+    // One IPC owner for the entire chain, including distinct rows. A lost renderer reply may
+    // keep this occupied while the original physical work/result/cleanup still drains.
+    handoff_busy: bool,
+}
+
+/// Affine capacity for application-owned native/browser handoff copies. The trusted adapter
+/// chooses a measured byte ceiling before creating copies and retains this owner until their
+/// actual observable work drains. It grants no engine, result, packet or RTC authority.
+///
+/// This is a loan from the existing confirmation envelope, never another independent reserve
+/// or Crypto slot. Keeping the actual Workflow alive also prevents overlapping replacement
+/// envelopes after End; retaining only its Reservation would lose that ownership invariant.
+#[must_use = "retain the handoff loan until every application-owned copy and work item drains"]
+pub struct HandoffLoan {
+    workflow: Arc<Workflow>,
+    _credit: Credit,
+}
+impl Drop for HandoffLoan {
+    fn drop(&mut self) {
+        let mut state = self
+            .workflow
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        debug_assert!(state.handoff_busy);
+        state.handoff_busy = false;
+        // Credit/Workflow destruction follows this guard. Never run downstream resource
+        // destructors under the workflow fence.
+    }
 }
 struct Control {
     closed: bool,
@@ -156,7 +188,7 @@ pub struct PreparedChain {
     history: Arc<HistoryPlan>,
     control: Mutex<Control>,
 }
-redacted_debug!(Workflow, PreparedChain);
+redacted_debug!(Workflow, PreparedChain, HandoffLoan);
 
 pub(super) struct PreparedHistory {
     pub record: Credit,
@@ -202,6 +234,9 @@ impl RowIssue {
     }
     pub(super) fn epoch(&self) -> u64 {
         self.plan.binding.epoch
+    }
+    pub(super) fn binding(&self) -> Arc<PlanBinding> {
+        self.plan.binding.clone()
     }
 
     /// Allocation, tagging, input construction and authority validation precede this boundary.
@@ -350,7 +385,10 @@ impl PreparedChain {
                     crypto,
                     lowers,
                     packets,
-                    closed: Mutex::new(false),
+                    state: Mutex::new(WorkflowState {
+                        closed: false,
+                        handoff_busy: false,
+                    }),
                 })),
             }),
         });
@@ -456,12 +494,25 @@ impl Workflow {
         if !Arc::ptr_eq(resources, &self.resources) || group != self.binding.scope.group {
             return Err(VoiceError::Scope);
         }
-        let closed = self.closed.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         // Pure lease observations: callers own time checks. A Clock callback here could revoke
         // authority after the enclosing engine fence checked it.
-        if *closed || !self.live.is_live() || !self.binding.live() {
+        if state.closed || !self.live.is_live() || !self.binding.live() {
             return Err(VoiceError::Unauthorized);
         }
+        let credit = self.charge_locked(resources, group, bytes, kind)?;
+        drop(state);
+        Ok(credit.with_custody(self.clone()))
+    }
+    // Caller owns the workflow state fence and has checked original leases. Do not call
+    // charge() recursively while holding that fence (notably from handoff admission).
+    fn charge_locked(
+        &self,
+        resources: &Arc<Resources>,
+        group: [u8; 32],
+        bytes: usize,
+        kind: ResourceKind,
+    ) -> Result<Credit, VoiceError> {
         let credit = if kind == ResourceKind::Forward {
             let mut result = Err(VoiceError::Capacity);
             for lane in &self.lowers {
@@ -484,8 +535,35 @@ impl Workflow {
         } else {
             return Err(VoiceError::Scope);
         };
-        drop(closed);
-        Ok(credit.with_custody(self.clone()))
+        Ok(credit)
+    }
+    pub(super) fn borrow_handoff(
+        self: &Arc<Self>,
+        bytes: usize,
+    ) -> Result<HandoffLoan, VoiceError> {
+        if bytes == 0 || bytes > VARIABLE_BYTES {
+            return Err(VoiceError::Bounds);
+        }
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.closed || !self.live.is_live() || !self.binding.live() {
+            return Err(VoiceError::Unauthorized);
+        }
+        if state.handoff_busy {
+            return Err(VoiceError::Capacity);
+        }
+        let credit = self.charge_locked(
+            &self.resources,
+            self.binding.scope.group,
+            bytes,
+            ResourceKind::Retained,
+        )?;
+        // A failed capacity claim leaves the position available for the exact original retry.
+        state.handoff_busy = true;
+        drop(state);
+        Ok(HandoffLoan {
+            workflow: self.clone(),
+            _credit: credit.with_custody(self.clone()),
+        })
     }
     pub(crate) fn collect_expired(&self, mono: u64) {
         if mono >= self.binding.deadline || !self.binding.live() || !self.live.is_live() {
@@ -497,7 +575,7 @@ impl Workflow {
         }
     }
     fn close(&self) {
-        *self.closed.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
         self.reserve.close();
         self.crypto.close();
         for lane in &self.lowers {

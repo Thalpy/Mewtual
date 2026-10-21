@@ -1,0 +1,587 @@
+//! Synthetic desktop grant and publication completion; real signed discovery, LocalJoin and
+//! protected action/result factories. Not ServerActor/MLS/IPC/WebView acceptance evidence.
+use super::*;
+use crate::voice_authority::{Binding, CandidateKind, Coordinator, PublicationPlan};
+use catcoms_crypto::DeviceKeypair;
+use catcoms_sync::voice_v2::runtime::Runtime;
+use catcoms_sync::voice_v2::{key_reference, Scope};
+
+fn noop_waker() -> std::task::Waker {
+    struct Idle;
+    impl std::task::Wake for Idle {
+        fn wake(self: Arc<Self>) {}
+    }
+    std::task::Waker::from(Arc::new(Idle))
+}
+
+fn selection() -> (Coordinator, Arc<SelectedHandoffOwner>, PairSelector) {
+    let mut coordinator =
+        Coordinator::with_runtime(Runtime::new(Arc::new(catcoms_rt::ManualClock::new(1000))));
+    let controller = coordinator
+        .prepare(CandidateKind::Controller(1), 0)
+        .unwrap();
+    coordinator
+        .activate(&controller, [0; 32], 0, &mut None)
+        .unwrap();
+    let binding = Binding {
+        generation: 1,
+        server: 7,
+        instance: 1,
+        group: vec![1],
+        scope: Scope::for_group(&[1], Some([8; 32]), 12),
+    };
+    let id = coordinator
+        .prepare(
+            CandidateKind::Call {
+                controller,
+                binding: binding.clone(),
+            },
+            0,
+        )
+        .unwrap();
+    let grant = CallGrant::from_lease(CallLease::default(), binding.scope);
+    coordinator
+        .activate(&id, [1; 32], 0, &mut Some(grant))
+        .unwrap();
+    let point: [u8; 65] = hex::decode("046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5").unwrap().try_into().unwrap();
+    let admission = coordinator.admit_join_key(&id, [9; 32]).unwrap();
+    let PublicationPlan::Start(mut work) = coordinator
+        .prepare_join_key_publication(&id, [9; 32], &admission.permit, point)
+        .unwrap()
+    else {
+        panic!("publication")
+    };
+    coordinator
+        .finish_join_key_publication(&mut work, true)
+        .unwrap();
+    coordinator.settle_join_key(&id, [9; 32]).unwrap();
+    let selected = coordinator.selected_handoff_owner(&id, [9; 32]).unwrap();
+    let selector = PairSelector {
+        peer: DeviceKeypair::from_seed(&[4; 32]).device_id(),
+        join: [7; 32],
+        key_ref: key_reference(&point),
+        epoch: 1,
+    };
+    (coordinator, selected, selector)
+}
+fn ticket(
+    ledger: &Arc<Ledger>,
+    selected: Arc<SelectedHandoffOwner>,
+    selector: PairSelector,
+) -> Registration {
+    let Begin::Factory(ticket) = ledger.begin(selected, Purpose::Derive(selector)).unwrap() else {
+        panic!("factory ticket")
+    };
+    ticket
+}
+fn actual_action(
+    coordinator: &Coordinator,
+    selected: &SelectedHandoffOwner,
+) -> (
+    catcoms_sync::voice_v2::presence::LocalJoin,
+    Arc<CryptoAction>,
+    PairReceipt,
+) {
+    let (join, action) = crate::voice_authority::tests::proven_action_with_protection(
+        coordinator,
+        selected.id(),
+        selected.resources(),
+        true,
+    );
+    let binding = action.protected_binding().unwrap();
+    let pair = PairReceipt {
+        handshake: binding.handshake,
+        peer: binding.peer,
+        local_is_low: binding.local_is_low,
+    };
+    (join, action, pair)
+}
+
+#[test]
+fn complete_records_index_handles_and_one_worker_fit_existing_fixed_payments() {
+    let ledger = Ledger::default();
+    let waiter = ledger.wait_compacted(RowId { slot: 0, serial: 0 });
+    // Selected and Phase have their own paid records. Include full native Work/Registration
+    // wrappers, index slot, temporary Status response and Arc allocation counters here.
+    let bytes = std::mem::size_of::<Row>()
+        + 2 * std::mem::size_of::<usize>()
+        + std::mem::size_of::<CallGrant>()
+        + 2 * std::mem::size_of::<usize>()
+        + std::mem::size_of::<Option<Arc<Row>>>()
+        + std::mem::size_of::<Registration>()
+        + std::mem::size_of::<Work>()
+        + std::mem::size_of::<Observation>()
+        + std::mem::size_of_val(&waiter)
+        + std::mem::size_of::<Status>();
+    assert!(
+        bytes <= ROW_BYTES,
+        "native row layout {bytes} exceeds {ROW_BYTES}"
+    );
+}
+
+#[test]
+fn observer_retirement_wakes_the_sole_cleanup_after_phase_drains_without_a_new_data_loan() {
+    use std::future::Future;
+    use std::sync::atomic::AtomicUsize;
+    use std::task::{Context, Wake, Waker};
+    struct Wakes(AtomicUsize);
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let (coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let (_join, action, pair) = actual_action(&coordinator, &selected);
+    let id = registration
+        .attach(action.clone(), pair, 16 * 1024)
+        .unwrap();
+    let work = ledger.work(id).unwrap();
+    action.settle_engine();
+    let phase = work.phase().clone();
+    phase.close();
+    let observation = Ledger::observe(&ledger.row(id).unwrap(), true)
+        .unwrap()
+        .unwrap();
+    let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+    let waker = Waker::from(wakes.clone());
+    let mut context = Context::from_waker(&waker);
+    let mut waiter = Box::pin(ledger.wait_compacted(id));
+    assert!(waiter.as_mut().poll(&mut context).is_pending());
+    let mut duplicate = Box::pin(ledger.wait_compacted(id));
+    assert!(matches!(
+        duplicate.as_mut().poll(&mut context),
+        std::task::Poll::Ready(Err(VoiceError::Capacity))
+    ));
+    drop(work);
+    assert!(phase.is_drained());
+    assert!(waiter.as_mut().poll(&mut context).is_pending());
+    let before = wakes.0.load(Ordering::SeqCst);
+    assert!(waiter.as_mut().poll(&mut context).is_pending());
+    assert_eq!(wakes.0.load(Ordering::SeqCst), before);
+    drop(observation);
+    assert!(wakes.0.load(Ordering::SeqCst) > before);
+    assert!(
+        matches!(waiter.as_mut().poll(&mut context), std::task::Poll::Ready(Ok(status)) if status.drained)
+    );
+}
+
+#[test]
+fn cancelled_cleanup_releases_only_its_waiter_position_and_reuses_original_history() {
+    use std::future::Future;
+    use std::task::Context;
+    let (coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let (_join, action, pair) = actual_action(&coordinator, &selected);
+    let id = registration
+        .attach(action.clone(), pair, 16 * 1024)
+        .unwrap();
+    let work = ledger.work(id).unwrap();
+    action.settle_engine();
+    let phase = work.phase().clone();
+    phase.close();
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let mut first = Box::pin(ledger.wait_compacted(id));
+    assert!(first.as_mut().poll(&mut context).is_pending());
+    let counts = selected.resources().counts();
+    drop(first);
+    assert_eq!(selected.resources().counts(), counts);
+    assert!(!ledger.status(id).unwrap().drained);
+    let mut replacement = Box::pin(ledger.wait_compacted(id));
+    assert!(replacement.as_mut().poll(&mut context).is_pending());
+    drop(work);
+    assert!(
+        matches!(replacement.as_mut().poll(&mut context), std::task::Poll::Ready(Ok(status)) if status.drained)
+    );
+}
+
+#[test]
+fn cleanup_waits_for_late_exact_ack_without_waking_itself_on_unchanged_history() {
+    use std::future::Future;
+    use std::task::Context;
+    let (coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let (mut join, action, pair) = actual_action(&coordinator, &selected);
+    let id = registration
+        .attach(action.clone(), pair, 16 * 1024)
+        .unwrap();
+    let work = ledger.work(id).unwrap();
+    action.admit_engine(action.engine_bytes()).unwrap();
+    let receipt = crate::voice_authority::tests::derivation_receipt(
+        &coordinator,
+        selected.id(),
+        &mut join,
+        &action,
+    );
+    ledger.settle(id).unwrap();
+    let phase = work.phase().clone();
+    phase.close();
+    drop(work);
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let mut waiter = Box::pin(ledger.wait_compacted(id));
+    assert!(waiter.as_mut().poll(&mut context).is_pending());
+    assert!(waiter.as_mut().poll(&mut context).is_pending());
+    assert!(!ledger.status(id).unwrap().drained);
+    ledger.acknowledge(id, &receipt).unwrap();
+    assert!(
+        matches!(waiter.as_mut().poll(&mut context), std::task::Poll::Ready(Ok(status)) if status.drained)
+    );
+}
+
+#[test]
+fn uncertain_factory_reply_reuses_paid_purpose_identity_and_does_not_rearm_another_worker() {
+    let (coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let first = ticket(&ledger, selected.clone(), selector);
+    let id = first.id();
+    first.mark_handoff().unwrap();
+    let counts = selected.resources().counts();
+    assert!(
+        matches!(ledger.begin(selected.clone(), Purpose::Derive(selector)).unwrap(), Begin::Existing(existing) if existing == id)
+    );
+    // A native worker lost after actor handoff leaves the original row, even without input.
+    drop(first);
+    let retry = ticket(&ledger, selected.clone(), selector);
+    assert!(retry.id() == id);
+    assert_eq!(selected.resources().counts(), counts);
+    let (_join, action, pair) = actual_action(&coordinator, &selected);
+    assert!(retry.attach(action, pair, 16 * 1024).unwrap() == id);
+    assert!(
+        matches!(ledger.begin(selected, Purpose::Derive(selector)).unwrap(), Begin::Existing(existing) if existing == id)
+    );
+}
+
+#[test]
+fn dropping_before_handoff_removes_only_its_original_slot_and_credit() {
+    let (_coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let baseline = selected.resources().counts();
+    let first = ticket(&ledger, selected.clone(), selector);
+    let old = first.id();
+    drop(first);
+    assert!(ledger.status(old).is_err());
+    assert_eq!(selected.resources().counts(), baseline);
+    let next = ticket(&ledger, selected, selector);
+    assert_eq!(next.id().slot, old.slot);
+    assert_ne!(next.id().serial, old.serial);
+    assert!(ledger.status(old).is_err());
+}
+
+#[test]
+fn lost_terminal_ack_and_settlement_replies_recover_fixed_history_after_all_live_owners_drop() {
+    let (mut coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    registration.mark_handoff().unwrap();
+    let (mut join, action, pair) = actual_action(&coordinator, &selected);
+    let id = registration
+        .attach(action.clone(), pair, 16 * 1024)
+        .unwrap();
+    let work = ledger.work(id).unwrap();
+    assert_eq!(
+        ledger.work(id).err().map(|_| VoiceError::Capacity),
+        Some(VoiceError::Capacity)
+    );
+    action.admit_engine(action.engine_bytes()).unwrap();
+    let receipt = crate::voice_authority::tests::derivation_receipt(
+        &coordinator,
+        selected.id(),
+        &mut join,
+        &action,
+    );
+    work.refresh().unwrap();
+    work.acknowledge(&receipt).unwrap();
+    assert!(ledger.status(id).unwrap().acknowledged);
+    action.settle_engine();
+    let settled = work.refresh().unwrap();
+    assert!(settled.engine.settled && !settled.drained);
+    let phase = work.phase().clone();
+    let buffer = phase.buffer(23).unwrap();
+    let input_owner = phase.copy(0).unwrap();
+    // This call models the native gate AFTER selected-browser phase/RPC/engine drainage;
+    // these tests do not implement or prove that browser-side acknowledgement protocol.
+    phase.close();
+    assert!(!phase.is_drained());
+    assert!(!ledger.compact(id).unwrap());
+    // A completed but uncollected native result still holds its zero-byte phase contribution.
+    drop(buffer);
+    drop(input_owner);
+    assert!(!phase.is_drained());
+    drop(work);
+    assert!(phase.is_drained());
+    assert!(ledger.compact(id).unwrap());
+    let tombstone = ledger.status(id).unwrap();
+    assert!(tombstone.drained && tombstone.engine.settled && tombstone.acknowledged);
+    assert!(tombstone
+        .engine
+        .receipt
+        .as_ref()
+        .unwrap()
+        .same_transition(&receipt));
+    assert!(tombstone.engine.receipt.as_ref().unwrap().retired);
+    assert!(ledger.work(id).is_err());
+    let action_weak = Arc::downgrade(&action);
+    let selected_weak = Arc::downgrade(&selected);
+    let phase_weak = Arc::downgrade(&phase);
+    coordinator.end(selected.id());
+    drop((coordinator, selected, join, action, phase));
+    assert!(action_weak.upgrade().is_none());
+    assert!(selected_weak.upgrade().is_none());
+    assert!(phase_weak.upgrade().is_none());
+    for _ in 0..5 {
+        assert!(ledger.status(id).unwrap() == tombstone);
+    }
+    assert!(ledger
+        .status(RowId {
+            slot: id.slot,
+            serial: id.serial + 1
+        })
+        .is_err());
+}
+
+#[test]
+fn equal_field_foreign_owner_wrong_pair_or_selector_cannot_attach() {
+    let (coordinator, selected, selector) = selection();
+    let (foreign_coordinator, foreign, _foreign_selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    registration.mark_handoff().unwrap();
+    let (_foreign_join, foreign_action, foreign_pair) =
+        actual_action(&foreign_coordinator, &foreign);
+    assert_eq!(
+        registration
+            .attach(foreign_action, foreign_pair, 16 * 1024)
+            .err(),
+        Some(VoiceError::Unauthorized)
+    );
+    let retry = ticket(&ledger, selected.clone(), selector);
+    let (_join, action, mut pair) = actual_action(&coordinator, &selected);
+    pair.handshake[0] ^= 1;
+    assert_eq!(
+        retry.attach(action, pair, 16 * 1024).err(),
+        Some(VoiceError::Unauthorized)
+    );
+    assert!(matches!(
+        ledger.begin(selected, Purpose::Derive(selector)).unwrap(),
+        Begin::Factory(_)
+    ));
+}
+
+#[test]
+fn settlement_and_no_terminal_result_still_require_real_native_worker_collection() {
+    let (coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let (_join, action, pair) = actual_action(&coordinator, &selected);
+    let id = registration
+        .attach(action.clone(), pair, 16 * 1024)
+        .unwrap();
+    let work = ledger.work(id).unwrap();
+    action.settle_engine();
+    work.refresh().unwrap();
+    let phase = work.phase().clone();
+    phase.close();
+    assert!(!ledger.compact(id).unwrap());
+    drop(work);
+    assert!(ledger.compact(id).unwrap());
+    assert!(ledger.status(id).unwrap().engine.receipt.is_none());
+    assert!(action.admit_engine(action.engine_bytes()).is_err());
+}
+
+#[test]
+fn phase_waiter_can_compact_at_the_exact_final_worker_retirement_notification() {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::task::{Context, Wake, Waker};
+    struct Cleanup {
+        ledger: Arc<Ledger>,
+        id: RowId,
+        result: AtomicU8,
+    }
+    impl Wake for Cleanup {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.result.store(
+                if self.ledger.compact(self.id).unwrap() {
+                    1
+                } else {
+                    2
+                },
+                Ordering::SeqCst,
+            );
+        }
+    }
+    let (coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let (_join, action, pair) = actual_action(&coordinator, &selected);
+    let id = registration
+        .attach(action.clone(), pair, 16 * 1024)
+        .unwrap();
+    let work = ledger.work(id).unwrap();
+    action.settle_engine();
+    work.refresh().unwrap();
+    let phase = work.phase().clone();
+    phase.close();
+    let cleanup = Arc::new(Cleanup {
+        ledger: ledger.clone(),
+        id,
+        result: AtomicU8::new(0),
+    });
+    let waker = Waker::from(cleanup.clone());
+    let mut context = Context::from_waker(&waker);
+    let mut waiter = Box::pin(phase.wait_drained());
+    assert!(waiter.as_mut().poll(&mut context).is_pending());
+    // Wake runs synchronously inside the final contribution's Drop, before Work::drop returns.
+    // It must see a compactable row immediately; there is no later notification to rely on.
+    drop(work);
+    assert_eq!(cleanup.result.load(Ordering::SeqCst), 1);
+    assert!(ledger.status(id).unwrap().drained);
+}
+
+#[test]
+fn settled_close_and_worker_loss_without_refresh_recovers_without_a_new_data_loan() {
+    let (coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let (_join, action, pair) = actual_action(&coordinator, &selected);
+    let id = registration
+        .attach(action.clone(), pair, 16 * 1024)
+        .unwrap();
+    let work = ledger.work(id).unwrap();
+    action.settle_engine();
+    let phase = work.phase().clone();
+    phase.close();
+    drop(work); // deliberately no refresh after actual native settlement
+    assert!(phase.is_drained());
+    assert!(!ledger.status(id).unwrap().engine.settled);
+    assert!(ledger.work(id).is_err());
+    assert!(ledger.compact(id).unwrap());
+    assert!(ledger.status(id).unwrap().engine.settled);
+    assert!(ledger.settle(id).unwrap().drained);
+}
+
+#[test]
+fn lost_ack_latch_is_recoverable_after_phase_closure_without_input_or_progress_owners() {
+    let (coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let (mut join, action, pair) = actual_action(&coordinator, &selected);
+    let id = registration
+        .attach(action.clone(), pair, 16 * 1024)
+        .unwrap();
+    let work = ledger.work(id).unwrap();
+    action.admit_engine(action.engine_bytes()).unwrap();
+    let receipt = crate::voice_authority::tests::derivation_receipt(
+        &coordinator,
+        selected.id(),
+        &mut join,
+        &action,
+    );
+    action.acknowledge_result(&receipt).unwrap(); // crash between actual ACK and native latch
+    let phase = work.phase().clone();
+    ledger.settle(id).unwrap();
+    phase.close();
+    drop(work);
+    assert!(phase.is_drained());
+    assert!(!ledger.compact(id).unwrap());
+    let mut wrong = receipt.clone();
+    wrong.output_tag[0] ^= 1;
+    assert_eq!(
+        ledger.acknowledge(id, &wrong),
+        Err(VoiceError::RetryMismatch)
+    );
+    ledger.acknowledge(id, &receipt).unwrap();
+    assert!(ledger.compact(id).unwrap());
+    ledger.acknowledge(id, &receipt).unwrap();
+    assert!(ledger.acknowledge(id, &wrong).is_err());
+}
+
+#[test]
+fn reordered_metadata_observations_cannot_erase_rejected_history_or_settlement() {
+    use catcoms_sync::voice_v2::crypto_actions::CryptoOutcome;
+    let receipt = CryptoResultReceipt {
+        action: 3,
+        input_tag: [1; 32],
+        output_tag: [2; 32],
+        outcome: CryptoOutcome::Rejected(VoiceError::Unauthorized),
+        retired: true,
+    };
+    let mut status = Status {
+        action: Some((3, 1, [1; 32])),
+        engine: CryptoResultStatus {
+            settled: true,
+            receipt: Some(receipt.clone()),
+        },
+        acknowledged: true,
+        drained: false,
+    };
+    merge_observed(
+        &mut status,
+        CryptoResultStatus {
+            settled: false,
+            receipt: None,
+        },
+    )
+    .unwrap();
+    let mut older = receipt.clone();
+    older.retired = false;
+    merge_observed(
+        &mut status,
+        CryptoResultStatus {
+            settled: false,
+            receipt: Some(older),
+        },
+    )
+    .unwrap();
+    assert!(status.engine.settled);
+    assert_eq!(status.engine.receipt, Some(receipt.clone()));
+    let mut changed = receipt;
+    changed.outcome = CryptoOutcome::Derived;
+    assert_eq!(
+        merge_observed(
+            &mut status,
+            CryptoResultStatus {
+                settled: true,
+                receipt: Some(changed)
+            }
+        ),
+        Err(VoiceError::RetryMismatch)
+    );
+}
+
+#[test]
+fn pending_history_shares_the_finite_row_bound_without_eviction_or_ttl() {
+    let (_coordinator, selected, mut selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let mut ids = Vec::new();
+    for n in 0..ROWS {
+        selector.join[0] = n as u8;
+        let registration = ticket(&ledger, selected.clone(), selector);
+        ids.push(registration.id());
+        registration.mark_handoff().unwrap();
+        drop(registration);
+    }
+    let before = selected.resources().counts();
+    selector.join[0] = 99;
+    assert_eq!(
+        ledger
+            .begin(selected.clone(), Purpose::Derive(selector))
+            .err(),
+        Some(VoiceError::Capacity)
+    );
+    assert_eq!(selected.resources().counts(), before);
+    for id in ids {
+        assert!(!ledger.status(id).unwrap().drained);
+    }
+}

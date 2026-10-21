@@ -73,6 +73,10 @@ mod studio_exports;
 #[cfg(test)]
 mod voice_activation_tests;
 mod voice_authority;
+// The native pilot is compiled/tested while its listener/commands/live driver remain disabled.
+// Remove this temporary unused-item allowance when that integration owns these private APIs.
+#[allow(dead_code)]
+mod voice_handoff;
 mod voice_join_key;
 // This broker model has no registered command consumers yet. Retain its contract tests without
 // presenting the unwired implementation as a production pairing boundary.
@@ -468,6 +472,10 @@ struct AppState {
     /// Distinct voice-session authority and active-or-uncertain process crypto charges. Revoking
     /// a UI/controller ends effects immediately but cannot refund unresolved engine work.
     voice_authority: Arc<StdMutex<voice_authority::Coordinator>>,
+    /// Process lifetime, independent of UI lock/controller replacement and invoke waiters.
+    /// The disabled pilot has no command consumer yet; do not clear uncertain rows on End.
+    #[allow(dead_code)]
+    voice_handoff: Arc<voice_handoff::ledger::Ledger>,
     next_id: Mutex<u64>,
     /// Serialize first mount and already-mounted authentication. A duplicate frontend unlock must
     /// never race two reloads, while an explicitly UI-locked session must authenticate against

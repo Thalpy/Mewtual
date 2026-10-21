@@ -6,6 +6,7 @@ use crate::voice_v2::crypto_authority::CryptoAuthority;
 use crate::voice_v2::presence::PairSetup;
 use catcoms_crypto::DeviceKeypair;
 use catcoms_rt::ManualClock;
+mod handoff;
 
 fn binding(seed: u8) -> Binding {
     Binding {
@@ -881,5 +882,9 @@ fn close_in_publication_registration_gap_fences_effects_before_retiring_unstarte
     let other = prepare_chain(pool.clone(), binding(9), Arc::new(slots::Slots::default())).unwrap();
     other.close();
     drop((other, chain));
-    assert_eq!(pool.counts(), (ROW_BYTES, 0));
+    // Fixed historical binding now shares the existing paid PlanBinding. It conveys no live
+    // progress ownership, but its metadata cannot become uncharged while the action survives.
+    assert_eq!(pool.counts(), (ROW_BYTES + METADATA_BYTES, 0));
+    drop((action, _queue));
+    assert_eq!(pool.counts(), (0, 0));
 }

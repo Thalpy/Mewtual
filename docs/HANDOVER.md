@@ -1,5 +1,61 @@
 # Mewtual; Handover
 
+## Protected handoff prerequisites (21 October, full suites pending)
+
+Published communication head is7de74d11. Current work in
+target/communication-activation-recovery-worktree adds one serial HandoffLoan from an actual
+CryptoAction's existing96KiB Workflow. No budget or Crypto lane was added. Original Workflow
+custody survives settlement/End/expiry until the loan's actual last owner drops, and failed
+claims spend no lane. Fixed action history shares the original paid PlanBinding without
+retaining progress. Existing2KiB/1536-byte layout guards pass; an older metadata expectation
+now explicitly retains that charge while its action survives and asserts zero on final drop.
+
+All434 focused Root voice tests pass, including eight new handoff regressions. Formatting,
+strict whole-root Clippy, ambient and all four root deny categories pass. The complete root
+suite passes 3,226 with zero failures, 24 existing ignored and 58 summaries (4,815.7s), on the
+frozen current Root source. Complete native gates remain pending. Full frontend passes 2,297 tests;
+Svelte has zero errors/warnings, production build and all ten rendered flows pass. Shared-cache fingerprints
+initially named another checkout: only affected sync/app/CLI marker files were invalidated,
+then current-source compilation and focused tests passed. Stale/failed attempts are not passes.
+No build artifacts or worktrees were cleaned.
+
+The new voice-ipc-body candidate helper passes ten regressions, with zero Svelte errors/warnings.
+It follows transferred BYOB buffers, caps intake at authenticated2064 bytes plus one EOF byte,
+refuses unsupported actual streams and awaits stalled-read/cancellation drainage. The disposable
+packaged Edg155.0.4283.62 experiment passes the exact transpiled helper on a second real17-byte
+loopback response plus existing framing/takeover checks. Updated native counters record both
+GETs. It uses the existing generated-data fixture binary, no account. Read-only cumulative
+Root/reader review has no remaining findings. The cleanup-fault repeat refuses success and
+preserves the prior successful evidence; all 17 experiment Node regressions pass.
+
+The disabled native pilot now has a process-owned 32-row ledger. Pending factory work and
+drained history share that bound, with row/phase metadata paid before factories. Actual selected
+key snapshots retain Weak grant identity, and attachment checks the actual action, original
+local join/key, exact remote selector and trusted pair receipt before input can be exposed.
+Lost native factory replies retain the same counted purpose. Copy/input/completed worker owners
+retain the original phase loan; the sole cleanup waiter sees worker retirement before notification.
+Metadata-only reconcile, exact receipt ACK and engine settlement remain possible after phase
+closure without another data loan. Compacted history retains no Action, Phase or strong Grant.
+No uncertain rows are evicted; 32 retained rows are an explicit pilot lifetime limit.
+
+All 60 actual-source native harness tests pass (29 phase/parser/ledger, two new selected-owner
+cases plus existing authority coverage). This lightweight harness is not the native-workspace
+gate or actual ServerActor/MLS/browser acceptance. Ledger implementation re-review has no
+remaining blocker/high/medium after the reviewed cleanup and observer wake defects were fixed.
+The sole bounded cleanup waiter subscribes before checking readiness; private quiet compaction
+cannot wake itself into a retry loop. Cancellation and late exact ACK have focused coverage.
+All nine command-policy extraction tests pass freshly on the final native source.
+The first actual native compile caught two test-only references to an undeclared futures
+helper that the standalone harness supplied. They now use std::task::Wake without a dependency
+change. That failed attempt is not accepted evidence; native validation is running again.
+
+No application listener/CSP, byte-bearing command or V2 dispatch is enabled. Next: actual actor
+registration and framed derivation/result/ACK/settlement transport, independently prepaid
+terminal replies, authenticated browser closure and final delivery ACK/collection. Capacity alone
+supplies no action/effect authority. Measured96KiB-to224KiB phase transfer, epoch replacement, SDP/ICE/RTC/
+legacy isolation, media relay, external destination resume, combined acceptance and physical
+audio/network acceptance remain open. Only one physical desktop is available.
+
 ## Validated selected V2 join-key checkpoint (21 October)
 
 Published checkpoint remains `f5ae59a3`; local frozen source is `451ecbaa` in this isolated

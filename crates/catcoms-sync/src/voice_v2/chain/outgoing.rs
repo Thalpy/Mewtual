@@ -13,10 +13,7 @@ impl Workflow {
         slots: &crate::voice_v2::packets::PacketSlots,
         header: &EncryptedHeader,
     ) -> Result<(slots::Slot, u64, CallLease), VoiceError> {
-        let closed = self
-            .closed
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let correct_role = if self.binding.low {
             matches!(
                 header.kind,
@@ -25,7 +22,7 @@ impl Workflow {
         } else {
             header.kind == EncryptedKind::ConfirmProof
         };
-        if *closed
+        if state.closed
             || !self.live.is_live()
             || !self.binding.live()
             || !Arc::ptr_eq(resources, &self.resources)

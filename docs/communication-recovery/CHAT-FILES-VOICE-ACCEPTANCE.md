@@ -1,5 +1,34 @@
 # Chat, files and voice implementation evidence
 
+## Handoff prerequisites (21 October, full suites pending)
+
+Published head is7de74d11. Current code passes434 focused Root voice tests, including eight new
+handoff cases for original binding/Clock/expiry, settlement order, sibling rows, pressure and
+actual last-loan custody after End. Original2KiB/1536-byte allowances are unchanged. Root format,
+strict whole-root Clippy, ambient and all four deny categories pass. Complete current root
+passes 3,226, zero failures, 24 existing ignored, 58 summaries (4,815.7s). Complete native gates
+remain pending. Full frontend passes 2,297, Svelte zero errors/
+warnings, production build and all ten rendered flows pass. Stale-cache and failed attempts are not
+accepted current-source evidence; affected crate markers were invalidated before these results.
+
+Ten candidate-reader tests pass, with zero Svelte errors/warnings. Packaged Windows
+Edg155.0.4283.62 passes the exact transpiled helper on a real17-byte loopback BYOB response,
+releases its reader and records two successful GETs. Existing framing/replay/ACL/keyless
+takeover/native shutdown/profile cleanup pass. Cleanup-fault injection refuses publication
+and preserves the previous result; all 17 experiment Node tests pass. This uses generated fixture data and no account;
+it establishes no live V2 call or physical audio result. Read-only re-review has no findings.
+
+The disabled native pilot now includes selected-owner binding, original-action registration,
+one shared phase loan and immutable compacted terminal history. All 60 actual-source harness
+cases pass, including 29 phase/parser/ledger cases and two new selected-owner cases. This is
+not the complete native gate or actual Actor/MLS/browser acceptance. Ledger re-review has no
+remaining blocker/high/medium after cleanup and observer readiness fixes. The 32-row pending/live/drained bound is an explicit
+pilot limit; uncertain history is never evicted.
+
+The loan conserves capacity; actual actor integration, physical-copy/terminal-proof delivery,
+SDP phase transfer/live V2/RTC/isolation, media relay, external destination resume and combined/
+separate-device acceptance remain incomplete. No production listener/CSP/dispatch is enabled.
+
 ## Validated selected key bootstrap (21 October)
 
 Published source remains `f5ae59a3`. Local frozen `451ecbaa` integrates one native/browser selected

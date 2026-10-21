@@ -5,11 +5,20 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { parseDebuggerPort } from "../../../../apps/desktop/scripts/flow-processes.mjs";
 import { childOutputClosed } from "./child-output.mjs";
 import { keylessTakeover } from "./takeover.mjs";
 
 const ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
+const requireFrontend = createRequire(new URL("../../../../apps/desktop/package.json", import.meta.url));
+const ts = requireFrontend("typescript");
+// Exercise the current application helper in the actual packaged WebView without replacing
+// embedded assets or disabling browser security. TypeScript is an existing frontend dependency.
+const bodySource = await readFile(new URL("../../../../apps/desktop/src/voice-ipc-body.ts", import.meta.url), "utf8");
+const bodyModule = "(function(){const exports={};" + ts.transpileModule(bodySource, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+}).outputText + ";return exports;})()";
 const argument = process.argv.find(value => value.startsWith("--binary="));
 const fault = process.argv.find(value => value.startsWith("--fault="))?.slice("--fault=".length) ?? "";
 if (!["", "cleanup"].includes(fault)) throw new Error("unknown probe fault");
@@ -132,6 +141,47 @@ try {
   assert.equal(counters.frame_bodies, 2, "the corrupted body never reaches fixture execution");
   assert.equal(counters.frame_replies, 2);
   assert.ok(counters.options >= 1 && counters.peak_active <= 4);
+  // Constructor presence does not establish BYOB support for an actual fetch response.
+  // Use the exact already-observed permitted listener and only its fixed public fixture body.
+  // Never return arbitrary exceptions/URLs/keys from the WebView into runner diagnostics.
+  await main.cdp.send("Runtime.evaluate", { expression: String.raw`(async () => {
+    try {
+      const bounded = ${bodyModule};
+      const entry = performance.getEntriesByType("resource").find(value =>
+        /^http:\/\/127\.0\.0\.1:[0-9]+\/ok$/.test(value.name));
+      if (!entry) throw new Error();
+      const reply = await fetch(entry.name, { method: "GET", headers: { "x-probe": "1" },
+        credentials: "omit", redirect: "error", cache: "no-store", referrerPolicy: "no-referrer",
+        signal: AbortSignal.timeout(5000) });
+      const bytes = await bounded.readVoiceIpcBody(reply, 17, AbortSignal.timeout(5000));
+      const valid = new TextDecoder().decode(bytes) === "fixed probe bytes";
+      bytes.fill(0);
+      window.__bodyIntakeResult = { supported: valid, readerReleased: !reply.body.locked };
+    } catch (error) {
+      window.__bodyIntakeResult = { supported: false,
+        code: ["unsupported", "metadata", "truncated", "excess", "closed", "reader"].includes(error?.code)
+          ? error.code : "compatibility" };
+    }
+  })()` });
+  let bodyIntake;
+  while (!bodyIntake && performance.now() < deadline) {
+    bodyIntake = await main.cdp.eval("window.__bodyIntakeResult ?? null");
+    if (!bodyIntake) await sleep(25);
+  }
+  assert.deepEqual(bodyIntake, { supported: true, readerReleased: true },
+    "actual fetched body must support bounded BYOB intake and observable reader drainage");
+  await main.cdp.send("Runtime.evaluate", { expression:
+    "window.__TAURI_INTERNALS__.invoke('inspect').then(value => { window.__bodyIntakeCounters = value; })" });
+  let bodyCounters;
+  while (!bodyCounters && performance.now() < deadline) {
+    bodyCounters = await main.cdp.eval("window.__bodyIntakeCounters ?? null");
+    if (!bodyCounters) await sleep(25);
+  }
+  assert.equal(bodyCounters?.good_requests, 2, "the bounded reader used a real second response");
+  assert.equal(bodyCounters.frame_headers, 3);
+  assert.equal(bodyCounters.frame_bodies, 2);
+  assert.equal(bodyCounters.frame_replies, 2);
+  counters = bodyCounters; // publish the actual final listener observations, not the earlier snapshot
   await main.cdp.send("Runtime.evaluate", { expression: "window.__TAURI_INTERNALS__.invoke('release_endpoint').then(origin => { window.__releasedOrigin = origin; })" });
   let releasedOrigin;
   while (!releasedOrigin && performance.now() < deadline) { releasedOrigin = await main.cdp.eval("window.__releasedOrigin ?? null"); if (!releasedOrigin) await sleep(25); }
@@ -151,7 +201,8 @@ try {
   assert.equal(refreshed, true, "hard refresh cannot recreate fixture bootstrap allowance");
   candidate = { phase: "encrypted-framing-only", browser: debuggerInfo.browser, main: main.result,
     restricted: restricted.result, remote: remote.result, counters, refreshRefusesBootstrap: refreshed,
-    authenticatedBinaryFraming: true, actualPortTakeoverTested: true, takeover: keylessStats, wholeCopyCustody: false, productionIntegration: false };
+    authenticatedBinaryFraming: true, actualPortTakeoverTested: true, takeover: keylessStats,
+    actualBodyIntake: bodyIntake, wholeCopyCustody: false, productionIntegration: false };
   await main.cdp.send("Runtime.evaluate", { expression: "void window.__TAURI_INTERNALS__.invoke('finish_probe')" }).catch(() => {});
   while (exitCode === null && performance.now() < deadline) await sleep(25);
   const closed = await bounded(stdioClosed, "native output closure");

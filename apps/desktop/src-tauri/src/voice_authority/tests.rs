@@ -18,6 +18,18 @@ fn proven_action(
     catcoms_sync::voice_v2::presence::LocalJoin,
     Arc<CryptoAction>,
 ) {
+    proven_action_with_protection(coordinator, owner_id, pool, false)
+}
+
+pub(crate) fn proven_action_with_protection(
+    coordinator: &Coordinator,
+    owner_id: &str,
+    pool: Arc<Resources>,
+    protected: bool,
+) -> (
+    catcoms_sync::voice_v2::presence::LocalJoin,
+    Arc<CryptoAction>,
+) {
     use catcoms_crypto::DeviceKeypair;
     use catcoms_sync::voice_v2::limits::OriginLimits;
     use catcoms_sync::voice_v2::packets::Authority;
@@ -105,15 +117,46 @@ fn proven_action(
     let setup = join
         .begin_pair(&fresh, &authority, &mut limits, clock.as_ref())
         .unwrap();
-    let action = join
-        .derivation_action(setup.handshake, &authority, clock, ByteBudget::Ordinary)
-        .unwrap();
+    let action = if protected {
+        let chain = join
+            .prepare_crypto_chain(setup.handshake, &authority, clock.as_ref())
+            .unwrap();
+        join.chain_derivation_action(setup.handshake, &chain, &authority, clock)
+            .unwrap()
+    } else {
+        join.derivation_action(setup.handshake, &authority, clock, ByteBudget::Ordinary)
+            .unwrap()
+    };
     (join, action)
+}
+
+/// Synthetic desktop CallGrant, real signed discovery/LocalJoin/protected action factories.
+/// This tests custody, not actual ServerActor registration, MLS, IPC or WebView acceptance.
+pub(crate) fn phase_fixture() -> (
+    Coordinator,
+    catcoms_sync::voice_v2::presence::LocalJoin,
+    Arc<CryptoAction>,
+    Arc<crate::voice_handoff::custody::Phase>,
+) {
+    let mut coordinator = action_coordinator();
+    let parent = controller(&mut coordinator);
+    let id = call(&mut coordinator, &parent, 1, 1);
+    let owner = coordinator.owner(&id).unwrap();
+    let prepared = crate::voice_handoff::custody::PreparedPhase::new(
+        coordinator.resources.clone(),
+        owner.binding.scope,
+        owner.lease.clone(),
+    )
+    .unwrap();
+    let (join, action) =
+        proven_action_with_protection(&coordinator, &id, coordinator.resources.clone(), true);
+    let phase = prepared.bind(&action, 16 * 1024).unwrap();
+    (coordinator, join, action, phase)
 }
 
 /// Commit the genuine native derivation action without a JSON result cache or a browser key.
 /// The returned metadata is used only to exercise native history ownership below.
-fn derivation_receipt(
+pub(crate) fn derivation_receipt(
     coordinator: &Coordinator,
     owner_id: &str,
     join: &mut catcoms_sync::voice_v2::presence::LocalJoin,
