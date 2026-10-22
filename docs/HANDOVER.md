@@ -526,7 +526,9 @@ destinations that can be journaled. Design, crash table and every review's dispo
   the Resume preflight, Save new copy, two-step Remove with a process-wide cleanup claim, and the
   `rfd` dialog behind a chooser seam; `save_group_file` in `lib.rs` orders the dialog before any
   slot or record. No plugin, builder or `setup` change. FAT and exFAT are refused; fresh saves on
-  destinations without identity or locks keep the old writer.
+  destinations without identity or locks keep the old writer, which now also does its file work
+  in `spawn_blocking` (as does the post-save media check), so no destination I/O runs on an async
+  worker.
 - Frontend: typed statuses and actions (including Save as and `chosenPlace`) in
   `private-downloads.ts`, `native-download.ts`; Save as entries and the Transfers list in
   `App.svelte`; visual fixture support.
@@ -537,7 +539,8 @@ without changing a byte. Not yet run: complete root/native/frontend suites, `npm
 `test:startup`, `test:flows` (including the opt-in `FLOW_SCENARIO=private-download`), a real dialog
 on each OS, physical FAT/SMB/ReFS/OneDrive/portal checks, and any Unix execution (the storage
 crate compiles and passes Clippy for `x86_64-linux-android`). A post-implementation review of the
-whole range is still to come. No screenshot exists yet for the new rows or Save as entries.
+picker found no blocker or high; its fixes and dispositions are in the design document. No
+screenshot exists yet for the new rows or Save as entries.
 
 ## Chat history adversarial checkpoint (2026-10-20)
 

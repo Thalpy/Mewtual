@@ -354,12 +354,18 @@ Renderer commands (no new command names):
 - `save_group_file(..., freshCopy?, saveAs?)`: `freshCopy` requires `resume` and `expectedIntent`.
   It removes the partly saved file native can prove it created, forgets that journal under the
   intent CAS, then saves a separate file. `saveAs` is a flag only: native opens the OS dialog
-  itself (at most one at a time), validates the result and remembers the choice in the sealed
-  record; the command's parameter list is pinned by a test so no path, folder or destination
-  parameter can be added. Closing the dialog returns exactly "Save as was cancelled." with nothing
-  started. A plain Resume first runs a destination preflight (before any allowance is spent on
-  re-verification); it may return a verified saved result directly when the file was already
-  published before a crash.
+  itself (at most one at a time, starting in Downloads or at the OS default when none resolves),
+  validates the result and remembers the choice in the sealed record; the command's parameter
+  list is pinned by a test so no path, folder or destination parameter can be added. A Save as on
+  a file whose saved record already has a journal is refused before anything is resumed.
+  Closing the dialog returns exactly "Save as was cancelled." with nothing started. A plain
+  Resume first runs a destination preflight (before any allowance is spent on re-verification);
+  it may return a verified saved result directly when the file was already published before a
+  crash. The result adds `inDownloads: true` only when the saved file sits directly in the
+  resolved Downloads folder (fresh, resumed and recovered saves alike); absence asserts nothing.
+  The renderer names Downloads only for an expected first one-click save that carries the flag,
+  so a stale renderer list or a journal at a place chosen earlier can never be announced as
+  "Downloads". Every other command's save result never carries it.
 - `cancel_private_download(server, download, keepPartial?) -> Option<String>`: with a journal,
   removal is two-step (durable Deleting, native removal of only the proven partial, then release).
   `keepPartial` releases the record and leaves the file. The returned notice says when a file of
@@ -378,6 +384,13 @@ Rust interfaces:
   empty chunk is the empty file). `SavedCandidate::verify`, `remove_partial` (typed
   `PartialRemoval` with notices), `partial_presence`, `flush_destination` and
   `ChosenDestination::{validate, create_unjournaled}` are the only other external entry points.
+  Every creation with a captured folder identity re-reads it after creating its partial and
+  refuses a swapped folder; every link probe requires the probe name to be the new partial.
+- The non-resumable fallback writer (native `stream_download_staged`, used when a fresh save
+  cannot be journaled) also runs its staging, writes, sync, cleanup and publication link on the
+  blocking pool, and `SaveSource::liveness` is rechecked when each queued staging or write worker
+  starts. The media check of the published file runs on the pool before the session commit guard.
+  No destination file I/O runs on an async worker in either writer.
 - `DownloadStore` adds `download_export_state`, `begin/resume/checkpoint/publish_download_export`
   (export-lease fenced), `download_observation` plus `recover/halt_download_export` (fenced by an
   `ExportFence`: the preflight observation or the export lease, plus an exact journal CAS),

@@ -73,8 +73,15 @@ Responsibilities are split so that no Downloads I/O ever runs on the server acto
   through the existing `ReadDownloadChunk` command, runs every external effect in a blocking
   worker, emits progress, and asks the actor for journal transitions.
 
-A stalled Downloads volume (dropped SMB share, unplugged USB drive) therefore pins at most that
-save's blocking worker. Chat, MLS, sync and Lock do not wait on per-chunk external work.
+A stalled destination volume (dropped SMB share, unplugged USB drive) therefore pins at most that
+save's blocking worker. Chat, MLS, sync and Lock do not wait on per-chunk external work. Since
+picker review M2 this holds for the non-resumable writer as well: its staging, each chunk write,
+the sync, failure cleanup and publication also run on the blocking pool, with the liveness checks
+between them on the runtime and again when each queued staging or write worker starts. Before
+that fix it did its file I/O directly on a tokio worker, which Save as made worse by sending
+exactly the stall-prone identity-less shares to it. The media check of the published file runs on
+the blocking pool too, before the process-wide session commit guard is taken (re-review
+MEDIUM 1).
 
 If a **fresh** export cannot be journaled (no stable identity or birth time on this filesystem, no
 OS file lock, an encoded folder path over the bound, or an unsupported platform), native keeps
@@ -329,7 +336,7 @@ encrypted progress. Disk full and transient write failures are not halts; see Bu
 
 | # | Crash point | Recovered state | Next action |
 | --- | --- | --- | --- |
-| 1 | After exclusive create, before Writing(0) is durable | export None; an empty `.mewtual-part` orphan may exist, and (if the crash fell inside the link probe) an empty `<staging>-probeN` second name for it | A fresh export skips the occupied names. Orphans are never adopted or deleted; both are empty, so they disclose nothing. |
+| 1 | After exclusive create, before Writing(0) is durable | export None; an empty `.mewtual-part` orphan may exist, and (if the crash fell inside the link probe) an empty `<staging>-probeN` second name for it | In Downloads, a fresh export skips the occupied names. At a chosen place the exact name is required, so the remembered choice is refused with `PartialExists` ("...for example from an earlier interrupted save. Delete it from the folder, or choose another name.") until the user deletes the orphan or picks another name (picker review L3). Orphans are never adopted or deleted; both are empty, so they disclose nothing. |
 | 2 | After Writing(0), file lost (power loss) or deleted | Writing(0); staging missing | Preflight reports Unavailable; Save new copy or Remove. |
 | 3 | After chunk writes, before the next checkpoint | Writing(k); file holds more, possibly torn, bytes | Verification keeps matching whole chunks after k, truncates the first torn one, continues. |
 | 4 | Checkpoint claims more than the file holds (torn write, lying flush) | Writing(k); file shorter | Rewind to the last whole verified chunk and continue. A mismatch inside the checkpoint halts Changed. |
@@ -340,7 +347,7 @@ encrypted progress. Disk full and transient write failures are not halts; see Bu
 | 9 | After external cleanup, before journal retirement | Deleting with journal; staging gone | Remove is idempotent (missing staging is done), then releases. |
 | 10 | After the move to `deleting-v2` | Existing cleanup-only directory | Existing bounded `finish_deleting`. |
 | 11 | During Save new copy, after the retire step, before or after removing our partial | Writing with a new intent; staging present or missing | The old click is stale; the row offers Save new copy again (preflight reports Unavailable when the staging is gone). |
-| 12 | After a planned destination is remembered, before Begin | export None, planned Some | Resume (any later one, after restart too) saves to the remembered place; Save as again replaces it. |
+| 12 | After a planned destination is remembered, before Begin | export None, planned Some | Resume (any later one, after restart too) saves to the remembered place; Save as again replaces it. If the crash also left a row-1 orphan at that place, Resume is refused as in row 1. |
 
 External cleanup reports a typed outcome. Only `Removed` means nothing of this save stays on disk.
 `KeptSaved` (our staging name is gone; the same file stays under its final name), `OtherNameRemains`
@@ -496,6 +503,20 @@ so hard link plus unlink is used on both platforms. What remains path-based afte
 check: removing a proven staging name, removing the link-probe name, and (on Unix only) the
 publication link. On Windows the publication link is covered by the delete-denying pin.
 
+Creating a new partial is path-based too (picker review L4): the folder identity check and the
+exclusive create are separate calls. Every creation (`create`, `create_chosen`, and
+`create_unjournaled` when an identity was captured) now reads the folder identity again after
+creating; on a mismatch it removes its own partial, only while that name's handle identity still
+proves it is ours, and refuses (`FolderChanged` at a chosen place, a local failure in Downloads).
+A swap and swap-back that both fall between the two identity reads still leaves an empty partial
+in the other folder; the link probe that follows then fails, because every probe requires the
+probe name to be our own handle's object whenever the filesystem reports identities (re-review
+LOW 2 added this to `create_unjournaled`), so no plaintext is written there even if a file was
+planted at our name. An identity-less chosen folder has no swap check at all (as before). The
+proven removal leaves a just-created partial in place when its name cannot be opened right then
+(for example another program holding it); that empty file then blocks a remembered choice with
+`PartialExists` until the user deletes it.
+
 ## Tests
 
 - Storage: identity, birth time and no-follow primitives; name-surrogate classification; the
@@ -514,13 +535,17 @@ publication link. On Windows the publication link is covered by the delete-denyi
 - Actor: journal commands through the real actor; pause mid-export; cancel racing publication in
   both orders; freeze/thaw and remount fences, including stale preflight edges; replacement
   transfer; Save new copy; an empty file acquired and saved; a Save as choice surviving an
-  interrupted acquisition and remount.
+  interrupted acquisition and remount; a Save as refused before it can interrupt a live journaled
+  save; the undo for a new record whose choice cannot be written.
 - Native: projection of every status; retry bound; the real export sequence over `ExportPorts`
   (guard placement, Publish failure after the link and its recovery, paced and bounded publication
   retries, stop checkpoints, verification failure, a step queued before retirement, a staging name
   that cannot be removed); the real Remove, Keep and Save new copy sequences with a barrier inside
   the deleting worker; the recovered-save response after Lock, entry retirement or an actor change;
-  the chooser seam (cancel, existing name, valid choice, one dialog at a time); message mapping.
+  the chooser seam (cancel, existing name, valid choice, one dialog at a time, no Downloads
+  folder); destination selection; the export sequence at a chosen place; the fallback writer's
+  staging off a single-threaded runtime; a failed cleanup keeping earlier warnings; peer device
+  names with trailing spaces; message mapping.
 - Frontend: projection validation, labels, actions, chat Save routing and detail text; lifecycle
   handler tests for Save new copy, Keep partly saved file, removal notices and every Save as path;
   the save_group_file signature pin; the visual fixture.
@@ -536,7 +561,8 @@ the ledger says the guard cannot run on this host.
   local disk: it re-verifies the encrypted copy and reads the plaintext prefix again.
 - The path-based steps listed under Platform have a small race window against anyone with write
   access to that folder (the same user, or another user of a shared folder) who swaps the name at
-  exactly that moment; Mewtual could then delete or (on Unix) publish the swapped object.
+  exactly that moment; Mewtual could then delete or (on Unix) publish the swapped object. Creation
+  is rechecked afterwards, so a swapped folder gets at most an empty partial.
 - Identity is the only ownership proof for deletion: a real identity collision (infeasible with
   birth time on NTFS, ext4 and APFS; possible in principle on ReFS) would let Remove delete a
   foreign file at our staging name.
@@ -552,8 +578,11 @@ the ledger says the guard cannot run on this host.
 - Publication holds the session commit guard across the staging identity recheck, one hard link,
   the final-name reopen and the Published actor transition (the folder flush and staging unlink run
   after release). A destination that hangs during those steps can delay Lock, as the existing
-  writer's guarded link already can.
-- Orphans from crash row 1, or `.part` files from before this change, are never adopted.
+  writer's guarded link already can, and, because the guard is process-wide, every other command
+  that takes it (other saves' checks among them) until the operating system gives up.
+- Orphans from crash row 1, or `.part` files from before this change, are never adopted. At a
+  chosen place a row-1 orphan blocks the remembered choice until the user deletes it from the
+  folder or chooses another name; the refusal says so.
 - Old readers refuse the retained store while any V2 record exists, without deleting it.
 - Unix code is compile- and Clippy-checked locally for an Android target but never run here;
   native and physical acceptance remain separate.
@@ -576,7 +605,11 @@ user picks in a native dialog, for that one save.
   plugin was not chosen because it adds `tauri-plugin-fs`, a plugin IPC command surface and a
   builder registration for no capability we need; with `rfd` there is no `dialog:*` permission, no
   plugin registration and no builder or `setup` change. The dialog sits behind a chooser trait so
-  tests never open one.
+  tests never open one. It starts in Downloads, or at the OS default when no Downloads folder can
+  be resolved (picker review L6: Save as is the remedy offered when Downloads cannot be used, so it
+  must not depend on one). `rfd` logs only in backends this build does not compile (the XDG portal
+  and the macOS message box); the Windows common-controls and GTK save dialogs log nothing, so no
+  chosen path reaches a log through it.
 - **Order.** The invocation captures its session generation, server instance and native origin
   first; then the dialog opens (at most one at a time process-wide); then the origin and server
   instance are rechecked, so a Lock or unlock while the dialog is open discards the choice. Only
@@ -596,7 +629,9 @@ user picks in a native dialog, for that one save.
   the sealed Download record as a *planned destination* (folder path, optional folder identity,
   chosen name), written by the actor in the same synchronous step that starts or resumes the
   acquisition run, before any network work (if that write is refused, the run just started is
-  released). Every later Resume, including one-click Resume after a restart, saves to that planned
+  released: a record this step created is removed outright, an existing one is paused; picker
+  review L2). A Save as on a file whose record already has a journal is refused before the run is
+  resumed, so it never interrupts a live save of the same file. Every later Resume, including one-click Resume after a restart, saves to that planned
   place: the verified copy carries the record's planned destination, the export validates it again
   (identity, name absent) and Begin consumes it, refusing a journal that does not match it. Save as
   again replaces it (the latest choice wins); a Save as invocation whose choice another save already
@@ -608,9 +643,12 @@ user picks in a native dialog, for that one save.
 - **Creation** (`ExportFile::create_chosen`): the folder must still have the captured identity (a
   parent swapped for a link, junction or another folder, or one that no longer reports any
   identity, is refused with "The chosen folder changed"); the chosen name must still be absent; the
-  partial is created exclusively beside it; the lock, identity and hard-link probe run as for
+  partial is created exclusively beside it and the folder identity is read again afterwards (a
+  swap between the two reads removes our partial and refuses; a swap and swap-back inside that
+  window is the residual named under Platform); the lock, identity and hard-link probe run as for
   Downloads. Permission denied means "Mewtual cannot write to that folder". No directory is ever
-  created there.
+  created there. An existing `<name>.mewtual-part` (for example an orphan from crash row 1) is
+  refused, never adopted.
 - **Overwrite policy.** Never replace. A name that becomes occupied after the partial exists gets
   the next free numbered name at publication, derived from the sealed name this save used (the
   staging name without `.mewtual-part`), never from today's listed file name. The success result
@@ -634,7 +672,8 @@ user picks in a native dialog, for that one save.
     chosen name, refuses an existing name or `.part` instead of numbering, requires the folder to
     still be a directory, and probes hard links on its fresh `.part` first (refusing a no-link
     folder before writing). The result and any error say that an interrupted save there starts
-    over. Without an identity there is no parent-swap check (documented residual).
+    over. Without an identity there is no parent-swap check (documented residual). Like the
+    journaled path, this writer does all its file work on the blocking pool (picker review M2).
 - **Authority and privacy.** The chosen path authorizes this one save (and its resumes). It never
   comes from the renderer, is never logged, and persists only inside the sealed record (planned
   destination, then journal). The renderer receives the final path once, on success, plus a
@@ -646,15 +685,24 @@ user picks in a native dialog, for that one save.
 - **UI.** "Save as" sits next to Download in the file menu, embed menu, file details and image
   viewer, and in Transfers rows that are ready, incomplete, paused, unavailable, changed or saved.
   It is not offered on running, removing, exhausted, save-interrupted or save-paused rows (continue
-  or Remove those first). Rows with a remembered choice say so and their Save/Resume label reads
-  "to chosen place". The flipnote viewer and inline chips keep only their existing action
-  (follow-up). Copy that said "Downloads" for every save now names no folder.
+  or Remove those first). Rows with a remembered choice say so in their detail text (", saves to
+  the chosen place"); only the ready row's action label changes, to "Save to chosen place". Resume
+  labels are unchanged. The flipnote viewer and inline chips keep only their existing action
+  (follow-up). Copy that said "Downloads" for every save now names no folder, including a media
+  file whose bytes matched its declared type (picker review M1). Native's save result carries
+  `inDownloads` only when the file sits directly in the Downloads folder, and the notice names
+  Downloads only with it (re-review LOW 1b, made fail-closed in its re-check); a failed reveal
+  says "its folder could not be opened".
 - **Tests.** Scripted chooser: cancel writes nothing; an existing name is refused and left
   byte-identical; a chosen folder resumes after restart; the chosen folder removed or renamed while
   paused halts; no-link folders are refused before writing; identity-less folders fall back with
-  the chosen-location rules; a swapped parent is refused; the remembered choice survives an
-  interrupted acquisition and restart; one dialog at a time; the command signature cannot carry a
-  path; the visual fixture mock; frontend projection and actions.
+  the chosen-location rules; a swapped parent is refused, before and during creation; an orphan
+  partial is refused and left alone; the remembered choice survives an interrupted acquisition and
+  restart; a Save as never interrupts a live journaled save; a new record whose choice cannot be
+  written leaves no row; one dialog at a time, also without a Downloads folder; the destination
+  selection; the export sequence at a chosen place (exact name, refused Begin, existing journal);
+  the fallback writer off the async runtime; the command signature cannot carry a path; the visual
+  fixture mock; frontend projection, actions and folder-free notices.
 
 ## Design review dispositions (revision 2)
 
@@ -780,26 +828,88 @@ Read-only review of the Save as design before implementation (two HIGH, four MED
 | Design: disk-full coverage | Done in `cbdfee43`: each exempted step, both failed-cleanup paths, and a Keep record write. Test: `every_exempted_pre_rename_step_refuses_cleanly_and_a_failed_cleanup_still_fails_closed`, `a_keep_record_write_on_a_full_vault_refuses_cleanly`. |
 | Design: native sequence across awaits | Done: `ExportPorts` and `CleanupPorts` run the real sequences in tests (export, cleanup, chooser), plus the recovered-save response test. Still not covered: `save_group_file` itself end to end (it needs a real AppHandle, actor and dialog). |
 
+## Picker implementation review dispositions (Save as, `27ffa183..50d15dab`)
+
+Read-only review of the implemented picker and both review fix sets: no blocker or high, two
+medium, five low, plus coverage gaps and residual risks. Every guard below was confirmed by
+breaking it and watching its test fail.
+
+| Finding | Disposition |
+| --- | --- |
+| M1: a Save as of a recognized media file still said "Saved X to Downloads" | Fixed in `fa51f5b1`: a "matched" verdict takes the folder-free wording when the save may not be in Downloads. Test: `a save that may not be in Downloads names no folder` (matched, with and without a warning and reveal). |
+| M2: the fallback writer at a chosen place did blocking file I/O on the async runtime | Fixed in `19e1f486`: staging, every chunk write, the sync, failure cleanup and publication run through the shared blocking-pool helper; liveness checks stay on the runtime between steps; the session guard is still held across the blocking link. Test: `the_fallback_writer_stages_off_the_async_runtime` (single-threaded runtime, staging parked on a barrier only another runtime task can release). Docs corrected (Design overview, Unsupported locations, HANDOVER, INTERFACES). |
+| L1: a failed cleanup wiped earlier warnings | Fixed in `88869f39`: the cleanup notice is appended. Test: `a_failed_cleanup_keeps_the_warnings_the_save_already_carried`. |
+| L2: a chat Save as on a file with a journal interrupted that save before being refused; a new record could be left after a failed plan write | Fixed in `325220b9`: `start_saved` refuses a choice over a journal before `resume_download`, with storage's text; a record created in that step is released when its plan write fails, an existing one is paused. Tests: `a_save_as_choice_never_interrupts_a_live_journaled_save` (actor, through the real command), `a_new_download_whose_choice_cannot_be_written_leaves_no_row`. The failing plan write itself cannot be injected from the app crate (storage keeps fault injection private), so the second test pins the undo the error branch calls. |
+| L3: an orphan from a crash before Begin blocked the remembered choice forever | Documented and the message fixed in `5588a256`: the orphan is still never adopted (nothing proves it is ours); `PartialExists` now names an earlier interrupted save as a likely source and says to delete the file from the folder or choose another name (wording revised for re-review LOW 4 in `4a71bf25`); crash rows 1 and 12 and Honest limits say so. Test: `an_orphan_partial_from_a_crash_before_begin_is_refused_and_left_alone`. |
+| L4: a folder swap between the identity check and creation was not handled or documented | Fixed in `5588a256`: every creation re-reads the folder identity after creating, removes its own partial only while handle identity proves the name is still ours, and refuses; `adopt_created`'s cleanup uses the same proven removal. Creation is added to the path-based residual list here, in `external.rs` and in THREAT-MODEL. Test (new `BEFORE_CREATE` hook): `a_folder_swapped_between_the_identity_check_and_creation_is_refused` (chosen journaled, chosen non-resumable, Downloads; each call site break-checked separately). |
+| L5: a peer name such as "CON .txt" failed as "malformed data" | Fixed in `88869f39`: the sanitizer trims trailing spaces before its device check, matching storage. Test: `a_device_name_with_trailing_spaces_is_prefixed_like_storage_requires`, which also runs each sanitized name through storage's leaf rule. Design question (Unix Save as names such as `aux.c` are refused): kept, so a journal never names a Windows device if the vault moves. |
+| L6: Save as failed without a resolvable Downloads folder | Fixed in `3a93448d`: the dialog then starts at the OS default. Test: the chooser seam with no starting folder. The `save_group_file` call site itself needs an AppHandle and is not unit-tested; the `Option` in the seam's signature makes the earlier `?` a type error. |
+| L7: doc mismatches | Fixed in this document (only the ready row's label changes) and in HANDOVER and INTERFACES (the boundedness wording now covers the fallback writer). |
+| Coverage: `export_sequence` with a chosen destination | Added in `29836f10`: `a_save_as_choice_saves_at_the_exact_chosen_name_through_the_same_sequence`, `a_refused_begin_at_a_chosen_place_discards_the_new_partial`, `a_chosen_place_never_redirects_an_existing_journal` (the last two break-checked). `Unsupported` leading to `Ok(None)` needs an identity-less folder, which only storage's private injection can model; storage covers `create_chosen` returning it. |
+| Coverage: the inline destination selection | Moved into `select_destination` in `29836f10`. Test: `the_record_not_the_invocation_selects_where_a_fresh_save_goes` (every arm, `PLACE_CHANGED` break-checked). Still untested: `prepare_resume`'s chosen-plus-journal refusal through a real AppHandle, `stream_download_to_chosen` end to end, and the post-dialog recheck. |
+| Residual: Windows device names with superscript digits, `COM0`/`LPT0`, `CONIN$` | Fixed in `0db5498f` in storage's leaf rule and native's sanitizer together. Tests: the selection-checks table and the sanitizer test above. |
+| Residual: `%` in a suggested name | Fixed in `0db5498f`: the Windows dialog expands `%VAR%` in its name box, so the suggestion replaces `%`. Test: the chooser seam. |
+| Residual: `rfd` logging | Checked: `rfd` 0.16 logs only in its XDG portal and macOS message-box backends, neither compiled with `common-controls-v6` plus `gtk3`. |
+| Residual: no real dialog has run | Open; see the ledger. |
+| Residual: the one-dialog turn ends when the invocation future drops while an OS dialog stays open | Accepted: Tauri does not drop a running command future except at process exit. |
+| Residual: a dialog that fails to open looks like Cancel | Partly: a refused `run_on_main_thread` already returns "The Save as window could not be opened."; only a dialog task that ends without a result is treated as Cancel. Follow-up if it is seen in practice. |
+| Residual: any hard-link probe failure is reported as "FAT or exFAT" | Accepted wording residual ("for example"); copy follow-up. |
+| Residual: a remembered choice silently redirects the chat "Download" item | Documented; label follow-up. |
+| Residual: remembered choices without folder identity have no swap check | Documented (unchanged). |
+| Follow-on to M2 (found while fixing it) | With file work on the pool, a staging or write step could pass the async session check and start after Lock. Fixed in `d747c0d2`: `SaveSource::liveness` is evaluated when each queued staging or write worker starts, as on the journaled path. Test: `a_fallback_step_whose_worker_starts_after_retirement_does_nothing` (both checks break-checked). |
+
+### Re-review of the fixes (`50d15dab..0db5498f`)
+
+Read-only re-review: no blocker or high, one medium, four low. All fixed and break-checked except
+where stated.
+
+| Finding | Disposition |
+| --- | --- |
+| MEDIUM 1: the media check after publication read the destination on a tokio worker while holding the process-wide commit guard | Fixed in `d747c0d2`: `inspect_published` runs it on the blocking pool, before `read_commit`; a retired invocation is refused before it starts; the result is returned only after the guarded recheck. Test: `the_saved_file_check_runs_off_the_runtime_and_outside_the_commit_guard` (single-threaded runtime; the releasing task must also take the guard; both the order and the pool break-checked). The existing retirement-edges test still passes. |
+| LOW 1a: a failed reveal said "Downloads could not be opened" for any save | Fixed in `d747c0d2`: "its folder could not be opened". |
+| LOW 1b: a one-click save that resumed a record with a remembered choice was announced as "to Downloads" | Fixed in `e1b0cc39` (a `chosenPlace` flag), extended in `9d975719` to resumed journals, then replaced in `680184d1` after the re-check found it failed open for recovered journals: `SavedFileResult.inDownloads` (omitted when false) is set only when the saved file sits directly in the resolved Downloads folder, on every return path including the recovered-save one, and the notice requires it. Tests: `only_an_asserted_downloads_save_carries_the_in_downloads_flag`, `a_save_counts_as_in_downloads_only_directly_inside_the_downloads_folder`, `a notice names Downloads only when native asserts the file is there` (each break-checked); the visual fixture mirrors the field. |
+| LOW 2: `create_unjournaled` probed links without identity, so a swap and swap-back plus a planted file defeated the residual claim | Fixed in `4a71bf25`: the probe uses the new partial's handle identity when available and cleanup uses the proven removal. Test (new `AFTER_CREATE` hook, the swap through a directory link because Windows will not rename a folder holding our open file): `a_swap_and_swap_back_around_creation_with_a_planted_file_writes_nothing` (break-checked). |
+| LOW 3: `remove_created`'s proof branch was untested | Test added in `4a71bf25`: `removing_a_just_created_partial_needs_its_identity_to_still_match` (break-checked). |
+| LOW 4: "Remove it" in `PartialExists` read as the Transfers action | Fixed in `4a71bf25`: "Delete it from the folder, or choose another name." The orphan test asserts the wording. |
+| Design question: a stale-list one-click start can still resume a record whose journaled save is live, interrupting it | Not changed: this predates the picker (the renderer routes rows by status, so it needs a stale list) and refusing it changes the one-click contract. Follow-up: refuse a non-resume start when the found record shows an active Writing export. |
+| Residual: a hung guarded link stalls every command that takes the process-wide guard, not only Lock | Documented here and in THREAT-MODEL. |
+| Residual: a just-created partial whose name cannot be opened at cleanup time stays | Documented under Platform; it is empty and the refusal tells the user. |
+| Residual: a release that fails after Deleting is durable (inside the L2 undo) needs a storage check | Same failure mode as `cancel_download`; unchanged. |
+| Test gap: only staging and the media check are pinned off the runtime; writes, sync, cleanup and `ActorSaveSource::publish_verified` are not | Open: std's file writes and the production source cannot be parked from a test. The code runs each through the same helper. |
+| Doc drift: INTERFACES said every creation re-reads the folder identity | Fixed: "every creation with a captured folder identity". |
+
+Short re-check of those fixes (`0db5498f..e1b0cc39`): no blocker, high or medium; MEDIUM 1, LOW
+1a, 2, 3 and 4 confirmed fixed. Two lows:
+
+| Finding | Disposition |
+| --- | --- |
+| LOW A: `chosenPlace` failed open for resumed and recovered journals at a place chosen earlier | Fixed in `9d975719` and `680184d1` (the fail-closed `inDownloads`; see LOW 1b above). |
+| LOW B: the unjournaled reservation now refuses when the probe name is not provably ours, with a "could not be removed" message | Accepted as the safe direction (it only arises on unusual filesystems or a transient hold); the message now says "could not be confirmed or removed" (`680184d1`). No retry added. |
+
 ## Ledger (22 October)
 
-Focused commands, all passing at `b36737ba`:
+Focused commands, all passing at `680184d1` (after the picker implementation review, its
+re-review and the re-check):
 
-- `cargo test -p catcoms-storage --lib kept::`: 123 passed.
-- `cargo test -p catcoms-app --lib actor::file_transfers`: 56 passed (includes the export tests).
+- `cargo test -p catcoms-storage --lib kept::`: 127 passed.
+- `cargo test -p catcoms-app --lib actor::file_transfers`: 58 passed (includes the export tests).
 - Native `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib` with filters
-  `private_downloads` (21 passed), `keep_session` (12 passed), `download` (39 passed);
-  native `cargo check --locked`.
-- Frontend single files: `native-download` 9, `private-downloads` 8, `private-download-lifecycle`
-  10, `visual-fixture` 10, `tauri-command-security` 10, `inline-transfer` 5; `npm run check`: 0
-  errors, 0 warnings.
+  `private_downloads` (26 passed), `keep_session` (14 passed), `download` (45 passed), and the
+  set `streamed_save fallback stops_the_save lock download_to_disk publish in_downloads_flag
+  device_name` (85 passed); native `cargo check --locked`.
+- Frontend single files: `native-download` 10, `private-downloads` 8, `private-download-lifecycle`
+  10, `visual-fixture` 10, `tauri-command-security` 10, `inline-transfer` 5, `studio-media` 3;
+  `npm run check`: 0 errors, 0 warnings.
 - `cargo fmt --all -- --check` (root and native), `cargo clippy -p catcoms-storage -p catcoms-sync
   -p catcoms-app --all-targets --all-features -- -D warnings`, `cargo clippy --target
   x86_64-linux-android -p catcoms-storage --all-targets -- -D warnings`,
   `bash scripts/check-no-ambient.sh`: clean.
 - `cargo deny check` (root): advisories, bans, licenses and sources ok. Native `cargo deny check`:
   12 advisory errors, the same count as the baseline, none in `libc`, `rfd` or `winapi-util`.
-- Native Clippy is not clean at the baseline (a voice join-key variant size and argument counts);
-  no new native Clippy finding remains from this work.
+  (Run at `b36737ba`; no dependency changed afterwards.)
+- Native Clippy is not clean at the baseline: a voice join-key variant size and
+  `too_many_arguments` on `save_group_file` (8 parameters at `dbb8d36b`, 10 now with `fresh_copy`
+  and `save_as`) and `finish_saved_read_if` (8, unchanged). No other native Clippy finding remains from this work.
 
 Compatibility run: fixtures written by a temporary generator (never committed) into
 `M:/cargo-isolated/compat-fixtures`; a scratch `git worktree` at `dbb8d36b` with its own target dir
@@ -810,6 +920,6 @@ removed.
 
 Not run (reserved or outside this session): `cargo test --all --all-features`, the full native and
 frontend suites, whole-workspace Clippy, `npm run build`, `test:startup`, `test:flows` (whose
-private-download flow script was updated for `chosenPlace` but not run), physical FAT, SMB, ReFS,
+private-download flow script was updated for the rows' `chosenPlace` but not run), physical FAT, SMB, ReFS,
 OneDrive and document-portal checks, a real dialog on each OS, and any Unix execution. The two WOF
 tests skip on this host.

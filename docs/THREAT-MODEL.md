@@ -374,14 +374,20 @@ writer keeps those properties.
   swaps the name at exactly that moment can make Mewtual delete or, on Unix, publish the swapped
   object. Identity is the only proof for deletion, so a real identity collision (possible in
   principle on ReFS, whose 64-bit index is not guaranteed unique) would let Remove delete a
-  foreign file.
+  foreign file. Creating a partial is path-based too: every creation with a captured folder
+  identity re-reads it afterwards and removes (only while its handle identity still proves the
+  name is ours) and refuses a partial that landed in a swapped folder; a swap and swap-back inside
+  that window leaves at most an empty partial there, because the link probe that follows requires
+  the probe name to be our own handle's object, even if a file was planted at our name.
 - **New exposure.** A paused or interrupted export keeps partial plaintext in the destination
   folder as `<name>.mewtual-part` across lock and restart until it is resumed, completed, replaced
   by Save new copy or removed. While a session is open on Windows, other programs cannot read it.
 - **Save as.** Native opens the OS dialog itself; the renderer sends only a flag and the command's
   parameter list is pinned so no path can be added. The chosen place authorizes that save and its
-  resumes only, is never logged, and persists only in the sealed record. An existing name is
-  refused even if the dialog asked to replace it. Lock cannot close an open OS dialog, so the
+  resumes only, is never logged (`rfd` logs only in backends this build does not compile), and
+  persists only in the sealed record. An existing name is refused even if the dialog asked to
+  replace it. The peer-chosen suggestion is sanitized (Windows device names including `COM¹` and
+  `CONIN$`, and `%`, which the Windows dialog would expand into another path). Lock cannot close an open OS dialog, so the
   suggested name and folder stay on screen until the user closes it (the choice is then
   discarded). A cloud-synced or shared chosen folder (for example OneDrive Desktop or Documents)
   uploads the partial plaintext and the probe name as they are written. A chosen folder inside the
@@ -398,10 +404,15 @@ writer keeps those properties.
   Download that outlives a dropped invocation until its delete ends, so Keep can never promise a
   file a pending delete may still remove; Save new copy retires every observer before deleting.
 - **Residual risks.** Filesystems without stable identities, birth times or locks (some SMB/FUSE)
-  keep the non-resumable writer; FAT and exFAT are refused before writing. A volume whose device
+  keep the non-resumable writer, which like the journaled path does its file work on the blocking
+  pool, so a stalled share pins one blocking thread, not an async worker; FAT and exFAT are
+  refused before writing. A volume whose device
   number changes across reboot reports Changed. Destination folder flushes are best effort, so
   power loss can lose a just-published name on filesystems that ignore them. A destination that
-  hangs during the guarded link can delay Lock, as the existing writer could. Remove keeps a
+  hangs during the guarded link can delay Lock, as the existing writer could, and every other
+  command that takes the process-wide session commit guard until the operating system gives up.
+  The post-publication media check reads the destination outside that guard and off the async
+  runtime. Remove keeps a
   partial it cannot check tracked as Removing; every other file it leaves on disk is reported to
   the user. Unix code is compile- and Clippy-checked for an Android target but never run on the
   Windows development host.
