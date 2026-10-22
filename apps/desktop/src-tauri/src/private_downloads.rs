@@ -975,8 +975,7 @@ pub(super) async fn prepare_resume(
         return Err(JOURNAL_EXISTS.into());
     }
     let mut notice = None;
-    // The claim (plain Resume only) is held until the intent CAS below has committed.
-    let (intent, _claim) = if fresh_copy {
+    let intent = if fresh_copy {
         let (intent, left) = abandon_partial(
             state,
             server,
@@ -988,19 +987,19 @@ pub(super) async fn prepare_resume(
         )
         .await?;
         notice = left;
-        (intent, None)
+        intent
     } else {
-        // Re-review 2 LOW 2: Resume is excluded by the same claim as Remove, Keep and Save new
-        // copy. After Save new copy retires the journal, a Resume carrying the new intent (a
-        // second window, or a list refreshed meanwhile) could otherwise reopen and lock the
-        // partial its delete worker is about to remove. Held across the preflight and the intent
-        // CAS only; the save itself runs without it, and a later cleanup retires its session.
-        let claim = CleanupClaim::acquire(server, id)?;
+        // Re-review 3 MEDIUM: the destination preflight runs WITHOUT the cleanup claim. Its reads
+        // (folder identity, the read-only verify of a saved file) can block until the OS gives
+        // up, forever on a hard NFS mount, and holding the claim there would make Remove, Save
+        // new copy and Keep report "still being removed" for as long as it hangs. Its only
+        // effects (recording a halt, recovering a publication) are fenced by its observation,
+        // which Remove's Deleting step and Save new copy's retire both invalidate, so a
+        // preflight that started before a cleanup cannot act on that journal afterwards. The
+        // claim is taken only around the intent CAS (`plain_resume_commit` below).
         if let Preflight::Saved(path, preflight) =
             resume_preflight(actor, id, origin, !chosen).await?
         {
-            // Clearing the recovered record takes the claim itself.
-            drop(claim);
             let cleanup = async {
                 remove_download(state, server, instance, generation, actor, id, false)
                     .await
@@ -1021,20 +1020,40 @@ pub(super) async fn prepare_resume(
                 notice: None,
             });
         }
-        (expected_intent, Some(claim))
+        expected_intent
     };
-    commit_kept_command(
+    let resume = commit_kept_command(
         state,
         server,
         instance,
         generation,
         actor.set_download_paused(id, intent, false),
-    )
-    .await?;
+    );
+    if fresh_copy {
+        // Save new copy already held the claim through its own retire and delete.
+        resume.await?;
+    } else {
+        plain_resume_commit(server, id, resume).await?;
+    }
     Ok(Prepared {
         saved: None,
         notice,
     })
+}
+
+/// The intent CAS of a plain Resume, under the process-wide cleanup claim (re-review 2 LOW 2,
+/// narrowed by re-review 3 MEDIUM). Busy while Remove, Keep or Save new copy owns the Download:
+/// after Save new copy has retired the journal, a Resume carrying the new intent (a second window,
+/// or a list refreshed meanwhile) must not clear Pause and go on to reopen and lock the partial
+/// its delete worker is about to remove. Only this short actor step holds the claim; nothing that
+/// reads the destination does.
+pub(super) async fn plain_resume_commit(
+    server: u64,
+    id: DownloadId,
+    resume: impl Future<Output = Result<(), String>>,
+) -> Result<(), String> {
+    let _claim = CleanupClaim::acquire(server, id)?;
+    resume.await
 }
 
 /// Record a halt the preflight found, fenced by its observation. Best effort: a refusal means

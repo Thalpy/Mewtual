@@ -584,6 +584,65 @@ async fn preflight_edges_from_before_a_freeze_and_thaw_record_nothing() {
     bounded(drain).await.unwrap();
 }
 
+/// Re-review 3 MEDIUM: a plain Resume's destination preflight runs without the cleanup claim, so
+/// it can still be in flight when Save new copy retires the journal or Remove publishes Deleting.
+/// Its effects must be refused afterwards: both cleanups invalidate the preflight's observation.
+#[tokio::test]
+async fn a_preflight_from_before_a_cleanup_cannot_act_on_its_journal() {
+    for remove in [false, true] {
+        let run = running().await;
+        let ready = ready(&run, None).await;
+        let file = begin(&run, &ready).await;
+        let journal = file.journal().clone();
+        drop(file);
+        let saved = bounded(run.actor.downloads()).await.unwrap().remove(0);
+        let parked = bounded(run.actor.download_preflight(saved.id, run.origin.clone()))
+            .await
+            .unwrap();
+        assert!(parked.is_current());
+        if remove {
+            // Remove: Deleting is durable with the journal kept for external cleanup.
+            assert!(bounded(run.actor.cancel_download(saved.id))
+                .await
+                .unwrap()
+                .is_some());
+        } else {
+            // Save new copy, step one: retire every observer under the intent CAS.
+            bounded(
+                run.actor
+                    .retire_download_export(saved.id, saved.state.intent),
+            )
+            .await
+            .unwrap();
+        }
+        assert!(!parked.is_current(), "remove={remove}");
+        for edge in [
+            DownloadExportEdge::Halt(ExportHalt::Changed),
+            DownloadExportEdge::RecoverPublished,
+        ] {
+            assert!(
+                bounded(run.actor.download_export_edge(
+                    parked.clone(),
+                    journal.clone(),
+                    edge,
+                    run.origin.clone(),
+                ))
+                .await
+                .is_err(),
+                "remove={remove}"
+            );
+        }
+        assert_eq!(
+            bounded(run.actor.download_export_state(saved.id))
+                .await
+                .unwrap(),
+            Some(ExportState::Writing(journal)),
+            "the journal the cleanup owns is unchanged (remove={remove})"
+        );
+        run.close().await;
+    }
+}
+
 #[tokio::test]
 async fn actor_freeze_and_thaw_release_stale_export_transitions() {
     let Pair {

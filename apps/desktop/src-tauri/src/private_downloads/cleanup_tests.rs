@@ -334,28 +334,47 @@ async fn a_stale_save_new_copy_deletes_nothing() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn resume_is_refused_while_a_cleanup_owns_the_download() {
-    // Re-review 2 LOW 2: while Remove, Keep or Save new copy holds the claim (Save new copy has
-    // already retired the journal and moved the intent), a Resume carrying that new intent must
-    // not reopen and lock the partial the delete worker is about to remove.
+async fn resume_takes_the_cleanup_claim_only_around_its_intent_change() {
+    // Re-review 2 LOW 2, narrowed by re-review 3 MEDIUM (an intentional contract change): while
+    // Remove, Keep or Save new copy holds the claim, a Resume must not commit its intent change
+    // (and so cannot go on to reopen and lock a partial a delete worker is about to remove). But
+    // its destination preflight, whose reads can hang on a dead share, runs without the claim, so
+    // a hung Resume can never make the cleanups report "still being removed".
+    let key = id(0xA7);
+    let committed = std::sync::atomic::AtomicBool::new(false);
+    let commit = || async {
+        committed.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    };
+    let held = CleanupClaim::acquire(1, key).unwrap();
+    assert_eq!(
+        plain_resume_commit(1, key, commit()).await.err().as_deref(),
+        Some(CLEANUP_BUSY)
+    );
+    assert!(
+        !committed.load(std::sync::atomic::Ordering::SeqCst),
+        "no intent change"
+    );
+    drop(held);
+    assert_eq!(plain_resume_commit(1, key, commit()).await, Ok(()));
+    assert!(committed.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(
+        CleanupClaim::acquire(1, key).is_ok(),
+        "Resume does not keep the claim"
+    );
+
+    // The preflight is not excluded: with a cleanup holding the claim, prepare_resume still
+    // reaches the actor (this empty one then refuses it for its own reason, not Busy).
     let state = AppState::default();
     let (row, task, drain) = crate::leaving::tests::running(943);
     let actor = row.actor.clone();
     let (_cancel, watch) = tokio::sync::watch::channel(false);
     let origin = RequestCancellation::new(watch, None);
-    let key = id(0xA7);
     let held = CleanupClaim::acquire(1, key).unwrap();
-    let refused = prepare_resume(&state, 1, 0, 0, &actor, &origin, key, 4, false, false).await;
-    assert_eq!(refused.err().as_deref(), Some(CLEANUP_BUSY));
+    let reached = prepare_resume(&state, 1, 0, 0, &actor, &origin, key, 4, false, false).await;
+    assert!(reached.is_err());
+    assert_ne!(reached.err().as_deref(), Some(CLEANUP_BUSY));
     drop(held);
-    // With no cleanup in flight Resume gets past the claim (this empty actor then refuses it for
-    // its own reason) and releases the claim again.
-    let later = prepare_resume(&state, 1, 0, 0, &actor, &origin, key, 4, false, false).await;
-    assert_ne!(later.err().as_deref(), Some(CLEANUP_BUSY));
-    assert!(
-        CleanupClaim::acquire(1, key).is_ok(),
-        "Resume does not keep the claim"
-    );
     actor.shutdown().await;
     task.await.unwrap();
     drain.await.unwrap();
