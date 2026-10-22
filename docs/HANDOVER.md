@@ -1,5 +1,62 @@
 # Mewtual; Handover
 
+## Validated native/browser history checkpoint (22 October)
+
+Frozen runtime `e560d319fa72727b3298f96396307cfef4ea2ad1` passed all required local gates. Publication
+runtime/build inputs match that source; earlier published ownership evidence is preserved below.
+This remains a partial handoff: native serves Status9 and existing-history Begin8(false),
+not factory/effect dispatch. Historical checkpoint sections do not supersede this evidence.
+
+Complete validation, zero failures:
+
+- Root: **3254 passed**, 24 existing ignored across 59 summaries
+  (2781.5s). New retirement sentinels are present in the rebuilt binary.
+  Formatting, strict all-target/all-feature Clippy, ambient scanner and dependency policy pass.
+- Native: **664 library plus five ACL tests passed**
+  (567.23s gate); all192 focused handoff tests are included.
+  Separate native check, strict all-target/all-feature Clippy and formatting pass.
+- Frontend: **2447 passed** (72.0s), Svelte check zero errors/
+  warnings (65.22s), production build
+  (52.92s) and all ten Edge flows
+  (64.75s) pass. Focused history/request/reply130/0 also passes.
+- Development build (235.83s), actual startup
+  (3.8s), packaged build
+  (139.8s) and real packaged Windows document/reload/
+  public-metadata/exact-CSP-CORS/normal-close probe (2.86s) pass.
+  Packaged binary SHA256: `7060f6e924865f8ea660399fbf9e40f54830e7acd59b5700f3df26d4af7ca9f3`.
+
+Exact commands/source/times: frozen target/voice-history-gates.jsonl and
+voice-retirement-static.jsonl. Heavy Cargo jobs ran serially. Read-only adversarial design/
+actual-diff review and re-review have no remaining blocker/high/medium. Failed prototype/fixture/
+compile attempts remain recorded; tests and limits were preserved. Docker daemon unavailable;
+no container pass claimed. Hosted acceptance for the current head remains unverified.
+
+Historical lookup recovers the SAME purpose/Row/action/result after End/lock without new
+factory/grant/Work/Phase/task or replacement keys/counters. Browser v11 uses the exact retained
+owner/handle and established Session, coalesces identical query Promises and retains real SDK/
+read/cancel custody through End. History refusal cannot acknowledge setup, close the channel or
+refund payment. Shared242B status/3B refusal vectors pin exactu64s, flags/padding and original
+receipt identity. Actual Derive reports Derived only; actor errors do not fabricate Rejected.
+
+The original Workflow observer/native snapshot distinguishes local16KiB return from96KiB
+variable retirement. Existing compaction may still drop that proof; missing proof NEVER means
+retirement. The next reviewed design retains the SAME already-paid Phase only for final-intent
+compacted rows, drops Live before requiring Root-ready, and uses one bounded injected-Clock
+cleanup driver because the Root snapshot cannot wake Row. This is design, not implemented behavior.
+
+Still unfinished: factory/input/admission/result/ACK/settlement/phase/final adapters and dispatch,
+final-proof retention/issuance/retry coordination, normal production Actor/MLS-pair success and
+combined native/WebView action acceptance. Retired browser cleanup needs a narrow original-
+Session continuation, retaining framing keys through final delivery before collection.
+The8KiB browser inventory is structural known payload/wrapper accounting, not arbitrary JS/SDK/
+GC heaps, RSS or caller-retained results. Native idle is not browser SDK/Workflow proof.
+
+The packaged probe requests no unlock or credentials and proves no selected-key/action delivery,
+SDP/RTC or physical audio/network acceptance. One desktop only; independent multi-network and
+Linux/macOS WebView acceptance remain unverified. Live V2/legacy isolation, relay, combined
+rollout/rollback and separate native/experiment dependency-audit findings remain open. The
+recorded hosted exact-union failure is not dismissed by local passes.
+
 ## Retained native/browser history recovery candidate (22 October)
 
 The active isolated dispatch checkout follows unpublished39fb329c. Production native ingress

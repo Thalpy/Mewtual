@@ -10,7 +10,9 @@ shared paid driver, with canonical242B metadata/3B refusals. Same-query Promise 
 competing-query busy, authenticated malformed-reply RX spending and retained actual work after
 End are covered. Native focused192 and browser/request/reply130 tests, Svelte check, Root/native strict
 Clippy/format, ambient/deny and native check pass; actual-diff review has no remaining
-blocker/high/medium. Fresh full-suite/build/startup gates remain pending. HANDOVER is the source/evidence ledger.
+blocker/high/medium. Fresh complete local gates also pass: Root3254, native669 including5 ACL, frontend2447;
+Svelte/build/tenflows, native builds/startup and packaged public-metadata probe pass. This
+establishes no normal Actor/MLS/WebView action or live V2/media acceptance. See HANDOVER. HANDOVER is the source/evidence ledger.
 
 Still required: authorized factory, input, admission, result, exact receipt ACK, settlement,
 phase/final adapters and dispatch, final-proof retention across compaction, bounded coordination
