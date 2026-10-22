@@ -14735,12 +14735,20 @@ async fn stream_download_staged(
         stage()
     })
     .await??;
-    match fill_staged_download(file, &staging, &path, total, size, target, source).await {
+    // Re-review 2 LOW 7: the open handle lives in `OnPool`, so whichever await returns early, it
+    // is closed on the blocking pool and never on a runtime worker.
+    let mut file = private_downloads::OnPool::new(file);
+    match fill_staged_download(&mut file, &staging, &path, total, size, target, source).await {
         Ok(()) => Ok(path),
         Err(error) => {
-            // Failures remove only our own staging name, never the final path.
-            let doomed = staging.clone();
-            let _ = private_downloads::blocking(move || std::fs::remove_file(doomed)).await;
+            // Failures remove only our own staging name, never the final path. The handle (if a
+            // step did not already consume it) closes first, on the same pool thread.
+            let (doomed, open) = (staging.clone(), file.release());
+            let _ = private_downloads::blocking(move || {
+                drop(open);
+                std::fs::remove_file(doomed)
+            })
+            .await;
             Err(error)
         }
     }
@@ -14748,7 +14756,7 @@ async fn stream_download_staged(
 
 /// Write, verify and publish one staged download. Any error leaves the caller to remove staging.
 async fn fill_staged_download(
-    mut file: std::fs::File,
+    file: &mut private_downloads::OnPool<std::fs::File>,
     staging: &Path,
     path: &Path,
     total: usize,
@@ -14786,21 +14794,23 @@ async fn fill_staged_download(
         // drops it there; the caller still removes the staging name. A write whose worker starts
         // after Lock or retirement writes nothing.
         let live = source.liveness();
-        let (returned, written) = private_downloads::blocking(move || {
+        let mut session = file.take();
+        let (session, written) = private_downloads::blocking(move || {
             if !live() {
-                return (file, Err(RETIRED_SAVE.to_string()));
+                return (session, Err(RETIRED_SAVE.to_string()));
             }
-            let written = file.write_all(&chunk).map_err(|e| e.to_string());
-            (file, written)
+            let written = session.write_all(&chunk).map_err(|e| e.to_string());
+            (session, written)
         })
         .await?;
-        file = returned;
+        file.put(session);
         written?;
         source.progress(i + 1, bytes_done, network_bytes_done, provider);
     }
     // Closing happens on the blocking pool too, so a share that stalls on close cannot hold a
     // runtime worker either.
-    private_downloads::blocking(move || file.sync_all())
+    let session = file.take();
+    private_downloads::blocking(move || session.sync_all())
         .await?
         .map_err(|e| e.to_string())?;
     if bytes_done != size {

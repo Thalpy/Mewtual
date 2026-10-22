@@ -234,6 +234,38 @@ async fn a_save_checkpoints_before_linking_and_records_published_under_the_guard
     );
 }
 
+/// Re-review 2 LOW 7: the export session (an `ExportFile` whose drop closes an OS handle on the
+/// destination) is held in [`OnPool`] on the async side, so an early return or error closes it on
+/// the blocking pool, never on a runtime worker. On a single-threaded runtime the runtime thread
+/// is the test's own thread, so the drop must land elsewhere.
+#[test]
+fn a_session_dropped_on_the_async_side_closes_on_the_blocking_pool() {
+    struct Probe(std::sync::mpsc::Sender<std::thread::ThreadId>);
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            let _ = self.0.send(std::thread::current().id());
+        }
+    }
+    let here = std::thread::current().id();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (sender, dropped) = std::sync::mpsc::channel();
+    runtime.block_on(async {
+        let held = OnPool::new(Probe(sender));
+        drop(held); // what an early `?` return does
+    });
+    let on = dropped
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the value was dropped");
+    assert_ne!(on, here, "closed on the blocking pool");
+    // Outside any runtime there is no pool; it is dropped in place.
+    let (sender, dropped) = std::sync::mpsc::channel();
+    drop(OnPool::new(Probe(sender)));
+    assert_eq!(dropped.recv().unwrap(), here);
+}
+
 /// A folder the user picked in Save as, beside (not inside) the Downloads folder.
 fn chosen_place(root: &tempfile::TempDir, name: &str) -> (PathBuf, Destination) {
     let folder = root.path().join("Chosen place");
