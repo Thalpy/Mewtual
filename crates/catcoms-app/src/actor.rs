@@ -156,9 +156,11 @@ impl DownloadPreflight {
         self.plan.as_ref()
     }
     /// Where a fresh export of this record would go if it remembers a "Save as" choice (only
-    /// while there is no journal). Native-only: it names an external path. `Some(Err(_))` is a
-    /// choice this platform cannot decode. Native checks it read-only before a Resume spends
-    /// allowance; creation checks it again.
+    /// while there is no journal, and only for a Completed record about to re-verify: an
+    /// incomplete one reports `None` so its network Resume is never refused over the
+    /// destination). Native-only: it names an external path. `Some(Err(_))` is a choice this
+    /// platform cannot decode. Native checks it read-only before a Resume spends allowance;
+    /// creation checks it again.
     #[allow(clippy::type_complexity)]
     pub fn planned(
         &self,

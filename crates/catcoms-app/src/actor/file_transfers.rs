@@ -870,12 +870,22 @@ impl FileTransfers {
                 catcoms_storage::kept::ExportPlan::from_manifest(&manifest).ok()
             });
         // A remembered choice is read-only data here; a query failure just skips the check
-        // (creation re-checks the choice anyway).
+        // (creation re-checks the choice anyway). Re-review 3 LOW 2: only a Completed record is
+        // about to re-verify and export. An incomplete one still has its network phase ahead,
+        // and an unplugged chosen drive or a taken name may be fine again by the time it
+        // finishes, so its Resume is never refused over the destination.
+        let completed = server.sync.downloads().ok().is_some_and(|all| {
+            all.iter().any(|download| {
+                download.id == id
+                    && download.state.phase == catcoms_storage::kept::KeepPhase::Completed
+            })
+        });
         let planned = server
             .sync
             .download_planned_destination(id)
             .ok()
             .flatten()
+            .filter(|_| completed)
             .map(|choice| choice.map(Arc::new));
         Ok(super::DownloadPreflight {
             observation,

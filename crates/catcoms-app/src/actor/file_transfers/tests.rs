@@ -2354,6 +2354,69 @@ async fn a_save_as_choice_survives_an_interrupted_acquisition_and_remount() {
 }
 
 #[tokio::test]
+async fn an_incomplete_download_resumes_although_its_chosen_place_is_gone() {
+    // Re-review 3 LOW 2: the Resume preflight checks a remembered place only for a Completed
+    // record. An incomplete one still has its network phase ahead, so an unplugged chosen drive
+    // must not refuse resuming the acquisition itself.
+    let Pair {
+        mut requester,
+        holder,
+        cid,
+        gate: _gate,
+        mut entered,
+        ..
+    } = pair().await;
+    let dir = tempfile::tempdir().unwrap();
+    attach_kept(&mut requester, dir.path());
+    let chosen = tempfile::tempdir().unwrap();
+    let choice = Arc::new(
+        catcoms_storage::kept::ChosenDestination::validate(&chosen.path().join("report.bin"))
+            .unwrap(),
+    );
+    let (source, _events, source_task) = spawn(holder);
+    let mut transfers = isolated_transfers();
+    let (cancel, watch) = watch::channel(false);
+    let (reply, result) = oneshot::channel();
+    transfers.download(
+        &mut requester,
+        cid.as_bytes().to_vec(),
+        None,
+        Some(choice),
+        RequestCancellation::new(watch, None),
+        reply,
+    );
+    let step = bounded(transfers.next()).await.unwrap();
+    transfers.complete(&mut requester, step);
+    let _lower = bounded(entered.recv()).await.unwrap();
+    cancel.send_replace(true);
+    let step = bounded(transfers.next()).await.unwrap();
+    transfers.complete(&mut requester, step);
+    assert!(bounded(result).await.unwrap().is_err());
+    let saved = requester.sync.downloads().unwrap().remove(0);
+    assert!(saved.planned, "the choice is remembered");
+    assert_ne!(
+        saved.state.phase,
+        catcoms_storage::kept::KeepPhase::Completed
+    );
+    // The chosen drive is unplugged before the user resumes.
+    drop(chosen);
+    let (_live, watch) = watch::channel(false);
+    let preflight = transfers
+        .download_preflight(
+            &mut requester,
+            saved.id,
+            &RequestCancellation::new(watch, None),
+        )
+        .unwrap();
+    assert!(
+        preflight.planned().is_none(),
+        "nothing to refuse the network Resume over"
+    );
+    source.shutdown().await;
+    bounded(source_task).await.unwrap();
+}
+
+#[tokio::test]
 async fn a_new_download_whose_choice_cannot_be_written_leaves_no_row() {
     // Picker review L2: when the Save as choice cannot be written right after `begin_download`
     // created the record, that record is released, not left as an "Interrupted" row. An existing
