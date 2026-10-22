@@ -484,19 +484,46 @@ writer keeps those properties.
   The final name is never deleted, and publication is a no-replace hard link verified afterwards. A
   final name holding our identity is recorded as saved only after its content is verified
   read-only against the saved plan. Once a link may exist, the session never trims or writes.
-- **Path-based steps that remain.** std has no delete-by-handle and a handle-based delete needs
-  `unsafe`, which the workspace denies. So removing a proven staging name, removing the link-probe
-  name and (on Unix) the publication link are path calls made after a handle check. On Windows the
-  publication link is made while a delete-denying handle pins the staging file and its folder.
-  Anyone with write access to that folder (the same user, or another user of a shared folder) who
-  swaps the name at exactly that moment can make Mewtual delete or, on Unix, publish the swapped
-  object. Identity is the only proof for deletion, so a real identity collision (possible in
-  principle on ReFS, whose 64-bit index is not guaranteed unique) would let Remove delete a
-  foreign file. Creating a partial is path-based too: every creation with a captured folder
-  identity re-reads it afterwards and removes (only while its handle identity still proves the
-  name is ours) and refuses a partial that landed in a swapped folder; a swap and swap-back inside
-  that window leaves at most an empty partial there, because the link probe that follows requires
-  the probe name to be our own handle's object, even if a file was planted at our name.
+- **Automatic deletion (PR51 H1, 22 October).** Every automatic delete of an external name (Remove,
+  Save new copy, Clear of a saved row, the staging name after publication, failed-creation cleanup,
+  the link-probe name, the fallback writer's and the GIF export's staging file, a small download
+  whose write failed) deletes only the object it verified. No `unsafe` is added: the operating
+  system calls come from vetted crates (`fs_at` on Windows, `rustix` on Unix). Windows opens the
+  name with delete access and without delete sharing, without following a reparse point, verifies
+  that handle and deletes through it, so nobody can rename, replace or delete the name meanwhile
+  (guaranteed against every process); no attribute is ever changed, through a path or a handle.
+  Unix has no delete-by-inode, so the guarantee is narrower: **automatic deletion is guaranteed
+  only against processes running as other accounts.** In a folder other accounts can modify (owner
+  neither us nor root, or group- or other-writable without the sticky bit; a user-private group
+  folder at 0775 counts as shared) nothing is deleted automatically and the user is told to delete
+  the partly saved file. Elsewhere the name is renamed, relative to a pinned folder descriptor, to
+  an unguessable random name, verified there, and unlinked only if it is ours (else renamed back);
+  a process running as the same account could swap that random name in the instant before the
+  unlink, but such a process can already delete the file itself. A crash in between leaves our
+  file at a `mewtual-removing-` name, found later by identity, never by name. Writers without a
+  journal verify against the in-session number of the handle they still hold. Identity is still the
+  only proof: a real identity collision (possible in principle on ReFS, whose 64-bit index is not
+  guaranteed unique) could let Remove delete a foreign file.
+- **Publication (PR51 M1).** Both writers give the final name to exactly the object behind the
+  handle they verified. Linux and Android link that handle's descriptor through `/proc/self/fd`
+  into the pinned folder (no `/proc`: no journal, and the fallback writer refuses before writing).
+  Windows holds a delete-denying pin on the staging name, checked to be our object, across the
+  path-based link, which also blocks renaming its folders. macOS has no link by descriptor
+  (narrowed): the link is by path, and the post-link check only guarantees that a foreign object at
+  the final name is never reported as saved; it is then left alone with the staging name.
+- **Creation.** Creating a partial is path-based: every creation with a captured folder identity
+  re-reads it afterwards and removes (verified as above) and refuses a partial that landed in a
+  swapped folder; a swap and swap-back inside that window leaves at most an empty partial there,
+  because the link probe that follows requires the probe name to be our own handle's object, even
+  if a file was planted at our name.
+- **Filesystem support (PR51 M3, fail closed).** Unix journals only on filesystems `fstatfs`
+  identifies as local with stable identities (ext4, xfs, btrfs, tmpfs; APFS and HFS+ that are
+  `MNT_LOCAL`); FAT, vfat and exFAT are refused before writing; network, FUSE, overlay and
+  unrecognized filesystems get the non-resumable writer. Windows has no vetted crate that reports
+  the filesystem name, so FAT and exFAT are refused by the link probe, network folders (a
+  `\\?\UNC\` canonical path, mapped drives included) get the non-resumable writer, and every other
+  local volume is journaled on the 64-bit file index plus birth time: verified on NTFS only, ReFS
+  unverified. The matrix is in `communication-recovery/EXTERNAL-DOWNLOAD-RESUME.md`.
 - **New exposure.** A paused or interrupted export keeps partial plaintext in the destination
   folder as `<name>.mewtual-part` across lock and restart until it is resumed, completed, replaced
   by Save new copy or removed. While a session is open on Windows, other programs cannot read it.
@@ -534,8 +561,11 @@ writer keeps those properties.
   keep the non-resumable writer, which like the journaled path does its file work on the blocking
   pool, so a stalled share pins one blocking thread, not an async worker; FAT and exFAT are
   refused before writing. A volume whose device
-  number changes across reboot reports Changed. Destination folder flushes are best effort, so
-  power loss can lose a just-published name on filesystems that ignore them. A destination that
+  number changes across reboot reports Changed. The destination folder is flushed after the link
+  and before Published is recorded (PR51 M2), but flushes are best effort, so power loss can still
+  lose a just-published name on filesystems that ignore them; a saved row whose final name is gone
+  still reads "Saved" until it is cleared, and its Clear keeps the staging name when that is the
+  only copy and says so. A destination that
   hangs during the guarded link can delay Lock, as the existing writer could, and every other
   command that takes the process-wide session commit guard until the operating system gives up.
   The post-publication media check reads the destination outside that guard and off the async

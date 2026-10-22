@@ -527,6 +527,29 @@ The **Files** tab is a folder browser:
 **Custom emoji** live in the `emoji/` folder. Add one in **Server settings → Emoji & Stickers**:
 type a `code`, choose its display size and upload an image. Then anyone types `:code:` to use it.
 
+### Saving a file to your computer
+
+**Download** saves into your Downloads folder; **Save as** lets you pick the folder and name. While
+a file is being written it sits beside its final name as `<name>.mewtual-part` (or `<name>.part`),
+and only a fully verified file ever gets the real name. On most local drives an interrupted save
+(Lock, Pause, closing the app) can be **resumed** later from the Transfers list.
+
+Where it works:
+
+- **Resumable:** NTFS on Windows (ReFS also works but is not verified); ext4, xfs, btrfs and tmpfs
+  on Linux; local APFS or HFS+ drives on macOS (not verified yet).
+- **Saved, but not resumable:** network folders (SMB shares, mapped drives, NFS) and other
+  filesystems Mewtual cannot identify. An interrupted save there starts again.
+- **Refused before anything is written:** FAT and exFAT drives (many USB sticks and SD cards),
+  because they cannot make the link Mewtual publishes a finished file with. On Linux, saving also
+  needs `/proc`, which every normal desktop has.
+- **Cloud folders** (OneDrive, Dropbox and similar) work, but the provider uploads the partly
+  saved file as it is written.
+
+Mewtual only ever deletes a partly saved file it can prove is its own. On Linux and macOS it
+deletes nothing automatically in a folder that other accounts on the computer can change; it says
+so, and you can delete the leftover `.mewtual-part` or `.part` file yourself.
+
 ### What loads by itself, and how big it may be
 
 **Server settings → File Trust** carries two separate things that both answer "what may files do

@@ -520,10 +520,12 @@ constants passed through std's safe `custom_flags`. It cannot run on this Window
 22 October the storage crate (all targets, including the Unix-only FIFO tests) compiles and passes
 Clippy with `-D warnings` for `x86_64-linux-android`, a Unix-family target that is installed here;
 Linux-only `target_os` code would still be unchecked, and the Linux CI job remains the first runner.
-Windows by-handle delete and no-replace rename would need `unsafe` FFI, which the workspace denies,
-so hard link plus unlink is used on both platforms. What remains path-based after a handle-based
-check: removing a proven staging name, removing the link-probe name, and (on Unix only) the
-publication link. On Windows the publication link is covered by the delete-denying pin.
+Superseded by the PR51 review (see that section): deletion now goes through the verified handle on
+Windows (`fs_at`) and through rename-aside, verify and `unlinkat` relative to a pinned folder on
+Unix (`rustix`), and publication names the held object (Linux `/proc/self/fd`, Windows pin, macOS
+path link plus post-check only). Before that, by-handle delete would have needed `unsafe` FFI in
+our code, which the workspace denies, so removal and the Unix publication link were path calls
+made after a handle check.
 
 Creating a new partial is path-based too (picker review L4): the folder identity check and the
 exclusive create are separate calls. Every creation (`create`, `create_chosen`, and
@@ -581,10 +583,11 @@ the ledger says the guard cannot run on this host.
   name for one save (see the Save as addendum).
 - Resume avoids duplicate copies and orphan partials. It is not faster than a fresh save on a
   local disk: it re-verifies the encrypted copy and reads the plaintext prefix again.
-- The path-based steps listed under Platform have a small race window against anyone with write
-  access to that folder (the same user, or another user of a shared folder) who swaps the name at
-  exactly that moment; Mewtual could then delete or (on Unix) publish the swapped object. Creation
-  is rechecked afterwards, so a swapped folder gets at most an empty partial.
+- PR51: automatic deletion deletes only the verified object; on Windows against every process, on
+  Unix only against processes running as other accounts (folders other accounts can modify get no
+  automatic deletion; a same-account process could swap the random aside name before the unlink).
+  macOS publication guarantees only that a foreign object is never reported as saved. Creation is
+  rechecked afterwards, so a swapped folder gets at most an empty partial.
 - Identity is the only ownership proof for deletion: a real identity collision (infeasible with
   birth time on NTFS, ext4 and APFS; possible in principle on ReFS) would let Remove delete a
   foreign file at our staging name.
@@ -592,14 +595,16 @@ the ledger says the guard cannot run on this host.
   saves stay non-resumable as today. Volumes whose device number changes across reboots report
   Changed. A OneDrive placeholder whose data is not on the device is downloaded when Mewtual reads
   it back to verify or resume.
-- Folder flushes on the destination are attempted but not required; on a filesystem that ignores
-  them, power loss can lose a just-published name while the journal says Saved. Process crashes
-  are covered.
+- Folder flushes on the destination are attempted (since PR51 M2, after the link and before
+  Published) but not required; on a filesystem that ignores them, power loss can still lose a
+  just-published name while the journal says Saved. Clearing such a row keeps the staging name if it
+  is the only copy and says so. Process crashes are covered.
 - Hard links are required, as today; a FAT or exFAT folder (Downloads or chosen) is refused before
   any plaintext is written, with a message pointing to Save as.
-- Publication holds the session commit guard across the staging identity recheck, one hard link,
-  the final-name reopen and the Published actor transition (the folder flush and staging unlink run
-  after release). A destination that hangs during those steps can delay Lock, as the existing
+- Publication holds the session commit guard across the staging identity recheck, one hard link
+  and the final-name reopen; the folder flush then runs without the guard, and the Published actor
+  transition takes it again (PR51 M2; the staging removal runs after release). A destination that
+  hangs during the guarded steps can delay Lock, as the existing
   writer's guarded link already can, and, because the guard is process-wide, every other command
   that takes it (other saves' checks among them) until the operating system gives up.
 - Orphans from crash row 1, or `.part` files from before this change, are never adopted. At a
@@ -973,6 +978,124 @@ findings. Two lows:
 | --- | --- |
 | L1: a recovered save's cleanup could release a record a later Save new copy was re-saving (dating from `14ddba4b`) | Fixed in `cd0d2aa9`: `recovered_cleanup` stands down without a warning when another cleanup holds the claim or the recovering preflight's observation is no longer current; under its own claim it clears the record as before. Tests: `a_recovered_save_clears_only_the_record_it_recovered` (native, over the cleanup ports: the moved-on record and a held claim both leave the record and run untouched with no error, the current record is cleared; both guards break-checked), `a_recovered_publication_keeps_its_observation_until_save_new_copy_retires_it` (actor: recording the recovery keeps the observation current, the retire ends it). The literal end-to-end sequence (recover, Save new copy acquiring, then the late cleanup) is not one test; it is covered by those two halves. |
 | L2: the rewritten native test did not pin that Resume takes the claim | Fixed in `8de5641a`: `a_real_resume_commits_its_intent_change_only_without_a_cleanup_claim` builds a real local Completed record whose preflight passes; with a cleanup holding the claim `prepare_resume` is Busy and the intent unchanged, without it the intent advances and the claim is released. Bypassing `plain_resume_commit` makes it fail. |
+
+## PR51 review (user, at `86664d94`): design note
+
+The user's review requests changes: H1 (blocker), M1, M2, M3. Policy: no `unsafe` in our code;
+operating-system calls come from vetted crates with safe APIs; where none fits, the guarantee is
+narrowed honestly instead.
+
+### Crate evaluation
+
+| Need | Candidate | Verdict |
+| --- | --- | --- |
+| Windows: delete exactly the object whose identity was verified, through that handle | `fs_at` 0.2.1 (Robert Collins, the `remove_dir_all`/rustup maintainer; Apache-2.0; deps `windows-sys` 0.52 (already in the root lock), `aligned` 0.4.3 and `cvt` 0.1.2, both permissive; Windows-only dependency for us, so Linux CI gains nothing) | **Chosen.** `fs_at::os::windows::FileExt::delete_by_handle(File)` is a safe trait method: `SetFileInformationByHandle(FileDispositionInfoEx)` with POSIX semantics and IGNORE_READONLY on the handle we pass, falling back to `FileDispositionInfo` and, for read-only files, clearing and restoring the attribute through that same handle. No name is re-resolved. |
+| Windows: the same, std-only | `FILE_FLAG_DELETE_ON_CLOSE` via `OpenOptionsExt` | Rejected: the disposition is set at open, before the identity can be checked, and cannot be cancelled without `SetFileInformationByHandle`, so a foreign object opened by mistake would be deleted. |
+| Windows: 128-bit file id / filesystem name / remote volume | `file-id` 0.2.3 (path-only API that opens the path itself; useless for a handle we hold), `winapi-util` (`GetFileType` only), `sysinfo` (mount-point prefix matching, rejected as a path guess), `windows`/`windows-sys` (functions are `unsafe` to call) | **None fits: narrowed** (below). |
+| Unix: directory-relative rename, stat, unlink, link, statfs, euid | `rustix` 1.1.4 (Bytecode Alliance; Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT; already in both lock files through `tempfile`) | **Chosen**, as a direct `cfg(unix)` dependency with the `fs` and `process` features. `renameat_with(NOREPLACE)` exists on Linux and Apple. |
+
+Empirical checks on this host (Windows 11, NTFS): while a file is held open with `DELETE` access
+and share mode READ|WRITE (no DELETE), renaming its name fails (sharing violation), renaming its
+parent or grandparent folder fails (access denied), and `delete_by_handle` removes it even when it
+is read-only.
+
+### Contracts (as implemented; the design review's recommendations are noted where taken)
+
+Which path each finding took: **H1** crate on both platforms (`fs_at` on Windows, `rustix` on
+Unix), with the Unix guarantee narrowed to other accounts because Unix has no delete-by-inode.
+**M1** crate on Linux and Android (`rustix`); Windows needs no new crate (std share modes); macOS is
+narrowed (no link by descriptor exists there). **M2** needs no new dependency. **M3** crate on Unix
+(`rustix::fs::fstatfs`); narrowed on Windows (no vetted crate reports the filesystem name).
+
+**H1, every automatic delete of an external name.** Covered: Remove, Save new copy, Clear of a
+saved row's staging name, the staging name after a journaled publication, failed-creation
+cleanup, the link-probe name (`-probeN`), the fallback writer's staging file on failure and after
+publication, the GIF export's staging file, and a small download (`write_download`) whose write
+failed. All go through `external::remove_verified`:
+
+- Windows: open the name with `DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE`, share READ|WRITE (no
+  `FILE_SHARE_DELETE`), `FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS`; verify the
+  handle's identity (or in-session number); delete through that handle with
+  `fs_at::os::windows::FileExt::delete_by_handle` (POSIX semantics with IGNORE_READONLY where
+  available, else classic disposition). While the handle is held the name cannot be renamed,
+  replaced or deleted and its folders cannot be renamed, so the deleted object is exactly the one
+  verified. The handle asks for no `FILE_WRITE_ATTRIBUTES`, so the classic fallback for a read-only
+  file (FAT, SMB) fails instead of clearing the attribute: no attribute is ever changed, through a
+  path or a handle. Long-lived handles keep std's default share mode, so this short-lived open is
+  allowed (design review H-A).
+- Unix (no delete-by-inode exists): pin the folder by a descriptor and check it against the journal
+  when one exists. If other accounts can modify it (owner neither us nor root, or group- or
+  other-writable without the sticky bit), delete nothing and say so (`SharedFolder`: "Other
+  accounts can change the folder with the partly saved file, so Mewtual left it in place. Delete it
+  yourself if you no longer need it."; native's writers append "The partly saved file "<name>" was
+  left in place; delete it yourself."). Otherwise `renameat` the name to
+  `mewtual-removing-<128 random bits>` (no-replace where the platform has it; the random name
+  comes from the `catcoms-rt` RNG seam), open it without following links, verify, `unlinkat` it if
+  it is ours, else rename it back (no-replace) and report "not ours". A crash between the rename
+  and the unlink leaves our file at a removing name; Keep and the next Remove find it by identity,
+  never by name. Kept despite the design review's advice to drop the rename (it is what makes the
+  swapped-in file survive on Unix); the plain-rename fallback where no-replace rename is missing
+  (NFS, many FUSE) relies on the unguessable name.
+- Identity-less destinations (design review H-D, taken): the journaled writer is not started there
+  (it falls back), and the fallback writer and GIF export verify every removal against the
+  in-session number (`SessionId`: volume and file index, or device and inode) of the handle they
+  created the file with and still hold, so that number cannot be reused meanwhile. Not refused.
+- Guarantee wording, changed: "the deleted object is exactly the one verified" holds on Windows
+  against every process. On Unix: "Automatic deletion is guaranteed only against processes running
+  as other accounts; in folders other accounts can modify Mewtual deletes nothing automatically. A
+  process running as the same account could swap the random name in the instant before the unlink;
+  such a process can already delete the file itself."
+
+**M1, publication link.** Two guarantees: (a) never report a save that did not happen; (b) never
+give the final name to an object other than the one verified. Both writers now publish exactly the
+object behind the handle they hold (`ExportFile::link`; `publish_unjournaled` for the fallback
+writer and the GIF export):
+
+- Linux and Android: (a) and (b). `linkat` of `/proc/self/fd/N` with `AT_SYMLINK_FOLLOW` into the
+  pinned folder. Without a usable `/proc` no journal is started and the fallback writer refuses
+  before any plaintext is written (fail closed, "this system does not provide /proc, which Mewtual
+  needs to publish a save safely").
+- Windows: (a) and (b). A delete-denying pin on the staging name, checked to be our object, is held
+  across the path-based link (the existing test also pins that the folder cannot be renamed).
+- macOS: (a) only (narrowed). The link is by path; the post-link check fails the save when the
+  final name holds another object, and both names are left alone. A post-link check that cannot be
+  made fails the save on macOS, but not on Linux, Android or Windows, where the link itself already
+  named our object.
+
+**M2, durability.** The destination folder is flushed after the link and before Published is
+recorded, both for a fresh link and for the Resume path that finds an interrupted session's link
+(`RecoverPublished`). The flush runs outside the commit guard (design review), and Published takes
+the guard again; a Lock that wins that gap leaves the every-chunk journal with our final name
+linked (crash-table row 6), which the next Resume recovers without a second copy. A Published
+record whose final name is gone is not re-published automatically (the design review's
+resurrection hazard: the user may have deleted the saved file on purpose). Instead its Clear keeps
+the staging name when that is the only copy (`KeptOnlyCopy`, "The saved file was no longer in its
+folder, so its copy under the temporary .mewtual-part name was kept. Rename that file to keep it.")
+and reports `SavedFileMissing` ("The saved file was no longer in its folder.") when both names are
+gone. The row still reads "Saved" until it is cleared: a decision for the user (below).
+
+**M3, filesystem support (fail closed).** See the support matrix below. Unix decides with
+`fstatfs` (Apple: `f_fstypename` plus `MNT_LOCAL`). Windows has no vetted crate that reports the
+filesystem name or the remote flag, so: FAT and exFAT are refused by the link probe; network
+folders are recognized without guessing by canonicalizing the folder with std (a `\\?\UNC\`
+result, which mapped drives also produce) and get no journal; every other local volume is
+journaled on the 64-bit file index plus birth time, which is verified on NTFS only. The 64-bit file
+index is not presented as universally unique.
+
+### Support matrix
+
+| Filesystem | Journaled (resumable) writer | Fallback writer | Automatic cleanup | Notes |
+| --- | --- | --- | --- | --- |
+| NTFS (Windows) | Yes | Yes | Yes, by verified handle | Verified on the development host. |
+| ReFS (Windows) | Yes, unverified | Yes | Yes, by verified handle | ReFS has 128-bit file ids; Mewtual reads the 64-bit index, which is not guaranteed unique there. No vetted crate exposes the 128-bit id. |
+| SMB, mapped drives (Windows) | No | Yes | Yes, by verified handle, if the server gives a file number | Recognized by the `\\?\UNC\` canonical path. |
+| FAT, exFAT (Windows) | No | No (refused before writing) | n/a | No hard links, so publication is impossible. |
+| OneDrive and other cloud folders (Windows) | Yes, on NTFS | Yes | Yes | The provider uploads partial plaintext as it is written. Placeholders are the same file. |
+| ext4, xfs, btrfs, tmpfs (Linux) | Yes | Yes | Yes, except in folders other accounts can modify | Needs `/proc/self/fd`. |
+| overlayfs, FUSE, NFS, SMB/CIFS (Linux) | No | Yes | As above | Container `/tmp` on overlayfs gets no journal. |
+| vfat, exFAT (Linux) | No | No (refused before writing) | n/a | |
+| APFS, HFS+ (macOS, local) | Yes, unverified | Yes | As above | Not built in CI; publication guarantee (a) only. |
+| Network volumes (macOS) | No | Yes | As above | Not `MNT_LOCAL`. |
 
 ## Ledger (22 October)
 

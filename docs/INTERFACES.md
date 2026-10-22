@@ -510,6 +510,25 @@ Rust interfaces:
 - `ChosenDestination::preflight` (read-only) and `DownloadPreflight::planned()` let an explicit
   Resume check a remembered choice before re-verification; `confirm_staging_links` is the shared
   link probe for non-journaled reservations (chosen place and one-click Downloads).
+- PR51 review (22 October): the external entry points that create, probe or remove take
+  `rng: &mut dyn catcoms_rt::CryptoRngCore` (`ExportFile::create`/`create_chosen`/`finish`/
+  `discard`, `ChosenDestination::create_unjournaled`, `confirm_staging_links`, `remove_partial`),
+  because Unix removal renames a name aside to a random name first; native passes `OsCryptoRng`.
+  `remove_partial(journal, published, rng)` keeps a Published record's staging name when its
+  final name is gone (`PartialRemoval::KeptOnlyCopy`; `SavedFileMissing` when both are gone) and
+  adds `SharedFolder` (Unix: nothing deleted where other accounts can modify the folder);
+  `PartialRemoval::cleared_staging()` tells native whether no staging name of ours can remain. For
+  writers without a journal (native's fallback writer, the GIF export, `write_download`):
+  `session_id(&File) -> SessionId` (in-session volume and file index, or device and inode; never
+  persisted, Debug redacted), `remove_if_session(folder, leaf, id, rng) -> SessionRemoval`
+  (`Removed`, `Missing`, `NotOurs`, `SharedFolder`; an error means it could not check or delete)
+  and `publish_unjournaled(&File, staging, final) -> io::Result<()>`, which names exactly the
+  object behind the held handle (Linux/Android: `/proc/self/fd` link; Windows: delete-denying pin
+  across the link; macOS: path link plus post-link check). Native `SaveSource::publish_verified`
+  now receives the staging handle (`&mut OnPool<File>`), and `ExportPorts::flush(journal)` is the
+  folder flush the export sequence runs after the link and before Published or RecoverPublished.
+  Contracts and the support matrix:
+  [EXTERNAL-DOWNLOAD-RESUME](communication-recovery/EXTERNAL-DOWNLOAD-RESUME.md#pr51-review-user-at-86664d94-design-note).
 - Remove, Keep partly saved file and Save new copy share one process-wide cleanup claim per
   (server, Download ID); plain Resume takes it only around its intent change, never across its
   destination preflight. Keep's presence check is best effort (bounded wait, Unknown without a

@@ -823,6 +823,17 @@ written by the intermediate build `27ffa183` would fault (v2 was amended with th
 destination), but no dogfood or installed build of `27ffa183` exists; it only ran in tests. No
 screenshot exists yet for the new rows or Save as entries.
 
+PR51 review (user, at `86664d94`): every automatic delete of an external name now deletes only the
+object it verified (Windows through the verified handle via `fs_at`; Unix by rename-aside, verify,
+`unlinkat` via `rustix`, never in folders other accounts can modify, so on Unix the guarantee holds
+only against other accounts); both writers publish exactly the object behind their open handle
+(Linux via `/proc/self/fd`, Windows under a pin, macOS path link plus post-check only); the folder
+is flushed after the link and before Published; filesystem support fails closed (matrix in the
+design document). No `unsafe` was added. Native's fallback writer, GIF export and `write_download`
+use the new `session_id`/`remove_if_session`/`publish_unjournaled`. Open: Unix behaviour runs only
+in Linux CI, macOS is not built in CI, ReFS is unverified, and a Published row whose final name
+was lost still reads "Saved" until cleared.
+
 ## Chat history adversarial checkpoint (2026-10-20)
 
 The latest user request is to explain/test additive chat history across MLS epochs, disconnected
