@@ -1821,6 +1821,14 @@ impl ExportFile {
             Err(error) => return Err(local(error)),
         };
         let links = external::observe(&self.file).map_err(local)?.links;
+        // Re-review 2 LOW 1: an uncertain link error (a network timeout) marks the session
+        // "possibly visible". If our file still has exactly one name and the final name is not
+        // ours, that link did not happen (or its name is already gone), so no other name can show
+        // these bytes and the session is private again. Publication retries instead of halting
+        // Changed, which would discard a complete, valid partial as "changed or replaced".
+        if self.linked && !final_is_ours && links == 1 {
+            self.linked = false;
+        }
         if self.linked || final_is_ours || links != 1 {
             if !final_is_ours {
                 // Another name exists that is not our final name: someone else can see these
@@ -1913,7 +1921,8 @@ impl ExportFile {
                 return Err(ExportError::Halted(ExportHalt::Unavailable));
             }
             // Anything else is uncertain (a network filesystem can fail after creating the
-            // entry), so treat the file as possibly visible from now on.
+            // entry), so treat the file as possibly visible until `prepare_publication` proves
+            // otherwise (one name on our file, final name not ours; re-review 2 LOW 1).
             Err(error) => {
                 self.linked = true;
                 return Err(local(error));

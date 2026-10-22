@@ -952,6 +952,50 @@ fn a_retry_after_an_unconfirmed_link_never_trims_or_claims_a_changed_final_file(
 }
 
 #[test]
+fn an_uncertain_link_error_that_made_no_link_retries_instead_of_halting_changed() {
+    // Re-review 2 LOW 1: a network timeout in the link call that created no link left the
+    // session marked "possibly visible", and the retry then halted Changed (discarding a complete,
+    // valid partial with a message saying it was changed or replaced). With one name on our file
+    // and a final name that is not ours, nothing else can see these bytes: publish on retry.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (_id, lease) = completed(&mut store);
+    let mut file = started(&mut store, &lease, &fx.downloads);
+    write_all(&mut file);
+    let Publication::Ready(journal) = file.prepare_publication().unwrap() else {
+        panic!();
+    };
+    store
+        .checkpoint_download_export(&lease, file.journal(), &journal)
+        .unwrap();
+    file.checkpointed(journal);
+    assert!(matches!(
+        injected(Effect::Link, io::ErrorKind::TimedOut, || file.link()),
+        Err(ExportError::Local {
+            retryable: true,
+            ..
+        })
+    ));
+    assert!(!fx.downloads.join("notes.txt").exists(), "no link was made");
+    let Publication::Ready(journal) = file
+        .prepare_publication()
+        .expect("the partial is still private")
+    else {
+        panic!("nothing was published yet");
+    };
+    store
+        .checkpoint_download_export(&lease, file.journal(), &journal)
+        .unwrap();
+    file.checkpointed(journal);
+    let path = file.link().unwrap();
+    store
+        .publish_download_export(&lease, &file.published_journal())
+        .unwrap();
+    file.finish();
+    assert_eq!(fs::read(path).unwrap(), CHUNKS.concat());
+}
+
+#[test]
 fn a_long_multibyte_name_saves_with_its_extension_and_numbering_room() {
     // Review U-L3: 120 non-BMP characters made the probe name exceed 255 UTF-16 units (or the
     // staging name exceed 255 bytes on Unix), which looked like a folder without links.
