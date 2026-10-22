@@ -463,10 +463,10 @@ mod tests {
         let pressure = phase
             .buffer(16 * 1024 - 528 - VOICE_CONFIRMATION_BODY_METADATA_BYTES + 1)
             .unwrap();
-        let (error, buffer) = phase
-            .result_body(buffer, 16..528)
-            .err()
-            .expect("local capacity refusal");
+        let (error, buffer) = match phase.result_body(buffer, 16..528) {
+            Err(refusal) => refusal,
+            Ok(_) => panic!("expected local capacity refusal"),
+        };
         assert_eq!(error, VoiceError::Capacity);
         assert_eq!(buffer.bytes().as_ptr(), pointer);
         assert_eq!(buffer.bytes()[17], 91);
