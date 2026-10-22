@@ -643,6 +643,98 @@ test("fresh peers beyond the per-call ceiling are refused, not evicted", async (
   assert.ok(h.diags.includes("VOICE.V2.PEER_CAPACITY"));
 });
 
+test("an answer that outruns our own offer's submit reply waits for the OfferId instead of being lost", async () => {
+  const h = harness();
+  const lease = await joined(h);
+  const reply = deferred();
+  h.native.holdSubmit = reply.promise;
+  h.native.push(lease, { kind: "peer", identity: HIGH, join: join(1) });
+  h.native.push(lease, { kind: "paired", identity: HIGH, join: join(1) });
+  await settle();
+  // The remote answered over a fast route while our native submit reply is still delayed.
+  h.native.push(lease, { kind: "answer", identity: HIGH, join: join(1), offer: { issuer: SELF, message: join(0x81) }, sdp: "fast answer" });
+  await settle();
+  assert.equal(h.pcs[0].remotes.length, 0);
+  h.native.holdSubmit = null;
+  reply.resolve(); await settle();
+  assert.deepEqual(h.pcs[0].remotes, [{ type: "answer", sdp: "fast answer" }]);
+  assert.equal(h.peer(HIGH)?.signalling, "negotiated");
+  assert.ok(!h.diags.includes("VOICE.V2.STALE_ANSWER"));
+});
+
+test("retirement of an old join before the newer join's confirmation keeps the newer join", async () => {
+  for (const retirement of ["bye", "peer-gone"]) {
+    const h = harness();
+    const lease = await joined(h);
+    h.native.push(lease, { kind: "peer", identity: LOW, join: join(1) });
+    h.native.push(lease, { kind: "paired", identity: LOW, join: join(1) });
+    h.native.push(lease, { kind: "peer", identity: LOW, join: join(2) });
+    // Native promotion order is not fixed: the old join's retirement arrives first.
+    h.native.push(lease, retirement === "bye"
+      ? { kind: "bye", identity: LOW, join: join(1) }
+      : { kind: "peer-gone", identity: LOW, join: join(1), reason: "retired" });
+    await settle();
+    assert.ok(h.pcs[0].closed, "the old pair is retired");
+    assert.equal(h.peer(LOW)?.join, join(2), `${retirement}: the newer join becomes the candidate`);
+    assert.equal(h.peer(LOW)?.signalling, "waiting-pair");
+    h.native.push(lease, { kind: "paired", identity: LOW, join: join(2) });
+    await settle();
+    assert.equal(h.pcs.length, 2);
+    assert.equal(h.peer(LOW)?.signalling, "paired");
+  }
+});
+
+test("ending during an uncertain start still learns the native join and ends it", async () => {
+  const native = new FakeNative();
+  const gate = deferred();
+  native.holdStart = gate.promise;
+  native.loseStart = 1;
+  const h = harness({ native });
+  const starting = h.call.start();
+  await settle();
+  h.call.end("leave"); // the user leaves while the first start's reply is in flight
+  native.holdStart = null;
+  gate.resolve(); await settle(); // that reply is lost: native committed a join we cannot name
+  h.wake(); await settle();
+  await starting;
+  assert.equal(native.starts.length, 2);
+  assert.equal(native.starts[0].attempt, native.starts[1].attempt, "the same attempt recovers the same join");
+  assert.deepEqual(native.ends, ["lease-1"], "so no phantom participant is left behind");
+  assert.equal(h.call.snapshot().phase, "ended");
+});
+
+test("an ended call that never sent a start sends none", async () => {
+  const h = harness();
+  h.call.end("leave");
+  await h.call.start();
+  assert.equal(h.native.starts.length, 0);
+});
+
+test("sustained uncertain pulls report V2 unavailable, keep polling and recover", async () => {
+  const native = new FakeNative();
+  const h = harness({ native });
+  const lease = await joined(h);
+  native.losePoll = 8;
+  native.push(lease, { kind: "peer", identity: HIGH, join: join(1) });
+  // Failure k happens after k-1 backoff wakes: seven wakes reach the eighth failure.
+  for (let i = 0; i < 7; i++) { await settle(); h.wake(); }
+  await settle();
+  assert.equal(h.call.snapshot().phase, "unavailable");
+  assert.equal(h.call.snapshot().reason, "events-uncertain");
+  h.wake(); await settle();
+  assert.equal(h.call.snapshot().phase, "joined", "a successful pull restores the joined state");
+  assert.equal(h.peer(HIGH)?.join, join(1), "and the repeated cursor still delivers the item once");
+});
+
+test("V2 activation can only become available together with App driver wiring", async () => {
+  const { readFileSync } = await import("node:fs");
+  const app = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
+  // Flipping activation alone would pin joins to V2, suppress all legacy traffic and never build
+  // a driver: a silent dead call. This fails the moment activation outruns the wiring.
+  if (voiceV2Activation().available) assert.match(app, /new VoiceV2Call\(/);
+  else assert.doesNotMatch(app, /new VoiceV2Call\(/, "no half-wired driver exists while unavailable");
+});
+
 test("a peer that never completes key confirmation is reported, still without fallback", async () => {
   const h = harness();
   const lease = await joined(h);

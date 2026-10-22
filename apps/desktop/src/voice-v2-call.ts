@@ -50,6 +50,8 @@ export const VOICE_V2_RETRY_MS: readonly number[] = [250, 1000, 4000];
 export const VOICE_V2_RETRIES = VOICE_V2_RETRY_MS.length;
 /** Minimum pause after an empty pull, so a native adapter that answers at once cannot spin us. */
 export const VOICE_V2_IDLE_MS = 250;
+/** Consecutive uncertain pulls before the call reports "events-uncertain" (it keeps polling). */
+export const VOICE_V2_PULL_UNCERTAIN = 8;
 /** Automatic fresh joins after native epoch/policy replacement, within one rolling minute. */
 export const VOICE_V2_REJOINS = 3;
 export const VOICE_V2_REJOIN_WINDOW_MS = 60_000;
@@ -394,14 +396,21 @@ export class VoiceV2Call {
 
   async #join(generation: number): Promise<void> {
     const attempt = this.#deps.newId();
+    // True once a start request may have committed natively without our learning its lease.
+    let uncertain = false;
     for (let tries = 0; ; tries++) {
-      if (!this.#liveCall(generation)) return;
+      // Nothing can have committed before the first request, so an ended call stops here. After
+      // an uncertain reply it keeps retrying the SAME attempt even though the call has ended:
+      // only that recovers the lease, so the join can be ended instead of left as a phantom
+      // participant on the peers' side.
+      if (!this.#liveCall(generation) && !uncertain) return;
       let result: VoiceV2StartResult;
       try {
         result = await this.#deps.native.start({ server: this.#deps.server, room: this.#deps.room, attempt });
       } catch {
         // Uncertain: native may have started a join whose reply we lost. Retry the SAME attempt
         // so native returns that same lease instead of minting a second join.
+        uncertain = true;
         if (tries >= VOICE_V2_RETRIES) return this.#unavailable(generation, "start-uncertain");
         await this.#deps.clock.sleep(VOICE_V2_RETRY_MS[Math.min(tries, VOICE_V2_RETRY_MS.length - 1)]);
         continue;
@@ -482,11 +491,25 @@ export class VoiceV2Call {
         batch = await this.#deps.native.events(lease.lease, after);
         failures = 0;
       } catch {
-        // Uncertain pull: repeat the same cursor. Non-dequeueing pulls make this exact.
-        await this.#deps.clock.sleep(VOICE_V2_RETRY_MS[Math.min(failures++, VOICE_V2_RETRY_MS.length - 1)]);
+        // Uncertain pull: repeat the same cursor. Non-dequeueing pulls make this exact. A revoked
+        // lease must be answered authoritatively by native (an `ended` item), so endless failure
+        // means the native side is unreachable: say so, keep polling, and never fall back.
+        failures++;
+        if (failures === VOICE_V2_PULL_UNCERTAIN && this.#liveCall(generation)) {
+          this.#phase = "unavailable";
+          this.#reason = "events-uncertain";
+          this.#diag("VOICE.V2.UNAVAILABLE", { reason: "events-uncertain" });
+          this.#changed();
+        }
+        await this.#deps.clock.sleep(VOICE_V2_RETRY_MS[Math.min(failures - 1, VOICE_V2_RETRY_MS.length - 1)]);
         continue;
       }
       if (!this.#liveCall(generation)) return;
+      if (this.#phase === "unavailable" && this.#reason === "events-uncertain") {
+        this.#phase = "joined";
+        this.#reason = "";
+        this.#changed();
+      }
       const items = Array.isArray(batch?.items) ? batch.items : null;
       if (!isSerial(batch?.revision) || !items || items.length > VOICE_V2_BATCH || BigInt(batch.revision) < BigInt(after)) {
         this.#diag("VOICE.V2.BATCH_REFUSED");
@@ -517,8 +540,8 @@ export class VoiceV2Call {
       case "ended": return this.#nativeEnded(generation, item.reason);
       case "peer": return this.#peerFresh(lease, item.identity, item.join);
       case "paired": return this.#paired(generation, lease, item.identity, item.join);
-      case "bye": return this.#peerLeft(item.identity, item.join, "bye", true);
-      case "peer-gone": return this.#peerLeft(item.identity, item.join, item.reason, item.reason !== "expired");
+      case "bye": return this.#peerLeft(lease, item.identity, item.join, "bye", true);
+      case "peer-gone": return this.#peerLeft(lease, item.identity, item.join, item.reason, item.reason !== "expired");
       case "offer": case "answer": case "ice": {
         const record = this.#peers.get(item.identity);
         if (!record || record.join !== item.join) {
@@ -588,10 +611,12 @@ export class VoiceV2Call {
     current.pc = this.#deps.rtc.create(identity, () => this.#live(generation, current));
     this.#wire(generation, current);
     this.#changed();
-    if (current.initiator) void this.#offer(generation, current);
+    // On the record's chain, so an answer or ICE that outruns our own offer's submit reply waits
+    // for the OfferId it echoes instead of being judged stale and losing its receipt.
+    if (current.initiator) current.chain = current.chain.then(() => this.#offer(generation, current)).catch(() => {});
   }
 
-  #peerLeft(identity: string, join: string, reason: string, tearDown: boolean): void {
+  #peerLeft(lease: VoiceV2Lease, identity: string, join: string, reason: string, tearDown: boolean): void {
     const record = this.#peers.get(identity);
     if (!record) return;
     if (record.pendingJoin === join) {
@@ -610,7 +635,11 @@ export class VoiceV2Call {
       this.#changed();
       return;
     }
+    const pending = record.pendingJoin;
     this.#retire(record);
+    // Native may retire the old join before the newer one's confirmation arrives. The newer
+    // join is already native-fresh, so it becomes the waiting candidate instead of being lost.
+    if (pending) this.#peers.set(identity, this.#record(identity, pending, lease.self));
     this.#changed();
   }
 
@@ -829,11 +858,16 @@ export class VoiceV2Call {
           this.#diag("VOICE.V2.RESULT_REFUSED", { kind: action.kind });
           return null;
         }
-        if (result.status === "submitted" && result.offer !== null && !parseVoiceOfferId(result.offer)) {
+        if (result.status === "refused") {
+          return Object.freeze({ status: "refused", action: action.action, reason: typeof result.reason === "string" ? result.reason : "" });
+        }
+        // Keep only the validated, frozen OfferId; never the adapter's own (mutable) object.
+        const offer = result.offer === null || result.offer === undefined ? null : parseVoiceOfferId(result.offer);
+        if (offer === null && result.offer !== null && result.offer !== undefined) {
           this.#diag("VOICE.V2.RESULT_REFUSED", { kind: action.kind });
           return null;
         }
-        return result;
+        return Object.freeze({ status: "submitted", action: action.action, offer });
       } catch {
         if (tries >= VOICE_V2_RETRIES) {
           if (this.#live(generation, record) && action.kind !== "ice") {

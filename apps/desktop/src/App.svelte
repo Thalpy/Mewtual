@@ -13133,6 +13133,9 @@
   // to legacy. V2 is not chosen yet (voiceV2Activation lists what is missing), so every call is
   // legacy today and the V2 gates in handleCallSignal/sendSignal stay inert until activation.
   let callSignalMode: CallSignalMode = "legacy";
+  // Legacy kinds already diagnosed as excluded in this join: each protocol word is recorded once,
+  // so legacy peers pinging a V2 room every five seconds cannot flood the diagnostics ring.
+  const legacyExcludedKinds = new Set<string>();
   // Names and avatars on the call surfaces MUST resolve against the room's server, never the
   // viewed one. `profiles` is replaced wholesale on every server switch (see refreshProfiles),
   // so reading it from the call bar re-labelled you and every peer the moment you clicked
@@ -19461,6 +19464,7 @@
     activeCallLease = 0;
     // After announceHangup above: a V2 room's legacy bye stays suppressed until the call is gone.
     callSignalMode = "legacy";
+    legacyExcludedKinds.clear();
     defaultRouteIpv4 = null;
     callProfiles = {};
     peerTransport = {};
@@ -19626,7 +19630,11 @@
     // whatever capability fields are missing or whichever helper relayed it (VOICE-SIGNALLING-V2.md).
     // This runs before the presence writes below. Other rooms keep their legacy presence meaning.
     if (legacyCallSignalAdmission({ mode: callSignalMode, inCall, callServer, callChannel, server, channel: cid }) === "exclude") {
-      diagRecord({ section: "voice", code: "VOICE.V2.LEGACY_EXCLUDED", level: "info", fields: { kind: legacyCallSignalKind(type) } });
+      const kind = legacyCallSignalKind(type);
+      if (!legacyExcludedKinds.has(kind)) {
+        legacyExcludedKinds.add(kind);
+        diagRecord({ section: "voice", code: "VOICE.V2.LEGACY_EXCLUDED", level: "info", fields: { kind } });
+      }
       return;
     }
     const currentRoom = inCall && isCurrentVoiceRoom(callServer, callChannel, server, cid);

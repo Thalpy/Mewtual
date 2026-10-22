@@ -28,6 +28,7 @@ function fixture() {
   return new Function("MediaCaptureSession", "heartbeatRecovery", "isCurrentVoiceRoom", "mappableIcePort", "mappingAddressPolicy", "routerMappedCandidate", "shouldSignalHostCandidate", "mappedIceIsCurrent", "legacyCallSignalAdmission", "legacyCallSignalKind", "mergePeerState", `
     let locked = false, inCall = true, callServer = 1, callChannel = "7", callSelfId = "b".repeat(64);
     let callSignalMode = "legacy";
+    const legacyExcludedKinds = new Set();
     const callLifecycleSession = new MediaCaptureSession();
     let activeCallLease = callLifecycleSession.begin();
     const callPeers = {}, waitingIce = {};
@@ -176,6 +177,9 @@ test("a V2 join's room admits no legacy writer: presence, peers, SDP, ICE, juke 
   // Stripped capability fields do not lower the protection: a bare heartbeat is excluded too.
   await app.signal(MEMBER, { type: "voice-ping" });
   assert.equal(app.current(MEMBER), undefined);
+  // Five-second legacy pings into a V2 room cannot flood diagnostics: one record per kind per join.
+  for (let i = 0; i < 20; i++) await app.signal(MEMBER, { type: "voice-ping", mic: 1 });
+  assert.equal(app.calls.diags.length, LEGACY_KINDS.length);
 });
 
 test("a wholly legacy call keeps its legacy behaviour for the same signals", async () => {
