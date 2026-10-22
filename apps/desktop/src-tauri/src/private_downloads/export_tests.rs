@@ -49,8 +49,11 @@ struct Fake {
     live: AtomicBool,
     refuse_publish: AtomicBool,
     /// When Published is recorded, another program opens the staging name without delete
-    /// sharing, so the sequence cannot remove it afterwards (Windows).
+    /// sharing, so the sequence cannot remove it afterwards. Windows only: share modes are a
+    /// Windows concept, and on other targets these fields would be dead code under strict Clippy.
+    #[cfg(windows)]
     hold_staging: AtomicBool,
+    #[cfg(windows)]
     held: StdMutex<Option<std::fs::File>>,
     /// Lock lands right after the every-chunk checkpoint, before the commit guard.
     lock_at_publication: AtomicBool,
@@ -73,7 +76,9 @@ impl Fake {
             live: AtomicBool::new(true),
             refuse_begin: AtomicBool::new(false),
             refuse_publish: AtomicBool::new(false),
+            #[cfg(windows)]
             hold_staging: AtomicBool::new(false),
+            #[cfg(windows)]
             held: StdMutex::new(None),
             lock_at_publication: AtomicBool::new(false),
             retired_before_worker_start: AtomicBool::new(false),
