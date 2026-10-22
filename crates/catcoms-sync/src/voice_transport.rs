@@ -1,6 +1,8 @@
-//! V2 transport admission, deliberately not registered in request dispatch yet. Native endpoint
-//! ownership and bounded actor forwarding must be wired before kind28 is enabled. Legacy kind8
-//! and its authentication clock/framing remain unchanged.
+//! V2 transport admission. Normal request dispatch routes kind28 here only when the local
+//! `VoiceRouting` switch enables service (Disabled by default); `voice_schedule` drives the
+//! endpoint/source/helper work it admits. Encrypted SDP/ICE still has no native phase factory or browser adapter, so only public
+//! controls and protected confirmation reach native owners. Legacy kind8 and its authentication
+//! clock/framing remain unchanged.
 use super::*;
 use voice_v2::helper::BoundRoute;
 use voice_v2::{Disposition, Envelope, VoiceError, MAX_ENVELOPE};
@@ -325,9 +327,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.prepare_voice_transport_reply(from, frame, None)
     }
 
-    /// Trusted dispatch seam. Normal kind28 dispatch remains disabled. Bind the prepared ACK
-    /// to this exact request's responder; no caller can detach response bytes or substitute a
-    /// later responder. Driver ingress and original application/packet gates remain distinct.
+    /// Trusted dispatch seam, called by normal dispatch (`serve_voice_transport`). Bind the
+    /// prepared ACK to this exact request's responder; no caller can detach response bytes or
+    /// substitute a later responder. A refused preparation drops the responder unanswered, which
+    /// the requester sees as unavailable. Driver ingress and packet gates remain distinct.
     pub fn handle_voice_transport_request(
         &mut self,
         from: PeerId,

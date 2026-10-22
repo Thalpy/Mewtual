@@ -283,7 +283,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
     /// One native pass signs/queues at most four public responses. Source capacity refusal keeps
     /// the exact Watcher/LocalJoin cache for retry; member/room/parent retirement closes old work.
-    /// The production actor must schedule this fairly and provide quiet renewal/retry wakeups.
+    /// `voice_schedule` runs it each sync tick, after served kind28 requests and completions,
+    /// and on its quiet-network wake while a join or watcher is live.
     pub fn pump_voice_endpoint(&mut self) -> Result<(), VoiceError> {
         self.reconcile_voice_actor();
         self.observe_voice_directory();
