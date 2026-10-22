@@ -143,6 +143,14 @@ async fn save_as_selection_through_the_chooser_seam() {
         nowhere.asked.lock().unwrap()[0],
         (None, "report.bin".to_string())
     );
+
+    // A peer-chosen name never suggests `%VAR%`, which the Windows dialog would expand into a
+    // path the user did not see.
+    let expand = Scripted::answering(Ok(None));
+    choose_destination(&expand, None, "%APPDATA%_x.txt")
+        .await
+        .unwrap();
+    assert_eq!(expand.asked.lock().unwrap()[0].1, "_APPDATA__x.txt");
 }
 
 #[test]

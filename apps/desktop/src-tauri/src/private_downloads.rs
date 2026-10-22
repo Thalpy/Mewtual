@@ -620,7 +620,11 @@ pub(super) async fn choose_destination(
     name: &str,
 ) -> Result<Option<ChosenDestination>, String> {
     let _turn = DialogTurn::take().ok_or(DIALOG_BUSY)?;
-    let Some(picked) = chooser.choose(downloads, safe_download_name(name)).await? else {
+    // The suggestion is a peer-chosen name. The Windows file dialog expands `%VAR%` in its name
+    // box when the user presses Save, so "%APPDATA%_x" would turn into a path elsewhere that the
+    // user never saw or typed. A suggestion never carries `%` (picker review residual).
+    let suggested = safe_download_name(name).replace('%', "_");
+    let Some(picked) = chooser.choose(downloads, suggested).await? else {
         return Ok(None);
     };
     blocking(move || ChosenDestination::validate(&picked))

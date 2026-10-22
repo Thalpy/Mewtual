@@ -519,6 +519,11 @@ pub(super) fn valid_leaf(leaf: &str) -> bool {
 /// can address the device instead of a file. Native's name sanitizer already prefixes such peer
 /// names, but a "Save as" name comes from the user's dialog and must be refused here instead.
 /// Applied on every platform so a journal written on one cannot name a device on another.
+///
+/// The list follows Microsoft's file naming rules: `CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9` and
+/// `LPT0`-`LPT9` including the superscript digits `¹ ² ³` (picker review residual), plus the console
+/// names `CONIN$` and `CONOUT$`. Trailing spaces before the extension are ignored, as Windows does.
+/// Native's `safe_download_name` must stay at least this strict (a test pins the two together).
 fn windows_device_name(leaf: &str) -> bool {
     let stem = leaf
         .split('.')
@@ -526,10 +531,15 @@ fn windows_device_name(leaf: &str) -> bool {
         .unwrap_or_default()
         .trim_end()
         .to_ascii_uppercase();
-    let numbered = (stem.starts_with("COM") || stem.starts_with("LPT"))
-        && stem.len() == 4
-        && matches!(stem.as_bytes()[3], b'1'..=b'9');
-    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered
+    let mut chars = stem.chars();
+    let prefix: String = chars.by_ref().take(3).collect();
+    let digit = (chars.next(), chars.next());
+    let numbered = matches!(prefix.as_str(), "COM" | "LPT")
+        && matches!(digit, (Some('0'..='9' | '¹' | '²' | '³'), None));
+    matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || numbered
 }
 
 /// Longest path component the destination accepts, in its own units: NTFS allows 255 UTF-16 code

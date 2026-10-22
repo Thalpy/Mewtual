@@ -13705,16 +13705,26 @@ fn safe_download_name(requested: &str) -> String {
     // This must stay at least as strict as storage's `windows_device_name`, which refuses such a
     // leaf outright (picker review L5): a looser rule here turns a peer-chosen name into a
     // "malformed data" failure instead of a saved `_CON .txt`.
+    // The same list as storage: COM0-9 and LPT0-9 including superscript ¹ ² ³, and the console
+    // names CONIN$ and CONOUT$.
     let stem = name
         .split('.')
         .next()
         .unwrap_or_default()
         .trim_end()
         .to_ascii_uppercase();
-    let numbered_device = (stem.starts_with("COM") || stem.starts_with("LPT"))
-        && stem.len() == 4
-        && matches!(stem.as_bytes()[3], b'1'..=b'9');
-    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered_device {
+    let mut chars = stem.chars();
+    let prefix: String = chars.by_ref().take(3).collect();
+    let numbered_device = matches!(prefix.as_str(), "COM" | "LPT")
+        && matches!(
+            (chars.next(), chars.next()),
+            (Some('0'..='9' | '¹' | '²' | '³'), None)
+        );
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || numbered_device
+    {
         name.insert(0, '_');
     }
     name
@@ -25344,7 +25354,17 @@ mod tests {
         // The sanitizer and storage's leaf rule agree: storage refuses the raw peer name and
         // accepts the sanitized one.
         let dir = tempfile::tempdir().unwrap();
-        for raw in ["CON .txt", "nul  .png", "com1 .log"] {
+        for raw in [
+            "CON .txt",
+            "nul  .png",
+            "com1 .log",
+            // Picker review residual: superscript and zero ports and the console names.
+            "COM\u{00B9}.txt",
+            "lpt\u{00B2} .bin",
+            "com0.log",
+            "CONIN$",
+            "conout$.txt",
+        ] {
             assert!(
                 catcoms_storage::kept::ChosenDestination::validate(&dir.path().join(raw)).is_err(),
                 "storage refuses {raw:?}"

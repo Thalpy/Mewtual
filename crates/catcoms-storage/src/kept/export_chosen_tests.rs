@@ -73,6 +73,12 @@ fn selection_checks_refuse_unusable_paths_and_never_touch_an_existing_file() {
         (folder.join("NUL.txt"), ChoiceRefusal::InvalidName),
         (folder.join("com1"), ChoiceRefusal::InvalidName),
         (folder.join("Lpt9 .log"), ChoiceRefusal::InvalidName),
+        // Picker review residual: superscript and zero ports and the console names, too.
+        (folder.join("COM\u{00B9}.txt"), ChoiceRefusal::InvalidName),
+        (folder.join("lpt\u{00B3}"), ChoiceRefusal::InvalidName),
+        (folder.join("com0.log"), ChoiceRefusal::InvalidName),
+        (folder.join("CONIN$"), ChoiceRefusal::InvalidName),
+        (folder.join("conout$.txt"), ChoiceRefusal::InvalidName),
         (
             folder.join("missing").join("x.bin"),
             ChoiceRefusal::FolderUnavailable,
@@ -85,7 +91,12 @@ fn selection_checks_refuse_unusable_paths_and_never_touch_an_existing_file() {
             "{path:?}"
         );
     }
-    assert!(ChosenDestination::validate(&folder.join("COM10.txt")).is_ok());
+    for fine in ["COM10.txt", "COM\u{2074}.txt", "CONSOLE.txt", "LPT.txt"] {
+        assert!(
+            ChosenDestination::validate(&folder.join(fine)).is_ok(),
+            "{fine}"
+        );
+    }
     // A chosen name is never shortened: one without room for the suffixes is refused.
     let long = folder.join(format!("{}.txt", "\u{1F600}".repeat(120)));
     assert_eq!(
