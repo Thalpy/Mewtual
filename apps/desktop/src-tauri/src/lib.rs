@@ -14939,19 +14939,11 @@ async fn save_group_file(
             "file is larger than the {MAX_FILE_BYTES}-byte limit"
         ));
     }
-    // The record, not this invocation, names where a fresh save goes: its remembered choice
-    // (this one, an earlier one that survived a restart, or a newer Save as that replaced it), or
-    // Downloads. Begin refuses any journal that does not match the record's choice.
-    let destination = match (ready.planned(), chosen.is_some()) {
-        (Some(Ok(choice)), _) => private_downloads::Destination::Chosen(choice),
-        (Some(Err(refusal)), _) => return Err(refusal.to_string()),
-        // This invocation chose a place but the record no longer remembers one: another save
-        // already started a journal there. Never redirect this Save as to Downloads.
-        (None, true) => return Err(private_downloads::PLACE_CHANGED.into()),
-        (None, false) => private_downloads::Destination::Downloads(
-            app.path().download_dir().map_err(|e| e.to_string())?,
-        ),
-    };
+    // The record, not this invocation, names where a fresh save goes (see select_destination).
+    let destination =
+        private_downloads::select_destination(ready.planned(), chosen.is_some(), || {
+            app.path().download_dir().map_err(|e| e.to_string())
+        })?;
     // Journaled, resumable export first; the non-resumable writer only when this destination
     // cannot carry a journal for a fresh save (no stable identity, links unsupported).
     let context = private_downloads::ExportContext {

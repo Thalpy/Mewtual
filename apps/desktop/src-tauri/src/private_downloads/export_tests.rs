@@ -60,6 +60,9 @@ struct Fake {
     take_final_name: AtomicUsize,
     folder: PathBuf,
     backoffs: AtomicUsize,
+    /// The actor refuses Begin (for example the record's remembered choice is not this journal's
+    /// place, or the record was replaced meanwhile).
+    refuse_begin: AtomicBool,
 }
 impl Fake {
     fn new(folder: &Path) -> Arc<Self> {
@@ -68,6 +71,7 @@ impl Fake {
             events: StdMutex::new(Vec::new()),
             guard: Arc::new(AtomicBool::new(false)),
             live: AtomicBool::new(true),
+            refuse_begin: AtomicBool::new(false),
             refuse_publish: AtomicBool::new(false),
             hold_staging: AtomicBool::new(false),
             held: StdMutex::new(None),
@@ -109,6 +113,9 @@ impl ExportPorts for Arc<Fake> {
         let mut record = self.record.lock().unwrap();
         let event = match transition {
             DownloadExportTransition::Begin { journal, .. } => {
+                if self.refuse_begin.load(AtomicOrdering::SeqCst) {
+                    return Err("Saved download changed.".into());
+                }
                 assert!(record.is_none());
                 *record = Some(ExportState::Writing(journal));
                 Event::Begin
@@ -219,6 +226,89 @@ async fn a_save_checkpoints_before_linking_and_records_published_under_the_guard
     assert!(
         !fake.guard.load(AtomicOrdering::SeqCst),
         "the guard is released"
+    );
+}
+
+/// A folder the user picked in Save as, beside (not inside) the Downloads folder.
+fn chosen_place(root: &tempfile::TempDir, name: &str) -> (PathBuf, Destination) {
+    let folder = root.path().join("Chosen place");
+    std::fs::create_dir_all(&folder).unwrap();
+    let choice = ChosenDestination::validate(&folder.join(name)).unwrap();
+    (folder, Destination::Chosen(Arc::new(choice)))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_save_as_choice_saves_at_the_exact_chosen_name_through_the_same_sequence() {
+    // Picker review coverage: the chosen place goes through the same journaled sequence
+    // (Begin, every-chunk checkpoint, Published under the guard) at the exact name typed.
+    let (root, downloads) = downloads();
+    let (folder, destination) = chosen_place(&root, "Renamed report.bin");
+    let fake = Fake::new(&folder);
+    let exported = export_sequence(&fake, good_plan(), &destination, "listed name.bin")
+        .await
+        .unwrap()
+        .expect("an identified chosen folder carries a journal");
+    assert_eq!(exported.path, folder.join("Renamed report.bin"));
+    assert!(exported.staging_cleared);
+    assert_eq!(std::fs::read(&exported.path).unwrap(), DATA.concat());
+    assert_eq!(
+        fake.events(),
+        [Event::Begin, Event::Checkpoint(2), Event::Publish]
+    );
+    assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1);
+    assert_eq!(
+        std::fs::read_dir(&downloads).unwrap().count(),
+        0,
+        "nothing in Downloads"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_begin_at_a_chosen_place_discards_the_new_partial() {
+    // The actor refuses Begin (the record's choice moved, or the record was replaced): the empty
+    // partial this save just created at the chosen place is removed, nothing is journaled.
+    let (root, _downloads) = downloads();
+    let (folder, destination) = chosen_place(&root, "report.bin");
+    let fake = Fake::new(&folder);
+    fake.refuse_begin.store(true, AtomicOrdering::SeqCst);
+    assert!(
+        export_sequence(&fake, good_plan(), &destination, "report.bin")
+            .await
+            .is_err()
+    );
+    assert!(fake.events().is_empty());
+    assert_eq!(
+        std::fs::read_dir(&folder).unwrap().count(),
+        0,
+        "no partial left at the chosen place"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chosen_place_never_redirects_an_existing_journal() {
+    // A Download whose record already holds a Writing journal (here in Downloads) is never
+    // continued or restarted at a chosen place; nothing is created there.
+    let (root, downloads) = downloads();
+    let fake = Fake::new(&downloads);
+    fake.lock_at_publication.store(true, AtomicOrdering::SeqCst);
+    let first = Destination::Downloads(downloads.clone());
+    assert!(export_sequence(&fake, good_plan(), &first, "notes.txt")
+        .await
+        .is_err());
+    assert_eq!(fake.written_chunks(), Some(DATA.len()));
+    fake.live.store(true, AtomicOrdering::SeqCst);
+    let (folder, chosen) = chosen_place(&root, "elsewhere.bin");
+    assert_eq!(
+        export_sequence(&fake, good_plan(), &chosen, "notes.txt")
+            .await
+            .err()
+            .as_deref(),
+        Some(JOURNAL_EXISTS)
+    );
+    assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0);
+    assert!(
+        downloads.join("notes.txt.mewtual-part").exists(),
+        "the tracked partial is untouched"
     );
 }
 

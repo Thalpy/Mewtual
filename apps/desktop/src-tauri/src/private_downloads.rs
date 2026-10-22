@@ -11,9 +11,9 @@
 use super::*;
 use catcoms_app::{DownloadExportEdge, DownloadExportTransition, DownloadPreflight, DownloadReady};
 use catcoms_storage::kept::{
-    flush_destination, partial_presence, remove_partial, ChosenDestination, DownloadId,
-    DownloadStatus, ExportError, ExportFile, ExportHalt, ExportJournal, ExportPlan, ExportProbe,
-    ExportProgress, ExportReopen, ExportState, ExportView, KeepPhase, PartialPresence,
+    flush_destination, partial_presence, remove_partial, ChoiceRefusal, ChosenDestination,
+    DownloadId, DownloadStatus, ExportError, ExportFile, ExportHalt, ExportJournal, ExportPlan,
+    ExportProbe, ExportProgress, ExportReopen, ExportState, ExportView, KeepPhase, PartialPresence,
     PartialRemoval, Publication, EXPORT_CHECKPOINT_CHUNKS,
 };
 
@@ -503,6 +503,30 @@ pub(super) enum Destination {
     Downloads(PathBuf),
     /// A folder and name the user picked in the native "Save as" dialog, for this save only.
     Chosen(Arc<ChosenDestination>),
+}
+
+/// Where a fresh save of this Download goes. The record, not the invocation, decides: its
+/// remembered choice (this invocation's, an earlier one that survived a restart, or a newer Save
+/// as that replaced it), else Downloads. Begin later refuses any journal that does not match it.
+///
+/// - `planned`: the record's remembered choice as acquisition returned it; `Some(Err(_))` is a
+///   choice this platform cannot decode (the vault moved to another operating system), refused
+///   rather than redirected to Downloads.
+/// - `chose_now`: this invocation opened Save as. If the record no longer remembers any choice,
+///   another save already took it into a journal, and this Save as is refused with
+///   [`PLACE_CHANGED`], never silently redirected to Downloads.
+/// - `downloads`: resolved only when Downloads is actually the destination.
+pub(super) fn select_destination(
+    planned: Option<Result<Arc<ChosenDestination>, ChoiceRefusal>>,
+    chose_now: bool,
+    downloads: impl FnOnce() -> Result<PathBuf, String>,
+) -> Result<Destination, String> {
+    match (planned, chose_now) {
+        (Some(Ok(choice)), _) => Ok(Destination::Chosen(choice)),
+        (Some(Err(refusal)), _) => Err(refusal.to_string()),
+        (None, true) => Err(PLACE_CHANGED.into()),
+        (None, false) => downloads().map(Destination::Downloads),
+    }
 }
 
 /// The native "Save as" dialog behind a seam, so tests never open a real window. Returns the

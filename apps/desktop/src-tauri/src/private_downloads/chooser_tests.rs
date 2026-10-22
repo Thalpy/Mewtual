@@ -146,6 +146,44 @@ async fn save_as_selection_through_the_chooser_seam() {
 }
 
 #[test]
+fn the_record_not_the_invocation_selects_where_a_fresh_save_goes() {
+    // Picker review coverage: the selection that used to be inline in save_group_file.
+    let root = tempfile::tempdir().unwrap();
+    let downloads = root.path().join("Downloads");
+    let choice = Arc::new(ChosenDestination::validate(&root.path().join("chosen.bin")).unwrap());
+    let unused = || -> Result<PathBuf, String> { panic!("Downloads is not the destination") };
+
+    // A remembered choice wins, whether this invocation chose it or an earlier one did.
+    for chose_now in [true, false] {
+        match select_destination(Some(Ok(choice.clone())), chose_now, unused) {
+            Ok(Destination::Chosen(picked)) => assert_eq!(*picked, *choice),
+            _ => panic!("the remembered choice is the destination"),
+        }
+    }
+    // A choice this platform cannot decode is refused, never redirected to Downloads.
+    assert_eq!(
+        select_destination(Some(Err(ChoiceRefusal::FolderUnavailable)), false, unused).err(),
+        Some(ChoiceRefusal::FolderUnavailable.to_string())
+    );
+    // This Save as found its choice already consumed by another save of the same file.
+    assert_eq!(
+        select_destination(None, true, unused).err().as_deref(),
+        Some(PLACE_CHANGED)
+    );
+    // The one-click default resolves Downloads only now, and reports its failure.
+    match select_destination(None, false, || Ok(downloads.clone())) {
+        Ok(Destination::Downloads(folder)) => assert_eq!(folder, downloads),
+        _ => panic!("the one-click default is Downloads"),
+    }
+    assert_eq!(
+        select_destination(None, false, || Err("no Downloads folder".into()))
+            .err()
+            .as_deref(),
+        Some("no Downloads folder")
+    );
+}
+
+#[test]
 fn the_projection_says_a_choice_is_remembered_without_naming_it() {
     let status = DownloadStatus {
         id: DownloadId::from_bytes([5; 32]),
