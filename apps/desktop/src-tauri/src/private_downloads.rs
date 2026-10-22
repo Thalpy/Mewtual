@@ -505,17 +505,6 @@ pub(super) enum Destination {
     Chosen(Arc<ChosenDestination>),
 }
 
-/// Where a fresh save of this Download goes. The record, not the invocation, decides: its
-/// remembered choice (this invocation's, an earlier one that survived a restart, or a newer Save
-/// as that replaced it), else Downloads. Begin later refuses any journal that does not match it.
-///
-/// - `planned`: the record's remembered choice as acquisition returned it; `Some(Err(_))` is a
-///   choice this platform cannot decode (the vault moved to another operating system), refused
-///   rather than redirected to Downloads.
-/// - `chose_now`: this invocation opened Save as. If the record no longer remembers any choice,
-///   another save already took it into a journal, and this Save as is refused with
-///   [`PLACE_CHANGED`], never silently redirected to Downloads.
-/// - `downloads`: resolved only when Downloads is actually the destination.
 /// Whether a finished group-file save sits directly in the resolved Downloads folder, for the
 /// result's `inDownloads` flag (picker re-review LOW 1b and its re-check). Where the file was
 /// actually written decides, not which destination was selected: a resumed or recovered journal
@@ -527,6 +516,17 @@ pub(super) fn saved_in_downloads(downloads: Option<&Path>, saved: &Path) -> bool
     downloads.is_some_and(|folder| saved.parent() == Some(folder))
 }
 
+/// Where a fresh save of this Download goes. The record, not the invocation, decides: its
+/// remembered choice (this invocation's, an earlier one that survived a restart, or a newer Save
+/// as that replaced it), else Downloads. Begin later refuses any journal that does not match it.
+///
+/// - `planned`: the record's remembered choice as acquisition returned it; `Some(Err(_))` is a
+///   choice this platform cannot decode (the vault moved to another operating system), refused
+///   rather than redirected to Downloads.
+/// - `chose_now`: this invocation opened Save as. If the record no longer remembers any choice,
+///   another save already took it into a journal, and this Save as is refused with
+///   [`PLACE_CHANGED`], never silently redirected to Downloads.
+/// - `downloads`: resolved only when Downloads is actually the destination.
 pub(super) fn select_destination(
     planned: Option<Result<Arc<ChosenDestination>, ChoiceRefusal>>,
     chose_now: bool,
