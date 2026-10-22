@@ -6,7 +6,7 @@ use catcoms_storage::kept::ChoiceRefusal;
 /// Answers with a scripted result, optionally waiting on a gate first (a dialog left open).
 struct Scripted {
     answer: StdMutex<Option<Result<Option<PathBuf>, String>>>,
-    asked: StdMutex<Vec<(PathBuf, String)>>,
+    asked: StdMutex<Vec<(Option<PathBuf>, String)>>,
     gate: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 impl Scripted {
@@ -22,7 +22,7 @@ impl Scripted {
 impl DestinationChooser for Scripted {
     async fn choose(
         &self,
-        directory: PathBuf,
+        directory: Option<PathBuf>,
         suggested_name: String,
     ) -> Result<Option<PathBuf>, String> {
         self.asked.lock().unwrap().push((directory, suggested_name));
@@ -44,13 +44,13 @@ async fn save_as_selection_through_the_chooser_seam() {
     // Defaults: the dialog starts in Downloads with the sanitized peer name. Cancel changes
     // nothing and creates nothing.
     let cancel = Scripted::answering(Ok(None));
-    let picked = choose_destination(&cancel, downloads.clone(), "a/b:c.txt")
+    let picked = choose_destination(&cancel, Some(downloads.clone()), "a/b:c.txt")
         .await
         .unwrap();
     assert!(picked.is_none());
     assert_eq!(
         cancel.asked.lock().unwrap()[0],
-        (downloads.clone(), "b_c.txt".to_string())
+        (Some(downloads.clone()), "b_c.txt".to_string())
     );
     assert_eq!(std::fs::read_dir(&chosen).unwrap().count(), 0);
 
@@ -59,7 +59,7 @@ async fn save_as_selection_through_the_chooser_seam() {
     let existing = chosen.join("report.bin");
     std::fs::write(&existing, b"the user's own report").unwrap();
     let replace = Scripted::answering(Ok(Some(existing.clone())));
-    let refused = choose_destination(&replace, downloads.clone(), "report.bin")
+    let refused = choose_destination(&replace, Some(downloads.clone()), "report.bin")
         .await
         .unwrap_err();
     assert_eq!(refused, ChoiceRefusal::Exists.to_string());
@@ -67,7 +67,7 @@ async fn save_as_selection_through_the_chooser_seam() {
 
     // A usable choice comes back validated, with the exact name the user typed.
     let fresh = Scripted::answering(Ok(Some(chosen.join("Renamed.bin"))));
-    let choice = choose_destination(&fresh, downloads.clone(), "report.bin")
+    let choice = choose_destination(&fresh, Some(downloads.clone()), "report.bin")
         .await
         .unwrap()
         .expect("a valid choice");
@@ -81,7 +81,7 @@ async fn save_as_selection_through_the_chooser_seam() {
     // A relative or otherwise unusable result is refused.
     let relative = Scripted::answering(Ok(Some(PathBuf::from("relative.bin"))));
     assert_eq!(
-        choose_destination(&relative, downloads.clone(), "x")
+        choose_destination(&relative, Some(downloads.clone()), "x")
             .await
             .unwrap_err(),
         ChoiceRefusal::InvalidName.to_string()
@@ -94,7 +94,7 @@ async fn save_as_selection_through_the_chooser_seam() {
     *open.gate.lock().await = Some(gate);
     let first = tokio::spawn({
         let open = open.clone();
-        let downloads = downloads.clone();
+        let downloads = Some(downloads.clone());
         async move { choose_destination(&*open, downloads, "one.bin").await }
     });
     while open.asked.lock().unwrap().is_empty() {
@@ -102,7 +102,7 @@ async fn save_as_selection_through_the_chooser_seam() {
     }
     let second = Scripted::answering(Ok(None));
     assert_eq!(
-        choose_destination(&second, downloads.clone(), "two.bin")
+        choose_destination(&second, Some(downloads.clone()), "two.bin")
             .await
             .unwrap_err(),
         DIALOG_BUSY
@@ -114,18 +114,35 @@ async fn save_as_selection_through_the_chooser_seam() {
     release.send(()).unwrap();
     assert!(first.await.unwrap().unwrap().is_none());
     let again = Scripted::answering(Ok(None));
-    assert!(choose_destination(&again, downloads.clone(), "three.bin")
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        choose_destination(&again, Some(downloads.clone()), "three.bin")
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // A chooser error releases the turn too.
     let broken = Scripted::answering(Err("The Save as window could not be opened.".into()));
-    assert!(choose_destination(&broken, downloads.clone(), "x")
+    assert!(choose_destination(&broken, Some(downloads.clone()), "x")
         .await
         .is_err());
     let after = Scripted::answering(Ok(None));
-    assert!(choose_destination(&after, downloads, "x").await.is_ok());
+    assert!(choose_destination(&after, Some(downloads), "x")
+        .await
+        .is_ok());
+
+    // Picker review L6: with no resolvable Downloads folder the dialog still opens, at the OS
+    // default, and its choice is validated the same way.
+    let nowhere = Scripted::answering(Ok(Some(chosen.join("Without downloads.bin"))));
+    let choice = choose_destination(&nowhere, None, "report.bin")
+        .await
+        .unwrap()
+        .expect("Save as works without a Downloads folder");
+    assert_eq!(choice.name(), "Without downloads.bin");
+    assert_eq!(
+        nowhere.asked.lock().unwrap()[0],
+        (None, "report.bin".to_string())
+    );
 }
 
 #[test]

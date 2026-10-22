@@ -14864,7 +14864,9 @@ async fn save_group_file(
     // open dialog holds no slot. At most one dialog is open at a time. The dialog can outlive
     // Lock, unlock or a server replacement, so all of that is rechecked once it closes.
     let chosen = if save_as.unwrap_or(false) {
-        let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
+        // Picker review L6: no resolvable Downloads folder only changes where the dialog starts.
+        // Save as is the remedy offered when Downloads cannot be used, so it must not need it.
+        let downloads = app.path().download_dir().ok();
         let chooser = private_downloads::NativeChooser::new(app.clone());
         let choice = private_downloads::choose_destination(&chooser, downloads, &name).await?;
         let current = actor_instance_of(&state, server)

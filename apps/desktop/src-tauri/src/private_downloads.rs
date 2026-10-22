@@ -506,12 +506,14 @@ pub(super) enum Destination {
 }
 
 /// The native "Save as" dialog behind a seam, so tests never open a real window. Returns the
-/// path the user picked, or `None` when they cancelled.
+/// path the user picked, or `None` when they cancelled. `directory` is where the dialog starts;
+/// `None` (no Downloads folder could be resolved) lets the OS pick its own default, because Save
+/// as is the remedy for a Downloads folder that does not work and must not depend on one.
 #[async_trait::async_trait]
 pub(super) trait DestinationChooser: Send + Sync {
     async fn choose(
         &self,
-        directory: PathBuf,
+        directory: Option<PathBuf>,
         suggested_name: String,
     ) -> Result<Option<PathBuf>, String>;
 }
@@ -530,7 +532,7 @@ impl NativeChooser {
 impl DestinationChooser for NativeChooser {
     async fn choose(
         &self,
-        directory: PathBuf,
+        directory: Option<PathBuf>,
         suggested_name: String,
     ) -> Result<Option<PathBuf>, String> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -539,8 +541,10 @@ impl DestinationChooser for NativeChooser {
             .run_on_main_thread(move || {
                 let mut dialog = rfd::AsyncFileDialog::new()
                     .set_title("Save as")
-                    .set_directory(&directory)
                     .set_file_name(&suggested_name);
+                if let Some(directory) = &directory {
+                    dialog = dialog.set_directory(directory);
+                }
                 if let Some(window) = &window {
                     dialog = dialog.set_parent(window);
                 }
@@ -581,14 +585,14 @@ impl Drop for DialogTurn {
 }
 pub(super) const DIALOG_BUSY: &str = "A Save as window is already open.";
 
-/// Ask the user where to save, starting in Downloads with the sanitized file name. `Ok(None)`
-/// means cancelled. Whatever the dialog returns is validated before use: absolute path, usable
-/// name, an existing parent directory whose identity is captured, and no existing file or
-/// partial at that name (an existing file is refused and left untouched even if the dialog
-/// already asked to replace it).
+/// Ask the user where to save, starting in Downloads (or the OS default when `downloads` is
+/// `None`, picker review L6) with the sanitized file name. `Ok(None)` means cancelled. Whatever
+/// the dialog returns is validated before use: absolute path, usable name, an existing parent
+/// directory whose identity is captured, and no existing file or partial at that name (an
+/// existing file is refused and left untouched even if the dialog already asked to replace it).
 pub(super) async fn choose_destination(
     chooser: &dyn DestinationChooser,
-    downloads: PathBuf,
+    downloads: Option<PathBuf>,
     name: &str,
 ) -> Result<Option<ChosenDestination>, String> {
     let _turn = DialogTurn::take().ok_or(DIALOG_BUSY)?;
