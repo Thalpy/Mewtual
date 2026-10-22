@@ -1,5 +1,63 @@
 # Next voice milestone: native result recovery
 
+## Native action ownership checkpoint (22 October)
+
+Fully validated runtime source `4a606d706c77e68cef7660571cdb66df4566862e` in
+`target/communication-action-transport-worktree` follows the published8ef5bcff tree.
+This remains a partial implementation: the application listener serves authenticated Status
+only. Action dispatch, normal proven-pair Actor ingress, final delivery/history collection,
+live V2/RTC, member relay and combined/physical acceptance are still unfinished.
+
+The factory derives selection from its actual Route, repeats original generation/selection/
+closed checks under the original UIcommit, and requires that same Session's unique physical
+hold. Detached actor work and completed output retain that hold/payment after caller loss.
+The opaque authenticated header can select only original Phase capacity; the future dispatcher
+must still resolve the SAME header RowId and complete decrypted purpose before operations.
+
+Phase result transfer reserves4KiB actor metadata from its original16KiB loan and pins the
+actual Buffer/range without copying. Local refusal returns that exact Buffer. The trusted
+actor bridge calls its owner slice callback once outside guards, then reads cached immutable
+bytes. One body Flight covers queueing AND completed output; it cannot fund concurrent
+requests. Root's original grant/action/tag checks remain unchanged. No result IPC is enabled.
+
+Explicit HandoffLoan retirement closes its ORIGINAL confirmation plan; ordinary Drop merely
+returns loan bytes to an open Workflow. Held inputs/lower work/copies remain paid after close;
+local Phase drainage does not prove full96KiB release. Browser broker v10 shares an actual
+Ready channel's existing execution position with its exact selected key and retains each
+row's original native adapter. End retains framing/key/control until actual SDK/RPC cleanup.
+
+Complete source-specific gates pass, zero failures:
+
+- Root:3249 passed,24 existing ignored,59 result summaries (2466.83s). New retirement/body/
+  actor sentinels are present in the actual rebuilt executable. Format4.23s, strict all-target/
+  all-feature Clippy64.95s, ambient0.97s and all four deny categories2.08s pass. Root inputs
+  were unchanged by the native test-only lint correction from d5660512 to4a606d70.
+- Native:612 library plus5 ACL tests passed (610.91s gate;531.43s library). All140 focused
+  handoff tests are covered. Check48.97s, strict all-target/all-feature Clippy37.72s and
+  formatting0.88s pass. Focused actor/body22, Root handoff9 and browser crypto/channel162 pass.
+- Frontend:2355 passed (89.91s gate), Svelte55.44s zero errors/warnings, production build41.62s
+  and all10 rendered Edge flows54.73s pass. These frontend sources are unchanged by4a606d70.
+- Development native build200.72s, actual startup3.64s, packaged build124.89s and actual packaged
+  Windows metadata/reload/CSP/CORS/normal-close probe3.14s pass. Corrected source-label probe
+  rerun also passes on the SAME binary, SHA256
+  `3460b673856707326f073353a924c36c36922612c5618b9482fa2cb8b78e9c2e`.
+
+Commands, source IDs, timings and failed attempts: `target/voice-action-custody-gates.jsonl`
+and `target/voice-action-custody-*`. Missing frontend-dist and test err_expect Clippy failures
+were corrected; no test/limit was loosened. Stale cross-checkout dep-info was preserved and
+renamed, never deleted; earlier stale focused executables are NOT evidence for new tests.
+The first packaged probe's source label still named test-only parentd5660512; its retained log
+and corrected rerun distinguish metadata correction from a new runtime/build claim.
+
+Read-only actual-diff adversarial review and re-review have no remaining findings for this
+checkpoint. The separate action-dispatch checkout contains later shutdown/grammar/transfer
+and typed result work; those changes are NOT covered or published by this ownership checkpoint.
+Its full frontend checks pass, but current native compilation/review is separate and ongoing.
+Only one physical desktop exists. The packaged probe requests no unlock or credentials and
+proves neither selected-key/action delivery nor audible/multi-network/other-platform behavior.
+Separate native/experiment dependency audits and the recorded hosted exact-union failure remain
+open. No fully green latest-hosted-head or complete Revision2 claim is made.
+
 ## Native weak-context and lost-reply checkpoint (22 October)
 
 Frozen runtime source4db3f8249ef7960e11cc40febd2b81f6c3a6018e in
