@@ -1016,11 +1016,11 @@ pub(super) async fn prepare_resume(
         if let Preflight::Saved(path, preflight) =
             resume_preflight(actor, id, origin, !chosen).await?
         {
-            let cleanup = async {
-                remove_download(state, server, instance, generation, actor, id, false)
-                    .await
-                    .map(|_| ())
-            };
+            // Final review L1: clear the recovered record only while it is still the one this
+            // preflight recovered (see `recovered_cleanup`).
+            let cleanup = remove_recovered(state, server, instance, generation, actor, id, || {
+                preflight.is_current()
+            });
             let saved = finish_recovered_save(
                 state,
                 generation,
@@ -1055,6 +1055,56 @@ pub(super) async fn prepare_resume(
         saved: None,
         notice,
     })
+}
+
+/// Clear the record of a save the Resume preflight recovered (crash after the link), but only
+/// while it is still that record (final review L1).
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn remove_recovered(
+    state: &AppState,
+    server: u64,
+    instance: u64,
+    generation: u64,
+    actor: &ServerActor,
+    id: DownloadId,
+    still_current: impl Fn() -> bool,
+) -> Result<(), String> {
+    let ports = ActorCleanup {
+        state,
+        server,
+        instance,
+        generation,
+        actor,
+        id,
+    };
+    recovered_cleanup(&ports, CleanupClaim::acquire(server, id), still_current).await
+}
+
+/// The conditional cleanup behind [`remove_recovered`], over [`CleanupPorts`].
+///
+/// A plain Remove here released whatever record held this Download ID with no compare-and-swap.
+/// Between the preflight's RecoverPublished and this cleanup, a Save new copy from another window
+/// could retire and forget that published journal and start re-saving the same record; the late
+/// Remove then released it, cancelling that save's active run and deleting its encrypted copy, and
+/// the recovered save reported a false "could not be removed" warning. Now:
+/// - another cleanup holding the claim (a Remove, or a Save new copy in progress) owns the record:
+///   leave it to that cleanup, without a warning;
+/// - under our own claim nothing else can retire or remove the record, and the preflight's
+///   observation (`still_current`) proves it is still the one recovered: Save new copy's retire,
+///   Remove's Deleting step and any re-verification all invalidate it. If it moved on, this is a
+///   no-op without a warning; the user already has the recovered file.
+pub(super) async fn recovered_cleanup(
+    ports: &impl CleanupPorts,
+    claim: Result<CleanupClaim, String>,
+    still_current: impl Fn() -> bool,
+) -> Result<(), String> {
+    let Ok(claim) = claim else {
+        return Ok(());
+    };
+    if !still_current() {
+        return Ok(());
+    }
+    remove_sequence(ports, claim, false).await.map(|_| ())
 }
 
 /// The intent CAS of a plain Resume, under the process-wide cleanup claim (re-review 2 LOW 2,

@@ -643,6 +643,61 @@ async fn a_preflight_from_before_a_cleanup_cannot_act_on_its_journal() {
     }
 }
 
+/// Final review L1: native clears a recovered save's record only while the preflight that
+/// recovered it is still current. That needs both facts pinned here: recording the recovery does
+/// not itself retire the observation (or no recovered record would ever be cleared), and Save
+/// new copy's retire does (so a late cleanup leaves a re-saving record alone).
+#[tokio::test]
+async fn a_recovered_publication_keeps_its_observation_until_save_new_copy_retires_it() {
+    let run = running().await;
+    let first = ready(&run, None).await;
+    let mut file = begin(&run, &first).await;
+    write_all(&run, &first, &mut file).await;
+    let Publication::Ready(journal) = file.prepare_publication().unwrap() else {
+        panic!("not yet published");
+    };
+    bounded(run.actor.download_export_transition(
+        first.clone(),
+        DownloadExportTransition::Checkpoint {
+            expected: file.journal().clone(),
+            next: journal.clone(),
+        },
+        run.origin.clone(),
+    ))
+    .await
+    .unwrap();
+    file.checkpointed(journal.clone());
+    file.link().unwrap(); // crash right after the link: Published was never recorded
+    drop(file);
+    let saved = bounded(run.actor.downloads()).await.unwrap().remove(0);
+    let recovering = bounded(run.actor.download_preflight(saved.id, run.origin.clone()))
+        .await
+        .unwrap();
+    bounded(run.actor.download_export_edge(
+        recovering.clone(),
+        journal,
+        DownloadExportEdge::RecoverPublished,
+        run.origin.clone(),
+    ))
+    .await
+    .unwrap();
+    assert!(
+        recovering.is_current(),
+        "recording the recovery leaves its own observation current"
+    );
+    let intent = bounded(run.actor.downloads()).await.unwrap()[0]
+        .state
+        .intent;
+    bounded(run.actor.retire_download_export(saved.id, intent))
+        .await
+        .unwrap();
+    assert!(
+        !recovering.is_current(),
+        "Save new copy's retire makes a late cleanup stand down"
+    );
+    run.close().await;
+}
+
 #[tokio::test]
 async fn actor_freeze_and_thaw_release_stale_export_transitions() {
     let Pair {

@@ -382,6 +382,42 @@ async fn resume_takes_the_cleanup_claim_only_around_its_intent_change() {
     drain.await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recovered_save_clears_only_the_record_it_recovered() {
+    // Final review L1: the Resume preflight recovered a published save; before its cleanup ran, a
+    // Save new copy from another window retired and forgot that journal and is now re-saving the
+    // same record (or still holds the claim). The late cleanup must leave that record and its run
+    // alone and report no failure (which would become a false "could not be removed" warning).
+    let (_root, staging, journal) = partial();
+    let (fake, release, _inside) = Fake::new(&journal);
+    drop(release); // no barrier: the one delete below runs straight through
+    fake.record.lock().unwrap().export = Some(ExportState::Published(journal.clone()));
+    let key = id(0xA8);
+    // The record moved on (its observation was retired by the Save new copy).
+    let claim = CleanupClaim::acquire(7, key);
+    assert_eq!(recovered_cleanup(&fake, claim, || false).await, Ok(()));
+    assert!(
+        fake.exists() && !fake.record.lock().unwrap().deleting,
+        "the re-saving record survives"
+    );
+    // Another cleanup holds the claim right now: leave it to that cleanup.
+    let other = CleanupClaim::acquire(7, key).unwrap();
+    assert_eq!(
+        recovered_cleanup(&fake, CleanupClaim::acquire(7, key), || true).await,
+        Ok(())
+    );
+    assert!(fake.exists() && !fake.record.lock().unwrap().deleting);
+    drop(other);
+    assert_eq!(fake.deletes.load(std::sync::atomic::Ordering::SeqCst), 0);
+    // Still the recovered record: it is cleared as before (our staging name goes, the record too).
+    assert_eq!(
+        recovered_cleanup(&fake, CleanupClaim::acquire(7, key), || true).await,
+        Ok(())
+    );
+    assert!(!fake.exists());
+    assert!(!staging.exists());
+}
+
 #[test]
 fn claims_are_per_download_and_released_by_the_last_holder() {
     let first = CleanupClaim::acquire(7, id(0xB1)).unwrap();
