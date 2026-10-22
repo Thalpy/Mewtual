@@ -14570,8 +14570,10 @@ async fn stream_download_to_disk(
     target: &[u8; 32],
     source: &mut impl SaveSource,
 ) -> Result<PathBuf, String> {
+    // Owned copies: the staging closure runs on the blocking pool and must be 'static.
+    let (downloads, name) = (downloads.to_path_buf(), name.to_owned());
     stream_download_staged(
-        || create_staged_download(downloads, name),
+        move || create_staged_download(&downloads, &name),
         total,
         size,
         target,
@@ -14591,8 +14593,11 @@ async fn stream_download_to_chosen(
     target: &[u8; 32],
     source: &mut impl SaveSource,
 ) -> Result<PathBuf, String> {
+    // The choice is cloned into the blocking-pool closure: identity reads, exclusive creation and
+    // the hard-link probe can stall on exactly the shares that land on this writer.
+    let choice = choice.clone();
     stream_download_staged(
-        || {
+        move || {
             choice
                 .create_unjournaled()
                 .map_err(|error| error.to_string())
@@ -14607,8 +14612,14 @@ async fn stream_download_to_chosen(
 
 /// Shared body of the non-resumable writer. `stage` reserves the `.part` and names the final path;
 /// it runs only after the first liveness check, so a retired command creates no plaintext file.
+///
+/// Picker review M2: every filesystem step here (staging, each chunk write, the sync, failure
+/// cleanup and, through [`ActorSaveSource::publish_verified`], publication) runs on the blocking
+/// pool through [`private_downloads::blocking`]. Save as sends identity-less SMB, CIFS and FUSE
+/// folders to this writer, and a stalled share there must pin one blocking thread, never a tokio
+/// worker that chat and sync share. Liveness is still checked on the runtime between steps.
 async fn stream_download_staged(
-    stage: impl FnOnce() -> Result<(std::fs::File, PathBuf, PathBuf), String>,
+    stage: impl FnOnce() -> Result<(std::fs::File, PathBuf, PathBuf), String> + Send + 'static,
     total: usize,
     size: u64,
     target: &[u8; 32],
@@ -14616,11 +14627,28 @@ async fn stream_download_staged(
 ) -> Result<PathBuf, String> {
     // Refuse a command retired during its earlier plan awaits before creating plaintext staging.
     source.still_unlocked().await?;
-    let (mut file, staging, path) = stage()?;
-    let failed = |error: String| -> String {
-        let _ = std::fs::remove_file(&staging);
-        error
-    };
+    let (file, staging, path) = private_downloads::blocking(stage).await??;
+    match fill_staged_download(file, &staging, &path, total, size, target, source).await {
+        Ok(()) => Ok(path),
+        Err(error) => {
+            // Failures remove only our own staging name, never the final path.
+            let doomed = staging.clone();
+            let _ = private_downloads::blocking(move || std::fs::remove_file(doomed)).await;
+            Err(error)
+        }
+    }
+}
+
+/// Write, verify and publish one staged download. Any error leaves the caller to remove staging.
+async fn fill_staged_download(
+    mut file: std::fs::File,
+    staging: &Path,
+    path: &Path,
+    total: usize,
+    size: u64,
+    target: &[u8; 32],
+    source: &mut impl SaveSource,
+) -> Result<(), String> {
     source.progress(0, 0, 0, None);
     let mut address = CidHasher::new();
     let mut bytes_done = 0u64;
@@ -14630,16 +14658,9 @@ async fn stream_download_staged(
         // across a lock. Check before asking for bytes and again before writing them: the second
         // check is the one that matters, because the first says nothing about a session that
         // closed while the fetch was outstanding.
-        if let Err(e) = source.still_unlocked().await {
-            return Err(failed(e));
-        }
-        let (chunk, provider) = match source.chunk(i).await {
-            Ok(got) => got,
-            Err(e) => return Err(failed(e)),
-        };
-        if let Err(e) = source.still_unlocked().await {
-            return Err(failed(e));
-        }
+        source.still_unlocked().await?;
+        let (chunk, provider) = source.chunk(i).await?;
+        source.still_unlocked().await?;
         if provider.is_some() {
             network_bytes_done = network_bytes_done.saturating_add(chunk.len() as u64);
         }
@@ -14650,40 +14671,38 @@ async fn stream_download_staged(
             .checked_add(chunk.len() as u64)
             .filter(|n| *n <= size);
         let Some(next) = next else {
-            return Err(failed(
-                "this file's chunks hold more data than it declares".into(),
-            ));
+            return Err("this file's chunks hold more data than it declares".into());
         };
         address.update(&chunk);
         bytes_done = next;
-        if let Err(e) = file.write_all(&chunk) {
-            return Err(failed(e.to_string()));
-        }
+        // The file moves to the blocking pool and back with each write. A worker that panics
+        // drops it there; the caller still removes the staging name.
+        let (returned, written) = private_downloads::blocking(move || {
+            let written = file.write_all(&chunk);
+            (file, written)
+        })
+        .await?;
+        file = returned;
+        written.map_err(|e| e.to_string())?;
         source.progress(i + 1, bytes_done, network_bytes_done, provider);
     }
-    if let Err(e) = file.sync_all() {
-        return Err(failed(e.to_string()));
-    }
-    drop(file);
+    // Closing happens on the blocking pool too, so a share that stalls on close cannot hold a
+    // runtime worker either.
+    private_downloads::blocking(move || file.sync_all())
+        .await?
+        .map_err(|e| e.to_string())?;
     if bytes_done != size {
-        return Err(failed(
-            "this file's chunks hold less data than it declares".into(),
-        ));
+        return Err("this file's chunks hold less data than it declares".into());
     }
     // End-to-end integrity, the same check the all-in-one download makes: individually valid
     // chunks in the wrong order (or a manifest that lied) must not be saved as the file.
     if address.cid().as_bytes() != target {
-        return Err(failed(
-            "the reassembled file failed its integrity check".into(),
-        ));
+        return Err("the reassembled file failed its integrity check".into());
     }
     // The source owns one indivisible authorization+rename step. A plain check followed by this
     // rename has a lock TOCTOU: explicit lock can complete in the gap and the old command then
     // publishes plaintext under its final name.
-    if let Err(e) = source.publish_verified(&staging, &path).await {
-        return Err(failed(e));
-    }
-    Ok(path)
+    source.publish_verified(staging, path).await
 }
 
 fn exported_media_validation(path: &Path, declared_mime: &str) -> Option<String> {
@@ -14744,7 +14763,12 @@ impl SaveSource for ActorSaveSource<'_> {
         if self.origin.is_cancelled() || !self.ready.is_current() {
             return Err("The file read is no longer active.".into());
         }
-        publish_staged_download(staging, final_path)
+        // The guard stays held across the blocking link, so Lock still waits for this one
+        // check-and-link step, the same shape as the journaled path's guarded `link()`. Tauri
+        // commands are not dropped mid-flight; only process exit could release the guard while the
+        // pool thread still links, and then no later Lock exists to race.
+        let (staging, final_path) = (staging.to_path_buf(), final_path.to_path_buf());
+        private_downloads::blocking(move || publish_staged_download(&staging, &final_path)).await?
     }
 
     fn progress(
@@ -19783,6 +19807,48 @@ mod tests {
             &[(0, 0), (1, 6), (2, 12)],
             "one update per chunk, plus the opening zero"
         );
+    }
+
+    /// Picker review M2: the fallback writer (one-click into Downloads, and Save as at a place that
+    /// cannot carry a journal) must keep its filesystem work off the async runtime. On a
+    /// single-threaded runtime the releasing task below can only run while staging is parked if
+    /// staging runs on the blocking pool; inline staging would starve it until the timeout.
+    #[test]
+    fn the_fallback_writer_stages_off_the_async_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let folder = dir.path().to_path_buf();
+            let mut source = ScriptedSave::new(vec![b"chunk".to_vec()]);
+            let (total, size, target) = (source.total(), source.size(), source.address());
+            let (parked, parked_seen) = tokio::sync::oneshot::channel::<()>();
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            let releaser = tokio::spawn(async move {
+                if parked_seen.await.is_ok() {
+                    let _ = release.send(());
+                }
+            });
+            let saved = stream_download_staged(
+                move || {
+                    let _ = parked.send(());
+                    released
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .map_err(|_| "staging blocked the async runtime".to_string())?;
+                    create_staged_download(&folder, "parked.bin")
+                },
+                total,
+                size,
+                &target,
+                &mut source,
+            )
+            .await;
+            let path = saved.expect("the runtime stayed free while staging was parked");
+            assert_eq!(std::fs::read(&path).unwrap(), b"chunk");
+            releaser.await.unwrap();
+        });
     }
 
     #[tokio::test]

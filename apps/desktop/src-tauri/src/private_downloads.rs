@@ -459,7 +459,11 @@ pub(super) fn export_slot() -> Result<Arc<tokio::sync::OwnedSemaphorePermit>, St
 }
 
 /// Run one external filesystem step off the async workers and the server actor.
-async fn blocking<T: Send + 'static>(
+///
+/// Shared with the non-resumable fallback writer in `lib.rs` (`stream_download_staged`), whose
+/// staging, writes, sync, cleanup and publication must stay off the runtime for the same reason:
+/// a stalled share pins one blocking-pool thread, never a tokio worker that chat and sync need.
+pub(super) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, String> {
     tokio::task::spawn_blocking(work)
