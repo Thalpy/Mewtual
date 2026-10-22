@@ -33,6 +33,15 @@ impl DestinationChooser for Scripted {
     }
 }
 
+/// [`choose_destination`] for an invocation that is never cancelled while its dialog is open.
+async fn choose_now(
+    chooser: &dyn DestinationChooser,
+    downloads: Option<PathBuf>,
+    name: &str,
+) -> Result<Option<ChosenDestination>, String> {
+    choose_destination(chooser, downloads, name, std::future::pending()).await
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn save_as_selection_through_the_chooser_seam() {
     let root = tempfile::tempdir().unwrap();
@@ -44,7 +53,7 @@ async fn save_as_selection_through_the_chooser_seam() {
     // Defaults: the dialog starts in Downloads with the sanitized peer name. Cancel changes
     // nothing and creates nothing.
     let cancel = Scripted::answering(Ok(None));
-    let picked = choose_destination(&cancel, Some(downloads.clone()), "a/b:c.txt")
+    let picked = choose_now(&cancel, Some(downloads.clone()), "a/b:c.txt")
         .await
         .unwrap();
     assert!(picked.is_none());
@@ -59,7 +68,7 @@ async fn save_as_selection_through_the_chooser_seam() {
     let existing = chosen.join("report.bin");
     std::fs::write(&existing, b"the user's own report").unwrap();
     let replace = Scripted::answering(Ok(Some(existing.clone())));
-    let refused = choose_destination(&replace, Some(downloads.clone()), "report.bin")
+    let refused = choose_now(&replace, Some(downloads.clone()), "report.bin")
         .await
         .unwrap_err();
     assert_eq!(refused, ChoiceRefusal::Exists.to_string());
@@ -67,7 +76,7 @@ async fn save_as_selection_through_the_chooser_seam() {
 
     // A usable choice comes back validated, with the exact name the user typed.
     let fresh = Scripted::answering(Ok(Some(chosen.join("Renamed.bin"))));
-    let choice = choose_destination(&fresh, Some(downloads.clone()), "report.bin")
+    let choice = choose_now(&fresh, Some(downloads.clone()), "report.bin")
         .await
         .unwrap()
         .expect("a valid choice");
@@ -81,7 +90,7 @@ async fn save_as_selection_through_the_chooser_seam() {
     // A relative or otherwise unusable result is refused.
     let relative = Scripted::answering(Ok(Some(PathBuf::from("relative.bin"))));
     assert_eq!(
-        choose_destination(&relative, Some(downloads.clone()), "x")
+        choose_now(&relative, Some(downloads.clone()), "x")
             .await
             .unwrap_err(),
         ChoiceRefusal::InvalidName.to_string()
@@ -95,14 +104,14 @@ async fn save_as_selection_through_the_chooser_seam() {
     let first = tokio::spawn({
         let open = open.clone();
         let downloads = Some(downloads.clone());
-        async move { choose_destination(&*open, downloads, "one.bin").await }
+        async move { choose_now(&*open, downloads, "one.bin").await }
     });
     while open.asked.lock().unwrap().is_empty() {
         tokio::task::yield_now().await;
     }
     let second = Scripted::answering(Ok(None));
     assert_eq!(
-        choose_destination(&second, Some(downloads.clone()), "two.bin")
+        choose_now(&second, Some(downloads.clone()), "two.bin")
             .await
             .unwrap_err(),
         DIALOG_BUSY
@@ -114,27 +123,23 @@ async fn save_as_selection_through_the_chooser_seam() {
     release.send(()).unwrap();
     assert!(first.await.unwrap().unwrap().is_none());
     let again = Scripted::answering(Ok(None));
-    assert!(
-        choose_destination(&again, Some(downloads.clone()), "three.bin")
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(choose_now(&again, Some(downloads.clone()), "three.bin")
+        .await
+        .unwrap()
+        .is_none());
 
     // A chooser error releases the turn too.
     let broken = Scripted::answering(Err("The Save as window could not be opened.".into()));
-    assert!(choose_destination(&broken, Some(downloads.clone()), "x")
+    assert!(choose_now(&broken, Some(downloads.clone()), "x")
         .await
         .is_err());
     let after = Scripted::answering(Ok(None));
-    assert!(choose_destination(&after, Some(downloads), "x")
-        .await
-        .is_ok());
+    assert!(choose_now(&after, Some(downloads), "x").await.is_ok());
 
     // Picker review L6: with no resolvable Downloads folder the dialog still opens, at the OS
     // default, and its choice is validated the same way.
     let nowhere = Scripted::answering(Ok(Some(chosen.join("Without downloads.bin"))));
-    let choice = choose_destination(&nowhere, None, "report.bin")
+    let choice = choose_now(&nowhere, None, "report.bin")
         .await
         .unwrap()
         .expect("Save as works without a Downloads folder");
@@ -147,10 +152,31 @@ async fn save_as_selection_through_the_chooser_seam() {
     // A peer-chosen name never suggests `%VAR%`, which the Windows dialog would expand into a
     // path the user did not see.
     let expand = Scripted::answering(Ok(None));
-    choose_destination(&expand, None, "%APPDATA%_x.txt")
-        .await
-        .unwrap();
+    choose_now(&expand, None, "%APPDATA%_x.txt").await.unwrap();
     assert_eq!(expand.asked.lock().unwrap()[0].1, "_APPDATA__x.txt");
+
+    // Re-review 2 residual: a dialog that never answers (a GTK future that never completes) no
+    // longer wedges Save as for the life of the process. Cancelling the invocation (Lock, unlock,
+    // a server replacement) ends the wait and releases the one-dialog turn.
+    let (_never_answers, gate) = tokio::sync::oneshot::channel();
+    let hung = Scripted::answering(Ok(None));
+    *hung.gate.lock().await = Some(gate);
+    let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+    let abandoned = choose_destination(&hung, None, "hung.bin", async {
+        let _ = cancelled.await;
+    });
+    cancel.send(()).unwrap();
+    // Bounded, so a regression fails here instead of hanging the suite.
+    let ended = tokio::time::timeout(Duration::from_secs(20), abandoned)
+        .await
+        .expect("cancelling the invocation ends the dialog wait");
+    assert_eq!(ended.unwrap_err(), DIALOG_ABANDONED);
+    assert_eq!(hung.asked.lock().unwrap().len(), 1, "the dialog had opened");
+    let next = Scripted::answering(Ok(None));
+    assert!(
+        choose_now(&next, None, "next.bin").await.unwrap().is_none(),
+        "the turn was released"
+    );
 }
 
 #[test]

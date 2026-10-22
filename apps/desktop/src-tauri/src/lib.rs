@@ -14993,7 +14993,14 @@ async fn save_group_file(
         // Save as is the remedy offered when Downloads cannot be used, so it must not need it.
         let downloads = app.path().download_dir().ok();
         let chooser = private_downloads::NativeChooser::new(app.clone());
-        let choice = private_downloads::choose_destination(&chooser, downloads, &name).await?;
+        // Lock, unlock or a server replacement cancels the origin and ends the wait, releasing
+        // the one-dialog turn even if the OS dialog never answers.
+        let mut abandoned = origin.clone();
+        let choice =
+            private_downloads::choose_destination(&chooser, downloads, &name, async move {
+                abandoned.cancelled().await
+            })
+            .await?;
         let current = actor_instance_of(&state, server)
             .await
             .is_ok_and(|(_, now)| now == instance);

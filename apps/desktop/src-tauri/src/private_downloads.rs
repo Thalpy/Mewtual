@@ -650,23 +650,39 @@ impl Drop for DialogTurn {
     }
 }
 pub(super) const DIALOG_BUSY: &str = "A Save as window is already open.";
+/// The invocation that opened the dialog ended (Lock, unlock, server replacement) first.
+pub(super) const DIALOG_ABANDONED: &str = "The download is no longer active.";
 
 /// Ask the user where to save, starting in Downloads (or the OS default when `downloads` is
 /// `None`, picker review L6) with the sanitized file name. `Ok(None)` means cancelled. Whatever
 /// the dialog returns is validated before use: absolute path, usable name, an existing parent
 /// directory whose identity is captured, and no existing file or partial at that name (an
 /// existing file is refused and left untouched even if the dialog already asked to replace it).
+///
+/// The one-dialog turn is an RAII guard held by this future: it is released when the dialog
+/// answers, when the chooser fails, and when the awaiting invocation is dropped. A dialog whose
+/// answer never comes (for example a GTK dialog future that never completes) would otherwise hold
+/// the turn for the life of the process, because Tauri does not drop a running command. So the
+/// wait also ends when `cancelled` resolves (production: the invocation's origin, cancelled by
+/// Lock, unlock or a server replacement), which releases the turn; a still-open OS window is then
+/// orphaned and its answer discarded (re-review 2 residual).
 pub(super) async fn choose_destination(
     chooser: &dyn DestinationChooser,
     downloads: Option<PathBuf>,
     name: &str,
+    cancelled: impl Future<Output = ()>,
 ) -> Result<Option<ChosenDestination>, String> {
     let _turn = DialogTurn::take().ok_or(DIALOG_BUSY)?;
     // The suggestion is a peer-chosen name. The Windows file dialog expands `%VAR%` in its name
     // box when the user presses Save, so "%APPDATA%_x" would turn into a path elsewhere that the
     // user never saw or typed. A suggestion never carries `%` (picker review residual).
     let suggested = safe_download_name(name).replace('%', "_");
-    let Some(picked) = chooser.choose(downloads, suggested).await? else {
+    let answer = tokio::select! {
+        biased;
+        answer = chooser.choose(downloads, suggested) => answer?,
+        () = cancelled => return Err(DIALOG_ABANDONED.into()),
+    };
+    let Some(picked) = answer else {
         return Ok(None);
     };
     blocking(move || ChosenDestination::validate(&picked))
