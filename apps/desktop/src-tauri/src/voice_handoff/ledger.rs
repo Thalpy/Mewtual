@@ -95,6 +95,9 @@ enum Body {
 struct State {
     body: Body,
     status: Status,
+    // Monotonic native-only proof. It is independent of action/Phase drainage and cannot be
+    // inferred from a browser FinalACK, timeout, lease revocation or copied selected fields.
+    session_collected: bool,
 }
 struct Row {
     id: RowId,
@@ -180,6 +183,73 @@ impl ResolvedRow {
 }
 
 impl Ledger {
+    /// Pure cleanup preflight under the caller's original UI commit. No new factory may
+    /// enter until channel closure commits under that SAME mutex. Drained is monotonic;
+    /// unknown rows do not assert SDK drainage, but no original action means there is no
+    /// action Control path to strand. Pending and Live (even settled/ACKed) refuse closure.
+    pub(super) fn channel_may_close(&self, selected: &SelectedHandoffOwner) -> bool {
+        let index = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        index.rows.iter().flatten().all(|row| {
+            !row.key.matches(selected, row.key.purpose)
+                || matches!(
+                    row.state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .body,
+                    Body::Drained
+                )
+        })
+    }
+
+    /// Accept only the actual bootstrap registry's last-owner proof, after all its locks
+    /// have been released. The full original grant allocation/executor/lease must match;
+    /// equal public labels in a replacement generation do not authorize removal of history.
+    /// Remember this before attempting collection: delayed ResolvedRow/cleanup owners may
+    /// legitimately keep the record alive after its one original channel witness is gone.
+    pub(super) fn channel_collected(&self, collected: super::bootstrap::CollectedChannel) {
+        {
+            let index = self.index.lock().unwrap_or_else(|error| error.into_inner());
+            for row in index.rows.iter().flatten() {
+                if row.key.matches(collected.selected(), row.key.purpose) {
+                    row.state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .session_collected = true;
+                }
+            }
+        }
+        // Selected owners, credits and weak control blocks may have nontrivial destructors.
+        // In particular the channel witness MUST NOT drop while either index is locked.
+        drop(collected);
+    }
+
+    /// Bounded history reclamation, never uncertain-history eviction. Phase/engine/receipt
+    /// compaction and actual channel collection are separate prerequisites. An original live
+    /// Session must retain its purpose even after FinalACK, otherwise a fresh Begin could
+    /// allocate another pending factory on that same purpose. Dead leases cannot be revived.
+    /// Pending (including a possibly published Root pair) and Live rows remain untouched.
+    pub(super) fn collect_retired(&self) {
+        let mut removed: [Option<Arc<Row>>; ROWS] = std::array::from_fn(|_| None);
+        {
+            let mut index = self.index.lock().unwrap_or_else(|error| error.into_inner());
+            for (slot, retired) in index.rows.iter_mut().zip(&mut removed) {
+                let reclaim = slot.as_ref().is_some_and(|row| {
+                    if row.key.lease.is_live() || Arc::strong_count(row) != 1 {
+                        return false;
+                    }
+                    let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.session_collected && matches!(state.body, Body::Drained)
+                });
+                if reclaim {
+                    *retired = slot.take();
+                }
+            }
+        }
+        // Never run original credit/lease/weak-grant destruction under native index/state
+        // guards. The index serial deliberately survives collection and slot reuse.
+        drop(removed);
+    }
+
     /// Capacity ONLY after canonical header authentication. The opaque request fixes the
     /// exact header RowId; no unauthenticated/reparsed logical ID can trigger this lookup.
     /// Compare the original grant allocation/executor/lease, then return only its existing
@@ -311,6 +381,7 @@ impl Ledger {
                 purpose,
             },
             state: Mutex::new(State {
+                session_collected: false,
                 body: Body::Pending(Pending {
                     selected,
                     prepared: Some(prepared),
@@ -823,4 +894,4 @@ impl Drop for Work {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

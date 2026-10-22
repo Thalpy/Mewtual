@@ -1,5 +1,23 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native channel/action history collection (22 October)
+
+Registry::collect_retired receives the actual native action Ledger. When the original channel
+row is physically removable (closed, setup finished, dead lease, no independent Session/public
+or Row owners), it transfers a private CollectedChannel witness outside Registry locks. Only
+bootstrap can construct that witness; it has no renderer constructor or serialized identity.
+Ledger remembers it only for the same original grant allocation/executor/lease. A subsequent
+bounded sweep removes only Body::Drained plus dead lease plus recorded proof plus sole indexed
+Row ownership. It runs on every collection hook, including an empty registry, so late metadata
+handles cannot strand the one-shot evidence. Missing history is still an error, not a drained
+status. Neither index serial resets when a slot is reused.
+
+Both explicit setup-failure cleanup and final channel collection hold the original UI commit
+across original-selection lookup, Ledger::channel_may_close and routing closure. Every matching
+action must already be compacted; Capacity leaves Control available for its ACK/settlement/phase
+cleanup. This is not browser SDK or full Root Workflow drainage proof. Pending factory closure
+and production action transport remain unfinished; the listener still serves Status only.
+
 ## App-owned public bootstrap and status channel (21 October)
 
 `setup_voice_channel({owner, executor})` requires the unlocked session and actual selected

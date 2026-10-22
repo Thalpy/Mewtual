@@ -1,5 +1,24 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Original channel history reclamation (22 October)
+
+Lost replies, FinalACK, timeout, End and a dead lease alone cannot evict an action purpose.
+Otherwise an original Session still able to submit Begin could allocate a second Pending row.
+Bootstrap alone creates an opaque witness when its original closed row has no live Session,
+header, reply, setup ticket, public-output or Row owner and its lease is permanently dead.
+The ledger accepts only matching original grant allocation/executor/lease and separately requires
+actual Body::Drained and sole indexed ownership. A foreign equal-label generation cannot collect
+another original record. Proof is monotonic and survives delayed metadata owners; fixed sweeps
+and non-resetting serials prevent late old IDs from aliasing replacement slots. Registry and
+ledger locks do not overlap, and actual owners/resources drop outside their guards.
+
+Explicit setup/final closure also checks every original action is compacted before cutting off
+Control. The same original UI commit orders this check/closure against factory admission.
+Refusal preserves Control and existing owners; a settled engine, acknowledged receipt or closed
+browser alone is insufficient. Native Pending may hide an accepted Root pair after a lost actor
+reply and remains retained. Its cleanup protocol, production opcode dispatch and full browser/
+Root Workflow drainage are still open; no new live V2 or physical-media claim follows.
+
 ## App-owned bootstrap/status boundary (21 October)
 
 The listener is now reachable during application lifetime. Its fixed process payment and

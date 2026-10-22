@@ -280,6 +280,33 @@ async fn actual_actor_rejection_retains_work_input_and_task_custody_until_collec
     assert!(matches!(case.row().work(), Err(VoiceError::Capacity)));
     assert!(case.route.session().header().is_err());
     assert!(case.native.state.ui_session_commit.try_lock().is_ok());
+    for channel in [false, true] {
+        let closure = if channel {
+            crate::voice_handoff::bootstrap::collect_channel(
+                &case.native.state,
+                case.selected.id(),
+                case.selected.executor(),
+            )
+            .await
+        } else {
+            crate::voice_handoff::bootstrap::settle_setup(
+                &case.native.state,
+                case.selected.id(),
+                case.selected.executor(),
+            )
+            .await
+        };
+        assert!(matches!(
+            closure,
+            Err(crate::voice_handoff::channel::Refused::Capacity)
+        ));
+        assert!(
+            case.route.require_open().is_ok(),
+            "an uncollected actual result cannot lose its cleanup route"
+        );
+        assert!(response.work.is_some());
+        assert_eq!(case.selected.resources().counts(), before);
+    }
     let (_, incoming) = response.into_parts();
     assert_eq!(case.selected.resources().counts(), before);
     assert!(case.phase.buffer(16 * 1024 - TASK_BYTES).is_ok());

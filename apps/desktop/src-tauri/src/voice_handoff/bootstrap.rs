@@ -49,6 +49,20 @@ struct Retirement {
     session: Weak<Session>,
     public: Weak<SetupOutput>,
 }
+/// Native-only evidence that the ORIGINAL closed channel has no remaining Session, header,
+/// reply, setup ticket or public-output owner and its lease is permanently dead. Only the
+/// registry's locked last-owner collection can construct this value. Renderer identifiers,
+/// FinalACK, a dead lease alone, and a returned close reply cannot mint this evidence.
+/// Retain the paid Row until the ledger has observed its original provenance; drop it only
+/// outside both registries' guards. This proves channel collection, not action/SDK drainage.
+pub(super) struct CollectedChannel {
+    row: Arc<Row>,
+}
+impl CollectedChannel {
+    pub(super) fn selected(&self) -> &SelectedHandoffOwner {
+        &self.row.selected
+    }
+}
 /// Exact retries share ONE immutable projection/allocation. Every returned owner retains the
 /// original row payment even after the registry is destroyed; a caller cannot clone raw public
 /// buffers without separately paying its copy. Future IPC serialization needs its own flight.
@@ -118,6 +132,26 @@ struct Ticket {
 }
 
 impl Registry {
+    /// Original immutable provenance for cleanup preflight, including after End. This grants
+    /// no effect authority and does not reinstall a retired Session. The caller must retain
+    /// the SAME UI commit through ledger preflight and final closure so an admitted factory
+    /// cannot appear in between. Never hold this registry guard while consulting the ledger.
+    fn original_selected(
+        &self,
+        owner: &str,
+        executor: [u8; 32],
+    ) -> Option<Arc<SelectedHandoffOwner>> {
+        self.index
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()?
+            .rows
+            .iter()
+            .flatten()
+            .find(|row| row.selected.id() == owner && row.selected.executor() == executor)
+            .map(|row| row.selected.clone())
+    }
+
     /// Exact public projection after ensure, outside Coordinator. If collection won this
     /// interval, refuse rather than create an unpaid historical reply. Holding the actual Row
     /// keeps its payment through delayed serialization after End/collection. The single busy
@@ -376,31 +410,40 @@ impl Registry {
 
     /// Bounded collection requires an irreversibly dead original lease, no pending setup,
     /// and actual drainage of ALL detached owners. Keep the monotonic serial across reuse.
-    pub(crate) fn collect_retired(&self) {
+    pub(crate) fn collect_retired(&self, ledger: &super::ledger::Ledger) {
         let mut removed: [Option<Arc<Row>>; ROWS] = std::array::from_fn(|_| None);
         {
             let mut held = self.index.lock().unwrap_or_else(|error| error.into_inner());
-            let Some(index) = held.as_mut() else { return };
-            for (slot, retired) in index.rows.iter_mut().zip(&mut removed) {
-                let reclaim = slot.as_ref().is_some_and(|row| {
-                    if row.selected.lease().is_live() || Arc::strong_count(row) != 1 {
-                        return false;
+            if let Some(index) = held.as_mut() {
+                for (slot, retired) in index.rows.iter_mut().zip(&mut removed) {
+                    let reclaim = slot.as_ref().is_some_and(|row| {
+                        if row.selected.lease().is_live() || Arc::strong_count(row) != 1 {
+                            return false;
+                        }
+                        let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+                        state.closed
+                            && !state.pending
+                            && state.retirement.as_ref().is_some_and(|owners| {
+                                owners.session.strong_count() == 0
+                                    && owners.public.strong_count() == 0
+                            })
+                    });
+                    if reclaim {
+                        *retired = slot.take();
                     }
-                    let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
-                    state.closed
-                        && !state.pending
-                        && state.retirement.as_ref().is_some_and(|owners| {
-                            owners.session.strong_count() == 0 && owners.public.strong_count() == 0
-                        })
-                });
-                if reclaim {
-                    *retired = slot.take();
                 }
             }
         }
         // Includes original selected snapshot and paid weak control blocks. No resource/
         // output destructor may execute under Index/State (or a caller's Coordinator guard).
-        drop(removed);
+        // Registry and Ledger locks NEVER overlap. Persist the evidence even when a delayed
+        // ledger handle still retains history; a later sweep must not need a second witness.
+        for row in removed.into_iter().flatten() {
+            ledger.channel_collected(CollectedChannel { row });
+        }
+        // Always sweep, including an empty/uninitialized registry. The original one-shot
+        // witness may have arrived before the last cleanup/metadata handle actually dropped.
+        ledger.collect_retired();
     }
 
     /// Process shutdown only: close every existing first-effect fence before collecting any
@@ -639,7 +682,7 @@ pub(crate) async fn ensure(
 ) -> Result<Status, Refused> {
     // Collection stays outside Coordinator: even paid historical snapshot/control-block
     // owners must be destroyed after final native authority/index gates are released.
-    state.voice_channels.collect_retired();
+    state.voice_channels.collect_retired(&state.voice_handoff);
     let selected = state
         .voice_authority
         .lock()
@@ -728,6 +771,16 @@ async fn finish(
     closure: Closure,
 ) -> Result<Status, Refused> {
     let _commit = state.ui_session_commit.clone().lock_owned().await;
+    if let Some(original) = state.voice_channels.original_selected(owner, executor) {
+        // Both setup-failure cleanup and final channel collection permanently close Control
+        // routing. Keep it available until every original action is compacted; otherwise
+        // ACK/settlement/phase closure could become unreachable. All factory admissions use
+        // this SAME UI commit, so a new Pending row cannot race the pure preflight below.
+        // No Registry/Coordinator guard overlaps the ledger check or original-owner drop.
+        if !state.voice_handoff.channel_may_close(&original) {
+            return Err(Refused::Capacity);
+        }
+    }
     let row = {
         let mut authority = state
             .voice_authority
@@ -767,7 +820,7 @@ async fn finish(
     }
     let status = row.status();
     drop(row);
-    state.voice_channels.collect_retired();
+    state.voice_channels.collect_retired(&state.voice_handoff);
     Ok(status)
 }
 

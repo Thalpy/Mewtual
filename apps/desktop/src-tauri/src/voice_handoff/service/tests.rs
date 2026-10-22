@@ -1103,7 +1103,9 @@ async fn shutdown_finds_a_retired_session_owned_only_by_an_uncollected_reply() {
     super::super::bootstrap::collect_channel(&f.state, &owner, [9; 32])
         .await
         .unwrap();
-    f.state.voice_channels.collect_retired(); // actual reply prevents reclamation.
+    f.state
+        .voice_channels
+        .collect_retired(&f.state.voice_handoff); // actual reply prevents reclamation.
     let mut finish = Box::pin(running.finish());
     assert!(std::future::poll_fn(|cx| Poll::Ready(finish.as_mut().poll(cx).is_pending())).await);
     // Observe service reaching its drain through the closed socket, not a timer.

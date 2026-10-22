@@ -219,8 +219,14 @@ async fn admitted_factory_holds_channel_collection_behind_actual_actor_completio
         "collection cannot close ahead of admitted work"
     );
     drop(parked);
-    collection.as_mut().await.unwrap();
-    assert!(route.require_open().is_err());
+    assert!(matches!(
+        collection.as_mut().await,
+        Err(crate::voice_handoff::channel::Refused::Capacity)
+    ));
+    assert!(
+        route.require_open().is_ok(),
+        "actual publication completed, but its uncertain purpose still needs Control cleanup"
+    );
     assert!(f
         .state
         .voice_handoff

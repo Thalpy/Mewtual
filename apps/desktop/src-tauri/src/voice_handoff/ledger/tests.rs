@@ -15,9 +15,14 @@ fn noop_waker() -> std::task::Waker {
     std::task::Waker::from(Arc::new(Idle))
 }
 
-fn selection() -> (Coordinator, Arc<SelectedHandoffOwner>, PairSelector) {
-    let mut coordinator =
-        Coordinator::with_runtime(Runtime::new(Arc::new(catcoms_rt::ManualClock::new(1000))));
+pub(in crate::voice_handoff) fn selection() -> (Coordinator, Arc<SelectedHandoffOwner>, PairSelector)
+{
+    selection_with_runtime(Runtime::new(Arc::new(catcoms_rt::ManualClock::new(1000))))
+}
+pub(in crate::voice_handoff) fn selection_with_runtime(
+    runtime: Arc<Runtime>,
+) -> (Coordinator, Arc<SelectedHandoffOwner>, PairSelector) {
+    let mut coordinator = Coordinator::with_runtime(runtime);
     let controller = coordinator
         .prepare(CandidateKind::Controller(1), 0)
         .unwrap();
@@ -75,7 +80,7 @@ fn ticket(
     };
     ticket
 }
-fn actual_action(
+pub(in crate::voice_handoff) fn actual_action(
     coordinator: &Coordinator,
     selected: &SelectedHandoffOwner,
 ) -> (
@@ -113,6 +118,7 @@ fn complete_records_index_handles_and_one_worker_fit_existing_fixed_payments() {
         + std::mem::size_of::<Work>()
         + std::mem::size_of::<ResolvedRow>()
         + std::mem::size_of::<Observation>()
+        + std::mem::size_of::<Option<Arc<Row>>>() // fixed collector's one removed-slot owner
         + std::mem::size_of_val(&waiter)
         + std::mem::size_of::<Status>();
     assert!(

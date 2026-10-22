@@ -43,12 +43,27 @@ An original native 8 KiB Crypto credit stays paid through real browser setup/out
 Separate original control capacity remains within the existing group/process/eight-Crypto and
 two-browser-position limits. IO expiry aborts actual reads but never proves SDK/cancel drainage.
 
-Final collection closes routing first, then detaches native Session/public/setup owners only
-after browser SDK/IO and buffers drain. Paid weak witnesses track independent headers, completed
+Explicit setup-failure and final channel collection first acquire the original shared UI commit
+and check the action ledger using the actual retained selected owner. Every matching action
+must already be compacted before routing closes. Pending or Live work returns Capacity with
+Control still open, so receipt ACK, settlement and phase cleanup remain reachable. Factory
+admission uses that same commit; the check and closure cannot race a new Pending factory.
+Only then does final collection detach native Session/public/setup owners after browser SDK/IO
+and buffers drain. Paid weak witnesses track independent headers, completed
 replies and public outputs. A slot is reusable only when its original lease is permanently dead,
 no setup is pending and every actual owner has drained. Serial IDs never reset. Housekeeping
 runs outside Coordinator before new controller/owner/key admission, including late last-owner
 drops after the collection reply. No uncertain history is evicted to make capacity.
+
+Physical channel collection transfers an opaque native-only original-Row witness to the action
+ledger, after releasing all bootstrap registry locks. It records original grant allocation,
+executor and lease provenance without upgrading current authority. The separate bounded32-slot
+sweep reclaims only actual compacted Body::Drained records with this proof, a permanently dead
+lease and no other Row owner. Evidence persists through late metadata/cleanup handles; every
+ordinary collection hook sweeps even without a new channel witness. Resources drop outside all
+registry/ledger guards and both serial allocators remain monotonic. Root can independently retain
+its own history, lower work and input owners; this collection is not proof of full Workflow
+drainage. Pending/uncertain factory closure and production action dispatch remain unfinished.
 
 Action lookup now produces a native-only ResolvedRow only after checking the actual original
 grant allocation, executor, lease and complete purpose. It retains the paid Row through delayed
@@ -65,7 +80,8 @@ pure historical lookup must not prevent an idle Pending worker from resuming on 
 This service still handles authenticated Status only. Factory/action input, result, exact
 receipt ACK, settlement, phase closure and final delivery remain open. Starting the local
 listener does not enable V2 signalling, SDP/ICE/RTC or legacy-mode isolation. The action ledger's
-separate finite history also needs collection. Relay and combined/physical acceptance remain
+separate finite history now has Drained-only physical collection; Pending closure remains open.
+Relay and combined/physical acceptance remain
 open. Earlier checkpoint sections below retain their historical scope; HANDOVER has current
 gate provenance and platform limits.
 
