@@ -541,6 +541,44 @@ impl ChosenDestination {
     pub fn name(&self) -> &str {
         &self.name
     }
+    /// Read-only check that a remembered choice can still be used, made before an explicit
+    /// Resume spends any allowance re-verifying the encrypted copy (re-review 2 LOW 3): the folder
+    /// is still the identified directory (or, without a captured identity, still a directory),
+    /// and neither the chosen name nor its partial names exist. Nothing is created. Creation
+    /// repeats every check, so this only spares a doomed acquisition; it authorizes nothing.
+    pub fn preflight(&self) -> Result<(), ChoiceRefusal> {
+        match self.folder_id {
+            Some(captured) => match external::folder_identity(&self.folder) {
+                Ok(id) if id == captured => {}
+                // Swapped, or no longer reporting the identity it had: not provably the choice.
+                Ok(_) => return Err(ChoiceRefusal::FolderChanged),
+                Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                    return Err(ChoiceRefusal::FolderChanged)
+                }
+                // Missing folder, unplugged drive, revoked permission.
+                Err(_) => return Err(ChoiceRefusal::FolderUnavailable),
+            },
+            None if self.folder.is_dir() => {}
+            None => return Err(ChoiceRefusal::FolderUnavailable),
+        }
+        let occupied = |leaf: &str| {
+            external::occupied(&self.folder.join(leaf))
+                .map_err(|_| ChoiceRefusal::FolderUnavailable)
+        };
+        if occupied(&self.name)? {
+            return Err(ChoiceRefusal::Exists);
+        }
+        // `.mewtual-part` for the journaled writer; an identity-less place uses the
+        // non-resumable writer's `.part`, which it also refuses to adopt.
+        let unjournaled = format!("{}{UNJOURNALED_SUFFIX}", self.name);
+        if occupied(&external::staging_for(&self.name))?
+            || (self.folder_id.is_none() && occupied(&unjournaled)?)
+        {
+            return Err(ChoiceRefusal::PartialExists);
+        }
+        Ok(())
+    }
+
     /// The sealed form the actor stores until Begin. Always representable: `validate` refused
     /// paths beyond the folder bound and platforms without a tag.
     pub(super) fn planned(&self) -> PlannedDestination {

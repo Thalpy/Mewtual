@@ -740,10 +740,18 @@ pub(super) async fn resume_preflight(
     actor: &ServerActor,
     id: DownloadId,
     origin: &RequestCancellation,
+    check_plan: bool,
 ) -> Result<Preflight, String> {
     let preflight = actor.download_preflight(id, origin.clone()).await?;
     let journal = match preflight.state() {
-        None => return Ok(Preflight::Continue),
+        None => {
+            // A remembered choice is the destination; spare a doomed re-verification. Skipped
+            // when this invocation's own Save as choice will replace it (`check_plan` false).
+            if check_plan {
+                plan_preflight(preflight.planned()).await?;
+            }
+            return Ok(Preflight::Continue);
+        }
         Some(ExportState::Published(_)) => return Err(ALREADY_SAVED.into()),
         Some(ExportState::Writing(journal)) => journal.clone(),
     };
@@ -780,6 +788,22 @@ pub(super) async fn resume_preflight(
         }
         // Review L5: the probe's text is already a complete message; never prefix it again.
         ExportProbe::Local(reason) => Err(reason),
+    }
+}
+
+/// Re-review 2 LOW 3: check a remembered "Save as" choice read-only, on the blocking pool, before
+/// an explicit Resume spends allowance re-verifying the encrypted copy. An unplugged, swapped or
+/// occupied chosen place is refused here with the same message creation would give, so repeated
+/// "Save to chosen place" clicks cannot exhaust the allowance. No choice: nothing to check.
+pub(super) async fn plan_preflight(
+    planned: Option<Result<Arc<ChosenDestination>, ChoiceRefusal>>,
+) -> Result<(), String> {
+    match planned {
+        None => Ok(()),
+        Some(Err(refusal)) => Err(refusal.to_string()),
+        Some(Ok(choice)) => blocking(move || choice.preflight())
+            .await?
+            .map_err(|refusal| refusal.to_string()),
     }
 }
 
@@ -956,7 +980,9 @@ pub(super) async fn prepare_resume(
         // partial its delete worker is about to remove. Held across the preflight and the intent
         // CAS only; the save itself runs without it, and a later cleanup retires its session.
         let claim = CleanupClaim::acquire(server, id)?;
-        if let Preflight::Saved(path, preflight) = resume_preflight(actor, id, origin).await? {
+        if let Preflight::Saved(path, preflight) =
+            resume_preflight(actor, id, origin, !chosen).await?
+        {
             // Clearing the recovered record takes the claim itself.
             drop(claim);
             let cleanup = async {

@@ -869,10 +869,19 @@ impl FileTransfers {
             .and_then(|(_, manifest)| {
                 catcoms_storage::kept::ExportPlan::from_manifest(&manifest).ok()
             });
+        // A remembered choice is read-only data here; a query failure just skips the check
+        // (creation re-checks the choice anyway).
+        let planned = server
+            .sync
+            .download_planned_destination(id)
+            .ok()
+            .flatten()
+            .map(|choice| choice.map(Arc::new));
         Ok(super::DownloadPreflight {
             observation,
             state,
             plan,
+            planned,
             root,
             actor: self.lifetime.subscribe(),
         })

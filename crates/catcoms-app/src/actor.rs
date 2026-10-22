@@ -130,6 +130,11 @@ pub struct DownloadPreflight {
     observation: catcoms_storage::kept::DownloadObservation,
     state: Option<catcoms_storage::kept::ExportState>,
     plan: Option<catcoms_storage::kept::ExportPlan>,
+    /// The record's remembered "Save as" choice, for the Resume preflight (re-review 2 LOW 3).
+    #[allow(clippy::type_complexity)]
+    planned: Option<
+        Result<Arc<catcoms_storage::kept::ChosenDestination>, catcoms_storage::kept::ChoiceRefusal>,
+    >,
     root: Arc<dyn catcoms_rt::RequestAuthority>,
     actor: tokio::sync::watch::Receiver<bool>,
 }
@@ -149,6 +154,18 @@ impl DownloadPreflight {
     /// Plaintext layout of the saved manifest, when it decodes.
     pub fn plan(&self) -> Option<&catcoms_storage::kept::ExportPlan> {
         self.plan.as_ref()
+    }
+    /// Where a fresh export of this record would go if it remembers a "Save as" choice (only
+    /// while there is no journal). Native-only: it names an external path. `Some(Err(_))` is a
+    /// choice this platform cannot decode. Native checks it read-only before a Resume spends
+    /// allowance; creation checks it again.
+    #[allow(clippy::type_complexity)]
+    pub fn planned(
+        &self,
+    ) -> Option<
+        Result<Arc<catcoms_storage::kept::ChosenDestination>, catcoms_storage::kept::ChoiceRefusal>,
+    > {
+        self.planned.clone()
     }
     /// Original actor and Root generation without storage custody: fences the final response
     /// after a recovery's cleanup intentionally released the record.

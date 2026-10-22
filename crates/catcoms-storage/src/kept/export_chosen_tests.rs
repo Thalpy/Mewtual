@@ -343,6 +343,40 @@ fn a_folder_swapped_between_the_identity_check_and_creation_is_refused() {
 }
 
 #[test]
+fn a_remembered_choice_is_preflighted_without_creating_anything() {
+    // Re-review 2 LOW 3: an unplugged, swapped or occupied chosen place is found before Resume
+    // spends allowance, and the check itself creates nothing.
+    let fx = fixture();
+    let folder = chosen_folder(&fx);
+    let choice = ChosenDestination::validate(&folder.join("report.bin")).unwrap();
+    assert_eq!(choice.preflight(), Ok(()));
+    assert_eq!(fs::read_dir(&folder).unwrap().count(), 0, "nothing created");
+    fs::write(folder.join("report.bin"), b"arrived meanwhile").unwrap();
+    assert_eq!(choice.preflight(), Err(ChoiceRefusal::Exists));
+    fs::remove_file(folder.join("report.bin")).unwrap();
+    fs::write(folder.join("report.bin.mewtual-part"), b"").unwrap();
+    assert_eq!(choice.preflight(), Err(ChoiceRefusal::PartialExists));
+    fs::remove_file(folder.join("report.bin.mewtual-part")).unwrap();
+    // Swapped for another directory at the same path.
+    fs::rename(&folder, folder.with_file_name("Moved away")).unwrap();
+    fs::create_dir(&folder).unwrap();
+    assert_eq!(choice.preflight(), Err(ChoiceRefusal::FolderChanged));
+    // Gone entirely (an unplugged drive).
+    fs::remove_dir(&folder).unwrap();
+    assert_eq!(choice.preflight(), Err(ChoiceRefusal::FolderUnavailable));
+    assert!(!folder.exists(), "never recreated");
+    // Without a captured identity: still a directory, and the `.part` name counts too.
+    fs::create_dir(&folder).unwrap();
+    let loose = identityless(&folder, "loose.bin");
+    assert_eq!(loose.preflight(), Ok(()));
+    fs::write(folder.join("loose.bin.part"), b"").unwrap();
+    assert_eq!(loose.preflight(), Err(ChoiceRefusal::PartialExists));
+    fs::remove_file(folder.join("loose.bin.part")).unwrap();
+    fs::remove_dir(&folder).unwrap();
+    assert_eq!(loose.preflight(), Err(ChoiceRefusal::FolderUnavailable));
+}
+
+#[test]
 fn a_swap_and_swap_back_around_creation_with_a_planted_file_writes_nothing() {
     // Picker re-review LOW 2: the folder is swapped before the create (our partial lands in the
     // other folder), then restored with a file planted at our name before the recheck. The

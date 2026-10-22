@@ -191,6 +191,29 @@ fn the_record_not_the_invocation_selects_where_a_fresh_save_goes() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_remembered_choice_that_cannot_be_used_is_refused_before_reverification() {
+    // Re-review 2 LOW 3: the Resume preflight for a record with a remembered Save as choice.
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().join("Chosen place");
+    std::fs::create_dir(&folder).unwrap();
+    let choice = Arc::new(ChosenDestination::validate(&folder.join("report.bin")).unwrap());
+    assert_eq!(plan_preflight(None).await, Ok(()));
+    assert_eq!(plan_preflight(Some(Ok(choice.clone()))).await, Ok(()));
+    assert_eq!(
+        plan_preflight(Some(Err(ChoiceRefusal::FolderUnavailable))).await,
+        Err(ChoiceRefusal::FolderUnavailable.to_string()),
+        "a choice this platform cannot decode is refused, not redirected"
+    );
+    // The drive holding the chosen folder was unplugged.
+    std::fs::remove_dir(&folder).unwrap();
+    assert_eq!(
+        plan_preflight(Some(Ok(choice))).await,
+        Err(ChoiceRefusal::FolderUnavailable.to_string())
+    );
+    assert!(!folder.exists(), "the preflight creates nothing");
+}
+
 #[test]
 fn a_save_counts_as_in_downloads_only_directly_inside_the_downloads_folder() {
     // Picker re-review LOW 1b and its re-check: the result's inDownloads flag fails closed.

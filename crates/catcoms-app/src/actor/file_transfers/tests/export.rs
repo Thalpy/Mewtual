@@ -452,6 +452,49 @@ async fn save_new_copy_and_replacement_transfers_release_stale_export_results() 
     run.close().await;
 }
 
+/// Re-review 2 LOW 3: the Resume preflight carries the record's remembered choice so native can
+/// check it before any re-verification; Begin consumes it.
+#[tokio::test]
+async fn the_resume_preflight_carries_the_remembered_choice_until_begin() {
+    let run = running().await;
+    let chosen = tempfile::tempdir().unwrap();
+    let choice = Arc::new(
+        catcoms_storage::kept::ChosenDestination::validate(&chosen.path().join("report.bin"))
+            .unwrap(),
+    );
+    let ready = bounded(run.actor.acquire_download_to(
+        run.cid.as_bytes().to_vec(),
+        None,
+        Some(choice.clone()),
+        run.origin.clone(),
+    ))
+    .await
+    .unwrap()
+    .with_export_custody(Arc::new(()));
+    let preflight = bounded(run.actor.download_preflight(ready.id(), run.origin.clone()))
+        .await
+        .unwrap();
+    let planned = preflight.planned().expect("remembered").unwrap();
+    assert_eq!(*planned, *choice);
+    let file = ExportFile::create_chosen(&planned, ready.export_plan().unwrap()).unwrap();
+    bounded(run.actor.download_export_transition(
+        ready.clone(),
+        DownloadExportTransition::Begin {
+            journal: file.journal().clone(),
+            presence: file.presence(),
+        },
+        run.origin.clone(),
+    ))
+    .await
+    .unwrap();
+    let after = bounded(run.actor.download_preflight(ready.id(), run.origin.clone()))
+        .await
+        .unwrap();
+    assert!(after.planned().is_none(), "Begin consumed the choice");
+    drop(file);
+    run.close().await;
+}
+
 #[tokio::test]
 async fn preflight_edges_from_before_a_freeze_and_thaw_record_nothing() {
     // Review U-M3: a Resume preflight snapshots the journal and starts its blocking probe; the
