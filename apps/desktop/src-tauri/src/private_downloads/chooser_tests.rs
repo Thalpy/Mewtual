@@ -165,17 +165,39 @@ async fn save_as_selection_through_the_chooser_seam() {
     let abandoned = choose_destination(&hung, None, "hung.bin", async {
         let _ = cancelled.await;
     });
-    cancel.send(()).unwrap();
+    // Lock lands only once the dialog is open.
+    let lock_lands = async {
+        while hung.asked.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        cancel.send(()).unwrap();
+    };
     // Bounded, so a regression fails here instead of hanging the suite.
-    let ended = tokio::time::timeout(Duration::from_secs(20), abandoned)
-        .await
-        .expect("cancelling the invocation ends the dialog wait");
+    let (ended, ()) = tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::join!(abandoned, lock_lands)
+    })
+    .await
+    .expect("cancelling the invocation ends the dialog wait");
     assert_eq!(ended.unwrap_err(), DIALOG_ABANDONED);
     assert_eq!(hung.asked.lock().unwrap().len(), 1, "the dialog had opened");
     let next = Scripted::answering(Ok(None));
     assert!(
         choose_now(&next, None, "next.bin").await.unwrap().is_none(),
         "the turn was released"
+    );
+
+    // Re-review 3 LOW 3: an invocation already cancelled (Lock landed before the dialog) never
+    // asks for a dialog at all, so no orphan window opens.
+    let late = Scripted::answering(Ok(None));
+    assert_eq!(
+        choose_destination(&late, None, "late.bin", std::future::ready(()))
+            .await
+            .unwrap_err(),
+        DIALOG_ABANDONED
+    );
+    assert!(
+        late.asked.lock().unwrap().is_empty(),
+        "no dialog was opened"
     );
 }
 

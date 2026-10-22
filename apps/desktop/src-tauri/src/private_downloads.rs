@@ -677,10 +677,13 @@ pub(super) async fn choose_destination(
     // box when the user presses Save, so "%APPDATA%_x" would turn into a path elsewhere that the
     // user never saw or typed. A suggestion never carries `%` (picker review residual).
     let suggested = safe_download_name(name).replace('%', "_");
+    // Cancellation is polled first (re-review 3 LOW 3): `NativeChooser` schedules the OS dialog on
+    // its first poll, so an invocation already cancelled must never reach it, or it would open an
+    // orphan window.
     let answer = tokio::select! {
         biased;
-        answer = chooser.choose(downloads, suggested) => answer?,
         () = cancelled => return Err(DIALOG_ABANDONED.into()),
+        answer = chooser.choose(downloads, suggested) => answer?,
     };
     let Some(picked) = answer else {
         return Ok(None);
