@@ -14,20 +14,22 @@ use std::future::{poll_fn, Future};
 use std::pin::Pin;
 use std::task::Poll;
 
-struct Case {
-    native: Fixture,
-    context: Context,
-    route: Route,
-    public: Arc<SetupOutput>,
-    selected: Arc<SelectedHandoffOwner>,
-    selector: PairSelector,
-    join: LocalJoin,
-    action: Arc<CryptoAction>,
-    id: RowId,
+// Shared ONLY inside native handoff tests: the same real action/Phase fixture also pins
+// history recovery. This exposes no production constructor or Root fabrication seam.
+pub(in crate::voice_handoff) struct Case {
+    pub(in crate::voice_handoff) native: Fixture,
+    pub(in crate::voice_handoff) context: Context,
+    pub(in crate::voice_handoff) route: Route,
+    pub(in crate::voice_handoff) public: Arc<SetupOutput>,
+    pub(in crate::voice_handoff) selected: Arc<SelectedHandoffOwner>,
+    pub(in crate::voice_handoff) selector: PairSelector,
+    pub(in crate::voice_handoff) join: LocalJoin,
+    pub(in crate::voice_handoff) action: Arc<CryptoAction>,
+    pub(in crate::voice_handoff) id: RowId,
     phase: Arc<Phase>,
 }
 impl Case {
-    async fn new() -> Self {
+    pub(in crate::voice_handoff) async fn new() -> Self {
         let native = Fixture::new().await;
         let owner = native.candidate().await;
         let runtime = crate::voice_runtime(&native.state);
@@ -134,7 +136,7 @@ impl Case {
             phase,
         }
     }
-    fn bytes(&self) -> Vec<u8> {
+    pub(in crate::voice_handoff) fn bytes(&self) -> Vec<u8> {
         let mut bytes = vec![1];
         bytes.extend_from_slice(self.selector.peer.as_bytes());
         bytes.extend_from_slice(&self.selector.join);
@@ -147,7 +149,7 @@ impl Case {
         bytes.extend_from_slice(&0u16.to_be_bytes());
         bytes
     }
-    fn frame(&self, sequence: u64, bytes: &[u8]) -> Incoming {
+    pub(in crate::voice_handoff) fn frame(&self, sequence: u64, bytes: &[u8]) -> Incoming {
         crate::voice_handoff::service::tests::opened_frame(
             &self.public,
             &self.route,
@@ -156,14 +158,14 @@ impl Case {
             Some(&self.phase),
         )
     }
-    fn row(&self) -> super::super::ledger::ResolvedRow {
+    pub(in crate::voice_handoff) fn row(&self) -> super::super::ledger::ResolvedRow {
         self.native
             .state
             .voice_handoff
             .resolve(&self.selected, Purpose::Derive(self.selector), self.id)
             .unwrap()
     }
-    fn retire(&self) {
+    pub(in crate::voice_handoff) fn retire(&self) {
         self.action.settle_engine();
         self.phase.close_confirmation().unwrap();
     }

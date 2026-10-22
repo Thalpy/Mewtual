@@ -1,5 +1,5 @@
 //! Inactive original-Pending closure adapter. It terminates ONLY local native preparation,
-//! not an uncertain Root pair/action or full Workflow. Production still serves Status only.
+//! not an uncertain Root pair/action or full Workflow. Production serves only Status/read-only history.
 //! The retained broker must first drain actual SDK/RPC work before issuing ClosePhase; frame
 //! authentication cannot prove that protocol precondition on its own.
 use super::bootstrap::Route;

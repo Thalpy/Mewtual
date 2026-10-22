@@ -7,6 +7,8 @@ import {
   voiceIpcNonce, voiceIpcResponseAad, type VoiceIpcHeader,
 } from "./voice-ipc-frame.ts";
 import { readVoiceIpcResponse } from "./voice-ipc-body.ts";
+import { encodeVoiceIpcAction, type VoiceIpcPurpose } from "./voice-ipc-actions.ts";
+import { decodeVoiceIpcActionReply, isVoiceIpcActionRow, type VoiceIpcActionReply } from "./voice-ipc-replies.ts";
 // The broker survives HMR, so new module instances must use its original owner brand.
 // This is lifecycle bookkeeping within one trusted window, not a security capability.
 const OWNER = Symbol.for("mewtual.voice.crypto-owner.v2");
@@ -193,6 +195,14 @@ export interface VoiceIpcNative {
 }
 export type VoiceIpcStatus = Readonly<{ kind: "ready" | "closed"; nativeSetupDrained: boolean }> |
   Readonly<{ kind: "uncertain" | "retired" | "failed" }>;
+/** Historical metadata only. Even localDrained/retired receipts grant no call, factory,
+ * Workflow-finalization or unlink authority. Native history refusals do not close a Session. */
+export type VoiceIpcHistoryOutcome = VoiceIpcActionReply |
+  Readonly<{ kind: "uncertain" | "retired" | "failed" | "busy" }>;
+type IpcHistoryRequest = {
+  purpose: VoiceIpcPurpose; expectedRow: string | null;
+  body: Uint8Array<ArrayBuffer>; result: Signal<VoiceIpcHistoryOutcome>;
+};
 export type VoiceIpcChannel = Readonly<{
   /** Coalesces the current physical flight. Later calls spend a fresh original-session TX. */
   status(): Promise<VoiceIpcStatus>;
@@ -360,7 +370,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 10;
+  readonly version = 11;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -493,7 +503,7 @@ export class VoiceCryptoBroker {
   /** The only browser Session constructor consumes this broker's EXACT accepted selected
    * key/executor. Generic bound keys, supplied seeds/points or equal owner strings cannot
    * reconstruct it. The original channel and its counters survive component/HMR remounts.
-   * This status-only stage grants no Root, remote-member, action, SDP or RTC authority. */
+   * Setup status and historical reads grant no Root, remote-member, action, SDP or RTC authority. */
   nativeChannel(owner: VoiceCryptoOwner, handle: VoiceJoinKeyHandle, native: VoiceIpcNative,
     transport: typeof fetch = globalThis.fetch): VoiceIpcChannel {
     current(owner);
@@ -533,6 +543,18 @@ export class VoiceCryptoBroker {
     try { channel.observe(); }
     catch (error) { channel.abandon(); throw error; }
     return channel.handle;
+  }
+
+  /** Recover existing action history on this broker's EXACT retained channel. Establish it
+   * with status() first: this method never constructs/reconstructs keys or starts setup.
+   * One paid Control flight coalesces identical requests; another purpose returns busy.
+   * Null expectedRow is only for the first Begin reply, which authenticates the unknown ID. */
+  recoverChannelHistory(owner: VoiceCryptoOwner, handle: VoiceIpcChannel,
+    purpose: VoiceIpcPurpose, expectedRow: string | null = null): Promise<VoiceIpcHistoryOutcome> {
+    const channel = this.ipcChannels.get(owner.token);
+    // Compare actual original allocations BEFORE any owner predicate/callback can run.
+    if (!channel || channel.handle !== handle || !channel.owns(owner)) throw new Error("voice channel identity changed");
+    return channel.history(purpose, expectedRow);
   }
 
   private async waitSelectedKeyRetry(record: SelectedKeyRecord, observed: object): Promise<void> {
@@ -1304,6 +1326,9 @@ class RetainedIpcChannel {
   // driver's finally; a microtask gap after SDK release is not whole-channel drainage.
   private activity = 0;
   private request: Signal<VoiceIpcStatus> | null = null;
+  // At most one original paid read flight, not a request map or independent queue. Its
+  // immutable purpose remains available for coalescing after SDK plaintext is zeroed.
+  private historyRequest: IpcHistoryRequest | null = null;
   private driving = false;
   private retired = false;
   private drained = false;
@@ -1336,6 +1361,32 @@ class RetainedIpcChannel {
   }
   belongsTo(selected: SelectedKeyRecord, native: VoiceIpcNative, transport: typeof fetch): boolean {
     return this.selected === selected && this.native === native && this.transport === transport;
+  }
+  owns(owner: VoiceCryptoOwner): boolean { return this.selected.owner === owner; }
+  history(purpose: VoiceIpcPurpose, expectedRow: string | null): Promise<VoiceIpcHistoryOutcome> {
+    if (!this.live()) return Promise.resolve(Object.freeze({ kind: "retired" }));
+    if (expectedRow !== null && !isVoiceIpcActionRow(expectedRow)) throw new Error("invalid voice history row");
+    // Copy exactly four immutable strings, never extra caller properties or a mutable
+    // purpose object. Encode validates canonical hashes/u64 before publishing any request.
+    const selected = Object.freeze({ peer: purpose.peer, join: purpose.join, keyRef: purpose.keyRef, epoch: purpose.epoch });
+    const encoded = encodeVoiceIpcAction(selected, { kind: "begin", retry: false });
+    if (!this.live()) { encoded.body.fill(0); return Promise.resolve(Object.freeze({ kind: "retired" })); }
+    const previous = this.historyRequest;
+    if (previous) {
+      const same = previous.expectedRow === expectedRow && previous.purpose.peer === selected.peer &&
+        previous.purpose.join === selected.join && previous.purpose.keyRef === selected.keyRef && previous.purpose.epoch === selected.epoch;
+      encoded.body.fill(0);
+      return same ? previous.result.promise : Promise.resolve(Object.freeze({ kind: "busy" }));
+    }
+    // History has no constructor path. Preserve the SAME keys/bootstrap and any real
+    // SDK/IO owner already occupying this original driver, including its final cleanup.
+    if (!this.keys || !this.bootstrap || this.request || this.driving) {
+      encoded.body.fill(0); return Promise.resolve(Object.freeze({ kind: "busy" }));
+    }
+    const query: IpcHistoryRequest = { purpose: selected, expectedRow, body: encoded.body, result: signal<VoiceIpcHistoryOutcome>() };
+    this.historyRequest = query;
+    this.start();
+    return query.result.promise;
   }
   private beginActivity(): void { if (++this.activity === 1) this.custody.begin(); }
   private endActivity(): void { if (--this.activity === 0) this.custody.end(); }
@@ -1378,6 +1429,9 @@ class RetainedIpcChannel {
     this.retired = true; this.controller?.abort(); this.wake();
     this.linked?.handle.close();
     this.request?.resolve(Object.freeze({ kind: "retired" })); this.request = null;
+    // Early observation is not physical completion. Keep the SAME query/body in State and
+    // the existing driver until actual SDK/read/cancellation and native cleanup finish.
+    this.historyRequest?.result.resolve(Object.freeze({ kind: "retired" }));
     if (this.drained) this.collect(); else this.start();
   }
   private collect(): void {
@@ -1385,6 +1439,7 @@ class RetainedIpcChannel {
     this.collected = true; this.unsubscribe(); this.custody.collected();
   }
   private status(): Promise<VoiceIpcStatus> {
+    if (this.historyRequest) return Promise.resolve(Object.freeze({ kind: this.live() ? "uncertain" : "retired" }));
     this.wake();
     if (!this.live()) return Promise.resolve(Object.freeze({ kind: "retired" }));
     if (this.request) return this.request.promise;
@@ -1400,16 +1455,22 @@ class RetainedIpcChannel {
   }
   private async drive(): Promise<void> {
     let outcome: VoiceIpcStatus = Object.freeze({ kind: "uncertain" });
+    const history = this.historyRequest;
+    let historical: VoiceIpcHistoryOutcome = Object.freeze({ kind: "uncertain" });
     try {
       await this.execution.run(async () => {
-        if (this.live() && await this.setup()) outcome = await this.exchange();
+        if (history) {
+          if (this.live() && this.keys && this.bootstrap) historical = await this.exchange(history);
+        } else if (this.live() && await this.setup()) outcome = await this.exchange(null);
       });
     } catch {
       // Engine/setup validation failure cannot restart construction. Transport/body failures
       // after keys exist remain retryable using fresh physical counters on this SAME Session.
-      if (!this.keys) { this.retired = true; outcome = Object.freeze({ kind: "failed" }); }
+      if (!this.keys) { this.retired = true; outcome = Object.freeze({ kind: "failed" }); historical = Object.freeze({ kind: "failed" }); }
     } finally {
+      history?.body.fill(0); // the shared execution promise includes real SDK/read cancellation
       if (!this.live()) {
+        if (history) historical = Object.freeze({ kind: "retired" });
         this.linked?.handle.close();
         // Release the physical lane BEFORE waiting for linked SDK/settlement. A provider
         // may already be queued behind our aborting read and still need this SAME position.
@@ -1419,6 +1480,8 @@ class RetainedIpcChannel {
       }
       if (this.terminal) outcome = this.terminal;
       this.request?.resolve(outcome); this.request = null;
+      history?.result.resolve(historical);
+      if (this.historyRequest === history) this.historyRequest = null;
       this.driving = false; this.endActivity(); this.collect();
     }
   }
@@ -1481,16 +1544,18 @@ class RetainedIpcChannel {
       return Object.freeze({ requestMac, requestBody, responseMac, responseBody });
     } finally { shared?.fill(0); seed?.fill(0); }
   }
-  private async exchange(): Promise<VoiceIpcStatus> {
+  private exchange(query: null): Promise<VoiceIpcStatus>;
+  private exchange(query: IpcHistoryRequest): Promise<VoiceIpcActionReply>;
+  private async exchange(query: IpcHistoryRequest | null): Promise<VoiceIpcStatus | VoiceIpcActionReply> {
     this.check();
     const keys = this.keys!, bootstrap = this.bootstrap!;
     if (this.tx === 0xffff_ffff_ffff_ffffn) { this.retired = true; throw new Error("voice channel exhausted"); }
     // Debit BEFORE invoking WebCrypto. Even a synchronous failure, refused fetch or lost
     // response permanently spends this physical TX; logical retries never reconstruct it.
-    const request: VoiceIpcHeader = Object.freeze({ direction: 0, operation: 9, kind: 0,
-      slot: bootstrap.slot, sequence: ++this.tx, logical: bootstrap.session, length: 65 });
-    const header = encodeVoiceIpcHeader(request), plaintext = new Uint8Array(49);
-    plaintext[0] = 1; plaintext.set(ipcBytes(bootstrap.session), 1); plaintext.set(this.hash!, 17);
+    const request: VoiceIpcHeader = Object.freeze({ direction: 0, operation: query ? 8 : 9, kind: 0,
+      slot: bootstrap.slot, sequence: ++this.tx, logical: query ? "0".repeat(32) : bootstrap.session, length: query ? 122 : 65 });
+    const header = encodeVoiceIpcHeader(request), plaintext = query ? query.body : new Uint8Array(49);
+    if (!query) { plaintext[0] = 1; plaintext.set(ipcBytes(bootstrap.session), 1); plaintext.set(this.hash!, 17); }
     let sealed: Uint8Array<ArrayBuffer> | null = null, opened: Uint8Array<ArrayBuffer> | null = null;
     let body: Uint8Array<ArrayBuffer> | null = null, response: Response | null = null;
     const controller = new AbortController(); this.controller = controller;
@@ -1520,7 +1585,8 @@ class RetainedIpcChannel {
       let incoming: ReturnType<typeof decodeVoiceIpcAdmission> | null = null;
       body = await readVoiceIpcResponse(response, controller.signal, async admission => {
         const decoded = decodeVoiceIpcAdmission(admission);
-        if (decoded.header.operation !== 9 || decoded.header.kind !== 0 || decoded.header.length !== 19) throw new Error("voice status refused");
+        if (decoded.header.operation !== request.operation || decoded.header.kind !== 0 ||
+            (query ? decoded.header.length !== 19 && decoded.header.length !== 258 : decoded.header.length !== 19)) throw new Error("voice control reply refused");
         const aad = voiceIpcResponseAad(decoded.header, request);
         if (!await this.step(this.subtle.verify("HMAC", keys.responseMac, decoded.tag, aad))) throw new Error("voice response refused");
         if (decoded.header.sequence <= this.rx) throw new Error("voice response replayed");
@@ -1533,6 +1599,9 @@ class RetainedIpcChannel {
       if (!received) throw new Error("voice response refused");
       opened = new Uint8Array(await this.subtle.decrypt({ name: "AES-GCM", iv: voiceIpcNonce(received.header), additionalData: voiceIpcResponseAad(received.header, request) }, keys.responseBody, body));
       this.check();
+      // History closed/stopped are action-history refusals, never channel closure, setup
+      // acknowledgement, a refund, Root readiness or permission to unlink a linked chain.
+      if (query) return decodeVoiceIpcActionReply(opened, query.expectedRow);
       if (opened.length !== 3 || opened[0] !== 1 || (opened[1] !== 1 && opened[1] !== 2) || opened[2] > 1) throw new Error("voice status refused");
       // This proves only native setup drainage. Native never asserts browser/RTC readiness.
       this.custody.setupDrained();
@@ -1596,7 +1665,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 10 || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 11 || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");

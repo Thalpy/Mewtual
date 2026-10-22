@@ -116,7 +116,9 @@ fn paid_fixed_storage_and_original_control_lane_cover_codec_peak() {
         + 2 * std::mem::size_of::<usize>()
         + state
         + http::HEADER_BYTES // FULL fixed Box allocation, not merely its inline pointer
-        + super::super::pending_close::layout_bytes()
+        // Only one synchronous Control opcode owns this original physical position. Count
+        // its largest complete handler graph, not a sum of mutually exclusive dispatch arms.
+        + super::super::pending_close::layout_bytes().max(super::super::history::layout_bytes())
         + std::mem::size_of::<Aes256Gcm>()
         + 2 * std::mem::size_of::<Hmac<Sha256>>()
         + crypto::HEADER * 4

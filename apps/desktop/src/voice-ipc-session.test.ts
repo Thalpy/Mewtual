@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { webcrypto } from "node:crypto";
+import { readFileSync } from "node:fs";
 import {
   VoiceCryptoBroker, createVoiceCryptoOwner, windowVoiceCryptoBroker,
   type VoiceIpcNative, type VoiceSelectedKeyNative, type VoiceCryptoChainBinding,
@@ -8,9 +9,11 @@ import {
 } from "./voice-crypto.ts";
 import {
   decodeVoiceIpcAdmission, encodeVoiceIpcAdmission,
-  voiceIpcNonce, voiceIpcResponseAad, type VoiceIpcHeader,
+  voiceIpcNonce, type VoiceIpcHeader,
 } from "./voice-ipc-frame.ts";
 import { windowVoiceIpcNative } from "./voice-ipc-native.ts";
+import { encodeVoiceIpcAction, type VoiceIpcPurpose } from "./voice-ipc-actions.ts";
+import type { VoiceIpcActionReply } from "./voice-ipc-replies.ts";
 
 const real = webcrypto.subtle as unknown as SubtleCrypto;
 const utf8 = new TextEncoder();
@@ -21,6 +24,15 @@ async function until(check: () => boolean) {
   while (!check()) { if (performance.now() >= deadline) throw new Error("condition did not settle"); await new Promise<void>(yes => setImmediate(yes)); }
 }
 const integer = (n: bigint, size: number) => Buffer.from(n.toString(16).padStart(size * 2, "0"), "hex");
+const historyPurpose: VoiceIpcPurpose = Object.freeze({ peer: hash(7), join: hash(8), keyRef: hash(9), epoch: "9007199254740993" });
+const historyVectors = JSON.parse(readFileSync(new URL("../src-tauri/src/voice_handoff/replies/vectors.json", import.meta.url), "utf8")) as {
+  statusCases: { name: string; plaintext: string; expected: VoiceIpcActionReply }[];
+  refusedCases: { name: string; plaintext: string; expected: VoiceIpcActionReply }[];
+};
+const historyVector = (name: string) => {
+  const found = [...historyVectors.statusCases, ...historyVectors.refusedCases].find(item => item.name === name);
+  assert.ok(found, `missing shared history vector ${name}`); return found;
+};
 
 /** Independent actual-WebCrypto native endpoint fixture. It consumes only the published
  * selected point, never this broker's private key or its Session internals/counters. */
@@ -33,6 +45,9 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
   let forceSequence: bigint | null = null, nativeSequence = 0n;
   const requestSequences: bigint[] = [], engineSteps: string[] = [];
   const bodyReads: number[] = [];
+  const operations: number[] = [];
+  let historyBody = Buffer.from(historyVector("derived-drained").plaintext, "hex");
+  let responseChange: Partial<VoiceIpcHeader> | null = null;
   let holdAt = -1, held: ReturnType<typeof gate> | null = null, engineEnabled = false;
   let stalled = false, cancelEntered = false, cancelGate: ReturnType<typeof gate> | null = null;
   let observedStep = -1;
@@ -124,11 +139,24 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     assert.equal(await real.verify("HMAC", requestMac, request.tag, request.bytes), true);
     requestSequences.push(request.header.sequence);
     const opened = new Uint8Array(await real.decrypt({ name: "AES-GCM", iv: voiceIpcNonce(request.header), additionalData: request.bytes }, requestBody, init!.body as Uint8Array<ArrayBuffer>));
-    assert.deepEqual(opened, new Uint8Array(Buffer.concat([Buffer.from([1]), session, transcriptHash]))); opened.fill(0);
-    const response: VoiceIpcHeader = Object.freeze({ ...request.header, direction: 1, length: 19,
-      sequence: forceSequence ?? ++nativeSequence });
-    const aad = voiceIpcResponseAad(response, request.header);
-    const body = new Uint8Array(await real.encrypt({ name: "AES-GCM", iv: voiceIpcNonce(response), additionalData: aad }, responseBody, new Uint8Array([1, setupClosed ? 2 : 1, 1])));
+    operations.push(request.header.operation);
+    if (request.header.operation === 9) {
+      assert.deepEqual(opened, new Uint8Array(Buffer.concat([Buffer.from([1]), session, transcriptHash])));
+    } else {
+      assert.equal(request.header.operation, 8); assert.equal(request.header.kind, 0);
+      assert.equal(request.header.logical, "0".repeat(32)); assert.equal(request.header.length, 122);
+      assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "begin", retry: false }).body);
+    }
+    opened.fill(0);
+    const plaintext = request.header.operation === 8 ? historyBody : new Uint8Array([1, setupClosed ? 2 : 1, 1]);
+    const response: VoiceIpcHeader = Object.freeze({ ...request.header, direction: 1, length: plaintext.length + 16,
+      sequence: forceSequence ?? ++nativeSequence, ...responseChange });
+    // Deliberately allow a valid native MAC over a wrongly bound response. The actual
+    // browser must reject its binding before accepting/reading the body, even with a MAC.
+    const aad = new Uint8Array(Buffer.concat([
+      Buffer.from(decodeVoiceIpcAdmission(encodeVoiceIpcAdmission(response, new Uint8Array(32))).bytes), request.bytes,
+    ]));
+    const body = new Uint8Array(await real.encrypt({ name: "AES-GCM", iv: voiceIpcNonce(response), additionalData: aad }, responseBody, plaintext));
     if (badBody) body[0] ^= 1;
     const mac = new Uint8Array(await real.sign("HMAC", responseMac, aad));
     const wire = new Uint8Array(Buffer.concat([utf8.encode(encodeVoiceIpcAdmission(response, mac)), body]));
@@ -158,6 +186,10 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     cleanup(work: () => void) { cleanups.push(work); },
     channel() { return broker.nativeChannel(owner, selected.key, native, transport); },
     counts: () => ({ ordinary, setups, settlements, collections, steps: [...engineSteps], tx: [...requestSequences], reads: bodyReads.length }),
+    historyBytes(value: Uint8Array) { historyBody = Buffer.from(value); },
+    historyReply(name: string) { historyBody = Buffer.from(historyVector(name).plaintext, "hex"); },
+    responseChange(value: Partial<VoiceIpcHeader> | null) { responseChange = value; },
+    operations: () => [...operations], bodyReads: () => [...bodyReads],
     hold(index: number) { holdAt = index; held = gate(); return { release: held.release, entered: () => observedStep === index }; },
     loseSetup() { loseSetup = true; }, loseSettle() { loseSettle = true; }, tamperSetup() { tamperSetup = true; },
     closeBeforeSetup() { setupClosed = true; },
@@ -485,8 +517,203 @@ test("absolute IO deadline aborts stale-port fetch but retains custody until act
   assert.equal((await channel.status()).kind, "ready"); assert.deepEqual(f.counts().tx, [2n]);
 });
 
-for (const version of [7, 8, 9]) test(`HMR refuses v${version} retained pool rather than creating a second channel allocator`, () => {
+for (const version of [7, 8, 9, 10]) test(`HMR refuses v${version} retained pool rather than creating a second channel allocator`, () => {
   const host = { [Symbol.for("mewtual.voice.crypto-broker.v2")]: { version } };
   const native = { async admit() { return ""; }, async settle() {}, async commitInbound() {} };
   assert.throws(() => windowVoiceCryptoBroker(native, host, real), /reload required/);
+});
+
+test("history cannot construct a session and rejects substituted owner/handle before owner callbacks", async t => {
+  const f = await fixture(t), channel = f.channel(), before = f.counts();
+  assert.deepEqual(await f.broker.recoverChannelHistory(f.owner, channel, historyPurpose), { kind: "busy" });
+  assert.deepEqual(f.counts(), before);
+  let callbacks = 0;
+  const foreign = createVoiceCryptoOwner(f.owner.token, f.owner.group, () => { callbacks++; return true; });
+  assert.throws(() => f.broker.recoverChannelHistory(foreign, channel, historyPurpose), /identity changed/);
+  assert.throws(() => f.broker.recoverChannelHistory(f.owner, { ...channel }, historyPurpose), /identity changed/);
+  assert.equal(callbacks, 0); assert.deepEqual(f.counts(), before);
+  assert.equal((await channel.status()).kind, "ready");
+  assert.equal((await f.broker.recoverChannelHistory(f.owner, channel, historyPurpose)).kind, "status");
+  assert.equal(f.counts().setups, 1);
+});
+
+test("history uses original keys/counters, coalesces the same promise and never queues a competing read", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const before = f.counts(), charged = f.broker.counts().bytes;
+  const held = f.hold(before.steps.length), mutable = { ...historyPurpose };
+  const request = f.broker.recoverChannelHistory(f.owner, channel, mutable);
+  mutable.peer = hash(55);
+  await until(held.entered);
+  assert.equal(f.broker.recoverChannelHistory(f.owner, channel, historyPurpose), request);
+  assert.deepEqual(await f.broker.recoverChannelHistory(f.owner, channel, mutable), { kind: "busy" });
+  const row = historyVector("derived-drained").expected;
+  assert.equal(row.kind, "status"); if (row.kind !== "status") throw new Error("fixture");
+  assert.deepEqual(await f.broker.recoverChannelHistory(f.owner, channel, historyPurpose, row.row), { kind: "busy" });
+  assert.deepEqual(await channel.status(), { kind: "uncertain" });
+  assert.equal(f.counts().steps.length, before.steps.length + 1);
+  assert.equal(f.broker.counts().active, 1); assert.equal(f.broker.counts().bytes, charged);
+  held.release(); assert.deepEqual(await request, row);
+  assert.equal(f.counts().steps.length - before.steps.length, 4);
+  assert.deepEqual(f.counts().steps.slice(before.steps.length), ["encrypt", "sign", "verify", "decrypt"]);
+  assert.deepEqual(f.operations(), [9, 8]); assert.deepEqual(f.counts().tx, [1n, 2n]);
+  assert.deepEqual(f.bodyReads(), [19, 258]); assert.equal(f.counts().ordinary, 0);
+  assert.equal(f.counts().setups, 1); assert.equal(f.broker.counts().bytes, charged);
+  assert.deepEqual(await f.broker.recoverChannelHistory(f.owner, channel, historyPurpose, row.row), row);
+  assert.deepEqual(f.counts().tx, [1n, 2n, 3n]);
+});
+
+test("a pending status leaves history busy without reserving a waiter or starting another driver", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const hold = f.hold(f.counts().steps.length), status = channel.status(); await until(hold.entered);
+  const before = f.counts(), charged = f.broker.counts().bytes;
+  assert.deepEqual(await f.broker.recoverChannelHistory(f.owner, channel, historyPurpose), { kind: "busy" });
+  assert.deepEqual(f.counts(), before); assert.equal(f.broker.counts().bytes, charged);
+  hold.release(); assert.equal((await status).kind, "ready");
+  assert.deepEqual(f.operations(), [9, 9]);
+});
+
+for (const step of [1, 3]) test(`history coalesces after plaintext zeroing while SDK step ${step + 1} is parked`, async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const held = f.hold(f.counts().steps.length + step);
+  const first = f.broker.recoverChannelHistory(f.owner, channel, historyPurpose); await until(held.entered);
+  // Encrypt has already consumed and zeroed query.body. Coalescing must use only the
+  // retained canonical purpose, not the now-zero bytes or a newly allocated request.
+  const before = f.counts();
+  assert.equal(f.broker.recoverChannelHistory(f.owner, channel, { ...historyPurpose }), first);
+  assert.deepEqual(f.counts(), before); assert.equal(f.broker.counts().active, 1);
+  held.release(); assert.deepEqual(await first, historyVector("derived-drained").expected);
+});
+
+for (const item of historyVectors.refusedCases) test(`authenticated history refusal ${item.name} cannot close or refund the channel`, async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const charged = f.broker.counts().bytes; f.historyReply(item.name);
+  assert.deepEqual(await f.broker.recoverChannelHistory(f.owner, channel, historyPurpose), item.expected);
+  assert.equal(f.broker.counts().bytes, charged); assert.equal(f.counts().settlements, 0);
+  assert.equal(f.counts().collections, 0); assert.equal((await channel.status()).kind, "ready");
+  assert.deepEqual(f.operations(), [9, 8, 9]); assert.equal(f.counts().setups, 1);
+});
+
+test("malformed authenticated history spends RX; a fresh retry never reconstructs the session", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const malformed = Buffer.from(historyVector("derived-drained").plaintext, "hex"); malformed[209] = 2;
+  f.historyBytes(malformed);
+  assert.deepEqual(await f.broker.recoverChannelHistory(f.owner, channel, historyPurpose), { kind: "uncertain" });
+  assert.deepEqual(f.bodyReads(), [19, 258]);
+  f.historyReply("derived-drained"); f.forceSequence(2n);
+  assert.deepEqual(await f.broker.recoverChannelHistory(f.owner, channel, historyPurpose), { kind: "uncertain" });
+  assert.deepEqual(f.bodyReads(), [19, 258], "authenticated replay is refused before body intake");
+  f.forceSequence(null);
+  const outcome = historyVector("derived-drained").expected;
+  assert.deepEqual(await f.broker.recoverChannelHistory(f.owner, channel, historyPurpose), outcome);
+  assert.equal(f.counts().setups, 1); assert.deepEqual(f.counts().tx, [1n, 2n, 3n, 4n]);
+  assert.equal(f.counts().steps.filter(step => step === "deriveBits").length, 2);
+});
+
+test("an authenticated history from another native row is rejected without becoming current history", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const row = historyVector("derived-drained").expected;
+  assert.equal(row.kind, "status"); if (row.kind !== "status") throw new Error("fixture");
+  const wrongRow = "00000000000000010000000000000001";
+  assert.notEqual(wrongRow, row.row);
+  assert.deepEqual(await f.broker.recoverChannelHistory(f.owner, channel, historyPurpose, wrongRow), { kind: "uncertain" });
+  assert.deepEqual(await f.broker.recoverChannelHistory(f.owner, channel, historyPurpose, row.row), row);
+  assert.equal(f.counts().setups, 1);
+});
+
+for (const [name, change] of Object.entries({
+  operation: { operation: 9 }, logical: { logical: "1".repeat(32) }, slot: { slot: 2 },
+  direction: { direction: 0 }, length: { length: 257 },
+} satisfies Record<string, Partial<VoiceIpcHeader>>)) test(`wrong history response ${name} is refused before body intake`, async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  f.responseChange(change);
+  assert.deepEqual(await f.broker.recoverChannelHistory(f.owner, channel, historyPurpose), { kind: "uncertain" });
+  assert.deepEqual(f.bodyReads(), [19]);
+  f.responseChange(null);
+  assert.equal((await f.broker.recoverChannelHistory(f.owner, channel, historyPurpose)).kind, "status");
+});
+
+for (let index = 0; index < 4; index++) test(`End during history SDK step ${index + 1} retains the original flight until actual completion`, async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const before = f.counts().steps.length, held = f.hold(before + index);
+  const request = f.broker.recoverChannelHistory(f.owner, channel, historyPurpose); await until(held.entered);
+  const charged = f.broker.counts().bytes; f.owner.retire();
+  assert.deepEqual(await request, { kind: "retired" });
+  let closed = false; const close = channel.close().then(() => { closed = true; });
+  assert.equal(closed, false); assert.equal(f.broker.counts().bytes, charged);
+  assert.equal(f.broker.counts().active, 1); assert.equal(f.counts().settlements, 0);
+  held.release(); await close;
+  assert.equal(f.counts().steps.length, before + index + 1);
+  assert.equal(f.counts().setups, 1); assert.equal(f.counts().settlements, 1);
+  assert.equal(f.counts().collections, 1);
+  // close observes native cleanup; the enclosing original driver's finally still owns
+  // the paid Control position until it actually returns. Never equate that to a refund.
+  await until(() => f.broker.counts().active === 0); assert.equal(f.broker.counts().bytes, 0);
+  assert.throws(() => f.channel(), /owner changed/, "retired selection cannot create/recover a session");
+});
+
+test("End cannot refund history while actual BYOB cancellation still owns its buffers", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const cancellation = f.stallBody(), before = f.counts().reads;
+  const request = f.broker.recoverChannelHistory(f.owner, channel, historyPurpose);
+  await until(() => f.counts().reads === before + 1);
+  const charged = f.broker.counts().bytes; f.owner.retire();
+  assert.deepEqual(await request, { kind: "retired" }); await until(cancellation.entered);
+  assert.equal(f.broker.counts().bytes, charged); assert.equal(f.broker.counts().active, 1);
+  assert.equal(f.counts().settlements, 0);
+  cancellation.release(); await channel.close();
+  await until(() => f.broker.counts().active === 0); assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("history shares a lent provider's one physical lane without ordinary admission", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const linked = await linkedDerivation(f, channel), action = linked.register();
+  const held = f.hold(f.counts().steps.length + 5), attempt = action.attempt(); await until(held.entered);
+  const before = f.counts(), request = f.broker.recoverChannelHistory(f.owner, channel, historyPurpose);
+  assert.equal(f.broker.recoverChannelHistory(f.owner, channel, historyPurpose), request);
+  await new Promise<void>(yes => setImmediate(yes));
+  assert.deepEqual(f.counts(), before); assert.equal(f.broker.counts().active, 1);
+  held.release(); assert.equal((await request).kind, "status");
+  // The fixture's commit RPC asks for Status. It deliberately collides with the queued
+  // history flight and is uncertain; retry reuses the original cached provider output.
+  assert.equal((await attempt).kind, "uncertain");
+  const providerSteps = f.counts().steps.filter(step => step === "deriveBits").length;
+  assert.equal((await action.attempt()).kind, "accepted");
+  assert.equal(f.counts().steps.filter(step => step === "deriveBits").length, providerSteps);
+  assert.equal(f.counts().ordinary, 0);
+});
+
+test("a reentrant purpose getter that retires the owner cannot admit history", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const before = f.counts();
+  const purpose = { ...historyPurpose, get peer() { f.owner.retire(); return historyPurpose.peer; } };
+  assert.deepEqual(await f.broker.recoverChannelHistory(f.owner, channel, purpose), { kind: "retired" });
+  await channel.close();
+  assert.deepEqual(f.counts().steps, before.steps); assert.deepEqual(f.counts().tx, before.tx);
+  assert.equal(f.counts().setups, 1);
+});
+
+test("the bounded history graph fits the original 8KiB Control payment with its existing wrappers", () => {
+  // Structural payload accounting, NOT an assertion about arbitrary JS/SDK heap sizes or
+  // caller-retained replies. One paid flight owns at most these concrete bounded copies.
+  // Reserving half the 8KiB for promises/closures/records/typed-array wrappers deliberately
+  // leaves slack; changes to the buffers/grammar/retained fields must update this inventory.
+  const strings = (value: unknown): number => {
+    if (typeof value === "string") return value.length * 2;
+    if (value && typeof value === "object") return Object.entries(value).reduce((n, [key, field]) => n + key.length * 2 + strings(field), 0);
+    return 8;
+  };
+  const request = encodeVoiceIpcAction(historyPurpose, { kind: "begin", retry: false });
+  const largestReply = Math.max(...historyVectors.statusCases.map(item => strings(item.expected)));
+  // Request body+cipher, header, MAC, nonce; response prefix+admission+decoded header/tag,
+  // response cipher+opened body, EOF byte, response AAD and nonce. Include purpose/row,
+  // native metadata and one immutable request+response header record with string fields.
+  const buffers = request.body.length + request.body.length + 16 + 40 + 32 + 12 +
+    144 + 288 + 40 + 32 + 258 + 242 + 1 + 80 + 12;
+  const graph = buffers + strings(historyPurpose) + 64 + largestReply + 2 * (64 + 10 * 8) + 4096;
+  assert.ok(graph <= 8192, `history payload/wrapper envelope ${graph}/8192`);
+  // One query slot in the original driver, not a new map or a fresh ordinary permit.
+  const source = readFileSync(new URL("./voice-crypto.ts", import.meta.url), "utf8");
+  assert.match(source, /const IPC_CONTROL_BYTES = 8 \* 1024;/);
+  assert.match(source, /private historyRequest: IpcHistoryRequest \| null = null;/);
+  assert.equal(request.body.length, 106);
 });

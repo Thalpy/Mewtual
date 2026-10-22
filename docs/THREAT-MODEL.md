@@ -1,5 +1,32 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Read-only original-session history ingress (22 October)
+
+Exposing history does not expose factory admission. The production whitelist admits only
+Status9's original fixed setup grammar and context-backed Begin8(false), Control, zero logical
+header and exact cipher length. Header MAC authenticates the SAME Session before counter/body
+admission; AEAD then binds the complete selector to original native allocation/executor/lease.
+A no-Context service, other opcode/class/length/logical binding or bad MAC refuses before debit.
+Bad AEAD, replay and interrupted bodies cannot refund spent physical counters. History recovery
+may observe an existing Root result but cannot create/rearm work, upgrade a grant or authorize
+an actor effect. Missing records are refusal, never absence, settlement or final drainage proof.
+
+The browser API checks original owner/channel allocation before predicates, copies exactly the
+bounded purpose and rechecks retirement after callbacks. It requires existing keys/bootstrap,
+reuses the original one-slot driver/shared SDK lane and retains all real work/payment after End.
+No raw frame/key, caller-selected port or replacement constructor is exported. Valid native MAC
+alone cannot bypass response direction/opcode/class/length/slot/logical/physical-request binding;
+only then are original RX and bounded BYOB body admitted. Canonical metadata and optional exact
+RowId are checked after AEAD. Refusal never closes the channel or returns setup/control payment.
+The fixed opaque receipt digest is metadata, not browser authority to mint/ACK a Root receipt.
+
+The new query/purpose/known wire/plaintext/metadata copies fit the original8KiB Control payload
+inventory with wrapper allowance. This structural check does not bound arbitrary caller-retained
+metadata, opaque SDK allocations, GC heaps or RSS. localDrained cannot establish whole original
+Workflow retirement. Native final-proof transfer across compaction, effect dispatch and normal
+Actor/MLS browser handoff remain unfinished. Existing phase/effect adapters stay unexposed;
+this change makes no live V2/RTC, relay or independent physical audio/network acceptance claim.
+
 ## Original variable Workflow retirement signal (22 October)
 
 Final confirmation closure cannot be inferred from a returned16KiB loan, revoked grant, missing

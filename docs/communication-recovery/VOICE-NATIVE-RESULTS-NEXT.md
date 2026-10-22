@@ -1,5 +1,24 @@
 # Next voice milestone: native result recovery
 
+## Current read-only history integration (22 October)
+
+Unpublished39fb329c supplies original Workflow retirement observation/native snapshot; the
+following WIP connects original-session existing-history recovery end to end. Native production
+now serves Status9 plus context-backed Begin8(false), never factory admission/retry. Browser
+v11 recoverChannelHistory uses its exact established channel/owner, original keys/counters and
+shared paid driver, with canonical242B metadata/3B refusals. Same-query Promise coalescing,
+competing-query busy, authenticated malformed-reply RX spending and retained actual work after
+End are covered. Native focused192 and browser/request/reply130 tests, Svelte check, Root/native strict
+Clippy/format, ambient/deny and native check pass; actual-diff review has no remaining
+blocker/high/medium. Fresh full-suite/build/startup gates remain pending. HANDOVER is the source/evidence ledger.
+
+Still required: authorized factory, input, admission, result, exact receipt ACK, settlement,
+phase/final adapters and dispatch, final-proof retention across compaction, bounded coordination
+and normal production MLS-pair Actor/browser success. Generic sealed/opened/rejected codec
+variants do not implement their effect adapters. localDrained is not whole Workflow drainage.
+No live V2/RTC/relay/combined/physical acceptance follows. Older checkpoint sections below are
+historical source-specific status and do not supersede this current candidate.
+
 ## Original variable-retirement observation candidate (22 October)
 
 The latest unpublished Root/native slice separates ordinary16KiB return from final96KiB plan

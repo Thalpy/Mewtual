@@ -278,13 +278,29 @@ impl HeaderWorker {
         origin: &str,
         session: [u8; 16],
     ) -> Result<Incoming, Refused> {
+        self.admit_service_control(port, origin, session, false)
+    }
+    /// Native-configured read-only service whitelist. Authentication and exact header shape
+    /// precede counter debit. Historical Begin can only LOOK UP an original row after AEAD;
+    /// no flag here enables factories, data input/results, engine admission or cleanup.
+    pub(super) fn admit_service_control(
+        self,
+        port: u16,
+        origin: &str,
+        session: [u8; 16],
+        history_available: bool,
+    ) -> Result<Incoming, Refused> {
         let authenticated = self.authenticate(port, origin)?;
         let request = &authenticated.request;
-        if request.operation() != Operation::Status
-            || request.kind() != BodyKind::Control
-            || request.length() != 49 + 16
-            || request.logical() != session
-        {
+        let permitted = request.kind() == BodyKind::Control
+            && match request.operation() {
+                Operation::Status => request.length() == 49 + 16 && request.logical() == session,
+                Operation::BeginDerive if history_available => {
+                    request.length() == 106 + 16 && request.logical() == [0; 16]
+                }
+                _ => false,
+            };
+        if !permitted {
             return Err(Refused::Binding);
         }
         authenticated.admit(None)
@@ -503,6 +519,9 @@ impl Incoming {
     }
     pub(super) fn operation(&self) -> Operation {
         self.request.operation()
+    }
+    pub(super) fn kind(&self) -> BodyKind {
+        self.request.kind()
     }
     pub(super) fn logical(&self) -> [u8; 16] {
         self.request.logical()

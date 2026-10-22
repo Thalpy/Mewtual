@@ -534,6 +534,10 @@ impl Route {
     pub(super) fn acknowledge_setup(&self) -> Result<(), Refused> {
         self.row.retire_setup()
     }
+    #[cfg(test)]
+    pub(super) fn fixture_browser_setup_held(&self) -> bool {
+        self.row.state.lock().unwrap().browser_setup.is_some()
+    }
     /// A snapshot of NATIVE setup state only. It neither proves browser drainage nor lets a
     /// late Ready response revive a retired call, room, join or action.
     pub(super) fn snapshot(&self) -> [u8; 3] {

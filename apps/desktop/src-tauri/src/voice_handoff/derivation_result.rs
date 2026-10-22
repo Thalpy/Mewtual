@@ -1,6 +1,6 @@
 //! Inactive typed executor for the row-zero result. It owns the actual authenticated request
 //! through actor publication and completed-output collection, including after socket loss.
-//! This is not a listener opcode or complete action adapter; normal ingress remains Status only.
+//! This effect executor is not exposed by the listener: ingress serves only Status and read-only history.
 use super::bootstrap::Route;
 use super::channel::{Incoming, Operation};
 use super::context::Context;
@@ -243,4 +243,4 @@ async fn run(mut worker: Worker) -> Response {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

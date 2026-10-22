@@ -158,7 +158,8 @@ pub(super) fn receipt_digest(receipt: &CryptoResultReceipt) -> [u8; 32] {
     }
     hash.finalize().into()
 }
-fn error_code(error: VoiceError) -> u8 {
+/// Closed private IPC tag table shared by request receipt digests and fixed replies.
+pub(super) fn error_code(error: VoiceError) -> u8 {
     match error {
         VoiceError::Malformed => 0,
         VoiceError::Bounds => 1,

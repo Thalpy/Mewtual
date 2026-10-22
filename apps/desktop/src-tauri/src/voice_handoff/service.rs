@@ -1,7 +1,7 @@
-//! Status-only local handoff IO, owned by the application host when supported.
+//! Setup status and original-history-only local handoff IO, owned by the application host.
 //! A confirmed channel is not a call grant, room proof, action admission or browser-drain proof.
 use super::bootstrap::{Registry, Route};
-use super::channel::{BodyKind, CompletedReply, Incoming};
+use super::channel::{BodyKind, CompletedReply, Incoming, Operation};
 use super::context::Context;
 use super::http;
 use catcoms_rt::Clock;
@@ -246,7 +246,7 @@ impl ServerState {
                 biased;
                 _ = &mut stop => break false,
                 _ = expire_at(self.clock.as_ref(), deadline) => {},
-                _ = connection.serve(&self.registry, self.port, self.origin, self.clock.as_ref(), deadline) => {},
+                _ = connection.serve(&self.registry, self.port, self.origin, self.clock.as_ref(), deadline, self.context.as_ref()) => {},
             }
             // Connection fields destroy the stream before any admitted Session/reply owner.
         };
@@ -311,6 +311,7 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
         origin: Origin,
         clock: &dyn Clock,
         deadline: u64,
+        context: Option<&Context>,
     ) -> Result<(), Refused> {
         let method = loop {
             current(clock, deadline)?;
@@ -349,7 +350,12 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
             current(clock, deadline)?;
             self.incoming = Some(
                 worker
-                    .admit_status(port, origin.value(), route.session_id())
+                    .admit_service_control(
+                        port,
+                        origin.value(),
+                        route.session_id(),
+                        context.is_some(),
+                    )
                     .map_err(|_| Refused::Header)?,
             );
             let incoming = self.incoming.as_mut().ok_or(Refused::Body)?;
@@ -369,24 +375,37 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
             // for the response first. Coalesced excess is refused by HTTP parsing; later bytes
             // can never become a second request because this connection is always closed.
             current(clock, deadline)?;
-            let plain = incoming.open().map_err(|_| Refused::Body)?;
-            if plain.len() != 49
-                || plain[0] != 1
-                || plain[1..17] != route.session_id()
-                || plain[17..49] != route.hash()
-            {
-                return Err(Refused::Body);
-            }
-            // The retained browser constructs this only after ECDH/HKDF and outgoing seal/MAC
-            // promises have settled. Response crypto uses its separately prepaid control lane.
-            route.acknowledge_setup().map_err(|_| Refused::Body)?;
-            let snapshot = route.snapshot();
-            let incoming = self.incoming.take().ok_or(Refused::Body)?;
-            let mut prepared = incoming
-                .reply(BodyKind::Control, 3, None)
-                .map_err(|_| Refused::Body)?;
-            prepared.plain_mut().copy_from_slice(&snapshot);
-            self.reply = Some(prepared.seal().map_err(|_| Refused::Body)?);
+            incoming.open().map_err(|_| Refused::Body)?;
+            self.reply = Some(match incoming.operation() {
+                Operation::Status => {
+                    let plain = incoming.plain().map_err(|_| Refused::Body)?;
+                    if plain.len() != 49
+                        || plain[0] != 1
+                        || plain[1..17] != route.session_id()
+                        || plain[17..49] != route.hash()
+                    {
+                        return Err(Refused::Body);
+                    }
+                    // ONLY the existing Status9 setup protocol acknowledges constructor/SDK
+                    // drainage. A historical Begin must not invent or advance that evidence.
+                    route.acknowledge_setup().map_err(|_| Refused::Body)?;
+                    let snapshot = route.snapshot();
+                    let incoming = self.incoming.take().ok_or(Refused::Body)?;
+                    let mut prepared = incoming
+                        .reply(BodyKind::Control, 3, None)
+                        .map_err(|_| Refused::Body)?;
+                    prepared.plain_mut().copy_from_slice(&snapshot);
+                    prepared.seal().map_err(|_| Refused::Body)?
+                }
+                Operation::BeginDerive => {
+                    let context = context.ok_or(Refused::Binding)?;
+                    let incoming = self.incoming.take().ok_or(Refused::Body)?;
+                    super::history::recover(context, route, incoming)
+                        .seal()
+                        .map_err(|_| Refused::Body)?
+                }
+                _ => return Err(Refused::Binding), // fail closed if the whitelist ever drifts
+            });
             let reply = self.reply.as_ref().ok_or(Refused::Body)?;
             self.output.reply(origin, reply.body().len())?;
         }

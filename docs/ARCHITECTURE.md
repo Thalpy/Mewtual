@@ -1,5 +1,30 @@
 # Mewtual; Architecture
 
+## Original-session read-only action history (22 October)
+
+Production native loopback ingress accepts Status9 and, only with the original application
+Context, Begin8(retry=false) existing-history lookup. Exact MAC/session/Control/length/logical
+checks precede body admission. The opened full purpose selects the SAME original native
+allocation/executor/lease; reconciliation observes an existing Root action, never a factory,
+new grant/Work/Phase or actor effect. End/lock does not erase history. Missing history refuses.
+Status9 alone acknowledges original setup; its old grammar and no-Context behavior are preserved.
+
+Browser broker v11 retains the original established channel, keys, directional counters and
+shared paid driver for the one history query. Exact owner/handle identity precedes callbacks;
+purpose is copied/validated and original liveness rechecked before admission. Identical queries
+coalesce the same promise; competing purposes return busy, and Status returns uncertain while
+history occupies the driver. History cannot start setup/key construction. Authenticated replies
+bind the original request, MAC, RX and optional expected native RowId before strict metadata
+parsing. Refusals never close/refund the channel or acknowledge setup. End retains actual query,
+SDK/IO/cancellation and original keys/payment until the existing driver drains and cleanup finishes.
+
+One fixed242-byte status or3-byte refusal describes native history; exact u64s stay strings.
+localDrained is not whole96KiB Workflow retirement. Native Derive publishes only actual Derived;
+an actor error with no terminal result remains no receipt. Other generic codec outcomes confer
+no effect authority or implemented adapter. Factory/action execution, ACK/settlement/phase/final
+wiring, retained final proof and normal production Actor/MLS success remain unfinished. Historical
+checkpoint claims below are scoped to their source; HANDOVER records current test provenance.
+
 ## Original confirmation Workflow retirement observer (22 October)
 
 The inactive native handoff can now obtain ConfirmationRetirement by consuming the original

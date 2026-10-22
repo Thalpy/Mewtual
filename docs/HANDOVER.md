@@ -1,8 +1,58 @@
 # Mewtual; Handover
 
+## Retained native/browser history recovery candidate (22 October)
+
+The active isolated dispatch checkout follows unpublished39fb329c. Production native ingress
+now admits only the original authenticated Status9 and existing-history Begin8(retry=false).
+The latter resolves the full decrypted purpose against the SAME native grant allocation,
+executor and lease, with zero logical header. It can recover the authenticated original RowId
+when a Begin reply was lost, including after End/lock/grant destruction. It cannot create or
+rearm a factory, obtain a grant/Work/Phase or authorize an actor effect. Unknown history is a
+bounded refusal, never absence or Workflow drainage. Status9 retains its exact setup grammar;
+history does not implicitly acknowledge setup. A server without original Context stays Status-only.
+
+The retained browser broker's v11 recoverChannelHistory requires its EXACT owner allocation
+and channel handle BEFORE callbacks, established original keys/bootstrap, and canonical purpose
+and expected RowId (null only for first ID recovery). One query occupies the original driver
+and shared execution lane. Identical queries return the same stored promise; another query
+returns busy and Status during history returns uncertain, without a second flight/queue.
+No constructor/setup/derive/ordinary admission path exists in history. All TX/RX, keys, physical
+positions and deadline/cancellation ownership remain original. End can return retired early
+while the SAME query/driver stays paid until actual SDK/read cancellation and cleanup return.
+
+Shared Rust/TypeScript vectors pin the fixed242-byte status and3-byte refusal grammar, exact
+u64 strings, purpose/row identity, receipt digest and canonical flags/padding. Authenticated
+malformed bodies still spend RX. History closed/stopped/error are query refusals, never channel
+closure, setup ACK, Root readiness, new authorization or refund. localDrained means ONLY local
+Phase drainage; it is not the separate96KiB Workflow proof. Native Derive history returns only
+its actual Derived receipt; an actor authorization error is no receipt, not fabricated Rejected.
+The generic codec's other outcome variants do not imply their native adapters are implemented.
+
+Current focused native handoff PASSED192/0 (4.63s tests/98.84s gate), including full process/group
+pressure, real TCP after End/lock, malformed/refused/replayed/truncated requests and unchanged
+Status9. Exact adapter tests include actual accepted LocalJoin output and actual actor rejection
+with lost native observation; the accepted fixture is NOT normal production MLS-pair success.
+Browser/request/reply focused130/0 passes (1.56s), including coalescing after plaintext is
+zeroed while sign/decrypt is parked. Svelte check PASSES with zero errors/warnings (69.16s).
+Root/native formatting, strict all-target/all-feature Clippy, ambient/deny and native check
+pass. Read-only design/actual-diff review has no remaining blocker/high/medium; the8KiB
+inventory limitation is explicit. Fresh complete-suite/build/startup gates remain pending.
+Logs: target/voice-action-dispatch-native-focus-16.log, voice-action-dispatch-focused.jsonl,
+voice-history-front-focused-5.log, voice-history-front.jsonl and voice-retirement-static.jsonl. Failed fixture/compile attempts
+remain recorded and are not passing evidence. Header/codec/router/task caps remain unchanged.
+Browser payload accounting includes one bounded query and known concrete wire/metadata copies
+inside8KiB Control; it does not establish allocator/SDK/GC heap bounds or arbitrary caller retention.
+
+Still unfinished: actual factory/input/admission/result/ACK/settle/phase/final dispatch and browser
+adapters, final-proof capture across native compaction, bounded coordination, normal proven-pair
+Actor/browser success and complete delivery acceptance. The published fully gated PR48 remains
+7dfbb797. Live V2/RTC/isolation, relay and combined/physical acceptance have separate owners and
+remain open; only one physical desktop is available. Sections below retain checkpoint-specific
+history and do not supersede this current source/evidence scope.
+
 ## Original Workflow retirement and native snapshot candidate (22 October)
 
-Current unpublished work in target/communication-action-dispatch-worktree followscc7274b7.
+Unpublished commit39fb329c in target/communication-action-dispatch-worktree followscc7274b7.
 HandoffLoan::retire_confirmation_observed consumes the ORIGINAL loan and returns a non-Clone
 snapshot witness retaining only its paid fixed binding. Ordinary loan Drop still returns an
 individual16KiB phase to the OPEN96KiB Workflow; successful Derive continuation must use that
@@ -26,11 +76,12 @@ phase metadata and12KiB codec layout guards pass. Root strict all-target/all-fea
 PASSED66.92s, ambient0.98s, cargo deny11.30s; native strict Clippy48.92s and check48.16s
 pass. Root/native formatting and git diff --check pass. Exact commands/results are in
 target/voice-retirement-static.jsonl; these do not replace pending full-suite gates.
-Read-only design/actual-diff review has no actionable findings; no production opcode is enabled.
+Read-only design/actual-diff review of39fb329c has no actionable findings. The subsequent
+read-only history integration is described above; effect opcodes remain disabled.
 
 Existing ledger compaction may drop Phase/witness. Missing or compacted Phase is NOT full-variable
 retirement proof. Final-proof capture/transfer, bounded native retry coordination and browser
-adapter wiring remain unfinished. Production ingress still serves Status only. Fresh complete
+effect-adapter wiring remain unfinished. Fresh complete
 root/native/build/startup/probe gates remain pending until the handoff implementation is coherent.
 No new live V2/SDP/RTC, relay, combined or independent physical acceptance follows.
 

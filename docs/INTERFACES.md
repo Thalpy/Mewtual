@@ -1,5 +1,31 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Retained history transport (22 October)
+
+VoiceCryptoBroker.recoverChannelHistory(owner, channel, purpose, expectedRow=null) requires the
+actual retained owner allocation/channel handle and an already established original Session.
+It is deliberately non-async so identical pending queries return the SAME stored Promise.
+The exact peer/join/keyRef/epoch selector is copied/validated; null expectedRow is only first
+unknown-ID recovery. A canonical existing RowId pins subsequent metadata. Unready or occupied
+history returns busy without setup, ordinary admission or another queue/driver. Status during
+history returns uncertain. v11 retained brokers reject incompatible older HMR state.
+
+The private wire is Begin8, Control, zero logical header,106 plaintext/122 cipher bytes,
+retry=false. Only the application-context service admits it beside unchanged Status9; a server
+without that context refuses before counter/body admission. Native resolves the original paid
+purpose without a live-grant upgrade or factory rearm. Response is Control with3 or242 plaintext
+bytes (19/258 cipher); Rust/TypeScript share replies/vectors.json. Canonical exact u64 decimal
+strings, RowId, action/receipt identity, fixed padding/flags and native opaque receipt digest
+are checked. The digest is no browser-created Root receipt or ACK authority. localDrained means
+local Phase only. Other generic outcomes are codec compatibility, not enabled effect handlers.
+
+Original session MAC/AEAD/request binding and monotonic spent TX/RX apply. A malformed opened
+body still spends RX. End can resolve an observer retired while actual SDK/read cancellation,
+query/body/key and original paid position remain retained. History refusal closed/stopped/error
+never retires the channel, acknowledges setup or refunds its payment. No raw-key/frame API,
+replacement Session, factory/input/result/ACK/settlement/close/final request is exposed here.
+HANDOVER records focused evidence and pending complete gates; live V2/RTC remains incomplete.
+
 ## Original variable Workflow observation (22 October)
 
 HandoffLoan::retire_confirmation_observed consumes the original loan, closes its original
