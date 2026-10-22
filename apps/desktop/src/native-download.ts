@@ -113,12 +113,22 @@ export function completedDownload(
   };
 }
 
+/** The final component of the path native saved to (either separator), or `fallback` when the
+ * path has none. Display only: the path itself was produced and validated by native. */
+export function savedFileName(saved: SavedFileResult, fallback: string): string {
+  const leaf = saved.path.split(/[\\/]/).filter(part => part.length > 0).pop();
+  return leaf ?? fallback;
+}
+
 /** The notice names the Downloads folder only when the caller expects a first one-click save
  * (`toDownloads`) AND native asserts the file sits in Downloads (`inDownloads`). A "Save as"
  * choice, a remembered choice or a resumed partial may be anywhere, so those notices name no
  * folder. A "matched" media verdict carries no extra warning, so it takes the same folder-free
  * wording; only "mismatch" and "unrecognized" need their own text. */
-export function downloadSavedNotice(name: string, saved: SavedFileResult, toDownloads = true) {
+export function downloadSavedNotice(listedName: string, saved: SavedFileResult, toDownloads = true) {
+  // Re-review 2 LOW 5: name the file that was actually written (a name typed in Save as, or a
+  // numbered name when the listed one was taken), not the listed name.
+  const name = savedFileName(saved, listedName);
   const warning = saved.warning ? ` ${saved.warning}` : "";
   // Fails closed: the caller's inference rests on a list that can be stale (a one-click save can
   // resume a record whose save goes to a place chosen earlier), so native must also say so.

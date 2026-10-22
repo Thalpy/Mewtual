@@ -5,6 +5,7 @@ import {
   downloadSavedNotice,
   guideSavedNotice,
   isSaveAsCancelled,
+  savedFileName,
   saveGroupFile,
   resumeGroupFile,
   saveSpaceGuide,
@@ -189,6 +190,23 @@ test("malformed native responses cannot falsely mark a download done", async () 
   );
   const badPlace = mockInvoker({ path: "/Chosen/cat.png", displayed: true, inDownloads: "yes" });
   await assert.rejects(saveGroupFile(badPlace.invoke, 1, "ab12", "cat.png"), /invalid save result/);
+});
+
+test("a notice names the file that was written, not the listed name", () => {
+  // Re-review 2 LOW 5: a name typed in Save as, or a numbered name when the listed one was taken.
+  assert.equal(
+    downloadSavedNotice("report.bin", { path: String.raw`D:\Chosen\Quarterly report.bin`, displayed: true }, false).text,
+    "Saved Quarterly report.bin.",
+  );
+  assert.equal(
+    downloadSavedNotice("cat.png", { path: "/home/u/Downloads/cat (1).png", displayed: true, inDownloads: true }).text,
+    "Saved cat (1).png to Downloads",
+  );
+  assert.match(
+    downloadSavedNotice("cat.png", { path: "/x/cat (2).png", displayed: true, contentValidation: "mismatch" }, false).text,
+    /^Saved cat \(2\)\.png, but/,
+  );
+  assert.equal(savedFileName({ path: "/", displayed: true }, "listed.bin"), "listed.bin");
 });
 
 test("a notice names Downloads only when native asserts the file is there", async () => {
