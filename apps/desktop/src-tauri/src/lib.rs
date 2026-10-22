@@ -13701,10 +13701,15 @@ fn safe_download_name(requested: &str) -> String {
     } else {
         trimmed.to_string()
     };
+    // Windows ignores trailing spaces before the extension, so "CON .txt" is still the console.
+    // This must stay at least as strict as storage's `windows_device_name`, which refuses such a
+    // leaf outright (picker review L5): a looser rule here turns a peer-chosen name into a
+    // "malformed data" failure instead of a saved `_CON .txt`.
     let stem = name
         .split('.')
         .next()
         .unwrap_or_default()
+        .trim_end()
         .to_ascii_uppercase();
     let numbered_device = (stem.starts_with("COM") || stem.starts_with("LPT"))
         && stem.len() == 4
@@ -15049,7 +15054,12 @@ where
     F: Future<Output = Result<(), String>>,
 {
     if cleanup.await.is_err() {
-        saved.warning = Some("The file was saved. Its encrypted download copy could not be removed; remove it from Transfers.".into());
+        // Picker review L1: append, never replace. Earlier notices (an old partial left on disk,
+        // a location that cannot resume, a failed reveal) must survive a failed cleanup.
+        private_downloads::append_warning(
+            &mut saved,
+            "The file was saved. Its encrypted download copy could not be removed; remove it from Transfers.",
+        );
     }
     let _commit = keep_session::read_commit(state, generation, origin).await?;
     if !allowed() {
@@ -25326,6 +25336,31 @@ mod tests {
         assert_eq!(safe_download_name(" . "), "mewtual-download");
         assert_eq!(numbered_download_name("photo.png", 2), "photo (2).png");
         assert_eq!(numbered_download_name("README", 3), "README (3)");
+    }
+
+    /// Picker review L5: Windows ignores trailing spaces before the extension, so "CON .txt" still
+    /// names the console device. Storage refuses such a leaf; the sanitizer must prefix it too, or
+    /// a peer-chosen name makes one-click Download fail as "malformed data" instead of saving.
+    #[test]
+    fn a_device_name_with_trailing_spaces_is_prefixed_like_storage_requires() {
+        assert_eq!(safe_download_name("CON .txt"), "_CON .txt");
+        assert_eq!(safe_download_name("nul  .png"), "_nul  .png");
+        assert_eq!(safe_download_name("com1 .log"), "_com1 .log");
+        assert_eq!(safe_download_name("CONSOLE .txt"), "CONSOLE .txt");
+        // The sanitizer and storage's leaf rule agree: storage refuses the raw peer name and
+        // accepts the sanitized one.
+        let dir = tempfile::tempdir().unwrap();
+        for raw in ["CON .txt", "nul  .png", "com1 .log"] {
+            assert!(
+                catcoms_storage::kept::ChosenDestination::validate(&dir.path().join(raw)).is_err(),
+                "storage refuses {raw:?}"
+            );
+            let safe = safe_download_name(raw);
+            assert!(
+                catcoms_storage::kept::ChosenDestination::validate(&dir.path().join(&safe)).is_ok(),
+                "storage accepts {safe:?}"
+            );
+        }
     }
 
     #[test]

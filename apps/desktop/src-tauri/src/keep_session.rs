@@ -562,6 +562,42 @@ mod read_tests {
         }
     }
 
+    /// Picker review L1: a failed ciphertext cleanup adds its warning to what the save already
+    /// reported. Overwriting it hid the "old partial left behind" and "cannot resume" notices,
+    /// so plaintext could stay on disk without the user being told.
+    #[tokio::test]
+    async fn a_failed_cleanup_keeps_the_warnings_the_save_already_carried() {
+        let state = AppState::default();
+        let directory = tempfile::tempdir().unwrap();
+        *state.store.lock().await =
+            Some(ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap());
+        *state.session_resumable.lock().await = true;
+        let entry = EntryOwner::new();
+        let origin = entry.scope(current(&state, 0).unwrap());
+        let earlier = "An earlier partial file stays on disk.";
+        let saved = finish_download_response(
+            &state,
+            0,
+            &origin,
+            SavedFileResult {
+                path: "saved.bin".into(),
+                displayed: true,
+                warning: Some(earlier.into()),
+                content_validation: None,
+            },
+            || true,
+            async { Err("cleanup failed".to_string()) },
+        )
+        .await
+        .expect("a live session still gets its saved file");
+        let warning = saved.warning.expect("both notices are reported");
+        assert!(warning.contains(earlier), "earlier notice kept: {warning}");
+        assert!(
+            warning.contains("encrypted download copy could not be removed"),
+            "cleanup notice added: {warning}"
+        );
+    }
+
     #[tokio::test]
     async fn private_download_cleanup_wait_cannot_return_success_into_a_retired_invocation() {
         for edge in 0..3 {
