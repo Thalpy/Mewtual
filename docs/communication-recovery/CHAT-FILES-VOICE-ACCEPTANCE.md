@@ -1,11 +1,77 @@
 # Chat, files and voice implementation evidence
 
+## Validated proof retention and automatic cleanup retry (22 October)
+
+Frozen runtime `edf923c107f3d11bf635a3e58a04e0b673edd7c1` passed the current native/frontend/static/build gates.
+Publication runtime/build inputs match it exactly; source-specific older evidence is preserved.
+The native/browser handoff remains incomplete and final dispatch remains disabled.
+Browser recovery requires its original owner to remain current. Native history survives End/lock,
+but a retired browser owner receives retired; authenticated browser cleanup exchange after End
+remains unfinished.
+
+Native final-intent compaction now retains the same already-paid Phase/original Root observer.
+Local compaction drops Live outside guards before requiring Root readiness. Channel closure and
+independent history GC retain unready proof; ordinary continuation and ClosedPending do not
+invent whole Workflow retirement. Existing Row/Phase/codec/listener caps are unchanged.
+
+Browser v12 retries exact setup/channel cleanup after an actual refused RPC using one original
+paid driver, one injected-Clock timer and the same availability Signal. Stale callbacks, early
+firing and large clock jumps cannot produce duplicate work or missed-tick bursts. Pending RPCs
+never overlap; actual SDK/read/linked-chain drainage precedes cleanup. General action retry
+behavior is unchanged. Old retained brokers through v11 refuse adoption. This cadence does not
+implement authenticated post-End final exchange, issuance or FinalACK.
+
+Validation, zero failures:
+
+- Native: **671 library plus five ACL tests passed**
+  (513.28s gate), including all **199 focused handoff tests**
+  (4.88s tests/56.53s focused gate). Formatting (8.8s), strict
+  all-target/all-feature Clippy (78.61s) and separate check
+  (51.84s) pass. No memory/copy/resource cap was raised.
+- Frontend: **2456 passed** (79.25s); Svelte zero errors/warnings
+  (63.98s), production build (45.81s)
+  and all ten Edge flows (57.28s) pass. Focused139/139 passes1.95s.
+- Root: **3,254 passed**, 24 existing ignored, 59 summaries on `e560d319fa72727b3298f96396307cfef4ea2ad1`
+  (2781.50s). Its Root workspace/dependency inputs are byte-identical to this native/browser-only
+  follow-up. The completed Root run and static/ambient/dependency policy retain that provenance;
+  Root validation retains that exact source and command record.
+- Development build (83.92s), actual startup
+  (6.09s), packaged build (122.72s)
+  and real packaged Windows document/reload/public-metadata/exact-CSP-CORS/normal-close probe
+  (2.94s) pass. Binary SHA256: `9919a4c1c9ae3e568a025fb3ec24bff121371dc0371f7a3cb53bf37895eafa2d`.
+
+Logs: frozen target/voice-final-proof-gates.jsonl, voice-final-proof-root-provenance.json,
+voice-final-proof-focused.jsonl and voice-final-proof-front-focused.jsonl. All heavy Cargo
+jobs ran serially. Actual-diff adversarial design/review/re-review has no remaining actionable
+blocker/high/medium. Initial focused failures are retained: native198/1 dropped the real
+LocalJoin revocation owner; browser137/1 expected one aggregate timer for two active channels.
+Corrected tests preserve production checks and distinguish the independent owners/deadlines.
+The first development build stopped with disk-full error112 on M:, not a code failure. Twelve
+older incremental cache folders (23.42GiB logical/3,381 files) were moved intact to
+G:/Mewtual-build-cache/CatComs-native-incremental-20261022 and verified; original paths remain
+junctions. Relocation preserved cache data and targeted only M: and G: paths. Only the failed build and subsequent
+gates were resumed. The relocation manifest is target/native-cache-relocation-summary.json.
+
+Still required: factory/input/admission/result/receipt ACK/settlement/phase/final adapters and
+dispatch, authenticated post-End final issuance/ACK/retry retaining original Session keys,
+normal Actor/MLS pair success and combined native/WebView action acceptance. History remains
+read-only Status9/Begin8(false). Local Phase drainage is not96KiB Workflow retirement. The8KiB
+browser wrapper inventory is structural, not arbitrary JS/SDK/GC heap, RSS or caller retention.
+
+The packaged probe requests no unlock/credentials and proves no selected crypto/action delivery
+or media. One desktop only: independent physical audio/network and Linux/macOS WebView evidence
+remain unavailable. Live V2/legacy isolation, member relay, combined rollout/rollback and separate
+native/experiment dependency audits remain open. Current hosted-head acceptance is unverified;
+the recorded hosted exact-union failure is not dismissed by local passes. Docker daemon is
+unavailable; no container pass is claimed. Separate upload fixes still require Gate7 integration.
+
 ## Validated native/browser history checkpoint (22 October)
 
-Frozen runtime `e560d319fa72727b3298f96396307cfef4ea2ad1` passed all required local gates. Publication
-runtime/build inputs match that source; earlier published ownership evidence is preserved below.
-This remains a partial handoff: native serves Status9 and existing-history Begin8(false),
-not factory/effect dispatch. Historical checkpoint sections do not supersede this evidence.
+Frozen Alpha runtime `e560d319fa72727b3298f96396307cfef4ea2ad1` passed all required local gates.
+Earlier publication `f42c8e5cbd8f40b6376c5d070d2ecf2901cebd18` has runtime/build inputs matching
+that source. These Alpha native/frontend/build gates predate Beta and do not validate Beta's
+changed ledger/cleanup code. The later source-specific section records Beta's own gates.
+This remains a partial handoff: Status9 and existing-history Begin8(false), no effect dispatch.
 
 Complete validation, zero failures:
 
@@ -38,11 +104,11 @@ read/cancel custody through End. History refusal cannot acknowledge setup, close
 refund payment. Shared242B status/3B refusal vectors pin exactu64s, flags/padding and original
 receipt identity. Actual Derive reports Derived only; actor errors do not fabricate Rejected.
 
-The original Workflow observer/native snapshot distinguishes local16KiB return from96KiB
-variable retirement. Existing compaction may still drop that proof; missing proof NEVER means
-retirement. The next reviewed design retains the SAME already-paid Phase only for final-intent
-compacted rows, drops Live before requiring Root-ready, and uses one bounded injected-Clock
-cleanup driver because the Root snapshot cannot wake Row. This is design, not implemented behavior.
+At Alpha publication `f42c8e5c`, the original Workflow observer/native snapshot distinguished
+local16KiB return from96KiB variable retirement, but compaction could still drop its proof.
+Missing proof never meant retirement. Retaining the same paid final-intent Phase and adding
+bounded cleanup cadence were reviewed designs at that Alpha checkpoint. Beta implements them;
+its separate source-specific section records current implementation and validation status.
 
 Still unfinished: factory/input/admission/result/ACK/settlement/phase/final adapters and dispatch,
 final-proof retention/issuance/retry coordination, normal production Actor/MLS-pair success and

@@ -6,8 +6,9 @@ The isolated final-proof checkout follows `e560d319`. Compacted final-intent his
 the same already-paid Phase and original Root witness. Native snapshots, channel preflight
 and independent history GC preserve unready proof; compaction still drops Live outside locks
 before requiring Root readiness. Ordinary continuation retains none and ClosedPending cannot
-invent Root retirement. All199 focused native handoff tests and existing layout/capacity guards pass; complete
-native/frontend/static/build gates remain pending.
+invent Root retirement. All199 focused handoff tests and current complete native676/frontend2456 gates pass,
+with static/build/startup/packaged public-metadata checks. Root3254 retains identical-input
+sourcee560d319 provenance. HANDOVER records exact boundaries; no action-flow acceptance follows.
 
 Broker v12's existing setup/channel cleanup retries temporary native refusals using one
 injected-Clock timer and the same availability Signal/paid driver. Large jumps, stale timer
@@ -19,8 +20,48 @@ Still required: authorized factory/input/admission/result/receipt ACK/settlement
 adapters and dispatch; authenticated post-End final exchange and original keys through final
 issuance/ACK/retry; normal production Actor/MLS pair success and combined real-WebView/native
 action acceptance. Final dispatch stays disabled. No live V2/RTC, relay or physical acceptance
-is established by these local custody/cleanup improvements. Historical checkpoints below
-retain their own source scope and do not supersede the current status.
+is established by these local custody/cleanup improvements.
+
+Before enabling final dispatch, add native original-row issuance/ACK state to channel preflight.
+Its current local-Drained/Root-ready condition is not proof of final delivery: setup cleanup could
+otherwise close Control before the final reply/ACK. Preserve the independent actual physical-owner
+collection proof. ClosedPending with actor_handoff=true cannot mint whole-Workflow proof: Pair
+may have been published before Derive/attachment failed, and this local tombstone owns no Root
+closure capability. Keep final proof separate from the242-byte read-only history response.
+
+The browser action pump must settle its exact action before waiting for whole-chain/final
+retirement. driveAction.finally awaits settleAction before clearing chain.running; making that
+settlement wait for chain drainage would deadlock. Authenticated post-End cleanup must preserve
+original keys and avoid reacquiring the execution lane recursively from current cleanup.
+
+Implement the next derivation delivery slice in this order:
+
+1. Define canonical Input, admitted-permit and separate final-proof replies. The242-byte history
+   response is observation, not an engine-admission permit; it cannot carry another32-byte proof
+   inside its256-byte allowance. Define browser binding.chain as a scoped adapter identity:
+   Root ProtectedCryptoBinding has no public chain serial. Distinguish ordinary16KiB phase
+   return from terminal whole-plan retirement explicitly in the request grammar.
+2. Prepay browser intake before materializing the Input response, then bind its exact action,
+   protected context, points/transcript and engine bytes. Existing prepareChainFromChannel
+   receives input before charging its chain, so it cannot alone fund the earlier Data read.
+3. Compose native factory/Input/result/metadata adapters within the existing listener/codec/
+   task payments. Retain actual Incoming/physical hold through detached factory completion,
+   and actual CryptoInputLease/paid Phase copies through Input response collection. ACK must
+   compare the native digest and pass the actual retained receipt to Root. Metadata cleanup
+   must not hold Work/copies while waiting for their own drainage. Actor refusal stays a refusal.
+4. Prove the complete original-Session cycle under lost replies, End, cancellation, full group/
+   process pressure and completed-but-uncollected output ownership. Keep action settlement
+   independent of whole-chain finalization and add bounded action-cleanup retry coordination.
+5. Establish successful actual Actor discovery before enablement: voice_endpoint/pair.rs requires
+   the actual participant grant, original implicit watcher and proven peer record. The current
+   protected_start fixture reaches private observer state; synthetic grants/selector IDs cannot
+   establish normal ingress. Native adapter/issuance tests can proceed independently, but a
+   production successful pilot needs the actual signed-discovery Actor fixture.
+6. Enable only the exact derivation shapes after those contracts, composed memory guards and
+   acceptance pass. A terminal derivation-only pilot ends its confirmation plan; it cannot
+   claim completed Derive->Hello/Proof/Finish continuation, SDP phase transfer or RTC readiness.
+
+Historical checkpoints below retain their own source scope and do not supersede current status.
 
 
 ## Current read-only history integration (22 October)
