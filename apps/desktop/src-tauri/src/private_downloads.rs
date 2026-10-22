@@ -387,12 +387,16 @@ const STALE_DOWNLOAD: &str = "This download changed. Open Transfers and try agai
 /// Small dedicated bound on blocking cleanup workers, separate from the export slots so a Remove
 /// can still run while saves are busy.
 fn cleanup_slot() -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+    cleanup_slots()
+        .try_acquire_owned()
+        .map_err(|_| CLEANUP_BUSY.into())
+}
+/// The process-wide pool behind [`cleanup_slot`].
+fn cleanup_slots() -> Arc<tokio::sync::Semaphore> {
     static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
     SLOTS
         .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
         .clone()
-        .try_acquire_owned()
-        .map_err(|_| CLEANUP_BUSY.into())
 }
 
 /// How long "Keep partly saved file" waits for its read-only presence check before releasing the
@@ -405,7 +409,16 @@ pub(super) const KEEP_PRESENCE_WAIT: Duration = Duration::from_secs(3);
 /// the escape from a stuck removal, `Unknown` makes no promise, and the held claim alone already
 /// excludes a concurrent delete of this Download.
 pub(super) async fn bounded_presence(journal: ExportJournal) -> Result<PartialPresence, String> {
-    let Ok(slot) = cleanup_slot() else {
+    presence_in(cleanup_slots(), journal).await
+}
+
+/// [`bounded_presence`] against a given slot pool, so a test owns its pool instead of depending
+/// on the process-wide one being free.
+pub(super) async fn presence_in(
+    pool: Arc<tokio::sync::Semaphore>,
+    journal: ExportJournal,
+) -> Result<PartialPresence, String> {
+    let Ok(slot) = pool.try_acquire_owned() else {
         return Ok(PartialPresence::Unknown);
     };
     blocking(move || {

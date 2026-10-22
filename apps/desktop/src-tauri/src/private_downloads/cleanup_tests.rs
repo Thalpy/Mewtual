@@ -267,17 +267,19 @@ async fn keep_partial_still_releases_when_its_presence_check_hangs() {
 async fn keep_presence_is_unknown_without_touching_the_disk_when_every_slot_is_busy() {
     // Re-review 2 MEDIUM: four stuck Removes, of any downloads, hold every cleanup slot. Keep's
     // check answers Unknown at once (no promise) instead of Busy, and reads nothing.
+    // The test owns its pool (re-review 3 nit), so other tests using the process-wide one can
+    // never make it flaky.
     let (_root, staging, journal) = partial();
-    let held: Vec<_> = std::iter::from_fn(|| cleanup_slot().ok()).take(8).collect();
-    assert_eq!(held.len(), 4, "the pool has four slots");
+    let pool = Arc::new(tokio::sync::Semaphore::new(1));
+    let held = pool.clone().try_acquire_owned().unwrap();
     assert_eq!(
-        bounded_presence(journal.clone()).await,
+        presence_in(pool.clone(), journal.clone()).await,
         Ok(PartialPresence::Unknown)
     );
     assert!(staging.exists());
     drop(held);
     assert_eq!(
-        bounded_presence(journal).await,
+        presence_in(pool, journal).await,
         Ok(PartialPresence::Present)
     );
 }
