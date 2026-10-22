@@ -1,5 +1,24 @@
 # Chat, files and voice implementation evidence
 
+## V2 dispatch, scheduling and call driver (22 October, branch `communication-v2-signalling`)
+
+Isolated from `f227b4f7`; details, contract and limits are in
+[VOICE-V2-CALL-DRIVER](VOICE-V2-CALL-DRIVER.md). Kind-28 dispatch and a production scheduler for
+the existing endpoint/source/helper seams sit behind a local `VoiceRouting` switch that is
+**Disabled by default** (the old empty reply; nothing scheduled). The renderer pins `legacy`/`v2`
+per join and excludes every legacy writer from a V2 join's room. A dedicated V2 call driver
+targets a narrow native interface with contract tests. It is **not activated**: no native
+commands implement that interface and SDP/ICE action delivery is still pending.
+
+Focused results: `cargo test -p catcoms-sync --lib -- voice` passes 448, zero failures, including
+A-B-C discovery through unjoined B and recovery through replacement D under normal ticks, with
+hop oracles showing only bound routes were used. Frontend voice/identity/lifecycle/wiring tests
+pass 81, and Svelte check reports zero errors and warnings. Read-only adversarial review found one
+blocker (default-on service contradicting the decision's gate) and six medium issues; all are
+resolved with regressions confirmed to fail when reverted. Mem transport is not physical A-C
+exclusion; no WebView crypto, real RTC, SDP forwarding or audio is claimed. Complete suites were
+not run in this session (the primary owns them).
+
 ## Bootstrap continuation (21 October, local complete gates passed)
 
 Active checkout is target/communication-bootstrap-channel-worktree, based on published

@@ -710,7 +710,7 @@ test("an ended call that never sent a start sends none", async () => {
   assert.equal(h.native.starts.length, 0);
 });
 
-test("sustained uncertain pulls report V2 unavailable, keep polling and recover", async () => {
+test("sustained uncertain pulls report V2 uncertain, keep polling and recover", async () => {
   const native = new FakeNative();
   const h = harness({ native });
   const lease = await joined(h);
@@ -719,7 +719,7 @@ test("sustained uncertain pulls report V2 unavailable, keep polling and recover"
   // Failure k happens after k-1 backoff wakes: seven wakes reach the eighth failure.
   for (let i = 0; i < 7; i++) { await settle(); h.wake(); }
   await settle();
-  assert.equal(h.call.snapshot().phase, "unavailable");
+  assert.equal(h.call.snapshot().phase, "uncertain", "not the terminal unavailable phase");
   assert.equal(h.call.snapshot().reason, "events-uncertain");
   h.wake(); await settle();
   assert.equal(h.call.snapshot().phase, "joined", "a successful pull restores the joined state");

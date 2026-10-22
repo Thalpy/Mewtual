@@ -161,7 +161,11 @@ export type VoiceV2Clock = Readonly<{ now(): number; sleep(ms: number): Promise<
 
 export type VoiceV2Diagnostic = Readonly<{ code: string; fields?: Readonly<Record<string, string | number>> }>;
 
-export type VoiceV2Phase = "starting" | "joined" | "rejoining" | "ended" | "unavailable";
+/**
+ * "unavailable" is terminal for this join (refused, budget spent, native end). "uncertain" is not:
+ * native replies are being lost, the driver keeps polling and returns to "joined" on success.
+ */
+export type VoiceV2Phase = "starting" | "joined" | "rejoining" | "uncertain" | "ended" | "unavailable";
 export type VoiceV2Signalling =
   | "waiting-pair" | "pair-unavailable" | "paired" | "offering" | "answering"
   | "offer-submitted" | "answer-submitted" | "negotiated" | "refused" | "uncertain";
@@ -496,16 +500,16 @@ export class VoiceV2Call {
         // means the native side is unreachable: say so, keep polling, and never fall back.
         failures++;
         if (failures === VOICE_V2_PULL_UNCERTAIN && this.#liveCall(generation)) {
-          this.#phase = "unavailable";
+          this.#phase = "uncertain";
           this.#reason = "events-uncertain";
-          this.#diag("VOICE.V2.UNAVAILABLE", { reason: "events-uncertain" });
+          this.#diag("VOICE.V2.UNCERTAIN", { reason: "events-uncertain" });
           this.#changed();
         }
         await this.#deps.clock.sleep(VOICE_V2_RETRY_MS[Math.min(failures - 1, VOICE_V2_RETRY_MS.length - 1)]);
         continue;
       }
       if (!this.#liveCall(generation)) return;
-      if (this.#phase === "unavailable" && this.#reason === "events-uncertain") {
+      if (this.#phase === "uncertain") {
         this.#phase = "joined";
         this.#reason = "";
         this.#changed();
