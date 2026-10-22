@@ -3,7 +3,8 @@ import test, { type TestContext } from "node:test";
 import { webcrypto } from "node:crypto";
 import {
   VoiceCryptoBroker, createVoiceCryptoOwner, windowVoiceCryptoBroker,
-  type VoiceIpcNative, type VoiceSelectedKeyNative,
+  type VoiceIpcNative, type VoiceSelectedKeyNative, type VoiceCryptoChainBinding,
+  type VoiceDerivationInput, type VoiceDerivationNative,
 } from "./voice-crypto.ts";
 import {
   decodeVoiceIpcAdmission, encodeVoiceIpcAdmission,
@@ -23,7 +24,8 @@ const integer = (n: bigint, size: number) => Buffer.from(n.toString(16).padStart
 
 /** Independent actual-WebCrypto native endpoint fixture. It consumes only the published
  * selected point, never this broker's private key or its Session internals/counters. */
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identitySeed = 1) {
+  const cleanups: Array<() => void> = [];
   let ordinary = 0, setups = 0, settlements = 0, loseSetup = false, loseSettle = false;
   let setupClosed = false, published: Uint8Array | null = null, executor = "";
   let collections = 0, loseCollection = false;
@@ -49,9 +51,9 @@ async function fixture(t: TestContext) {
       return value.apply(target, args);
     };
   } });
-  const owner = createVoiceCryptoOwner("native-owner", hash(1), () => true);
+  const owner = createVoiceCryptoOwner(identitySeed === 1 ? "native-owner" : `native-owner-${identitySeed}`, hash(identitySeed), () => true);
   const admission = { async admit() { ordinary++; return "ordinary"; }, async settle() {}, async commitInbound() {} };
-  const broker = new VoiceCryptoBroker(admission, engine, () => now, {
+  const broker = sharedBroker ?? new VoiceCryptoBroker(admission, engine, () => now, {
     now: () => now, schedule(run, ms) { const id = ++timerSerial; timers.set(id, { at: now + ms, run }); return id; },
     cancel(id) { timers.delete(id as number); },
   });
@@ -146,12 +148,14 @@ async function fixture(t: TestContext) {
   };
   engineEnabled = true;
   t.after(async () => {
+    for (const cleanup of cleanups) cleanup();
     held?.release(); cancelGate?.release(); fetchCancel?.release(); owner.retire(); broker.retrySelectedJoinKeys();
     await until(() => broker.counts().active === 0);
     assert.equal(broker.counts().bytes, 0);
   });
   return {
     owner, broker, native, transport, key: selected.key, admission,
+    cleanup(work: () => void) { cleanups.push(work); },
     channel() { return broker.nativeChannel(owner, selected.key, native, transport); },
     counts: () => ({ ordinary, setups, settlements, collections, steps: [...engineSteps], tx: [...requestSequences], reads: bodyReads.length }),
     hold(index: number) { holdAt = index; held = gate(); return { release: held.release, entered: () => observedStep === index }; },
@@ -165,6 +169,158 @@ async function fixture(t: TestContext) {
     advance(ms: number) { now += ms; for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.run(); } },
   };
 }
+
+/** Real selected keys and provider work, with mock Root action replies. Status inside the
+ * action hooks exercises same-channel RPC progress; these tests do NOT establish native
+ * framed action ingress or native pair provenance, which need their own integration gate. */
+async function linkedDerivation(f: Awaited<ReturnType<typeof fixture>>, channel = f.channel()) {
+  const peer = await real.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
+  const setup = { localPublicKey: f.key.publicKey(), peerPublicKey: new Uint8Array(await real.exportKey("raw", peer.publicKey)), transcript: utf8.encode("original native handoff purpose") };
+  const binding: VoiceCryptoChainBinding = {
+    chain: "1", epoch: "0", localDevice: hash(6), localJoin: hash(2), localKey: hash(3),
+    peerDevice: hash(7), peerJoin: hash(8), peerKey: hash(9), handshake: hash(10),
+    generation: "1", nativeDeadline: "15000", localIsLow: true,
+  };
+  const input: VoiceDerivationInput = { owner: f.owner.token, action: "1", version: "1", inputTag: hash(11),
+    binding, ...setup, engineBytes: 3 * setup.transcript.length + 4096 + 256 };
+  const empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+  let admits = 0, commits = 0, settlements = 0, loseSettle = false;
+  let settleHold: ReturnType<typeof gate> | null = null;
+  let admitHold: ReturnType<typeof gate> | null = null, admitted = false;
+  f.cleanup(() => { settleHold?.release(); admitHold?.release(); });
+  const native: VoiceDerivationNative = {
+    async admitAction(id, bytes) {
+      admits++; assert.equal(id.owner, f.owner.token); assert.equal(bytes, input.engineBytes);
+      assert.equal((await channel.status()).kind, "ready");
+      admitted = true; if (admitHold) await admitHold.promise;
+      return { ...id, kind: "admitted", permit: "original-permit" };
+    },
+    async commitDerivation(id, tag) {
+      commits++; assert.equal(id.owner, f.owner.token); assert.equal(tag, empty);
+      assert.equal((await channel.status()).kind, "ready");
+      return { ...id, kind: "accepted", resultTag: tag, receipt: "exact-receipt", derived: true };
+    },
+    async settleAction(id) {
+      settlements++; assert.equal(id.owner, f.owner.token);
+      if (settleHold) await settleHold.promise;
+      if (loseSettle) { loseSettle = false; throw new Error("original settlement reply lost"); }
+    },
+  };
+  const plan = () => f.broker.prepareChainFromChannel(f.owner, channel, f.key, binding, 15000, setup);
+  return { channel, setup, binding, input, native, plan,
+    register() { return f.broker.registerProtectedDerivation(f.owner, plan(), native, input); },
+    counts: () => ({ admits, commits, settlements }),
+    holdSettle() { settleHold = gate(); return settleHold; },
+    holdAdmit() { admitHold = gate(); return { release: admitHold.release, entered: () => admitted }; },
+    loseSettle() { loseSettle = true; },
+  };
+}
+
+test("two retained channels lend their existing two positions without a third reservation or nested RPC deadlock", async t => {
+  const f = await fixture(t), a = f.channel(); await a.status();
+  const second = await fixture(t, f.broker, 2), b = second.channel(); await b.status();
+  const linked = await linkedDerivation(f, a);
+  const linkedSecond = await linkedDerivation(second, b);
+  assert.throws(() => f.broker.prepareChain(f.owner, f.key, linked.binding, 15000, linked.setup), /capacity/);
+  const plan = linked.plan(); assert.equal(linked.plan(), plan);
+  const action = linked.register(), secondAction = linkedSecond.register();
+  assert.deepEqual((await Promise.all([action.attempt(), secondAction.attempt()])).map(outcome => outcome.kind), ["accepted", "accepted"]);
+  assert.ok(action.pair()); assert.ok(secondAction.pair());
+  assert.throws(() => f.broker.registerProtectedDerivation(f.owner, plan, { ...linked.native }, linked.input), /identity changed/);
+  assert.equal(linked.counts().admits, 1); assert.equal(linked.counts().commits, 1);
+  await a.close(); second.owner.retire(); await b.close();
+  assert.equal(linked.counts().settlements, 1);
+  assert.deepEqual(linkedSecond.counts(), { admits: 1, commits: 1, settlements: 1 });
+});
+
+test("a lent provider and same-channel status are mutually exclusive through actual provider settlement", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const linked = await linkedDerivation(f, channel);
+  // Admit's four Status SDK calls precede row0's first import. Hold its real ECDH after import.
+  const provider = f.hold(f.counts().steps.length + 5), action = linked.register();
+  const attempt = action.attempt(); await until(provider.entered);
+  const before = f.counts(), status = channel.status();
+  assert.equal(channel.status(), status, "logical status observers still coalesce");
+  await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(f.counts().steps.length, before.steps.length, "queued channel cannot enter SDK behind a running provider");
+  assert.deepEqual(f.counts().tx, before.tx);
+  assert.equal(f.broker.counts().active, 1, "one physical position, not two logical reservations");
+  provider.release(); assert.equal((await status).kind, "ready");
+  assert.equal((await attempt).kind, "accepted");
+  await channel.close();
+});
+
+test("End with a provider and queued channel retains cleanup transport until exact action settlement", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const linked = await linkedDerivation(f, channel), settlement = linked.holdSettle();
+  const provider = f.hold(f.counts().steps.length + 5), action = linked.register();
+  const attempt = action.attempt(); await until(provider.entered);
+  const status = channel.status(), charged = f.broker.counts().bytes;
+  f.owner.retire();
+  assert.equal((await attempt).kind, "retired"); assert.equal((await status).kind, "retired");
+  let closed = false; const close = channel.close().then(() => { closed = true; });
+  assert.equal(f.counts().settlements, 0);
+  // End legitimately returns the eleven unused fixed row claims. Actual row0,96KiB
+  // variable copies and original key/control custody must still remain until their owners drain.
+  assert.equal(f.broker.counts().bytes, charged - 11 * 2048);
+  provider.release(); await until(() => linked.counts().settlements === 1);
+  assert.equal(closed, false); assert.equal(f.counts().settlements, 0); assert.equal(f.counts().collections, 0);
+  assert.ok(f.broker.counts().bytes > 0, "original key/control/chain custody stays retained");
+  settlement.release(); await close;
+  assert.equal(f.counts().settlements, 1); assert.equal(f.counts().collections, 1);
+});
+
+test("lost linked settlement after End retries only on an availability wake and keeps original cleanup custody", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const linked = await linkedDerivation(f, channel); linked.loseSettle();
+  const provider = f.hold(f.counts().steps.length + 5), action = linked.register();
+  const attempt = action.attempt(); await until(provider.entered);
+  f.owner.retire(); assert.equal((await attempt).kind, "retired");
+  let closed = false; const close = channel.close().then(() => { closed = true; });
+  provider.release();
+  await until(() => linked.counts().settlements === 1);
+  await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(closed, false); assert.equal(f.counts().settlements, 0);
+  assert.equal(linked.counts().settlements, 1, "no retry timer/failure loop");
+  f.broker.retrySelectedJoinKeys(); await close;
+  assert.equal(linked.counts().settlements, 2);
+  assert.equal(linked.counts().admits, 1); assert.equal(linked.counts().commits, 0);
+});
+
+test("End while real channel cancellation holds the lane retires an already-admitted queued provider without new SDK", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const linked = await linkedDerivation(f, channel), admission = linked.holdAdmit();
+  const attempt = linked.register().attempt(); await until(admission.entered);
+  const cancellation = f.stallBody(), reads = f.counts().reads;
+  const status = channel.status(); await until(() => f.counts().reads === reads + 1);
+  const steps = f.counts().steps.length;
+  admission.release(); await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(f.counts().steps.length, steps, "already-admitted provider queues behind actual channel intake");
+  f.owner.retire(); assert.equal((await status).kind, "retired"); assert.equal((await attempt).kind, "retired");
+  let closed = false; const close = channel.close().then(() => { closed = true; });
+  await until(cancellation.entered);
+  assert.equal(closed, false); assert.equal(linked.counts().settlements, 0);
+  assert.equal(f.counts().settlements, 0); assert.equal(f.counts().collections, 0);
+  cancellation.release(); await close;
+  assert.equal(f.counts().steps.length, steps, "queued provider performs only its post-acquisition retirement check");
+  assert.equal(linked.counts().settlements, 1);
+  assert.equal(f.counts().settlements, 1); assert.equal(f.counts().collections, 1);
+});
+
+test("channel-linked preparation rejects unready, copied and foreign retained handles before reserving a chain", async t => {
+  const f = await fixture(t), channel = f.channel(), linked = await linkedDerivation(f, channel);
+  const before = f.broker.counts().bytes;
+  assert.throws(linked.plan, /ready voice channel/); assert.equal(f.broker.counts().bytes, before);
+  await channel.status();
+  const copied = Object.freeze({ ...channel });
+  assert.throws(() => f.broker.prepareChainFromChannel(f.owner, copied, f.key, linked.binding, 15000, linked.setup), /ready voice channel/);
+  const generic = await f.broker.createJoinKeyHandle(f.owner);
+  assert.throws(() => f.broker.prepareChainFromChannel(f.owner, channel, generic, linked.binding, 15000, linked.setup), /ready voice channel/);
+  const foreign = createVoiceCryptoOwner(f.owner.token, f.owner.group, () => true);
+  assert.throws(() => f.broker.prepareChainFromChannel(foreign, channel, f.key, linked.binding, 15000, linked.setup), /ready voice channel/);
+  foreign.retire();
+  await channel.close(); assert.throws(linked.plan, /ready voice channel/);
+});
 
 test("retained channel derives from actual selected key once, coalesces and advances original counters", async t => {
   const f = await fixture(t), channel = f.channel();
@@ -329,7 +485,7 @@ test("absolute IO deadline aborts stale-port fetch but retains custody until act
   assert.equal((await channel.status()).kind, "ready"); assert.deepEqual(f.counts().tx, [2n]);
 });
 
-for (const version of [7, 8]) test(`HMR refuses v${version} retained pool rather than creating a second channel allocator`, () => {
+for (const version of [7, 8, 9]) test(`HMR refuses v${version} retained pool rather than creating a second channel allocator`, () => {
   const host = { [Symbol.for("mewtual.voice.crypto-broker.v2")]: { version } };
   const native = { async admit() { return ""; }, async settle() {}, async commitInbound() {} };
   assert.throws(() => windowVoiceCryptoBroker(native, host, real), /reload required/);
