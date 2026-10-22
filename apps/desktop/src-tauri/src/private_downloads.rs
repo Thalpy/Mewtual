@@ -778,7 +778,7 @@ where
         origin,
         path,
         "application/octet-stream",
-        exported_media_validation,
+        inspect_published,
         reveal,
         || !origin.is_cancelled() && allowed(),
     )

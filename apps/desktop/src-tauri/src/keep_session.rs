@@ -478,7 +478,7 @@ mod read_tests {
                     if edge == 3 {
                         register_ui_lock_request(&state);
                     }
-                    None
+                    std::future::ready(None)
                 },
                 |_| {
                     revealed.set(true);
@@ -560,6 +560,63 @@ mod read_tests {
             }
             assert_eq!(std::fs::read(&path).unwrap(), b"verified file");
         }
+    }
+
+    /// Picker re-review MEDIUM 1: the media check reads the file just published, on whatever share
+    /// the user saved to. It must run on the blocking pool and without the process-wide commit
+    /// guard, so a stalled share pins neither a runtime worker nor Lock and every other save. On a
+    /// single-threaded runtime the releasing task below can only run, and can only take the commit
+    /// guard, if both hold; otherwise the parked inspection times out and reports "blocked".
+    #[test]
+    fn the_saved_file_check_runs_off_the_runtime_and_outside_the_commit_guard() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let state = AppState::default();
+            let directory = tempfile::tempdir().unwrap();
+            *state.store.lock().await =
+                Some(ServerStore::open(directory.path(), b"read test", &mut OsCryptoRng).unwrap());
+            *state.session_resumable.lock().await = true;
+            let path = directory.path().join("published.png");
+            std::fs::write(&path, b"verified file").unwrap();
+            let entry = EntryOwner::new();
+            let origin = entry.scope(current(&state, 0).unwrap());
+            let (parked, parked_seen) = tokio::sync::oneshot::channel::<()>();
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            let releaser = async {
+                if parked_seen.await.is_ok() {
+                    // Taking the commit guard proves the inspection does not hold it.
+                    let guard = require_ui_session_generation(&state, 0).await.unwrap();
+                    drop(guard);
+                    let _ = release.send(());
+                }
+            };
+            let saving = finish_saved_read(
+                &state,
+                0,
+                &origin,
+                &path,
+                "image/png",
+                |path, mime| {
+                    inspect_published_with(path, mime, move |_, _| {
+                        let _ = parked.send(());
+                        match released.recv_timeout(std::time::Duration::from_secs(10)) {
+                            Ok(()) => None,
+                            Err(_) => Some("blocked".into()),
+                        }
+                    })
+                },
+                |_| Ok(()),
+            );
+            let (saved, ()) = tokio::join!(saving, releaser);
+            let saved = saved.expect("a live session gets its saved file");
+            assert_eq!(
+                saved.content_validation, None,
+                "the inspection was not blocked"
+            );
+        });
     }
 
     /// Picker review L1: a failed ciphertext cleanup adds its warning to what the save already

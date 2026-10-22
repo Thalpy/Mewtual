@@ -239,6 +239,10 @@ impl SaveSource for PrivateExportSource<'_> {
         }
         publish_staged_download(staging, final_path)
     }
+    fn liveness(&self) -> private_downloads::Liveness {
+        let (origin, ready) = (self.origin.clone(), self.ready.clone());
+        Arc::new(move || !origin.is_cancelled() && ready.is_current())
+    }
     fn progress(&self, _: usize, _: u64, _: u64, _: Option<String>) {}
 }
 

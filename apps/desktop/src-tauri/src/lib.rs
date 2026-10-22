@@ -14562,6 +14562,14 @@ trait SaveSource {
     /// session check from the rename.
     async fn publish_verified(&self, staging: &Path, final_path: &Path) -> Result<(), String>;
 
+    /// The invocation's synchronous liveness (origin not cancelled, read epoch current) as an
+    /// owned check a blocking worker evaluates when it actually starts. The async
+    /// `still_unlocked` runs before a step is dispatched; a step can then wait for a pool thread,
+    /// and Lock can land in that gap. Same contract as the journaled path's
+    /// [`private_downloads::ExportPorts::liveness`]: a queued step that starts after retirement
+    /// does nothing; a started step completes.
+    fn liveness(&self) -> private_downloads::Liveness;
+
     /// Report progress. Purely informational; a dropped update never changes the outcome.
     fn progress(
         &self,
@@ -14625,6 +14633,9 @@ async fn stream_download_to_chosen(
     .await
 }
 
+/// Error for a fallback-writer step whose blocking worker started after the invocation retired.
+const RETIRED_SAVE: &str = "The file read is no longer active.";
+
 /// Shared body of the non-resumable writer. `stage` reserves the `.part` and names the final path;
 /// it runs only after the first liveness check, so a retired command creates no plaintext file.
 ///
@@ -14640,9 +14651,17 @@ async fn stream_download_staged(
     target: &[u8; 32],
     source: &mut impl SaveSource,
 ) -> Result<PathBuf, String> {
-    // Refuse a command retired during its earlier plan awaits before creating plaintext staging.
+    // Refuse a command retired during its earlier plan awaits before creating plaintext staging,
+    // and again when the staging worker starts (it may have waited for a pool thread).
     source.still_unlocked().await?;
-    let (file, staging, path) = private_downloads::blocking(stage).await??;
+    let live = source.liveness();
+    let (file, staging, path) = private_downloads::blocking(move || {
+        if !live() {
+            return Err(RETIRED_SAVE.to_string());
+        }
+        stage()
+    })
+    .await??;
     match fill_staged_download(file, &staging, &path, total, size, target, source).await {
         Ok(()) => Ok(path),
         Err(error) => {
@@ -14691,14 +14710,19 @@ async fn fill_staged_download(
         address.update(&chunk);
         bytes_done = next;
         // The file moves to the blocking pool and back with each write. A worker that panics
-        // drops it there; the caller still removes the staging name.
+        // drops it there; the caller still removes the staging name. A write whose worker starts
+        // after Lock or retirement writes nothing.
+        let live = source.liveness();
         let (returned, written) = private_downloads::blocking(move || {
-            let written = file.write_all(&chunk);
+            if !live() {
+                return (file, Err(RETIRED_SAVE.to_string()));
+            }
+            let written = file.write_all(&chunk).map_err(|e| e.to_string());
             (file, written)
         })
         .await?;
         file = returned;
-        written.map_err(|e| e.to_string())?;
+        written?;
         source.progress(i + 1, bytes_done, network_bytes_done, provider);
     }
     // Closing happens on the blocking pool too, so a share that stalls on close cannot hold a
@@ -14784,6 +14808,11 @@ impl SaveSource for ActorSaveSource<'_> {
         // pool thread still links, and then no later Lock exists to race.
         let (staging, final_path) = (staging.to_path_buf(), final_path.to_path_buf());
         private_downloads::blocking(move || publish_staged_download(&staging, &final_path)).await?
+    }
+
+    fn liveness(&self) -> private_downloads::Liveness {
+        let (origin, ready) = (self.origin.clone(), self.ready.clone());
+        Arc::new(move || !origin.is_cancelled() && ready.is_current())
     }
 
     fn progress(
@@ -15008,7 +15037,7 @@ async fn save_group_file(
         &origin,
         &path,
         &declared_mime,
-        exported_media_validation,
+        inspect_published,
         reveal_path,
         || ready.is_current(),
     )
@@ -15076,7 +15105,7 @@ where
 /// can publish its atomic generation during CPU/OS work even while the commit mutex is held.
 /// Recheck at each synchronous boundary; a file already renamed stays in Downloads on refusal.
 #[cfg(test)]
-async fn finish_saved_read<I, R>(
+async fn finish_saved_read<I, IF, R>(
     state: &AppState,
     generation: u64,
     origin: &RequestCancellation,
@@ -15086,7 +15115,8 @@ async fn finish_saved_read<I, R>(
     reveal: R,
 ) -> Result<SavedFileResult, String>
 where
-    I: FnOnce(&Path, &str) -> Option<String>,
+    I: FnOnce(PathBuf, String) -> IF,
+    IF: Future<Output = Option<String>>,
     R: FnOnce(&Path) -> Result<(), String>,
 {
     finish_saved_read_if(
@@ -15102,7 +15132,31 @@ where
     .await
 }
 
-async fn finish_saved_read_if<I, R, A>(
+/// The media signature check of a published save, on the blocking pool (picker re-review
+/// MEDIUM 1). It opens and reads the file it just published, which sits on whatever share the
+/// user saved to; a stalled share must pin a pool thread, never a tokio worker. A worker that dies
+/// reports "unrecognized", so the notice treats the copy as untrusted rather than as checked.
+async fn inspect_published(path: PathBuf, declared_mime: String) -> Option<String> {
+    inspect_published_with(path, declared_mime, exported_media_validation).await
+}
+
+/// [`inspect_published`] with the inspection injected, so a test can park it.
+async fn inspect_published_with(
+    path: PathBuf,
+    declared_mime: String,
+    inspect: impl FnOnce(&Path, &str) -> Option<String> + Send + 'static,
+) -> Option<String> {
+    private_downloads::blocking(move || inspect(&path, &declared_mime))
+        .await
+        .unwrap_or_else(|_| Some("unrecognized".into()))
+}
+
+/// Inspect and reveal a published save, then return it only if the ORIGINAL invocation is still
+/// authorized. `inspect` runs before the session commit guard is taken (picker re-review
+/// MEDIUM 1): that guard is process-wide (Lock and every other save's checks take it), and the
+/// inspection reads the destination, which can stall. Its result reaches the renderer only after
+/// the guarded recheck below, and a retired invocation is refused before inspection starts.
+async fn finish_saved_read_if<I, IF, R, A>(
     state: &AppState,
     generation: u64,
     origin: &RequestCancellation,
@@ -15113,21 +15167,23 @@ async fn finish_saved_read_if<I, R, A>(
     allowed: A,
 ) -> Result<SavedFileResult, String>
 where
-    I: FnOnce(&Path, &str) -> Option<String>,
+    I: FnOnce(PathBuf, String) -> IF,
+    IF: Future<Output = Option<String>>,
     R: FnOnce(&Path) -> Result<(), String>,
     A: Fn() -> bool,
 {
-    let _commit = keep_session::read_commit(state, generation, origin).await?;
-    if !allowed() {
+    if origin.is_cancelled() || !allowed() {
         return Err("The download is no longer active.".into());
     }
-    let content_validation = inspect(path, declared_mime);
+    let content_validation = inspect(path.to_path_buf(), declared_mime.to_owned()).await;
+    let _commit = keep_session::read_commit(state, generation, origin).await?;
     if origin.is_cancelled() || !allowed() {
         return Err("The file read is no longer active.".into());
     }
+    // Folder-neutral: the save may be in Downloads or at a place chosen in Save as.
     let warning = reveal(path)
         .err()
-        .map(|error| format!("The file was saved, but Downloads could not be opened: {error}"));
+        .map(|error| format!("The file was saved, but its folder could not be opened: {error}"));
     if origin.is_cancelled() || !allowed() {
         return Err("The file read is no longer active.".into());
     }
@@ -19699,6 +19755,9 @@ mod tests {
         /// how far the save actually got, which is what distinguishes "stopped before writing"
         /// from "wrote and then failed", since the failure path deletes the evidence on disk.
         progress: std::cell::RefCell<Vec<(usize, u64)>>,
+        /// What the owned liveness check reports to blocking workers: set to model a session
+        /// retired after the async check passed but before the queued worker started.
+        retired_before_worker: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl ScriptedSave {
@@ -19711,6 +19770,7 @@ mod tests {
                 fetches: std::cell::Cell::new(0),
                 locked: std::cell::Cell::new(false),
                 progress: std::cell::RefCell::new(Vec::new()),
+                retired_before_worker: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }
         }
 
@@ -19782,6 +19842,11 @@ mod tests {
         async fn publish_verified(&self, staging: &Path, final_path: &Path) -> Result<(), String> {
             self.still_unlocked().await?;
             publish_staged_download(staging, final_path)
+        }
+
+        fn liveness(&self) -> private_downloads::Liveness {
+            let retired = self.retired_before_worker.clone();
+            Arc::new(move || !retired.load(std::sync::atomic::Ordering::SeqCst))
         }
 
         fn progress(&self, done: usize, bytes_done: u64, _network: u64, _provider: Option<String>) {
@@ -19863,6 +19928,64 @@ mod tests {
             assert_eq!(std::fs::read(&path).unwrap(), b"chunk");
             releaser.await.unwrap();
         });
+    }
+
+    /// With file work on the blocking pool (picker review M2), a step can pass the async session
+    /// check and then wait for a pool thread while Lock lands. Such a step must do nothing when its
+    /// worker starts: no staging file at all, and no plaintext write into an existing one.
+    #[tokio::test]
+    async fn a_fallback_step_whose_worker_starts_after_retirement_does_nothing() {
+        // Retired before the staging worker starts: no `.part` is ever created.
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = ScriptedSave::new(vec![b"secret".to_vec()]);
+        source
+            .retired_before_worker
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (total, size, target) = (source.total(), source.size(), source.address());
+        let folder = dir.path().to_path_buf();
+        let created = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let staged = created.clone();
+        assert!(stream_download_staged(
+            move || {
+                staged.store(true, std::sync::atomic::Ordering::SeqCst);
+                create_staged_download(&folder, "early.bin")
+            },
+            total,
+            size,
+            &target,
+            &mut source,
+        )
+        .await
+        .is_err());
+        assert!(
+            !created.load(std::sync::atomic::Ordering::SeqCst),
+            "no staging"
+        );
+        assert!(downloads_empty(dir.path()));
+
+        // Retired after staging, before the first write's worker starts: nothing is written and
+        // the staging name is removed.
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = ScriptedSave::new(vec![b"secret".to_vec()]);
+        let (total, size, target) = (source.total(), source.size(), source.address());
+        let folder = dir.path().to_path_buf();
+        let retire = source.retired_before_worker.clone();
+        assert!(stream_download_staged(
+            move || {
+                let staged = create_staged_download(&folder, "late.bin");
+                // The next worker (the first write) starts after Lock.
+                retire.store(true, std::sync::atomic::Ordering::SeqCst);
+                staged
+            },
+            total,
+            size,
+            &target,
+            &mut source,
+        )
+        .await
+        .is_err());
+        assert_eq!(source.written(), 0, "no plaintext write after retirement");
+        assert!(downloads_empty(dir.path()));
     }
 
     #[tokio::test]
