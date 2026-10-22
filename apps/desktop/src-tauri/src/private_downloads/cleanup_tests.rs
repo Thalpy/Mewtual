@@ -383,6 +383,66 @@ async fn resume_takes_the_cleanup_claim_only_around_its_intent_change() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_real_resume_commits_its_intent_change_only_without_a_cleanup_claim() {
+    // Final review L2: a real Download record whose preflight passes (Completed, no journal, no
+    // remembered place), so prepare_resume reaches its intent change. With a cleanup holding the
+    // claim it must be Busy and leave the intent alone; without one it commits.
+    let state = AppState::default();
+    let vault = tempfile::tempdir().unwrap();
+    *state.store.lock().await = Some(
+        catcoms_app::store::ServerStore::open(vault.path(), b"resume claim", &mut OsCryptoRng)
+            .unwrap(),
+    );
+    *state.session_resumable.lock().await = true;
+    let (row, task, drain, cid) =
+        crate::leaving::tests::running_with_file(944, &state, b"a resumable private copy").await;
+    let actor = row.actor.clone();
+    state.servers.lock().await.insert(1, row);
+    let (_cancel, watch) = tokio::sync::watch::channel(false);
+    let origin = RequestCancellation::new(watch, None);
+    let ready = actor
+        .acquire_download(cid, None, origin.clone())
+        .await
+        .expect("the file is local, so the private copy completes at once");
+    let key = ready.id();
+    drop(ready);
+    let intent = || async {
+        actor
+            .downloads()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == key)
+            .unwrap()
+            .state
+            .intent
+    };
+    let before = intent().await;
+    let held = CleanupClaim::acquire(1, key).unwrap();
+    let refused = prepare_resume(
+        &state, 1, 944, 0, &actor, &origin, key, before, false, false,
+    )
+    .await;
+    assert_eq!(refused.err().as_deref(), Some(CLEANUP_BUSY));
+    assert_eq!(intent().await, before, "no intent change under a cleanup");
+    drop(held);
+    let resumed = prepare_resume(
+        &state, 1, 944, 0, &actor, &origin, key, before, false, false,
+    )
+    .await
+    .expect("no cleanup in flight: Resume commits");
+    assert!(resumed.saved.is_none());
+    assert_eq!(intent().await, before + 1);
+    assert!(
+        CleanupClaim::acquire(1, key).is_ok(),
+        "Resume released the claim"
+    );
+    actor.shutdown().await;
+    task.await.unwrap();
+    drain.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_recovered_save_clears_only_the_record_it_recovered() {
     // Final review L1: the Resume preflight recovered a published save; before its cleanup ran, a
     // Save new copy from another window retired and forgot that journal and is now re-saving the
