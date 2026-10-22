@@ -81,7 +81,10 @@ between them on the runtime and again when each queued staging or write worker s
 that fix it did its file I/O directly on a tokio worker, which Save as made worse by sending
 exactly the stall-prone identity-less shares to it. The media check of the published file runs on
 the blocking pool too, before the process-wide session commit guard is taken (re-review
-MEDIUM 1).
+MEDIUM 1). Closing a session's handle is destination I/O as well: on the async side the session
+lives in an `OnPool` wrapper, so every early return or error (a refused transition, a failed
+checkpoint, Lock at the commit guard, a refused Publish) closes it on the blocking pool, and the
+fallback writer closes its handle together with the staging removal (re-review 2 LOW 7).
 
 If a **fresh** export cannot be journaled (no stable identity or birth time on this filesystem, no
 OS file lock, an encoded folder path over the bound, or an unsupported platform), native keeps
@@ -429,7 +432,12 @@ second reservation.
   hold a process-wide claim per (server, Download ID). The deleting blocking worker owns a clone
   of the claim, so it outlives a dropped invocation (Lock, a closed window) until the delete has
   ended; a second claimant gets Busy. Keep reassesses under the claim and says when the file was
-  already removed instead of promising it.
+  already removed instead of promising it. That check is best effort (re-review 2 MEDIUM): with
+  every cleanup slot busy it answers "unknown" without touching the disk, and Keep stops waiting
+  for it after a few seconds on the sanctioned clock, so Keep stays the escape from a removal
+  stuck on a dead share; "unknown" promises nothing. Plain Resume takes the same claim across its
+  preflight and intent change (re-review 2 LOW 2), so it is Busy while a cleanup owns the
+  Download.
 - Native checks the original invocation and lease before **every** write attempt, including each
   retry after a backoff, so a session retired by Lock, Pause, Remove or replacement writes no more
   plaintext.
@@ -440,7 +448,10 @@ second reservation.
   actively saving.
 - After a successful link, a failure to *check* the final name is transient: the retry trims and
   writes nothing, verifies our own final name's content read-only, and only then reports it saved;
-  a different identity, a foreign object or changed content there is Changed. Recording a proven
+  a different identity, a foreign object or changed content there is Changed. A link call that
+  failed uncertainly (a network timeout) but left our file with one name and the final name not
+  ours made no link, so the retry publishes normally instead of halting Changed (re-review 2
+  LOW 1). Recording a proven
   publication also retires an earlier halt and clears Pause with an intent change.
 - `finish_download_export` is allowed only with export None (the non-resumable path) or Published.
   A record with a Writing journal cannot be released through the fallback path. An already
@@ -631,15 +642,22 @@ user picks in a native dialog, for that one save.
   acquisition run, before any network work (if that write is refused, the run just started is
   released: a record this step created is removed outright, an existing one is paused; picker
   review L2). A Save as on a file whose record already has a journal is refused before the run is
-  resumed, so it never interrupts a live save of the same file. Every later Resume, including one-click Resume after a restart, saves to that planned
-  place: the verified copy carries the record's planned destination, the export validates it again
-  (identity, name absent) and Begin consumes it, refusing a journal that does not match it. Save as
-  again replaces it (the latest choice wins); a Save as invocation whose choice another save already
-  consumed is refused, never redirected to Downloads. A remembered choice this platform cannot
-  decode (a vault moved to another OS) is refused. Save new copy and Remove behave as before. This amends the unreleased v2 encoding (a planned field after
-  the export section) rather than adding v3; v2 has never been pushed or released. A planned
+  resumed, so it never interrupts a live save of the same file. Every later Resume, including
+  one-click Resume after a restart, saves to that planned place: an explicit Resume first checks
+  it read-only (folder identity, names free) before spending allowance on re-verification
+  (re-review 2 LOW 3), the verified copy carries the record's planned destination, the export
+  validates it again (identity, name absent) and Begin consumes it, refusing a journal that does
+  not match it. Save as again replaces it (the latest choice wins); a Save as invocation whose
+  choice another save already consumed is refused, never redirected to Downloads. A remembered
+  choice this platform cannot decode (a vault moved to another OS) is refused. Save new copy and
+  Remove behave as before. This amends the unreleased v2 encoding (a planned field after the
+  export section) rather than adding v3; v2 has never been pushed or released. A planned
   destination may exist only while there is no journal, and only a V1 record that gains a journal
   or a planned destination is upgraded.
+- **Builds at `27ffa183` (re-review 2 LOW 6).** Records written by that intermediate build carry
+  v2 without the planned-destination byte, so this build refuses them and the retained store
+  faults ("needs a storage check") without destroying anything. No dogfood or installed build of
+  `27ffa183` exists; it was only ever exercised by tests, so no real vault is affected.
 - **Creation** (`ExportFile::create_chosen`): the folder must still have the captured identity (a
   parent swapped for a link, junction or another folder, or one that no longer reports any
   identity, is refused with "The chosen folder changed"); the chosen name must still be absent; the
@@ -665,7 +683,9 @@ user picks in a native dialog, for that one save.
 - **Unsupported locations.** Two cases are kept apart:
   - No hard links (FAT, exFAT, typical USB sticks): no writer can publish there without risking a
     replace, so the save is refused before any plaintext is written ("This drive cannot finish a
-    save safely..."). This also applies to one-click saves into such a Downloads folder.
+    save safely..."). This also applies to one-click saves into such a Downloads folder, including
+    the non-resumable one-click writer for a Downloads folder without identities, which probes
+    links on its fresh `.part` with the same storage function (re-review 2 LOW 4).
   - Hard links but no stable identity (some network shares, FUSE mounts without birth time such as
     the document portal): the non-resumable writer runs in the chosen folder with a chosen-location
     variant (`ChosenDestination::create_unjournaled`) that never creates folders, uses the exact
@@ -674,13 +694,23 @@ user picks in a native dialog, for that one save.
     folder before writing). The result and any error say that an interrupted save there starts
     over. Without an identity there is no parent-swap check (documented residual). Like the
     journaled path, this writer does all its file work on the blocking pool (picker review M2).
-- **Authority and privacy.** The chosen path authorizes this one save (and its resumes). It never
-  comes from the renderer, is never logged, and persists only inside the sealed record (planned
-  destination, then journal). The renderer receives the final path once, on success, plus a
+- **Authority and privacy.** The chosen path authorizes saves of that one Download, never of any
+  other file. It stays the destination of every save of that Download until a save begins there
+  (Begin consumes it into the journal), a newer Save as replaces it, or the record is released.
+  So a plain one-click Download of the same file from the chat, made meanwhile, also saves there,
+  by design (the choice survives interruption), and a folder without identity, which never
+  begins a journal, keeps the choice until its non-resumable save completes and releases the
+  record. Re-review 2 LOW 7 asked whether a plain click should stop inheriting an older choice;
+  it was kept, because that is exactly the interrupted-save path the choice exists for, and the
+  result's `inDownloads` flag keeps the notice truthful. It never comes from the renderer, is
+  never logged, and persists only inside the sealed record (planned destination, then journal). The renderer receives the final path once, on success, plus a
   boolean "saving to a chosen place" for the row. The app writes only the chosen leaf, its
   `.mewtual-part` (or `.part` for the non-resumable writer) and a transient link probe there;
   operating-system permissions still apply. Lock cannot close an open OS dialog, so the suggested
-  name and folder stay on screen until the user closes it (the choice is then discarded).
+  name and folder stay on screen until the user closes it (the choice is then discarded). Lock,
+  unlock or a server replacement does end the invocation's wait and releases the one-dialog turn,
+  so a dialog that never answers (a GTK future that never completes) cannot wedge Save as until
+  restart; that orphaned window's answer is discarded and a new Save as may open beside it.
   Cloud-synced or shared folders may upload the partial plaintext and the probe name.
 - **UI.** "Save as" sits next to Download in the file menu, embed menu, file details and image
   viewer, and in Transfers rows that are ready, incomplete, paused, unavailable, changed or saved.
@@ -886,20 +916,42 @@ Short re-check of those fixes (`0db5498f..e1b0cc39`): no blocker, high or medium
 | LOW A: `chosenPlace` failed open for resumed and recovered journals at a place chosen earlier | Fixed in `9d975719` and `680184d1` (the fail-closed `inDownloads`; see LOW 1b above). |
 | LOW B: the unjournaled reservation now refuses when the probe name is not provably ours, with a "could not be removed" message | Accepted as the safe direction (it only arises on unusual filesystems or a transient hold); the message now says "could not be confirmed or removed" (`680184d1`). No retry added. |
 
+## Re-review 2 (`27ffa183..fe18048b`): dispositions
+
+Read-only re-review of the whole range after the merge of `chat-update-implementation`: no
+blocker. Its HIGH (Windows-only test fields dead on Linux under strict Clippy) was resolved by
+`5e04f5c0`. Every guard below was broken on purpose and seen to fail.
+
+| Finding | Disposition |
+| --- | --- |
+| MEDIUM: "Keep partly saved file" was no longer an escape from a stuck removal (Busy when four stuck Removes held every cleanup slot; an unbounded presence check held the claim, record and quota while a dead share hung) | Fixed in `81541158`: with no free slot the check answers Unknown without touching the disk; a failed check is Unknown; Keep stops waiting after `KEEP_PRESENCE_WAIT` on the sanctioned clock (a new `CleanupPorts::wait`). Unknown promises nothing and the claim alone excludes a concurrent delete. Tests: `keep_partial_still_releases_when_its_presence_check_hangs`, `keep_presence_is_unknown_without_touching_the_disk_when_every_slot_is_busy`. |
+| LOW 1: an uncertain link error became a permanent, false "changed" | Fixed in `9fe145f5`: with one name on our file and a final name that is not ours, the link did not happen; the session is private again and publication retries within the budget. Test: `an_uncertain_link_error_that_made_no_link_retries_instead_of_halting_changed` (red before the fix). |
+| LOW 2: Resume was not excluded by the cleanup claim | Fixed in `7857aaeb`: plain Resume holds the claim across its preflight and intent CAS and is Busy while a cleanup owns the Download. Test: `resume_is_refused_while_a_cleanup_owns_the_download`. |
+| LOW 3: a remembered Save as choice had no preflight | Fixed in `2d9290cf`: `ChosenDestination::preflight` (read-only folder identity and free names), carried by `DownloadPreflight::planned` and checked by the Resume preflight unless the invocation brings its own new choice. Tests: `a_remembered_choice_is_preflighted_without_creating_anything` (storage), `the_resume_preflight_carries_the_remembered_choice_until_begin` (actor), `a_remembered_choice_that_cannot_be_used_is_refused_before_reverification` (native). A plain chat click with a stale list (no row, so no Resume preflight) still learns at creation. |
+| LOW 4: the Downloads fallback writer had no link probe | Fixed in `7caeedec`: the shared `confirm_staging_links` (identity-checked probe, proven removal) now also guards native's one-click `.part`. Test: `a_downloads_reservation_without_links_is_refused_before_any_plaintext` (storage; the native call site has no failure injection, so only its success path runs natively). |
+| LOW 5: the Save as success toast named the listed file | Fixed in `2abd8649`: the notice names the final component of the saved path. Test: `a notice names the file that was written, not the listed name`. |
+| LOW 6: vaults written at `27ffa183` now fault | Agreed, no code change: no dogfood or installed build of `27ffa183` exists. Stated under Remembered choice above and in HANDOVER. |
+| LOW 7a: export handles were dropped on the runtime in about six error paths | Fixed in `7b4f29ef` rather than documented: `OnPool` holds the session on the async side and closes it on the blocking pool on every early return; the fallback writer closes its handle with the staging removal. Test: `a_session_dropped_on_the_async_side_closes_on_the_blocking_pool`. The INTERFACES claim is now accurate. |
+| LOW 7b: the docs said a choice authorizes "that save and its resumes only" | Wording corrected here, in THREAT-MODEL and INTERFACES: the choice is the destination of every save of that Download until Begin consumes it, a newer Save as replaces it or the record is released. Inheritance by a plain click was kept on purpose (it is the interrupted-save path); the `inDownloads` flag keeps the notice truthful. |
+| Residual: a GTK dialog future that never completes kept the one-dialog flag set until restart | The turn already was an RAII guard, but Tauri does not drop running commands. Fixed in `e1ad2103`: the dialog wait also ends when the invocation's origin is cancelled (Lock, unlock, a server replacement), releasing the turn; the orphaned window's answer is discarded. Test: the chooser seam's never-answering dialog (bounded, break-checked). Without a Lock or replacement a hung dialog still holds the turn for that session; documented. |
+| PR #51 Windows root failure (`accepted_crossing_range_chunk_renews_quiet_deadline_before_fetching_the_next_chunk`) | Not worked on, as asked. That test drives `range_cancellable`. In the actor, Re-review 2 changed only `download_preflight` (an extra read of the planned destination); `start_saved` changed earlier (picker L2). Neither is on that test's path, and nothing here changes range chunks, quiet deadlines or chunk stepping. |
+
 ## Ledger (22 October)
 
-Focused commands, all passing at `680184d1` (after the picker implementation review, its
-re-review and the re-check):
+Focused commands, all passing at `e1ad2103` (after Re-review 2):
 
-- `cargo test -p catcoms-storage --lib kept::`: 127 passed.
-- `cargo test -p catcoms-app --lib actor::file_transfers`: 58 passed (includes the export tests).
+- `cargo test -p catcoms-storage --lib kept::`: 130 passed.
+- `cargo test -p catcoms-app --lib actor::file_transfers`: 59 passed (includes the export tests).
 - Native `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib` with filters
-  `private_downloads` (26 passed), `keep_session` (14 passed), `download` (45 passed), and the
+  `private_downloads` (31 passed), `keep_session` (14 passed), `download` (50 passed), and the
   set `streamed_save fallback stops_the_save lock download_to_disk publish in_downloads_flag
-  device_name` (85 passed); native `cargo check --locked`.
-- Frontend single files: `native-download` 10, `private-downloads` 8, `private-download-lifecycle`
-  10, `visual-fixture` 10, `tauri-command-security` 10, `inline-transfer` 5, `studio-media` 3;
+  device_name` (95 passed); native `cargo check --locked`.
+- The complete frontend suite, `npm --prefix apps/desktop test`: 2,365 passed, 0 failed.
   `npm run check`: 0 errors, 0 warnings.
+- Strict native Clippy, `cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml
+  --all-targets --all-features -- -D warnings` (with `apps/desktop/dist` built): clean on
+  Windows. (The baseline findings noted below are gone since the merge of
+  `chat-update-implementation`.)
 - `cargo fmt --all -- --check` (root and native), `cargo clippy -p catcoms-storage -p catcoms-sync
   -p catcoms-app --all-targets --all-features -- -D warnings`, `cargo clippy --target
   x86_64-linux-android -p catcoms-storage --all-targets -- -D warnings`,
@@ -907,9 +959,10 @@ re-review and the re-check):
 - `cargo deny check` (root): advisories, bans, licenses and sources ok. Native `cargo deny check`:
   12 advisory errors, the same count as the baseline, none in `libc`, `rfd` or `winapi-util`.
   (Run at `b36737ba`; no dependency changed afterwards.)
-- Native Clippy is not clean at the baseline: a voice join-key variant size and
-  `too_many_arguments` on `save_group_file` (8 parameters at `dbb8d36b`, 10 now with `fresh_copy`
-  and `save_as`) and `finish_saved_read_if` (8, unchanged). No other native Clippy finding remains from this work.
+- Before the merge, native Clippy was not clean at the baseline: a voice join-key variant size
+  and `too_many_arguments` on `save_group_file` (8 parameters at `dbb8d36b`, 10 now with
+  `fresh_copy` and `save_as`) and `finish_saved_read_if`. The merge brought upstream's allowances,
+  and strict native Clippy is now clean (above).
 
 Compatibility run: fixtures written by a temporary generator (never committed) into
 `M:/cargo-isolated/compat-fixtures`; a scratch `git worktree` at `dbb8d36b` with its own target dir

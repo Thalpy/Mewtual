@@ -504,7 +504,15 @@ Rust interfaces:
   cannot be journaled) also runs its staging, writes, sync, cleanup and publication link on the
   blocking pool, and `SaveSource::liveness` is rechecked when each queued staging or write worker
   starts. The media check of the published file runs on the pool before the session commit guard.
-  No destination file I/O runs on an async worker in either writer.
+  On the async side an open session (`ExportFile`, or the fallback writer's file) lives in
+  `OnPool`, so an early return or error closes it on the pool too. No destination file I/O runs
+  on an async worker in either writer.
+- `ChosenDestination::preflight` (read-only) and `DownloadPreflight::planned()` let an explicit
+  Resume check a remembered choice before re-verification; `confirm_staging_links` is the shared
+  link probe for non-journaled reservations (chosen place and one-click Downloads).
+- Plain Resume, Remove, Keep partly saved file and Save new copy share one process-wide cleanup
+  claim per (server, Download ID); Keep's presence check is best effort (bounded wait, Unknown
+  without a free slot) and never blocks the release.
 - `DownloadStore` adds `download_export_state`, `begin/resume/checkpoint/publish_download_export`
   (export-lease fenced), `download_observation` plus `recover/halt_download_export` (fenced by an
   `ExportFence`: the preflight observation or the export lease, plus an exact journal CAS),

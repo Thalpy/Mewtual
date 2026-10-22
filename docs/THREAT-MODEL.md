@@ -501,13 +501,17 @@ writer keeps those properties.
   folder as `<name>.mewtual-part` across lock and restart until it is resumed, completed, replaced
   by Save new copy or removed. While a session is open on Windows, other programs cannot read it.
 - **Save as.** Native opens the OS dialog itself; the renderer sends only a flag and the command's
-  parameter list is pinned so no path can be added. The chosen place authorizes that save and its
-  resumes only, is never logged (`rfd` logs only in backends this build does not compile), and
-  persists only in the sealed record. An existing name is refused even if the dialog asked to
+  parameter list is pinned so no path can be added. The chosen place authorizes saves of that one
+  Download only: it stays the destination of every save of it (a later plain one-click Download
+  of the same file included) until a save begins there, a newer Save as replaces it or the record
+  is released. It is never logged (`rfd` logs only in backends this build does not compile), and
+  persists only in the sealed record. An explicit Resume checks a remembered place read-only
+  before spending allowance. An existing name is refused even if the dialog asked to
   replace it. The peer-chosen suggestion is sanitized (Windows device names including `COM¹` and
-  `CONIN$`, and `%`, which the Windows dialog would expand into another path). Lock cannot close an open OS dialog, so the
-  suggested name and folder stay on screen until the user closes it (the choice is then
-  discarded). A cloud-synced or shared chosen folder (for example OneDrive Desktop or Documents)
+  `CONIN$`, and `%`, which the Windows dialog would expand into another path). Lock cannot close
+  an open OS dialog, so the suggested name and folder stay on screen until the user closes it
+  (the choice is then discarded); Lock does release the one-dialog turn, so a dialog that never
+  answers cannot block later Save as attempts after Lock or a server replacement. A cloud-synced or shared chosen folder (for example OneDrive Desktop or Documents)
   uploads the partial plaintext and the probe name as they are written. A chosen folder inside the
   app's own data or vault folder is not refused (documented, not enforced).
 - **Fences.** In-session journal transitions require the original export lease; the Resume

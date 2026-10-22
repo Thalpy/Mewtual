@@ -817,7 +817,10 @@ without changing a byte. Not yet run: complete root/native/frontend suites, `npm
 `test:startup`, `test:flows` (including the opt-in `FLOW_SCENARIO=private-download`), a real dialog
 on each OS, physical FAT/SMB/ReFS/OneDrive/portal checks, and any Unix execution (the storage
 crate compiles and passes Clippy for `x86_64-linux-android`). A post-implementation review of the
-picker found no blocker or high; its fixes and dispositions are in the design document. No
+picker found no blocker or high; its fixes and dispositions are in the design document, as are
+those of Re-review 2 (one medium, seven lows, a dialog residual; all fixed or settled). Vaults
+written by the intermediate build `27ffa183` would fault (v2 was amended with the planned
+destination), but no dogfood or installed build of `27ffa183` exists; it only ran in tests. No
 screenshot exists yet for the new rows or Save as entries.
 
 ## Chat history adversarial checkpoint (2026-10-20)
