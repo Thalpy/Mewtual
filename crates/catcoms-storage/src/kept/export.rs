@@ -438,8 +438,10 @@ impl std::fmt::Display for ChoiceRefusal {
             // Review L3: also reached when a save to a remembered choice finds the empty partial
             // an earlier interrupted save left (a crash between creation and Begin). It is never
             // adopted or deleted, so say where it likely came from and how to recover.
+            // Re-review LOW 4: "delete it from the folder", not "Remove", which names the
+            // Transfers action (that discards encrypted progress and never touches this file).
             Self::PartialExists => {
-                "A partly saved file with that name is already there, probably from an earlier interrupted save. Remove it, or choose another name."
+                "A partly saved file with that name is already in that folder, for example from an earlier interrupted save. Delete it from the folder, or choose another name."
             }
             Self::FolderChanged => "The chosen folder changed before saving started. Choose it again.",
             Self::NotWritable => "Mewtual cannot write to that folder. Choose another folder.",
@@ -601,7 +603,14 @@ impl ChosenDestination {
             )?,
             None => file,
         };
-        let failure = match links_supported(&self.folder, &staging_leaf, None) {
+        // Picker re-review LOW 2: when the filesystem reports identities, the probe must link our
+        // own handle's object. Without that, a swap and swap-back around the create plus a file
+        // planted at our name would make the probe "work" on the planted file, and publication
+        // would later link it. On an identity-less folder there is nothing to compare (residual).
+        let ours = external::observe(&file)
+            .ok()
+            .map(|observed| observed.identity);
+        let failure = match links_supported(&self.folder, &staging_leaf, ours) {
             LinkProbe::Works => return Ok((file, staging, final_path)),
             LinkProbe::Refused => ExportError::NoLinks,
             // A probe name may still point at this file; never fill it with plaintext. The
@@ -611,9 +620,8 @@ impl ChosenDestination {
                 reason: "a temporary name in that folder could not be removed".into(),
             },
         };
-        // Created exclusively by this call a moment ago; nothing else can own it.
-        drop(file);
-        let _ = fs::remove_file(&staging);
+        // Only while the name still proves to be the file this call created.
+        remove_created(file, &staging);
         Err(failure)
     }
 }

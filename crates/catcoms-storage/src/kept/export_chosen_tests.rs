@@ -343,6 +343,86 @@ fn a_folder_swapped_between_the_identity_check_and_creation_is_refused() {
 }
 
 #[test]
+fn a_swap_and_swap_back_around_creation_with_a_planted_file_writes_nothing() {
+    // Picker re-review LOW 2: the folder is swapped before the create (our partial lands in the
+    // other folder), then restored with a file planted at our name before the recheck. The
+    // identity recheck passes; the link probe must still refuse, because the probe name is not our
+    // handle's object, and the planted file must be left alone.
+    // The swapped-in folder is a link (junction on Windows) to a decoy directory: Windows refuses
+    // to rename a directory while our new file inside it is open, but removing a link is allowed.
+    let fx = fixture();
+    let folder = chosen_folder(&fx);
+    let choice = ChosenDestination::validate(&folder.join("report.bin")).unwrap();
+    let original = folder.with_file_name("Original");
+    let decoy = folder.with_file_name("Decoy");
+    fs::create_dir(&decoy).unwrap();
+    let probe = folder.with_file_name("Link probe");
+    if !external::tests::link_directory(&decoy, &probe) {
+        eprintln!("skipped: this host cannot create a directory link");
+        return;
+    }
+    fs::remove_dir(&probe)
+        .or_else(|_| fs::remove_file(&probe))
+        .unwrap();
+    let (path, held, target) = (folder.clone(), original.clone(), decoy.clone());
+    external::BEFORE_CREATE.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |_| {
+            fs::rename(&path, &held).unwrap();
+            assert!(external::tests::link_directory(&target, &path));
+        }))
+    });
+    let (path, held) = (folder.clone(), original.clone());
+    external::AFTER_CREATE.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |_| {
+            fs::remove_dir(&path)
+                .or_else(|_| fs::remove_file(&path))
+                .unwrap();
+            fs::rename(&held, &path).unwrap();
+            fs::write(path.join("report.bin.part"), b"planted").unwrap();
+        }))
+    });
+    let created = choice.create_unjournaled();
+    external::BEFORE_CREATE.with(|hook| *hook.borrow_mut() = None);
+    external::AFTER_CREATE.with(|hook| *hook.borrow_mut() = None);
+    assert!(created.is_err(), "the planted file is never adopted");
+    assert_eq!(
+        fs::read(folder.join("report.bin.part")).unwrap(),
+        b"planted",
+        "the planted file is left alone"
+    );
+    assert_eq!(
+        fs::metadata(decoy.join("report.bin.part")).unwrap().len(),
+        0,
+        "our own partial, in the other folder, holds no plaintext"
+    );
+}
+
+#[test]
+fn removing_a_just_created_partial_needs_its_identity_to_still_match() {
+    // Picker re-review LOW 3: the proven-removal branch of `remove_created`.
+    let fx = fixture();
+    let folder = chosen_folder(&fx);
+    // The name was swapped for someone else's file: left alone.
+    let swapped = folder.join("swapped.mewtual-part");
+    let file = external::create_leaf(&swapped).unwrap();
+    fs::rename(&swapped, folder.join("ours elsewhere")).unwrap();
+    fs::write(&swapped, b"someone else's").unwrap();
+    remove_created(file, &swapped);
+    assert_eq!(fs::read(&swapped).unwrap(), b"someone else's");
+    // Still our own object: removed.
+    let kept = folder.join("ours.mewtual-part");
+    let file = external::create_leaf(&kept).unwrap();
+    remove_created(file, &kept);
+    assert!(!kept.exists());
+    // No identity to prove it with: the exclusively created name is removed by path, so an
+    // identity-less filesystem is not left with an empty partial on every refused save.
+    let unproven = folder.join("unproven.mewtual-part");
+    let file = external::create_leaf(&unproven).unwrap();
+    with_identity_unsupported(1, || remove_created(file, &unproven));
+    assert!(!unproven.exists());
+}
+
+#[test]
 fn an_orphan_partial_from_a_crash_before_begin_is_refused_and_left_alone() {
     // Picker review L3: a crash between `create_chosen` and Begin leaves an empty
     // `<name>.mewtual-part` at the chosen place. Nothing proves it is ours, so a later save to the
@@ -363,7 +443,9 @@ fn an_orphan_partial_from_a_crash_before_begin_is_refused_and_left_alone() {
     ));
     let message = refused.to_string().to_lowercase();
     assert!(
-        message.contains("earlier interrupted save") && message.contains("remove it"),
+        message.contains("earlier interrupted save")
+            && message.contains("delete it from the folder")
+            && !message.contains("remove"),
         "says where it came from and how to recover: {message}"
     );
     assert_eq!(fs::read(&staging).unwrap(), b"", "the orphan is untouched");
