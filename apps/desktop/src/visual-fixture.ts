@@ -332,7 +332,8 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
       }
       if (args.saveAs === true) throw new Error("Save as was cancelled.");
       const name = typeof args.name === "string" ? args.name : "download";
-      return { path: `C:\\Users\\fixture\\Downloads\\${name}`, displayed: true };
+      // A one-click save lands directly in Downloads, which native asserts with `inDownloads`.
+      return { path: `C:\\Users\\fixture\\Downloads\\${name}`, displayed: true, inDownloads: true };
     }
     case "get_storage_health":
       return { listed_files: 2, unique_files: 2, referenced_chunks: 2, verified_chunks: 2,

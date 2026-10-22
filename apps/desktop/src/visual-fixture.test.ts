@@ -87,7 +87,8 @@ test("visual fixture fails loudly for an unsupported native dependency", () => {
 test("file fixture saves to Downloads, treats Save as as a closed dialog and refuses any path", () => {
   assert.deepEqual(
     visualFixtureResponse("save_group_file", { server: 1, cid: "55aa", name: "notes.md" }),
-    { path: "C:\\Users\\fixture\\Downloads\\notes.md", displayed: true },
+    // The native result asserts a one-click save is in Downloads (picker re-review LOW 1b).
+    { path: "C:\\Users\\fixture\\Downloads\\notes.md", displayed: true, inDownloads: true },
   );
   assert.throws(
     () => visualFixtureResponse("save_group_file", { server: 1, cid: "55aa", name: "notes.md", saveAs: true }),

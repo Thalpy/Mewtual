@@ -311,7 +311,7 @@ fn revealed<R: FnOnce(&Path) -> Result<(), String>>(path: &Path, reveal: R) -> S
         displayed: warning.is_none(),
         warning,
         content_validation: Some("matched".into()),
-        chosen_place: false,
+        in_downloads: false,
     }
 }
 

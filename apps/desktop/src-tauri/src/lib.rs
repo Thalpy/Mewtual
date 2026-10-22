@@ -13909,12 +13909,13 @@ struct SavedFileResult {
     /// `matched`, `mismatch`, or `unrecognized` for an allowlisted declared media type. This is
     /// format evidence only—not a promise that a platform decoder is vulnerability-free.
     content_validation: Option<String>,
-    /// `save_group_file` only: the file went to a place chosen in Save as (this invocation's
-    /// choice or one the record remembered), not to Downloads. The renderer's notice names
-    /// Downloads only when this is false, because its own list can be stale (picker re-review
-    /// LOW 1b). Omitted from the JSON when false, so other results are unchanged.
+    /// `save_group_file` only: native asserts the saved file sits directly in the resolved
+    /// Downloads folder. The renderer's notice names Downloads only when this is set, because its
+    /// own list can be stale and a save can land at a place chosen in Save as, now or earlier
+    /// (picker re-review LOW 1b and its re-check). It fails closed: any path that does not set it
+    /// names no folder. Omitted from the JSON when false, so other results are unchanged.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
-    chosen_place: bool,
+    in_downloads: bool,
 }
 
 #[derive(Serialize)]
@@ -14197,7 +14198,7 @@ async fn save_and_open_space_guide(
         displayed: warning.is_none(),
         warning,
         content_validation: Some("matched".into()), // generator output passed strict PNG checks
-        chosen_place: false,
+        in_downloads: false,
     })
 }
 
@@ -14222,7 +14223,7 @@ async fn save_space_layout(
         displayed: warning.is_none(),
         warning,
         content_validation: None,
-        chosen_place: false,
+        in_downloads: false,
     })
 }
 
@@ -14546,7 +14547,7 @@ where
         displayed: warning.is_none(),
         warning,
         content_validation: None,
-        chosen_place: false,
+        in_downloads: false,
     })
 }
 
@@ -14959,7 +14960,12 @@ async fn save_group_file(
             chosen.is_some(),
         )
         .await?;
-        if let Some(saved) = prepared.saved {
+        if let Some(mut saved) = prepared.saved {
+            // A recovered save keeps its journal's own folder, which may be a chosen place.
+            saved.in_downloads = private_downloads::saved_in_downloads(
+                app.path().download_dir().ok().as_deref(),
+                Path::new(&saved.path),
+            );
             return Ok(saved);
         }
         left_behind = prepared.notice;
@@ -15051,8 +15057,9 @@ async fn save_group_file(
         || ready.is_current(),
     )
     .await?;
-    // Native, not the renderer's possibly stale list, says whether this may not be in Downloads.
-    saved.chosen_place = private_downloads::saved_outside_downloads(&destination, &path);
+    // Native, not the renderer's possibly stale list, says whether this is in Downloads.
+    saved.in_downloads =
+        private_downloads::saved_in_downloads(app.path().download_dir().ok().as_deref(), &path);
     if !resumable {
         // Say honestly that this location could not have resumed an interrupted save.
         private_downloads::append_warning(&mut saved, private_downloads::NOT_RESUMABLE_NOTE);
@@ -15203,7 +15210,7 @@ where
         displayed: warning.is_none(),
         warning,
         content_validation,
-        chosen_place: false,
+        in_downloads: false,
     })
 }
 
@@ -25477,21 +25484,21 @@ mod tests {
         assert_eq!(numbered_download_name("README", 3), "README (3)");
     }
 
-    /// Picker re-review LOW 1b: a group-file save says when it went to a chosen place; every other
-    /// save result keeps its exact earlier JSON.
+    /// Picker re-review LOW 1b: a group-file save says when native asserts it is in Downloads;
+    /// every other save result keeps its exact earlier JSON.
     #[test]
-    fn only_a_save_at_a_chosen_place_carries_the_chosen_place_flag() {
-        let result = |chosen_place| SavedFileResult {
+    fn only_an_asserted_downloads_save_carries_the_in_downloads_flag() {
+        let result = |in_downloads| SavedFileResult {
             path: "x".into(),
             displayed: true,
             warning: None,
             content_validation: None,
-            chosen_place,
+            in_downloads,
         };
         let plain = serde_json::to_value(result(false)).unwrap();
-        assert!(plain.get("chosenPlace").is_none(), "{plain}");
-        let chosen = serde_json::to_value(result(true)).unwrap();
-        assert_eq!(chosen["chosenPlace"], serde_json::Value::Bool(true));
+        assert!(plain.get("inDownloads").is_none(), "{plain}");
+        let asserted = serde_json::to_value(result(true)).unwrap();
+        assert_eq!(asserted["inDownloads"], serde_json::Value::Bool(true));
     }
 
     /// Picker review L5: Windows ignores trailing spaces before the extension, so "CON .txt" still

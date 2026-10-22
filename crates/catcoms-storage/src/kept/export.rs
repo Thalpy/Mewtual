@@ -615,9 +615,12 @@ impl ChosenDestination {
             LinkProbe::Refused => ExportError::NoLinks,
             // A probe name may still point at this file; never fill it with plaintext. The
             // abandoned file is empty, so a leftover probe name discloses nothing.
+            // Re-review LOW B: also reached when the probe name is not provably our own file (a
+            // transient hold by an indexer, or a swapped name), so say "confirmed", not only
+            // "removed". Refusing is the safe direction; the user can try again.
             LinkProbe::Inconclusive => ExportError::Local {
                 retryable: false,
-                reason: "a temporary name in that folder could not be removed".into(),
+                reason: "a temporary name in that folder could not be confirmed or removed".into(),
             },
         };
         // Only while the name still proves to be the file this call created.

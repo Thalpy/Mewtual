@@ -193,27 +193,24 @@ fn the_record_not_the_invocation_selects_where_a_fresh_save_goes() {
 
 #[test]
 fn a_save_counts_as_in_downloads_only_directly_inside_the_downloads_folder() {
-    // Picker re-review LOW 1b: the result's chosenPlace flag.
+    // Picker re-review LOW 1b and its re-check: the result's inDownloads flag fails closed.
     let root = tempfile::tempdir().unwrap();
     let downloads = root.path().join("Downloads");
-    let chosen = Destination::Chosen(Arc::new(
-        ChosenDestination::validate(&root.path().join("c.bin")).unwrap(),
-    ));
-    assert!(saved_outside_downloads(&chosen, &downloads.join("c.bin")));
-    let one_click = Destination::Downloads(downloads.clone());
-    assert!(!saved_outside_downloads(
-        &one_click,
+    assert!(saved_in_downloads(
+        Some(&downloads),
         &downloads.join("c (1).bin")
     ));
-    // Downloads was selected, but a resumed journal kept its own (earlier chosen) folder.
-    assert!(saved_outside_downloads(
-        &one_click,
+    // A resumed or recovered journal kept its own (earlier chosen) folder.
+    assert!(!saved_in_downloads(
+        Some(&downloads),
         &root.path().join("Chosen place").join("c.bin")
     ));
-    assert!(saved_outside_downloads(
-        &one_click,
+    assert!(!saved_in_downloads(
+        Some(&downloads),
         &downloads.join("nested").join("c.bin")
     ));
+    // No resolvable Downloads folder asserts nothing.
+    assert!(!saved_in_downloads(None, &downloads.join("c.bin")));
 }
 
 #[test]

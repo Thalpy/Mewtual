@@ -136,7 +136,7 @@ test("native completion turns the UI transfer into a fully saved row", () => {
 
 test("saved notices distinguish a visible folder from a reveal warning", () => {
   assert.deepEqual(
-    downloadSavedNotice("cat.png", { path: "/Downloads/cat.png", displayed: true }),
+    downloadSavedNotice("cat.png", { path: "/Downloads/cat.png", displayed: true, inDownloads: true }),
     { text: "Saved cat.png to Downloads", kind: "ok", ms: 4_000 },
   );
   assert.deepEqual(
@@ -144,6 +144,7 @@ test("saved notices distinguish a visible folder from a reveal warning", () => {
       path: "/Downloads/cat.png",
       displayed: false,
       warning: "file manager unavailable",
+      inDownloads: true,
     }),
     {
       text: "Saved to /Downloads/cat.png. file manager unavailable",
@@ -186,21 +187,22 @@ test("malformed native responses cannot falsely mark a download done", async () 
     saveGroupFile(badValidation.invoke, 1, "ab12", "cat.png"),
     /invalid save result/,
   );
-  const badPlace = mockInvoker({ path: "/Chosen/cat.png", displayed: true, chosenPlace: "yes" });
+  const badPlace = mockInvoker({ path: "/Chosen/cat.png", displayed: true, inDownloads: "yes" });
   await assert.rejects(saveGroupFile(badPlace.invoke, 1, "ab12", "cat.png"), /invalid save result/);
 });
 
-test("native's chosen-place flag overrides a caller that assumed Downloads", async () => {
-  // Picker re-review LOW 1b: a one-click save whose record remembered a Save as choice went to
-  // that place although the caller's (possibly stale) list said Downloads.
-  const chosen = mockInvoker({ path: "/Chosen/cat.png", displayed: true, chosenPlace: true });
-  const saved = await saveGroupFile(chosen.invoke, 1, "ab12", "cat.png");
-  assert.equal(saved.chosenPlace, true);
-  for (const result of [saved, { ...saved, contentValidation: "matched" as const }, { ...saved, displayed: false }]) {
+test("a notice names Downloads only when native asserts the file is there", async () => {
+  // Picker re-review LOW 1b and its re-check: a one-click save whose record had a choice, or a
+  // journal at a place chosen earlier, did not go to Downloads although the caller's (possibly
+  // stale) list said so. Native's assertion is required, so a missing flag names no folder.
+  const elsewhere = await saveGroupFile(mockInvoker({ path: "/Chosen/cat.png", displayed: true, inDownloads: false }).invoke, 1, "ab12", "cat.png");
+  assert.equal("inDownloads" in elsewhere, false);
+  for (const result of [elsewhere, { ...elsewhere, contentValidation: "matched" as const }, { ...elsewhere, displayed: false }]) {
     assert.doesNotMatch(downloadSavedNotice("cat.png", result, true).text, /Downloads/);
   }
-  // Without the flag (and for every other save result) nothing changes.
-  const plain = await saveGroupFile(mockInvoker({ path: "/Downloads/cat.png", displayed: true, chosenPlace: false }).invoke, 1, "ab12", "cat.png");
-  assert.equal("chosenPlace" in plain, false);
-  assert.equal(downloadSavedNotice("cat.png", plain, true).text, "Saved cat.png to Downloads");
+  const there = await saveGroupFile(mockInvoker({ path: "/Downloads/cat.png", displayed: true, inDownloads: true }).invoke, 1, "ab12", "cat.png");
+  assert.equal(there.inDownloads, true);
+  assert.equal(downloadSavedNotice("cat.png", there, true).text, "Saved cat.png to Downloads");
+  // The caller's own "not a first one-click save" still wins over native's assertion.
+  assert.doesNotMatch(downloadSavedNotice("cat.png", there, false).text, /Downloads/);
 });

@@ -8,8 +8,9 @@ export type SavedFileResult = {
   displayed: boolean;
   warning?: string;
   contentValidation?: "matched" | "mismatch" | "unrecognized";
-  /** Native says this group-file save went to a place chosen in Save as, not to Downloads. */
-  chosenPlace?: true;
+  /** Native asserts this group-file save sits directly in the Downloads folder. Absent means
+   * not asserted (a chosen place, a resumed journal's own folder, or unknown). */
+  inDownloads?: true;
 };
 
 function checkedResult(value: unknown): SavedFileResult {
@@ -28,7 +29,7 @@ function checkedResult(value: unknown): SavedFileResult {
       result.contentValidation !== "unrecognized") {
     throw new Error("the desktop returned an invalid save result");
   }
-  if (result.chosenPlace !== undefined && result.chosenPlace !== null && typeof result.chosenPlace !== "boolean") {
+  if (result.inDownloads !== undefined && result.inDownloads !== null && typeof result.inDownloads !== "boolean") {
     throw new Error("the desktop returned an invalid save result");
   }
   return {
@@ -38,7 +39,7 @@ function checkedResult(value: unknown): SavedFileResult {
     ...(typeof result.contentValidation === "string"
       ? { contentValidation: result.contentValidation as SavedFileResult["contentValidation"] }
       : {}),
-    ...(result.chosenPlace === true ? { chosenPlace: true as const } : {}),
+    ...(result.inDownloads === true ? { inDownloads: true as const } : {}),
   };
 }
 
@@ -112,15 +113,16 @@ export function completedDownload(
   };
 }
 
-/** `toDownloads` is true only when the save provably went to the Downloads folder (a first
- * one-click save). A "Save as" choice, a remembered choice or a resumed partial may be anywhere,
- * so those notices name no folder. A "matched" media verdict carries no extra warning, so it takes
- * the same folder-free wording; only "mismatch" and "unrecognized" need their own text. */
+/** The notice names the Downloads folder only when the caller expects a first one-click save
+ * (`toDownloads`) AND native asserts the file sits in Downloads (`inDownloads`). A "Save as"
+ * choice, a remembered choice or a resumed partial may be anywhere, so those notices name no
+ * folder. A "matched" media verdict carries no extra warning, so it takes the same folder-free
+ * wording; only "mismatch" and "unrecognized" need their own text. */
 export function downloadSavedNotice(name: string, saved: SavedFileResult, toDownloads = true) {
   const warning = saved.warning ? ` ${saved.warning}` : "";
-  // Native's own word wins over the caller's inference, which rests on a list that can be stale
-  // (a one-click save can resume a record that remembers a Save as choice).
-  const inDownloads = toDownloads && saved.chosenPlace !== true;
+  // Fails closed: the caller's inference rests on a list that can be stale (a one-click save can
+  // resume a record whose save goes to a place chosen earlier), so native must also say so.
+  const inDownloads = toDownloads && saved.inDownloads === true;
   if (!inDownloads && (!saved.contentValidation || saved.contentValidation === "matched")) {
     return saved.displayed
       ? { text: `Saved ${name}.${warning}`, kind: saved.warning ? "info" as const : "ok" as const, ms: saved.warning ? 8_000 : 4_000 }
