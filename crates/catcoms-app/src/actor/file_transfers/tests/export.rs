@@ -227,6 +227,43 @@ async fn journal_writes_after_lock_are_refused_even_though_the_lease_is_live() {
     run.close().await;
 }
 
+/// Picker review L2: a Save as from the chat on a file whose journaled save is still running is
+/// refused BEFORE the record's run is resumed. Resuming first retired the live save's read epoch,
+/// interrupting it, and only then refused the choice.
+#[tokio::test]
+async fn a_save_as_choice_never_interrupts_a_live_journaled_save() {
+    let run = running().await;
+    let first = ready(&run, None).await;
+    let mut file = begin(&run, &first).await;
+    let chosen = tempfile::tempdir().unwrap();
+    let choice = Arc::new(
+        catcoms_storage::kept::ChosenDestination::validate(&chosen.path().join("other.bin"))
+            .unwrap(),
+    );
+    let refused = bounded(run.actor.acquire_download_to(
+        run.cid.as_bytes().to_vec(),
+        None,
+        Some(choice),
+        run.origin.clone(),
+    ))
+    .await;
+    assert!(refused.is_err(), "a chosen place never redirects a partial");
+    assert!(first.is_current(), "the live save keeps its read epoch");
+    let saved = bounded(run.actor.downloads()).await.unwrap().remove(0);
+    assert!(!saved.planned, "nothing was remembered");
+    assert!(matches!(
+        saved.export,
+        catcoms_storage::kept::ExportView::Writing { active: true, .. }
+    ));
+    // The interrupted-looking save is in fact untouched: it writes and publishes normally.
+    write_all(&run, &first, &mut file).await;
+    let path = publish(&run, &first, &mut file).await;
+    file.finish();
+    assert_eq!(std::fs::read(path).unwrap(), run.data);
+    assert_eq!(std::fs::read_dir(chosen.path()).unwrap().count(), 0);
+    run.close().await;
+}
+
 #[tokio::test]
 async fn pause_mid_export_stops_effects_and_resume_continues_the_same_partial_file() {
     let run = running().await;

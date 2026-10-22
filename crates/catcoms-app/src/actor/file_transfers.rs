@@ -79,6 +79,32 @@ fn kept_plan(
     Ok((plan, manifest))
 }
 
+/// Refusal for a "Save as" choice on a Download that already has a journal. The same text as
+/// storage's `plan_download_destination` refusal, so the user sees one message whichever check
+/// catches it first.
+const SAVE_AS_OVER_JOURNAL: &str =
+    "This file already has a partly saved copy. Choose Save new copy or Remove in Transfers first.";
+
+/// Undo a Download run whose "Save as" choice could not be written (picker review L2).
+///
+/// A record this same actor step created (`created`) is released outright: it holds no verified
+/// chunks yet, and leaving it would show an "Interrupted" row for a save that never started. An
+/// existing record is only paused, keeping its verified progress and allowance. If the release
+/// itself fails (most likely the same full or faulted vault that refused the plan write), fall
+/// back to pausing so the run never keeps the single active-run slot.
+fn abandon_unplanned<T: MeshTransport, R: CryptoRngCore>(
+    server: &mut Server<T, R>,
+    token: SavedRun,
+    created: bool,
+) {
+    if let (true, SavedRun::Download(run)) = (created, token) {
+        if server.sync.cancel_download(run.id()).is_ok() {
+            return;
+        }
+    }
+    let _ = token.pause(server);
+}
+
 fn kept_request_window(
     reference: &FileRef,
     paged: bool,
@@ -917,7 +943,8 @@ impl FileTransfers {
                     .map_err(|_| "bad content address".to_string())?,
             );
             let download = matches!(request, SavedRequest::Download { .. });
-            let saved_download = if let SavedRequest::Download { resume, .. } = request {
+            let saved_download = if let SavedRequest::Download { resume, planned } = &request {
+                let resume = *resume;
                 let found = server
                     .sync
                     .downloads()
@@ -929,6 +956,17 @@ impl FileTransfers {
                 }
                 if found.as_ref().is_some_and(|d| d.state.plan.cid != cid) {
                     return Err("Saved download changed.".into());
+                }
+                // Picker review L2: a "Save as" choice is refused while a journal exists (a
+                // chosen place never redirects an existing partial). Refuse it HERE, before
+                // `resume_download` retires the record's read epoch: otherwise a Save as from
+                // the chat would interrupt a live journaled save of the same file and only then
+                // be refused by `plan_download_destination`. Same text as that storage refusal.
+                let journaled = found
+                    .as_ref()
+                    .is_some_and(|d| !matches!(d.export, catcoms_storage::kept::ExportView::None));
+                if journaled && planned.is_some() {
+                    return Err(SAVE_AS_OVER_JOURNAL.into());
                 }
                 found
             } else {
@@ -1023,6 +1061,9 @@ impl FileTransfers {
                 (plan, manifest, resolved.version, candidates)
             };
             let plan_version = plan.version;
+            // Whether this step creates the Download record (no saved record was found). Only
+            // such a record may be released outright when its Save as choice cannot be written.
+            let created = download && saved_download.is_none();
             let token = if let Some(d) = saved_download {
                 SavedRun::Download(
                     server
@@ -1056,8 +1097,9 @@ impl FileTransfers {
             };
             // Remember a "Save as" choice in the same synchronous step, before any network
             // work: an interrupted acquisition, Pause, Lock or restart then still saves there.
-            // If that write is refused, release the run we just started so nothing is left
-            // holding the single active-run slot.
+            // If that write is refused, undo the run we just started so nothing is left holding
+            // the single active-run slot (and, picker review L2, no "Interrupted" row is left
+            // for a brand-new record that never got its choice).
             if let (
                 SavedRun::Download(run),
                 SavedRequest::Download {
@@ -1067,7 +1109,7 @@ impl FileTransfers {
             ) = (&token, &request)
             {
                 if let Err(error) = server.sync.plan_download_destination(*run, choice) {
-                    let _ = token.pause(server);
+                    abandon_unplanned(server, token, created);
                     return Err(error.to_string());
                 }
             }

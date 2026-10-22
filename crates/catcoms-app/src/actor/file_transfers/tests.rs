@@ -2354,6 +2354,42 @@ async fn a_save_as_choice_survives_an_interrupted_acquisition_and_remount() {
 }
 
 #[tokio::test]
+async fn a_new_download_whose_choice_cannot_be_written_leaves_no_row() {
+    // Picker review L2: when the Save as choice cannot be written right after `begin_download`
+    // created the record, that record is released, not left as an "Interrupted" row. An existing
+    // record is only paused. (The failing plan write itself needs vault fault injection, which
+    // storage keeps private; this pins the undo that the error branch calls.)
+    let Pair {
+        mut requester, cid, ..
+    } = pair().await;
+    let dir = tempfile::tempdir().unwrap();
+    attach_kept(&mut requester, dir.path());
+    let resolved = file_resolution::resolve(&requester.files(), &cid).unwrap();
+    let plans = resolved
+        .variants
+        .iter()
+        .map(|(entry, _)| kept_plan(entry.file_ref.clone(), cid).unwrap().0)
+        .collect::<Vec<_>>();
+    let run = requester
+        .sync
+        .begin_download(plans.clone(), 0, resolved.version)
+        .unwrap();
+    abandon_unplanned(&mut requester, SavedRun::Download(run), true);
+    assert!(
+        requester.sync.downloads().unwrap().is_empty(),
+        "a record created for this Save as is released"
+    );
+    let run = requester
+        .sync
+        .begin_download(plans, 0, resolved.version)
+        .unwrap();
+    abandon_unplanned(&mut requester, SavedRun::Download(run), false);
+    let rows = requester.sync.downloads().unwrap();
+    assert_eq!(rows.len(), 1, "an existing record keeps its progress");
+    assert!(!rows[0].state.running, "and no longer holds the active run");
+}
+
+#[tokio::test]
 async fn private_export_cannot_survive_actual_actor_freeze_and_thaw() {
     let Pair {
         mut holder,
