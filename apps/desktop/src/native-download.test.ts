@@ -91,6 +91,20 @@ test("a save that may not be in Downloads names no folder", () => {
   for (const notice of [warned, downloadSavedNotice("r.bin", { path: "/x/r.bin", displayed: true }, false)]) {
     assert.doesNotMatch(notice.text, /[·—–]/);
   }
+  // A media file whose bytes matched its declared type is still outside Downloads when it went
+  // to a chosen place; the matched verdict must not fall through to the Downloads wording.
+  for (const displayed of [true, false]) {
+    for (const warning of [undefined, "Note."]) {
+      const matched = downloadSavedNotice("cat.png",
+        { path: "/Chosen/cat.png", displayed, warning, contentValidation: "matched" }, false);
+      assert.doesNotMatch(matched.text, /Downloads/, `displayed=${displayed} warning=${warning}`);
+      assert.match(matched.text, /^Saved /);
+      if (warning) assert.ok(matched.text.includes(warning));
+    }
+  }
+  // Mismatch and unrecognized verdicts keep their untrusted-content warning at a chosen place.
+  assert.match(downloadSavedNotice("cat.png",
+    { path: "/Chosen/cat.png", displayed: true, contentValidation: "mismatch" }, false).text, /untrusted/);
 });
 test("successful reveal does not hide a committed save's encrypted-cleanup warning", () => {
   const warning = "The encrypted download copy could not be removed; remove it from Transfers.";

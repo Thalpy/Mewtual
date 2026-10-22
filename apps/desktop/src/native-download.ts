@@ -108,10 +108,11 @@ export function completedDownload(
 
 /** `toDownloads` is true only when the save provably went to the Downloads folder (a first
  * one-click save). A "Save as" choice, a remembered choice or a resumed partial may be anywhere,
- * so those notices name no folder. */
+ * so those notices name no folder. A "matched" media verdict carries no extra warning, so it takes
+ * the same folder-free wording; only "mismatch" and "unrecognized" need their own text. */
 export function downloadSavedNotice(name: string, saved: SavedFileResult, toDownloads = true) {
   const warning = saved.warning ? ` ${saved.warning}` : "";
-  if (!toDownloads && !saved.contentValidation) {
+  if (!toDownloads && (!saved.contentValidation || saved.contentValidation === "matched")) {
     return saved.displayed
       ? { text: `Saved ${name}.${warning}`, kind: saved.warning ? "info" as const : "ok" as const, ms: saved.warning ? 8_000 : 4_000 }
       : { text: `Saved to ${saved.path}.${warning}`, kind: "info" as const, ms: 8_000 };
